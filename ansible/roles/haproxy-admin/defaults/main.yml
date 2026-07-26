@@ -1,0 +1,133 @@
+app_dir: /opt/haproxy-admin
+socket_path: /run/haproxy/admin.sock
+geo_ip_dir: /etc/haproxy/geoip
+app_user: haproxyadmin
+app_group: hadmin
+haproxy_admin_proxy_secret: "{{ authelia_session_secret | default('') }}"
+hapadm_ipset_name: haproxy_ban
+venv_dir: "{{ app_dir }}/venv"
+whitelist_global_file: /etc/haproxy/whitelist.ip
+whitelist_geo_file: /etc/haproxy/geoip/whitelist.geo
+ui_exclude_backends_exact:
+  [be_admin, be_http_challenge, be_tls_terminator, be_maintenance]
+ui_exclude_backends_prefix: [tbl_]
+haproxy_log: /var/log/haproxy.log
+haproxy_conf: /etc/haproxy/haproxy.cfg
+hapadm_journal_unit: "haproxy.service"
+# Journal lookback step in minutes for one journalctl call.
+# journalctl sources: options ("-u haproxy"), FIELD=VALUE matches, or a bare
+# word which the daemon maps to a syslog identifier ("-t word").
+hapadm_journal_sources: "-u haproxy,SYSLOG_IDENTIFIER=haproxy,-u rsyslog.service"
+hapadm_ban_table: "tbl_ban"
+hapadm_ban_delta_seconds: 120
+hapadm_log_limit: 150
+hapadm_debug_on_empty: "1"
+# --- Authelia bans daemon integration ---
+authelia_bans_enabled: true
+authelia_bans_socket_path: /run/easy-ha-proxy/authelia-bansd.sock
+authelia_root_dir: "/opt/authelia"
+# Path to the active Authelia JSON log.
+authelia_log_file: "{{ authelia_root_dir }}/logs/authelia.log"
+authelia_log_limit: 200
+hapadm_ban_sync_interval: 10
+# Host path to the Authelia user database.
+authelia_users_file: "{{ authelia_root_dir }}/users_database.yml"
+
+# Path to the Authelia Docker Compose file.
+authelia_docker_compose_file: "{{ authelia_root_dir }}/docker-compose.yml"
+
+# Authelia container name in Compose.
+authelia_container_name: authelia
+
+# Authelia configuration path inside the container.
+authelia_config_path: /config/configuration.yml
+# Enable Docker mode for haproxy-admin.
+haproxy_admin_use_docker: true
+
+# Populated dynamically by tasks/install.yml.
+haproxy_admin_uid: ""
+haproxy_admin_gid: ""
+hadmin_gid: ""
+
+# Application root on the host.
+haproxy_admin_root_dir: "{{ app_dir }}"
+haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
+
+# Container image and name.
+haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
+haproxy_admin_container_name: "haproxy-admin"
+
+# UI port exposed on localhost.
+haproxy_admin_listen_port: 5000
+haproxy_admin_start_wait_timeout: 180
+haproxy_admin_compose_pull_timeout: 420
+haproxy_admin_compose_up_timeout: 180
+
+# Container timezone.
+haproxy_admin_timezone: "Europe/Moscow"
+haproxy_admin_default_language: "en"
+
+# Technical UI debug routes are disabled by default.
+haproxy_admin_debug_routes: false
+
+# haproxy-admin .env path containing socket and application settings.
+haproxy_admin_env_file: "{{ haproxy_admin_root_dir }}/.env"
+
+# Helper daemon sockets.
+certd_socket_path: /run/easy-ha-proxy/haproxy-certd.sock
+haproxy_control_socket_path: /run/easy-ha-proxy/haproxy-controld.sock
+backupd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-backupd.sock
+
+# Full backup/restore broker. The spool is deliberately outside every managed
+# directory included in full_backup.py.
+backupd_root_dir: /var/lib/easy-ha-proxy/backup-web
+backupd_jobs_dir: "{{ backupd_root_dir }}/jobs"
+backupd_uploads_dir: "{{ backupd_root_dir }}/uploads"
+backupd_backups_dir: "{{ backupd_root_dir }}/backups"
+backupd_source_dir: /opt/easy-ha-proxy/source
+backupd_max_request_bytes: 65536
+backupd_max_archive_bytes: 8589934592
+backupd_min_free_bytes: 536870912
+backupd_max_capture_bytes: 65536
+backupd_max_state_bytes: 262144
+backupd_job_timeout_seconds: 21600
+backupd_list_limit: 50
+backupd_upload_ttl_seconds: 86400
+backupd_restore_active_marker: /run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active
+backupd_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-backupd-restart.requested
+backupd_operation_lock_path: /run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock
+
+# Asynchronous software-update broker. It shares backupd's operation lock so
+# update and disaster-recovery jobs cannot mutate the host concurrently.
+updated_socket_path: /run/easy-ha-proxy/easy-ha-proxy-updated.sock
+updated_state_root: /var/lib/easy-ha-proxy/update-web
+updated_jobs_dir: "{{ updated_state_root }}/jobs"
+updated_source_dir: /opt/easy-ha-proxy/source
+updated_config_dir: /etc/easy-ha-proxy
+updated_python_path: /opt/easy-ha-proxy/venv/bin/python
+updated_cli_path: /usr/local/bin/easy-ha-proxy
+updated_max_request_bytes: 32768
+updated_max_response_bytes: 2097152
+updated_max_capture_bytes: 262144
+updated_max_state_bytes: 1048576
+updated_job_timeout_seconds: 7200
+updated_check_timeout_seconds: 600
+updated_plan_ttl_seconds: 900
+updated_list_limit: 30
+updated_active_marker: /run/easy-ha-proxy/easy-ha-proxy-update.active
+updated_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested
+updated_maintenance_lock_path: "{{ backupd_operation_lock_path }}"
+updated_haproxy_transaction_marker: /opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json
+
+# Authelia user-management daemon socket.
+authelia_users_socket: /run/easy-ha-proxy/authelia-usersd.sock
+
+# haproxy-certd mode: 0 for production, 1 for dry-run.
+haproxy_certd_dry_run: "0"
+haproxy_ca_root_dir: "/etc/haproxy/certificate-authorities"
+
+# Authelia network health-check endpoint.
+authelia_healthcheck_url: "http://authelia:9091/api/health"
+
+# Optional variable-controlled socket group.
+haproxy_certd_socket_group: "hadmin"

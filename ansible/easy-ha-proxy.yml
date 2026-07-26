@@ -1,0 +1,268 @@
+---
+- hosts: "{{ easy_ha_proxy_target | default('easy_ha_proxy') }}"
+  become: true
+
+  # Several roles run `apt: update_cache: true` to ensure packages such as
+  # snapd, docker and logrotate are present. Without a validity window each of
+  # those refreshes the whole APT index over the network, so a single apply
+  # could spend many minutes (and, on slow or flaky mirrors with retries, close
+  # to an hour) repeatedly re-downloading indices. Refreshing at most once per
+  # window makes the first apt task update the cache and every later task reuse
+  # it. Override with -e easy_ha_proxy_apt_cache_valid_time=0 to force refresh.
+  module_defaults:
+    ansible.builtin.apt:
+      cache_valid_time: "{{ easy_ha_proxy_apt_cache_valid_time | default(3600) }}"
+
+  #################################################################
+  # 0. Variables loaded from external files.
+  #################################################################
+  vars_files:
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/vars.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/authelia.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/authelia_users_initial.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/websites.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/tcp.yml"
+  #################################################################
+  # 1. Pre-tasks: build certbot_domains.
+  #################################################################
+  pre_tasks:
+    - name: Load easy-ha-proxy local secrets
+      ansible.builtin.include_vars:
+        file: "{{ easy_ha_proxy_config_dir }}/secrets.yml"
+      when: easy_ha_proxy_config_dir is defined
+      no_log: true
+      tags: always
+
+    - name: Derive the internal proxy secret for legacy managed configurations
+      ansible.builtin.set_fact:
+        haproxy_admin_proxy_secret: >-
+          {{
+            haproxy_admin_proxy_secret
+            | default(authelia_session_secret | hash('sha256'), true)
+          }}
+      no_log: true
+      tags: always
+
+    - name: Require the private HAProxy-to-admin authentication secret
+      ansible.builtin.assert:
+        that:
+          - haproxy_admin_proxy_secret is defined
+          - haproxy_admin_proxy_secret | string | length >= 32
+          - haproxy_admin_proxy_secret | string is match('^[A-Za-z0-9_-]+$')
+        fail_msg: >-
+          haproxy_admin_proxy_secret is missing or unsafe. Run the current
+          easy-ha-proxy installer once to migrate secrets.yml.
+      no_log: true
+      tags: always
+
+    - name: Use new-lineage issuance mode for addsite
+      set_fact:
+        cert_issue_mode: new
+      tags: addsite
+
+    - name: Initialize certbot_domains
+      set_fact:
+        certbot_domains: >-
+          {{
+              (sites | map(attribute='domain') | list)
+              + [ admin_domain ]
+              + ( [ aut_domain ] if authelia_enabled | default(false) | bool else [] )
+          }}
+      tags: always
+
+    - name: Debug certbot_domains
+      debug:
+        var: certbot_domains
+      tags: always
+
+  #################################################################
+  # 2. Roles.
+  #################################################################
+  roles:
+    - role: update_packages # apt upgrade
+      tags: upgrade
+
+    - role: cert
+      task_stage: install
+      tags:
+        - crt-install
+        - cert
+
+    - role: cert
+      task_stage: notify
+      tags:
+        - crt-notify
+        - cert
+
+    - role: cert
+      task_stage: hooks
+      tags:
+        - crt-hooks
+        - crt-install
+
+    - role: cert
+      task_stage: remove_orphans
+      tags:
+        - never
+        - remove_site
+
+    - role: cert
+      task_stage: rdg
+      tags:
+        - crt-rdg
+        - cert
+        - never
+
+    - role: cert
+      task_stage: test
+      tags:
+        - crt-test
+        - never
+
+    # - role: cert
+    #   task_stage: backup
+    #   tags:
+    #     - crt-backup
+    #     - never
+
+    - role: haproxy
+      task_stage: install
+      tags: ha-install
+
+    - role: haproxy
+      task_stage: apparmor
+      tags:
+        - ha-install
+        - apparmor
+
+    - role: geoip_acl
+      tags: geo
+
+    - role: docker
+      tags:
+        - docker
+
+    - role: haproxy-admin
+      task_stage: getuseruid
+      tags:
+        - ha-adm-install
+        - ha-adm-cfg
+
+    - role: authelia
+      task_stage: install
+      tags:
+        - authelia
+        - aut-install
+
+    # The Certbot deploy hook submits through mail_relay. Start Authelia's
+    # trusted relay before the first certificate issuance on a fresh host.
+    - role: cert
+      task_stage: renew
+      tags:
+        - crt-renew
+        - addsite
+        - cert
+
+    - role: haproxy-admin
+      task_stage: install
+      tags: ha-adm-install
+
+    # HAProxy configuration references the hadmin group, Authelia Lua files,
+    # and whitelist files prepared by the roles above. Keep strict validation
+    # after those dependencies are installed, especially on a clean server.
+    - role: haproxy
+      task_stage: config
+      tags:
+        - ha-cfg
+        - addsite
+        - remove_site
+
+    - role: haproxy-admin
+      task_stage: config
+      tags: ha-adm-cfg
+
+    - role: haproxy-admin
+      task_stage: healthd
+      tags: ha-adm-healthd
+
+    - role: haproxy-admin
+      task_stage: controld
+      tags: ha-adm-controld
+
+    - role: haproxy-admin
+      task_stage: backupd
+      tags: ha-adm-backupd
+
+    - role: haproxy-admin
+      task_stage: updated
+      tags: ha-adm-updated
+
+    - role: haproxy-admin
+      task_stage: daemons
+      tags:
+        - never
+        - ha-adm-daemons
+
+    - role: haproxy-admin
+      task_stage: journald-retention
+      tags: ha-adm-journald
+
+    - role: haproxy-admin
+      task_stage: start
+      tags: ha-adm-start
+
+    - role: haproxy-admin
+      task_stage: update_haproxy_admin
+      tags: 
+        - never
+        - ha-adm-update
+
+    - role: authelia
+      task_stage: remove
+      tags:
+        - never
+        - aut-remove
+
+    - role: authelia
+      task_stage: config
+      tags:
+        - never
+        - aut-cfg
+
+    - role: authelia
+      task_stage: daemons
+      tags:
+        - never
+        - aut-daemons
+        - aut-cfg
+
+    - role: authelia
+      task_stage: update
+      tags:
+        - never
+        - aut-update
+
+    - role: authelia
+      task_stage: users_apply
+      tags:
+        - never
+        - aut-users
+
+    - role: haproxy
+      task_stage: addadmin
+      tags:
+        - ha-add-adm-ip
+        - never
+
+- hosts: "{{ easy_ha_proxy_target | default('easy_ha_proxy') }}"
+  become: true
+  vars_files:
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/vars.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/authelia.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/authelia_users_initial.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/websites.yml"
+    - "{{ easy_ha_proxy_config_dir | default(playbook_dir) }}/tcp.yml"
+  roles:
+    - role: healthcheck
+      tags:
+        - status

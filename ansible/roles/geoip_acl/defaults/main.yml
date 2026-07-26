@@ -1,0 +1,27 @@
+---
+# Keep the local country database available for the administration UI even
+# when HAProxy country filtering is disabled.
+geoip_database_enabled: true
+geoip_database_base_url: "https://download.db-ip.com/free"
+
+# The updater is a target-side systemd service. Keep its Python environment on
+# the managed host instead of embedding the controller's Ansible interpreter
+# path in the service wrapper (which is invalid for remote inventories).
+geoip_runtime_venv: "/usr/local/lib/easy-ha-proxy/geoip-venv"
+geoip_maxminddb_version: "3.1.1"
+geoip_pyyaml_version: "6.0.2"
+
+# ISO 3166-1 alpha-2 countries used to derive the HAProxy ACL from the MMDB.
+geoip_country_codes:
+  - RU
+  - PL
+  - US
+
+# allow: permit selected countries; deny: reject selected countries.
+geoip_mode: "allow"
+enable_geoip: false
+
+# The timer runs daily so it can retry a delayed monthly publication. The
+# updater performs no network request after the current month's DB is active.
+geoip_update_on_calendar: "daily"
+geoip_update_randomized_delay: "2h"

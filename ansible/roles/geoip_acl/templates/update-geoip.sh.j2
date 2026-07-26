@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PYTHON={{ ((geoip_runtime_venv | default('/usr/local/lib/easy-ha-proxy/geoip-venv')) ~ '/bin/python') | quote }}
+UPDATER="/usr/local/lib/easy-ha-proxy/update_geoip.py"
+FORCE_MARKER="/run/easy-ha-proxy/geoip-force-download"
+FORCE_DOWNLOAD=0
+
+if [[ -e "${FORCE_MARKER}" ]]; then
+  if [[ -L "${FORCE_MARKER}" || ! -f "${FORCE_MARKER}" ]]; then
+    printf 'ERROR: unsafe GeoIP force-update marker: %s\n' "${FORCE_MARKER}" >&2
+    exit 1
+  fi
+  rm -f -- "${FORCE_MARKER}"
+  FORCE_DOWNLOAD=1
+fi
+
+if [[ ! -x "${PYTHON}" ]]; then
+  printf 'ERROR: GeoIP Python interpreter is not executable: %s\n' "${PYTHON}" >&2
+  exit 1
+fi
+if ! "${PYTHON}" -c 'import maxminddb, yaml' >/dev/null 2>&1; then
+  printf 'ERROR: the maxminddb or PyYAML package is missing from %s\n' "${PYTHON}" >&2
+  exit 1
+fi
+
+# HAProxy config validation needs the same private environment as the service.
+if [[ -r /etc/haproxy/easy-ha-proxy.env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/haproxy/easy-ha-proxy.env
+  set +a
+fi
+
+args=(
+  --directory /etc/haproxy/geoip
+  --base-url {{ geoip_database_base_url | default('https://download.db-ip.com/free') | quote }}
+  --selection-file /etc/haproxy/geoip/selection.json
+  --vars-file /opt/haproxy-admin/config/vars.yml
+  --config-transaction-state /var/lib/easy-ha-proxy/haproxy-config-guard/transaction.json
+)
+
+if (( FORCE_DOWNLOAD )); then
+  args+=(--force-download)
+fi
+
+exec "${PYTHON}" "${UPDATER}" "${args[@]}" "$@"

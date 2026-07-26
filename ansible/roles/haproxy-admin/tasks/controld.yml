@@ -1,0 +1,64 @@
+---
+# Установка и настройка root-демона haproxy-controld
+
+- name: "haproxy-controld | Install required packages (ipset, socat)"
+  ansible.builtin.package:
+    name:
+      - ipset
+      - socat
+    state: present
+  tags: restore-network
+
+- name: "haproxy-controld | Install bans daemon script"
+  ansible.builtin.copy:
+    src: haproxy-controld.py
+    dest: /usr/local/sbin/haproxy-controld.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: haproxy_controld_script
+
+- name: "haproxy-controld | Install systemd unit"
+  ansible.builtin.template:
+    src: haproxy-controld.service.j2
+    dest: /etc/systemd/system/haproxy-controld.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: haproxy_controld_unit
+
+- name: "haproxy-controld | Reload systemd if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: haproxy_controld_unit.changed
+
+- name: "haproxy-controld | Check runtime environment"
+  ansible.builtin.stat:
+    path: "{{ haproxy_admin_env_file }}"
+  register: haproxy_controld_env
+
+- name: "haproxy-controld | Enable service"
+  ansible.builtin.systemd:
+    name: haproxy-controld.service
+    enabled: true
+
+- name: "haproxy-controld | Keep service stopped until configuration exists"
+  ansible.builtin.systemd:
+    name: haproxy-controld.service
+    state: stopped
+  when: not haproxy_controld_env.stat.exists
+
+- name: "haproxy-controld | Ensure configured service is started"
+  ansible.builtin.systemd:
+    name: haproxy-controld.service
+    state: >-
+      {{
+        'restarted'
+        if (
+          haproxy_controld_script.changed
+          or haproxy_controld_unit.changed
+          or (hapadm_env_t.changed | default(false))
+        )
+        else 'started'
+      }}
+  when: haproxy_controld_env.stat.exists

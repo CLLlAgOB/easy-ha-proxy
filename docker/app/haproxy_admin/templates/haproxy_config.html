@@ -1,0 +1,308 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – configuration{% endblock %}
+{% block header_title %}HAProxy configuration{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card config-error-card">
+  <div class="card-header">
+    <h2>Configuration generation error</h2>
+  </div>
+  <div class="mono notranslate config-technical-output" translate="no" data-i18n-skip>
+    {{ error }}
+  </div>
+</div>
+{% endif %}
+
+<section class="card config-overview" aria-labelledby="config-overview-title">
+  <div class="card-header config-overview-header">
+    <div>
+      <h2 id="config-overview-title">Current haproxy.cfg</h2>
+      <div class="config-drift-row" id="config-drift-row" aria-label="Configuration status">
+        {% if diff_summary %}
+          {% if diff_summary.server_differs %}
+          <span id="config-server-status" class="config-status-pill config-status-pill--warning">Server configuration differs</span>
+          {% else %}
+          <span id="config-server-status" class="config-status-pill config-status-pill--success">Server configuration is current</span>
+          {% endif %}
+
+          {% if diff_summary.has_applied_state %}
+            {% if diff_summary.source_has_changes %}
+            <span id="config-pending-status" class="config-status-pill config-status-pill--warning">Unapplied changes</span>
+            {% else %}
+            <span id="config-pending-status" class="config-status-pill config-status-pill--neutral">No pending changes</span>
+            {% endif %}
+          {% else %}
+          <span id="config-pending-status" class="config-status-pill config-status-pill--neutral">No apply history</span>
+          {% endif %}
+        {% else %}
+        <span id="config-server-status" class="config-status-pill config-status-pill--warning">Status unavailable</span>
+        <span id="config-pending-status" class="config-status-pill config-status-pill--neutral" hidden></span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="config-toolbar config-overview-toolbar">
+      <div class="config-toolbar-group config-toolbar-group--actions">
+        <button type="button" class="btn btn-danger" id="btn-apply">
+          Validate and apply configuration
+        </button>
+        <button type="button" class="btn" id="btn-check">Validate</button>
+        <button type="button" class="btn" id="btn-revert">Revert changes</button>
+      </div>
+      <div class="config-toolbar-group config-toolbar-group--tools">
+        <button type="button" class="btn btn-refresh" id="btn-preview" aria-expanded="false"
+                aria-controls="cfg-preview-container">
+          <span class="icon">Show preview</span>
+          <span class="spinner" aria-hidden="true"></span>
+        </button>
+        <a id="btn-download-cfg-rendered" class="btn btn-icon"
+           href="{{ url_for('routes.haproxy_download_cfg', source='rendered') }}">
+          Download rendered config
+        </a>
+        <a id="btn-download-cfg-server" class="btn btn-icon"
+           href="{{ url_for('routes.haproxy_download_cfg', source='server') }}">
+          Download from server
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <details class="config-change-details" id="config-change-details"
+           {% if not (diff_summary and diff_summary.has_applied_state and diff_summary.source_has_changes) %}hidden{% endif %}>
+    <summary>Review pending changes</summary>
+    <ul id="config-change-list">
+      {% if diff_summary.sites_added %}
+      <li>Added sites: <span class="mono notranslate" translate="no" data-i18n-skip>{{ diff_summary.sites_added | join(", ") }}</span></li>
+      {% endif %}
+      {% if diff_summary.sites_removed %}
+      <li>Removed sites: <span class="mono notranslate" translate="no" data-i18n-skip>{{ diff_summary.sites_removed | join(", ") }}</span></li>
+      {% endif %}
+      {% if diff_summary.sites_changed %}
+      <li>
+        Changed sites:
+        <ul>
+          {% for name, info in diff_summary.sites_changed.items() %}
+          <li>
+            <span class="mono notranslate" translate="no" data-i18n-skip>{{ name }}</span>:
+            <span class="mono notranslate" translate="no" data-i18n-skip>{{ info.changed_keys | join(", ") }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </li>
+      {% endif %}
+      {% if diff_summary.tcp_added %}
+      <li>Added TCP proxies: <span class="mono notranslate" translate="no" data-i18n-skip>{{ diff_summary.tcp_added | join(", ") }}</span></li>
+      {% endif %}
+      {% if diff_summary.tcp_removed %}
+      <li>Removed TCP proxies: <span class="mono notranslate" translate="no" data-i18n-skip>{{ diff_summary.tcp_removed | join(", ") }}</span></li>
+      {% endif %}
+      {% if diff_summary.tcp_changed %}
+      <li>
+        Changed TCP proxies:
+        <ul>
+          {% for name, info in diff_summary.tcp_changed.items() %}
+          <li>
+            <span class="mono notranslate" translate="no" data-i18n-skip>{{ name }}</span>:
+            <span class="mono notranslate" translate="no" data-i18n-skip>{{ info.changed_keys | join(", ") }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </li>
+      {% endif %}
+      {% if diff_summary.global_changed_keys %}
+      <li>
+        Changed global settings:
+        <span class="mono notranslate" translate="no" data-i18n-skip>{{ diff_summary.global_changed_keys | join(", ") }}</span>
+      </li>
+      {% endif %}
+    </ul>
+  </details>
+
+  <div class="config-operation-results" aria-label="Validate and apply configuration">
+    <section class="config-operation-result" aria-labelledby="validation-result-title">
+      <div class="config-operation-result-header">
+        <h3 id="validation-result-title">Validation result</h3>
+        <div id="check-result-time" class="apply-result-time muted"></div>
+      </div>
+      <div id="check-status" class="result-message notranslate" translate="no" data-i18n-skip
+           role="status" aria-live="polite"></div>
+      <div id="check-stdout" class="mono notranslate config-technical-output" translate="no" data-i18n-skip></div>
+      <div id="check-stderr" class="mono notranslate config-technical-output" translate="no" data-i18n-skip></div>
+    </section>
+
+    <section class="config-operation-result" aria-labelledby="apply-result-title">
+      <div class="config-operation-result-header">
+        <h3 id="apply-result-title">Apply result</h3>
+        <div id="apply-result-time" class="apply-result-time muted"></div>
+      </div>
+      <div class="apply-safety-note">
+        <strong>Automatic safety check:</strong>
+        <span>The candidate is applied temporarily. Confirm it before the countdown expires, or the previous configuration is restored automatically.</span>
+      </div>
+      <div id="apply-status" class="result-message notranslate" translate="no" data-i18n-skip
+           role="status" aria-live="polite"></div>
+      <div id="apply-warnings" class="config-apply-warnings notranslate" translate="no" data-i18n-skip
+           role="status" aria-live="polite"></div>
+      <div id="apply-stdout" class="mono notranslate config-technical-output" translate="no" data-i18n-skip></div>
+      <div id="apply-stderr" class="mono notranslate config-technical-output" translate="no" data-i18n-skip></div>
+    </section>
+  </div>
+
+  <div id="cfg-preview-container" class="config-preview" hidden>
+    <div class="cfg-diff-wrapper">
+      <div id="cfg-diff" class="cfg-diff mono notranslate" translate="no" data-i18n-skip></div>
+    </div>
+  </div>
+</section>
+
+<section class="card vars-editor-card" aria-labelledby="vars-editor-title">
+  <div class="card-header vars-editor-header">
+    <div>
+      <h2 id="vars-editor-title">Global HAProxy settings</h2>
+      <p class="table-meta">Edit supported values from <code>vars.yml</code>. Website and TCP proxy settings have their own pages.</p>
+    </div>
+    <a class="btn btn-icon" href="{{ url_for('routes.haproxy_config_download', kind='vars') }}" download="vars.yml">
+      Download vars.yml
+    </a>
+  </div>
+
+  <form id="vars-guided-form" class="vars-guided-form" data-revision="{{ vars_revision | default('') }}">
+    <div class="vars-sections">
+      {% for section in vars_sections | default([]) %}
+      <fieldset class="vars-section">
+        <legend>{{ section.title }}</legend>
+        {% if section.description %}
+        <p class="vars-section-description">{{ section.description }}</p>
+        {% endif %}
+
+        <div class="vars-fields-grid">
+          {% for field in section.fields %}
+          {% set field_id = 'vars-field-' ~ field.path | replace('.', '-') | replace('_', '-') %}
+          {% set field_type = field.type | default('text') %}
+          <div class="vars-field{% if field.readonly %} vars-field--readonly{% endif %}">
+            <div class="vars-field-heading">
+              <label class="form-label" for="{{ field_id }}">{{ field.label }}</label>
+              {% if field.readonly %}<span class="vars-readonly-badge">Managed</span>{% endif %}
+            </div>
+
+            {% if field_type in ['boolean', 'bool'] %}
+            <label class="vars-switch" for="{{ field_id }}">
+              <input id="{{ field_id }}" type="checkbox"
+                     data-vars-field data-field-path="{{ field.path }}" data-field-type="boolean"
+                     data-field-present="{{ 'true' if field.present else 'false' }}"
+                     {% if field.value %}checked{% endif %}
+                     {% if field.readonly %}disabled data-readonly="true"{% endif %}>
+              <span class="vars-switch-control" aria-hidden="true"></span>
+              <span class="vars-switch-label">Enabled</span>
+            </label>
+            {% elif field.options %}
+            <select id="{{ field_id }}" class="form-input"
+                    data-vars-field data-field-path="{{ field.path }}" data-field-type="{{ field_type }}"
+                    data-field-present="{{ 'true' if field.present else 'false' }}"
+                    {% if field.readonly %}disabled data-readonly="true"{% endif %}>
+              {% for option in field.options %}
+                {% if option is mapping %}
+                  {% set option_value = option.value %}
+                  {% set option_label = option.label %}
+                {% else %}
+                  {% set option_value = option %}
+                  {% set option_label = option %}
+                {% endif %}
+              <option value="{{ option_value }}" {% if option_value | string == field.value | string %}selected{% endif %}>{{ option_label }}</option>
+              {% endfor %}
+            </select>
+            {% elif field.rows or field_type in ['textarea', 'json', 'yaml', 'list'] %}
+            <textarea id="{{ field_id }}" class="form-input vars-textarea"
+                      rows="{{ field.rows | default(3) }}"
+                      data-vars-field data-field-path="{{ field.path }}" data-field-type="{{ field_type }}"
+                      data-field-present="{{ 'true' if field.present else 'false' }}"
+                      {% if field.readonly %}readonly data-readonly="true"{% endif %}>{% if field.value is string %}{{ field.value }}{% elif field.value is not none %}{{ field.value | tojson }}{% endif %}</textarea>
+            {% else %}
+            <input id="{{ field_id }}" class="form-input" type="{% if field_type in ['integer', 'int', 'number', 'float'] %}number{% else %}text{% endif %}"
+                   value="{% if field.value is not none %}{{ field.value }}{% endif %}"
+                   data-vars-field data-field-path="{{ field.path }}" data-field-type="{{ field_type }}"
+                   data-field-present="{{ 'true' if field.present else 'false' }}"
+                   {% if field.minimum is not none %}min="{{ field.minimum }}"{% endif %}
+                   {% if field.maximum is not none %}max="{{ field.maximum }}"{% endif %}
+                   {% if field_type in ['integer', 'int'] %}step="1"{% endif %}
+                   {% if field.pattern %}pattern="{{ field.pattern }}"{% endif %}
+                   {% if field.readonly %}readonly data-readonly="true"{% endif %}>
+            {% endif %}
+
+            {% if field.help %}<p class="vars-field-help">{{ field.help }}</p>{% endif %}
+            <div class="vars-field-error" data-field-error="{{ field.path }}" role="alert"></div>
+          </div>
+          {% endfor %}
+        </div>
+      </fieldset>
+      {% else %}
+      <div class="alert alert-info">No guided settings are available for this installation.</div>
+      {% endfor %}
+    </div>
+
+    <div class="vars-form-actions">
+      <button type="submit" class="btn" id="btn-save-vars">Save settings</button>
+      <span id="vars-status" class="result-message" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+
+  <details class="vars-advanced" id="vars-advanced">
+    <summary>Advanced YAML editor</summary>
+    <div class="vars-advanced-body">
+      <div class="alert alert-warning">
+        Advanced mode replaces the complete runtime <code>vars.yml</code>. Use it only for settings that are not available above.
+      </div>
+      <label class="form-label" for="vars-yaml-editor">Runtime vars.yml</label>
+      <textarea id="vars-yaml-editor" class="form-input vars-yaml-editor mono notranslate"
+                translate="no" data-i18n-skip rows="18"
+                data-revision="{{ vars_revision | default('') }}">{{ vars_yaml | default('') }}</textarea>
+      <div class="vars-form-actions">
+        <button type="button" class="btn" id="btn-save-vars-raw">Save raw YAML</button>
+        <span id="vars-raw-status" class="result-message" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+</section>
+
+<div id="apply-confirm-modal" class="config-modal" hidden
+     role="dialog" aria-modal="true" aria-labelledby="apply-confirm-title"
+     aria-describedby="apply-confirm-description">
+  <div class="config-modal-backdrop"></div>
+  <div class="config-modal-panel" tabindex="-1">
+    <div class="config-confirm-icon" aria-hidden="true">!</div>
+    <h2 id="apply-confirm-title">Confirm the new HAProxy configuration</h2>
+    <p id="apply-confirm-description">
+      The administration UI is reachable with the candidate configuration. Keep it only after verifying the important sites.
+    </p>
+    <div class="config-countdown" aria-live="polite">
+      <span>Automatic rollback in</span>
+      <strong id="apply-confirm-countdown">—</strong>
+    </div>
+    <div id="apply-confirm-status" class="result-message notranslate" translate="no" data-i18n-skip
+         role="status" aria-live="polite"></div>
+    <div class="config-modal-actions">
+      <button type="button" class="btn btn-danger" id="btn-confirm-apply">Keep configuration</button>
+      <button type="button" class="btn" id="btn-rollback-pending">Roll back now</button>
+    </div>
+  </div>
+</div>
+
+<div class="config-download-footer">
+  <a class="btn btn-icon" href="{{ url_for('routes.haproxy_download_all_configs') }}">
+    Download all configuration files (zip)
+  </a>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/haproxy_config.js') }}"></script>
+{% endblock %}

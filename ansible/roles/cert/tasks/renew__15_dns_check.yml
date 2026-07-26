@@ -1,0 +1,73 @@
+---
+# 15 — проверка готовности DNS для целей выпуска
+
+- name: Defaults for DNS check
+  set_fact:
+    acme_resolvers: "{{ acme_resolvers | default(['1.1.1.1','8.8.8.8']) }}"
+
+# Все запланированные цели из предыдущего шага (строки-линейки)
+- name: Aggregate planned targets
+  set_fact:
+    _planned_lineages: "{{ (targets_explicit | default([])) + (targets_single | default([])) }}"
+
+# Нормализуем: из линейки → base + SAN из описания сайта
+- name: Normalize planned targets into uniform objects
+  set_fact:
+    planned_items: "{{ _planned_items_json | from_json }}"
+  vars:
+    _planned_items_json: >-
+      {%- set out = [] -%}
+      {%- for lin in _planned_lineages -%}
+        {%- set base = lin | regex_replace('(-rsa|-ecdsa)$','') -%}
+        {%- set site = (cert_sites | default([]) | selectattr('domain','equalto', base) | list | first) -%}
+        {%- set names = [base] + (site.alt_names | default([])) -%}
+        {%- set _ = out.append({'lineage': lin, 'names': names}) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+# Проверяем: у каждого имени есть A или AAAA у всех заданных резолверов
+- name: DNS readiness per target
+  vars:
+    names: "{{ item.names }}"
+  shell: |
+    set -eo pipefail
+    ok=1
+    for n in {{ names | join(' ') }}; do
+      for r in {{ acme_resolvers | join(' ') }}; do
+        if ! (dig +time=2 +tries=1 +short A "$n" @"$r" | grep -E '^[0-9]+\.' >/dev/null \
+           || dig +time=2 +tries=1 +short AAAA "$n" @"$r" | grep -E '^[0-9a-f:]' >/dev/null); then
+          ok=0
+        fi
+      done
+    done
+    echo "$ok"
+  args: { executable: /bin/bash }
+  loop: "{{ planned_items }}"
+  register: _dns_checks
+  changed_when: false
+  loop_control:
+    label: "{{ item.lineage }} → {{ item.names | join(',') }}"
+
+# Разделяем готовые/неготовые
+- name: Compute ready/not-ready lineages
+  set_fact:
+    ready_lineages:     "{{ _dns_checks.results | selectattr('stdout','equalto','1') | map(attribute='item.lineage') | list }}"
+    not_ready_lineages: "{{ _dns_checks.results | rejectattr('stdout','equalto','1') | map(attribute='item.lineage') | list }}"
+
+# Строим списки для выпуска (в исходном формате — строки)
+- name: Build issue target lists in the original shape
+  set_fact:
+    issue_targets_explicit: "{{ targets_explicit | default([]) | select('in', ready_lineages) | list }}"
+    issue_targets_single:   "{{ targets_single  | default([]) | select('in', ready_lineages) | list }}"
+
+- name: Compute issue_targets_count
+  set_fact:
+    issue_targets_count: "{{ (issue_targets_explicit | default([]) | length)
+                             + (issue_targets_single  | default([]) | length) }}"
+
+- name: Show DNS readiness summary
+  debug:
+    msg:
+      - "DNS-ready: {{ ready_lineages }}"
+      - "Not ready: {{ not_ready_lineages }}"
+      - "Will issue count: {{ issue_targets_count }}"

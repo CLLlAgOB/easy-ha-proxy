@@ -1,0 +1,32 @@
+
+# ------------------------------------------------------------
+# 2. Backup сертификатов на контрол-хост 
+# ------------------------------------------------------------
+- name: Archive Let's Encrypt and HAProxy certificates on the managed host
+  ansible.builtin.archive:
+    path:
+      - /etc/letsencrypt           # что архивируем
+      - /etc/haproxy/certs         # добавляем папку с сертификатами HAProxy
+    dest: /tmp/backup_{{ inventory_hostname }}.tar.gz
+    format: gz                     # tar.gz
+  become: true                    # под root, чтобы прочитать все файлы
+
+- name: Fetch the certificate archive to the control host
+  ansible.builtin.fetch:
+    src: /tmp/backup_{{ inventory_hostname }}.tar.gz
+    dest: ./backups/               # локальная папка
+    flat: true                     # без вложенных директорий
+
+- name: Remove the temporary certificate archive from the managed host
+  ansible.builtin.file:
+    path: /tmp/backup_{{ inventory_hostname }}.tar.gz
+    state: absent
+  become: true
+
+
+# - name: Перечитать конфиг HAProxy
+#   service:
+#     name: haproxy
+#     state: reloaded
+#     enabled: yes
+#   when: haproxy_present

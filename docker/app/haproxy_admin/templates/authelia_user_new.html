@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}New Authelia user{% endblock %}
+{% block header_title %}New Authelia user{% endblock %}
+
+{% block header_buttons %}
+  {% include "_authelia_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <div class="table-title">Error</div>
+    </div>
+    <div style="padding:12px 16px;color:var(--error);">
+        {{ error }}
+    </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <div class="table-title">Message</div>
+    </div>
+    <div style="padding:12px 16px;color:var(--success);">
+        {{ message }}
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>Create user</h2>
+    </div>
+
+    <div style="padding:16px;max-width:620px;">
+        <form method="post">
+            {{ csrf_token() if csrf_token is defined }}
+
+            <div class="form-row">
+                <label for="username" class="form-label">
+                    Username <span style="color:var(--error)">*</span>
+                </label>
+                <input type="text"
+                       id="username"
+                       name="username"
+                       class="form-input"
+                       required
+                       value="{{ form.username if form is defined else '' }}">
+            </div>
+
+            <div class="form-row">
+                <label for="displayname" class="form-label">
+                    Display name <span style="color:var(--error)">*</span>
+                </label>
+                <input type="text"
+                       id="displayname"
+                       name="displayname"
+                       class="form-input"
+                       required
+                       value="{{ form.displayname if form is defined else '' }}">
+            </div>
+
+            <div class="form-row">
+                <label for="email" class="form-label">
+                    Email <span style="color:var(--error)">*</span>
+                </label>
+                <input type="email"
+                       id="email"
+                       name="email"
+                       class="form-input"
+                       required
+                       value="{{ form.email if form is defined else '' }}">
+            </div>
+
+            {# Groups: list существующих + доп. группы вручную #}
+            <div class="form-row">
+                <div class="form-label" style="margin-bottom:4px;">Groups</div>
+
+                {% if all_groups is defined and all_groups %}
+                {% set groups_list = all_groups %}
+                {% else %}
+                {% set groups_list = [] %}
+                {% endif %}
+
+                {% if form is defined and form.selected_groups is defined %}
+                {% set selected_groups = form.selected_groups %}
+                {% else %}
+                {% set selected_groups = [] %}
+                {% endif %}
+
+                {% if groups_list %}
+                <div class="group-grid">
+                    {% for g in groups_list %}
+                    <label class="checkbox-pill">
+                        <input type="checkbox"
+                               name="groups"
+                               value="{{ g }}"
+                               {% if g in selected_groups %}checked{% endif %}>
+                        <span>{{ g }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p style="opacity:.7;margin:4px 0 0;">
+                    The group list is empty; you can enter groups below.
+                </p>
+                {% endif %}
+
+                <div style="margin-top:10px;">
+                    <label for="groups_extra" class="form-label">
+                        Additional groups (comma-separated)
+                    </label>
+                    <input type="text"
+                           id="groups_extra"
+                           name="groups_extra"
+                           class="form-input"
+                           placeholder="for example: powerusers,devops"
+                           value="{{ form.groups_extra if form is defined else '' }}">
+                    <p style="opacity:.7;font-size:12px;margin-top:4px;">
+                        Checked groups will be merged with the groups entered manually.
+                    </p>
+                </div>
+            </div>
+
+            <div class="form-row" style="display:flex;gap:12px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:220px;">
+                    <label for="password" class="form-label">
+                        Password <span style="color:var(--error)">*</span>
+                    </label>
+                    <input type="password"
+                           id="password"
+                           name="password"
+                           class="form-input"
+                           required>
+                </div>
+                <div style="flex:1;min-width:220px;">
+                    <label for="password2" class="form-label">
+                        Repeat password <span style="color:var(--error)">*</span>
+                    </label>
+                    <input type="password"
+                           id="password2"
+                           name="password2"
+                           class="form-input"
+                           required>
+                </div>
+            </div>
+
+            <div style="margin-top:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                <button type="submit" class="btn">
+                    Create
+                </button>
+                {% if form and form.username %}
+                <span class="mono" style="opacity:.7">Username: {{ form.username }}</span>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock %}

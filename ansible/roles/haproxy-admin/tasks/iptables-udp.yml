@@ -1,0 +1,82 @@
+---
+# Kernel-NAT UDP forwarding (variant A): generator script + loader unit.
+# HAProxy cannot proxy UDP, so UDP services are forwarded with iptables-legacy
+# DNAT programmed from the managed udp.yml. Reuses the haproxy_ban ipset.
+
+- name: "iptables-udp | Install required packages"
+  ansible.builtin.package:
+    name:
+      - ipset
+      - iptables
+      - python3-yaml
+    state: present
+  tags: restore-network
+
+- name: "iptables-udp | Enable IPv4 forwarding for DNATed UDP flows"
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-easy-ha-proxy-udp.conf
+    reload: yes
+
+- name: "iptables-udp | Keep external routing to loopback disabled"
+  ansible.posix.sysctl:
+    name: net.ipv4.conf.all.route_localnet
+    value: "0"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-easy-ha-proxy-udp.conf
+    reload: yes
+
+- name: "iptables-udp | Keep loopback routing disabled on future interfaces"
+  ansible.posix.sysctl:
+    name: net.ipv4.conf.default.route_localnet
+    value: "0"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-easy-ha-proxy-udp.conf
+    reload: yes
+
+- name: "iptables-udp | Ensure a managed udp.yml exists (empty by default)"
+  ansible.builtin.copy:
+    dest: "{{ app_dir }}/config/udp.yml"
+    content: |
+      # Managed by easy-ha-proxy. UDP forwards (kernel NAT / iptables DNAT).
+      udp_forwards: []
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0640"
+    force: no
+
+- name: "iptables-udp | Install UDP forwarding generator"
+  ansible.builtin.copy:
+    src: haproxy-udp-forward.py
+    dest: /usr/local/sbin/haproxy-udp-forward.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: udp_generator
+
+- name: "iptables-udp | Install loader systemd unit"
+  ansible.builtin.template:
+    src: iptables-haproxy-udp.service.j2
+    dest: /etc/systemd/system/iptables-haproxy-udp.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: udp_unit
+
+- name: "iptables-udp | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: udp_unit.changed
+
+- name: "iptables-udp | Enable & (re)load UDP forwarding rules"
+  ansible.builtin.systemd:
+    name: iptables-haproxy-udp
+    enabled: yes
+    state: >-
+      {{
+        'restarted'
+        if (udp_generator.changed or udp_unit.changed)
+        else 'started'
+      }}

@@ -1,0 +1,55 @@
+[Unit]
+Description=easy-ha-proxy software update broker
+After=network-online.target docker.service easy-ha-proxy-backupd.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group | default('hadmin') }}
+Environment="PYTHONUNBUFFERED=1"
+Environment="UPDATED_SOCKET_PATH={{ updated_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-updated.sock') }}"
+Environment="UPDATED_STATE_ROOT={{ updated_state_root | default('/var/lib/easy-ha-proxy/update-web') }}"
+Environment="UPDATED_SOURCE_DIR={{ updated_source_dir | default('/opt/easy-ha-proxy/source') }}"
+Environment="UPDATED_CONFIG_DIR={{ updated_config_dir | default('/etc/easy-ha-proxy') }}"
+Environment="UPDATED_PYTHON_PATH={{ updated_python_path | default('/opt/easy-ha-proxy/venv/bin/python') }}"
+Environment="UPDATED_CLI_PATH={{ updated_cli_path | default('/usr/local/bin/easy-ha-proxy') }}"
+Environment="UPDATED_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
+Environment="UPDATED_APP_GROUP={{ app_group | default('hadmin') }}"
+Environment="UPDATED_MAX_REQUEST_BYTES={{ updated_max_request_bytes | default(32768) }}"
+Environment="UPDATED_MAX_RESPONSE_BYTES={{ updated_max_response_bytes | default(2097152) }}"
+Environment="UPDATED_MAX_CAPTURE_BYTES={{ updated_max_capture_bytes | default(262144) }}"
+Environment="UPDATED_MAX_STATE_BYTES={{ updated_max_state_bytes | default(1048576) }}"
+Environment="UPDATED_JOB_TIMEOUT_SECONDS={{ updated_job_timeout_seconds | default(7200) }}"
+Environment="UPDATED_CHECK_TIMEOUT_SECONDS={{ updated_check_timeout_seconds | default(600) }}"
+Environment="UPDATED_PLAN_TTL_SECONDS={{ updated_plan_ttl_seconds | default(900) }}"
+Environment="UPDATED_LIST_LIMIT={{ updated_list_limit | default(30) }}"
+Environment="UPDATED_ACTIVE_MARKER={{ updated_active_marker | default('/run/easy-ha-proxy/easy-ha-proxy-update.active') }}"
+Environment="UPDATED_RESTART_REQUEST_MARKER={{ updated_restart_request_marker | default('/run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested') }}"
+Environment="UPDATED_MAINTENANCE_LOCK={{ updated_maintenance_lock_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock') }}"
+Environment="UPDATED_HAPROXY_TRANSACTION_MARKER={{ updated_haproxy_transaction_marker | default('/opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json') }}"
+Environment="UPDATED_HAPROXY_TRANSACTION_STATE={{ updated_haproxy_transaction_state | default('/var/lib/easy-ha-proxy/haproxy-config-guard/transaction.json') }}"
+Environment="UPDATED_SERVICE_NAME=easy-ha-proxy-updated.service"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-updated.py', rstrip=false) | hash('sha256') }}"
+ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py
+Restart=always
+RestartSec=3
+TimeoutStopSec={{ (updated_job_timeout_seconds | default(7200) | int) + 30 }}
+KillMode=mixed
+LimitCORE=0
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+PrivateTmp=yes
+# The broker never runs privileged children itself: fixed-argv jobs are
+# spawned by PID 1 as systemd-run transient units, escaping this sandbox.
+# That keeps NoNewPrivileges/RestrictSUIDSGID here while APT can still drop
+# to `_apt`, dpkg can install setuid binaries, and snap-confined certbot can
+# switch its AppArmor profile inside the transient job.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

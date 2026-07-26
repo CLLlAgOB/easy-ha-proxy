@@ -1,0 +1,175 @@
+---
+# 00 — нормализация и выбор целей
+
+# 1. Гарантируем, что sites — список (или пустой)
+- name: Ensure sites is a list
+  set_fact:
+    sites: "{{ sites | default([], true) | list }}"
+
+# 2. ЛОКАЛЬНЫЙ список для роли cert:
+#    реальные sites + служебные домены из certbot_domains
+#    (НЕ трогаем глобальный sites!)
+- name: Build local cert_sites (sites + certbot_domains)
+  set_fact:
+    cert_sites: "{{ _cert_sites_json | from_json }}"
+  vars:
+    _cert_sites_json: >-
+      {%- set out = [] -%}
+      {%- set existing = [] -%}
+
+      {# 2.1. Копируем все реальные sites как есть #}
+      {%- for s in (sites | default([], true)) -%}
+        {%- set _ = out.append(s) -%}
+        {%- if s.domain is defined -%}
+          {%- set _ = existing.append(s.domain) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# 2.2. Добавляем домены из certbot_domains как "служебные сайты",
+         НО только в cert_sites, НЕ в sites #}
+      {%- for d in (certbot_domains | default([])) -%}
+        {%- if d not in existing -%}
+          {%- set _ = out.append({'name': d, 'domain': d}) -%}
+          {%- set _ = existing.append(d) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {{ out | to_json }}
+
+# Значения по умолчанию для режима и типа ключа
+- name: Defaults for mode and key type
+  set_fact:
+    _cert_issue_mode: "{{ cert_issue_mode | default('all') }}"
+    _cert_key_type: "{{ cert_key_type   | default('ecdsa') }}"
+
+# Найти текущие renewal lineages
+- name: Find existing renewal lineages
+  ansible.builtin.find:
+    paths: /etc/letsencrypt/renewal
+    patterns: "*.conf"
+    file_type: file
+  register: renewal_files
+  failed_when: false
+  changed_when: false
+
+- name: Build list of existing lineage names
+  set_fact:
+    existing_lineages: "{{ _existing_json | from_json }}"
+  vars:
+    _existing_json: >-
+      {%- set out = [] -%}
+      {%- for f in (renewal_files.files | default([])) -%}
+        {%- set b = (f.path | basename) -%}
+        {%- if b.endswith('.conf') -%}
+          {%- set name = b[:-5] -%}
+        {%- else -%}
+          {%- set name = b -%}
+        {%- endif -%}
+        {%- set _ = out.append(name) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: debug existing_lineages
+  debug:
+    var: existing_lineages
+
+# -----------------------------
+# Формируем все потенциальные lineages (строки) по cert_sites
+# -----------------------------
+
+# Сайты с явным key_types → base-ecdsa/base-rsa (если ключей >1) иначе base
+- name: Build all_explicit targets (lineage names)
+  when: (cert_sites | selectattr('key_types','defined') | list | length) > 0
+  set_fact:
+    all_explicit_lineages: "{{ _all_explicit_json | from_json }}"
+  vars:
+    _all_explicit_json: >-
+      {%- set out = [] -%}
+      {%- for s in (cert_sites | selectattr('key_types','defined') | list) -%}
+        {%- set multi = (s.key_types | length) | int > 1 -%}
+        {%- for kt in s.key_types -%}
+          {%- if multi -%}
+            {%- set _ = out.append(s.domain ~ '-' ~ kt) -%}
+          {%- else -%}
+            {%- set _ = out.append(s.domain) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+# Если явных не было — всё равно создадим пустой список
+- name: Build all_explicit targets (lineage names, no external filters)
+  set_fact:
+    all_explicit_lineages: "{{ all_explicit_lineages | default([]) }}"
+
+# Сайты без key_types → просто base
+- name: Build all_single targets (lineage names)
+  set_fact:
+    all_single_lineages: "{{ _all_single_json | from_json }}"
+  vars:
+    _all_single_json: >-
+      {%- set out = [] -%}
+      {%- for s in (cert_sites | rejectattr('key_types','defined') | list) -%}
+        {%- if s.domain is defined -%}
+          {%- set _ = out.append(s.domain) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+# (опц.) sites_include — фильтруем по базовому домену
+- name: Apply sites_include filter (if provided)
+  when: (vars.get('sites_include', []) | length) > 0
+  set_fact:
+    _sites_include: "{{ vars.get('sites_include', []) }}"
+    all_explicit_lineages: "{{ _filtered_explicit_json | from_json }}"
+    all_single_lineages: "{{ _filtered_single_json   | from_json }}"
+  vars:
+    _filtered_explicit_json: >-
+      {%- set out = [] -%}
+      {%- for lin in all_explicit_lineages -%}
+        {%- set base = lin | regex_replace('(-rsa|-ecdsa)$','') -%}
+        {%- if base in _sites_include -%}
+          {%- set _ = out.append(lin) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+    _filtered_single_json: >-
+      {%- set out = [] -%}
+      {%- for lin in all_single_lineages -%}
+        {%- if lin in _sites_include -%}
+          {%- set _ = out.append(lin) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+# Режим: all → все; new → только отсутствующие
+- name: Select final targets by mode
+  set_fact:
+    targets_explicit: >-
+      {{
+        ((_cert_issue_mode | default('all')) == 'new')
+        | ternary(
+            (all_explicit_lineages | reject('in', existing_lineages | default([])) | list),
+            (all_explicit_lineages | list)
+          )
+      }}
+    targets_single: >-
+      {{
+        ((_cert_issue_mode | default('all')) == 'new')
+        | ternary(
+            (all_single_lineages | reject('in', existing_lineages | default([])) | list),
+            (all_single_lineages | list)
+          )
+      }}
+
+- name: Count targets
+  set_fact:
+    targets_count: "{{ (targets_explicit | default([]) | length) + (targets_single | default([]) | length) }}"
+
+- name: debug
+  debug:
+    msg:
+      - "targets_explicit: {{ targets_explicit }}"
+      - "targets_single  : {{ targets_single }}"
+      - "current_lineages: {{ existing_lineages }}"
+      - "mode: {{ _cert_issue_mode }}, total targets: {{ targets_count }}"

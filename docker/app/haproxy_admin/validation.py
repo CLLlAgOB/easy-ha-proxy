@@ -1,0 +1,253 @@
+"""Validation shared by the UI editors and whole-file YAML uploads."""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+DOMAIN_RE = re.compile(
+    r"^(?:\*\.)?(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}"
+    r"[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
+)
+HOST_RE = re.compile(r"^[A-Za-z0-9_.:%-]{1,253}$")
+ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
+INTERVAL_RE = re.compile(r"^[1-9][0-9]*(?:ms|s|m|h|d)$")
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[A-Za-z0-9-]{2,63}$")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+BALANCE_VALUES = {
+    "roundrobin", "static-rr", "leastconn", "first", "source",
+    "uri", "url_param", "hdr", "random", "rdp-cookie",
+}
+CONTROL_PLANE_ACL_RE = re.compile(
+    r"^\s*acl\s+(host_admin|host_authelia)\s+"
+    r"hdr\(host\)\s+-i\s+(.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def validate_identifier(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    if not IDENTIFIER_RE.fullmatch(text):
+        raise ValueError(
+            f"{label}: only Latin letters, digits, '.', '_', and '-' are allowed (up to 128 characters)"
+        )
+    return text
+
+
+def validate_domain(value: Any, label: str = "domain") -> str:
+    text = str(value or "").strip().lower()
+    if not DOMAIN_RE.fullmatch(text):
+        raise ValueError(f"{label}: invalid DNS name")
+    return text.rstrip(".")
+
+
+def validate_host(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    if not HOST_RE.fullmatch(text) or CONTROL_RE.search(text):
+        raise ValueError(f"{label}: invalid IP address or hostname")
+    return text
+
+
+def validate_port(value: Any, label: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{label} must be between 1 and 65535")
+    return port
+
+
+def control_plane_domains(config_text: str) -> dict[str, tuple[str, ...]]:
+    """Return the admin/Authelia host ACL values from rendered HAProxy config."""
+    domains: dict[str, tuple[str, ...]] = {}
+    for match in CONTROL_PLANE_ACL_RE.finditer(config_text or ""):
+        values = tuple(
+            sorted(
+                {
+                    value.strip().lower().rstrip(".")
+                    for value in match.group(2).split()
+                    if value.strip()
+                }
+            )
+        )
+        if values:
+            domains[match.group(1)] = values
+    return domains
+
+
+def validate_control_plane_transition(
+    active_config: str,
+    candidate_config: str,
+) -> None:
+    """Prevent UI-generated configs from replacing protected service domains."""
+    active = control_plane_domains(active_config)
+    if not active:
+        return
+
+    candidate = control_plane_domains(candidate_config)
+    labels = {
+        "host_admin": "HAProxy Admin",
+        "host_authelia": "Authelia",
+    }
+    for acl_name, active_domains in active.items():
+        candidate_domains = candidate.get(acl_name)
+        if candidate_domains == active_domains:
+            continue
+        current = ", ".join(active_domains)
+        proposed = (
+            ", ".join(candidate_domains)
+            if candidate_domains
+            else "missing"
+        )
+        raise ValueError(
+            f"Protected domain {labels[acl_name]} changed: "
+            f"{current} -> {proposed}. "
+            'The change was blocked. Service domains can only be changed '
+            'with easy-ha-proxy migrate-domain.'
+        )
+
+
+def reject_unsafe_scalars(
+    value: Any,
+    path: str = "root",
+    depth: int = 0,
+    seen: set[int] | None = None,
+) -> int:
+    """Reject control characters and excessively complex expanded YAML."""
+    if seen is None:
+        seen = set()
+    if depth > 20:
+        raise ValueError(f"{path}: structure is too deeply nested")
+    if isinstance(value, str):
+        if len(value) > 16384:
+            raise ValueError(f"{path}: string is too long")
+        if CONTROL_RE.search(value):
+            raise ValueError(f"{path}: control characters and line breaks are forbidden")
+        return 1
+    if isinstance(value, dict):
+        if id(value) in seen:
+            raise ValueError(f"{path}: YAML aliases are not allowed")
+        seen.add(id(value))
+        count = 1
+        for key, item in value.items():
+            if not isinstance(key, str) or CONTROL_RE.search(key) or len(key) > 128:
+                raise ValueError(f"{path}: invalid key")
+            count += reject_unsafe_scalars(item, f"{path}.{key}", depth + 1, seen)
+            if count > 10000:
+                raise ValueError('YAML contains too many items')
+        return count
+    if isinstance(value, list):
+        if id(value) in seen:
+            raise ValueError(f"{path}: YAML aliases are not allowed")
+        seen.add(id(value))
+        count = 1
+        for index, item in enumerate(value):
+            count += reject_unsafe_scalars(
+                item, f"{path}[{index}]", depth + 1, seen
+            )
+            if count > 10000:
+                raise ValueError('YAML contains too many items')
+        return count
+    if value is not None and not isinstance(value, (bool, int, float)):
+        raise ValueError(f"{path}: unsupported value type")
+    return 1
+
+
+def _validate_site(site: Any, index: int) -> None:
+    if not isinstance(site, dict):
+        raise ValueError(f"sites[{index}] must be an object")
+    validate_identifier(site.get("name") or site.get("domain"), f"sites[{index}].name")
+    validate_domain(site.get("domain") or site.get("name"), f"sites[{index}].domain")
+    if site.get("backend_ip"):
+        validate_host(site["backend_ip"], f"sites[{index}].backend_ip")
+    if site.get("backend_port") is not None:
+        validate_port(site["backend_port"], f"sites[{index}].backend_port")
+    geo_countries = site.get("geo_countries")
+    if geo_countries is not None:
+        if not isinstance(geo_countries, list) or len(geo_countries) > 249:
+            raise ValueError(
+                f"sites[{index}].geo_countries must be a list of at most 249 ISO alpha-2 codes"
+            )
+        for country_index, country in enumerate(geo_countries):
+            if (
+                not isinstance(country, str)
+                or not ISO_ALPHA2_RE.fullmatch(country.strip())
+            ):
+                raise ValueError(
+                    f"sites[{index}].geo_countries[{country_index}] must be an uppercase ISO alpha-2 code"
+                )
+    if site.get("access_gate") is not None and not isinstance(
+        site["access_gate"], bool
+    ):
+        raise ValueError(f"sites[{index}].access_gate must be true or false")
+    if site.get("alert_enabled") is not None and not isinstance(
+        site["alert_enabled"], bool
+    ):
+        raise ValueError(f"sites[{index}].alert_enabled must be true or false")
+    if site.get("alert_mode") is not None and site["alert_mode"] not in (
+        "down",
+        "degraded",
+    ):
+        raise ValueError(f"sites[{index}].alert_mode must be down or degraded")
+    if site.get("alert_after") is not None and not INTERVAL_RE.fullmatch(
+        str(site["alert_after"])
+    ):
+        raise ValueError(
+            f"sites[{index}].alert_after must be an interval such as 5m or 300s"
+        )
+    if site.get("alert_email") is not None:
+        email = str(site["alert_email"]).strip()
+        if len(email) > 254 or not EMAIL_RE.fullmatch(email):
+            raise ValueError(f"sites[{index}].alert_email must be a valid email")
+    for srv_index, server in enumerate(site.get("servers") or []):
+        if not isinstance(server, dict):
+            raise ValueError(f"sites[{index}].servers[{srv_index}] must be an object")
+        validate_identifier(
+            server.get("name") or f"srv{srv_index + 1}",
+            f"sites[{index}].servers[{srv_index}].name",
+        )
+        validate_host(server.get("host"), f"sites[{index}].servers[{srv_index}].host")
+        validate_port(server.get("port"), f"sites[{index}].servers[{srv_index}].port")
+
+
+def _validate_tcp(proxy: Any, index: int) -> None:
+    if not isinstance(proxy, dict):
+        raise ValueError(f"tcp_proxies[{index}] must be an object")
+    validate_identifier(proxy.get("name"), f"tcp_proxies[{index}].name")
+    validate_host(proxy.get("bind_ip") or "0.0.0.0", f"tcp_proxies[{index}].bind_ip")
+    validate_port(proxy.get("bind_port"), f"tcp_proxies[{index}].bind_port")
+    balance = str(proxy.get("balance") or "source").strip()
+    if balance not in BALANCE_VALUES:
+        raise ValueError(f"tcp_proxies[{index}].balance: unsupported algorithm")
+    if proxy.get("inter") and not INTERVAL_RE.fullmatch(str(proxy["inter"])):
+        raise ValueError(f"tcp_proxies[{index}].inter: invalid interval")
+    if proxy.get("backend_host"):
+        validate_host(proxy["backend_host"], f"tcp_proxies[{index}].backend_host")
+        validate_port(proxy.get("backend_port"), f"tcp_proxies[{index}].backend_port")
+    for srv_index, server in enumerate(proxy.get("servers") or []):
+        if not isinstance(server, dict):
+            raise ValueError(f"tcp_proxies[{index}].servers[{srv_index}] must be an object")
+        validate_identifier(
+            server.get("name") or f"srv{srv_index + 1}",
+            f"tcp_proxies[{index}].servers[{srv_index}].name",
+        )
+        validate_host(server.get("host"), f"tcp_proxies[{index}].servers[{srv_index}].host")
+        validate_port(server.get("port"), f"tcp_proxies[{index}].servers[{srv_index}].port")
+
+
+def validate_config_data(kind: str, data: dict[str, Any]) -> None:
+    reject_unsafe_scalars(data)
+    if kind == "websites":
+        sites = data.get("sites", [])
+        if not isinstance(sites, list) or len(sites) > 500:
+            raise ValueError('sites must be a list of at most 500 items')
+        for index, site in enumerate(sites):
+            _validate_site(site, index)
+    elif kind == "tcp":
+        proxies = data.get("tcp_proxies", data.get("tcp", []))
+        if not isinstance(proxies, list) or len(proxies) > 500:
+            raise ValueError('tcp_proxies must be a list of at most 500 items')
+        for index, proxy in enumerate(proxies):
+            _validate_tcp(proxy, index)

@@ -1,0 +1,153 @@
+# roles/cert/tasks/remove_orphans.yml
+# DRY-RUN: ansible-playbook site.yml -t remove_site -e cleanup_dry_run=true
+# DELETE : ansible-playbook site.yml -t remove_site
+# Требуется: certbot_domains собран в pre_tasks. Опц.: haproxy_certs_dir.
+
+- name: "Validate that certbot_domains is defined"
+  tags: [never, remove_site]
+  assert:
+    that:
+      - certbot_domains is defined
+      - certbot_domains | length >= 1
+    fail_msg: "certbot_domains не определён или пуст. Собери его в pre_tasks."
+
+- name: "Normalize the target domain list from pre_tasks"
+  tags: [never, remove_site]
+  set_fact:
+    _target_domains: "{{ certbot_domains | unique | list }}"
+    _certs_dir: "{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+
+# 1) Текущие линеки certbot
+- name: "Find current Certbot lineages (/etc/letsencrypt/renewal/*.conf)"
+  tags: [never, remove_site]
+  find:
+    paths: /etc/letsencrypt/renewal
+    patterns: "*.conf"
+    file_type: file
+  register: renewal_confs
+  failed_when: false
+
+- name: "Build the current Certbot lineage name list"
+  tags: [never, remove_site]
+  set_fact:
+    current_lineages: "{{ (renewal_confs.files | default([]))
+                          | map(attribute='path')
+                          | map('basename')
+                          | map('regex_replace','\\.conf$','')
+                          | list }}"
+
+# 2) Осиротевшие линеки = те, чей root (без -rsa/-ecdsa) ∉ _target_domains
+- name: "Calculate orphaned Certbot lineages by exact name"
+  tags: [never, remove_site]
+  set_fact:
+    orphan_lineages: >-
+      {{
+        dict(
+          current_lineages
+          | zip(current_lineages | map('regex_replace','(-rsa|-ecdsa)$','') | list)
+        )
+        | dict2items
+        | rejectattr('value','in', _target_domains)
+        | map(attribute='key')
+        | list
+        | unique
+        | sort
+      }}
+
+# 3) Поиск *.pem и определение «осиротевших»
+- name: "Find assembled HAProxy PEM files"
+  tags: [never, remove_site]
+  find:
+    paths: "{{ _certs_dir }}"
+    patterns: "*.pem"
+    file_type: file
+  register: haproxy_pems
+  failed_when: false
+
+# 3a) *.pem к удалению — по ТЕЧНОМУ соответствию orphan_lineages (если есть)
+- name: "Calculate PEM files matching orphaned lineages"
+  tags: [never, remove_site]
+  set_fact:
+    orphan_pems_exact: >-
+      {{
+        (haproxy_pems.files | default([]))
+        | map(attribute='path') | map('basename') | list
+        | select('in', orphan_lineages | map('regex_replace', '$', '.pem') | list)
+        | list
+      }}
+
+# 3b) *.pem к удалению — по КОРНЮ (если линейки уже нет, а файл остался)
+- name: "Calculate orphaned PEM files by root domain"
+  tags: [never, remove_site]
+  set_fact:
+    orphan_pems_by_root: >-
+      {{
+        dict(
+          ((haproxy_pems.files | default([])) | map(attribute='path') | map('basename') | list)
+          |
+          zip(
+            (
+              (haproxy_pems.files | default([]))
+              | map(attribute='path') | map('basename') | list
+              | map('regex_replace','pem$','')
+              | map('regex_replace','\\.$','')
+              | map('regex_replace','(-rsa|-ecdsa)$','')
+              | list
+            )
+          )
+        )
+        | dict2items
+        | rejectattr('value','in', _target_domains)
+        | map(attribute='key')
+        | list
+      }}
+
+# 3c) Итоговый список *.pem к удалению (и защита от коллизий с активными линейками)
+- name: "Build the final orphaned PEM removal list"
+  tags: [never, remove_site]
+  set_fact:
+    orphan_pems: >-
+      {{
+        (orphan_pems_exact + orphan_pems_by_root)
+        | unique
+        | difference(current_lineages | map('regex_replace', '$', '.pem') | list)
+        | sort
+      }}
+
+# 4) DRY-RUN отчёт
+- name: "DRY-RUN | Show lineages and PEM files that would be removed"
+  tags: [never, remove_site]
+  debug:
+    msg:
+      - "Целевые домены      : {{ _target_domains | sort }}"
+      - "Найденные линеки    : {{ current_lineages | sort }}"
+      - "Линеки к удалению   : {{ orphan_lineages }}"
+      - "*.pem   к удалению  : {{ orphan_pems }}"
+      - "cleanup_dry_run={{ cleanup_dry_run | default(false) | bool }}"
+
+# 5) Удаляем ТОЛЬКО если не dry-run
+- name: "certbot delete orphaned lineages (non-interactive, quiet)"
+  tags: [never, remove_site]
+  command:
+    cmd: "certbot delete --non-interactive --quiet --cert-name {{ item }}"
+  loop: "{{ orphan_lineages }}"
+  when: not (cleanup_dry_run | default(false) | bool)
+  register: _certbot_del
+  failed_when: false
+
+- name: "Delete orphaned assembled HAProxy PEM files"
+  tags: [never, remove_site]
+  file:
+    path: "{{ _certs_dir }}/{{ item }}"
+    state: absent
+  loop: "{{ orphan_pems }}"
+  when: not (cleanup_dry_run | default(false) | bool)
+
+- name: "Reload HAProxy after orphan cleanup"
+  tags: [never, remove_site]
+  service:
+    name: haproxy
+    state: reloaded
+  when:
+    - orphan_lineages | length > 0
+    - not (cleanup_dry_run | default(false) | bool)

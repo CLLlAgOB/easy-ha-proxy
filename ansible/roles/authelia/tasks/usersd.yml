@@ -1,0 +1,59 @@
+---
+# roles/authelia/tasks/usersd.yml
+# Установка и запуск root-демона authelia-usersd
+
+- name: "Authelia | usersd | install & start users daemon"
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: "authelia-usersd | Install password hashing dependency"
+      become: true
+      ansible.builtin.apt:
+        name: python3-argon2
+        state: present
+        update_cache: true
+      tags: restore-network
+
+    - name: "authelia-usersd | Install script"
+      become: true
+      ansible.builtin.copy:
+        src: authelia-usersd.py
+        dest: /usr/local/sbin/authelia-usersd.py
+        owner: root
+        group: root
+        mode: "0750"
+      register: authelia_usersd_script
+
+    - name: "authelia-usersd | Install systemd unit"
+      become: true
+      ansible.builtin.template:
+        src: authelia-usersd.service.j2
+        dest: /etc/systemd/system/authelia-usersd.service
+        owner: root
+        group: root
+        mode: "0640"
+      register: authelia_usersd_unit
+
+    - name: "authelia-usersd | systemd daemon-reload if unit changed"
+      become: true
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      when: authelia_usersd_unit.changed
+
+    - name: "authelia-usersd | Enable service"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-usersd.service
+        enabled: yes
+
+    - name: "authelia-usersd | Restart service if changed"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-usersd.service
+        state: restarted
+      when: authelia_usersd_script.changed or authelia_usersd_unit.changed
+
+    - name: "authelia-usersd | Ensure service started"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-usersd.service
+        state: started

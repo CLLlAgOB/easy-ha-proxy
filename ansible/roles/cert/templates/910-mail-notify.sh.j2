@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+[ -n "${RENEWED_LINEAGE:-}" ] || exit 0
+[ -n "${RENEWED_DOMAINS:-}" ] || exit 0
+
+STATE_FILE="{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}/mail-notify.json"
+LOCK_FILE="/run/easy-ha-proxy/authelia-mail.lock"
+
+# The settings daemon holds this lock exclusively while changing/recreating the
+# relay. Certbot takes a shared lock so it cannot enqueue between queue checks.
+/usr/bin/install -d -m 0750 "${LOCK_FILE%/*}" || {
+  /usr/bin/logger -t easy-ha-proxy-cert-notify "mail lock directory is unavailable; message skipped"
+  exit 0
+}
+exec 9>"${LOCK_FILE}"
+if ! /usr/bin/flock -s -w 30 9; then
+  /usr/bin/logger -t easy-ha-proxy-cert-notify "mail settings are busy; certificate notification skipped"
+  exit 0
+fi
+
+[ -f "${STATE_FILE}" ] || exit 0
+if ! IFS=$'\t' read -r ENABLED TO FROM DOMAINS < <(
+  /usr/bin/python3 -c '
+import json, re, sys
+
+control = re.compile(r"[\x00-\x1f\x7f]")
+email = re.compile(
+    r"^[A-Za-z0-9.!#$%&\x27*+/=?^_`{|}~-]+@"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+domain = re.compile(
+    r"^(?:\*\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as stream:
+        state = json.load(stream)
+    enabled = state.get("enabled") is True
+    recipient = state.get("to", "")
+    sender = state.get("from", "")
+    if not enabled:
+        print("0", "", "", "", sep="\t")
+        sys.exit(0)
+    domains = sys.argv[2].split()
+    only_for = state.get("only_for", [])
+    if (
+        not isinstance(recipient, str)
+        or not isinstance(sender, str)
+        or control.search(recipient)
+        or control.search(sender)
+        or not email.fullmatch(recipient)
+        or not email.fullmatch(sender)
+        or not domains
+        or any(not domain.fullmatch(item) for item in domains)
+        or not isinstance(only_for, list)
+        or any(
+            not isinstance(item, str) or not domain.fullmatch(item)
+            for item in only_for
+        )
+    ):
+        raise ValueError("invalid notification state")
+    if only_for and not set(domains).intersection(only_for):
+        enabled = False
+    print("1" if enabled else "0", recipient, sender, " ".join(domains), sep="\t")
+except Exception:
+    sys.exit(1)
+' "${STATE_FILE}" "${RENEWED_DOMAINS}"
+); then
+  /usr/bin/logger -t easy-ha-proxy-cert-notify "certificate notification state is invalid; message skipped"
+  exit 0
+fi
+[ "${ENABLED}" = "1" ] || exit 0
+LINEAGE_DIR="${RENEWED_LINEAGE:-}"
+
+CN="${DOMAINS%% *}"
+END_DATE="$(/usr/bin/openssl x509 -noout -enddate -in "${LINEAGE_DIR}/fullchain.pem" | /usr/bin/sed 's/notAfter=//')"
+START_DATE="$(/usr/bin/openssl x509 -noout -startdate -in "${LINEAGE_DIR}/fullchain.pem" | /usr/bin/sed 's/notBefore=//')"
+SERIAL_HEX="$(/usr/bin/openssl x509 -noout -serial -in "${LINEAGE_DIR}/fullchain.pem" | /usr/bin/sed 's/serial=//')"
+FINGERPRINT="$(/usr/bin/openssl x509 -noout -fingerprint -sha256 -in "${LINEAGE_DIR}/fullchain.pem" | /usr/bin/sed 's/SHA256 Fingerprint=//')"
+HOSTNAME="$(/usr/bin/hostname -f 2>/dev/null || /usr/bin/hostname)"
+SUBJECT="[Certbot] Renewed: ${CN} on ${HOSTNAME}"
+
+if ! /usr/bin/docker exec -i mail_relay /usr/sbin/sendmail -i -f "${FROM}" -- "${TO}" 2>/dev/null <<EOF
+To: ${TO}
+From: ${FROM}
+Subject: ${SUBJECT}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+✅ Сертификат выпущен/продлён
+
+Хост:          ${HOSTNAME}
+Линейка:       ${LINEAGE_DIR}
+Домены (SAN):  ${DOMAINS}
+
+Срок действия:
+  notBefore:   ${START_DATE}
+  notAfter:    ${END_DATE}
+
+Серийный №:    ${SERIAL_HEX}
+SHA256 FP:     ${FINGERPRINT}
+
+Источник: Certbot deploy-hook (910-mail-notify.sh)
+EOF
+then
+  # Certificate issuance/renewal must remain successful if the relay is not
+  # running yet or the upstream SMTP server is temporarily unavailable.
+  /usr/bin/logger -t easy-ha-proxy-cert-notify "mail_relay did not accept the certificate notification"
+fi
+exit 0

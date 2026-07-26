@@ -1,0 +1,63 @@
+---
+# Кому Let’s Encrypt будет слать письма об истекающих/ошибочных сертификатах
+certbot_email: admin@example.com
+
+# ОПИСАНИЕ САЙТОВ (SAN): один сайт → много имён
+# - domain: основной CN/lineage (имя каталога в /etc/letsencrypt/live)
+# - alt_names: SAN-алиасы (www и т.п.)
+# - key_types: какие ключи выпускать: [ecdsa] или [ecdsa, rsa]
+# - cert_path: куда склеивать fullchain+privkey для HAProxy (если 2 ключа — добавим -ecdsa/-rsa)
+sites:
+  - domain: site.com
+    alt_names: [www.site.com]
+    key_types: [rsa]               # можно [ecdsa, rsa]
+    cert_path: "/etc/haproxy/certs/site.com.pem"
+
+# Глобальные дефолты для ключей (используются, если у сайта не задан key_types)
+cert_key_type: ecdsa                 # rsa | ecdsa (по-умолчанию ecdsa)
+rsa_key_size: 3072
+ecdsa_curve: secp256r1               # p-256 (совместимость лучше всего)
+
+# RDG параметры (используются в post-hook)
+rdg_domain:   "example.com"          # CN/SAN сертификата
+rdg_host:     "example.com"          # FQDN или IP Windows-сервера
+rdg_ssh_user: "certbot"              # учётка для SFTP-чрута
+rdg_ssh_key:  "/root/.ssh/id_cert"   # приватный ключ на HAProxy
+rdg_ssh_port: 22                     # порт SSH
+rdg_pfx_password: ""                 # пустой пароль допустим
+rdg_remote_path: "C:/SFTP/upload/rdg_cert.pfx"
+
+# Bootstrap-режим: временно DNAT 80→8000 для standalone-сервера Certbot
+haproxy_autoreload: true
+haproxy_certs_dir: /etc/haproxy/certs
+acme_bootstrap: null   # null → авто; true/false → принудительно
+acme_ipv6: false
+# === Уведомления по e-mail о выпуске/продлении сертификатов ===
+mail_notify_enabled: false
+
+# Кому слать
+mail_notify_to: "admin@example.invalid"
+mail_notify_from: "relay@example.invalid"
+
+# External SMTP settings used by the managed mail_relay container.
+mail_smtp_host: "smtp.example.invalid"
+mail_smtp_port: 587           # 465 = SMTPS (SSL), 587 = STARTTLS
+mail_smtp_user: ""
+mail_smtp_pass: ""
+mail_smtp_auth: "on"          # on/off
+mail_smtp_ssl_mode: "starttls" # smtps | starttls
+mail_smtp_tls_trust_file: "/etc/ssl/certs/ca-certificates.crt"
+
+# (опционально) ограничить уведомления только определёнными доменами
+mail_notify_only_for: []      # например: ["rdg.domain.local", "ha.domain.local"]
+
+# Режим выпуска: all — все цели; new — только отсутствующие линеки (для addsite)
+cert_issue_mode: all
+
+# (опц.) фильтровать запуск по списку доменов (базовые имена, без -rsa/-ecdsa)
+sites_include: []
+
+# (опц.) список публичных резолверов для проверки готовности DNS
+acme_resolvers:
+  - 1.1.1.1
+  - 8.8.8.8

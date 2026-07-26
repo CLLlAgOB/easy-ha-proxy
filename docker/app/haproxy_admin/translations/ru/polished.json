@@ -1,0 +1,38 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    ". General settings (port, logging, storage, Redis, etc.) are edited on the page «Authelia settings».": ". Общие настройки (порт, логирование, хранилище, Redis и т. д.) редактируются на странице «Настройки Authelia».",
+    ". If this option and the «Groups» and «Users» fields are empty, the rule has no": ". Если эта опция и поля «Группы» и «Пользователи» пусты, в правиле нет",
+    "and applies to every user who satisfies the required authentication (": "и оно применяется ко всем пользователям, прошедшим требуемую аутентификацию (",
+    ". If the list is empty, the rule applies to all paths on this domain.": ". Если список пуст, правило действует для всех путей этого домена.",
+    ") and low-level parameters (server address, Redis, database path, and user file) are hidden and remain managed by Ansible/manual configuration.": ") и низкоуровневые параметры (адрес сервера, Redis, путь к базе данных и файл пользователей) скрыты и управляются Ansible или ручной конфигурацией.",
+    "Name of the cookie in which Authelia stores the session identifier (for example,": "Имя cookie, в которой Authelia хранит идентификатор сессии (например,",
+    "How long a session lasts when «Remember me» is": "Как долго длится сессия, когда режим «Запомнить меня»",
+    "If the user is inactive longer than this period, the session ends before its overall": "Если пользователь неактивен дольше этого периода, сессия завершится до общего",
+    "Domain to which the cookie applies (usually the organization's primary domain).": "Домен, для которого действует cookie (обычно основной домен организации).",
+    "Full Authelia portal URL where the user is sent to sign in.": "Полный URL портала Authelia, куда пользователь перенаправляется для входа.",
+    "Where to redirect the user after successful authentication when no custom redirect URL is supplied.": "Куда перенаправить пользователя после успешной аутентификации, если другой redirect URL не задан.",
+    "are intended for debugging.": "предназначены для отладки.",
+    "Which identifiers are tracked for bans (for example:": "Какие идентификаторы учитываются при блокировке (например:",
+    "Number of time steps tolerated in each direction to account for clock skew.": "Количество допустимых временных шагов в каждую сторону для учёта рассинхронизации часов.",
+    "May be left empty if a backend server list is defined below. Used for a single backend and as the default value.": "Можно оставить пустым, если ниже задан список backend-серверов. Используется для одного backend и как значение по умолчанию.",
+    "You can define several backend servers for one site.": "Для одного сайта можно задать несколько backend-серверов.",
+    "Enter one domain per line. In HTTP mode it is added as a SAN to the Let's Encrypt certificate; in TCP passthrough it is used for SNI routing.": "Введите по одному домену на строку. В HTTP-режиме они добавляются как SAN в сертификат Let's Encrypt; в TCP passthrough используются для SNI-маршрутизации.",
+    "In this mode the helper manages the Let's Encrypt certificate. You can issue or renew it through the interface.": "В этом режиме сертификатом Let's Encrypt управляет helper. Его можно выпустить или обновить через интерфейс.",
+    "This mode uses an uploaded custom certificate. Provide a PEM file containing the certificate, private key, and chain when required.": "В этом режиме используется загруженный пользовательский сертификат. Передайте PEM-файл с сертификатом, закрытым ключом и, при необходимости, цепочкой.",
+    ". Affects memory usage and the number of distinct IP addresses that can be tracked simultaneously, but does not change the ban threshold itself. Empty — use the default value (or default": ". Влияет на расход памяти и число IP-адресов, которые можно одновременно отслеживать, но не меняет сам порог блокировки. Пусто — использовать значение по умолчанию (или",
+    "— this site does not participate in error-based bans, while other mechanisms (rate_ban, GEO, and manual bans) continue to work.": "— сайт не участвует в блокировках по ошибкам, а остальные механизмы (rate_ban, GEO и ручные блокировки) продолжают работать.",
+    "Configure requests that should be excluded from this site's error-ban counter.": "Настройте запросы, которые нужно исключить из счётчика ошибок этого сайта.",
+    "— comma-separated list (GET,POST,...). If empty, the rule applies to all methods.": "— список через запятую (GET,POST,...). Если пусто, правило действует для всех методов.",
+    "Enable or disable GeoIP filtering for this site. The default comes from": "Включает или отключает GeoIP-фильтрацию для этого сайта. Значение по умолчанию берётся из",
+    "Selects the backend check type for": "Выбирает тип проверки backend для",
+    "true/false, seconds, or a duration such as": "true/false, секунды или длительность, например",
+    "Add TCP proxy": "Добавить TCP-прокси",
+    "Creates a minimal entry with one": "Создаёт минимальную запись с одной парой",
+    "TCP proxy parameters": "Параметры TCP-прокси",
+    "If the server list is not defined, a single": "Если список серверов не задан, используется одна пара"
+  }
+}

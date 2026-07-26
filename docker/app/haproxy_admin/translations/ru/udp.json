@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "UDP forwarding": "Проброс UDP",
+    "UDP forwarding list": "Список пробросов UDP",
+    "Add UDP forward": "Добавить проброс UDP",
+    "Edit UDP forward": "Редактировать проброс UDP",
+    "Listen (udp)": "Слушает (udp)",
+    "Listen port": "Порт прослушивания",
+    "Listen port or range": "Порт или диапазон прослушивания",
+    "Backend port or range": "Порт или диапазон backend",
+    "There are no UDP forwards yet.": "Пробросов UDP пока нет.",
+    "Honor tbl_ban (drop banned sources)": "Учитывать tbl_ban (дропать забаненные)",
+    "Zero trust (only authorized IPs)": "Zero trust (только авторизованные IP)",
+    "HAProxy handles only TCP/HTTP. UDP forwarding is installed by the kernel from config/udp.yml. Backends see the proxy address (MASQUERADE). Loopback addresses (127.0.0.0/8) are intentionally not supported.": "HAProxy обрабатывает только TCP/HTTP. Проброс UDP устанавливается ядром из config/udp.yml. Backend видят адрес прокси (MASQUERADE). Loopback-адреса (127.0.0.0/8) намеренно не поддерживаются.",
+    "Saving waits for the systemd loader to finish. A success result means the complete ruleset is already active; a failed apply restores the previous YAML and rules automatically.": "Сохранение ждёт завершения systemd loader. Успешный результат означает, что полный набор правил уже активен; при ошибке предыдущие YAML и правила восстанавливаются автоматически.",
+    "Last successful apply:": "Последнее успешное применение:",
+    "Active forwards:": "Активных пробросов:",
+    "Forwarded ports:": "Проброшено портов:",
+    "Runtime status unavailable:": "Runtime-статус недоступен:",
+    "Applied": "Применено",
+    "Use one port (51820) or paired inclusive ranges of the same size (19999-20010 → 9999-10010). A range may contain at most 1024 ports. Use a container or LAN IPv4 backend; loopback addresses are rejected.": "Укажите один порт (51820) или парные включительные диапазоны одинакового размера (19999-20010 → 9999-10010). Один диапазон может содержать не более 1024 портов. Используйте IPv4 backend в контейнере или LAN; loopback-адреса запрещены.",
+    "backend_host must not use a loopback address; use a container or LAN backend": "backend_host не должен быть loopback-адресом; используйте backend в контейнере или LAN",
+    "Save and apply now": "Сохранить и применить сейчас",
+    "Cancel editing": "Отменить редактирование",
+    "UDP forwarding applied immediately.": "Проброс UDP применён сразу.",
+    "Active forwards": "Активных пробросов",
+    "forwarded ports": "проброшено портов",
+    "applied at": "применено в",
+    "Applying the UDP rules failed. The previous configuration and rules were restored automatically:": "Применить правила UDP не удалось. Предыдущая конфигурация и правила восстановлены автоматически:"
+  }
+}

@@ -1,0 +1,33 @@
+---
+- name: Ensure Certbot deploy-hooks directory exists
+  file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# (опц.) для чтения manifest.json в hook-е
+- name: Install jq (for manifest reading)
+  apt:
+    name: jq
+    state: present
+    update_cache: true
+  tags: restore-network
+
+- name: Deploy HAProxy PEM assembly & reload hook (DEPLOY)
+  template:
+    src: 905-haproxy-pems-reload.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/905-haproxy-pems-reload.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure HAProxy certs dir exists
+  file:
+    path: "{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+

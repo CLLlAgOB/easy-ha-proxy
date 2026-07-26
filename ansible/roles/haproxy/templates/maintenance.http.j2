@@ -1,0 +1,34 @@
+{# Follows the HAProxy Admin UI language. Add a language to the mapping below.
+   All Jinja setup stays above the status line so the raw HTTP errorfile
+   structure (status line, headers, blank line, body) is never disturbed. #}
+{%- set _lang = (haproxy_admin_default_language | default('en'))[:2] | lower -%}
+{%- set _pages = {
+  'en': {
+    'lang': 'en',
+    'title': 'Service Temporarily Unavailable',
+    'heading': '503 Service Temporarily Unavailable',
+    'body': 'Our service is temporarily unavailable. Please try again later.'
+  },
+  'ru': {
+    'lang': 'ru',
+    'title': 'Сервис временно недоступен',
+    'heading': '503 Сервис временно недоступен',
+    'body': 'Наш сервис временно недоступен. Пожалуйста, зайдите позже.'
+  }
+} -%}
+{%- set _p = _pages.get(_lang, _pages['en']) -%}
+HTTP/1.0 503 Service Temporarily Unavailable
+Cache-Control: no-cache
+Connection: close
+Content-Type: text/html; charset=UTF-8
+
+<html lang="{{ _p.lang }}">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>{{ _p.title }}</title>
+  </head>
+  <body>
+    <h1>{{ _p.heading }}</h1>
+    <p>{{ _p.body }}</p>
+  </body>
+</html>

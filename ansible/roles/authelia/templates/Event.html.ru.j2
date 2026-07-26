@@ -1,0 +1,161 @@
+{#
+  Derived from Authelia's official notification templates:
+  https://github.com/authelia/authelia/tree/master/internal/templates/embed/notification
+  Modified by easy-ha-proxy: Russian translation and Ansible/Jinja wrapping.
+  SPDX-FileCopyrightText: Authelia contributors
+  SPDX-License-Identifier: Apache-2.0
+#}
+{% raw %}
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html dir="ltr" lang="ru">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="x-apple-disable-message-reformatting" />
+  </head>
+  <body
+    style="
+      background-color: #ffffff;
+      margin: 0 auto;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        'Segoe UI', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+      padding-left: 0.5rem;
+      padding-right: 0.5rem;
+    "
+  >
+    <!-- скрытый превью-текст в почтовых клиентах -->
+    <div
+      style="
+        display: none;
+        overflow: hidden;
+        line-height: 1px;
+        opacity: 0;
+        max-height: 0;
+        max-width: 0;
+      "
+      data-skip-in-text="true"
+    >
+      Уведомление о действии с безопасностью учётной записи
+      <div>&nbsp;</div>
+    </div>
+
+    <table
+      align="center"
+      width="100%"
+      border="0"
+      cellpadding="0"
+      cellspacing="0"
+      role="presentation"
+      style="
+        border-width: 1px;
+        border-style: solid;
+        border-color: #eaeaea;
+        border-radius: 4px;
+        margin: 40px auto;
+        padding: 20px;
+        max-width: 465px;
+      "
+    >
+      <tbody>
+        <tr style="width: 100%">
+          <td>
+            <h1
+              style="
+                color: #000000;
+                font-size: 24px;
+                font-weight: 400;
+                text-align: center;
+                padding: 0;
+                margin: 30px 0;
+              "
+            >
+              Изменение настроек безопасности учётной записи
+            </h1>
+
+            <p
+              style="
+                color: #000000;
+                font-size: 14px;
+                line-height: 24px;
+                margin: 16px 0;
+              "
+            >
+              Здравствуйте, {{ .DisplayName }}!
+            </p>
+
+            <p
+              style="
+                color: #000000;
+                font-size: 14px;
+                line-height: 24px;
+                margin: 16px 0;
+              "
+            >
+              Это письмо отправлено для информирования о том, что для вашей
+              учётной записи было выполнено действие, связанное с
+              безопасностью (например, смена пароля или параметров
+              аутентификации).
+            </p>
+
+            <p
+              style="
+                color: #000000;
+                font-size: 14px;
+                line-height: 24px;
+                margin: 16px 0;
+              "
+            >
+              Если вы не выполняли никаких действий, ваши учётные данные могли
+              быть скомпрометированы. Рекомендуется немедленно сменить пароль
+              и связаться с администратором.
+            </p>
+
+            <hr
+              style="
+                border: none;
+                border-top: 1px solid #eaeaea;
+                margin: 26px 0;
+                width: 100%;
+              "
+            />
+
+            <p
+              style="
+                color: #666666;
+                font-size: 12px;
+                line-height: 24px;
+                text-align: center;
+                margin: 16px 0;
+              "
+            >
+              Техническая информация: уведомление было сгенерировано запросом
+              с IP-адреса
+              <span style="color: #000000">{{ .RemoteIP }}</span>.
+            </p>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p
+      class="text-muted"
+      style="
+        color: #666666;
+        font-size: 10px;
+        line-height: 24px;
+        text-align: center;
+        margin: 16px 0;
+      "
+    >
+      Работает на
+      <a
+        href="https://www.authelia.com"
+        style="color: #666666; text-decoration: none"
+        target="_blank"
+        >Authelia</a
+      >
+    </p>
+  </body>
+</html>
+{% endraw %}

@@ -1,0 +1,50 @@
+{
+  "systemd": {
+    "units": {{ healthd_units | default(
+      [
+        "haproxy.service",
+        "docker.service",
+        "easy-ha-proxy-backupd.service",
+        "easy-ha-proxy-updated.service",
+        "iptables-haproxy-ban.service",
+        "iptables-haproxy-udp.service",
+        "journal-vacuum.timer"
+      ]
+      + (["update-admin-rt.timer"] if admin_dyn_enabled | default(false) | bool else [])
+      + (
+        [
+          "easy-ha-proxy-geoip-update.service",
+          "easy-ha-proxy-geoip-update.timer"
+        ]
+        if geoip_database_enabled | default(true) | bool
+        else []
+      )
+    ) | tojson }},
+    "unit_globs": {{ healthd_unit_globs | default(["haproxy-*.service", "authelia-*.service"]) | tojson }}
+  },
+  "docker": {
+    "containers": {{ healthd_containers | default(
+      ["haproxy-admin"]
+      + (
+        [
+          authelia_container_name | default("authelia")
+        ]
+        + (["authelia-redis"] if authelia_session_redis_enabled | default(true) | bool else [])
+        + (["mail_relay"] if (
+            mail_notify_enabled | default(false) | bool
+            or mail_relay_server | default(false) | bool
+          ) else [])
+        if authelia_enabled | default(false) | bool
+        else []
+      )
+    ) | tojson }}
+  },
+  "poll_interval_seconds": {{ healthd_poll_interval | default(5) }},
+  "events_max": {{ healthd_events_max | default(200) }},
+  "logs": {
+    "default_tail": {{ healthd_logs_default_tail | default(200) }},
+    "max_tail": {{ healthd_logs_max_tail | default(2000) }},
+    "default_since_seconds": {{ healthd_logs_default_since_seconds | default(3600) }},
+    "max_since_seconds": {{ healthd_logs_max_since_seconds | default(86400) }}
+  }
+}

@@ -1,0 +1,81 @@
+services:
+  haproxy-admin:
+    image: "{{ haproxy_admin_image }}"
+    container_name: "{{ haproxy_admin_container_name }}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+    {% if haproxy_admin_uid is defined and haproxy_admin_gid is defined
+          and haproxy_admin_uid|length > 0 and haproxy_admin_gid|length > 0 %}
+    # Run the container as the host haproxyadmin UID/GID.
+    user: "{{ haproxy_admin_uid }}:{{ haproxy_admin_gid }}"
+    {% endif %}
+
+    {% if hadmin_gid is defined and hadmin_gid|length > 0 %}
+    # Add the host hadmin GID for access to /run/haproxy/admin.sock.
+    group_add:
+      - "{{ hadmin_gid }}"
+    {% endif %}
+
+    env_file:
+      - "{{ haproxy_admin_env_file }}"
+
+    environment:
+      TZ: "{{ haproxy_admin_timezone }}"
+      HOME: "/tmp"
+      HAPROXY_ADMIN_SECRET_FILE: "/var/lib/haproxy-admin/secret_key"
+      HAPROXY_ADMIN_GEOIP_DB: "/etc/haproxy/geoip/current/dbip-country-lite.mmdb"
+
+    volumes:
+      - "{{ haproxy_admin_data_dir }}:/var/lib/haproxy-admin"
+      - "/opt/authelia/logs:/opt/authelia/logs:ro"
+      - "/etc/haproxy:/etc/haproxy:ro"
+      - "{{ whitelist_global_file }}:{{ whitelist_global_file }}:rw"
+      - "{{ whitelist_geo_file }}:{{ whitelist_geo_file }}:rw"
+      - "/var/log/haproxy.log:/var/log/haproxy.log:ro"
+      - "/run/haproxy:/run/haproxy:ro"
+      - "/run/easy-ha-proxy:/run/easy-ha-proxy:ro"
+      - "/opt/haproxy-admin/config:/opt/haproxy-admin/config"
+      - "/opt/haproxy-admin/backups:/opt/haproxy-admin/backups"
+      - "{{ backupd_uploads_dir }}:{{ backupd_uploads_dir }}:rw"
+      - "{{ backupd_backups_dir }}:{{ backupd_backups_dir }}:ro"
+    ports:
+      - "127.0.0.1:{{ haproxy_admin_listen_port }}:5000"
+
+    # Exercise the same authenticated request boundary as HAProxy without
+    # exposing a separate unauthenticated readiness endpoint. Python is
+    # already part of the application image, so no extra utility is needed.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, os, urllib.request;
+          request = urllib.request.Request(
+          "http://127.0.0.1:5000/api/control-plane-health",
+          headers={"X-Easy-HA-Proxy-Secret": os.environ["HAPROXY_ADMIN_PROXY_SECRET"],
+          "Remote-User": "easy-ha-proxy-healthcheck",
+          "Remote-Groups": "healthcheck"});
+          response = urllib.request.urlopen(request, timeout=3);
+          payload = json.load(response);
+          assert response.status == 200 and payload.get("ok") is True
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+    networks:
+      - hadmin_net
+
+networks:
+  hadmin_net:
+    external: true
+    name: hadmin_net

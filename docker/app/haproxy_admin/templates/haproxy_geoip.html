@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – GeoIP database{% endblock %}
+{% block header_title %}GeoIP database{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<section class="card geoip-overview-card" aria-labelledby="geoip-overview-title">
+  <div class="card-header geoip-card-header">
+    <div>
+      <h2 id="geoip-overview-title">Local GeoIP database</h2>
+      <p class="table-meta">The local DB-IP Country Lite database is used for country lookups and HAProxy access rules.</p>
+    </div>
+    <div class="config-toolbar">
+      <button type="button" class="btn" id="geoip-refresh">Refresh status</button>
+      <button type="button" class="btn btn-refresh" id="geoip-update">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="icon">Update database</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="geoip-page-status" class="result-message" role="status" aria-live="polite"></div>
+  <div id="geoip-sync-warning" class="alert alert-warning" hidden>
+    The GeoIP runtime selection differs from <code>vars.yml</code>. Refresh or save the country selection to reconcile it.
+  </div>
+
+  <div class="geoip-metrics" aria-live="polite">
+    <div class="geoip-metric">
+      <span class="geoip-metric-label">Database status</span>
+      <strong id="geoip-db-status">Loading…</strong>
+    </div>
+    <div class="geoip-metric">
+      <span class="geoip-metric-label">Database records</span>
+      <strong id="geoip-db-records">—</strong>
+    </div>
+    <div class="geoip-metric">
+      <span class="geoip-metric-label">Selected ACL networks</span>
+      <strong id="geoip-allowed-networks">—</strong>
+    </div>
+    <div class="geoip-metric">
+      <span class="geoip-metric-label">Database size</span>
+      <strong id="geoip-db-size">—</strong>
+    </div>
+    <div class="geoip-metric">
+      <span class="geoip-metric-label">Database release</span>
+      <strong id="geoip-source-period">—</strong>
+    </div>
+    <div class="geoip-metric">
+      <span class="geoip-metric-label">Activated</span>
+      <strong id="geoip-activated-at">—</strong>
+    </div>
+  </div>
+
+  <details class="geoip-technical-details">
+    <summary>Database details</summary>
+    <dl class="geoip-details-list">
+      <div><dt>Provider</dt><dd id="geoip-provider">—</dd></div>
+      <div><dt>Release identifier</dt><dd id="geoip-release" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Database build time</dt><dd id="geoip-build-at">—</dd></div>
+      <div><dt>Integrity check</dt><dd id="geoip-integrity">—</dd></div>
+    </dl>
+  </details>
+</section>
+
+<div class="geoip-management-grid">
+  <section class="card" aria-labelledby="geoip-countries-title">
+    <div class="card-header geoip-card-header">
+      <div>
+        <h2 id="geoip-countries-title">Global country selection</h2>
+        <p class="table-meta">This is the default country list and the available pool for per-site country subsets.</p>
+      </div>
+      <div class="geoip-filter-pills">
+        <span id="geoip-filter-state" class="config-status-pill config-status-pill--neutral">Loading…</span>
+        <span id="geoip-filter-mode" class="config-status-pill config-status-pill--neutral">Mode: —</span>
+      </div>
+    </div>
+
+    <div class="alert alert-info geoip-selection-note">
+      Country selection is stored independently of the installer. The global enable switch and allow/deny mode remain in
+      <a href="{{ url_for('routes.haproxy_config_page') }}">HAProxy configuration</a> because changing them requires a guarded configuration apply.
+    </div>
+
+    <form id="geoip-countries-form" class="geoip-countries-form">
+      <label class="form-label" for="geoip-country-input">Add ISO country codes</label>
+      <div class="geoip-country-entry">
+        <input id="geoip-country-input" class="form-input mono notranslate" translate="no" data-i18n-skip
+               type="text" autocomplete="off" spellcheck="false" maxlength="512"
+               placeholder="RU, PL, DE" aria-describedby="geoip-country-help">
+        <button type="button" class="btn" id="geoip-add-countries">Add</button>
+      </div>
+      <p id="geoip-country-help" class="vars-field-help">Use two-letter ISO 3166-1 codes separated by commas or spaces.</p>
+
+      <div id="geoip-selected-countries" class="geoip-country-chips" aria-live="polite">
+        <span class="muted">Loading…</span>
+      </div>
+
+      <div class="vars-form-actions">
+        <button type="submit" class="btn" id="geoip-save-countries">Save and rebuild ACL</button>
+        <span id="geoip-countries-status" class="result-message" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="geoip-schedule-title">
+    <div class="card-header">
+      <h2 id="geoip-schedule-title">Automatic updates</h2>
+    </div>
+    <dl class="geoip-details-list geoip-schedule-list">
+      <div><dt>Timer</dt><dd id="geoip-timer-status" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Next update</dt><dd id="geoip-next-run">—</dd></div>
+      <div><dt>Last scheduled run</dt><dd id="geoip-last-trigger">—</dd></div>
+      <div><dt>Last service result</dt><dd id="geoip-service-result" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Last service run</dt><dd id="geoip-last-run">—</dd></div>
+    </dl>
+
+    <label class="geoip-force-option" for="geoip-force-update">
+      <input type="checkbox" id="geoip-force-update">
+      Download the current monthly database again
+    </label>
+    <p class="vars-field-help">Normally the updater downloads only a newer monthly DB-IP release.</p>
+  </section>
+</div>
+
+<section class="card geoip-journal-card" aria-labelledby="geoip-journal-title">
+  <div class="card-header">
+    <div>
+      <h2 id="geoip-journal-title">Last updater events</h2>
+      <p class="table-meta">Raw system journal output is shown without translation.</p>
+    </div>
+  </div>
+  <pre id="geoip-journal" class="mono notranslate config-technical-output geoip-journal" translate="no" data-i18n-skip>Loading…</pre>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/geoip.js') }}"></script>
+{% endblock %}

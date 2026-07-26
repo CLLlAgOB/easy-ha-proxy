@@ -1,0 +1,87 @@
+---
+# A dedicated root broker keeps full backup/restore outside the web container.
+
+- name: "easy-ha-proxy-backupd | Ensure persistent spool directories"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ backupd_root_dir }}"
+      owner: root
+      group: "{{ app_group }}"
+      mode: "0750"
+    - path: "{{ backupd_jobs_dir }}"
+      owner: root
+      group: "{{ app_group }}"
+      mode: "0750"
+    - path: "{{ backupd_uploads_dir }}"
+      owner: "{{ app_user }}"
+      group: "{{ app_group }}"
+      mode: "0700"
+    - path: "{{ backupd_backups_dir }}"
+      owner: root
+      group: "{{ app_group }}"
+      mode: "0750"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: "easy-ha-proxy-backupd | Install daemon script"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-backupd.py
+    dest: /usr/local/sbin/easy-ha-proxy-backupd.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: backupd_script
+
+- name: "easy-ha-proxy-backupd | Install systemd unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-backupd.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-backupd.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: backupd_unit
+
+- name: "easy-ha-proxy-backupd | Reload systemd when unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: backupd_unit.changed
+
+- name: "easy-ha-proxy-backupd | Inspect active restore marker"
+  ansible.builtin.stat:
+    path: "{{ backupd_restore_active_marker }}"
+    follow: false
+  register: backupd_restore_active
+
+- name: "easy-ha-proxy-backupd | Defer self restart during active restore"
+  ansible.builtin.file:
+    path: "{{ backupd_restart_request_marker }}"
+    state: touch
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0600"
+  when:
+    - backupd_restore_active.stat.exists
+    - backupd_script.changed or backupd_unit.changed
+
+- name: "easy-ha-proxy-backupd | Enable service"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-backupd.service
+    enabled: true
+
+- name: "easy-ha-proxy-backupd | Restart changed service outside restore"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-backupd.service
+    state: restarted
+  when:
+    - not backupd_restore_active.stat.exists
+    - backupd_script.changed or backupd_unit.changed
+
+- name: "easy-ha-proxy-backupd | Ensure service is started"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-backupd.service
+    state: started

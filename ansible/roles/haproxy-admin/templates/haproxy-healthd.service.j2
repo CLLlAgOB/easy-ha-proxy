@@ -1,0 +1,37 @@
+# /etc/systemd/system/haproxy-healthd.service
+[Unit]
+Description=haproxy-healthd (root, Unix socket health monitor)
+After=network.target
+Wants=network.target
+
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group | default('hadmin') }}
+
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-{{ haproxy_admin_env_file }}
+Environment="HEALTHD_SOCKET_PATH={{ healthd_socket_path | default('/run/easy-ha-proxy/haproxy-healthd.sock') }}"
+Environment="HEALTHD_CONFIG={{ healthd_config_path | default('/opt/haproxy-admin/healthd.json') }}"
+Environment="HEALTHD_SOCKET_GROUP={{ healthd_socket_group | default('hadmin') }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-healthd.py', rstrip=false) | hash('sha256') }}"
+
+ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-healthd.py
+
+Restart=always
+RestartSec=3
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

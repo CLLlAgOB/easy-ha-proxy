@@ -1,0 +1,211 @@
+# roles/authelia/tasks/start.yml
+- name: Authelia | validate and (re)start stack
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: Include Authelia config stage
+      import_tasks: check.yml
+
+    - name: Pull Authelia stack images
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - pull
+        chdir: "{{ authelia_root_dir }}"
+      environment:
+        COMPOSE_PROGRESS: plain
+        DOCKER_CLI_HINTS: "false"
+      register: authelia_compose_pull
+      changed_when: false
+      retries: 3
+      delay: 20
+      until: authelia_compose_pull.rc == 0
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+      tags: restore-network
+
+    - name: Run the fail-closed mail relay spool migration guard
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+      block:
+        - name: Include mail relay spool migration guard
+          ansible.builtin.include_tasks: mail_relay_spool.yml
+      rescue:
+        - name: Report a safe mail relay migration failure
+          ansible.builtin.fail:
+            msg: >-
+              The legacy mail_relay spool could not be migrated safely. Its
+              container and queue were preserved or recovered. Verify Docker,
+              let any queued mail drain, and retry the update.
+
+    - name: Reconcile the Authelia stack with migration recovery
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+      block:
+        - name: Ensure Authelia stack is up
+          ansible.builtin.command:
+            argv: >-
+              {{
+                [
+                  'docker',
+                  'compose',
+                  'up',
+                  '--detach',
+                  '--force-recreate',
+                  '--remove-orphans'
+                ]
+                + (
+                  ['--pull', 'never']
+                  if easy_ha_proxy_offline_restore | default(false) | bool
+                  else []
+                )
+              }}
+            chdir: "{{ authelia_root_dir }}"
+          environment:
+            COMPOSE_PROGRESS: plain
+            DOCKER_CLI_HINTS: "false"
+          register: authelia_compose_up
+          changed_when: true
+          retries: 2
+          delay: 10
+          until: authelia_compose_up.rc == 0
+      rescue:
+        - name: Restart the existing mail relay after a failed reconcile
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - mail_relay
+          changed_when: true
+          failed_when: false
+          when: >-
+            mail_notify_enabled | default(false) | bool
+            or mail_relay_server | default(false) | bool
+
+        - name: Restart Authelia after a failed spool migration reconcile
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ authelia_container_name }}"
+          changed_when: true
+          failed_when: false
+
+        - name: Report the failed Authelia stack reconcile
+          ansible.builtin.fail:
+            msg: >-
+              Docker Compose could not reconcile the Authelia stack. If the
+              legacy spool migration stopped Authelia, a best-effort restart
+              was attempted and the old relay spool was not deleted explicitly.
+
+    - name: Inspect Authelia container state after compose up
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format
+          - "{{ '{{' }}.State.Status{{ '}}' }}"
+          - "{{ authelia_container_name }}"
+      register: authelia_container_state_after_up
+      changed_when: false
+      failed_when: false
+      retries: 12
+      delay: 5
+      until:
+        - authelia_container_state_after_up.rc == 0
+        - authelia_container_state_after_up.stdout | trim == "running"
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+
+    - name: Inspect Authelia compose status when container is not running
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - ps
+          - --all
+        chdir: "{{ authelia_root_dir }}"
+      register: authelia_compose_ps_after_failed_up
+      changed_when: false
+      failed_when: false
+      when:
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+        - >-
+          authelia_container_state_after_up.rc != 0
+          or (authelia_container_state_after_up.stdout | trim) != "running"
+
+    - name: Collect recent Authelia logs when startup fails
+      ansible.builtin.command:
+        argv:
+          - docker
+          - logs
+          - --timestamps
+          - --tail
+          - "80"
+          - "{{ authelia_container_name }}"
+      register: authelia_logs_after_failed_up
+      changed_when: false
+      failed_when: false
+      no_log: true
+      diff: false
+      when:
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+        - >-
+          authelia_container_state_after_up.rc != 0
+          or (authelia_container_state_after_up.stdout | trim) != "running"
+
+    - name: Collect host time status when Authelia startup fails
+      ansible.builtin.command:
+        argv:
+          - timedatectl
+          - status
+      register: authelia_time_status_after_failed_up
+      changed_when: false
+      failed_when: false
+      when:
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+        - >-
+          authelia_container_state_after_up.rc != 0
+          or (authelia_container_state_after_up.stdout | trim) != "running"
+
+    - name: Fail if Authelia container did not start
+      ansible.builtin.fail:
+        msg: |-
+          Authelia container did not start after docker compose up.
+          inspect rc={{ authelia_container_state_after_up.rc }}
+          inspect stdout={{ authelia_container_state_after_up.stdout | default('') | trim }}
+          inspect stderr={{ authelia_container_state_after_up.stderr | default('') | trim }}
+          docker compose ps:
+          {{ authelia_compose_ps_after_failed_up.stdout | default('not collected') }}
+          timedatectl status:
+          {{ authelia_time_status_after_failed_up.stdout | default('not collected', true) }}
+          sanitized docker logs (credential-related lines omitted):
+          {{
+            (
+              (
+                (
+                  authelia_logs_after_failed_up.stdout_lines | default([])
+                )
+                +
+                (
+                  authelia_logs_after_failed_up.stderr_lines | default([])
+                )
+              )
+              | reject(
+                  'search',
+                  '(?i)(@|authorization|cookie|credential|encryption.?key|jwt|password|recipient|secret|sender|token)'
+                )
+              | list
+              | join('\n')
+            )
+            | default('no non-sensitive log lines collected', true)
+          }}
+      when:
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+        - >-
+          authelia_container_state_after_up.rc != 0
+          or (authelia_container_state_after_up.stdout | trim) != "running"
+
+    - name: Wait for Authelia to listen on port 9091
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: 9091
+        delay: 3
+        timeout: "{{ authelia_start_wait_timeout | int }}"
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)

@@ -1,0 +1,62 @@
+---
+# roles/authelia/tasks/configd.yml
+# (Опционально) root-демон authelia-configd
+
+- name: "Authelia | configd | install & start config daemon"
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: Include managed mail notification state
+      ansible.builtin.include_tasks: mail_notify_state.yml
+
+    - name: "authelia-configd | Install daemon script"
+      become: true
+      ansible.builtin.copy:
+        src: authelia-configd.py
+        dest: /usr/local/sbin/authelia-configd.py
+        owner: root
+        group: root
+        mode: "0750"
+      register: authelia_configd_script
+      when: authelia_configd_enabled | default(true) | bool
+
+    - name: "authelia-configd | Install systemd unit"
+      become: true
+      ansible.builtin.template:
+        src: authelia-configd.service.j2
+        dest: /etc/systemd/system/authelia-configd.service
+        owner: root
+        group: root
+        mode: "0640"
+      register: authelia_configd_unit
+      when: authelia_configd_enabled | default(true) | bool
+
+    - name: "authelia-configd | systemd daemon-reload if unit changed"
+      become: true
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      when:
+        - authelia_configd_enabled | default(true) | bool
+        - authelia_configd_unit.changed
+
+    - name: "authelia-configd | Enable service"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-configd.service
+        enabled: yes
+      when: authelia_configd_enabled | default(true) | bool
+
+    - name: "authelia-configd | Restart service if changed"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-configd.service
+        state: restarted
+      when:
+        - authelia_configd_enabled | default(true) | bool
+        - (authelia_configd_script is defined and authelia_configd_script.changed) or (authelia_configd_unit is defined and authelia_configd_unit.changed)
+
+    - name: "authelia-configd | Ensure service started"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-configd.service
+        state: started
+      when: authelia_configd_enabled | default(true) | bool

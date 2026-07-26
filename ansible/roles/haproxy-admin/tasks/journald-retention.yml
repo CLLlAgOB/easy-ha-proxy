@@ -1,0 +1,66 @@
+# roles/haproxy-admin/tasks/journald-retention.yml
+# Настройка удержания journald ~10 дней + ежедневная вакуум-очистка
+
+- name: "journald | Ensure drop-in dir"
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "journald | Configure retention (MaxRetentionSec/MaxFileSec)"
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/80-retention.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (haproxy-admin)
+      [Journal]
+      # Keep journal entries for ~10 days (time-based retention)
+      MaxRetentionSec={{ journald_retention_sec | default('10day') }}
+      # Rotate each journal file daily (helps time-based retention operate on archived files)
+      MaxFileSec={{ journald_max_file_sec | default('1day') }}
+  register: journald_retention_conf
+
+- name: "journald | Install vacuum service"
+  ansible.builtin.template:
+    src: journal-vacuum.service.j2
+    dest: /etc/systemd/system/journal-vacuum.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: journald_vacuum_service
+
+- name: "journald | Install vacuum timer"
+  ansible.builtin.template:
+    src: journal-vacuum.timer.j2
+    dest: /etc/systemd/system/journal-vacuum.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: journald_vacuum_timer
+
+- name: "journald | systemd daemon-reload if units changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: journald_vacuum_service.changed or journald_vacuum_timer.changed
+
+- name: "journald | Restart systemd-journald if retention config changed"
+  ansible.builtin.systemd:
+    name: systemd-journald.service
+    state: restarted
+  when: journald_retention_conf.changed
+
+- name: "journald | Enable and start vacuum timer"
+  ansible.builtin.systemd:
+    name: journal-vacuum.timer
+    enabled: yes
+    state: started
+
+- name: "journald | Run vacuum once if config/units changed"
+  ansible.builtin.systemd:
+    name: journal-vacuum.service
+    state: started
+  when: journald_retention_conf.changed or journald_vacuum_service.changed or journald_vacuum_timer.changed

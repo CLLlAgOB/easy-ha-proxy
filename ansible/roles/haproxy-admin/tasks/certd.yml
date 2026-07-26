@@ -1,0 +1,51 @@
+---
+# Install and configure the root-owned haproxy-certd daemon.
+
+- name: "haproxy-certd | Install runtime packages"
+  ansible.builtin.package:
+    name:
+      - python3
+      - python3-yaml
+      - python3-cryptography
+      - openssl
+    state: present
+  tags: restore-network
+
+- name: "haproxy-certd | Install script"
+  ansible.builtin.copy:
+    src: haproxy-certd.py
+    dest: /usr/local/sbin/haproxy-certd.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: certd_script
+
+- name: "haproxy-certd | Install systemd unit"
+  ansible.builtin.template:
+    src: haproxy-certd.service.j2
+    dest: /etc/systemd/system/haproxy-certd.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: certd_unit
+
+- name: "haproxy-certd | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: certd_unit.changed
+
+- name: "haproxy-certd | Enable service"
+  ansible.builtin.systemd:
+    name: haproxy-certd.service
+    enabled: yes
+
+- name: "haproxy-certd | Restart service if changed"
+  ansible.builtin.systemd:
+    name: haproxy-certd.service
+    state: restarted
+  when: certd_script.changed or certd_unit.changed
+
+- name: "haproxy-certd | Ensure service started"
+  ansible.builtin.systemd:
+    name: haproxy-certd.service
+    state: started

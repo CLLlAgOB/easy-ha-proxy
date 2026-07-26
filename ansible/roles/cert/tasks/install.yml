@@ -1,0 +1,48 @@
+---
+# ------------------------------------------------------------
+# 0. Подготовка: пакеты / snapd / certbot
+# ------------------------------------------------------------
+- name: Install snapd for the current Certbot release
+  apt:
+    name: snapd
+    state: present
+    update_cache: true
+  tags: restore-network
+
+- name: Ensure snap core is installed
+  command: snap install core --classic
+  args:
+    creates: /snap/core/current
+  tags: restore-network
+
+- name: Install Certbot with snap
+  command: snap install --classic certbot
+  args:
+    creates: /snap/bin/certbot
+  tags: restore-network
+
+- name: Link /usr/bin/certbot to the snap executable
+  file:
+    src: /snap/bin/certbot
+    dest: /usr/bin/certbot
+    state: link
+
+# ------------------------------------------------------------
+# 1. Проверяем, установлен ли HAProxy
+# ------------------------------------------------------------
+- name: Gather service facts
+  service_facts:
+
+# true / false → удобно переиспользовать дальше
+- name: Record whether haproxy.service is installed
+  set_fact:
+    haproxy_present: "{{ 'haproxy.service' in ansible_facts.services }}"
+
+- name: Read the snap Certbot version
+  command: /snap/bin/certbot --version
+  register: snap_certbot_ver
+  changed_when: false
+
+- name: Report the Certbot version
+  debug:
+    msg: "Using Certbot {{ snap_certbot_ver.stdout }}"

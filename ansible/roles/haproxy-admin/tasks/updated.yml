@@ -1,0 +1,72 @@
+---
+# A dedicated root broker exposes only structured update checks and a fixed
+# component allowlist to the unprivileged web application.
+
+- name: "easy-ha-proxy-updated | Ensure persistent job directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0750"
+  loop:
+    - "{{ updated_state_root }}"
+    - "{{ updated_jobs_dir }}"
+
+- name: "easy-ha-proxy-updated | Install broker script"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-updated.py
+    dest: /usr/local/sbin/easy-ha-proxy-updated.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: updated_script
+
+- name: "easy-ha-proxy-updated | Install systemd unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-updated.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-updated.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: updated_unit
+
+- name: "easy-ha-proxy-updated | Reload systemd when unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: updated_unit.changed
+
+- name: "easy-ha-proxy-updated | Inspect active update marker"
+  ansible.builtin.stat:
+    path: "{{ updated_active_marker }}"
+    follow: false
+  register: updated_active
+
+- name: "easy-ha-proxy-updated | Defer self restart during an active update"
+  ansible.builtin.file:
+    path: "{{ updated_restart_request_marker }}"
+    state: touch
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0600"
+  when:
+    - updated_active.stat.exists
+    - updated_script.changed or updated_unit.changed
+
+- name: "easy-ha-proxy-updated | Enable service"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-updated.service
+    enabled: true
+
+- name: "easy-ha-proxy-updated | Restart changed service outside an update"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-updated.service
+    state: restarted
+  when:
+    - not updated_active.stat.exists
+    - updated_script.changed or updated_unit.changed
+
+- name: "easy-ha-proxy-updated | Ensure service is started"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-updated.service
+    state: started

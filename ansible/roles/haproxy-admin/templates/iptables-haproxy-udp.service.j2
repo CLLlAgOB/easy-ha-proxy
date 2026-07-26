@@ -1,0 +1,16 @@
+[Unit]
+Description=Load easy-ha-proxy UDP forwarding rules (iptables-legacy DNAT)
+After=network-online.target docker.service iptables-haproxy-ban.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The ban and authorized-IP ipsets must exist before the generator references
+# them in match-set rules (controld keeps them populated).
+ExecStartPre=/usr/sbin/ipset create {{ udp_ban_set | default('haproxy_ban') }} hash:ip family inet -exist
+ExecStartPre=/usr/sbin/ipset create {{ udp_auth_set | default('haproxy_ip_auth') }} hash:ip family inet -exist
+ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-udp-forward.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

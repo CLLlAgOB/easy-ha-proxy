@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+install_root="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
+source_dir="${EASY_HA_PROXY_SOURCE_DIR:-${install_root}/source}"
+python_bin="${install_root}/venv/bin/python"
+
+if [[ ! -x "${python_bin}" ]]; then
+  echo "easy-ha-proxy: Python environment not found: ${python_bin}" >&2
+  echo "Run install-local.sh first." >&2
+  exit 1
+fi
+
+export EASY_HA_PROXY_SOURCE_DIR="${source_dir}"
+exec "${python_bin}" "${source_dir}/installer/easy_ha_proxy.py" "$@"

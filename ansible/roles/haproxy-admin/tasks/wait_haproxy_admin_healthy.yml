@@ -1,0 +1,42 @@
+---
+- name: "haproxy-admin | Wait for the application container to become healthy"
+  block:
+    - name: "haproxy-admin | Read container health status"
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - inspect
+          - --format
+          - !unsafe "{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}"
+          - "{{ haproxy_admin_container_name }}"
+      register: hapadm_container_health
+      changed_when: false
+      retries: "{{ [((haproxy_admin_start_wait_timeout | int) // 5), 1] | max }}"
+      delay: 5
+      until:
+        - hapadm_container_health.rc == 0
+        - hapadm_container_health.stdout | trim == "healthy"
+
+  rescue:
+    - name: "haproxy-admin | Read failed container health checks"
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - inspect
+          - --format
+          - !unsafe "{{json .State.Health}}"
+          - "{{ haproxy_admin_container_name }}"
+      register: hapadm_container_health_details
+      changed_when: false
+      failed_when: false
+
+    - name: "haproxy-admin | Stop after an unsuccessful application health check"
+      ansible.builtin.fail:
+        msg: >-
+          The {{ haproxy_admin_container_name }} container did not become healthy
+          within {{ haproxy_admin_start_wait_timeout | int }} seconds.
+          Docker health details:
+          {{ hapadm_container_health_details.stdout
+             | default(hapadm_container_health.stderr | default('unavailable'), true) }}

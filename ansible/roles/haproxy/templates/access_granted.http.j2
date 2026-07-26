@@ -1,0 +1,111 @@
+{# The static access-granted page follows the HAProxy Admin UI language.
+   Add a language by adding an entry to the mapping below. All Jinja setup
+   stays above the status line so the raw HTTP errorfile structure is intact. #}
+{%- set _lang = (haproxy_admin_default_language | default('en'))[:2] | lower -%}
+{%- set _pages = {
+  'en': {
+    'lang': 'en',
+    'title': 'Access granted',
+    'heading': 'Access granted',
+    'lead': 'You have successfully authenticated with Authelia.',
+    'meta': 'This device is now trusted. You can close this page and open the service you need using your bookmarks or the main menu.',
+    'pill': 'Session active'
+  },
+  'ru': {
+    'lang': 'ru',
+    'title': 'Доступ разрешён',
+    'heading': 'Доступ разрешён',
+    'lead': 'Вы успешно прошли аутентификацию через Authelia.',
+    'meta': 'Теперь это устройство считается доверенным. Вы можете закрыть эту страницу и перейти к нужному сервису, используя закладки или главное меню.',
+    'pill': 'Сессия активна'
+  }
+} -%}
+{%- set _p = _pages.get(_lang, _pages['en']) -%}
+HTTP/1.0 200 OK
+Cache-Control: no-cache
+Connection: close
+Content-Type: text/html; charset=utf-8
+
+<!DOCTYPE html>
+<html lang="{{ _p.lang }}">
+<head>
+  <meta charset="utf-8">
+  <title>{{ _p.title }}</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(circle at top, #0f172a, #020617);
+      color: #e5e7eb;
+    }
+    .wrap {
+      min-height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.9);
+      border-radius: 16px;
+      padding: 32px 40px;
+      max-width: 480px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+      text-align: center;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+    }
+    .icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 16px;
+      border: 2px solid #22c55e;
+    }
+    .icon span {
+      font-size: 32px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+    }
+    p {
+      margin: 0 0 16px;
+      font-size: 15px;
+      line-height: 1.5;
+      color: #cbd5f5;
+    }
+    .meta {
+      font-size: 13px;
+      color: #9ca3af;
+    }
+    .pill {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(34, 197, 94, 0.12);
+      color: #bbf7d0;
+      font-size: 12px;
+      border: 1px solid rgba(34, 197, 94, 0.35);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="icon"><span>✔</span></div>
+      <h1>{{ _p.heading }}</h1>
+      <p>{{ _p.lead }}</p>
+      <p class="meta">
+        {{ _p.meta }}
+      </p>
+      <div class="pill">{{ _p.pill }}</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run update-admin-rt every {{ admin_dyn_timer_interval | default('5min') }}
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec={{ admin_dyn_timer_interval | default('5min') }}
+AccuracySec=30s
+Unit=update-admin-rt.service
+
+[Install]
+WantedBy=timers.target

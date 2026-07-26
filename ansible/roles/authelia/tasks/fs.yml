@@ -1,0 +1,192 @@
+---
+- name: "Authelia | fs | prepare directories, files and permissions"
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: Ensure private runtime directory exists
+      become: true
+      ansible.builtin.file:
+        path: /run/easy-ha-proxy
+        state: directory
+        owner: root
+        group: "{{ authelia_log_reader_group }}"
+        mode: "0750"
+
+    # -------- СЕРВИСНЫЕ ПОЛЬЗОВАТЕЛИ ДЛЯ КОНТЕЙНЕРОВ --------
+    - name: Ensure groups for Authelia stack exist
+      become: true
+      ansible.builtin.group:
+        name: "{{ item.name }}"
+        gid: "{{ item.gid }}"
+        system: true
+      loop:
+        - { name: "authelia",       gid: "{{ authelia_gid }}" }
+        - { name: "authelia_redis", gid: "{{ authelia_redis_gid }}" }
+
+    - name: Ensure users for Authelia stack exist
+      become: true
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        uid: "{{ item.uid }}"
+        group: "{{ item.group }}"
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+      loop:
+        - { name: "authelia",       uid: "{{ authelia_uid }}",       group: "authelia" }
+        - { name: "authelia_redis", uid: "{{ authelia_redis_uid }}", group: "authelia_redis" }
+
+    # -------- ДИРЕКТОРИИ / ПРАВА НА ХОСТЕ --------
+    - name: Ensure Authelia base dir exists and has correct permissions
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_root_dir }}"
+        state: directory
+        owner: authelia
+        group: authelia
+        mode: "0750"
+
+    - name: Ensure the local Authelia notification file is private
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_root_dir }}/notification.log"
+        state: touch
+        owner: authelia
+        group: authelia
+        mode: "0600"
+        access_time: preserve
+        modification_time: preserve
+
+    - name: Ensure Authelia redis data dir exists
+      when: authelia_session_redis_enabled | default(true)
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_redis_data_dir }}"
+        state: directory
+        owner: authelia_redis
+        group: authelia_redis
+        mode: "0750"
+
+    # КАТАЛОГ ЛОГОВ AUTHELIA (пишет authelia, читает haproxy)
+    - name: Ensure Authelia logs dir exists
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_logs_dir }}"
+        state: directory
+        owner: authelia
+        group: "{{ authelia_log_reader_group }}"
+        mode: "0750"
+
+    - name: Stat Authelia log file
+      ansible.builtin.stat:
+        path: "{{ authelia_log_file }}"
+      register: authelia_log_stat
+
+    - name: Ensure directory for Authelia log exists
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_log_file | dirname }}"
+        state: directory
+        owner: authelia
+        group: "{{ authelia_log_reader_group }}"
+        mode: "0750"
+      when: not authelia_log_stat.stat.exists
+
+    - name: Create Authelia log file if it does not exist
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_log_file }}"
+        state: touch
+        owner: authelia
+        group: "{{ authelia_log_reader_group }}"
+        mode: "0640"
+      when: not authelia_log_stat.stat.exists
+
+    - name: Ensure permissions on the existing Authelia log file
+      become: true
+      ansible.builtin.file:
+        path: "{{ authelia_log_file }}"
+        state: file
+        owner: authelia
+        group: "{{ authelia_log_reader_group }}"
+        mode: "0640"
+      when: authelia_log_stat.stat.exists
+
+    # ACL (для чтения логов haproxy/haproxyadmin)
+    - name: Ensure ACL support is installed
+      become: true
+      ansible.builtin.apt:
+        name: acl
+        state: present
+        update_cache: yes
+      tags: restore-network
+
+    - name: Allow haproxy reader user to read Authelia log (current file)
+      ansible.posix.acl:
+        path: "{{ authelia_log_file }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        permissions: r
+        state: present
+
+    - name: Ensure default ACL for Authelia logs dir
+      ansible.posix.acl:
+        path: "{{ authelia_logs_dir }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        permissions: rx
+        default: yes
+        state: present
+
+    - name: Ensure default ACL for Authelia root dir
+      ansible.posix.acl:
+        path: "{{ authelia_root_dir }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        permissions: rx
+        default: yes
+        state: present
+
+    - name: Allow haproxy reader user to traverse Authelia root dir (non-default ACL)
+      ansible.posix.acl:
+        path: "{{ authelia_root_dir }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        permissions: rx
+        state: present
+
+    - name: Allow haproxy reader user to traverse Authelia logs dir (non-default ACL)
+      ansible.posix.acl:
+        path: "{{ authelia_logs_dir }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        permissions: rx
+        state: present
+
+    # EMAIL templates dir (сами шаблоны остаются в config/install)
+    - name: Ensure Authelia email templates dir exists
+      become: true
+      ansible.builtin.file:
+        path: /opt/authelia/email_templates
+        state: directory
+        owner: authelia
+        group: authelia
+        mode: "0750"
+
+    # LUA dirs для haproxy (поскольку Authelia роль кладёт туда файлы)
+    - name: Ensure HAProxy lua dir exists
+      become: true
+      ansible.builtin.file:
+        path: /etc/haproxy/lua
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure haproxy-lua-http dir exists
+      become: true
+      ansible.builtin.file:
+        path: /etc/haproxy/lua/haproxy-lua-http
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"

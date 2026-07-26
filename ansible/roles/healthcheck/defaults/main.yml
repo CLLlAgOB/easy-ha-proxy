@@ -1,0 +1,437 @@
+---
+# roles/healthcheck/defaults/main.yml
+#
+# Глобальные настройки роли healthcheck.
+# Здесь описываем:
+#   - какие systemd-сервисы проверять
+#   - какие Docker-контейнеры проверять
+#   - как вести себя при ошибках
+#   - сколько строк логов показывать и откуда брать docker compose logs
+
+#################################################################
+# SYSTEMD-СЕРВИСЫ ДЛЯ ПРОВЕРКИ
+#################################################################
+# Каждый элемент:
+#   name   — реальное имя unit’а в systemd
+#   label  — человекочитаемое имя в отчёте
+#   enabled — проверять ли этот сервис (можно завязать на переменные Ansible)
+
+status_check_systemd_units:
+  # Основной HAProxy (reverse proxy с сайтами)
+  - name: "haproxy.service"
+    label: "HAProxy (reverse proxy)"
+    enabled: true
+
+  # Root-демон управления сертификатами для HAProxy
+  - name: "haproxy-certd.service"
+    label: "HAProxy certificate daemon"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+    version_file: "/usr/local/sbin/haproxy-certd.py"
+    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-certd.py"
+
+  - name: "haproxy-controld.service"
+    label: "HAProxy control daemon"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+    version_file: "/usr/local/sbin/haproxy-controld.py"
+    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-controld.py"
+
+  - name: "haproxy-healthd.service"
+    label: "HAProxy health daemon"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+    version_file: "/usr/local/sbin/haproxy-healthd.py"
+    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-healthd.py"
+
+  - name: "easy-ha-proxy-backupd.service"
+    label: "Encrypted backup and restore broker"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+    version_file: "/usr/local/sbin/easy-ha-proxy-backupd.py"
+    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
+
+  - name: "easy-ha-proxy-updated.service"
+    label: "Software update broker"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+    version_file: "/usr/local/sbin/easy-ha-proxy-updated.py"
+    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
+
+  # Демон банов Authelia (regulation helper)
+  - name: "authelia-bansd.service"
+    label: "Authelia regulation bans daemon"
+    # Проверяем только если вообще включена Authelia и включён bans-демон
+    enabled: >-
+      {{ authelia_enabled | default(false) | bool
+         and authelia_bans_daemon_enabled | default(true) | bool }}
+    version_file: "/usr/local/sbin/authelia-bansd.py"
+    version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-bansd.py"
+
+  # Демон управления пользователями Authelia (watcher)
+  - name: "authelia-usersd.service"
+    label: "Authelia users management daemon"
+    enabled: "{{ authelia_enabled | default(false) | bool }}"
+    version_file: "/usr/local/sbin/authelia-usersd.py"
+    version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-usersd.py"
+
+  # Демон управления configuration.yml Authelia (authelia-configd.py)
+  - name: "authelia-configd.service"
+    label: "Authelia config daemon (authelia-configd)"
+    enabled: >-
+      {{ authelia_enabled | default(false) | bool
+         and authelia_configd_enabled | default(true) | bool }}
+    version_file: "/usr/local/sbin/authelia-configd.py"
+    version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-configd.py"
+
+  - name: "iptables-haproxy-ban.service"
+    label: "HAProxy iptables ban loader"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "iptables-haproxy-udp.service"
+    label: "UDP forwarding loader"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "update-admin-rt.timer"
+    label: "Dynamic admin IP update timer"
+    enabled: "{{ admin_dyn_enabled | default(false) | bool }}"
+
+  - name: "journal-vacuum.timer"
+    label: "Journal vacuum timer"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  # Docker Engine — нужен для контейнеров Authelia и прочих сервисов
+  - name: "docker.service"
+    label: "Docker Engine"
+    enabled: true
+
+  - name: "systemd-journald.service"
+    label: "systemd journal"
+    enabled: true
+
+  - name: "systemd-timesyncd.service"
+    label: "Time synchronization"
+    enabled: "{{ easy_ha_proxy_test_mode | default(false) | bool }}"
+
+  - name: "apparmor.service"
+    label: "AppArmor"
+    enabled: "{{ haproxy_enable_rsyslog_apparmor | default(true) | bool }}"
+
+  - name: "rsyslog.service"
+    label: "rsyslog"
+    enabled: "{{ haproxy_enable_rsyslog_apparmor | default(true) | bool }}"
+
+  - name: "easy-ha-proxy-geoip-update.timer"
+    label: "Local GeoIP database update timer"
+    # The web restore broker keeps this timer quiesced until the surrounding
+    # restore transaction exits. Do not turn that intentional offline window
+    # into a false health-check failure; Quiesce resumes the previously active
+    # timer immediately after a successful candidate or rollback.
+    enabled: >-
+      {{
+        geoip_database_enabled | default(true) | bool
+        and not (easy_ha_proxy_offline_restore | default(false) | bool)
+      }}
+
+  - name: "logrotate.timer"
+    label: "Authelia logrotate timer"
+    enabled: >-
+      {{
+        authelia_enabled | default(false) | bool
+        and authelia_logrotate_enabled | default(true) | bool
+      }}
+
+  - name: "snap.certbot.renew.timer"
+    label: "Certbot renewal timer"
+    enabled: true
+
+  # Example for future services (uncomment and replace the values as needed).
+  # - name: "my-extra-service.service"
+  #   label: "My extra backend service"
+  #   enabled: "{{ my_extra_service_enabled | default(false) | bool }}"
+
+#################################################################
+# DOCKER-КОНТЕЙНЕРЫ ДЛЯ ПРОВЕРКИ
+#################################################################
+# Каждый элемент:
+#   name   — имя контейнера (как видно в docker ps)
+#   label  — человекочитаемое имя в отчёте
+#   enabled — проверять ли этот контейнер
+
+status_check_docker_containers:
+  # Веб-интерфейс HAProxy-admin (Flask-приложение)
+  - name: "haproxy-admin"
+    label: "HAProxy Admin UI"
+    # Если переменная haproxy_admin_enabled не определена — считаем, что сервис должен быть
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  # Основной контейнер Authelia
+  - name: "{{ authelia_container_name | default('authelia') }}"
+    label: "Authelia"
+    enabled: "{{ authelia_enabled | default(false) | bool }}"
+
+  # Redis session store for Authelia (authelia-redis Compose container).
+  - name: "authelia-redis"
+    label: "Authelia Redis (sessions)"
+    enabled: >-
+      {{ authelia_enabled | default(false) | bool
+         and authelia_session_redis_enabled | default(true) }}
+
+  # Internal mail relay shared by Authelia and certificate notifications.
+  - name: "mail_relay"
+    label: "Mail relay (docker-compose)"
+    enabled: >-
+      {{ authelia_enabled | default(false) | bool
+         and (
+           mail_notify_enabled | default(false) | bool
+           or mail_relay_server | default(false) | bool
+         ) }}
+
+  # Example for future Docker stacks.
+  # - name: "some_other_container"
+  #   label: "Some other service"
+  #   enabled: "{{ some_other_container_enabled | default(false) | bool }}"
+
+#################################################################
+# ONESHOT-СЛУЖБЫ, СВЯЗАННЫЕ С TIMER
+#################################################################
+
+status_check_systemd_jobs:
+  - timer: "easy-ha-proxy-geoip-update.timer"
+    service: "easy-ha-proxy-geoip-update.service"
+    label: "Local GeoIP database updater"
+    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
+
+  - timer: "update-admin-rt.timer"
+    service: "update-admin-rt.service"
+    label: "Dynamic admin IP updater"
+    enabled: "{{ admin_dyn_enabled | default(false) | bool }}"
+
+  - timer: "journal-vacuum.timer"
+    service: "journal-vacuum.service"
+    label: "Journal vacuum"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+#################################################################
+# ИСПОЛНЯЕМЫЕ ФАЙЛЫ И UNIT-ФАЙЛЫ, УПРАВЛЯЕМЫЕ PLAYBOOK
+#################################################################
+
+status_check_managed_artifacts:
+  - name: "iptables-ban-rules"
+    label: "HAProxy iptables ban rules"
+    path: "/etc/iptables/haproxy_ban.rules"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy_ban.rules"
+    source_type: "file"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "iptables-ban-unit"
+    label: "HAProxy iptables loader unit"
+    path: "/etc/systemd/system/iptables-haproxy-ban.service"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/templates/iptables-haproxy-ban.service.j2"
+    source_type: "template"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "iptables-udp-generator"
+    label: "UDP forwarding generator"
+    path: "/usr/local/sbin/haproxy-udp-forward.py"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-udp-forward.py"
+    source_type: "file"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "iptables-udp-unit"
+    label: "UDP forwarding loader unit"
+    path: "/etc/systemd/system/iptables-haproxy-udp.service"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/templates/iptables-haproxy-udp.service.j2"
+    source_type: "template"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "update-admin-rt-script"
+    label: "Dynamic admin IP updater"
+    path: "/usr/local/sbin/update-admin-rt.sh"
+    source: "{{ playbook_dir }}/roles/haproxy/templates/update-admin-rt.sh.j2"
+    source_type: "template"
+    enabled: "{{ admin_dyn_enabled | default(false) | bool }}"
+
+  - name: "update-admin-rt-service"
+    label: "Dynamic admin IP service unit"
+    path: "/etc/systemd/system/update-admin-rt.service"
+    source: "{{ playbook_dir }}/roles/haproxy/templates/update-admin-rt.service.j2"
+    source_type: "template"
+    enabled: "{{ admin_dyn_enabled | default(false) | bool }}"
+
+  - name: "update-admin-rt-timer"
+    label: "Dynamic admin IP timer unit"
+    path: "/etc/systemd/system/update-admin-rt.timer"
+    source: "{{ playbook_dir }}/roles/haproxy/templates/update-admin-rt.timer.j2"
+    source_type: "template"
+    enabled: "{{ admin_dyn_enabled | default(false) | bool }}"
+
+  - name: "journal-vacuum-service"
+    label: "Journal vacuum service unit"
+    path: "/etc/systemd/system/journal-vacuum.service"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/templates/journal-vacuum.service.j2"
+    source_type: "template"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "journal-vacuum-timer"
+    label: "Journal vacuum timer unit"
+    path: "/etc/systemd/system/journal-vacuum.timer"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/templates/journal-vacuum.timer.j2"
+    source_type: "template"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "backupd-script"
+    label: "Encrypted backup and restore broker"
+    path: "/usr/local/sbin/easy-ha-proxy-backupd.py"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
+    source_type: "file"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "backupd-unit"
+    label: "Encrypted backup and restore broker unit"
+    path: "/etc/systemd/system/easy-ha-proxy-backupd.service"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/templates/easy-ha-proxy-backupd.service.j2"
+    source_type: "template"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "updated-script"
+    label: "Software update broker"
+    path: "/usr/local/sbin/easy-ha-proxy-updated.py"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
+    source_type: "file"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "updated-unit"
+    label: "Software update broker unit"
+    path: "/etc/systemd/system/easy-ha-proxy-updated.service"
+    source: "{{ playbook_dir }}/roles/haproxy-admin/templates/easy-ha-proxy-updated.service.j2"
+    source_type: "template"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "geoip-updater"
+    label: "GeoIP update script"
+    path: "/usr/local/bin/update-geoip.sh"
+    source: "{{ playbook_dir }}/roles/geoip_acl/templates/update-geoip.sh.j2"
+    source_type: "template"
+    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
+
+  - name: "geoip-updater-python"
+    label: "Transactional GeoIP updater"
+    path: "/usr/local/lib/easy-ha-proxy/update_geoip.py"
+    source: "{{ playbook_dir }}/roles/geoip_acl/files/update_geoip.py"
+    source_type: "file"
+    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
+
+  - name: "geoip-update-service"
+    label: "GeoIP update service unit"
+    path: "/etc/systemd/system/easy-ha-proxy-geoip-update.service"
+    source: "{{ playbook_dir }}/roles/geoip_acl/templates/easy-ha-proxy-geoip-update.service.j2"
+    source_type: "template"
+    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
+
+  - name: "geoip-update-timer"
+    label: "GeoIP update timer unit"
+    path: "/etc/systemd/system/easy-ha-proxy-geoip-update.timer"
+    source: "{{ playbook_dir }}/roles/geoip_acl/templates/easy-ha-proxy-geoip-update.timer.j2"
+    source_type: "template"
+    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
+
+  - name: "authelia-bans-helper"
+    label: "Authelia bans helper"
+    path: "{{ authelia_bans_script_path | default('/usr/local/sbin/authelia-bans.sh') }}"
+    source: "{{ playbook_dir }}/roles/authelia/templates/authelia-bans.sh.j2"
+    source_type: "template"
+    enabled: "{{ authelia_enabled | default(false) | bool }}"
+
+  - name: "certbot-haproxy-hook"
+    label: "Certbot HAProxy deploy hook"
+    path: "/etc/letsencrypt/renewal-hooks/deploy/905-haproxy-pems-reload.sh"
+    source: "{{ playbook_dir }}/roles/cert/templates/905-haproxy-pems-reload.sh.j2"
+    source_type: "template"
+    enabled: true
+
+  - name: "certbot-mail-hook"
+    label: "Certbot mail notification hook"
+    path: "/etc/letsencrypt/renewal-hooks/deploy/910-mail-notify.sh"
+    source: "{{ playbook_dir }}/roles/cert/templates/910-mail-notify.sh.j2"
+    source_type: "template"
+    enabled: >-
+      {{
+        mail_notify_enabled | default(false) | bool
+      }}
+
+  - name: "haproxy-lua-http"
+    label: "HAProxy Lua HTTP library"
+    path: "/etc/haproxy/lua/haproxy-lua-http/http.lua"
+    expected_checksum: "e1ef01995fb040f82cad2e142d01662d1209fed81c19a6c9768d19924eb0efde"
+    enabled: "{{ authelia_enabled | default(false) | bool }}"
+
+  - name: "haproxy-json-lua"
+    label: "HAProxy JSON Lua library"
+    path: "/etc/haproxy/lua/json.lua"
+    expected_checksum: "0eaccda57fabc0330736de25f45cf589821a42b5e0fe02e4e3125f7dc0bf2b7e"
+    enabled: "{{ authelia_enabled | default(false) | bool }}"
+
+  - name: "haproxy-auth-request-lua"
+    label: "HAProxy auth-request Lua library"
+    path: "/etc/haproxy/lua/auth-request.lua"
+    expected_checksum: "f2a504a543ee14d85253df55a68bda418fc3ebc918b8f424f8140395f3faeb75"
+    enabled: "{{ authelia_enabled | default(false) | bool }}"
+
+#################################################################
+# ПАКЕТЫ И SNAP, ОПРЕДЕЛЯЮЩИЕ ВЕРСИИ ОСНОВНЫХ СЛУЖБ
+#################################################################
+
+status_check_apt_packages: >-
+  {{
+    [
+      'haproxy',
+      'docker-ce',
+      'docker-ce-cli',
+      'containerd.io',
+      'docker-buildx-plugin',
+      'docker-compose-plugin',
+      'iptables',
+      'ipset'
+    ]
+    + (
+      ['logrotate']
+      if (
+        authelia_enabled | default(false) | bool
+        and authelia_logrotate_enabled | default(true) | bool
+      )
+      else []
+    )
+    + (
+      ['apparmor', 'rsyslog']
+      if haproxy_enable_rsyslog_apparmor | default(true) | bool
+      else []
+    )
+    + ['snapd']
+  }}
+
+status_check_snap_packages:
+  - core
+  - certbot
+
+#################################################################
+# ОБЩЕЕ ПОВЕДЕНИЕ РОЛИ
+#################################################################
+
+# Если true — при наличии проблем с сервисами/контейнерами play упадёт (fail).
+# Если false — только вывод отчёта + логи, без падения.
+status_check_fail_on_error: false
+
+# Сколько строк логов systemd показывать для проблемных сервисов
+status_check_journal_lines: 40
+
+#################################################################
+# ЛОГИ DOCKER COMPOSE ДЛЯ ПРОБЛЕМНЫХ КОНТЕЙНЕРОВ
+#################################################################
+
+# Включать ли показ docker compose logs для "плохих" контейнеров
+status_check_docker_logs_enabled: true
+
+# Сколько строк логов docker compose выводить для каждого проблемного контейнера
+status_check_docker_log_lines: 80
+
+# Каталог, где лежит docker-compose.yml для Authelia.
+# Тут будет выполняться команда:
+#   docker compose logs --tail N <container>
+# При необходимости можно переопределить в group_vars/host_vars.
+status_check_docker_logs_compose_dir: "/opt/authelia"

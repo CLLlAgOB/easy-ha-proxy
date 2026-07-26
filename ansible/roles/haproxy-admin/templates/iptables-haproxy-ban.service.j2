@@ -1,0 +1,14 @@
+[Unit]
+Description=Load iptables rules for HAProxy ban set (iptables-legacy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ipset должен существовать до загрузки правил
+ExecStartPre=/usr/sbin/ipset create haproxy_ban hash:ip family inet -exist
+ExecStart=/usr/sbin/iptables-legacy-restore /etc/iptables/haproxy_ban.rules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

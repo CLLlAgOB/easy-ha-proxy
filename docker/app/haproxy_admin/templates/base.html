@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="{{ current_language }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}{% endblock %}</title>
+
+  <!-- общий стиль -->
+  <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/styles.css') }}">
+
+  <script>
+    window.HAPROXY_ADMIN_I18N = {{ i18n_config | tojson }};
+    window.HAPROXY_ADMIN_FLAG_BASE = {{ url_for('static', filename='vendor/flag-icons/flags/4x3/') | tojson }};
+  </script>
+  <!-- Translation catalog as a separate, browser-cached asset (must load
+       before i18n.js, which reads window.HAPROXY_ADMIN_I18N.messages). -->
+  <script src="{{ i18n_messages_url }}"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/security.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/config_state.js') }}"></script>
+</head>
+
+<body>
+  <header>
+    <div class="logo-area">
+      <div class="logo">
+        <div class="logo-icon">
+          <!-- простой svg-значок -->
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M3 12L21 12" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round"/>
+            <path d="M12 3L12 21" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h1>{% block header_title %}HAProxy Security Dashboard{% endblock %}</h1>
+      </div>
+    </div>
+
+    <div class="controls">
+      {% if g.is_superadmin %}
+      <a id="global-config-state"
+         class="global-config-state"
+         href="{{ url_for('routes.haproxy_config_page') }}"
+         data-state-endpoint="{{ url_for('routes.haproxy_configuration_state') }}"
+         aria-label="Open HAProxy configuration"
+         hidden>
+        <span class="global-config-state-dot" aria-hidden="true"></span>
+        <span id="global-config-state-label" role="status" aria-live="polite">
+          Configuration status unavailable
+        </span>
+      </a>
+      {% endif %}
+      <form class="language-switcher" method="post" action="{{ url_for('set_language') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="next" value="{{ request.full_path }}">
+        <label class="visually-hidden" for="language-select">Interface language</label>
+        <select id="language-select" name="language" aria-label="Interface language"
+                onchange="this.form.submit()">
+          {% for language in supported_languages %}
+          <option value="{{ language.code }}" {% if language.code == current_language %}selected{% endif %}>
+            {{ language.label }}
+          </option>
+          {% endfor %}
+        </select>
+      </form>
+      <!-- переключатель темы -->
+      <button id="theme-toggle" class="theme-toggle" title="Toggle theme">
+        ☀
+      </button>
+      {% block header_buttons %}{% endblock %}
+    </div>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer>
+    HAProxy Security&nbsp;Dashboard © 2026 ·
+    <a href="https://db-ip.com" rel="noopener noreferrer">IP Geolocation by DB-IP</a>
+  </footer>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

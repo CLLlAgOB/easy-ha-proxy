@@ -1,0 +1,30 @@
+---
+- name: "HAProxy | fs | prepare directories and permissions"
+  block:
+    - name: Ensure HAProxy base dirs exist
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode  | default('0755') }}"
+      loop:
+        - { path: /etc/haproxy }
+        - { path: /var/lib/haproxy }
+        - { path: /var/log/haproxy, owner: syslog, group: adm }
+
+    - name: Ensure HAProxy errors directory exists
+      ansible.builtin.file:
+        path: /etc/haproxy/errors
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure HAProxy certs directory exists
+      ansible.builtin.file:
+        path: "{{ haproxy_certs_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"

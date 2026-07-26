@@ -1,0 +1,10 @@
+---
+- name: Ensure the managed mail notification state exists
+  ansible.builtin.template:
+    src: mail-notify.json.j2
+    dest: "{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}/mail-notify.json"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false

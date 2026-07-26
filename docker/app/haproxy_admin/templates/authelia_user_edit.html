@@ -1,0 +1,144 @@
+{# templates/authelia_user_edit.html #}
+{% extends "base.html" %}
+
+{% block title %}Edit user {{ user.username }}{% endblock %}
+{% block header_title %}Edit user{% endblock %}
+
+{% block header_buttons %}
+{% include "_authelia_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <div class="table-title">Error</div>
+    </div>
+    <div style="padding:12px 16px;color:var(--error);">
+        {{ error }}
+    </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <div class="table-title">Message</div>
+    </div>
+    <div style="padding:12px 16px;color:var(--success);">
+        {{ message }}
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>User profile</h2>
+    </div>
+
+    <div style="padding:16px;max-width:520px;">
+        <form method="post">
+            {{ csrf_token() if csrf_token is defined }}
+
+            <div class="form-row">
+                <label class="form-label">Username</label>
+                <input type="text" class="form-input mono" value="{{ user.username }}" disabled>
+                <input type="hidden" name="username" value="{{ user.username }}">
+            </div>
+
+            <div class="form-row">
+                <label for="displayname" class="form-label">
+                    Display name <span style="color:var(--error)">*</span>
+                </label>
+                <input type="text" id="displayname" name="displayname" class="form-input"
+                    value="{{ user.displayname or '' }}" required>
+            </div>
+
+            <div class="form-row">
+                <label for="email" class="form-label">
+                    Email <span style="color:var(--error)">*</span>
+                </label>
+                <input type="email" id="email" name="email" class="form-input" value="{{ user.email or '' }}" required>
+            </div>
+
+            {# --- Groups user --- #}
+            <div class="form-row">
+                <div class="form-label" style="margin-bottom:4px;">Groups</div>
+
+                {# List всех доступных групп #}
+                {% if all_groups is defined and all_groups %}
+                {% set groups_list = all_groups %}
+                {% else %}
+                {% set groups_list = [] %}
+                {% endif %}
+
+                {# Уже выбранные группы #}
+                {% set selected_groups = user.groups or [] %}
+
+                {% if groups_list %}
+                <div class="group-grid">
+                    {% for g in groups_list %}
+                    <label class="checkbox-pill">
+                        <input type="checkbox" name="groups" value="{{ g }}" {% if g in selected_groups %}checked{%
+                            endif %}>
+                        <span>{{ g }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p style="opacity:.7;margin:4px 0 0;">
+                    The group list is empty; you can enter groups below.
+                </p>
+                {% endif %}
+
+                <div style="margin-top:10px;">
+                    <label for="groups_extra" class="form-label">
+                        Additional groups (comma-separated)
+                    </label>
+                    <input type="text" id="groups_extra" name="groups_extra" class="form-input"
+                        placeholder="for example: powerusers,devops">
+                    <p style="opacity:.7;font-size:12px;margin-top:4px;">
+                        Checked groups will be merged with additional groups.
+                    </p>
+                </div>
+            </div>
+
+            <div class="form-row" style="margin-top:8px;">
+                <label class="form-label" for="disabled">
+                    Disabled
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:6px;">
+                    <input type="checkbox" id="disabled" name="disabled" value="1" {% if user.disabled %}checked{% endif
+                        %}>
+                    <span style="opacity:.8;">Disable login</span>
+                </label>
+            </div>
+
+            <hr style="margin:18px 0;opacity:.25;">
+
+            <div class="form-row" style="display:flex;gap:12px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:200px;">
+                    <label for="password" class="form-label">New password</label>
+                    <input type="password" id="password" name="password" class="form-input">
+                </div>
+                <div style="flex:1;min-width:200px;">
+                    <label for="password2" class="form-label">Repeat password</label>
+                    <input type="password" id="password2" name="password2" class="form-input">
+                </div>
+            </div>
+            <p style="opacity:.7;font-size:12px;margin-top:6px;">
+                Leave the password fields empty to keep the current password.
+            </p>
+
+            <div style="margin-top:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                <button type="submit" class="btn">
+                    Save changes
+                </button>
+                {# Кнопку удаления отсюда убрали, удаление делаем from списка users #}
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock %}

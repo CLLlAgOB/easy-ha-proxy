@@ -1,0 +1,298 @@
+---
+- name: Validate local GeoIP database settings
+  ansible.builtin.assert:
+    that:
+      - not (enable_geoip | default(false) | bool) or (geoip_database_enabled | default(true) | bool)
+    fail_msg: >-
+      HAProxy GeoIP access filtering requires the local GeoIP database.
+      Set geoip_database_enabled=true or disable enable_geoip.
+
+- name: Install local GeoIP database dependencies
+  ansible.builtin.package:
+    name:
+      - ca-certificates
+      - python3
+      - python3-venv
+    state: present
+  when: geoip_database_enabled | default(true) | bool
+  tags: restore-network
+
+- name: Ensure the GeoIP directory exists
+  ansible.builtin.file:
+    path: /etc/haproxy/geoip
+    state: directory
+    owner: root
+    group: haproxy
+    mode: "0755"
+
+- name: Ensure the GeoIP updater library directory exists
+  ansible.builtin.file:
+    path: /usr/local/lib/easy-ha-proxy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check the target-side GeoIP Python environment
+  ansible.builtin.stat:
+    path: "{{ geoip_runtime_venv }}/bin/pip"
+  register: geoip_runtime_pip
+  when: geoip_database_enabled | default(true) | bool
+
+- name: Create the target-side GeoIP Python environment
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -m
+      - venv
+      - "{{ geoip_runtime_venv }}"
+    creates: "{{ geoip_runtime_venv }}/bin/pip"
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - not (geoip_runtime_pip.stat.exists | default(false))
+
+- name: Install the MaxMind DB reader in the target-side environment
+  ansible.builtin.pip:
+    name: "maxminddb=={{ geoip_maxminddb_version }}"
+    executable: "{{ geoip_runtime_venv }}/bin/pip"
+    state: present
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - not ansible_check_mode or (geoip_runtime_pip.stat.exists | default(false))
+  tags: restore-network
+
+- name: Install the YAML reader in the target-side environment
+  ansible.builtin.pip:
+    name: "PyYAML=={{ geoip_pyyaml_version }}"
+    executable: "{{ geoip_runtime_venv }}/bin/pip"
+    state: present
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - not ansible_check_mode or (geoip_runtime_pip.stat.exists | default(false))
+  tags: restore-network
+
+- name: Copy the static GeoIP bypass list
+  ansible.builtin.copy:
+    src: whitelist.geo
+    dest: /etc/haproxy/geoip/whitelist.geo
+    owner: haproxy
+    group: haproxy
+    mode: "0664"
+    force: false
+
+- name: Check the HAProxy Admin runtime variables for GeoIP selection
+  ansible.builtin.stat:
+    path: /opt/haproxy-admin/config/vars.yml
+  register: geoip_runtime_vars_file
+
+- name: Read the HAProxy Admin runtime variables for GeoIP selection
+  ansible.builtin.slurp:
+    src: /opt/haproxy-admin/config/vars.yml
+  register: geoip_runtime_vars_raw
+  when:
+    - geoip_runtime_vars_file.stat.exists | default(false)
+    - not haproxy_admin_sync_managed_config | default(false) | bool
+  no_log: true
+
+- name: Select the effective runtime GeoIP settings
+  ansible.builtin.set_fact:
+    geoip_runtime_selection_countries: >-
+      {{
+        (
+          (
+            geoip_runtime_vars_raw.content
+            | default('e30=')
+            | b64decode
+            | from_yaml
+          ).geoip_country_codes
+          | default(geoip_country_codes | default([]))
+        )
+        | map('upper')
+        | unique
+        | sort
+        | list
+      }}
+    geoip_runtime_selection_enabled: >-
+      {{
+        (
+          (
+            geoip_runtime_vars_raw.content
+            | default('e30=')
+            | b64decode
+            | from_yaml
+          ).enable_geoip
+          | default(enable_geoip | default(false))
+        )
+        | bool
+      }}
+  no_log: true
+
+- name: Validate the effective runtime GeoIP settings
+  ansible.builtin.assert:
+    that:
+      - >-
+        geoip_runtime_selection_countries
+        | select('match', '^[A-Z]{2}$')
+        | list
+        | length
+        == geoip_runtime_selection_countries | length
+      - >-
+        not geoip_runtime_selection_enabled | bool
+        or geoip_runtime_selection_countries | length > 0
+    fail_msg: >-
+      Runtime GeoIP filtering requires one or more valid ISO 3166-1 alpha-2
+      country codes.
+
+- name: Synchronize the runtime GeoIP country selection
+  ansible.builtin.copy:
+    content: >-
+      {{
+        {
+          'version': 1,
+          'countries': geoip_runtime_selection_countries,
+          'access_filter_enabled': geoip_runtime_selection_enabled | bool
+        }
+        | to_nice_json
+      }}
+
+    dest: /etc/haproxy/geoip/selection.json
+    owner: root
+    group: haproxy
+    mode: "0644"
+  register: geoip_selection_sync
+
+- name: Install the transactional GeoIP updater
+  ansible.builtin.copy:
+    src: update_geoip.py
+    dest: /usr/local/lib/easy-ha-proxy/update_geoip.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: geoip_updater_script
+
+- name: Install the GeoIP update command
+  ansible.builtin.template:
+    src: update-geoip.sh.j2
+    dest: /usr/local/bin/update-geoip.sh
+    owner: root
+    group: root
+    mode: "0755"
+  register: geoip_update_command
+
+- name: Install the GeoIP update service
+  ansible.builtin.template:
+    src: easy-ha-proxy-geoip-update.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-geoip-update.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: geoip_update_service
+
+- name: Install the GeoIP update timer
+  ansible.builtin.template:
+    src: easy-ha-proxy-geoip-update.timer.j2
+    dest: /etc/systemd/system/easy-ha-proxy-geoip-update.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: geoip_update_timer
+
+- name: Check whether the legacy cron command is installed
+  ansible.builtin.stat:
+    path: /usr/bin/crontab
+  register: geoip_crontab_command
+
+- name: Remove the legacy GeoIP cron entry
+  ansible.builtin.cron:
+    name: "Update HAProxy GeoIP lists"
+    user: root
+    state: absent
+  when: geoip_crontab_command.stat.exists
+
+- name: Reload systemd after GeoIP unit changes
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: geoip_update_service.changed or geoip_update_timer.changed
+
+- name: Check whether a local GeoIP release is already active
+  ansible.builtin.stat:
+    path: /etc/haproxy/geoip/current
+  register: geoip_current_release
+  when: geoip_database_enabled | default(true) | bool
+
+# The updater is transactional: it only swaps the active release when the
+# selection or the source database actually changed. Running it on every apply
+# therefore reported "changed" for no reason. Trigger it only to bootstrap a
+# missing release or when an input that affects the release changed; the daily
+# timer keeps the database itself fresh.
+- name: Build the current local GeoIP release through its systemd unit
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - start
+      - easy-ha-proxy-geoip-update.service
+  register: geoip_initial_update
+  changed_when: not ansible_check_mode and (geoip_initial_update.rc | default(1)) == 0
+  failed_when: false
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - >-
+      not (geoip_current_release.stat.exists | default(false))
+      or (geoip_selection_sync.changed | default(false))
+      or (geoip_update_service.changed | default(false))
+      or (geoip_update_timer.changed | default(false))
+      or (geoip_updater_script.changed | default(false))
+      or (geoip_update_command.changed | default(false))
+  tags: restore-network
+
+- name: Read the GeoIP updater journal after an initial failure
+  ansible.builtin.command:
+    argv:
+      - journalctl
+      - -u
+      - easy-ha-proxy-geoip-update.service
+      - -n
+      - "50"
+      - --no-pager
+  register: geoip_initial_update_journal
+  changed_when: false
+  failed_when: false
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - geoip_initial_update.rc | default(0) != 0
+
+- name: Enable or disable the local GeoIP update timer
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-geoip-update.timer
+    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
+    state: >-
+      {{ 'started' if geoip_database_enabled | default(true) | bool else 'stopped' }}
+  tags: restore-network
+
+- name: Report a deferred UI-only GeoIP database update
+  ansible.builtin.debug:
+    msg: >-
+      The local GeoIP database could not be downloaded. HAProxy country
+      filtering is disabled, so installation continues and the UI will show
+      unknown countries until the timer succeeds: {{
+      geoip_initial_update_journal.stdout
+      | default(geoip_initial_update.stderr, true)
+      | default(geoip_initial_update.stdout, true) }}
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - not enable_geoip | default(false) | bool
+    - geoip_initial_update.rc | default(0) != 0
+
+- name: Stop when an enabled GeoIP access filter has no valid local database
+  ansible.builtin.fail:
+    msg: >-
+      The local GeoIP release could not be prepared, so enabling the HAProxy
+      country filter would be unsafe. The previous release was preserved and
+      the update timer remains enabled. Details: {{
+      geoip_initial_update_journal.stdout
+      | default(geoip_initial_update.stderr, true)
+      | default(geoip_initial_update.stdout, true) }}
+  when:
+    - geoip_database_enabled | default(true) | bool
+    - enable_geoip | default(false) | bool
+    - geoip_initial_update.rc | default(0) != 0

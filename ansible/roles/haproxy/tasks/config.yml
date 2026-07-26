@@ -1,0 +1,224 @@
+- name: Initialize the optional HAProxy Admin runtime source
+  ansible.builtin.set_fact:
+    easy_ha_proxy_runtime_vars: {}
+    easy_ha_proxy_runtime_websites: {}
+    easy_ha_proxy_runtime_tcp: {}
+    easy_ha_proxy_runtime_source_active: false
+
+- name: Inspect HAProxy Admin runtime source files
+  ansible.builtin.stat:
+    path: "{{ haproxy_runtime_config_dir }}/{{ item }}"
+    follow: false
+  loop:
+    - vars.yml
+    - websites.yml
+    - tcp.yml
+  register: haproxy_runtime_source_stats
+  when: not (haproxy_admin_sync_managed_config | default(false) | bool)
+
+- name: Count available HAProxy Admin runtime source files
+  ansible.builtin.set_fact:
+    haproxy_runtime_source_count: >-
+      {{
+        haproxy_runtime_source_stats.results
+        | default([])
+        | selectattr('stat.exists', 'defined')
+        | selectattr('stat.exists', 'equalto', true)
+        | list
+        | length
+      }}
+
+- name: Reject incomplete HAProxy Admin runtime source
+  ansible.builtin.assert:
+    that:
+      - haproxy_runtime_source_count | int in [0, 3]
+    fail_msg: >-
+      The HAProxy Admin runtime configuration is incomplete. Restore
+      vars.yml, websites.yml, and tcp.yml together before updating HAProxy.
+  when: not (haproxy_admin_sync_managed_config | default(false) | bool)
+
+- name: Validate HAProxy Admin runtime source file boundaries
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.size | int > 0
+      - item.stat.size | int <= 2097152
+    fail_msg: >-
+      Refusing an unsafe HAProxy Admin runtime source file. Runtime YAML must
+      be a regular, non-symlink file between 1 byte and 2 MiB.
+  loop: "{{ haproxy_runtime_source_stats.results | default([]) }}"
+  when:
+    - not (haproxy_admin_sync_managed_config | default(false) | bool)
+    - item.stat.exists | default(false)
+
+- name: Read the HAProxy Admin runtime source
+  ansible.builtin.slurp:
+    src: "{{ haproxy_runtime_config_dir }}/{{ item }}"
+  loop:
+    - vars.yml
+    - websites.yml
+    - tcp.yml
+  register: haproxy_runtime_source_raw
+  when:
+    - not (haproxy_admin_sync_managed_config | default(false) | bool)
+    - haproxy_runtime_source_count | int == 3
+  no_log: true
+
+- name: Decode the HAProxy Admin runtime source in a private namespace
+  ansible.builtin.set_fact:
+    easy_ha_proxy_runtime_vars: >-
+      {{ haproxy_runtime_source_raw.results[0].content | b64decode | from_yaml }}
+    easy_ha_proxy_runtime_websites: >-
+      {{ haproxy_runtime_source_raw.results[1].content | b64decode | from_yaml }}
+    easy_ha_proxy_runtime_tcp: >-
+      {{ haproxy_runtime_source_raw.results[2].content | b64decode | from_yaml }}
+    easy_ha_proxy_runtime_source_active: true
+  when:
+    - not (haproxy_admin_sync_managed_config | default(false) | bool)
+    - haproxy_runtime_source_count | int == 3
+  no_log: true
+
+- name: Validate the decoded HAProxy Admin runtime source
+  ansible.builtin.assert:
+    that:
+      - easy_ha_proxy_runtime_vars is mapping
+      - easy_ha_proxy_runtime_websites is mapping
+      - easy_ha_proxy_runtime_tcp is mapping
+      - easy_ha_proxy_runtime_vars.site_defaults | default({}) is mapping
+      - easy_ha_proxy_runtime_websites.sites | default([]) is sequence
+      - easy_ha_proxy_runtime_websites.sites | default([]) is not string
+      - >-
+        easy_ha_proxy_runtime_tcp.tcp_proxies
+        | default(easy_ha_proxy_runtime_tcp.tcp | default([]))
+        is sequence
+      - >-
+        easy_ha_proxy_runtime_tcp.tcp_proxies
+        | default(easy_ha_proxy_runtime_tcp.tcp | default([]))
+        is not string
+    fail_msg: >-
+      The HAProxy Admin runtime YAML has an invalid root, sites list, or TCP
+      proxy list. No HAProxy configuration was changed.
+  when: easy_ha_proxy_runtime_source_active | bool
+  no_log: true
+
+- name: Calculate the runtime HAProxy configuration generation
+  ansible.builtin.set_fact:
+    easy_ha_proxy_config_generation: >-
+      {{
+        (
+          'easy-ha-proxy-config-generation-v1|'
+          ~ 'vars.yml:' ~ haproxy_runtime_source_raw.results[0].content
+          ~ '|websites.yml:' ~ haproxy_runtime_source_raw.results[1].content
+          ~ '|tcp.yml:' ~ haproxy_runtime_source_raw.results[2].content
+        )
+        | hash('sha256')
+      }}
+  when: easy_ha_proxy_runtime_source_active | bool
+  no_log: true
+
+- name: Read the managed HAProxy source for its configuration generation
+  ansible.builtin.slurp:
+    src: >-
+      {{
+        (easy_ha_proxy_config_dir | default(playbook_dir))
+        ~ '/' ~ item
+      }}
+  loop:
+    - vars.yml
+    - websites.yml
+    - tcp.yml
+  register: haproxy_managed_source_raw
+  when: not (easy_ha_proxy_runtime_source_active | bool)
+  no_log: true
+
+- name: Calculate the managed HAProxy configuration generation
+  ansible.builtin.set_fact:
+    easy_ha_proxy_config_generation: >-
+      {{
+        (
+          'easy-ha-proxy-config-generation-v1|'
+          ~ 'vars.yml:' ~ haproxy_managed_source_raw.results[0].content
+          ~ '|websites.yml:' ~ haproxy_managed_source_raw.results[1].content
+          ~ '|tcp.yml:' ~ haproxy_managed_source_raw.results[2].content
+        )
+        | hash('sha256')
+      }}
+  when: not (easy_ha_proxy_runtime_source_active | bool)
+  no_log: true
+
+- name: Validate the HAProxy configuration generation
+  ansible.builtin.assert:
+    that:
+      - easy_ha_proxy_config_generation is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      The HAProxy configuration generation could not be derived from the exact
+      vars.yml, websites.yml, and tcp.yml source bytes.
+
+- name: Ensure HAProxy systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/haproxy.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install private HAProxy runtime environment
+  ansible.builtin.copy:
+    dest: /etc/haproxy/easy-ha-proxy.env
+    content: |
+      HAPROXY_ADMIN_PROXY_SECRET={{ haproxy_admin_proxy_secret }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  register: haproxy_runtime_environment
+  notify:
+    - validate haproxy
+    - apply haproxy
+
+- name: Configure HAProxy to load its private environment
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/haproxy.service.d/easy-ha-proxy.conf
+    content: |
+      [Service]
+      EnvironmentFile=/etc/haproxy/easy-ha-proxy.env
+    owner: root
+    group: root
+    mode: "0644"
+  register: haproxy_secret_dropin
+  notify:
+    - validate haproxy
+    - apply haproxy
+
+- name: Reload systemd after HAProxy environment drop-in changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: haproxy_secret_dropin.changed
+
+- name: Copy HAProxy configuration
+  template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: haproxy
+    mode: '0644'
+    trim_blocks: true
+    lstrip_blocks: true
+    validate: '/usr/sbin/haproxy -c -f %s'
+  notify:
+    - validate haproxy
+    - apply haproxy
+  environment:
+    HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
+
+- name: Ensure HAProxy is enabled and running after configuration
+  ansible.builtin.service:
+    name: haproxy
+    enabled: true
+    state: started
+  environment:
+    HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
+
+# «Ensure service running» больше НЕ трогаем — handlers сделают всё сами

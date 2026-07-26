@@ -1,0 +1,92 @@
+###############################################################################
+# Роль: ansible-haproxy-flex — defaults/main.yml
+# Все значения можно переопределить на уровне host- или group_vars.
+###############################################################################
+
+######## 1. Базовые пути ######################################################
+haproxy_certs_dir: "/etc/haproxy/certs"     # куда складываем fullchain+privkey *.pem
+haproxy_socket: "/run/haproxy/admin.sock"
+haproxy_socket_group: "hadmin"
+# The web UI owns these three runtime source files after the initial seed.
+# They are read into a private namespace by the config stage; they are never
+# imported wholesale as Ansible variables because vars.yml also contains
+# installer-owned values such as the selected container image.
+haproxy_runtime_config_dir: "/opt/haproxy-admin/config"
+# null = выбрать автоматически по числу доступных vCPU, но не больше max.
+haproxy_nbthread: null
+haproxy_nbthread_max: 2
+######## 2. Админ-панель /stats ###############################################
+admin_domain: null                          # пример: ha.example.com
+admin_allowed_ips: []                       # список IP; пустой ⇒ доступ всем
+admin_password: "changeme"                  # bcrypt/sha-256 hash либо plaintext
+admin_ips_file: "/etc/haproxy/admin.allow"  # Разрешенные к доступ ип
+admin_dyn_state: "/var/lib/haproxy/admin-dyn-ip.state" # нужно для хранения при использовании динамического днс
+admin_dyn_timer_interval: "5min"      # как часто проверять DNS
+admin_dyn_hostname: null    # откуда брать динамический IP
+admin_dyn_enabled: false    # вкл/выкл динамики через DNS  
+
+######## 3. Служебные фронтенды ################################################
+enable_http80: false                        # true → создаётся frontend fe_http80
+export_prometheus: false                    # true → listen stats_prom с /metrics
+prometheus_port: 8404
+
+######## 4. Глобальные дефолты сайтов #########################################
+site_defaults:
+  # — LB / sticky —
+  balance: "roundrobin"                     # roundrobin | leastconn | source …
+  sticky: "none"                            # cookie | ip | none
+
+  # — backend connection —
+  backend_port: 80                          # если у сервера не указан свой порт
+  backend_ssl: false                        # TLS к бекенду
+  backend_ssl_verify: true                  # проверять сертификат бекенда
+  backend_ssl_ca: ""                        # кастомный CA для verify
+  backend_ssl_sni: ""                       # по-умолч. = domain
+
+  # — HTTPS redirect & maintenance —
+  redirect_to_https: true                   # 301 с 80-го порта
+  maintenance: false                        # трафик на be_maintenance
+
+  # — Security & performance —
+  hsts: 15552000                            # seconds; 180 days, 0 disables HSTS
+  compress: false                           # gzip html/css/js
+  add_headers: {}                           # произвольные set-header пары
+
+  # — Rate-limit & ban —
+  max_req_rate: 200                           # 0 ⇒ лимит выключен
+  rate_window: "20s"
+  rate_ban: false                           # заносить IP в tbl_ban при превышении
+  rate_errors: 8                            # глобальный автобан >N 4xx / rate_window
+
+  # — Geo filter —
+  # The top-level enable_geoip remains the master switch. Individual sites may
+  # override this default with `geo` and may narrow the global country list with
+  # `geo_countries`.
+  enable_geoip: true
+
+  # — WAF / SPOE —
+  waf: "none"                               # имя spoe-engine или none
+  # Усорение
+  enable_splice_global: false
+######## 5. Список сайтов (ПЕРЕОПРЕДЕЛЯЕМ в group_vars/host_vars) #############
+sites: []
+# пример структуры:
+#   - name: blog
+#     domain: blog.example.com
+#     backend_ip: 10.0.0.10
+#     servers:
+#       - { name: app1, host: 10.0.0.10, port: 8881 }
+
+######## 6. GeoIP глобальные ###################################################
+enable_geoip: false         # opt-in: old configs without this key stay unrestricted
+# Режим работы: allow (разрешить только из allowed) или deny (запретить из allowed)
+geoip_mode: "allow"  # allow | deny
+
+######## 7. Certbot (читает внешняя роль) ######################################
+certbot_email: "admin@example.com"
+
+######## 8. AppArmor для rsyslog → сокет в chroot HAProxy ########
+haproxy_chroot: "/var/lib/haproxy"
+
+# Включить автоматическое разрешение для rsyslogd работать с /var/lib/haproxy/dev/log
+haproxy_enable_rsyslog_apparmor: true

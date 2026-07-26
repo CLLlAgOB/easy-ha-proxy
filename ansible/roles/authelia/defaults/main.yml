@@ -1,0 +1,197 @@
+authelia_version: "4.39.20"
+authelia_jwt_secret: ""        # openssl rand -hex 64
+authelia_session_secret: ""    # openssl rand -hex 64
+authelia_storage_key: ""       # openssl rand -hex 64
+
+# Keep the historical variable names for managed configuration compatibility.
+# Authelia now checks time synchronization on every host. The 24 x 5 second
+# defaults allow two minutes for systemd-timesyncd to recover after a cold boot.
+authelia_test_time_sync_retries: 24
+authelia_test_time_sync_delay: 5
+
+# Cold restores on fresh VMs often spend time pulling Redis/Postfix/Authelia
+# images before the local 9091 port exists. Keep this generous but bounded.
+authelia_start_wait_timeout: 180
+
+# ----------------- SESSIONS -----------------
+authelia_session_name: "authelia_session"
+authelia_session_same_site: "lax"
+authelia_session_expiration: "1h"
+authelia_session_inactivity: "5m"
+authelia_session_remember_me: "1M"
+
+# ----------------- Session Redis -----------------
+# Enabled by default so sessions survive restarts.
+authelia_session_redis_enabled: true
+
+# Redis service name inside Docker Compose.
+authelia_session_redis_host: "authelia-redis"
+authelia_session_redis_port: 6379
+authelia_session_redis_database: 0
+authelia_session_redis_timeout: "5s"
+authelia_session_redis_max_active: 8
+authelia_session_redis_max_idle: 4
+
+# Host directory for Redis data.
+authelia_redis_data_dir: "/opt/authelia/redis"
+
+# Linux kernel overcommit setting for Redis.
+# When true, the role sets vm.overcommit_memory=1 on the host.
+authelia_redis_tune_overcommit: true
+authelia_redis_overcommit_value: 1
+authelia_redis_sysctl_file: "/etc/sysctl.d/99-authelia-redis.conf"
+
+# Redis session persistence mode:
+#  - rdb    stores snapshots so sessions survive Redis restarts;
+#  - memory keeps data only in memory, without RDB/AOF.
+authelia_redis_persistence: "rdb"
+
+# ----------------- GENERAL ROLE SETTINGS -----------------
+
+# Enable or disable the role.
+authelia_enabled: false
+
+# Domains and URLs used for cookies and redirects.
+authelia_cookie_domain: "example.com"
+authelia_portal_url: "https://auth.example.com"
+authelia_default_redirection_url: "https://example.com"
+
+# Container timezone.
+authelia_timezone: "Europe/Moscow"
+
+# ----------------- MAIL / SMTP / RELAY -----------------
+
+# Keep the role self-contained for upgrades from managed configurations that
+# predate the relay settings.  Values explicitly stored in vars.yml,
+# authelia.yml, and secrets.yml still take precedence; missing new values use
+# these inert defaults without rewriting the managed files.
+mail_notify_enabled: false
+mail_notify_to: "admin@example.invalid"
+mail_notify_from: "relay@example.invalid"
+mail_notify_only_for: []
+
+# Enable or disable the mail relay container.
+mail_relay_server: false
+
+# Shared external SMTP settings.
+mail_smtp_host: "smtp.example.invalid"
+mail_smtp_user: ""
+mail_smtp_pass: ""
+mail_smtp_server: "{{ mail_smtp_host }}"
+mail_smtp_port: 587
+mail_smtp_username: "{{ mail_smtp_user }}"
+mail_smtp_password: "{{ mail_smtp_pass }}"
+mail_smtp_ssl_mode: "starttls"
+mail_smtp_tls_skip_verify: false
+mail_smtp_disable_require_tls: false
+mail_smtp_timeout: "10s"
+
+# Common Authelia message presentation settings.
+mail_subject: "[Authelia] {title}"
+authelia_notification_language: "en"
+
+# Relay image.
+mail_relay_image: "juanluisbaptiste/postfix:1.9.0"
+authelia_redis_image: "redis:7.4.9-alpine"
+
+# Docker network for Authelia and related services.
+authelia_docker_network: "hadmin_net"
+
+# ----------------- AUTHELIA LOGS -----------------
+
+# Authelia log level (trace|debug|info|warn|error).
+authelia_log_level: "warn"
+# Log format: text or json; JSON is easier for haproxy-admin to parse.
+# authelia_log_format: "json"
+
+# Host log directory and container log path.
+authelia_root_dir: "/opt/authelia"
+authelia_logs_dir: "/opt/authelia/logs"
+authelia_log_file_path: "/config/logs/authelia.log"
+authelia_log_file: /opt/authelia/logs/authelia.log
+
+# Account that reads Authelia logs (haproxy-admin UI).
+authelia_log_reader_user: haproxyadmin
+authelia_log_reader_group: hadmin
+# Logrotate settings.
+authelia_logrotate_enabled: true
+authelia_logrotate_maxsize: "500M"
+authelia_logrotate_rotate: 7      # number of rotated files to keep
+authelia_logrotate_maxage: 7      # maximum retention in days
+
+# ----------------- REGULATION / BANS -----------------
+
+authelia_regulation_modes:
+  - ip
+authelia_regulation_max_retries: 3
+authelia_regulation_find_time: "2m"
+authelia_regulation_ban_time: "12h"
+
+# Path to the helper script.
+authelia_bans_script_mode: "0755"
+authelia_bans_script_path: /usr/local/sbin/authelia-bans.sh
+authelia_container_name: authelia
+authelia_cli_config_path: ""         # normally left empty (/config/configuration.yml)
+authelia_bans_daemon_enabled: true
+authelia_bans_socket_path: /run/easy-ha-proxy/authelia-bansd.sock
+authelia_bans_socket_group: hadmin  # group used by haproxy-admin app_user
+
+# ----------------- USERS DATABASE (file backend) -----------------
+
+# File path inside the container (used by configuration.yml).
+authelia_users_file_path: "/config/users_database.yml"
+
+# Host file path written by Ansible and mounted into the container.
+authelia_users_host_path: "/opt/authelia/users_database.yml"
+
+# users_database.yml management mode:
+#  - managed: Ansible fully manages the file;
+#  - selfservice: Ansible creates it once (force: no), then Authelia/admin manages it.
+authelia_users_mode: "selfservice"
+
+# Ansible user management through users_apply.
+# authelia_users_ops_enable is currently not used by tasks; task_stage=users_apply is the trigger.
+authelia_users_ops_enable: false
+authelia_users_ops_file: "authelia_users_ops.yml"
+
+# Optional users_database.yml backup directory.
+# Tasks default to playbook_dir + '/cache/authelia-users'.
+# authelia_cache_dir: "/some/absolute/path"
+
+# Profile refresh interval from the backend.
+# The file provider defaults to 'always'; keep it explicit.
+authelia_auth_refresh_interval: "always"
+
+# Watch users_database.yml for changes.
+authelia_users_watch: true
+
+# Host path to the Authelia user database.
+authelia_users_file: "{{ authelia_root_dir }}/users_database.yml"
+
+# User-management daemon socket.
+authelia_users_socket: /run/easy-ha-proxy/authelia-usersd.sock
+
+# Path to the Authelia Docker Compose file.
+authelia_docker_compose_file: "{{ authelia_root_dir }}/docker-compose.yml"
+
+# Path to the Authelia configuration inside the container.
+authelia_config_path: /config/configuration.yml
+# ----------------- configuration.yml MANAGEMENT DAEMON -----------------
+# Enable or disable the root daemon that manages access_control.rules.
+authelia_configd_enabled: true
+authelia_configd_validate_config: true
+
+# Host path to configuration.yml.
+authelia_config_file: "{{ authelia_root_dir }}/configuration.yml"
+
+# authelia-configd UNIX socket path.
+authelia_configd_socket: /run/easy-ha-proxy/authelia-configd.sock
+
+# Docker Compose .env path for credentials.
+authelia_env_file: "{{ authelia_root_dir }}/.env"
+
+authelia_uid: 19010
+authelia_gid: 19010
+
+authelia_redis_uid: 19011
+authelia_redis_gid: 19011

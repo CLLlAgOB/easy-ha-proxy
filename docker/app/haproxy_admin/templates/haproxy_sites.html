@@ -1,0 +1,542 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – HTTP sites{% endblock %}
+{% block header_title %}HTTP sites{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+{# ───── helpers ──────────────────────────────────────────────── #}
+{% macro fmt_val(v) -%}
+{%- if v is sameas true -%}on
+{%- elif v is sameas false -%}off
+{%- elif v is none -%}∅
+{%- elif v is mapping -%}{{ v }}
+{%- elif v is sequence and (v is not string) -%}{{ v | join(", ") }}
+{%- else -%}{{ v }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro diff_flag(ns, label, effv, defv) -%}
+{%- if effv != defv -%}
+{%- set _ = ns.flags.append(label ~ ': ' ~ fmt_val(effv) ~ ' (def ' ~ fmt_val(defv) ~ ')') -%}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro show_if_set(ns, label, v) -%}
+{%- if v is defined and v is not none and v != '' -%}
+{%- set _ = ns.flags.append(label ~ ': ' ~ fmt_val(v)) -%}
+{%- endif -%}
+{%- endmacro %}
+
+{% if error %}
+<div class="card" style="border-left: 4px solid var(--error);">
+  <div class="card-header">
+    <h2>Error</h2>
+  </div>
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+    {{ error }}
+  </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="border-left: 4px solid var(--success);">
+  <div class="card-header">
+    <h2>Operation completed</h2>
+  </div>
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+    {{ message }}
+  </div>
+</div>
+{% endif %}
+
+{# ───── Таблица существующих сайтов ────────────────────────────── #}
+{% set global_geo_enabled = config_vars.enable_geoip|default(false) %}
+{% set global_geo_mode = config_vars.geoip_mode|default('allow') %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Sites</h2>
+    <div class="table-meta">
+      Effective values are shown including <code>site_defaults</code> from <code>vars.yml</code>.
+    </div>
+  </div>
+
+  <div class="site-table-wrapper">
+    <table class="site-table">
+      <colgroup>
+        <col>
+        <col>
+        <col>
+        <col>
+        <col>
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Domain</th>
+          <th>Backend</th>
+          <th>Certificate</th>
+          <th>Flags</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if sites %}
+        {% for item in sites %}
+        {% set raw = item.raw %}
+        {% set eff = item.effective %}
+
+        {% set primary_domain = eff.domain %}
+        {% set alt_list = eff.alt_names or [] %}
+
+        {# флажки #}
+        {% set authelia_on = eff.authelia_enabled|default(site_defaults.authelia_enabled|default(false)) %}
+        {% set zt_on = eff.zero_trust|default(site_defaults.zero_trust|default(false)) %}
+
+        {# GEO: the on/off value may be overridden per site; mode is global. #}
+        {% if raw.geo_disable|default(false) %}
+        {% set site_geo = false %}
+        {% elif raw.geo is defined %}
+        {% set site_geo = raw.geo %}
+        {% elif site_defaults.geo is defined %}
+        {% set site_geo = site_defaults.geo %}
+        {% else %}
+        {% set site_geo = eff.enable_geoip|default(true) %}
+        {% endif %}
+        {% if not global_geo_enabled or site_geo is sameas false %}
+        {% set geo_label = 'off' %}
+        {% elif global_geo_mode == 'deny' %}
+        {% set geo_label = 'deny' %}
+        {% else %}
+        {% set geo_label = 'allow' %}
+        {% endif %}
+
+        {% set https_on = eff.redirect_to_https|default(site_defaults.redirect_to_https|default(true)) %}
+        {% set rate_ban_on = eff.rate_ban|default(site_defaults.rate_ban|default(true)) %}
+        {% set max_rate = eff.max_req_rate|default(site_defaults.max_req_rate|default(200)) %}
+
+        {% set ssl_on = eff.backend_ssl|default(site_defaults.backend_ssl|default(false)) %}
+        {% set ssl_verify = eff.backend_ssl_verify|default(site_defaults.backend_ssl_verify|default(false)) %}
+
+        <tr>
+          {# Domain #}
+          <td>
+            <div class="site-domain">{{ primary_domain }}</div>
+
+            {% if alt_list %}
+            <div class="site-domain-alt">
+              Alt: {{ alt_list | join(", ") }}
+            </div>
+            {% endif %}
+
+            {% if raw.name != primary_domain %}
+            <div class="site-domain-id">
+              ID: {{ raw.name }}
+            </div>
+            {% endif %}
+          </td>
+
+          {# Backend: with поддержкой нескольких servers (main/backup) #}
+          <td class="mono">
+            {% set servers = raw.servers or [] %}
+
+            {% if servers %}
+            {# выбираем primary server: первый without backup=true, иначе первый #}
+            {% set primary = None %}
+            {% for srv in servers %}
+            {% if not primary and not srv.backup %}
+            {% set primary = srv %}
+            {% endif %}
+            {% endfor %}
+            {% if not primary %}
+            {% set primary = servers[0] %}
+            {% endif %}
+
+            <div class="site-backend-main">
+              {{ primary.host }}:{{ primary.port }}
+              {% if primary.backup %}
+              (backup)
+              {% else %}
+              (primary)
+              {% endif %}
+            </div>
+
+            <div class="site-backend-meta">
+              {% for srv in servers %}
+              <div>
+                {{ srv.name|default('srv' ~ loop.index) }}:
+                {{ srv.host }}:{{ srv.port }}
+                {% if srv.backup %}
+                (backup)
+                {% else %}
+                (primary)
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+            {% else %}
+            <div class="site-backend-main">
+              {{ eff.backend_ip }}:{{ eff.backend_port }}
+            </div>
+            {% endif %}
+
+            {% if eff.backend_host %}
+            <div class="site-backend-meta">
+              Host: {{ eff.backend_host }}
+            </div>
+            {% endif %}
+
+            <div class="site-backend-meta">
+              SSL:
+              {% if ssl_on %}
+              on{% if ssl_verify %}, verify{% else %}, no-verify{% endif %}
+              {% else %}
+              off
+              {% endif %}
+            </div>
+          </td>
+
+          {# Certificate #}
+          <td class="mono">
+            {% set cert = item.cert if item.cert is defined else None %}
+            {% if cert %}
+            <div class="site-cert-status site-cert-{{ cert.state|default('unknown') }}">
+              <span {% if cert.tooltip %} title="{{ cert.tooltip }}" {% endif %}>
+                {{ cert.short }}
+              </span>
+            </div>
+
+            {% if cert.haproxy_has %}
+            <div class="site-cert-meta">
+              HAProxy: until {{ cert.haproxy_not_after }}
+              {% if cert.haproxy_days_left is not none %}
+              ({{ cert.haproxy_days_left }} days)
+              {% endif %}
+            </div>
+            {% endif %}
+
+            {% if cert.le_has %}
+            <div class="site-cert-meta">
+              LE: until {{ cert.le_not_after }}
+              {% if cert.le_days_left is not none %}
+              ({{ cert.le_days_left }} days)
+              {% endif %}
+            </div>
+            {% endif %}
+            {% else %}
+            <div class="site-cert-status site-cert-unknown">
+              ?
+            </div>
+            {% endif %}
+          </td>
+
+          {# Flags — отличия от site_defaults + (опционально) явно заданные ключи #}
+          <td>
+            {% set ns = namespace(flags=[], overrides=[]) %}
+
+            {# --- Authelia on/off --- #}
+            {% set def_authelia = site_defaults.authelia_enabled | default(false) %}
+            {% set eff_authelia = eff.authelia_enabled | default(def_authelia) %}
+            {{ diff_flag(ns, 'Authelia', ('on' if eff_authelia else 'off'), ('on' if def_authelia else 'off')) }}
+
+            {# --- Zero trust --- #}
+            {% set def_zt = site_defaults.zero_trust | default(false) %}
+            {% set eff_zt = eff.zero_trust | default(def_zt) %}
+            {{ diff_flag(ns, 'Zero trust', ('on' if eff_zt else 'off'), ('on' if def_zt else 'off')) }}
+
+            {# --- GEO (off / allow / deny) --- #}
+            {% if site_defaults.geo is defined %}
+            {% set def_geo = site_defaults.geo %}
+            {% else %}
+            {% set def_geo = site_defaults.enable_geoip | default(true) %}
+            {% endif %}
+            {% if not global_geo_enabled or def_geo is sameas false %}
+            {% set def_geo_label = 'off' %}
+            {% elif global_geo_mode == 'deny' %}
+            {% set def_geo_label = 'deny' %}
+            {% else %}
+            {% set def_geo_label = 'allow' %}
+            {% endif %}
+            {{ diff_flag(ns, 'Geo', geo_label, def_geo_label) }}
+
+            {# --- HTTPS redirect --- #}
+            {% set def_https = site_defaults.redirect_to_https | default(true) %}
+            {% set eff_https = eff.redirect_to_https | default(def_https) %}
+            {{ diff_flag(ns, 'HTTPS redirect', ('on' if eff_https else 'off'), ('on' if def_https else 'off')) }}
+
+            {# --- Rate ban --- #}
+            {% set def_rate_ban = site_defaults.rate_ban | default(true) %}
+            {% set eff_rate_ban = eff.rate_ban | default(def_rate_ban) %}
+            {{ diff_flag(ns, 'Rate ban', ('on' if eff_rate_ban else 'off'), ('on' if def_rate_ban else 'off')) }}
+
+            {# --- max_req_rate --- #}
+            {% set def_max_rate = site_defaults.max_req_rate | default(200) %}
+            {% set eff_max_rate = eff.max_req_rate | default(def_max_rate) %}
+            {{ diff_flag(ns, 'max_req_rate', eff_max_rate, def_max_rate) }}
+
+            {# --- rate_errors --- #}
+            {% set def_rate_errors = site_defaults.rate_errors if site_defaults.rate_errors is defined else none %}
+            {% set eff_rate_errors = eff.rate_errors if eff.rate_errors is defined else def_rate_errors %}
+            {{ diff_flag(ns, 'rate_errors', eff_rate_errors, def_rate_errors) }}
+
+            {# --- Maintenance --- #}
+            {% set def_maint = site_defaults.maintenance | default(false) %}
+            {% set eff_maint = eff.maintenance | default(def_maint) %}
+            {{ diff_flag(ns, 'Maintenance', ('on' if eff_maint else 'off'), ('on' if def_maint else 'off')) }}
+
+            {# --- TCP passthrough --- #}
+            {% set def_tcp_pt = site_defaults.tcp_passthrough | default(false) %}
+            {% set eff_tcp_pt = eff.tcp_passthrough | default(def_tcp_pt) %}
+            {{ diff_flag(ns, 'TCP passthrough', ('on' if eff_tcp_pt else 'off'), ('on' if def_tcp_pt else 'off')) }}
+
+            {# --- TCP check --- #}
+            {% set def_tcp_check = site_defaults.tcp_check if site_defaults.tcp_check is defined else none %}
+            {% set eff_tcp_check = eff.tcp_check if eff.tcp_check is defined else def_tcp_check %}
+            {{ diff_flag(ns, 'tcp_check', eff_tcp_check, def_tcp_check) }}
+
+            {# --- Backend SSL + verify --- #}
+            {% set def_ssl = site_defaults.backend_ssl | default(false) %}
+            {% set eff_ssl = eff.backend_ssl | default(def_ssl) %}
+            {% set def_ssl_verify = site_defaults.backend_ssl_verify | default(false) %}
+            {% set eff_ssl_verify = eff.backend_ssl_verify | default(def_ssl_verify) %}
+            {% if eff_ssl != def_ssl or eff_ssl_verify != def_ssl_verify %}
+            {% set _ = ns.flags.append(
+            'Backend SSL: ' ~ ('on' if eff_ssl else 'off')
+            ~ ', verify: ' ~ ('on' if eff_ssl_verify else 'off')
+            ~ ' (def '
+            ~ ('on' if def_ssl else 'off') ~ ','
+            ~ ' verify ' ~ ('on' if def_ssl_verify else 'off') ~ ')'
+            ) %}
+            {% endif %}
+
+            {# --- backend_alpn --- #}
+            {% set def_backend_alpn = site_defaults.backend_alpn if site_defaults.backend_alpn is defined else none %}
+            {% set eff_backend_alpn = eff.backend_alpn if eff.backend_alpn is defined else def_backend_alpn %}
+            {{ diff_flag(ns, 'backend_alpn', eff_backend_alpn, def_backend_alpn) }}
+
+            {# --- backend_ssl_ca / verify_host --- #}
+            {% set def_backend_ssl_ca = site_defaults.backend_ssl_ca if site_defaults.backend_ssl_ca is defined else
+            none %}
+            {% set eff_backend_ssl_ca = eff.backend_ssl_ca if eff.backend_ssl_ca is defined else def_backend_ssl_ca %}
+            {{ diff_flag(ns, 'backend_ssl_ca', eff_backend_ssl_ca, def_backend_ssl_ca) }}
+
+            {% set def_verify_host = site_defaults.verify_host if site_defaults.verify_host is defined else none %}
+            {% set eff_verify_host = eff.verify_host if eff.verify_host is defined else def_verify_host %}
+            {{ diff_flag(ns, 'verify_host', eff_verify_host, def_verify_host) }}
+
+            {# --- balance / sticky / cookie_* --- #}
+            {% set def_balance = site_defaults.balance if site_defaults.balance is defined else none %}
+            {% set eff_balance = eff.balance if eff.balance is defined else def_balance %}
+            {{ diff_flag(ns, 'balance', eff_balance, def_balance) }}
+
+            {% set def_sticky = site_defaults.sticky if site_defaults.sticky is defined else none %}
+            {% set eff_sticky = eff.sticky if eff.sticky is defined else def_sticky %}
+            {{ diff_flag(ns, 'sticky', eff_sticky, def_sticky) }}
+
+            {% set def_cookie_name = site_defaults.cookie_name if site_defaults.cookie_name is defined else none %}
+            {% set eff_cookie_name = eff.cookie_name if eff.cookie_name is defined else def_cookie_name %}
+            {{ diff_flag(ns, 'cookie_name', eff_cookie_name, def_cookie_name) }}
+
+            {% set def_cookie_attrs = site_defaults.cookie_attrs if site_defaults.cookie_attrs is defined else none %}
+            {% set eff_cookie_attrs = eff.cookie_attrs if eff.cookie_attrs is defined else def_cookie_attrs %}
+            {{ diff_flag(ns, 'cookie_attrs', eff_cookie_attrs, def_cookie_attrs) }}
+
+            {# --- http_reuse / prefer_last_server / splice --- #}
+            {% set def_http_reuse = site_defaults.http_reuse if site_defaults.http_reuse is defined else none %}
+            {% set eff_http_reuse = eff.http_reuse if eff.http_reuse is defined else def_http_reuse %}
+            {{ diff_flag(ns, 'http_reuse', eff_http_reuse, def_http_reuse) }}
+
+            {% set def_prefer_last = site_defaults.prefer_last_server if site_defaults.prefer_last_server is defined
+            else none %}
+            {% set eff_prefer_last = eff.prefer_last_server if eff.prefer_last_server is defined else def_prefer_last %}
+            {{ diff_flag(ns, 'prefer_last_server', eff_prefer_last, def_prefer_last) }}
+
+            {% set def_splice = site_defaults.enable_splice_backend if site_defaults.enable_splice_backend is defined
+            else none %}
+            {% set eff_splice = eff.enable_splice_backend if eff.enable_splice_backend is defined else def_splice %}
+            {{ diff_flag(ns, 'enable_splice_backend', eff_splice, def_splice) }}
+
+            {# --- timeouts --- #}
+            {% set def_session_timeout = site_defaults.session_timeout if site_defaults.session_timeout is defined else
+            none %}
+            {% set eff_session_timeout = eff.session_timeout if eff.session_timeout is defined else def_session_timeout
+            %}
+            {{ diff_flag(ns, 'session_timeout', eff_session_timeout, def_session_timeout) }}
+
+            {% set def_ka = site_defaults.http_keepalive_timeout if site_defaults.http_keepalive_timeout is defined else
+            none %}
+            {% set eff_ka = eff.http_keepalive_timeout if eff.http_keepalive_timeout is defined else def_ka %}
+            {{ diff_flag(ns, 'http_keepalive_timeout', eff_ka, def_ka) }}
+
+            {# --- health_* --- #}
+            {% set def_health_uri = site_defaults.health_uri if site_defaults.health_uri is defined else none %}
+            {% set eff_health_uri = eff.health_uri if eff.health_uri is defined else def_health_uri %}
+            {{ diff_flag(ns, 'health_uri', eff_health_uri, def_health_uri) }}
+
+            {% set def_health_status = site_defaults.health_status if site_defaults.health_status is defined else none
+            %}
+            {% set eff_health_status = eff.health_status if eff.health_status is defined else def_health_status %}
+            {{ diff_flag(ns, 'health_status', eff_health_status, def_health_status) }}
+
+            {% set def_health_expect = site_defaults.health_expect if site_defaults.health_expect is defined else none
+            %}
+            {% set eff_health_expect = eff.health_expect if eff.health_expect is defined else def_health_expect %}
+            {{ diff_flag(ns, 'health_expect', eff_health_expect, def_health_expect) }}
+
+            {# --- HSTS / WAF / compress --- #}
+            {% set def_hsts = site_defaults.hsts | default('0') %}
+            {% set eff_hsts = eff.hsts | default(def_hsts) %}
+            {{ diff_flag(ns, 'HSTS', eff_hsts, def_hsts) }}
+
+            {% set def_waf = site_defaults.waf | default('none') %}
+            {% set eff_waf = eff.waf | default(def_waf) %}
+            {{ diff_flag(ns, 'WAF', eff_waf, def_waf) }}
+
+            {% set def_compress = site_defaults.compress | default(false) %}
+            {% set eff_compress = eff.compress | default(def_compress) %}
+            {{ diff_flag(ns, 'Compress', ('on' if eff_compress else 'off'), ('on' if def_compress else 'off')) }}
+
+            {# --- err_ignore_rules (if defined у site) --- #}
+            {% if eff.err_ignore_rules is defined %}
+            {% set _ = ns.flags.append('err_ignore_rules: ' ~ eff.err_ignore_rules) %}
+            {% endif %}
+
+            {# --- LE-managed (certificate этим сайтом управляется) --- #}
+            {% set def_le = site_defaults.le_managed | default(false) %}
+            {% set eff_le = eff.le_managed | default(def_le) %}
+            {{ diff_flag(ns, 'LE managed', ('on' if eff_le else 'off'), ('on' if def_le else 'off')) }}
+
+            {# --- key_types (if отличается/or defined) --- #}
+            {% set def_key_types = site_defaults.key_types if site_defaults.key_types is defined else none %}
+            {% set eff_key_types = eff.key_types if eff.key_types is defined else def_key_types %}
+            {{ diff_flag(ns, 'key_types', eff_key_types, def_key_types) }}
+
+            {# --- list отличий --- #}
+            {% if ns.flags %}
+            <ul class="site-flags-list">
+              {% for f in ns.flags %}
+              <li>{{ f }}</li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <div class="site-flags-empty">All defaults</div>
+            {% endif %}
+
+            {# --- Explicitly set in YAML (показываем ключи, присутствующие in raw) --- #}
+            {% for k, v in raw|dictsort %}
+            {% if k not in ['name','domain'] %}
+            {# servers/alt_names уже показываются in других местах, but оставим возможность видеть что они есть #}
+            {% if k == 'servers' %}
+            {% set _ = ns.overrides.append('servers: ' ~ (raw.servers|length) ~ ' item(s)') %}
+            {% elif k == 'alt_names' %}
+            {% set _ = ns.overrides.append('alt_names: ' ~ fmt_val(v)) %}
+            {% else %}
+            {% set _ = ns.overrides.append(k ~ ': ' ~ fmt_val(v)) %}
+            {% endif %}
+            {% endif %}
+            {% endfor %}
+
+            {% if ns.overrides %}
+            <details style="margin-top: 6px;">
+              <summary style="cursor:pointer; font-size: 12px; opacity: .85;">Explicitly set in YAML</summary>
+              <ul class="site-flags-list" style="margin-top: 6px;">
+                {% for f in ns.overrides %}
+                <li>{{ f }}</li>
+                {% endfor %}
+              </ul>
+            </details>
+            {% endif %}
+          </td>
+
+          {# Actions #}
+          <td class="site-actions">
+            <a class="btn btn-sm" href="{{ url_for('routes.haproxy_site_edit', name=raw.name) }}">
+              Edit
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+        {% else %}
+        <tr>
+          <td colspan="5" style="font-size: 13px; opacity: .8;">
+            There are no sites yet.
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ───── Упрощённая форма: добавить site ─────────────────────── #}
+<div class="card">
+  <div class="card-header">
+    <h2>Add site</h2>
+    <div class="table-meta">
+      A normal site proxies to one <code>backend_ip/backend_port</code>. An access
+      gate has no backend: it shows an Authelia login page and, after sign-in,
+      authorizes the visitor IP (tbl_ip_auth) to reach zero-trust sites. Other
+      parameters can be configured on the edit page.
+    </div>
+  </div>
+
+  <form method="post" action="{{ url_for('routes.haproxy_sites_page') }}" id="add-site-form">
+    <input type="hidden" name="action" value="add">
+
+    <div class="flex-container" style="gap: 20px; align-items: flex-start; padding: 0 16px 16px;">
+      <div style="flex: 1 1 300px;">
+        <label class="form-label" for="site_type">Site type</label>
+        <select id="site_type" name="site_type" class="form-input">
+          <option value="normal" selected>Normal site (proxy to a backend)</option>
+          <option value="gate">Access gate (login page, no backend)</option>
+        </select>
+
+        <label class="form-label" for="domain" style="margin-top: 10px;">Domain *</label>
+        <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" />
+
+        <div id="add-site-backend-fields">
+          <label class="form-label" for="backend_ip" style="margin-top: 10px;">backend_ip *</label>
+          <input id="backend_ip" name="backend_ip" type="text" class="form-input"
+            placeholder="Backend server IP" />
+
+          <label class="form-label" for="backend_port" style="margin-top: 10px;">backend_port *</label>
+          <input id="backend_port" name="backend_port" type="number" min="1" max="65535" class="form-input"
+            placeholder="{{ site_defaults.backend_port|default(80) }}" />
+        </div>
+      </div>
+    </div>
+
+    <div style="padding: 0 16px 16px;">
+      <button type="submit" class="btn btn-primary">Add site</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  (function () {
+    var typeSel = document.getElementById("site_type");
+    var box = document.getElementById("add-site-backend-fields");
+    var ip = document.getElementById("backend_ip");
+    var port = document.getElementById("backend_port");
+    if (!typeSel || !box) return;
+    function sync() {
+      var gate = typeSel.value === "gate";
+      box.style.display = gate ? "none" : "";
+      // Cleared + disabled fields are not submitted, so the route sees an empty
+      // backend and creates the gate stub.
+      [ip, port].forEach(function (el) {
+        if (!el) return;
+        el.disabled = gate;
+        if (gate) el.value = "";
+      });
+    }
+    typeSel.addEventListener("change", sync);
+    sync();
+  })();
+</script>
+
+{% endblock %}

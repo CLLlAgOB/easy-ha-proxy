@@ -1,0 +1,17 @@
+{% block header_buttons %}
+  <a class="btn" href="{{ url_for('routes.authelia_bans') }}">
+    Authelia bans
+  </a>
+  <a class="btn" href="{{ url_for('routes.authelia_users') }}">
+    Authelia users
+  </a>
+  <a class="btn" href="{{ url_for('authelia_acl.edit_rules') }}">
+    access_control rules
+  </a>
+  <a class="btn" href="{{ url_for('authelia_settings.edit_settings') }}">
+    Authelia settings
+  </a>
+  <a class="btn" href="{{ url_for('routes.index') }}">
+    ← Home
+  </a>
+{% endblock %}

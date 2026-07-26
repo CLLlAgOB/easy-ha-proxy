@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+
+{% block title %}Mail settings{% endblock %}
+{% block header_title %}Mail settings{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<div id="mail-settings-app">
+  <section class="card authelia-mail-card" aria-labelledby="authelia-mail-title">
+    <div class="card-header authelia-mail-header">
+      <div>
+        <h2 id="authelia-mail-title">Email notifications</h2>
+        <p class="table-meta">Configure email delivery for Authelia and certificate-renewal notifications.</p>
+      </div>
+      <span id="authelia-mail-mode-status"
+            class="config-status-pill config-status-pill--neutral"
+            role="status" aria-live="polite">Loading…</span>
+    </div>
+
+    <form id="authelia-mail-form" autocomplete="off">
+      <fieldset class="authelia-mail-mode-fieldset">
+        <legend>Delivery mode</legend>
+        <div class="authelia-mail-mode-grid">
+          <label class="authelia-mail-mode-option" for="authelia-mail-mode-filesystem">
+            <input id="authelia-mail-mode-filesystem" type="radio" name="mail_mode" value="filesystem">
+            <span>
+              <strong>Email disabled</strong>
+              <small>Write notifications to the local Authelia notification log instead of sending email.</small>
+            </span>
+          </label>
+
+          <label class="authelia-mail-mode-option" for="authelia-mail-mode-relay">
+            <input id="authelia-mail-mode-relay" type="radio" name="mail_mode" value="relay">
+            <span>
+              <strong>Internal mail relay</strong>
+              <small>Authelia and certificate hooks send locally to mail_relay, which forwards messages to the external SMTP server.</small>
+            </span>
+          </label>
+        </div>
+      </fieldset>
+
+      <div id="authelia-mail-relay-unavailable" class="alert alert-warning" hidden>
+        The internal mail relay is not installed yet. Run one full software update to install its managed service definition, then retry.
+      </div>
+
+      <div id="authelia-mail-legacy-direct" class="alert alert-warning" hidden>
+        This installation still uses legacy direct SMTP. Review the settings and select Save and apply to move all email through the internal relay.
+      </div>
+
+      <div id="authelia-mail-smtp-fields" class="authelia-mail-settings" hidden>
+        <div id="authelia-mail-route-note" class="alert alert-info"></div>
+
+        <div class="authelia-mail-fields-grid">
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-host">External SMTP server</label>
+            <input class="form-input mono notranslate" translate="no" data-i18n-skip
+                   id="authelia-mail-host" name="mail_host" type="text" maxlength="253"
+                   autocomplete="off" spellcheck="false" placeholder="smtp.example.com" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-port">SMTP port</label>
+            <input class="form-input" id="authelia-mail-port" name="mail_port"
+                   type="number" min="1" max="65535" step="1" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-username">SMTP username</label>
+            <input class="form-input mono notranslate" translate="no" data-i18n-skip
+                   id="authelia-mail-username" name="mail_username" type="text"
+                   maxlength="320" autocomplete="off" spellcheck="false">
+          </div>
+
+          <div class="form-group authelia-mail-password-group">
+            <div class="authelia-mail-field-heading">
+              <label class="form-label" for="authelia-mail-password">SMTP password</label>
+              <span id="authelia-mail-password-status" class="vars-readonly-badge">Not configured</span>
+            </div>
+            <input class="form-input" id="authelia-mail-password" name="mail_password"
+                   type="password" maxlength="1024" autocomplete="new-password"
+                   placeholder="Leave blank to keep the current password">
+            <label class="authelia-mail-clear-password" for="authelia-mail-clear-password">
+              <input id="authelia-mail-clear-password" type="checkbox">
+              Clear the saved password
+            </label>
+            <p class="vars-field-help">The saved password is never displayed. Enter a new value only when replacing it.</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-tls-mode">Connection security</label>
+            <select class="form-input" id="authelia-mail-tls-mode" name="mail_tls_mode">
+              <option value="starttls">STARTTLS (usually port 587)</option>
+              <option value="smtps">Implicit TLS / SMTPS (usually port 465)</option>
+              <option value="plain">Plain SMTP (no TLS)</option>
+            </select>
+            <p class="vars-field-help">STARTTLS and SMTPS require encrypted transport. mail_relay verifies the external server certificate unless Skip verification is selected.</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-timeout">Connection timeout</label>
+            <input class="form-input mono notranslate" translate="no" data-i18n-skip
+                   id="authelia-mail-timeout" name="mail_timeout" type="text"
+                   maxlength="16" autocomplete="off" spellcheck="false" placeholder="10s" required>
+            <label class="authelia-mail-clear-password" for="authelia-mail-tls-skip-verify">
+              <input id="authelia-mail-tls-skip-verify" type="checkbox">
+              Skip SMTP TLS certificate verification
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-sender">Sender address</label>
+            <input class="form-input" id="authelia-mail-sender" name="mail_sender"
+                   type="email" maxlength="254" autocomplete="off" placeholder="authelia@example.com" required>
+            <p class="vars-field-help">Shared by Authelia and certificate-renewal notifications.</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="authelia-mail-recipient">Notification recipient</label>
+            <input class="form-input" id="authelia-mail-recipient" name="mail_recipient"
+                   type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+            <p class="vars-field-help">Used by the Authelia startup check and certificate-renewal notifications.</p>
+          </div>
+
+          <div class="form-group authelia-mail-subject-group">
+            <label class="form-label" for="authelia-mail-subject">Message subject template</label>
+            <input class="form-input" id="authelia-mail-subject" name="mail_subject"
+                   type="text" maxlength="255" autocomplete="off" placeholder="[Authelia] {title}" required>
+          </div>
+        </div>
+
+        <div id="authelia-mail-tls-warning" class="alert alert-warning" hidden>
+          Certificate verification is disabled. Use this only for a trusted internal SMTP server with a certificate that cannot be verified normally.
+        </div>
+        <div id="authelia-mail-relay-tls-warning" class="alert alert-info" hidden>
+          mail_relay verifies the external SMTP server certificate with the CA bundle installed in the relay container.
+        </div>
+      </div>
+
+      <div id="authelia-mail-test-controls" class="authelia-mail-test-controls" hidden>
+        <div class="form-group">
+          <label class="form-label" for="authelia-mail-test-recipient">Test email recipient</label>
+          <input class="form-input" id="authelia-mail-test-recipient" name="mail_test_recipient"
+                 type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com">
+          <p class="vars-field-help">
+            Defaults to the startup-check recipient. Changing it here affects only the next test message and is not saved.
+          </p>
+          <p class="vars-field-help">
+            The test uses the last applied SMTP settings. Save and apply any pending changes before sending it.
+          </p>
+        </div>
+      </div>
+
+      <div class="vars-form-actions authelia-mail-actions">
+        <button type="submit" class="btn" id="authelia-mail-apply">Save and apply</button>
+        <button type="button" class="btn btn-secondary authelia-mail-test-button" id="authelia-mail-test">Send test email</button>
+        <span id="authelia-mail-result" class="result-message" role="status" aria-live="polite"></span>
+      </div>
+      <p class="vars-field-help authelia-mail-apply-help">
+        Save and apply activates the displayed settings. Send test email is a separate action that uses the last applied settings and briefly waits for the external SMTP relay result. Acceptance by the external relay still does not guarantee final inbox delivery.
+      </p>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="acme-email-title">
+    <div class="card-header">
+      <div>
+        <h2 id="acme-email-title">Let's Encrypt account email</h2>
+        <p class="table-meta">Expiry warnings from Let's Encrypt are sent to this address. The same setting is available on the Certificates page.</p>
+      </div>
+    </div>
+    <form id="acme-email-form" autocomplete="off">
+      <div class="form-group">
+        <label class="form-label" for="acme-email-input">Account email</label>
+        <input class="form-input" id="acme-email-input" name="acme_email" type="email"
+               maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+        <p class="vars-field-help">
+          Applies to future certificate registrations and renewals after the next certificate operation or stack update.
+        </p>
+      </div>
+      <div class="vars-form-actions">
+        <button type="submit" class="btn" id="acme-email-save">Save email</button>
+        <span id="acme-email-result" class="result-message" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card authelia-notification-card"
+           id="authelia-notification-card"
+           aria-labelledby="authelia-notification-title"
+           hidden>
+    <div class="card-header authelia-notification-header">
+      <div>
+        <h2 id="authelia-notification-title">Latest local notification</h2>
+        <p class="table-meta">Manual fallback for Authelia when email delivery is disabled.</p>
+      </div>
+      <span id="authelia-notification-status"
+            class="config-status-pill config-status-pill--neutral"
+            role="status" aria-live="polite">Loading…</span>
+    </div>
+
+    <div class="alert alert-warning">
+      Latest-only: Authelia overwrites the previous local notification, and an Authelia restart can clear it. Refresh and handle the current notification promptly.
+    </div>
+    <div class="alert alert-warning">
+      This plaintext may contain a short-lived password-reset link or one-time security code. Verify the requester through a trusted channel, never use the secret as the administrator, and do not share it with anyone except the intended user. Authelia recommends SMTP instead of filesystem notifications for production.
+    </div>
+
+    <div class="vars-form-actions authelia-notification-actions">
+      <button type="button" class="btn btn-secondary" id="authelia-notification-refresh">Refresh metadata</button>
+      <span id="authelia-notification-result" class="result-message"
+            role="status" aria-live="polite"></span>
+    </div>
+
+    <p id="authelia-notification-empty" class="table-meta" hidden>
+      No current local notification.
+    </p>
+
+    <div id="authelia-notification-metadata" class="authelia-notification-metadata" hidden>
+      <dl>
+        <div>
+          <dt>Received</dt>
+          <dd id="authelia-notification-received">—</dd>
+        </div>
+        <div>
+          <dt>Recipient</dt>
+          <dd id="authelia-notification-recipient" class="mono notranslate" translate="no" data-i18n-skip>—</dd>
+        </div>
+        <div>
+          <dt>Size</dt>
+          <dd id="authelia-notification-size">—</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd id="authelia-notification-item-status">—</dd>
+        </div>
+      </dl>
+
+      <div class="vars-form-actions authelia-notification-item-actions">
+        <button type="button" class="btn" id="authelia-notification-reveal">Reveal plaintext</button>
+        <button type="button" class="btn btn-secondary" id="authelia-notification-handled">Mark handled</button>
+      </div>
+      <p class="vars-field-help">
+        Mark handled changes only the dashboard status. It does not use or revoke the password-reset link or one-time code.
+      </p>
+    </div>
+
+    <div id="authelia-notification-preview" class="authelia-notification-preview" hidden>
+      <div class="authelia-notification-preview-heading">
+        <h3>Plain text preview</h3>
+        <span>Automatically hidden after 60 seconds.</span>
+      </div>
+      <pre id="authelia-notification-content" class="mono notranslate"
+           translate="no" data-i18n-skip tabindex="0"></pre>
+      <div class="vars-form-actions">
+        <button type="button" class="btn" id="authelia-notification-copy">Copy full notification</button>
+        <button type="button" class="btn btn-secondary" id="authelia-notification-hide">Hide preview</button>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/authelia_settings.js') }}"></script>
+<script src="{{ url_for('static', filename='js/authelia_notifications.js') }}"></script>
+<script src="{{ url_for('static', filename='js/acme_email.js') }}"></script>
+{% endblock %}

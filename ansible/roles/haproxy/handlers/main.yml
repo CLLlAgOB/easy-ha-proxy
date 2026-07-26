@@ -1,0 +1,132 @@
+#############################################################################
+# handlers/main.yml  —  выводим ошибку красиво
+#############################################################################
+
+# 1. Проверяем синтаксис ----------------------------------------------------
+- name: run haproxy -c syntax-check
+  listen: validate haproxy
+  ansible.builtin.command:
+    argv:
+      - haproxy
+      - -c
+      - -f
+      - /etc/haproxy/haproxy.cfg
+  register: haproxy_cfg_test
+  changed_when: false
+  failed_when: false     # анализируем rc сами
+  environment:
+    HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
+
+# 2. Фильтруем и показываем только ALERT/WARNING ----------------------------
+- name: show pretty syntax error
+  listen: validate haproxy
+  when: haproxy_cfg_test.rc != 0
+  vars:
+    # берём stdout+stderr, делим на строки, оставляем ALERT/WARNING
+    bad_lines: >-
+      {{
+        (haproxy_cfg_test.stdout + '\n' + haproxy_cfg_test.stderr).splitlines()
+        | select('match', '.*(ALERT|WARNING).*')
+        | list
+      }}
+  debug:
+    msg: |
+      ───────────────────────────────────────────────
+      ⛔  HAProxy configuration error!
+      {% for l in bad_lines %}
+      {{ l }}
+      {% endfor %}
+      ───────────────────────────────────────────────
+
+# 3. Останавливаем play, если проверка не прошла ----------------------------
+- name: stop play on invalid config
+  listen: validate haproxy
+  when: haproxy_cfg_test.rc != 0
+  fail:
+    msg: "HAProxy syntax check failed — see details above."
+
+#############################################################################
+# 4. Применяем конфиг только если OK ----------------------------------------
+#############################################################################
+
+- name: apply validated HAProxy configuration
+  listen: apply haproxy
+  # `apply haproxy` is also notified by tasks that change files referenced by
+  # the config (error pages) but not haproxy.cfg itself, and those do not notify
+  # `validate haproxy`, so haproxy_cfg_test can be undefined here. An undefined
+  # result means the config was not changed and is therefore already valid, so
+  # default to a passing rc and reload.
+  when: haproxy_cfg_test.rc | default(0) == 0
+  service:
+    name: haproxy
+    # EnvironmentFile is read only when the service starts. A reload is
+    # sufficient for ordinary config changes, but secret/drop-in changes
+    # require a restart so new workers receive the trusted-proxy secret.
+    state: >-
+      {{
+        'restarted'
+        if (
+          haproxy_runtime_environment.changed | default(false)
+          or haproxy_secret_dropin.changed | default(false)
+        )
+        else 'reloaded'
+      }}
+  register: reload_res
+  ignore_errors: true      # reload может не поддерживаться
+
+- name: hard restart haproxy if reload failed
+  listen: apply haproxy
+  when:
+    - haproxy_cfg_test.rc | default(0) == 0
+    - reload_res is defined
+    - reload_res is failed
+  service:
+    name: haproxy
+    state: restarted
+
+# 4.a Перечитать профиль rsyslogd через apparmor_parser (предпочтительно)
+- name: apparmor | reload rsyslogd profile
+  listen: apparmor rsyslogd reload
+  command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
+  register: apparmor_reload_res
+  failed_when: false
+  changed_when: apparmor_reload_res.rc == 0
+  notify:
+    - rsyslog | restart              # после перезагрузки профиля — рестарт rsyslog
+    - wait | haproxy devlog socket   # затем подождём сокет
+    - haproxy | restart for logging  # и перезапустим HAProxy
+
+# 4.b Фолбэк: если parser не сработал — просто перегрузим AppArmor
+- name: apparmor | systemd reload
+  listen: apparmor rsyslogd reload
+  when: apparmor_reload_res.rc != 0
+  service:
+    name: apparmor
+    state: reloaded
+  notify:
+    - rsyslog | restart
+    - wait | haproxy devlog socket
+    - haproxy | restart for logging
+
+# 4.c Перезапуск rsyslog (чтобы точно пересоздал /dev/log в chroot при нужде)
+- name: rsyslog | restart
+  listen: rsyslog | restart
+  service:
+    name: rsyslog
+    state: restarted
+
+# 4.d Подождать появления сокета внутри chroot
+- name: wait | haproxy devlog socket
+  listen: wait | haproxy devlog socket
+  wait_for:
+    path: "/var/lib/haproxy/dev/log"
+    state: present
+    timeout: 5
+
+# 4.e Перезапуск HAProxy, чтобы он заново открыл сокет логгера
+- name: haproxy | restart for logging
+  listen: haproxy | restart for logging
+  service:
+    name: haproxy
+    state: restarted
+

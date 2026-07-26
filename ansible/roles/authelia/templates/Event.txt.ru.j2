@@ -1,0 +1,24 @@
+{#
+  Derived from Authelia's official notification templates:
+  https://github.com/authelia/authelia/tree/master/internal/templates/embed/notification
+  Modified by easy-ha-proxy: Russian translation and Ansible/Jinja wrapping.
+  SPDX-FileCopyrightText: Authelia contributors
+  SPDX-License-Identifier: Apache-2.0
+#}
+{% raw %}
+УВЕДОМЛЕНИЕ О ДЕЙСТВИИ С БЕЗОПАСНОСТЬЮ УЧЁТНОЙ ЗАПИСИ
+
+Здравствуйте, {{ .DisplayName }},
+
+Это письмо отправлено для информирования о том, что для вашей учётной записи
+было выполнено действие, связанное с безопасностью (например, смена пароля
+или параметров аутентификации).
+
+Если вы не выполняли никаких действий, ваши учётные данные могли быть
+скомпрометированы. Рекомендуется немедленно сменить пароль и связаться
+с администратором.
+
+Это уведомление было сгенерировано запросом с IP-адреса {{ .RemoteIP }}.
+
+Работает на Authelia https://www.authelia.com
+{% endraw %}

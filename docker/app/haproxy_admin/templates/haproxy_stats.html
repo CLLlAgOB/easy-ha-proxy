@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – statistics{% endblock %}
+{% block header_title %}HAProxy statistics{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+{# Локальные стили only for this страницы #}
+<style>
+  /* На this page отключаем прокрутку у внешнего документа,
+     чтобы not было второго скроллбара справа */
+  html,
+  body {
+    overflow: hidden;
+  }
+
+  .stats-page-fullscreen {
+    /* Растягиваем блок on всю ширину окна, игнорируя max-width контейнера */
+    position: relative;
+    left: 50%;
+    right: 50%;
+    margin-left: -50vw;
+    margin-right: -50vw;
+    width: 100vw;
+
+    margin-top: 10px;
+
+    /* Всё оставшееся место by высоте отдаём under iframe */
+    height: calc(100vh - 120px);
+
+    background: #000;
+  }
+
+  .stats-page-fullscreen iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+</style>
+
+<div class="stats-page-fullscreen">
+  <iframe src="/stats"></iframe>
+</div>
+{% endblock %}

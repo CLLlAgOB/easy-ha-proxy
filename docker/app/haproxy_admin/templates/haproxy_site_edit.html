@@ -1,0 +1,968 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – editing site {{ site.name }}{% endblock %}
+{% block header_title %}Edit site {{ site.name }}{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+<button type="button" class="btn btn-danger" id="btn-show-delete">
+    Delete site
+</button>
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="border-left: 4px solid var(--error);">
+    <div class="card-header">
+        <h2>Error</h2>
+    </div>
+    <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+        {{ error }}
+    </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="border-left: 4px solid var(--success);">
+    <div class="card-header">
+        <h2>Changes saved</h2>
+    </div>
+    <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+        {{ message }}
+    </div>
+</div>
+{% endif %}
+
+{# ───── Блок подтверждения удаления ────────────────────────────── #}
+<div id="delete-confirm" class="card" style="display: none; border-left: 4px solid var(--error); margin-bottom: 20px;">
+    <div class="card-header">
+        <h2>Delete site {{ site.name }}?</h2>
+    </div>
+    <div style="padding: 12px 16px;">
+        <p style="margin-top: 0; margin-bottom: 10px;">
+            Are you sure you want to <strong>delete</strong> site
+            <span class="mono">{{ site.name }}</span>?<br>
+            This action cannot be undone.
+        </p>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <form method="post">
+                <input type="hidden" name="action" value="delete">
+                <button type="submit" class="btn btn-danger">
+                    Yes, delete
+                </button>
+            </form>
+            <button type="button" class="btn" id="btn-delete-cancel">
+                Cancel
+            </button>
+        </div>
+    </div>
+</div>
+
+{# ───── Основная форма редактирования ──────────────────────────── #}
+<div class="card">
+    <div class="card-header">
+        <h2>Site parameters</h2>
+        <div class="table-meta">
+            Empty optional fields → come from <code>site_defaults</code> in <code>vars.yml</code>.
+        </div>
+    </div>
+
+    <form method="post" id="site-edit-form" data-original-name="{{ original_name }}">
+        <input type="hidden" name="action" value="save">
+        <input type="hidden" id="site_name" value="{{ site.name }}">
+
+        <div class="flex-container" style="gap: 20px; align-items: flex-start; padding: 0 16px 16px;">
+
+            {# ───── Левая колонка: базовые, backend, certificate, load balancing ───── #}
+            <div style="flex: 1 1 360px; min-width: 320px;">
+
+                <h3 style="margin-top: 16px;">Basic parameters</h3>
+
+                <label class="form-label" for="field-name" style="margin-top: 0;">Site ID (name)</label>
+                <input id="field-name" name="name" type="text" class="form-input" value="{{ site.name or '' }}" {% if
+                    not is_new %}readonly{% endif %}>
+                <div class="table-meta mono">
+                    Used as a key in <code>websites.yml</code> and in the backend name.
+                    {% if not is_new %}
+                    Rename an existing site manually in YAML.
+                    {% endif %}
+                </div>
+
+                <label class="form-label" for="field-domain" style="margin-top: 10px;">domain *</label>
+                <input id="field-domain" name="domain" type="text" class="form-input" required
+                    value="{{ site.domain or '' }}">
+
+                {# --- Site mode: HTTP vs TCP passthrough --- #}
+                {% set raw_tcp_passthrough = site.tcp_passthrough if site.tcp_passthrough is defined else None %}
+                {% set eff_tcp_passthrough = eff.tcp_passthrough | default(site_defaults.tcp_passthrough |
+                default(false)) %}
+                <label class="form-label" for="tcp_passthrough" style="margin-top: 10px;">Site mode</label>
+                <select id="tcp_passthrough" name="tcp_passthrough" class="form-input"
+                    data-eff-default="{{ 'true' if eff_tcp_passthrough else 'false' }}">
+                    <option value="" {% if raw_tcp_passthrough is none %}selected{% endif %}>
+                        Default ({{ 'TCP passthrough (SNI)' if eff_tcp_passthrough else 'HTTP (TLS termination)' }})
+                    </option>
+                    <option value="false" {% if raw_tcp_passthrough is sameas false %}selected{% endif %}>
+                        HTTP (TLS termination)
+                    </option>
+                    <option value="true" {% if raw_tcp_passthrough is sameas true %}selected{% endif %}>
+                        TCP passthrough (SNI)
+                    </option>
+                </select>
+                <div class="table-meta" id="tcp-mode-help">
+                    HTTP: HAProxy terminates TLS and can inspect HTTP headers. TCP passthrough: HAProxy routes by SNI and
+                    does not decrypt traffic.
+                </div>
+
+                <label class="form-label" for="field-backend-ip" style="margin-top: 10px;">
+                    backend_ip
+                </label>
+                <input id="field-backend-ip" name="backend_ip" type="text" class="form-input"
+                    value="{{ site.backend_ip or '' }}"
+                    placeholder="{{ eff.backend_ip or site_defaults.backend_ip or '' }}">
+
+                <label class="form-label" for="field-backend-port" style="margin-top: 10px;">
+                    backend_port
+                </label>
+                <input id="field-backend-port" name="backend_port" type="number" min="1" max="65535" class="form-input"
+                    value="{{ site.backend_port or '' }}"
+                    placeholder="{{ eff.backend_port or site_defaults.backend_port or 80 }}">
+
+                <div class="table-meta">
+                    May be left empty if a backend server list is defined below.
+                    Used for a single backend and as the default value.
+                </div>
+
+                <div id="block-backend-host">
+                    <label class="form-label" for="field-backend-host" style="margin-top: 10px;">
+                        backend_host (Host-header by default)
+                    </label>
+                    <input id="field-backend-host" name="backend_host" type="text" class="form-input"
+                        value="{{ site.backend_host or '' }}" placeholder="{{ eff.backend_host or eff.domain }}">
+                    <div class="table-meta">
+                        If omitted, the request <code>Host</code> is used ({{ eff.domain }}).
+                    </div>
+                </div>
+
+                {# ───── List backend-servers (main/backup, load balancing) ───── #}
+                <h3 style="margin-top: 20px;">Backend servers (primary/backup, load balancing)</h3>
+                <div class="table-meta">
+                    You can define several backend servers for one site.
+                    <ul>
+                        <li>Multiple <strong>Primary</strong> servers use load balancing
+                            (the algorithm is configured in the <code>balance</code> field
+                            in section «Load balancing / sticky / sessions»).</li>
+                        <li>A <strong>Backup</strong> is marked as <code>backup</code> and is used
+                            only when all primary servers are unavailable.</li>
+                    </ul>
+                </div>
+
+                <table class="table mono" style="margin-top: 8px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 20%;">name</th>
+                            <th style="width: 35%;">host/IP</th>
+                            <th style="width: 15%;">port</th>
+                            <th style="width: 15%;">role</th>
+                            <th style="width: 10%;">weight</th>
+                            <th style="width: 5%;"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="backend-servers-body">
+                        {% set raw_servers = site.servers or [] %}
+                        {% if raw_servers %}
+                        {% for srv in raw_servers %}
+                        {% set is_backup = srv.backup | default(false) %}
+                        <tr class="backend-row">
+                            <td>
+                                <input type="text" class="form-input backend-name" placeholder="srv{{ loop.index }}"
+                                    value="{{ srv.name or ('srv' ~ loop.index) }}">
+                            </td>
+                            <td>
+                                <input type="text" class="form-input backend-host"
+                                    placeholder="{{ site.backend_ip or eff.backend_ip or '' }}"
+                                    value="{{ srv.host or '' }}">
+                            </td>
+                            <td>
+                                <input type="number" min="1" max="65535" class="form-input backend-port"
+                                    value="{{ srv.port or eff.backend_port or site_defaults.backend_port or 80 }}">
+                            </td>
+                            <td>
+                                <select class="form-input backend-role">
+                                    <option value="main" {% if not is_backup %}selected{% endif %}>Primary</option>
+                                    <option value="backup" {% if is_backup %}selected{% endif %}>Backup</option>
+                                </select>
+                            </td>
+                            <td>
+                                <input type="number" min="1" max="65535" class="form-input backend-weight"
+                                    placeholder="100" value="{{ srv.weight | default(100) }}">
+                            </td>
+                            <td style="text-align: center;">
+                                <button type="button" class="btn btn-small btn-backend-remove" title="Delete backend">
+                                    ✕
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% else %}
+                        {# If servers not заданы – one primary backend from backend_ip/backend_port #}
+                        <tr class="backend-row">
+                            <td>
+                                <input type="text" class="form-input backend-name" placeholder="srv1" value="srv1">
+                            </td>
+                            <td>
+                                <input type="text" class="form-input backend-host"
+                                    placeholder="{{ site.backend_ip or eff.backend_ip or '' }}"
+                                    value="{{ site.backend_ip or eff.backend_ip or '' }}">
+                            </td>
+                            <td>
+                                <input type="number" min="1" max="65535" class="form-input backend-port"
+                                    value="{{ site.backend_port or eff.backend_port or site_defaults.backend_port or 80 }}">
+                            </td>
+                            <td>
+                                <select class="form-input backend-role">
+                                    <option value="main" selected>Primary</option>
+                                    <option value="backup">Backup</option>
+                                </select>
+                            </td>
+                            <td>
+                                <input type="number" min="1" max="65535" class="form-input backend-weight"
+                                    placeholder="100" value="100">
+                            </td>
+                            <td style="text-align: center;">
+                                <button type="button" class="btn btn-small btn-backend-remove" title="Delete backend">
+                                    ✕
+                                </button>
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+
+                <button type="button" class="btn" id="btn-add-backend" style="margin-top: 4px;">
+                    + Add backend server
+                </button>
+
+                {# ───── HTTP-only: SAN + сертификаты + load balancing/sticky ───── #}
+                <div id="block-http-left">
+
+                    <div id="block-alt-names">
+                        <label class="form-label" for="field-alt-names" style="margin-top: 16px;">Alt names
+                            (SAN)</label>
+                        {% set alt_list = site.alt_names or [] %}
+                        <textarea id="field-alt-names" name="alt_names" class="form-input mono" rows="4"
+                            placeholder="alternative domains, one per line">{{ alt_list | join("\n") }}</textarea>
+                        <div class="table-meta" id="alt-names-help">
+                            Enter one domain per line. In HTTP mode it is added as a SAN to the Let's Encrypt certificate;
+                            in TCP passthrough it is used for SNI routing.
+                        </div>
+                    </div>
+
+                    {# Certificate source: Let's Encrypt / external CA / internal CA #}
+                    <div id="block-cert-all">
+                        <div id="block-cert">
+                            <h3 style="margin-top: 20px;">Certificate</h3>
+
+                            {% if site.certificate_source is defined %}
+                            {% set cert_source = site.certificate_source %}
+                            {% elif site.le_managed is defined and not site.le_managed %}
+                            {% set cert_source = 'external' %}
+                            {% else %}
+                            {% set cert_source = 'letsencrypt' %}
+                            {% endif %}
+
+                            <div class="table-meta">
+                                Select the certificate mode for this site.
+                            </div>
+
+                            <div style="margin-top: 8px; display:flex; flex-wrap:wrap; gap:16px;">
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="cert_mode" id="cert_mode_le" value="letsencrypt"
+                                        {% if cert_source == 'letsencrypt' %}checked{% endif %}>
+                                    <span>Let's Encrypt (managed automatically)</span>
+                                </label>
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="cert_mode" id="cert_mode_external" value="external"
+                                        {% if cert_source == 'external' %}checked{% endif %}>
+                                    <span>External certificate authority</span>
+                                </label>
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="cert_mode" id="cert_mode_internal" value="internal"
+                                        {% if cert_source == 'internal' %}checked{% endif %}>
+                                    <span>Internal certificate authority</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div id="cert-block-le" style="margin-top:10px;{% if cert_source != 'letsencrypt' %} display:none;{% endif %}">
+                            <div class="table-meta">
+                                In this mode the helper manages the Let's Encrypt certificate.
+                                You can issue or renew it through the interface.
+                            </div>
+
+                            <label class="form-label" style="margin-top: 10px;">Key types</label>
+                            <div class="table-meta">
+                                If nothing is selected — will be used global
+                                <code>cert_key_type</code> ({{ site_defaults.cert_key_type|default('ecdsa') }}).
+                            </div>
+                            <div style="margin-top: 4px;">
+                                <label class="form-checkbox-inline">
+                                    <input type="checkbox" id="key_type_ecdsa" name="key_type_ecdsa" {% if
+                                        site.key_types is defined and 'ecdsa' in site.key_types %}checked{% endif %}>
+                                    ecdsa
+                                </label>
+                                <label class="form-checkbox-inline" style="margin-left: 12px;">
+                                    <input type="checkbox" id="key_type_rsa" name="key_type_rsa" {% if site.key_types is
+                                        defined and 'rsa' in site.key_types %}checked{% endif %}>
+                                    rsa
+                                </label>
+                            </div>
+
+                            <button type="button" class="btn" id="btn-issue-cert" style="margin-top: 10px;">
+                                Issue/renew Let's Encrypt certificate
+                            </button>
+                            <div id="issue-cert-status" class="table-meta mono"
+                                style="white-space: pre-wrap; margin-top: 4px;"></div>
+                        </div>
+
+                        <div id="cert-block-external" style="margin-top:10px;{% if cert_source != 'external' %} display:none;{% endif %}">
+                            <div class="table-meta">
+                                Select an imported external CA, then upload a PEM containing the server certificate,
+                                matching private key, and intermediate chain. The chain is verified before installation.
+                            </div>
+
+                            <label class="form-label" for="external_ca_id" style="margin-top:10px;">Certificate authority</label>
+                            <select id="external_ca_id" name="external_ca_id" class="form-input">
+                                <option value="">Select an imported certificate authority</option>
+                                {% for ca in external_cas|default([]) %}
+                                <option value="{{ ca.id }}" {% if site.external_ca_id|default('') == ca.id %}selected{% endif %}>
+                                    {{ ca.name }} ({{ ca.id }})
+                                </option>
+                                {% endfor %}
+                            </select>
+                            {% if not external_cas|default([]) %}
+                            <div class="table-meta">Import a root or intermediate CA on the Certificates page first.</div>
+                            {% endif %}
+
+                            <label class="form-label" for="cert_file" style="margin-top:10px;">Certificate file
+                                (PEM)</label>
+
+                            <div class="file-picker">
+                                <input id="cert_file" type="file" class="file-input-hidden" accept=".pem,.crt,.cer">
+                                <button type="button" class="btn btn-icon" id="cert-file-choose">
+                                    Choose file
+                                </button>
+                                <span class="file-name" id="cert-file-name">No file selected</span>
+                            </div>
+
+                            <button type="button" class="btn" id="btn-upload-cert" style="margin-top: 8px;">
+                                Upload certificate
+                            </button>
+                            <div id="upload-cert-status" class="table-meta mono"
+                                style="white-space: pre-wrap; margin-top: 4px;"></div>
+                        </div>
+
+                        <div id="cert-block-internal" style="margin-top:10px;{% if cert_source != 'internal' %} display:none;{% endif %}">
+                            <div class="table-meta">
+                                The server creates a local root CA once and issues a certificate for this site's domain and SANs.
+                                Download the public root certificate from the Certificates page and add it to client trust stores.
+                            </div>
+                            <button type="button" class="btn" id="btn-issue-internal-cert" style="margin-top:10px;">
+                                Issue/renew internal certificate
+                            </button>
+                            <div id="issue-internal-cert-status" class="table-meta mono"
+                                style="white-space:pre-wrap; margin-top:4px;"></div>
+                        </div>
+                    </div>
+
+                    {# ───── Load balancing / sticky / sessions (внизу левой колонки) ───── #}
+                    <div id="block-http-balance">
+                        <h3 style="margin-top: 24px;">Load balancing / sticky / sessions</h3>
+
+                                                <div id="row-balance">
+
+<label class="form-label" for="balance" style="margin-top: 10px;">balance</label>
+                        <input id="balance" name="balance" type="text" class="form-input"
+                            value="{{ site.balance or '' }}" placeholder="{{ eff.balance or site_defaults.balance }}">
+                        <div class="table-meta">
+                            Backend load-balancing algorithm (for example, <code>roundrobin</code>,
+                            <code>leastconn</code>, <code>source</code>).
+                            Empty — use the value from <code>site_defaults</code>.
+                        </div>
+                        </div>
+
+                        <div id="block-http-sticky">
+
+                        {% set raw_sticky = site.sticky if site.sticky is defined else None %}
+                        <label class="form-label" for="sticky" style="margin-top: 10px;">sticky</label>
+                        <select id="sticky" name="sticky" class="form-input">
+                            <option value="">Default (from site_defaults)</option>
+                            <option value="source" {% if raw_sticky=='source' %}selected{% endif %}>source</option>
+                            <option value="cookie" {% if raw_sticky=='cookie' %}selected{% endif %}>cookie</option>
+                            <option value="none" {% if raw_sticky=='none' %}selected{% endif %}>none</option>
+                        </select>
+                        <div class="table-meta">
+                            Mode «stickiness» client to backend: by IP (source), by cookie or without sticky.
+                        </div>
+
+                        <label class="form-label" for="cookie_name" style="margin-top: 10px;">cookie_name</label>
+                        <input id="cookie_name" name="cookie_name" type="text" class="form-input"
+                            value="{{ site.cookie_name or '' }}"
+                            placeholder="{{ eff.cookie_name or site_defaults.cookie_name }}">
+                        <div class="table-meta">
+                            Cookie name when using <code>sticky="cookie"</code>.
+                            Empty — value from <code>site_defaults</code>.
+                        </div>
+
+                        <label class="form-label" for="cookie_attrs" style="margin-top: 10px;">cookie_attrs</label>
+                        <input id="cookie_attrs" name="cookie_attrs" type="text" class="form-input"
+                            value="{{ site.cookie_attrs or '' }}"
+                            placeholder="{{ eff.cookie_attrs or site_defaults.cookie_attrs }}">
+                        <div class="table-meta">
+                            Cookie attributes (for example, <code>insert nocache</code>).
+                            Empty — use <code>site_defaults</code>.
+                        </div>
+
+                        {% set raw_http_reuse = site.http_reuse if site.http_reuse is defined else None %}
+                        <label class="form-label" for="http_reuse" style="margin-top: 10px;">http_reuse</label>
+                        <select id="http_reuse" name="http_reuse" class="form-input">
+                            <option value="">Default (from site_defaults)</option>
+                            <option value="safe" {% if raw_http_reuse=='safe' %}selected{% endif %}>safe</option>
+                            <option value="aggressive" {% if raw_http_reuse=='aggressive' %}selected{% endif %}>
+                                aggressive</option>
+                            <option value="always" {% if raw_http_reuse=='always' %}selected{% endif %}>always</option>
+                            <option value="never" {% if raw_http_reuse=='never' %}selected{% endif %}>never</option>
+                        </select>
+                        <div class="table-meta">
+                            Controls reuse of HTTP connections to the backend
+                            (the <code>http-reuse</code> option). Empty — value from <code>site_defaults</code>.
+                        </div>
+
+                        <label class="form-label" for="session_timeout"
+                            style="margin-top: 10px;">session_timeout</label>
+                        <input id="session_timeout" name="session_timeout" type="text" class="form-input"
+                            value="{{ site.session_timeout or '' }}"
+                            placeholder="{{ eff.session_timeout or site_defaults.session_timeout }}">
+                        <div class="table-meta">
+                            Backend session timeout (for example, <code>15m</code>, <code>1h</code>).
+                            Empty — use the value from <code>site_defaults</code>.
+                        </div>
+
+                        <label class="form-label" for="http_keepalive_timeout"
+                            style="margin-top: 10px;">http_keepalive_timeout</label>
+                        <input id="http_keepalive_timeout" name="http_keepalive_timeout" type="text" class="form-input"
+                            value="{{ site.http_keepalive_timeout or '' }}"
+                            placeholder="{{ eff.http_keepalive_timeout or site_defaults.http_keepalive_timeout }}">
+                        <div class="table-meta">
+                            HTTP keep-alive timeout. Empty — use <code>site_defaults</code>.
+                        </div>
+
+                        {% set raw_prefer_last_server = site.prefer_last_server if site.prefer_last_server is defined
+                        else None %}
+                        <label class="form-label" for="prefer_last_server"
+                            style="margin-top: 10px;">prefer_last_server</label>
+                        <select id="prefer_last_server" name="prefer_last_server" class="form-input">
+                            <option value="">Default (from site_defaults)</option>
+                            <option value="true" {% if raw_prefer_last_server is sameas true %}selected{% endif %}>
+                                Enabled</option>
+                            <option value="false" {% if raw_prefer_last_server is sameas false %}selected{% endif %}>
+                                Disabled</option>
+                        </select>
+                        <div class="table-meta">
+                            Controls option <code>option prefer-last-server</code> in backend.
+                        </div>
+
+                        {% set raw_enable_splice = site.enable_splice_backend if site.enable_splice_backend is defined
+                        else None %}
+                        <label class="form-label" for="enable_splice_backend"
+                            style="margin-top: 10px;">enable_splice_backend</label>
+                        <select id="enable_splice_backend" name="enable_splice_backend" class="form-input">
+                            <option value="">Default (from site_defaults)</option>
+                            <option value="true" {% if raw_enable_splice is sameas true %}selected{% endif %}>Enabled
+                            </option>
+                            <option value="false" {% if raw_enable_splice is sameas false %}selected{% endif %}>
+                                Disabled</option>
+                        </select>
+                        <div class="table-meta">
+                            Enables/disables «splice» for backend (is used in template HAProxy, if configured).
+                        </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            {# ───── Правая колонка: флаги, защита, health, geo ───── #}
+            <div style="flex: 1 1 360px; min-width: 320px;">
+
+                {# ───── HTTP-only: флаги/защита + errors + err_exclude + geo ───── #}
+                <div id="block-http-right">
+
+                    <h3 style="margin-top: 16px;">Flags / protection</h3>
+
+                    {% set raw_redirect = site.redirect_to_https if site.redirect_to_https is defined else None %}
+                    {% set raw_authelia = site.authelia_enabled if site.authelia_enabled is defined else None %}
+                    {% set raw_zt = site.zero_trust if site.zero_trust is defined else None %}
+                    {% set raw_bssl = site.backend_ssl if site.backend_ssl is defined else None %}
+                    {% set raw_bverify = site.backend_ssl_verify if site.backend_ssl_verify is defined else None %}
+                    {% set raw_maint = site.maintenance if site.maintenance is defined else None %}
+                    {% set raw_rateban = site.rate_ban if site.rate_ban is defined else None %}
+                    {% set raw_compress = site.compress if site.compress is defined else None %}
+
+                    <label class="form-label" for="redirect_to_https">redirect_to_https</label>
+                    <select name="redirect_to_https" id="redirect_to_https" class="form-input">
+                        <option value="" {% if raw_redirect is none %}selected{% endif %}>
+                            Default ({{
+                            eff.redirect_to_https|default(site_defaults.redirect_to_https|default(true)) }})
+                        </option>
+                        <option value="true" {% if raw_redirect is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_redirect is sameas false %}selected{% endif %}>Disabled
+                        </option>
+                    </select>
+
+                    <label class="form-label" for="authelia_enabled" style="margin-top: 10px;">authelia_enabled</label>
+                    <select name="authelia_enabled" id="authelia_enabled" class="form-input">
+                        <option value="" {% if raw_authelia is none %}selected{% endif %}>
+                            Default ({{ eff.authelia_enabled|default(site_defaults.authelia_enabled|default(false))
+                            }})
+                        </option>
+                        <option value="true" {% if raw_authelia is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_authelia is sameas false %}selected{% endif %}>Disabled
+                        </option>
+                    </select>
+
+                    <label class="form-label" for="zero_trust" style="margin-top: 10px;">zero_trust</label>
+                    <select name="zero_trust" id="zero_trust" class="form-input">
+                        <option value="" {% if raw_zt is none %}selected{% endif %}>
+                            Default ({{ eff.zero_trust|default(site_defaults.zero_trust|default(false)) }})
+                        </option>
+                        <option value="true" {% if raw_zt is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_zt is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+                    <div class="table-meta">
+                        When enabled — access only for IP from <code>tbl_ip_auth</code>.
+                    </div>
+
+                    <label class="form-label" for="backend_ssl" style="margin-top: 10px;">backend_ssl</label>
+                    <select name="backend_ssl" id="backend_ssl" class="form-input">
+                        <option value="" {% if raw_bssl is none %}selected{% endif %}>
+                            Default ({{ eff.backend_ssl|default(site_defaults.backend_ssl|default(false)) }})
+                        </option>
+                        <option value="true" {% if raw_bssl is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_bssl is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+
+                    <label class="form-label" for="backend_ssl_verify"
+                        style="margin-top: 10px;">backend_ssl_verify</label>
+                    <select name="backend_ssl_verify" id="backend_ssl_verify" class="form-input">
+                        <option value="" {% if raw_bverify is none %}selected{% endif %}>
+                            Default ({{
+                            eff.backend_ssl_verify|default(site_defaults.backend_ssl_verify|default(false)) }})
+                        </option>
+                        <option value="true" {% if raw_bverify is sameas true %}selected{% endif %}>verify required
+                        </option>
+                        <option value="false" {% if raw_bverify is sameas false %}selected{% endif %}>verify none
+                        </option>
+                    </select>
+
+                    <label class="form-label" for="maintenance" style="margin-top: 10px;">maintenance</label>
+                    <select name="maintenance" id="maintenance" class="form-input">
+                        <option value="" {% if raw_maint is none %}selected{% endif %}>
+                            Default ({{ eff.maintenance|default(site_defaults.maintenance|default(false)) }})
+                        </option>
+                        <option value="true" {% if raw_maint is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_maint is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+
+                    {% set raw_access_gate = site.access_gate if site.access_gate is defined else None %}
+                    <label class="form-label" for="access_gate" style="margin-top: 10px;">Access gate (zero-trust login page)</label>
+                    <select name="access_gate" id="access_gate" class="form-input">
+                        <option value="" {% if raw_access_gate is none %}selected{% endif %}>Default (false)</option>
+                        <option value="true" {% if raw_access_gate is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_access_gate is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+                    <div class="table-meta">After an Authelia login the visitor IP is added to the authorized-IP table (tbl_ip_auth), unlocking zero-trust sites and TCP proxies. Without a configured backend the gate serves a static welcome page; with a backend it proxies normally. Authelia protection is always on, zero_trust is ignored for the gate itself, and GeoIP is off by default (set geo explicitly to re-enable it). Saving a gate automatically adds a one_factor Authelia access rule for its domain (Authelia denies unknown domains by default); adjust it on the Authelia access rules page if needed.</div>
+
+                    {% set raw_alert_enabled = site.alert_enabled if site.alert_enabled is defined else None %}
+                    <label class="form-label" for="alert_enabled" style="margin-top: 10px;">Availability email alerts</label>
+                    <select name="alert_enabled" id="alert_enabled" class="form-input">
+                        <option value="" {% if raw_alert_enabled is none %}selected{% endif %}>Default (false)</option>
+                        <option value="true" {% if raw_alert_enabled is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_alert_enabled is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+                    <div class="table-meta">Send an email when this site stays unavailable longer than the threshold below.</div>
+
+                    <label class="form-label" for="alert_mode" style="margin-top: 10px;">alert_mode</label>
+                    <select name="alert_mode" id="alert_mode" class="form-input">
+                        <option value="" {% if not site.alert_mode %}selected{% endif %}>Default (down only)</option>
+                        <option value="down" {% if site.alert_mode == 'down' %}selected{% endif %}>Fully down only</option>
+                        <option value="degraded" {% if site.alert_mode == 'degraded' %}selected{% endif %}>Down or partially down</option>
+                    </select>
+
+                    <label class="form-label" for="alert_after" style="margin-top: 10px;">alert_after</label>
+                    <input id="alert_after" name="alert_after" type="text" class="form-input"
+                           placeholder="Default (5m)" autocomplete="off" spellcheck="false"
+                           value="{{ site.alert_after if site.alert_after is defined and site.alert_after is not none else '' }}">
+                    <div class="table-meta">Continuous downtime before the alert, e.g. 5m, 300s, 1h.</div>
+
+                    <label class="form-label" for="alert_email" style="margin-top: 10px;">alert_email</label>
+                    <input id="alert_email" name="alert_email" type="email" class="form-input" maxlength="254"
+                           placeholder="Default (mail settings recipient)" autocomplete="off"
+                           value="{{ site.alert_email if site.alert_email is defined and site.alert_email is not none else '' }}">
+                    <div class="table-meta">Optional recipient for this site only; delivery uses the Mail settings relay.</div>
+
+                    <label class="form-label" for="rate_ban" style="margin-top: 10px;">rate_ban</label>
+                    <select name="rate_ban" id="rate_ban" class="form-input">
+                        <option value="" {% if raw_rateban is none %}selected{% endif %}>
+                            Default ({{ eff.rate_ban|default(site_defaults.rate_ban|default(true)) }})
+                        </option>
+                        <option value="true" {% if raw_rateban is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_rateban is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+
+                    <label class="form-label" for="compress" style="margin-top: 10px;">compress</label>
+                    <select name="compress" id="compress" class="form-input">
+                        <option value="" {% if raw_compress is none %}selected{% endif %}>
+                            Default ({{ eff.compress|default(site_defaults.compress|default(false)) }})
+                        </option>
+                        <option value="true" {% if raw_compress is sameas true %}selected{% endif %}>Enabled (gzip)
+                        </option>
+                        <option value="false" {% if raw_compress is sameas false %}selected{% endif %}>Disabled
+                        </option>
+                    </select>
+
+                    <label class="form-label" for="max_req_rate" style="margin-top: 10px;">max_req_rate</label>
+                    <input id="max_req_rate" name="max_req_rate" type="number" min="0" class="form-input"
+                        value="{{ site.max_req_rate or '' }}"
+                        placeholder="{{ eff.max_req_rate or site_defaults.max_req_rate or 200 }}">
+                    <div class="table-meta">
+                        Maximum request rate per IP for this site.
+                        If value &gt; 0, then when exceeding limit:
+                        <ul>
+                            <li>the client receives <code>429</code> (Too Many Requests);</li>
+                            <li>if <code>rate_ban=true</code>, IP may be added in <code>tbl_ban</code>.</li>
+                        </ul>
+                        0 or empty — use the default value (from <code>site_defaults</code>).
+                    </div>
+
+                    <h3 style="margin-top: 20px;">Errors / error-based bans</h3>
+
+                    <label class="form-label" for="err_limit" style="margin-top: 10px;">err_limit</label>
+                    <input id="err_limit" name="err_limit" type="number" min="0" class="form-input"
+                        value="{{ site.err_limit or '' }}"
+                        placeholder="{{ eff.err_limit or site_defaults.err_limit or 8 }}">
+                    <div class="table-meta">
+                        Error-rate threshold for this site.
+                        Used in ACL form:
+                        <code>src_http_err_rate(tbl_err_SITE) gt err_limit</code>.
+                        If IP for this site generates more errors, than <code>err_limit</code>
+                        (in window <code>err_window</code>), IP may be added in <code>tbl_ban</code>.
+                        Empty — use the default value (from <code>site_defaults.err_limit</code> or default
+                        8).
+                    </div>
+
+                    <label class="form-label" for="err_window" style="margin-top: 10px;">err_window</label>
+                    <input id="err_window" name="err_window" type="text" class="form-input"
+                        value="{{ site.err_window or '' }}"
+                        placeholder="{{ eff.err_window or site_defaults.err_window or '20s' }}">
+                    <div class="table-meta">
+                        Time window used to count errors and storage entries stick-table.
+                        Examples: <code>10s</code>, <code>20s</code>, <code>1m</code>.
+                        A shorter window reacts faster and more aggressively to error spikes.
+                        Empty — use the default value (from <code>site_defaults.err_window</code> or default
+                        <code>20s</code>).
+                    </div>
+
+                    <label class="form-label" for="err_size" style="margin-top: 10px;">err_size</label>
+                    <input id="err_size" name="err_size" type="text" class="form-input"
+                        value="{{ site.err_size or '' }}"
+                        placeholder="{{ eff.err_size or site_defaults.err_size or '50k' }}">
+                    <div class="table-meta">
+                        Error stick-table size for this site (number IP-entries),
+                        for example <code>50k</code>, <code>100k</code>, <code>200k</code>.
+                        Affects memory usage and the number of distinct IP addresses that can be tracked
+                        simultaneously, but does not change the ban threshold itself.
+                        Empty — use the default value (or default <code>50k</code>, if in
+                        <code>site_defaults</code> not defined).
+                    </div>
+
+                    {% set raw_err_ignore = site.err_ignore_rules if site.err_ignore_rules is defined else None %}
+                    <label class="form-label" for="err_ignore_rules" style="margin-top: 10px;">err_ignore_rules</label>
+                    <select id="err_ignore_rules" name="err_ignore_rules" class="form-input">
+                        <option value="" {% if raw_err_ignore is none %}selected{% endif %}>
+                            Default (see <code>site_defaults.err_ignore_rules_default</code>)
+                        </option>
+                        <option value="rules" {% if raw_err_ignore is sameas true %}selected{% endif %}>
+                            Use list <code>err_exclude</code> for the site
+                        </option>
+                        <option value="ignore" {% if raw_err_ignore=='ignore' %}selected{% endif %}>
+                            Ignore this site's errors when calculating bans
+                        </option>
+                    </select>
+                    <div class="table-meta">
+                        Controls how site errors are counted:
+                        <ul>
+                            <li><strong>Default</strong> — use global value
+                                <code>site_defaults.err_ignore_rules_default</code>.
+                            </li>
+                            <li><strong>Use the err_exclude list</strong> —
+                                errors matching paths/methods in <code>err_exclude</code> are excluded
+                                from <code>http_err_rate</code> and therefore do not trigger an error-based ban.</li>
+                            <li><strong>Ignore errors completely</strong> —
+                                this site does not participate in error-based bans, while other mechanisms
+                                (rate_ban, GEO, and manual bans) continue to work.</li>
+                        </ul>
+                    </div>
+
+                    {# ---- UI for err_exclude (per-site) ---- #}
+                    <h4 style="margin-top: 16px;">Error accounting exclusions (err_exclude)</h4>
+
+                    {% set err_rules = site.err_exclude or [] %}
+
+                    <table class="table mono" style="margin-top: 8px;">
+                        <thead>
+                            <tr>
+                                <th style="width: 25%;">Path type</th>
+                                <th style="width: 45%;">Value</th>
+                                <th style="width: 25%;">Methods (GET,POST,...)</th>
+                                <th style="width: 5%;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="err-exclude-body">
+                            {% if err_rules %}
+                            {% for r in err_rules %}
+                            {% set path_type = 'path' %}
+                            {% set path_value = '' %}
+                            {% if r.path is defined %}
+                            {% set path_type = 'path' %}
+                            {% set path_value = r.path %}
+                            {% elif r.path_beg is defined %}
+                            {% set path_type = 'path_beg' %}
+                            {% set path_value = r.path_beg %}
+                            {% elif r.path_reg is defined %}
+                            {% set path_type = 'path_reg' %}
+                            {% set path_value = r.path_reg %}
+                            {% endif %}
+
+                            {% set methods_list = r.methods | default([]) %}
+                            {% set methods_str = methods_list | join(', ') %}
+
+                            <tr class="err-exclude-row">
+                                <td>
+                                    <select class="form-input err-path-type">
+                                        <option value="path" {% if path_type=='path' %}selected{% endif %}>path (exact
+                                            match)</option>
+                                        <option value="path_beg" {% if path_type=='path_beg' %}selected{% endif %}>
+                                            path_beg (prefix)</option>
+                                        <option value="path_reg" {% if path_type=='path_reg' %}selected{% endif %}>
+                                            path_reg (regular expression)</option>
+                                    </select>
+                                </td>
+                                <td>
+                                    <input type="text" class="form-input err-path-value"
+                                        placeholder="/metrics, /health, ^/static/" value="{{ path_value }}">
+                                </td>
+                                <td>
+                                    <input type="text" class="form-input err-methods" placeholder="GET,POST"
+                                        value="{{ methods_str }}">
+                                </td>
+                                <td style="text-align: center;">
+                                    <button type="button" class="btn btn-small btn-err-exclude-remove"
+                                        title="Delete rule">
+                                        ✕
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% endif %}
+                        </tbody>
+                    </table>
+
+                    <button type="button" class="btn" id="btn-add-err-rule" style="margin-top: 4px;">
+                        + Add rule err_exclude
+                    </button>
+
+                    <div class="table-meta">
+                        Configure requests that should be excluded from this site's error-ban counter.
+                        <ul>
+                            <li><strong>Path type</strong>:
+                                <ul>
+                                    <li><code>path</code> — exact path match;</li>
+                                    <li><code>path_beg</code> — path starts with the specified string;</li>
+                                    <li><code>path_reg</code> — regular expression (is used as
+                                        <code>path_reg</code> in HAProxy).</li>
+                                </ul>
+                            </li>
+                            <li><strong>Methods</strong> — comma-separated list (GET,POST,...). If empty,
+                                the rule applies to all methods.</li>
+                            <li>List <code>err_exclude</code> active only if
+                                <code>err_ignore_rules</code> set in mode «Use the err_exclude list».
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div id="block-geo">
+                        <h3 style="margin-top: 20px;">Geo / ACL</h3>
+
+                        {% set raw_geo = site.geo if site.geo is defined else None %}
+                        <label class="form-label" for="geo">geo</label>
+                        <select id="geo" name="geo" class="form-input">
+                            <option value="">Default (from site_defaults)</option>
+                            <option value="true" {% if raw_geo is sameas true %}selected{% endif %}>Enable Geo ACL
+                            </option>
+                            <option value="false" {% if raw_geo is sameas false %}selected{% endif %}>Disable Geo ACL
+                            </option>
+                        </select>
+                        <div class="table-meta">
+                            Enable or disable GeoIP filtering for this site.
+                            The default comes from <code>site_defaults</code>.
+                        </div>
+
+                        <label class="form-label" for="geo_countries">Allowed/blocked countries for this site</label>
+                        <textarea id="geo_countries" name="geo_countries" class="form-input mono notranslate"
+                            translate="no" data-i18n-skip rows="3"
+                            placeholder="{% if geoip_country_codes %}{{ geoip_country_codes | join(', ') }}{% else %}RU, PL{% endif %}">{% if site.geo_countries is defined and site.geo_countries %}{{ site.geo_countries | join(', ') }}{% endif %}</textarea>
+                        <div class="table-meta">
+                            Leave empty to use the global country selection. A custom list must be a subset of the
+                            globally selected countries.
+                            {% if geoip_country_codes %}
+                            Available: <code class="notranslate" translate="no" data-i18n-skip>{{ geoip_country_codes | join(', ') }}</code>.
+                            {% else %}
+                            No countries are selected globally.
+                            <a href="{{ url_for('routes.haproxy_geoip_page') }}">Open GeoIP database</a>.
+                            {% endif %}
+                        </div>
+
+                        <div class="table-meta">
+                            <span>GeoIP mode</span>: <code>allow</code> / <code>deny</code>
+                            (<a href="{{ url_for('routes.haproxy_config_page') }}">HAProxy configuration</a>)
+                        </div>
+                    </div>
+
+                </div>
+
+                {# ───── Health check / HSTS / WAF (частично is used and for TCP) ───── #}
+                <h3 style="margin-top: 20px;">Health check / HSTS / WAF</h3>
+
+                {# --- выбор типа check backend (L7 vs L4) --- #}
+{# tcp_check:
+   - in HTTP mode: tri-state bool (L4 TCP connect vs L7 HTTP-check)
+   - in TCP passthrough mode: line "tcp"/"ssl" (выбор типа check for backend)
+#}
+{% if site.tcp_check is sameas true %}
+{% set raw_tcp_check = true %}
+{% elif site.tcp_check is sameas false %}
+{% set raw_tcp_check = false %}
+{% else %}
+{% set raw_tcp_check = none %}
+{% endif %}
+{% set eff_tcp_check = eff.tcp_check|default(site_defaults.tcp_check|default(false)) %}
+
+<div id="row-http-tcp-check">
+    <label class="form-label" for="tcp_check">tcp_check</label>
+    <select id="tcp_check" name="tcp_check" class="form-input"
+        data-eff-default="{{ 'true' if eff_tcp_check else 'false' }}">
+        <option value="" {% if raw_tcp_check is none %}selected{% endif %}>
+            Default ({{ 'L4 TCP connect' if eff_tcp_check else 'L7 HTTP-check' }})
+        </option>
+        <option value="false" {% if raw_tcp_check is sameas false %}selected{% endif %}>L7 (HTTP-check)</option>
+        <option value="true" {% if raw_tcp_check is sameas true %}selected{% endif %}>L4 (TCP connect)</option>
+    </select>
+    <div class="table-meta" id="tcp-check-help">
+        If <code>false</code> — use L7 HTTP health-check (fields below).
+        If <code>true</code> — L4 TCP connect (fields below are hidden).
+    </div>
+</div>
+
+<div id="row-tcp-passthrough-check" style="display:none;">
+    {% set raw_tcp_passthrough_check = site.tcp_check if site.tcp_check is string else none %}
+    <label class="form-label" for="tcp_passthrough_check">tcp_passthrough_check</label>
+    <select id="tcp_passthrough_check" name="tcp_passthrough_check" class="form-input">
+        <option value="" {% if raw_tcp_passthrough_check is none %}selected{% endif %}>
+            Default (TCP connect)
+        </option>
+        <option value="tcp" {% if raw_tcp_passthrough_check == 'tcp' %}selected{% endif %}>TCP connect</option>
+        <option value="ssl" {% if raw_tcp_passthrough_check == 'ssl' %}selected{% endif %}>SSL (check-ssl, verify none, SNI)</option>
+    </select>
+    <div class="table-meta" id="tcp-passthrough-check-help">
+        Selects the backend check type for <code>tcp_passthrough</code>.
+        <code>tcp</code> — standard TCP connect; <code>ssl</code> — <code>check-ssl</code> (without CA verification).
+    </div>
+</div>
+
+<div id="row-health-uri">
+                    <label class="form-label" for="health_uri">health_uri</label>
+                    <input id="health_uri" name="health_uri" type="text" class="form-input"
+                        value="{{ site.health_uri or '' }}"
+                        placeholder="{{ eff.health_uri or site_defaults.health_uri or '/' }}">
+                </div>
+
+                <div id="row-health-status">
+                    <label class="form-label" for="health_status" style="margin-top: 10px;">health_status</label>
+                    <input id="health_status" name="health_status" type="number" min="100" max="599" class="form-input"
+                        value="{{ site.health_status or '' }}"
+                        placeholder="{{ eff.health_status or site_defaults.health_status or 200 }}">
+                </div>
+
+                <div id="row-hsts">
+                    <label class="form-label" for="hsts" style="margin-top: 10px;">hsts</label>
+                    <input id="hsts" name="hsts" type="text" class="form-input"
+                        value="{% if site.hsts is defined and site.hsts is not none %}{% if site.hsts is sameas true %}true{% elif site.hsts is sameas false %}false{% else %}{{ site.hsts }}{% endif %}{% endif %}"
+                        placeholder="{% if eff.hsts is defined and eff.hsts is not none %}{{ eff.hsts }}{% elif site_defaults.hsts is defined and site_defaults.hsts is not none %}{{ site_defaults.hsts }}{% else %}15552000{% endif %}"
+                        pattern="(?:true|false|[0-9]+|[0-9]+d)">
+                    <div class="table-meta">
+                        true/false, seconds, or a duration such as <code>365d</code>.
+                    </div>
+                </div>
+
+                <div id="row-waf">
+                    <label class="form-label" for="waf" style="margin-top: 10px;">waf</label>
+                    <input id="waf" name="waf" type="text" class="form-input" value="{{ site.waf or '' }}"
+                        placeholder="{{ eff.waf or site_defaults.waf or 'none' }}">
+                </div>
+
+            </div>
+
+        </div>
+
+        <div style="padding: 0 16px 16px;">
+            <button type="submit" class="btn btn-primary" id="btn-save-site">
+                Save changes
+            </button>
+            <span id="site-save-status" class="mono" style="margin-left: 12px; font-size: 0.9em;"></span>
+        </div>
+    </form>
+</div>
+
+{# Certificate issuance log #}
+<div id="issue-cert-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5);
+            z-index:1000; align-items:center; justify-content:center;">
+    <div class="card" style="max-width: 960px; width: 90%; max-height: 80vh;
+                display:flex; flex-direction:column;">
+        <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+            <h2 style="margin:0; display:flex; align-items:center; gap:0.5em;">
+                <span>Issue certificate</span>
+                <span id="issue-cert-status-dot" style="display:inline-block;
+                             width:0.6em;
+                             height:0.6em;
+                             border-radius:50%;
+                             background:#ccc;
+                             opacity:0;"></span>
+            </h2>
+            <button type="button" class="btn" id="issue-cert-modal-close">
+                Close
+            </button>
+        </div>
+        <div style="padding: 12px 16px;">
+            <pre id="issue-cert-log" class="mono" style="margin:0; max-height: 60vh; overflow:auto;
+                        white-space:pre-wrap; word-wrap:break-word;"></pre>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/haproxy_site_edit.js') }}"></script>
+{% endblock %}

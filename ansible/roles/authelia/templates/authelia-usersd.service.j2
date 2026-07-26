@@ -1,0 +1,35 @@
+[Unit]
+Description=Authelia users management daemon (users_database.yml helper)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+Group={{ authelia_log_reader_group }}
+ExecStart=/usr/local/sbin/authelia-usersd.py
+Restart=always
+RestartSec=2
+
+# ENV для демона
+Environment="AUTHELIA_USERS_FILE={{ authelia_users_file }}"
+Environment="AUTHELIA_USERS_SOCKET={{ authelia_users_socket }}"
+Environment="AUTHELIA_DOCKER_COMPOSE_FILE={{ authelia_docker_compose_file }}"
+Environment="AUTHELIA_CONTAINER_NAME={{ authelia_container_name }}"
+Environment="AUTHELIA_CONFIG_PATH={{ authelia_config_path }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-usersd.py', rstrip=false) | hash('sha256') }}"
+
+# Немного hardening, но без NoNewPrivileges (root+docker)
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

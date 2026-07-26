@@ -1,0 +1,31 @@
+# -------------------------------------------------------------------
+# 1) Пакеты
+# -------------------------------------------------------------------
+- name: Install required packages
+  apt:
+    name:
+      - python3
+      - python3-pip
+      - python3-venv
+      - python3-yaml
+      - python3-cryptography
+      - openssl
+      - haproxy
+      - socat
+      - ipset
+      - iptables
+      - iptables-persistent
+    state: present
+    update_cache: yes
+  tags: restore-network
+
+- import_tasks: fs.yml
+
+# -------------------------------------------------------------------
+# 4) Вспомогательные демоны (вынесены в отдельные стейджи)
+# -------------------------------------------------------------------
+- import_tasks: certd.yml
+- import_tasks: controld.yml
+- import_tasks: backupd.yml
+- import_tasks: iptables-ban.yml
+- import_tasks: iptables-udp.yml

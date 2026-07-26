@@ -1,0 +1,125 @@
+- name: Ensure required packages for Docker are installed
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+  tags: restore-network
+
+- name: Ensure keyrings dir exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: ansible_os_family == "Debian"
+
+- name: Check if Docker GPG keyring already exists
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/docker.gpg
+  register: docker_gpg_keyring_stat
+  when: ansible_os_family == "Debian"
+
+- name: Download Docker GPG key (ASCII)
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.gpg.asc
+    mode: "0644"
+    timeout: 30
+  register: docker_gpg_download
+  retries: 6
+  delay: 10
+  until: docker_gpg_download is succeeded
+  when:
+    - ansible_os_family == "Debian"
+    - not docker_gpg_keyring_stat.stat.exists | default(false)
+  tags: restore-network
+
+- name: Convert Docker GPG key to keyring (dearmor)
+  ansible.builtin.command:
+    cmd: >
+      gpg --dearmor
+      -o /etc/apt/keyrings/docker.gpg
+      /etc/apt/keyrings/docker.gpg.asc
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+  when:
+    - ansible_os_family == "Debian"
+    - not docker_gpg_keyring_stat.stat.exists | default(false)
+
+- name: Ensure permissions on Docker GPG key
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/docker.gpg
+    mode: "0644"
+  when: ansible_os_family == "Debian"
+
+- name: Map ansible_architecture to Docker arch
+  ansible.builtin.set_fact:
+    docker_arch: >-
+      {{
+        {
+          'x86_64': 'amd64',
+          'aarch64': 'arm64'
+        }.get(ansible_architecture, ansible_architecture)
+      }}
+  when: ansible_os_family == "Debian"
+
+- name: Add Docker APT repository
+  copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    mode: "0644"
+    content: |
+      deb [arch={{ docker_arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable
+  register: docker_repo_added
+  when: ansible_os_family == "Debian"
+
+# The play sets a cache_valid_time default, so a freshly added Docker repository
+# would otherwise not be indexed before the install below. Force one refresh
+# only when the repository actually changed.
+- name: Refresh APT cache after adding the Docker repository
+  apt:
+    update_cache: yes
+    cache_valid_time: 0
+  when:
+    - ansible_os_family == "Debian"
+    - docker_repo_added is changed
+  tags: restore-network
+
+- name: Install Docker Engine and plugins
+  apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+  tags: restore-network
+
+- name: Ensure Docker service is enabled and running
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+  when: ansible_os_family == "Debian"
+
+
+# ---- 2. Тест доступа к Docker Hub ----
+
+- name: Test connectivity to Docker Hub with hello-world image
+  ansible.builtin.command:
+    cmd: timeout 20 docker pull hello-world:latest
+  register: docker_hub_pull
+  changed_when: false      # это просто тест
+  failed_when: false       # не роняем play при ошибке
+  tags: restore-network
+
+- name: Include mirror configuration tasks if Docker Hub is not reachable
+  ansible.builtin.include_tasks: mirror.yml
+  when: docker_hub_pull.rc != 0
+  tags: restore-network

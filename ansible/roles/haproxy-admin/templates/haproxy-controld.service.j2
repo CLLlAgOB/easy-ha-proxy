@@ -1,0 +1,33 @@
+[Unit]
+Description=HAProxy control daemon (bansync + reload) — haproxy-controld
+After=network-online.target haproxy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile={{ haproxy_admin_env_file }}
+# Можно переопределять через .env:
+# SOCKET_PATH=/run/haproxy/admin.sock
+# HAPADM_BAN_TABLE=tbl_ban
+# HAPADM_IPSET_NAME=haproxy_ban
+# HAPADM_BAN_SYNC_INTERVAL=10
+# HAPROXY_CONTROL_SOCKET=/run/easy-ha-proxy/haproxy-controld.sock
+# HAPROXY_SYSTEMCTL_CMD=systemctl reload haproxy
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-controld.py', rstrip=false) | hash('sha256') }}"
+ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-controld.py
+Restart=always
+RestartSec=3
+User=root
+Group={{ app_group }}
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

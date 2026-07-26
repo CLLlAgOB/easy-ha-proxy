@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}Full backup and restore{% endblock %}
+{% block header_title %}Full backup and restore{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<div id="backup-app"
+     data-status-url="{{ url_for('system_backups.status_view') }}"
+     data-create-url="{{ url_for('system_backups.start_backup') }}"
+     data-upload-url="{{ url_for('system_backups.upload_archive') }}"
+     data-inspect-url-template="{{ url_for('system_backups.inspect_archive', upload_id='UPLOAD_ID') }}"
+     data-stage-url-template="{{ url_for('system_backups.stage_backup', backup_id='BACKUP_ID') }}"
+     data-restore-url="{{ url_for('system_backups.start_restore') }}"
+     data-delete-url="{{ url_for('system_backups.delete_artifact') }}"
+     data-download-url-template="{{ url_for('system_backups.download_backup', backup_id='BACKUP_ID') }}">
+
+  <section class="card backup-intro-card" aria-labelledby="backup-intro-title">
+    <div class="card-header backup-card-header">
+      <div>
+        <h2 id="backup-intro-title">Encrypted disaster-recovery snapshots</h2>
+        <p class="table-meta">
+          Move the complete easy-ha-proxy state to a newly installed server or return this server to an earlier snapshot.
+        </p>
+      </div>
+    </div>
+    <div class="alert alert-warning">
+      A restore replaces managed configuration, secrets, users, certificates and application data. The restored domains and
+      access rules take effect after reconciliation, so verify DNS and keep console or SSH access available.
+    </div>
+    <div id="backup-service-status" class="result-message" role="status" aria-live="polite"></div>
+  </section>
+
+  <div class="backup-workflow-grid">
+    <section class="card" aria-labelledby="backup-create-title">
+      <div class="card-header">
+        <div>
+          <h2 id="backup-create-title">Create full backup</h2>
+          <p class="table-meta">The archive is encrypted before it becomes available for download.</p>
+        </div>
+      </div>
+      <form id="backup-create-form" autocomplete="off">
+        <label class="form-label" for="backup-passphrase">Backup passphrase</label>
+        <input id="backup-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
+               autocomplete="new-password" required>
+        <label class="backup-option" for="backup-passphrase-show">
+          <input id="backup-passphrase-show" type="checkbox">
+          Show passphrase
+        </label>
+        <p class="vars-field-help">Check the passphrase visually before creating the backup. It is never saved by easy-ha-proxy and cannot be recovered.</p>
+        <p class="vars-field-help">Store this passphrase separately.</p>
+
+        <label class="backup-option" for="backup-quiesce">
+          <input id="backup-quiesce" type="checkbox" checked>
+          Pause managed services briefly for a consistent snapshot
+        </label>
+        <label class="backup-option backup-option-danger" for="backup-include-ssh">
+          <input id="backup-include-ssh" type="checkbox">
+          Include SSH host and private keys
+        </label>
+        <p class="vars-field-help">
+          SSH identity is excluded by default. Restoring host keys on another server duplicates its SSH fingerprint.
+        </p>
+
+        <button type="submit" class="btn" id="backup-create-button">Create encrypted backup</button>
+        <div id="backup-create-status" class="result-message" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section class="card backup-restore-card" aria-labelledby="backup-restore-title">
+      <div class="card-header">
+        <div>
+          <h2 id="backup-restore-title">Restore full backup</h2>
+          <p class="table-meta">Upload and verify the encrypted archive before any server files are changed.</p>
+        </div>
+      </div>
+
+      <div class="alert alert-info">
+        Web restore works over an already installed easy-ha-proxy stack, including a fresh minimal installation. A completely
+        empty Debian or Ubuntu server must first be restored with the controller installer.
+      </div>
+
+      <form id="backup-inspect-form" autocomplete="off">
+        <label class="form-label" for="backup-restore-file">Encrypted backup archive</label>
+        <input id="backup-restore-file" class="form-input" type="file" accept=".enc,application/octet-stream" required>
+        <p class="vars-field-help">Maximum upload size on this server: {{ max_upload_gib }} GiB.</p>
+
+        <label class="form-label" for="backup-restore-passphrase">Backup passphrase</label>
+        <input id="backup-restore-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
+               autocomplete="current-password" required>
+        <button type="submit" class="btn" id="backup-inspect-button">Upload and verify backup</button>
+        <div id="backup-upload-status" class="result-message" role="status" aria-live="polite"></div>
+      </form>
+
+      <div id="backup-inspection" class="backup-inspection" hidden>
+        <h3>Verified backup</h3>
+        <dl class="backup-manifest-list">
+          <div><dt>Source server</dt><dd id="backup-source-host">—</dd></div>
+          <div><dt>Created</dt><dd id="backup-created-at">—</dd></div>
+          <div><dt>Architecture</dt><dd id="backup-machine">—</dd></div>
+          <div><dt>Managed data size</dt><dd id="backup-expanded-size">—</dd></div>
+          <div><dt>Consistent snapshot</dt><dd id="backup-quiesced-state">—</dd></div>
+          <div><dt>SSH keys included</dt><dd id="backup-ssh-state">—</dd></div>
+        </dl>
+
+        <fieldset class="authelia-mail-mode-fieldset">
+          <legend>Restore scope</legend>
+          <div class="authelia-mail-mode-grid">
+            <label class="authelia-mail-mode-option" for="backup-scope-full">
+              <input id="backup-scope-full" type="radio" name="backup_restore_scope" value="full" checked>
+              <span>
+                <strong>Full restore</strong>
+                <small>Replaces all managed state, including source, services, secrets and Authelia.</small>
+              </span>
+            </label>
+            <label class="authelia-mail-mode-option" for="backup-scope-config">
+              <input id="backup-scope-config" type="radio" name="backup_restore_scope" value="config">
+              <span>
+                <strong>Sites and certificates only</strong>
+                <small>Restores HTTP/TCP sites, their settings and certificates. Source, systemd units, secrets, Authelia and SSH stay untouched — safe for backups taken on an older software revision.</small>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <label class="backup-option backup-option-danger" for="backup-restore-ssh" id="backup-restore-ssh-row">
+          <input id="backup-restore-ssh" type="checkbox" disabled>
+          Restore archived SSH keys and merge current authorized_keys
+        </label>
+        <label class="backup-option backup-option-danger" for="backup-replace-confirm">
+          <input id="backup-replace-confirm" type="checkbox">
+          I understand that all managed state on this server will be replaced
+        </label>
+        <label class="form-label" for="backup-restore-confirmation">Type RESTORE to continue</label>
+        <input id="backup-restore-confirmation" class="form-input mono notranslate" translate="no" data-i18n-skip
+               type="text" autocomplete="off" spellcheck="false" placeholder="RESTORE">
+        <button type="button" class="btn btn-danger" id="backup-restore-button" disabled>Restore and reconcile server</button>
+        <div id="backup-restore-status" class="result-message" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="backup-artifacts-title">
+    <div class="card-header">
+      <div>
+        <h2 id="backup-artifacts-title">Backups stored on this server</h2>
+        <p class="table-meta">Download both the encrypted archive and its SHA-256 checksum, then store them separately from the server.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="backup-table">
+        <thead><tr><th>Created</th><th>Source</th><th>Size</th><th>SSH</th><th>Actions</th></tr></thead>
+        <tbody id="backup-artifacts-body">
+          <tr><td colspan="5" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="backup-jobs-title">
+    <div class="card-header">
+      <div>
+        <h2 id="backup-jobs-title">Backup and restore jobs</h2>
+        <p class="table-meta">The status remains on the host while the application container is paused or recreated.</p>
+      </div>
+    </div>
+    <div id="backup-progress" class="job-progress" hidden>
+      <div class="job-progress-meta">
+        <span id="backup-progress-label">Working…</span>
+        <span id="backup-progress-elapsed" class="mono notranslate" translate="no" data-i18n-skip>0:00</span>
+      </div>
+      <div class="job-progress-track job-progress-track--indeterminate">
+        <div class="job-progress-fill"></div>
+      </div>
+    </div>
+    <details id="backup-log-details" class="backup-technical-details">
+      <summary>Selected job details <span id="backup-log-mode" class="muted"></span></summary>
+      <pre id="backup-job-log" class="mono notranslate config-technical-output" translate="no" data-i18n-skip>No job selected.</pre>
+    </details>
+    <div class="table-wrap">
+      <table class="backup-table">
+        <thead><tr><th>Started</th><th>Operation</th><th>Status</th><th>Result</th></tr></thead>
+        <tbody id="backup-jobs-body">
+          <tr><td colspan="4" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/system_backups.js') }}"></script>
+{% endblock %}

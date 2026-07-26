@@ -1,0 +1,99 @@
+##############################################################################
+# Authelia advanced authentication settings for managed sites. #tag: authelia
+##############################################################################
+# --- Global Authelia switch ---
+authelia_enabled: true           # false disables and stops Authelia
+mail_relay_server: true          # route all application mail through the managed relay
+admin_authelia_enabled: "{{ authelia_enabled }}"    # false falls back to less secure Basic Auth
+aut_domain: "aut.{{ root_domain }}"
+
+# Geo filter applied only to aut_domain.
+aut_geoip_enabled: false         # enable or disable GeoIP for aut_domain
+aut_geoip_mode: "allow"         # "allow" or "deny"
+
+#authelia_session_secret: ""   # stored in Vault/group_vars/all/authelia.yml
+# --- Authelia: identity_validation ---
+#authelia_jwt_secret: ""       # stored in Vault/group_vars/all/authelia.yml
+# --- Authelia: storage ---
+#authelia_storage_key: ""      # stored in Vault/group_vars/all/authelia.yml
+
+# --- Authelia: server / log ---
+authelia_server_address: "tcp://0.0.0.0:9091"
+authelia_log_level: "warn"
+
+# --- Authelia: session ---
+authelia_session_name: "authelia_session"
+authelia_session_same_site: "lax"
+authelia_session_expiration: "12h"
+authelia_session_inactivity: "30m"
+authelia_session_remember_me: "3M"
+
+authelia_cookie_domain: "{{ root_domain }}"
+authelia_portal_url: 'https://{{ aut_domain }}'
+authelia_default_redirection_url: "https://{{ aut_domain }}/access_granted"
+
+# --- Authelia: storage ---
+authelia_storage_local_path: "/config/db.sqlite3"
+
+# --- Authelia: authentication_backend ---
+authelia_users_file_path: "/config/users_database.yml"
+authelia_password_algorithm: "argon2id"
+
+# --- Authelia: regulation ---
+authelia_regulation_modes:
+    - 'ip'
+    #- 'user'
+authelia_regulation_max_retries: 5
+authelia_regulation_find_time: "2m"
+authelia_regulation_ban_time: "1h"
+
+# --- Authelia: notifier ---
+# filesystem or smtp
+authelia_notifier_type: "smtp"
+mail_subject: "[{{ root_domain }}] Security notification"
+authelia_notification_language: "en"  # en or ru
+
+# Filesystem notifier settings.
+authelia_notifier_filesystem_filename: "/config/notification.log"
+
+# SMTP notifier settings.
+mail_smtp_ssl_authelia: "smtp" # smtp with STARTTLS or implicit-TLS submissions
+
+mail_smtp_disable_require_tls: false
+mail_smtp_disable_starttls: false
+mail_smtp_tls_skip_verify: false
+mail_smtp_timeout: "10s"
+
+# --- Authelia: TOTP ---
+authelia_totp_issuer: "{{ root_domain }}"
+authelia_totp_period: 30
+authelia_totp_skew: 1
+
+# --- Authelia: access_control ---
+authelia_default_policy: "deny"
+
+authelia_log_file_path: "/config/logs/authelia.log" 
+
+authelia_access_control_rules:
+ 
+  - domain: "ha.{{ root_domain }}"
+    subject:
+      - "group:superadmin"
+    policy: "one_factor"
+
+  - domain: "ha.{{ root_domain }}"
+    resources:
+      - "^/authelia(/.*)?$"
+      - "^/stats(/.*)?$"
+      - "^/haproxy(/.*)?$"
+    policy: "deny"
+
+  - domain: "ha.{{ root_domain }}"
+    subject:
+      - "group:admins"
+    policy: "one_factor"
+
+  - domain: "aut.{{ root_domain }}"
+    resources:
+      - "^/access_granted/?$"
+    policy: "one_factor"

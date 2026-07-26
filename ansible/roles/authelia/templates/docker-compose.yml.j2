@@ -1,0 +1,104 @@
+services:
+{% set relay_enabled = (mail_notify_enabled | default(false) | bool) or (mail_relay_server | default(false) | bool) %}
+{% if authelia_session_redis_enabled | default(true) %}
+  authelia-redis:
+    image: {{ authelia_redis_image | default('redis:7.4.9-alpine') }}
+    container_name: authelia-redis
+    restart: unless-stopped
+    user: "{{ authelia_redis_uid }}:{{ authelia_redis_gid }}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    networks:
+      - authelia_rd
+{% if authelia_redis_persistence | default('rdb') == 'memory' %}
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--loglevel", "warning"]
+{% else %}
+    command: ["redis-server", "--save", "3600", "1", "--appendonly", "no", "--loglevel", "warning"]
+{% endif %}
+    volumes:
+      - {{ authelia_redis_data_dir }}:/data
+    environment:
+      - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+{% endif %}
+
+  mail_relay:
+    image: {{ mail_relay_image | default('juanluisbaptiste/postfix:1.9.0') }}
+    container_name: mail_relay
+{% if not relay_enabled %}
+    # Keep the trusted service definition available for web-managed mode
+    # switching without starting the relay on stacks which do not use it.
+    profiles: ["mail-relay"]
+{% endif %}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    networks:
+      - authelia_mail
+    volumes:
+      - mail_relay_spool:/var/spool/postfix
+    env_file:
+      - "{{ authelia_env_file }}"
+    environment:
+      - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+    healthcheck:
+      test: ["CMD-SHELL", "pidof master > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  {{ authelia_container_name }}:
+    image: authelia/authelia:{{ authelia_version | default('4.39.20') }}
+    container_name: authelia
+    restart: always
+    user: "{{ authelia_uid }}:{{ authelia_gid }}"
+    # Authelia 4.39 startup checks require a writable root filesystem.
+    # Keep the remaining hardening controls below; /config is also writable
+    # by design for SQLite, notifications, and generated runtime state.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    networks:
+      - authelia_rd
+      - authelia_mail
+      - {{ authelia_docker_network }}
+    volumes:
+      - /opt/authelia:/config
+    environment:
+      - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+    ports:
+      - "127.0.0.1:9091:9091"
+{% if relay_enabled %}
+    depends_on:
+      mail_relay:
+        condition: service_healthy
+{% endif %}
+
+networks:
+  authelia_rd:
+    internal: true
+  authelia_mail: {}
+  {{ authelia_docker_network }}:
+    name: {{ authelia_docker_network }}
+
+volumes:
+  # Preserve the live Postfix queue across relay recreation. Full backups do
+  # not claim to snapshot this transient delivery state.
+  mail_relay_spool:
+    name: easy-ha-proxy-mail-relay-spool

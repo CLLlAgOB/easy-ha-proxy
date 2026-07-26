@@ -1,0 +1,139 @@
+# HAProxy can be started automatically by apt immediately after installation.
+# Its restored configuration already references this socket group, so create
+# the group before the package is allowed to start on a fresh server.
+- name: Ensure HAProxy runtime socket group exists before package installation
+  ansible.builtin.group:
+    name: "{{ haproxy_socket_group }}"
+    system: true
+    state: present
+
+# 1) Установка пакета — вне условий
+- name: Install HAProxy
+  apt:
+    name: haproxy
+    state: present
+    update_cache: true
+  tags:
+    - install
+    - restore-network
+
+# 2) Проверяем, делали ли уже «первый запуск»
+- name: Check if HAProxy was initialized before
+  stat:
+    path: /var/lib/haproxy/.first_start_done
+  register: haproxy_first
+  
+- import_tasks: fs.yml
+
+# 4) Валидируем конфиг перед любыми стартами (если файл уже есть)
+- name: Validate HAProxy config if present
+  command: haproxy -c -f /etc/haproxy/haproxy.cfg
+  changed_when: false
+  failed_when: false   # на «самом первом» прогоне конфиг может ещё не быть
+  tags: install
+
+# 5) Одноразовый прогрев рантайма: start -> stop, и маркируем успех
+- block:
+    - name: Start HAProxy (bootstrap)
+      service:
+        name: haproxy
+        state: started
+
+    - name: Stop HAProxy (bootstrap)
+      service:
+        name: haproxy
+        state: stopped
+
+    - name: Mark HAProxy initialized
+      file:
+        path: /var/lib/haproxy/.first_start_done
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+  when: not haproxy_first.stat.exists
+  rescue:
+    - name: Explain bootstrap failure in logs
+      debug:
+        msg: "HAProxy bootstrap failed; not marking initialized."
+  tags: install
+
+# 6) Остальное — как у вас, но уже без риска «не установлен пакет / не выполнен bootstrap»
+- block:
+    - name: Deploy maintenance error page
+      template:
+        src: maintenance.http.j2
+        dest: /etc/haproxy/errors/maintenance.http
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
+    - name: Deploy access granted page
+      template:
+        src: access_granted.http.j2
+        dest: /etc/haproxy/errors/access_granted.http
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
+    - name: Ensure admin IPs file exists with static admin_allowed_ips
+      copy:
+        content: |
+          {% for ip in admin_allowed_ips %}
+          {{ ip }}
+          {% endfor %}
+        dest: "{{ admin_ips_file }}"
+        owner: root
+        group: haproxy
+        mode: "0640"
+
+    - name: Ensure socat is present (for runtime socket ops)
+      package:
+        name: socat
+        state: present
+      when: admin_dyn_enabled | default(false)
+      tags: restore-network
+
+    - name: Install runtime update script (no reload)
+      template:
+        src: update-admin-rt.sh.j2
+        dest: /usr/local/sbin/update-admin-rt.sh
+        mode: "0755"
+        owner: root
+        group: root
+      when: admin_dyn_enabled | default(false)
+
+    - name: Install systemd service
+      template:
+        src: update-admin-rt.service.j2
+        dest: /etc/systemd/system/update-admin-rt.service
+        mode: "0644"
+      when: admin_dyn_enabled | default(false)
+
+    - name: Install systemd timer
+      template:
+        src: update-admin-rt.timer.j2
+        dest: /etc/systemd/system/update-admin-rt.timer
+        mode: "0644"
+      when: admin_dyn_enabled | default(false)
+
+    - name: systemd daemon-reload
+      systemd:
+        daemon_reload: true
+      when: admin_dyn_enabled | default(false)
+
+    - name: Enable & start timer
+      systemd:
+        name: update-admin-rt.timer
+        enabled: true
+        state: started
+      when: admin_dyn_enabled | default(false)
+
+    - name: Run once now to populate runtime ACL
+      command: /usr/local/sbin/update-admin-rt.sh
+      changed_when: false
+      failed_when: false
+      when: admin_dyn_enabled | default(false)
+  tags: install

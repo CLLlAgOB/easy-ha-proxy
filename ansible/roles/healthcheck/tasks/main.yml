@@ -1,0 +1,597 @@
+---
+# roles/healthcheck/tasks/main.yml
+
+# ----------------- Подготовка списков -----------------
+
+- name: "Status check | prepare list of systemd services"
+  ansible.builtin.set_fact:
+    status_check_systemd_enabled: >-
+      {{ (status_check_systemd_units | default([]))
+         | selectattr('enabled')
+         | list }}
+
+- name: "Status check | prepare list of Docker containers"
+  ansible.builtin.set_fact:
+    status_check_docker_enabled: >-
+      {{ (status_check_docker_containers | default([]))
+         | selectattr('enabled')
+         | list }}
+
+# ----------------- Проверка systemd-сервисов -----------------
+
+- name: "Status check | systemd is-active for each service"
+  ansible.builtin.command:
+    cmd: "systemctl is-active {{ item.name }}"
+  check_mode: false
+  loop: "{{ status_check_systemd_enabled }}"
+  loop_control:
+    label: "{{ item.label | default(item.name) }}"
+  register: status_check_systemd_result
+  changed_when: false
+  failed_when: false
+  # Reconciliation and snapd may restart units moments before this check;
+  # only a state that survives a few probes is a real problem.
+  retries: "{{ status_check_is_active_retries | default(3) }}"
+  delay: "{{ status_check_is_active_delay | default(4) }}"
+  until: status_check_systemd_result.rc == 0
+
+- name: "Status check | initialize helper daemon version data"
+  ansible.builtin.set_fact:
+    status_check_daemon_versions: {}
+    status_check_daemon_outdated: []
+  changed_when: false
+
+- name: "Status check | inspect installed helper daemon versions"
+  ansible.builtin.stat:
+    path: "{{ item.version_file }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  loop: >-
+    {{
+      status_check_systemd_enabled
+      | selectattr('version_file', 'defined')
+      | list
+    }}
+  loop_control:
+    label: "{{ item.name }}"
+  register: status_check_daemon_version_result
+  changed_when: false
+
+- name: "Status check | prepare helper daemon version map"
+  ansible.builtin.set_fact:
+    status_check_daemon_versions: >-
+      {{
+        status_check_daemon_versions | default({})
+        | combine({
+            item.item.name: {
+              'installed': item.stat.checksum | default('missing'),
+              'source': (
+                lookup(
+                  'ansible.builtin.file',
+                  item.item.version_source,
+                  rstrip=false
+                )
+                | hash('sha256')
+              )
+            }
+          })
+      }}
+  loop: "{{ status_check_daemon_version_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  changed_when: false
+
+- name: "Status check | collect outdated helper daemons"
+  ansible.builtin.set_fact:
+    status_check_daemon_outdated: >-
+      {{
+        status_check_daemon_outdated | default([])
+        + [item.key]
+      }}
+  loop: "{{ (status_check_daemon_versions | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: item.value.installed != item.value.source
+  changed_when: false
+
+- name: "Status check | normalize outdated helper daemon list"
+  ansible.builtin.set_fact:
+    status_check_daemon_outdated: >-
+      {{ status_check_daemon_outdated | default([]) | unique }}
+  changed_when: false
+
+- name: "Status check | summary for systemd services"
+  ansible.builtin.debug:
+    msg: |
+      === СЕРВИСЫ (systemd) ===
+      {% if status_check_systemd_result is not defined
+            or status_check_systemd_result.results | length == 0 %}
+      (Нет сервисов для проверки; см. status_check_systemd_units)
+      {% else %}
+      {%   for r in status_check_systemd_result.results %}
+      {%     set state = ((r.stdout | default('')) | trim) or 'unknown' %}
+      {%     set prefix = 'OK  ' if state == 'active' else 'FAIL' %}
+      {%     if r.item.name in (status_check_daemon_versions | default({})) %}
+      {%       set version = status_check_daemon_versions[r.item.name] %}
+      {%       set current = version.installed == version.source %}
+      [{{ prefix }}] {{ r.item.label | default(r.item.name) }} ({{ r.item.name }}): state={{ state }}, installed={{ version.installed[:12] }}, source={{ version.source[:12] }}, {{ 'current' if current else 'UPDATE AVAILABLE' }}
+      {%     else %}
+      [{{ prefix }}] {{ r.item.label | default(r.item.name) }} ({{ r.item.name }}): {{ state }}
+      {%     endif %}
+      {%   endfor %}
+      {% endif %}
+  changed_when: false
+
+- name: "Status check | prepare scheduled oneshot jobs"
+  ansible.builtin.set_fact:
+    status_check_systemd_jobs_enabled: >-
+      {{
+        status_check_systemd_jobs | default([])
+        | selectattr('enabled')
+        | list
+      }}
+    status_check_systemd_jobs_failed: []
+    status_check_systemd_jobs_never_run: []
+  changed_when: false
+
+- name: "Status check | inspect scheduled oneshot results"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - "{{ item.service }}"
+      - --property=ActiveState
+      - --property=Result
+      - --property=ExecMainStatus
+      - --property=InactiveExitTimestamp
+      - --no-pager
+  check_mode: false
+  loop: "{{ status_check_systemd_jobs_enabled }}"
+  loop_control:
+    label: "{{ item.label }}"
+  register: status_check_systemd_jobs_result
+  changed_when: false
+  failed_when: false
+
+- name: "Status check | inspect timer schedules"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - "{{ item.timer }}"
+      - --property=LastTriggerUSec
+      - --property=NextElapseUSecRealtime
+      - --no-pager
+  check_mode: false
+  loop: "{{ status_check_systemd_jobs_enabled }}"
+  loop_control:
+    label: "{{ item.label }}"
+  register: status_check_systemd_timer_result
+  changed_when: false
+  failed_when: false
+
+- name: "Status check | collect failed scheduled oneshot jobs"
+  ansible.builtin.set_fact:
+    status_check_systemd_jobs_failed: >-
+      {{ status_check_systemd_jobs_failed + [item.item.service] }}
+  loop: "{{ status_check_systemd_jobs_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.label }}"
+  when: >-
+    item.rc != 0
+    or (
+      item.stdout | default('')
+      | regex_search('(?m)^ActiveState=failed$')
+    )
+    or (
+      item.stdout | default('')
+      | regex_search('(?m)^Result=(?!(?:success)?$).+$')
+    )
+    or (
+      item.stdout | default('')
+      | regex_search('(?m)^ExecMainStatus=([1-9][0-9]*)$')
+    )
+  changed_when: false
+
+- name: "Status check | collect scheduled oneshot jobs that have not run yet"
+  ansible.builtin.set_fact:
+    status_check_systemd_jobs_never_run: >-
+      {{ status_check_systemd_jobs_never_run + [item.item.service] }}
+  loop: "{{ status_check_systemd_jobs_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.label }}"
+  when:
+    - item.rc == 0
+    - item.item.service not in status_check_systemd_jobs_failed
+    - >-
+      item.stdout | default('')
+      | regex_search('(?m)^ActiveState=inactive$')
+    - >-
+      item.stdout | default('')
+      | regex_search('(?m)^InactiveExitTimestamp=(?:n/a)?$')
+  changed_when: false
+
+- name: "Status check | summary for scheduled oneshot jobs"
+  ansible.builtin.debug:
+    msg: |
+      === ПЛАНОВЫЕ ONESHOT-ЗАДАЧИ ===
+      {% if status_check_systemd_jobs_result.results | default([]) | length == 0 %}
+      (Нет включённых oneshot-задач)
+      {% else %}
+      {%   for r in status_check_systemd_jobs_result.results %}
+      {%     set timer = status_check_systemd_timer_result.results[loop.index0] %}
+      [{{ 'FAIL' if r.item.service in status_check_systemd_jobs_failed else ('WAIT' if r.item.service in status_check_systemd_jobs_never_run else 'OK  ') }}] {{ r.item.label }} ({{ r.item.service }}): {{ r.stdout | default('нет данных') | replace('\n', ', ') }}; {{ timer.stdout | default('нет расписания') | replace('\n', ', ') }}
+      {%   endfor %}
+      {% endif %}
+  changed_when: false
+
+- name: "Status check | init failed services list"
+  ansible.builtin.set_fact:
+    status_check_systemd_failed: []
+  changed_when: false
+
+- name: "Status check | collect failed systemd services (non-zero rc)"
+  ansible.builtin.set_fact:
+    status_check_systemd_failed: "{{ status_check_systemd_failed + [ item.item.name ] }}"
+  loop: "{{ (status_check_systemd_result.results | default([])) }}"
+  loop_control:
+    label: "{{ item.item.name | default('unknown') }}"
+  when: item.rc != 0
+  changed_when: false
+
+- name: "Status check | collect failed systemd services (bad state)"
+  ansible.builtin.set_fact:
+    status_check_systemd_failed: "{{ status_check_systemd_failed + [ item.item.name ] }}"
+  loop: "{{ (status_check_systemd_result.results | default([])) }}"
+  loop_control:
+    label: "{{ item.item.name | default('unknown') }}"
+  when:
+    - item.rc == 0
+    - (item.stdout | trim) not in ['active']
+  changed_when: false
+
+# ----------------- Проверка Docker-контейнеров -----------------
+
+- name: "Status check | docker containers info"
+  when: status_check_docker_enabled | length > 0
+  community.docker.docker_container_info:
+    name: "{{ item.name }}"
+  loop: "{{ status_check_docker_enabled }}"
+  loop_control:
+    label: "{{ item.label | default(item.name) }}"
+  register: status_check_docker_result
+  failed_when: false
+  ignore_errors: true
+  changed_when: false
+
+- name: "Status check | summary for Docker containers"
+  ansible.builtin.debug:
+    msg: |
+      === КОНТЕЙНЕРЫ (Docker) ===
+      {% if status_check_docker_enabled | length == 0 %}
+      (Нет контейнеров для проверки; см. status_check_docker_containers)
+      {% elif status_check_docker_result is not defined
+              or status_check_docker_result.results | length == 0 %}
+      (Модуль docker_container_info не вернул данных — проверь наличие Docker и коллекции community.docker)
+      {% else %}
+      {%   for r in status_check_docker_result.results %}
+      {%     if not (r.exists | default(false)) %}
+      [FAIL] {{ r.item.label | default(r.item.name) }} ({{ r.item.name }}): not found
+      {%     else %}
+      {%       set st = r.container.State.Status | default('unknown') %}
+      {%       set health = (r.container.State.Health.Status
+                             if r.container.State.Health is defined
+                             else 'n/a') %}
+      {%       set ok = (st == 'running'
+                        and (r.container.State.Health is not defined
+                             or health == 'healthy')) %}
+      [{{ 'OK  ' if ok else 'FAIL' }}] {{ r.item.label | default(r.item.name) }} ({{ r.item.name }}): status={{ st }}, health={{ health }}
+      {%     endif %}
+      {%   endfor %}
+      {% endif %}
+  changed_when: false
+
+- name: "Status check | init failed containers list"
+  ansible.builtin.set_fact:
+    status_check_docker_failed: []
+  changed_when: false
+
+- name: "Status check | collect failed containers"
+  ansible.builtin.set_fact:
+    status_check_docker_failed: "{{ status_check_docker_failed + [ item.item.name ] }}"
+  loop: "{{ (status_check_docker_result.results | default([])) }}"
+  loop_control:
+    label: "{{ item.item.name | default('unknown') }}"
+  when: >
+    status_check_docker_enabled | length > 0 and
+    status_check_docker_result is defined and
+    (
+      not (item.exists | default(false)) or
+      (
+        item.container is defined and
+        (
+          (item.container.State.Status is defined and item.container.State.Status != 'running') or
+          (item.container.State.Health is defined and item.container.State.Health.Status != 'healthy')
+        )
+      )
+    )
+  changed_when: false
+
+# ----------------- Управляемые исполняемые файлы -----------------
+
+- name: "Status check | prepare managed artifacts list"
+  ansible.builtin.set_fact:
+    status_check_managed_artifacts_enabled: >-
+      {{
+        status_check_managed_artifacts | default([])
+        | selectattr('enabled')
+        | list
+      }}
+    status_check_managed_artifact_versions: {}
+    status_check_managed_artifacts_outdated: []
+  changed_when: false
+
+- name: "Status check | inspect managed artifacts"
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  loop: "{{ status_check_managed_artifacts_enabled }}"
+  loop_control:
+    label: "{{ item.label }}"
+  register: status_check_managed_artifact_result
+  changed_when: false
+
+- name: "Status check | prepare managed artifact version map"
+  ansible.builtin.set_fact:
+    status_check_managed_artifact_versions: >-
+      {{
+        status_check_managed_artifact_versions
+        | combine({
+            item.item.name: {
+              'label': item.item.label,
+              'installed': item.stat.checksum | default('missing'),
+              'source': (
+                item.item.expected_checksum
+                if item.item.expected_checksum is defined
+                else (
+                  (
+                    lookup('ansible.builtin.template', item.item.source).splitlines()
+                    | join('%c' | format(10))
+                  ) ~ ('%c' | format(10))
+                  if item.item.source_type | default('file') == 'template'
+                  else lookup(
+                    'ansible.builtin.file',
+                    item.item.source,
+                    rstrip=false
+                  )
+                )
+                | hash('sha256')
+              )
+            }
+          })
+      }}
+  loop: "{{ status_check_managed_artifact_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.label }}"
+  changed_when: false
+
+- name: "Status check | collect outdated managed artifacts"
+  ansible.builtin.set_fact:
+    status_check_managed_artifacts_outdated: >-
+      {{ status_check_managed_artifacts_outdated + [item.key] }}
+  loop: "{{ status_check_managed_artifact_versions | dict2items }}"
+  loop_control:
+    label: "{{ item.value.label }}"
+  when: item.value.installed != item.value.source
+  changed_when: false
+
+- name: "Status check | summary for managed artifacts"
+  ansible.builtin.debug:
+    msg: |
+      === УПРАВЛЯЕМЫЕ СКРИПТЫ / UNIT-ФАЙЛЫ ===
+      {% if status_check_managed_artifact_versions | length == 0 %}
+      (Нет включённых файлов для проверки)
+      {% else %}
+      {%   for name, version in status_check_managed_artifact_versions.items() %}
+      {%     set current = version.installed == version.source %}
+      [{{ 'OK  ' if current else 'UPD ' }}] {{ version.label }}: installed={{ version.installed[:12] }}, source={{ version.source[:12] }}, {{ 'current' if current else 'UPDATE AVAILABLE' }}
+      {%   endfor %}
+      {% endif %}
+  changed_when: false
+
+# ----------------- Версии системных пакетов -----------------
+
+- name: "Status check | initialize package failures"
+  ansible.builtin.set_fact:
+    status_check_package_failed: []
+  changed_when: false
+
+- name: "Status check | installed APT package versions"
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - "--showformat=${Version}"
+      - "{{ item }}"
+  check_mode: false
+  loop: "{{ status_check_apt_packages | default([]) }}"
+  register: status_check_apt_installed_result
+  changed_when: false
+  failed_when: false
+
+- name: "Status check | collect missing APT packages"
+  ansible.builtin.set_fact:
+    status_check_package_failed: >-
+      {{ status_check_package_failed + ['apt:' ~ item.item] }}
+  loop: "{{ status_check_apt_installed_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc != 0
+  changed_when: false
+
+- name: "Status check | APT candidate package versions"
+  ansible.builtin.command:
+    argv:
+      - apt-cache
+      - policy
+      - "{{ item }}"
+  check_mode: false
+  loop: "{{ status_check_apt_packages | default([]) }}"
+  register: status_check_apt_candidate_result
+  changed_when: false
+  failed_when: false
+
+- name: "Status check | summary for APT package versions"
+  ansible.builtin.debug:
+    msg: |
+      === ВЕРСИИ APT-ПАКЕТОВ СЛУЖБ ===
+      {% for r in status_check_apt_installed_result.results | default([]) %}
+      {%   set policy = status_check_apt_candidate_result.results[loop.index0].stdout | default('') %}
+      {%   set candidate = (policy | regex_findall('Candidate:\\s*(\\S+)') | first | default('unknown')) %}
+      [{{ 'FAIL' if r.rc != 0 else ('UPD ' if r.stdout != candidate and candidate not in ['unknown', '(none)'] else 'OK  ') }}] {{ r.item }}: installed={{ r.stdout | default('missing', true) }}, candidate={{ candidate }}
+      {% endfor %}
+  changed_when: false
+
+- name: "Status check | installed snap package versions"
+  ansible.builtin.command:
+    argv:
+      - snap
+      - list
+      - "{{ item }}"
+  check_mode: false
+  loop: "{{ status_check_snap_packages | default([]) }}"
+  register: status_check_snap_result
+  changed_when: false
+  failed_when: false
+
+- name: "Status check | collect missing snap packages"
+  ansible.builtin.set_fact:
+    status_check_package_failed: >-
+      {{ status_check_package_failed + ['snap:' ~ item.item] }}
+  loop: "{{ status_check_snap_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: (item.rc | default(1)) != 0
+  changed_when: false
+
+- name: "Status check | summary for snap package versions"
+  ansible.builtin.debug:
+    msg: |
+      === ВЕРСИИ SNAP-ПАКЕТОВ СЛУЖБ ===
+      {% for r in status_check_snap_result.results | default([]) %}
+      [{{ 'OK  ' if (r.rc | default(1)) == 0 else 'FAIL' }}] {{ r.item }}: {{ (r.stdout_lines | default([]) | last) if (r.rc | default(1)) == 0 else (r.stderr | default('не установлен', true)) }}
+      {% endfor %}
+  changed_when: false
+
+# ----------------- Уникальные списки проблем -----------------
+
+- name: "Status check | unique failed services list"
+  ansible.builtin.set_fact:
+    status_check_systemd_failed_unique: "{{ (status_check_systemd_failed | default([])) | unique }}"
+  changed_when: false
+
+- name: "Status check | unique failed containers list"
+  ansible.builtin.set_fact:
+    status_check_docker_failed_unique: "{{ (status_check_docker_failed | default([])) | unique }}"
+  changed_when: false
+
+# ----------------- Итоговая сводка -----------------
+
+- name: "Status check | final summary"
+  ansible.builtin.debug:
+    msg: |
+      === ИТОГОВАЯ ПРОВЕРКА ===
+      Сервисы systemd:
+        проблемные: {{ status_check_systemd_failed_unique | join(', ') | default('нет', true) }}
+      Вспомогательные демоны:
+        требуют обновления: {{ status_check_daemon_outdated | join(', ') | default('нет', true) }}
+      Плановые oneshot-задачи:
+        проблемные: {{ status_check_systemd_jobs_failed | join(', ') | default('нет', true) }}
+        ещё не запускались: {{ status_check_systemd_jobs_never_run | join(', ') | default('нет', true) }}
+      Управляемые скрипты и unit-файлы:
+        требуют обновления: {{ status_check_managed_artifacts_outdated | join(', ') | default('нет', true) }}
+      Пакеты служб:
+        отсутствуют: {{ status_check_package_failed | join(', ') | default('нет', true) }}
+      Контейнеры Docker:
+        проблемные: {{ status_check_docker_failed_unique | join(', ') | default('нет', true) }}
+  changed_when: false
+
+# ----------------- Логи systemd для проблемных сервисов -----------------
+
+- name: "Status check | show last journal lines for failed services"
+  when:
+    - status_check_systemd_failed_unique | length > 0
+  block:
+    - name: "Status check | journalctl for failed services"
+      ansible.builtin.command:
+        cmd: "journalctl -u {{ item }} -n {{ status_check_journal_lines | default(40) }} --no-pager"
+      check_mode: false
+      loop: "{{ status_check_systemd_failed_unique }}"
+      loop_control:
+        label: "{{ item }}"
+      register: status_check_journal_output
+      changed_when: false
+      failed_when: false
+
+    - name: "Status check | print logs for failed services"
+      ansible.builtin.debug:
+        msg: |
+          === ЛОГИ systemd для {{ item.item }} (последние {{ status_check_journal_lines | default(40) }} строк) ===
+          {{ item.stdout | default('нет логов') }}
+      loop: "{{ status_check_journal_output.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      changed_when: false
+
+# ----------------- docker compose logs для проблемных контейнеров -----------------
+
+- name: "Status check | show docker compose logs for failed containers"
+  when:
+    - status_check_docker_logs_enabled | default(true) | bool
+    - status_check_docker_failed_unique | length > 0
+  block:
+    - name: "Status check | docker compose logs (failed containers)"
+      ansible.builtin.command:
+        cmd: >
+          docker compose logs
+          --tail {{ status_check_docker_log_lines | default(80) }}
+          {{ item }}
+      args:
+        chdir: "{{ status_check_docker_logs_compose_dir | default('/opt/authelia') }}"
+      check_mode: false
+      loop: "{{ status_check_docker_failed_unique }}"
+      loop_control:
+        label: "{{ item }}"
+      register: status_check_docker_logs_output
+      changed_when: false
+      failed_when: false
+
+    - name: "Status check | print docker logs for failed containers"
+      ansible.builtin.debug:
+        msg: |
+          === ЛОГИ docker compose для {{ item.item }} (последние {{ status_check_docker_log_lines | default(80) }} строк) ===
+          {{ item.stdout | default('нет логов или команда docker compose не выполнилась') }}
+      loop: "{{ status_check_docker_logs_output.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      changed_when: false
+
+# ----------------- Опциональный fail в конце -----------------
+
+- name: "Status check | fail if there are problems (optional)"
+  ansible.builtin.fail:
+    msg: |
+      Найдены проблемы с управляемыми компонентами:
+        systemd: {{ status_check_systemd_failed_unique | join(', ') | default('нет', true) }}
+        oneshot: {{ status_check_systemd_jobs_failed | join(', ') | default('нет', true) }}
+        artifacts: {{ status_check_managed_artifacts_outdated | join(', ') | default('нет', true) }}
+        packages: {{ status_check_package_failed | join(', ') | default('нет', true) }}
+        docker: {{ status_check_docker_failed_unique | join(', ') | default('нет', true) }}
+  when:
+    - status_check_fail_on_error | default(false) | bool
+    - status_check_systemd_failed_unique | length > 0
+      or status_check_systemd_jobs_failed | length > 0
+      or status_check_managed_artifacts_outdated | length > 0
+      or status_check_package_failed | length > 0
+      or status_check_docker_failed_unique | length > 0

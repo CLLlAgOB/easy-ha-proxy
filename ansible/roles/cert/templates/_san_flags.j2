@@ -1,0 +1,1 @@
+{{ (['-d ' ~ obj.domain] + (obj.alt_names | default([]) | map('regex_replace', '^(.*)$', '-d \\1') | list)) | join(' ') }}

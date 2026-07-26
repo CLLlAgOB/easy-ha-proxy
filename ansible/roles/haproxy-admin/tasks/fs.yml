@@ -1,0 +1,74 @@
+---
+- name: "haproxy-admin | fs | prepare directories, files and permissions"
+  block:
+    - name: Ensure private runtime directory exists
+      ansible.builtin.file:
+        path: /run/easy-ha-proxy
+        state: directory
+        owner: root
+        group: "{{ app_group }}"
+        mode: "0750"
+
+    - name: Ensure app dir exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Ensure app config dir exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}/config"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Ensure backups dir exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}/backups"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Ensure the local GeoIP data directory exists
+      ansible.builtin.file:
+        path: "{{ geo_ip_dir }}"
+        state: directory
+        owner: root
+        group: haproxy
+        mode: "0755"
+      when: geo_ip_dir is defined and geo_ip_dir|length > 0
+
+    - name: Ensure whitelist.geo exists
+      ansible.builtin.file:
+        path: "{{ whitelist_geo_file }}"
+        state: file
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+
+    - name: Stat whitelist_global_file
+      ansible.builtin.stat:
+        path: "{{ whitelist_global_file }}"
+      register: whitelist_stat
+
+    - name: Create whitelist_global_file if it does not exist
+      ansible.builtin.file:
+        path: "{{ whitelist_global_file }}"
+        state: touch
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+      when: not whitelist_stat.stat.exists
+
+    - name: Ensure data dir exists (for container)
+      ansible.builtin.file:
+        path: "{{ haproxy_admin_data_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0750"
+      when: haproxy_admin_use_docker | bool

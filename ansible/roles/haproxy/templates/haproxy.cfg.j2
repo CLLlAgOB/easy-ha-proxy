@@ -1,0 +1,1031 @@
+{# ============================================================================
+  HAProxy – универсальный шаблон (Ansible/Jinja2)
+  ============================================================================ #}
+{# -------------------------------
+   GLOBAL JINJA VARS / UTILS
+   ------------------------------- #}
+{# Ansible may render after the web UI has changed its runtime YAML while the
+   installer-owned files under /etc/easy-ha-proxy are intentionally unchanged.
+   Only HAProxy-render settings are accepted from the app-owned vars.yml. This
+   prevents values such as haproxy_admin_image, domains, certificate paths, or
+   secrets from becoming root Ansible inputs. Explicit migration workflows set
+   haproxy_admin_sync_managed_config=true and therefore pass empty namespaces. #}
+{% set runtime_vars = easy_ha_proxy_runtime_vars | default({}) %}
+{% set runtime_websites = easy_ha_proxy_runtime_websites | default({}) %}
+{% set runtime_tcp = easy_ha_proxy_runtime_tcp | default({}) %}
+{% set config_generation = easy_ha_proxy_config_generation | default('0000000000000000000000000000000000000000000000000000000000000000', true) %}
+{% set site_defaults = runtime_vars.get('site_defaults', site_defaults | default({})) %}
+{% set enable_http80 = runtime_vars.get('enable_http80', enable_http80 | default(false)) %}
+{% set admin_ips_enabled = runtime_vars.get('admin_ips_enabled', admin_ips_enabled | default(true)) %}
+{% set admin_authelia_enabled = runtime_vars.get('admin_authelia_enabled', admin_authelia_enabled | default(authelia_enabled | default(true))) %}
+{% set enable_geoip = runtime_vars.get('enable_geoip', enable_geoip | default(false)) %}
+{% set geoip_mode = runtime_vars.get('geoip_mode', geoip_mode | default('allow')) %}
+{% set haproxy_nbthread = runtime_vars.get('haproxy_nbthread', haproxy_nbthread | default(none)) %}
+{% set haproxy_nbthread_max = runtime_vars.get('haproxy_nbthread_max', haproxy_nbthread_max | default(2)) %}
+{% set haproxy_socket = runtime_vars.get('haproxy_socket', haproxy_socket | default('/run/haproxy/admin.sock', true)) %}
+{% set haproxy_socket_group = runtime_vars.get('haproxy_socket_group', haproxy_socket_group | default('hadmin', true)) %}
+{% set admin_password = runtime_vars.get('admin_password', admin_password | default(false)) %}
+{% set peers_enabled = runtime_vars.get('peers_enabled', peers_enabled | default(true)) %}
+{% set peers_name = runtime_vars.get('peers_name', peers_name | default('bancluster')) %}
+{% set localpeer = runtime_vars.get('localpeer', localpeer | default('ha-local')) %}
+{% set peers_bind = runtime_vars.get('peers_bind', peers_bind | default('127.0.0.1:10240')) %}
+{% set export_prometheus = runtime_vars.get('export_prometheus', export_prometheus | default(false)) %}
+{% set prometheus_port = runtime_vars.get('prometheus_port', prometheus_port | default(8404)) %}
+{% set sd = site_defaults %}
+{# гарантируем списки #}
+{% set sites = (runtime_websites.get('sites', sites | default([], true))) | list %}
+{% set tcp_proxies = (runtime_tcp.get('tcp_proxies', runtime_tcp.get('tcp', tcp_proxies | default([], true)))) | list %}
+{# утилиты #}
+{% macro san(v) -%}{{ (v | default('')) | regex_replace('[^A-Za-z0-9_]', '_') }}{%- endmacro %}
+{% macro sanitize(v) -%}{{ (v | default('')) | regex_replace('[^A-Za-z0-9_]', '_') }}{%- endmacro %}
+{# defaults paths #}
+{% set backend_ssl_verify_ca_file = backend_ssl_verify_ca_file | default('/etc/ssl/certs/ca-certificates.crt') %}
+{% set whitelist_geo_file = whitelist_geo_file | default('/etc/haproxy/geoip/whitelist.geo') %}
+{% set whitelist_global_file = whitelist_global_file | default('/etc/haproxy/whitelist.ip') %}
+{% set admin_ips_file = admin_ips_file | default('/etc/haproxy/admin.allow') %}
+{# Critical runtime socket values must never render as empty. Older installer
+   configs did not persist these role defaults into the UI runtime vars.yml. #}
+{% set haproxy_socket = haproxy_socket | default('/run/haproxy/admin.sock', true) %}
+{% set haproxy_socket_group = haproxy_socket_group | default('hadmin', true) %}
+{# admin flags #}
+{% set admin_password = admin_password | default(false) %}
+{% set admin_ips_enabled = admin_ips_enabled | default(true) %}
+{# threads: respect one-vCPU VMs and allow an explicit override #}
+{% set available_cpus = [ansible_processor_vcpus | default(1) | int, 1] | max %}
+{% set thread_limit = [haproxy_nbthread_max | default(2) | int, 1] | max %}
+{% set automatic_threads = [available_cpus, thread_limit] | min %}
+{% set haproxy_threads = haproxy_nbthread | default(automatic_threads, true) | int %}
+{# peers flags #}
+{% set peers_enabled = peers_enabled | default(true) %}
+{% set peers_name = peers_name | default('bancluster') %}
+{% set localpeer = localpeer | default('ha-local') %}
+{% set peers_bind = peers_bind | default('127.0.0.1:10240') %}
+{# authelia global flags #}
+{% set authelia_enabled = authelia_enabled | default(true) %}
+{% set _admin_authelia_raw = admin_authelia_enabled | default(authelia_enabled) %}
+{% set admin_authelia_enabled = authelia_enabled and _admin_authelia_raw %}
+{# passthrough sites #}
+{% set passthru_sites = sites | selectattr('tcp_passthrough','defined') | selectattr('tcp_passthrough') | list %}
+{% set has_passthru = (passthru_sites | length > 0) %}
+{% set has_tcp_proxies = (tcp_proxies | length > 0) %}
+#################################
+# GLOBAL
+#################################
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    nbthread {{ haproxy_threads }}
+    maxconn 6000
+    chroot /var/lib/haproxy
+    stats socket {{ haproxy_socket }} mode 660 user root group {{ haproxy_socket_group }} level admin expose-fd listeners
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    ca-base /etc/ssl/certs
+    crt-base /etc/ssl/private
+    ssl-default-bind-ciphersuites TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256
+    ssl-default-bind-ciphers ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256
+    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+    tune.bufsize 32768
+    tune.recv_enough 16384
+    tune.ssl.default-dh-param 2048
+    tune.ssl.cachesize 10000
+    tune.ssl.lifetime 3600
+    tune.idle-pool.shared on
+    tune.stick-counters 4
+
+    localpeer {{ localpeer }}
+
+{% if authelia_enabled %}
+    lua-prepend-path /etc/haproxy/lua/?/http.lua
+    lua-prepend-path /etc/haproxy/lua/?.lua
+    lua-load /etc/haproxy/lua/auth-request.lua
+{% endif %}
+
+#################################
+# DEFAULTS
+#################################
+defaults
+    log global
+    mode http
+    option dontlognull
+    option http-keep-alive
+    timeout connect 5s
+    timeout client 15m
+    timeout server 15m
+
+    # Важно: txn.ban_log может быть пустой
+    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %r"
+
+    errorfile 400 /etc/haproxy/errors/400.http
+    errorfile 403 /etc/haproxy/errors/403.http
+    errorfile 408 /etc/haproxy/errors/408.http
+    errorfile 500 /etc/haproxy/errors/500.http
+    errorfile 502 /etc/haproxy/errors/502.http
+    errorfile 503 /etc/haproxy/errors/503.http
+    errorfile 504 /etc/haproxy/errors/504.http
+
+{% if peers_enabled %}
+#################################
+# PEERS (репликация только бан-таблицы)
+#################################
+peers {{ peers_name }}
+    peer {{ localpeer }} {{ peers_bind }}
+{% endif %}
+
+#################################
+# STICK-TABLES (глобальные)
+#################################
+backend tbl_ban
+    stick-table type ip size 200k expire {{ sd.ban_expire | default('168h') }} store gpc0,gpt0{% if peers_enabled %} peers {{ peers_name }}{% endif %}
+
+{% if authelia_enabled %}
+backend tbl_ip_auth
+    stick-table type ip size 200k expire {{ sd.auth_ip_expire | default('9h') }} store gpc0{% if peers_enabled %} peers {{ peers_name }}{% endif %}
+{% endif %}
+
+{# per-site tables: err + optional rate #}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set err_window = s.err_window | default(sd.err_window | default('20s')) %}
+{% set rate_window = s.rate_window | default(sd.rate_window | default('20s')) %}
+{% set max_req_rate = (s.max_req_rate | default(0)) | int %}
+
+backend tbl_err_{{ id }}
+    stick-table type ip size {{ s.err_size | default('50k') }} expire {{ err_window }} store http_err_rate({{ err_window }})
+
+{% if max_req_rate > 0 %}
+backend tbl_rate_{{ id }}
+    stick-table type ip size {{ s.rate_size | default('200k') }} expire {{ rate_window }} store http_req_rate({{ rate_window }})
+{% endif %}
+
+{% endfor %}
+
+backend tbl_err_other
+    stick-table type ip size {{ sd.other_err_size | default('100k') }} expire {{ sd.other_err_window | default('20s') }} store http_err_rate({{ sd.other_err_window | default('20s') }})
+
+{% if has_passthru %}
+backend tbl_nosni_tcp
+    stick-table type ip size 100k expire {{ sd.nosni_tcp_window | default('20s') }} store conn_rate({{ sd.nosni_tcp_window | default('20s') }})
+{% endif %}
+
+{% if has_passthru %}
+#################################
+# TCP SNI router (:443) для passthrough доменов
+#################################
+frontend fe_tls_router
+    mode tcp
+    bind *:443
+    option tcplog
+
+    acl ip_whitelist src -f {{ whitelist_global_file }}
+{% if admin_ips_enabled %}
+    acl allowed_admin src -f {{ admin_ips_file }}
+{% endif %}
+{% if authelia_enabled %}
+    acl ip_auth_ok src_get_gpc0(tbl_ip_auth) gt 0
+{% endif %}
+    tcp-request connection reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+
+    acl sni_found req.ssl_sni -m found
+    tcp-request content track-sc0 src table tbl_nosni_tcp if !sni_found
+    acl nosni_too_often sc0_conn_rate(tbl_nosni_tcp) gt {{ sd.nosni_tcp_limit | default(5) }}
+    tcp-request content reject if nosni_too_often !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% for ps in passthru_sites %}
+{% set p = sd | combine(ps, recursive=True) %}
+{% set pid = san(p.name) %}
+{% set hostnames = [p.domain] + (p.alt_names | default([])) %}
+    acl sni_{{ pid }} req.ssl_sni -i {{ hostnames | join(' ') }}
+    use_backend be_{{ pid }}_tcp if sni_{{ pid }}
+{% endfor %}
+
+    default_backend be_tls_terminator
+{% endif %}
+
+#################################
+# FRONTEND HTTPS (:443) с TLS-терминацией
+#################################
+frontend fe_https
+{% if has_passthru %}
+    bind 127.0.0.1:8443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 accept-proxy no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+{% else %}
+    bind *:443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+{% endif %}
+    mode http
+    option dontlognull
+
+    # Slowloris
+    timeout http-request {{ sd.http_request_timeout | default('5s') }}
+    timeout client {{ sd.frontend_client_timeout | default('300s') }}
+
+    # lists
+    acl ip_whitelist src -f {{ whitelist_global_file }}
+{% if admin_ips_enabled %}
+    acl allowed_admin src -f {{ admin_ips_file }}
+{% endif %}
+{% if authelia_enabled %}
+    acl ip_auth_ok src_get_gpc0(tbl_ip_auth) gt 0
+{% endif %}
+
+    # Conn-flood limits (таблица прямо в fe_https)
+{% set conn_expire = sd.conn_table_expire | default('30s') %}
+{% set conn_rate_window = sd.conn_rate_window | default('10s') %}
+{% set conn_rate_burst = sd.conn_rate_burst | default(40) %}
+{% set conn_cur_limit = sd.conn_cur_limit | default(100) %}
+    stick-table type ip size 200k expire {{ conn_expire }} store conn_rate({{ conn_rate_window }}),conn_cur
+    tcp-request connection track-sc0 src
+    acl conn_rate_burst sc0_conn_rate(fe_https) gt {{ conn_rate_burst }}
+    acl conn_too_many  sc0_conn_cur(fe_https)  gt {{ conn_cur_limit }}
+    tcp-request connection reject if conn_rate_burst !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    tcp-request connection reject if conn_too_many  !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    # SNI / HOST
+    acl sni_found ssl_fc_sni -m found
+
+{% set sni_domains = [] %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set _ = sni_domains.append(s.domain) %}
+{% for an in (s.alt_names | default([])) %}
+{% set _ = sni_domains.append(an) %}
+{% endfor %}
+{% endfor %}
+{% if admin_domain is defined %}
+{% set _ = sni_domains.append(admin_domain) %}
+{% endif %}
+{% if aut_domain is defined and authelia_enabled %}
+{% set _ = sni_domains.append(aut_domain) %}
+{% endif %}
+
+    acl valid_sni ssl_fc_sni -i {{ sni_domains | unique | join(' ') }}
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set hostnames = [s.domain] + (s.alt_names | default([])) %}
+    acl host_{{ id }} hdr(host) -i {{ hostnames | join(' ') }}
+{% endfor %}
+
+{% if admin_domain is defined %}
+    acl host_admin hdr(host) -i {{ admin_domain }}
+    acl path_stats path_beg -i /stats
+    # Local-only route used after a config reload to prove the admin backend
+    # is still reachable through the real TLS frontend, SNI, and Host ACL.
+    acl local_control_plane_probe src 127.0.0.1
+    acl admin_control_plane_probe_path path -i /api/control-plane-health
+    acl admin_control_plane_probe_method method GET
+    http-request set-var(txn.admin_control_plane_probe) bool(true) if host_admin local_control_plane_probe admin_control_plane_probe_path admin_control_plane_probe_method
+    acl admin_control_plane_probe var(txn.admin_control_plane_probe) -m bool
+{% endif %}
+
+{% if aut_domain is defined and authelia_enabled %}
+    acl host_authelia hdr(host) -i {{ aut_domain }}
+    acl path_access_granted path -i /access_granted
+{% endif %}
+
+{% set all_hosts = [] %}
+{% if admin_domain is defined %}{% set _ = all_hosts.append(admin_domain) %}{% endif %}
+{% if aut_domain is defined and authelia_enabled %}{% set _ = all_hosts.append(aut_domain) %}{% endif %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set _ = all_hosts.append(s.domain) %}
+{% for an in (s.alt_names | default([])) %}{% set _ = all_hosts.append(an) %}{% endfor %}
+{% endfor %}
+    acl valid_host hdr(host) -i {{ all_hosts | unique | join(' ') }}
+
+    # ---- Исключения из учёта ошибок (txn-флаги) ----
+    http-request set-var(txn.other_excl) bool(false)
+
+    # ---- Исключения из учёта OTHER-ошибок (tbl_err_other) для запросов БЕЗ SNI ----
+    # Управляется через site_defaults:
+    #   other_err_exclude_enabled: true
+    #   other_err_exclude_exact:
+    #     - { path: "/", methods: ["GET"] }
+{% set _other_excl_enabled = sd.other_err_exclude_enabled | default(false) %}
+{% set _other_excl_list = sd.other_err_exclude_exact | default([]) %}
+
+{% if _other_excl_enabled and (_other_excl_list | length > 0) %}
+{% for ex in _other_excl_list %}
+{% set ex_path = ex.path | default('') %}
+{% set ex_methods = ex.methods | default([]) %}
+
+{% if ex_path %}
+    acl other_excl_{{ loop.index }}_path path -i {{ ex_path }}
+{% if ex_methods and (ex_methods | length > 0) %}
+    acl other_excl_{{ loop.index }}_meth method {{ ex_methods | join(' ') }}
+    http-request set-var(txn.other_excl) bool(true) if !{ var(txn.other_excl) -m bool } other_excl_{{ loop.index }}_path other_excl_{{ loop.index }}_meth
+{% else %}
+    http-request set-var(txn.other_excl) bool(true) if !{ var(txn.other_excl) -m bool } other_excl_{{ loop.index }}_path
+{% endif %}
+{% endif %}
+
+{% endfor %}
+{% endif %}
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+    http-request set-var(txn.site_{{ id }}_excl) bool(false)
+{% endfor %}
+
+    # ---- GEO (опционально) ----
+{% if enable_geoip | default(false) %}
+    # Country networks derived locally from the active DB-IP MMDB release.
+    acl geo_allowed   src -f /etc/haproxy/geoip/current/allowed.geo
+    # Static bypass list managed separately from the downloaded database.
+    acl geo_whitelist src -f {{ whitelist_geo_file }}
+{% if authelia_enabled %}
+    # Successful Authelia authorization also bypasses the GeoIP deny rules.
+{% endif %}
+
+    {# домены, где GEO выключен (совместимость со старым и новым стилем) #}
+    {% set geo_bypass = [] %}
+    {% for site in sites %}
+      {% set s = sd | combine(site, recursive=True) %}
+      {% if s.geo_disable | default(false) %}
+        {% set geo_disabled = true %}
+      {% elif site.geo is defined %}
+        {% set geo_disabled = site.geo is sameas false %}
+      {% elif s.access_gate | default(false) %}
+        {# The authorization gate stays reachable worldwide unless the site
+           explicitly opts back into GeoIP filtering. #}
+        {% set geo_disabled = true %}
+      {% elif sd.geo is defined %}
+        {% set geo_disabled = sd.geo is sameas false %}
+      {% else %}
+        {% set geo_disabled = not (s.enable_geoip | default(true)) %}
+      {% endif %}
+      {% if geo_disabled %}
+        {% set _ = geo_bypass.append(s.domain) %}
+        {% for an in (s.alt_names | default([])) %}{% set _ = geo_bypass.append(an) %}{% endfor %}
+      {% endif %}
+    {% endfor %}
+    {% if geo_bypass | length > 0 %}
+    acl geo_bypass hdr(host) -i {{ geo_bypass | unique | join(' ') }}
+    {% endif %}
+
+    {# домены, где GEO применяется #}
+    {% set geo_names = [] %}
+    {% for site in sites %}
+      {% set s = sd | combine(site, recursive=True) %}
+      {% if s.geo_disable | default(false) %}
+        {% set geo_disabled = true %}
+      {% elif site.geo is defined %}
+        {% set geo_disabled = site.geo is sameas false %}
+      {% elif s.access_gate | default(false) %}
+        {# The authorization gate stays reachable worldwide unless the site
+           explicitly opts back into GeoIP filtering. #}
+        {% set geo_disabled = true %}
+      {% elif sd.geo is defined %}
+        {% set geo_disabled = sd.geo is sameas false %}
+      {% else %}
+        {% set geo_disabled = not (s.enable_geoip | default(true)) %}
+      {% endif %}
+      {# A non-empty raw site override uses its own per-country ACL below.
+         Empty or absent keeps the historical global allowed.geo behavior. #}
+      {% set site_geo_countries = site.geo_countries | default([]) %}
+      {% if not geo_disabled and not site_geo_countries %}
+        {% set _ = geo_names.append(s.domain) %}
+        {% for an in (s.alt_names | default([])) %}{% set _ = geo_names.append(an) %}{% endfor %}
+      {% endif %}
+    {% endfor %}
+
+    {% set geo_mode = geoip_mode | default('allow') %}
+    {% if geo_names | length > 0 %}
+    acl geo_filter_domains hdr(host) -i {{ geo_names | unique | join(' ') }}
+
+    {% if geo_mode == 'allow' %}
+    http-request deny status 451 if geo_filter_domains !geo_allowed !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %} !geo_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if geo_bypass|length > 0 %} !geo_bypass{% endif %}
+
+    {% else %}
+    http-request deny status 451 if geo_filter_domains  geo_allowed !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %} !geo_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if geo_bypass|length > 0 %} !geo_bypass{% endif %}
+
+    {% endif %}
+    {% endif %}
+
+    {# Optional per-site country subsets. The updater materializes one CIDR
+       file per globally selected country in the active release. #}
+    {% for site in sites %}
+      {% set s = sd | combine(site, recursive=True) %}
+      {% set id = sanitize(s.name) %}
+      {% set site_geo_countries = site.geo_countries | default([]) %}
+      {% if s.geo_disable | default(false) %}
+        {% set geo_disabled = true %}
+      {% elif site.geo is defined %}
+        {% set geo_disabled = site.geo is sameas false %}
+      {% elif s.access_gate | default(false) %}
+        {# The authorization gate stays reachable worldwide unless the site
+           explicitly opts back into GeoIP filtering. #}
+        {% set geo_disabled = true %}
+      {% elif sd.geo is defined %}
+        {% set geo_disabled = sd.geo is sameas false %}
+      {% else %}
+        {% set geo_disabled = not (s.enable_geoip | default(true)) %}
+      {% endif %}
+      {% if not geo_disabled and site_geo_countries %}
+        {% for country in site_geo_countries | unique %}
+    acl geo_allowed_{{ id }} src -f /etc/haproxy/geoip/current/{{ country | upper }}.cidr
+        {% endfor %}
+        {% if geo_mode == 'allow' %}
+    http-request deny status 451 if host_{{ id }} !geo_allowed_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %} !geo_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}
+        {% else %}
+    http-request deny status 451 if host_{{ id }}  geo_allowed_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %} !geo_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}
+        {% endif %}
+      {% endif %}
+    {% endfor %}
+{% endif %}
+
+
+    # ---- Zero-trust (опционально) ----
+{% if authelia_enabled %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{# The gate itself must stay reachable for unauthorized IPs, otherwise nobody
+   could ever log in to become authorized. #}
+{% if (s.zero_trust | default(false)) and not (s.access_gate | default(false)) %}
+    http-request deny status 451 if host_{{ id }} !ip_auth_ok !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
+{% endfor %}
+{% endif %}
+
+    # ---- Трекинг ошибок (всё через sc1, но с защитой от множественных матчей) ----
+    http-request set-var(txn._err_tracked) bool(false)
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set _err_mode = s.err_ignore_rules | default(sd.err_ignore_rules_default | default(false)) %}
+{% if _err_mode != 'ignore' %}
+    http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool }
+    http-request set-var(txn._err_tracked) bool(true) if host_{{ id }} !{ var(txn._err_tracked) -m bool }
+{% endif %}
+{% endfor %}
+
+    # всё, что “мимо” валидного SNI/Host — в tbl_err_other (ровно один раз)
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
+    http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
+
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool }
+    http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool }
+
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
+    http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
+
+    # ---- Инициализация переменных бана на каждый запрос ----
+    http-request unset-var(txn.ban_code)
+    http-request unset-var(txn.ban_reason)
+    http-request unset-var(txn.ban_log)
+    http-request set-var(txn.is_new_ban) bool(false)
+
+    # Уже забаненный IP
+    acl already_banned src_get_gpc0(tbl_ban) gt 0
+
+    # ---- Пороговые значения (ошибки 4xx) ----
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set err_limit = s.err_limit | default(sd.err_limit | default(20)) %}
+    acl too_many_errs_{{ id }} src_http_err_rate(tbl_err_{{ id }}) gt {{ err_limit }}
+    http-request set-var(txn.ban_code)   int(10) if too_many_errs_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request set-var(txn.ban_reason) str("ERR_LIMIT_SITE name={{ s.name }} limit={{ err_limit }}") if too_many_errs_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endfor %}
+
+{% set other_err_limit = sd.other_err_limit | default(20) %}
+    acl too_many_errs_other src_http_err_rate(tbl_err_other) gt {{ other_err_limit }}
+    http-request set-var(txn.ban_code)   int(20) if too_many_errs_other !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request set-var(txn.ban_reason) str("ERR_LIMIT_OTHER limit={{ other_err_limit }}") if too_many_errs_other !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    # ---- Rate-limit (опционально) ----
+    http-request set-var(txn._rate_tracked) bool(false)
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set max_req_rate = (s.max_req_rate | default(0)) | int %}
+{% if max_req_rate > 0 %}
+    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
+
+    acl too_fast_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) gt {{ max_req_rate }}
+
+{% if s.rate_ban | default(false) %}
+    http-request set-var(txn.ban_code)   int(30) if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request set-var(txn.ban_reason) str("RATE_LIMIT_SITE name={{ s.name }} max_req_rate={{ max_req_rate }}") if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
+
+{% endif %}
+{% endfor %}
+
+    # --- Итоговый триггер бана ---
+    acl ban_trigger var(txn.ban_code) -m int gt 0
+
+    # 1) Уже забаненный IP — режем сразу
+    http-request set-var-fmt(txn.ban_log) " ban_val=1 ban_code=%[src_get_gpt0(tbl_ban)] ban_reason=\"ALREADY_BANNED\"" if already_banned !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request deny status 423 if already_banned !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    # 2) Новый бан — фиксируем флаг ДО изменения таблицы
+    http-request set-var(txn.is_new_ban) bool(true) if ban_trigger !already_banned !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    # Новый бан: пишем в tbl_ban
+    http-request track-sc2 src table tbl_ban if { var(txn.is_new_ban) -m bool }
+    http-request set-var(txn._incban) src_inc_gpc0(tbl_ban) if { var(txn.is_new_ban) -m bool }
+    http-request sc-set-gpt0(2) var(txn.ban_code) if { var(txn.is_new_ban) -m bool }
+
+    # лог только на событии бана
+    http-request set-var-fmt(txn.ban_log) " ban_val=1 ban_code=%[var(txn.ban_code)] ban_reason=\"%[var(txn.ban_reason)]\"" if { var(txn.is_new_ban) -m bool }
+
+    http-request deny status 423 if { var(txn.is_new_ban) -m bool }
+
+    # ---- Admin-домен / защита ----
+{% if admin_domain is defined %}
+{% if admin_ips_enabled %}
+    http-request deny status 403 if host_admin !allowed_admin !admin_control_plane_probe
+{% endif %}
+{% if (not admin_authelia_enabled) and admin_password %}
+    acl AuthOK http_auth(stats-auth)
+    http-request auth realm "HAProxy Stats" if host_admin path_stats !AuthOK
+    http-request auth realm "ADMIN UI"     if host_admin !path_stats !AuthOK !admin_control_plane_probe
+{% endif %}
+{% endif %}
+
+    # ---- Лимиты запросов (429) если rate_ban выключен ----
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set max_req_rate = (s.max_req_rate | default(0)) | int %}
+{% if max_req_rate > 0 and not (s.rate_ban | default(false)) %}
+    http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
+{% endfor %}
+
+    # ---- Валидация SNI/Host (400) ----
+    http-request deny status 400 if !sni_found
+    http-request deny status 400 if sni_found !valid_sni
+    http-request deny status 400 if !valid_host
+
+    # ---- Доверенная proxy-граница для admin UI ----
+    http-request del-header Remote-User
+    http-request del-header Remote-Groups
+    http-request del-header Remote-Name
+    http-request del-header Remote-Email
+    http-request del-header X-Easy-HA-Proxy-Secret
+    http-request del-header X-Easy-HAProxy-Config-Generation
+    http-request del-header X-Forwarded-For
+    http-request set-header X-Forwarded-For %[src]
+{% if authelia_enabled %}
+    # ---- Заголовки для Authelia ForwardAuth ----
+    http-request set-var(req.scheme) str(https) if { ssl_fc }
+    http-request set-var(req.scheme) str(http)  if !{ ssl_fc }
+    http-request set-var(req.questionmark) str(?) if { query -m found }
+
+    http-request set-header X-Forwarded-Method %[method]
+    http-request set-header X-Forwarded-Proto  %[var(req.scheme)]
+    http-request set-header X-Forwarded-Host   %[req.hdr(Host)]
+    http-request set-header X-Forwarded-URI    %[path]%[var(req.questionmark)]%[query]
+
+    # ---- Authelia forward-auth для выбранных доменов ----
+{% set authelia_hosts = [] %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{# Access-gate sites are meaningless without Authelia, so they are always
+   forward-auth protected regardless of their authelia_enabled value. #}
+{% if (s.authelia_enabled | default(false)) or (s.access_gate | default(false)) %}
+{% set hostnames = [s.domain] + (s.alt_names | default([])) %}
+{% for hn in hostnames %}{% set _ = authelia_hosts.append(hn) %}{% endfor %}
+{% endif %}
+{% endfor %}
+{% if admin_authelia_enabled and admin_domain is defined %}
+{% set _ = authelia_hosts.append(admin_domain) %}
+{% endif %}
+
+{% if authelia_hosts | length > 0 %}
+{% set admin_probe_condition = ' !admin_control_plane_probe' if admin_domain is defined else '' %}
+    acl authelia_protected hdr(host) -i {{ authelia_hosts | unique | join(' ') }}
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
+    http-request deny if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
+    http-request redirect location %[var(txn.auth_response_location)] if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
+    http-request deny status 503 if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool }
+    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if authelia_protected{{ admin_probe_condition }} { var(txn.auth_response_successful) -m bool }
+{% endif %}
+
+{% if aut_domain is defined %}
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if host_authelia path_access_granted
+    http-request deny if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
+    http-request redirect location %[var(txn.auth_response_location)] if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
+    http-request deny status 503 if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool }
+    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool }
+{% endif %}
+{% endif %}
+
+    # Добавляем внутренний маркер только после успешного ForwardAuth.
+{% if admin_domain is defined %}
+    # Runtime sample fetch сохраняет конфиг валидным и при ручном `haproxy -c`,
+    # когда закрытый systemd EnvironmentFile намеренно не загружен.
+    http-request set-header X-Easy-HA-Proxy-Secret %[env(HAPROXY_ADMIN_PROXY_SECRET)] if host_admin
+    http-request set-header X-Easy-HAProxy-Config-Generation {{ config_generation }} if host_admin
+    http-request set-header Remote-User easy-ha-proxy-healthcheck if host_admin admin_control_plane_probe
+    http-request set-header Remote-Groups healthcheck if host_admin admin_control_plane_probe
+{% if (not admin_authelia_enabled) and admin_password %}
+    http-request set-header Remote-User %[http_auth_user] if host_admin AuthOK
+    http-request set-header Remote-Groups superadmin if host_admin AuthOK
+{% endif %}
+{% endif %}
+
+    # ---- Маршрутизация ----
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{# An access gate without any configured upstream serves the static page and
+   has no backend to health-check. #}
+{% set gate_stub = (s.access_gate | default(false)) and not (site.servers | default([])) and not (site.backend_ip | default('')) and not (site.backend_host | default('')) %}
+{% if not (s.tcp_passthrough | default(false)) and not gate_stub %}
+{% set id = sanitize(s.name) %}
+    acl {{ id }}_up nbsrv(be_{{ id }}) gt 0
+{% endif %}
+{% endfor %}
+
+{% if admin_domain is defined %}
+    acl admin_up nbsrv(be_admin) gt 0
+{% endif %}
+{% if aut_domain is defined and authelia_enabled %}
+    acl authelia_up nbsrv(authelia_backend) gt 0
+{% endif %}
+
+{% if aut_domain is defined and authelia_enabled %}
+    use_backend be_access_granted if host_authelia path_access_granted
+    use_backend authelia_backend if authelia_up host_authelia !path_access_granted
+{% endif %}
+{% if admin_domain is defined %}
+    use_backend be_admin if admin_up host_admin !path_stats
+{% endif %}
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% if not (s.tcp_passthrough | default(false)) %}
+{% set id = sanitize(s.name) %}
+{% set gate_stub = (s.access_gate | default(false)) and not (site.servers | default([])) and not (site.backend_ip | default('')) and not (site.backend_host | default('')) %}
+{% if s.maintenance | default(false) %}
+    use_backend be_maintenance if host_{{ id }}
+{% elif gate_stub %}
+    {# The gate has no upstream: after Authelia forward-auth succeeded (and the
+       client IP was recorded in tbl_ip_auth above) it serves the static
+       access-granted page. A gate with a configured backend proxies normally. #}
+    use_backend be_access_granted if host_{{ id }}
+{% else %}
+    use_backend be_{{ id }} if {{ id }}_up host_{{ id }}
+{% endif %}
+{% endif %}
+{% endfor %}
+
+    default_backend be_maintenance
+
+    stats enable
+    stats uri /stats
+    stats refresh 30s
+
+{% if admin_domain is defined and not admin_authelia_enabled and admin_password %}
+    stats admin if host_admin AuthOK
+{% endif %}
+{% if admin_authelia_enabled and admin_domain is defined %}
+    stats admin if host_admin
+{% endif %}
+
+{# ---------------- HTTP80 enable logic ---------------- #}
+{% set need_http80 = false %}
+{% if enable_http80 | default(false) %}
+{% set need_http80 = true %}
+{% else %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% if s.redirect_to_https | default(false) %}
+{% set need_http80 = true %}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if need_http80 %}
+#################################
+# HTTP → HTTPS (:80)
+#################################
+frontend fe_http80
+    bind *:80
+    mode http
+    option dontlognull
+
+    acl acme_challenge_http path_beg /.well-known/acme-challenge/
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set hostnames = [s.domain] + (s.alt_names | default([])) %}
+    acl host_{{ id }} hdr(host) -i {{ hostnames | join(' ') }}
+{% endfor %}
+{% if aut_domain is defined and authelia_enabled %}
+    acl host_authelia hdr(host) -i {{ aut_domain }}
+{% endif %}
+
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% if s.redirect_to_https | default(false) %}
+    http-request redirect scheme https code 301 if host_{{ id }} !acme_challenge_http
+{% endif %}
+{% endfor %}
+{% if aut_domain is defined and authelia_enabled %}
+    http-request redirect scheme https code 301 if host_authelia !acme_challenge_http
+{% endif %}
+
+    http-request return status 404 content-type text/plain lf-string "Not found" if !acme_challenge_http
+    use_backend be_http_challenge if acme_challenge_http
+{% endif %}
+
+{% if has_tcp_proxies %}
+#################################
+# TCP FRONTENDS (generic)
+#################################
+{% for t in tcp_proxies %}
+frontend fe_tcp_{{ san(t.name) }}
+    mode tcp
+    bind {{ t.bind_ip | default('*') }}:{{ t.bind_port }}
+    option tcplog
+
+    acl ip_whitelist src -f {{ whitelist_global_file }}
+{% if admin_ips_enabled %}
+    acl allowed_admin src -f {{ admin_ips_file }}
+{% endif %}
+{% if authelia_enabled %}
+    acl ip_auth_ok src_get_gpc0(tbl_ip_auth) gt 0
+{% endif %}
+{% if authelia_enabled and (t.zero_trust | default(false)) %}
+    tcp-request connection reject if !ip_auth_ok !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
+
+{% if t.ban_check | default(true) %}
+    tcp-request connection reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
+
+    default_backend be_tcp_{{ san(t.name) }}
+{% endfor %}
+{% endif %}
+
+{% if need_http80 %}
+#################################
+# ACME HTTP-01 backend
+#################################
+backend be_http_challenge
+    # display-name: acme-http-01
+    mode http
+    server certbot 127.0.0.1:8000
+{% endif %}
+
+{% if has_passthru %}
+#################################
+# TLS terminator для «остальных» (когда есть passthrough)
+#################################
+backend be_tls_terminator
+    mode tcp
+    server local_ssl 127.0.0.1:8443 send-proxy-v2
+{% endif %}
+
+#################################
+# BACKENDS
+#################################
+{% if authelia_enabled %}
+backend authelia_backend
+    mode http
+    server authelia 127.0.0.1:9091 check
+{% endif %}
+
+{# ---------- TCP passthrough backends ---------- #}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% if s.tcp_passthrough | default(false) %}
+{% set id = sanitize(s.name) %}
+{% set tcp_check = (s.tcp_check | default('ssl')) %}
+
+backend be_{{ id }}_tcp
+    # display-name: {{ ([s.domain] + (s.alt_names | default([]))) | join(', ') }}
+    mode tcp
+    balance {{ s.balance | default('source') }}
+    default-server inter 3s rise 2 fall 3
+
+    {# L4 TCP-connect check #}
+    {% if tcp_check == 'tcp' %}
+    option tcp-check
+    tcp-check connect
+    {% endif %}
+
+{% for srv in (s.servers | default([{'name':'app1','host':s.backend_ip,'port':s.backend_port}])) %}
+    {% if tcp_check == 'ssl' %}
+    server {{ srv.name }} {{ srv.host }}:{{ srv.port }} check check-ssl verify none sni str({{ s.domain }}){% if srv.weight is defined %} weight {{ srv.weight }}{% endif %}{% if srv.backup | default(false) %} backup{% endif %}
+    {% else %}
+    server {{ srv.name }} {{ srv.host }}:{{ srv.port }} check{% if srv.weight is defined %} weight {{ srv.weight }}{% endif %}{% if srv.backup | default(false) %} backup{% endif %}
+    {% endif %}
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+
+
+{# ------------------- HTTP backends ------------------- #}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set gate_stub = (s.access_gate | default(false)) and not (site.servers | default([])) and not (site.backend_ip | default('')) and not (site.backend_host | default('')) %}
+{% if not (s.tcp_passthrough | default(false)) and not gate_stub %}
+{% set id = sanitize(s.name) %}
+{% set sticky = s.sticky | default('none') %}
+{% set use_ssl = s.backend_ssl | default(false) %}
+{% set ssl_verify = s.backend_ssl_verify | default(true) %}
+{% set ssl_ca = s.backend_ssl_ca | default('') %}
+{% set compress = s.compress | default(false) %}
+{% set uri = s.health_uri | default('/') %}
+{% set code = s.health_status | default(200) %}
+
+{# --- вычисляем имена для HTTP Host и TLS SNI/verify --- #}
+{% set be_http_host = s.backend_host | default('') %}
+{% set be_tls_name  = s.backend_sni | default(s.backend_host | default(s.domain)) %}
+{% set be_verify    = s.verify_host | default(be_tls_name) %}
+
+backend be_{{ id }}
+    # display-name: {{ ([s.domain] + (s.alt_names | default([]))) | join(', ') }}
+    mode http
+    balance {{ s.balance | default('roundrobin') }}
+
+{% if s.authelia_enabled | default(false) %}
+    # Пробрасываем Set-Cookie из ответа forward-auth к клиенту (если есть)
+    acl authelia_set_cookie var(req.auth_response_header.set_cookie) -m found
+    http-response set-header Set-Cookie %[var(req.auth_response_header.set_cookie)] if authelia_set_cookie
+{% endif %}
+
+{% if s.http_reuse is defined %}
+    http-reuse {{ s.http_reuse }}
+{% endif %}
+{% if s.session_timeout is defined %}
+    timeout server {{ s.session_timeout }}
+{% endif %}
+{% if s.http_keepalive_timeout is defined %}
+    timeout http-keep-alive {{ s.http_keepalive_timeout }}
+{% endif %}
+
+    # Бан в бэкенде не действует на whitelist/admin
+    acl ip_whitelist src -f {{ whitelist_global_file }}
+{% if admin_ips_enabled %}
+    acl allowed_admin src -f {{ admin_ips_file }}
+{% endif %}
+{% if authelia_enabled %}
+    acl ip_auth_ok src_get_gpc0(tbl_ip_auth) gt 0
+{% endif %}
+    tcp-request content  reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    tcp-response content reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    # Реальный IP и Host
+    http-request set-header X-Client-IP %[src]
+
+{# Если задан backend_host — жёстко ставим Host на него, иначе прокидываем исходный Host клиента #}
+{% if be_http_host %}
+    http-request set-header Host {{ be_http_host }}
+{% else %}
+    http-request set-header Host %[req.hdr(host)]
+{% endif %}
+
+{% if s.prefer_last_server | default(false) %}
+    option prefer-last-server
+{% endif %}
+
+{% if s.tcp_check | default(false) %}
+    option tcp-check
+    tcp-check connect
+{% else %}
+{% if sticky == 'cookie' %}
+    cookie {{ s.cookie_name | default('SRV') }} {{ s.cookie_attrs | default('insert nocache') }}
+{% endif %}
+
+    option httpchk
+{# Host для health-check: если backend_host задан — используем его, иначе домен сайта #}
+{% if be_http_host %}
+    http-check send meth GET uri {{ uri }} ver HTTP/1.1 hdr Host {{ be_http_host }}
+{% else %}
+    http-check send meth GET uri {{ uri }} ver HTTP/1.1 hdr Host {{ s.domain }}
+{% endif %}
+    http-check expect status {{ code }}
+{% endif %}
+
+{# ВАЖНО: всё в одну строку! #}
+    default-server inter 3s rise 2 fall 3{% if use_ssl %} ssl sni str({{ be_tls_name }}) alpn {{ s.backend_alpn | default('http/1.1') }}{% if ssl_verify %} verify required ca-file {{ (ssl_ca | default('', true)) or backend_ssl_verify_ca_file }} verifyhost {{ be_verify }} check-ssl check-sni {{ be_tls_name }}{% else %} verify none check-ssl check-sni {{ be_tls_name }}{% endif %}{% endif %}
+
+{% for srv in (s.servers | default([{'name':'app1','host':s.backend_ip,'port':s.backend_port}])) %}
+    server {{ srv.name }} {{ srv.host }}:{{ srv.port }} weight {{ srv.weight | default(100) }} check{% if srv.backup | default(false) %} backup{% endif %}{% if sticky == 'cookie' %} cookie {{ srv.name }}{% endif %}
+
+{% endfor %}
+
+{% if compress %}
+    filter compression
+    compression algo gzip
+    compression type text/html text/css application/javascript
+{% endif %}
+
+{% set _hsts_raw = s.hsts | default(15552000) %}
+{% if _hsts_raw is sameas true %}
+{% set _hsts_seconds = 31536000 %}
+{% elif _hsts_raw is sameas false %}
+{% set _hsts_seconds = 0 %}
+{% elif _hsts_raw is string and _hsts_raw[-1:] == 'd' %}
+{# Normalize the legacy duration format used by older managed vars.yml files. #}
+{% set _hsts_seconds = (_hsts_raw[:-1] | int) * 86400 %}
+{% else %}
+{% set _hsts_seconds = _hsts_raw | int %}
+{% endif %}
+{% if _hsts_seconds > 0 %}
+    http-response set-header Strict-Transport-Security "max-age={{ _hsts_seconds }}; includeSubDomains"
+{% endif %}
+
+{% for k, v in (s.add_headers | default({})).items() %}
+    http-response set-header {{ k }} "{{ v }}"
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+
+{% if has_tcp_proxies %}
+#################################
+# TCP BACKENDS (generic)
+#################################
+
+{% for t in tcp_proxies %}
+backend be_tcp_{{ san(t.name) }}
+    # display-name: {{ t.name }}
+    mode tcp
+    balance {{ t.balance | default('source') }}
+    default-server inter {{ t.inter | default('3s') }} rise 2 fall 3
+
+{% if t.servers is defined %}
+{% for srv in t.servers %}
+    server {{ srv.name }} {{ srv.host }}:{{ srv.port }} check
+{% endfor %}
+{% else %}
+    server srv1 {{ t.backend_host }}:{{ t.backend_port }} check
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if admin_domain is defined %}
+#################################
+# ADMIN / PROMETHEUS
+#################################
+backend be_admin
+    # display-name: admin-ui
+    mode http
+{% if authelia_enabled and admin_authelia_enabled %}
+    acl authelia_set_cookie var(req.auth_response_header.set_cookie) -m found
+    http-response set-header Set-Cookie %[var(req.auth_response_header.set_cookie)] if authelia_set_cookie
+{% endif %}
+    server ui 127.0.0.1:5000 check
+{% endif %}
+
+{% if authelia_enabled %}
+backend be_access_granted
+    # display-name: authelia
+    mode http
+    http-request return errorfile /etc/haproxy/errors/access_granted.http
+{% endif %}
+
+backend be_maintenance
+    # display-name: maintenance
+    mode http
+    errorfile 503 /etc/haproxy/errors/maintenance.http
+
+{% if export_prometheus | default(false) %}
+listen stats_prom
+    bind *:{{ prometheus_port | default(8404) }}
+    mode http
+    stats enable
+    stats uri /
+    http-request use-service prometheus-exporter if { path /metrics }
+{% endif %}
+
+{% if admin_password %}
+#################################
+# USERLISTS
+#################################
+userlist stats-auth
+    user admin password {{ admin_password }}
+{% endif %}

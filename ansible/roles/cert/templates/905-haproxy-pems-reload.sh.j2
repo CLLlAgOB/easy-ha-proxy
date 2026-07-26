@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CERTS_DIR="{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+HAPROXY_SERVICE="haproxy"
+HAPROXY_GROUP="haproxy"      # группа, под которой работает haproxy
+LIVE_DIR="/etc/letsencrypt/live"
+
+# Certbot-переменные
+RENEWED_LINEAGE="${RENEWED_LINEAGE:-}"     # /etc/letsencrypt/live/domain.local-ecdsa
+FORCE_ALL="${HAPROXY_PEMS_FORCE_ALL:-1}"   # если =1 — всегда пересобирать все
+
+mkdir -p "$CERTS_DIR"
+
+build_pem() {
+  local lineage="$1"   # имя lineage (domain.local, domain.local-ecdsa ...)
+  local dest="$2"      # /etc/haproxy/certs/domain.local-ecdsa.pem
+
+  local tmp="${dest}.tmp.$$"
+  local fc="$LIVE_DIR/$lineage/fullchain.pem"
+  local pk="$LIVE_DIR/$lineage/privkey.pem"
+
+  if [[ ! -f "$fc" || ! -f "$pk" ]]; then
+    echo "Skip $lineage (no cert files)"
+    return 0
+  fi
+
+  umask 077
+  cat "$fc" "$pk" > "$tmp"
+
+  # Права: root:haproxy, 0640
+  if getent group "$HAPROXY_GROUP" >/dev/null 2>&1; then
+    chown root:"$HAPROXY_GROUP" "$tmp"
+  else
+    # на всякий случай fallback, если группы нет
+    chown root:root "$tmp"
+  fi
+  chmod 0640 "$tmp"
+
+  mv -f "$tmp" "$dest"
+  echo "Built: $dest"
+}
+
+MANIFEST="$CERTS_DIR/manifest.json"
+
+#
+# Режим 1: certbot вызвал deploy-hook с RENEWED_LINEAGE → работаем точечно
+#
+if [[ -n "$RENEWED_LINEAGE" && "$FORCE_ALL" != "1" ]]; then
+  echo "haproxy-pems: single-lineage mode (RENEWED_LINEAGE=$RENEWED_LINEAGE)"
+
+  # Приводим к имени каталога внутри LIVE_DIR
+  # /etc/letsencrypt/live/domain.local-ecdsa -> domain.local-ecdsa
+  lineage_name="$(basename "$RENEWED_LINEAGE")"
+
+  # 1) Если есть manifest.json — пробуем взять путь из него
+  if [[ -f "$MANIFEST" ]]; then
+    dest_from_manifest="$(jq -r --arg k "$lineage_name" '.[$k] // empty' "$MANIFEST" 2>/dev/null || echo "")"
+    if [[ -n "$dest_from_manifest" ]]; then
+      build_pem "$lineage_name" "$dest_from_manifest"
+    else
+      echo "haproxy-pems: lineage $lineage_name not found in manifest, using auto naming"
+      dest_from_manifest=""
+    fi
+  else
+    dest_from_manifest=""
+  fi
+
+  # 2) Если manifest не дал dest — используем стандартную схему имён
+  if [[ -z "$dest_from_manifest" ]]; then
+    if [[ "$lineage_name" =~ ^(.+)-(ecdsa|rsa)$ ]]; then
+      base="${BASH_REMATCH[1]}"
+      kt="${BASH_REMATCH[2]}"
+      dest="$CERTS_DIR/${base}-${kt}.pem"
+    else
+      base="$lineage_name"
+      dest="$CERTS_DIR/${base}.pem"
+    fi
+
+    build_pem "$lineage_name" "$dest"
+  fi
+
+#
+# Режим 2: ручной запуск или FORCE_ALL=1 → пересобираем всё (как раньше)
+#
+else
+  echo "haproxy-pems: full rebuild mode"
+
+  shopt -s nullglob
+  declare -A has_type
+
+  # Строим карту: base,ecdsa / base,rsa / base,single
+  for d in "$LIVE_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    if [[ "$name" =~ ^(.+)-(ecdsa|rsa)$ ]]; then
+      base="${BASH_REMATCH[1]}"
+      kt="${BASH_REMATCH[2]}"
+      has_type["$base,$kt"]=1
+    else
+      has_type["$name,single"]=1
+    fi
+  done
+
+  if [[ -f "$MANIFEST" ]]; then
+    # manifest.json: { "lineage_name": "/etc/haproxy/certs/xxx.pem", ... }
+    mapfile -t lineages < <(jq -r 'keys[]' "$MANIFEST")
+    for lin in "${lineages[@]}"; do
+      dest="$(jq -r --arg k "$lin" '.[$k]' "$MANIFEST")"
+      [[ -n "$dest" ]] && build_pem "$lin" "$dest"
+    done
+  else
+    for key in "${!has_type[@]}"; do
+      base="${key%,*}"
+      kind="${key#*,}"
+
+      if [[ "$kind" == "single" ]]; then
+        build_pem "$base" "$CERTS_DIR/${base}.pem"
+      else
+        ecdsa_present=${has_type["$base,ecdsa"]+yes}
+        rsa_present=${has_type["$base,rsa"]+yes}
+
+        if [[ "$ecdsa_present" == "yes" && "$rsa_present" == "yes" ]]; then
+          build_pem "${base}-ecdsa" "$CERTS_DIR/${base}-ecdsa.pem"
+          build_pem "${base}-rsa"   "$CERTS_DIR/${base}-rsa.pem"
+        else
+          if [[ "$ecdsa_present" == "yes" ]]; then
+            build_pem "${base}-ecdsa" "$CERTS_DIR/${base}-ecdsa.pem"
+          elif [[ "$rsa_present" == "yes" ]]; then
+            build_pem "${base}-rsa"   "$CERTS_DIR/${base}-rsa.pem"
+          fi
+        fi
+      fi
+    done
+  fi
+fi
+
+# Перезагрузка HAProxy
+if systemctl list-unit-files | grep -q "^${HAPROXY_SERVICE}.service"; then
+  systemctl reload "$HAPROXY_SERVICE" || systemctl restart "$HAPROXY_SERVICE"
+fi

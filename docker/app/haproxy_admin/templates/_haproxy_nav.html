@@ -1,0 +1,46 @@
+{# _haproxy_nav.html
+   Shared navigation for the HAProxy administration section. #}
+
+<a class="btn" href="{{ url_for('routes.haproxy_sites_page') }}">
+  HTTP sites
+</a>
+
+<a class="btn" href="{{ url_for('routes.haproxy_tcp_page') }}">
+  TCP proxies
+</a>
+
+<a class="btn" href="{{ url_for('routes.haproxy_udp_page') }}">
+  UDP forwarding
+</a>
+
+<a class="btn" href="{{ url_for('routes.haproxy_config_page') }}">
+  HAProxy configuration
+</a>
+
+<a class="btn" href="{{ url_for('routes.haproxy_geoip_page') }}">
+  GeoIP database
+</a>
+
+<a class="btn" href="{{ url_for('routes.haproxy_certs_page') }}">
+  Certificates
+</a>
+
+<a class="btn" href="{{ url_for('routes.mail_settings_page') }}">
+  Mail settings
+</a>
+
+<a class="btn" href="{{ url_for('routes.system_health_page') }}">
+  Status
+</a>
+
+<a class="btn" href="{{ url_for('system_updates.page') }}">
+  Software updates
+</a>
+
+<a class="btn" href="{{ url_for('system_backups.page') }}">
+  Backup & restore
+</a>
+
+<a class="btn" href="{{ url_for('routes.index') }}">
+  Home
+</a>

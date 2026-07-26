@@ -1,0 +1,112 @@
+server:
+  address: "{{ authelia_server_address }}"
+
+log:
+  level: "{{ authelia_log_level }}"
+  format: json
+  file_path: "{{ authelia_log_file_path }}"
+  keep_stdout: true
+  
+session:
+  name: "{{ authelia_session_name }}"
+  secret: "{{ authelia_session_secret }}"
+  same_site: "{{ authelia_session_same_site }}"
+  expiration: "{{ authelia_session_expiration }}"
+  inactivity: "{{ authelia_session_inactivity }}"
+  remember_me: "{{ authelia_session_remember_me }}"
+  cookies:
+    - domain: "{{ authelia_cookie_domain }}"
+      authelia_url: "{{ authelia_portal_url }}"
+      default_redirection_url: "{{ authelia_default_redirection_url }}"
+{% if authelia_session_redis_enabled | default(true) %}
+  redis:
+    host: "{{ authelia_session_redis_host }}"
+    port: {{ authelia_session_redis_port }}
+    database_index: {{ authelia_session_redis_database | default(0) }}
+    maximum_active_connections: {{ authelia_session_redis_max_active | default(8) }}
+    minimum_idle_connections: {{ authelia_session_redis_max_idle | default(4) }}
+    timeout: "{{ authelia_session_redis_timeout | default('5s') }}"
+{% endif %}
+
+storage:
+  encryption_key: "{{ authelia_storage_key }}"
+  local:
+    path: "{{ authelia_storage_local_path }}"
+
+authentication_backend:
+  refresh_interval: "{{ authelia_auth_refresh_interval }}"
+  file:
+    path: "{{ authelia_users_file_path }}"
+    watch: {{ authelia_users_watch | default(true) | ternary('true', 'false') }}
+    password:
+      algorithm: "{{ authelia_password_algorithm }}"
+
+regulation:
+  modes: {{ authelia_regulation_modes | tojson }}
+  max_retries: {{ authelia_regulation_max_retries }}
+  find_time: "{{ authelia_regulation_find_time }}"
+  ban_time: "{{ authelia_regulation_ban_time }}"
+
+{% if authelia_notifier_type == 'filesystem' %}
+notifier:
+  disable_startup_check: false
+  template_path: "/config/email_templates"
+  filesystem:
+    filename: "{{ authelia_notifier_filesystem_filename }}"
+
+{% elif authelia_notifier_type == 'smtp' %}
+notifier:
+  disable_startup_check: false
+  template_path: "/config/email_templates"
+  smtp:
+    # All application mail goes through the internal relay. The relay owns
+    # external SMTP authentication, TLS verification, retries, and queueing.
+    address: 'smtp://mail_relay:25'
+    username: ''
+    password: ''
+    disable_require_tls: true
+    disable_starttls: true
+
+    timeout: {{ mail_smtp_timeout | string | to_json(ensure_ascii=False) }}
+    sender: {{ mail_notify_from | string | to_json(ensure_ascii=False) }}
+    subject: {{ mail_subject | string | to_json(ensure_ascii=False) }}
+    startup_check_address: {{ mail_notify_to | string | to_json(ensure_ascii=False) }}
+{% endif %}
+
+
+identity_validation:
+  reset_password:
+    jwt_secret: "{{ authelia_jwt_secret }}"
+
+totp:
+  issuer: "{{ authelia_totp_issuer }}"
+  period: {{ authelia_totp_period }}
+  skew: {{ authelia_totp_skew }}
+
+access_control:
+  default_policy: "{{ authelia_default_policy }}"
+  rules:
+    {{ authelia_access_control_rules | to_nice_yaml(indent=2) | indent(4) }}
+{# Access-gate sites need a login rule or Authelia's default_policy=deny would
+   reject them. Generate one_factor rules here so they survive every full apply
+   (the web UI also adds them at save time for immediate effect). Domains
+   already covered by a managed rule above are skipped. #}
+{% set _managed_domains = [] %}
+{% for _rule in authelia_access_control_rules | default([]) %}
+{%   set _rd = _rule.domain | default([]) %}
+{%   if _rd is string %}{% set _ = _managed_domains.append(_rd) %}
+{%   else %}{% for _d in _rd %}{% set _ = _managed_domains.append(_d) %}{% endfor %}{% endif %}
+{% endfor %}
+{% set _gate_domains = [] %}
+{% for _site in sites | default([]) %}
+{%   if _site.access_gate | default(false) %}
+{%     for _hn in [_site.domain] + (_site.alt_names | default([])) %}
+{%       if _hn and _hn not in _managed_domains and _hn not in _gate_domains %}
+{%         set _ = _gate_domains.append(_hn) %}
+    - domain: {{ _hn }}
+      policy: one_factor
+{%       endif %}
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+

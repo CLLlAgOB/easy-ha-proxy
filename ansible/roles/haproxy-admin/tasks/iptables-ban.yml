@@ -1,0 +1,57 @@
+---
+# Загрузка iptables правил для ipset haproxy_ban (oneshot unit)
+
+- name: "iptables-ban | Install required packages"
+  ansible.builtin.package:
+    name:
+      - ipset
+      - iptables
+      - iptables-persistent
+    state: present
+  tags: restore-network
+
+- name: "iptables-ban | Ensure /etc/iptables exists"
+  ansible.builtin.file:
+    path: /etc/iptables
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "iptables-ban | Ensure ipset haproxy_ban exists"
+  ansible.builtin.command: ipset create haproxy_ban hash:ip family inet -exist
+  changed_when: false
+
+- name: "iptables-ban | Copy iptables rules file"
+  ansible.builtin.copy:
+    src: haproxy_ban.rules
+    dest: /etc/iptables/haproxy_ban.rules
+    owner: root
+    group: root
+    mode: "0644"
+  register: rules_file
+
+- name: "iptables-ban | Install loader systemd unit"
+  ansible.builtin.template:
+    src: iptables-haproxy-ban.service.j2
+    dest: /etc/systemd/system/iptables-haproxy-ban.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: ipt_unit
+
+- name: "iptables-ban | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: ipt_unit.changed
+
+- name: "iptables-ban | Enable & start iptables loader"
+  ansible.builtin.systemd:
+    name: iptables-haproxy-ban
+    enabled: yes
+    state: >-
+      {{
+        'restarted'
+        if (rules_file.changed or ipt_unit.changed)
+        else 'started'
+      }}

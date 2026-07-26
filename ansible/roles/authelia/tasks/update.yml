@@ -1,0 +1,112 @@
+- name: Authelia | update managed container images
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: Ensure Docker daemon is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Include managed mail notification state
+      ansible.builtin.include_tasks: mail_notify_state.yml
+
+    - name: Render the current mail relay environment before migration
+      ansible.builtin.template:
+        src: authelia.env.j2
+        dest: "{{ authelia_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      diff: false
+
+    - name: Render the current Authelia Compose definition before migration
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ authelia_root_dir }}/docker-compose.yml"
+        owner: root
+        group: docker
+        mode: "0640"
+
+    - name: Pull Authelia stack images
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - pull
+        chdir: "{{ authelia_root_dir }}"
+      environment:
+        COMPOSE_PROGRESS: plain
+        DOCKER_CLI_HINTS: "false"
+      register: authelia_pull_result
+      changed_when: false
+
+    - name: Run the fail-closed mail relay spool migration guard
+      block:
+        - name: Include mail relay spool migration guard
+          ansible.builtin.include_tasks: mail_relay_spool.yml
+      rescue:
+        - name: Report a safe mail relay migration failure
+          ansible.builtin.fail:
+            msg: >-
+              The legacy mail_relay spool could not be migrated safely. Its
+              container and queue were preserved or recovered. Verify Docker,
+              let any queued mail drain, and retry the update.
+
+    - name: Reconcile the updated Authelia stack with migration recovery
+      block:
+        - name: Reconcile Authelia stack after image pull
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - up
+              - --detach
+              - --remove-orphans
+            chdir: "{{ authelia_root_dir }}"
+          environment:
+            COMPOSE_PROGRESS: plain
+            DOCKER_CLI_HINTS: "false"
+          register: authelia_compose_up
+          changed_when: >-
+            (
+              (authelia_compose_up.stdout | default(''))
+              ~
+              (authelia_compose_up.stderr | default(''))
+            )
+            is regex('(?i)(creating|created|recreating|recreated|starting|started|removing|removed)')
+      rescue:
+        - name: Restart the existing mail relay after a failed update reconcile
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - mail_relay
+          changed_when: true
+          failed_when: false
+          when: >-
+            mail_notify_enabled | default(false) | bool
+            or mail_relay_server | default(false) | bool
+
+        - name: Restart Authelia after a failed update reconcile
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ authelia_container_name }}"
+          changed_when: true
+          failed_when: false
+
+        - name: Report the failed Authelia update reconcile
+          ansible.builtin.fail:
+            msg: >-
+              Docker Compose could not reconcile the updated Authelia stack. A
+              best-effort Authelia restart was attempted after spool migration.
+
+    - name: Wait for Authelia after image update
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: 9091
+        delay: 3
+        timeout: "{{ authelia_start_wait_timeout | int }}"
+      when: not ansible_check_mode

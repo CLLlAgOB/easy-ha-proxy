@@ -1,0 +1,164 @@
+# -------------------------------------------------------------------
+# 1) Deploy the application.
+# -------------------------------------------------------------------
+- name: Ensure app dir
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+
+- name: Ensure app config dir
+  ansible.builtin.file:
+    path: "{{ app_dir }}/config"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+
+- name: Ensure backups dir
+  ansible.builtin.file:
+    path: "{{ app_dir }}/backups"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+
+- name: Ensure the local GeoIP data directory exists
+  ansible.builtin.file:
+    path: "{{ geo_ip_dir }}"
+    state: directory
+    owner: root
+    group: haproxy
+    mode: "0755"
+  when: geo_ip_dir is defined and geo_ip_dir|length > 0
+
+- name: "haproxy-admin | Render .env for app"
+  ansible.builtin.template:
+    src: haproxy-admin.env.j2
+    dest: "{{ haproxy_admin_env_file }}"
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0640"
+  register: hapadm_env_t
+  no_log: true
+  diff: false
+
+- name: Sync haproxy.cfg.j2
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/roles/haproxy/templates/haproxy.cfg.j2"
+    dest: "{{ app_dir }}/config/haproxy.cfg.j2"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+
+- name: Seed runtime config from the managed config (only if missing)
+  ansible.builtin.copy:
+    src: >-
+      {{
+        (easy_ha_proxy_config_dir | default(playbook_dir))
+        ~ '/' ~ item
+      }}
+    dest: "{{ app_dir }}/config/{{ item }}"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+    force: no
+  loop:
+    - vars.yml
+    - websites.yml
+    - tcp.yml
+
+- name: Sync control-plane runtime config when explicitly requested
+  ansible.builtin.copy:
+    src: "{{ easy_ha_proxy_config_dir }}/{{ item }}"
+    dest: "{{ app_dir }}/config/{{ item }}"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+  loop:
+    - vars.yml
+    - websites.yml
+    - tcp.yml
+  when: haproxy_admin_sync_managed_config | default(false) | bool
+
+- name: Persist managed HAProxy runtime socket values
+  ansible.builtin.lineinfile:
+    path: "{{ app_dir }}/config/vars.yml"
+    regexp: "^\\s*{{ item.key }}\\s*:"
+    line: "{{ item.key }}: {{ item.value | to_json }}"
+    insertafter: EOF
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+  loop:
+    - key: haproxy_socket
+      value: "{{ haproxy_socket | default('/run/haproxy/admin.sock', true) }}"
+    - key: haproxy_socket_group
+      value: "{{ haproxy_socket_group | default('hadmin', true) }}"
+
+- name: Calculate effective HAProxy thread count for the UI renderer
+  ansible.builtin.set_fact:
+    haproxy_effective_nbthread: >-
+      {{
+        haproxy_nbthread
+        | default(
+            [
+              [ansible_processor_vcpus | default(1) | int, 1] | max,
+              [haproxy_nbthread_max | default(2) | int, 1] | max
+            ] | min,
+            true
+          )
+        | int
+      }}
+
+- name: Persist effective HAProxy thread count in runtime vars
+  ansible.builtin.lineinfile:
+    path: "{{ app_dir }}/config/vars.yml"
+    regexp: '^\s*haproxy_nbthread\s*:'
+    line: "haproxy_nbthread: {{ haproxy_effective_nbthread }}"
+    insertafter: EOF
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+
+# ─────────────────────────────────────────────────────────────
+# Dedicated haproxy-admin Docker Compose stack.
+# ─────────────────────────────────────────────────────────────
+- name: "haproxy-admin | Ensure data dir exists (for container)"
+  ansible.builtin.file:
+    path: "{{ haproxy_admin_data_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0750"
+  when: haproxy_admin_use_docker | bool
+
+- name: "haproxy-admin | Restore ownership of writable tree after backup restore"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    recurse: true
+  loop:
+    - "{{ haproxy_admin_data_dir }}"
+    - "{{ haproxy_admin_root_dir }}/config"
+    - "{{ haproxy_admin_root_dir }}/backups"
+  when: haproxy_admin_use_docker | bool
+
+- name: "haproxy-admin | Render docker-compose.yml"
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ haproxy_admin_root_dir }}/docker-compose.yml"
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0640"
+  when: haproxy_admin_use_docker | bool
+  register: hapadm_compose_t
+
+- name: "haproxy-admin | Mark configs changed"
+  ansible.builtin.set_fact:
+    haproxy_admin_configs_changed: "{{ hapadm_compose_t.changed | default(false) }}"
+  when: haproxy_admin_use_docker | bool

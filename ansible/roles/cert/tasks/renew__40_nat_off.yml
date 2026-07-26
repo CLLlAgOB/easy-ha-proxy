@@ -1,0 +1,19 @@
+---
+# 40 — выключить NAT, только если включали и если были цели
+
+- name: Remove IPv4 DNAT 80->8000 (if present)
+  command: iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  register: ipt4_del
+  failed_when: ipt4_del.rc not in [0,1]
+  changed_when: ipt4_del.rc == 0
+  when: _enable_bootstrap_dnat and (issue_targets_count | default(0) | int) > 0
+
+- name: Remove IPv6 DNAT 80->8000 (if present)
+  command: ip6tables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  register: ipt6_del
+  failed_when: ipt6_del.rc not in [0,1]
+  changed_when: ipt6_del.rc == 0
+  when:
+    - _enable_bootstrap_dnat
+    - (issue_targets_count | default(0) | int) > 0
+    - (acme_ipv6 | default(true))

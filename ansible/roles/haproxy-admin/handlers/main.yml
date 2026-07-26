@@ -1,0 +1,71 @@
+---
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: restart haproxy-admin
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "{{ haproxy_admin_compose_up_timeout | int | string }}"
+      - docker
+      - compose
+      - up
+      - --detach
+      - --force-recreate
+      - --remove-orphans
+    chdir: "{{ haproxy_admin_root_dir }}"
+  environment:
+    COMPOSE_PROGRESS: plain
+    DOCKER_CLI_HINTS: "false"
+  register: hapadm_docker_up
+  changed_when: true
+
+- name: wait for haproxy-admin
+  ansible.builtin.command:
+    argv:
+      - docker
+      - container
+      - inspect
+      - --format
+      - !unsafe "{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}"
+      - "{{ haproxy_admin_container_name }}"
+  register: hapadm_handler_container_health
+  changed_when: false
+  retries: "{{ [((haproxy_admin_start_wait_timeout | int) // 5), 1] | max }}"
+  delay: 5
+  until:
+    - hapadm_handler_container_health.rc == 0
+    - hapadm_handler_container_health.stdout | trim == "healthy"
+
+
+- name: restart haproxy-certd
+  ansible.builtin.systemd:
+    name: haproxy-certd
+    state: restarted
+
+- name: restart haproxy-controld
+  ansible.builtin.systemd:
+    name: haproxy-controld
+    state: restarted
+
+- name: restart haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: reloaded
+  ignore_errors: true
+
+- name: validate logrotate
+  ansible.builtin.command:
+    cmd: "logrotate --debug /etc/logrotate.conf"
+  changed_when: false
+
+- name: Start core services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: yes
+    state: started
+  loop:
+    - haproxy
+    - haproxy-certd
+    - haproxy-controld

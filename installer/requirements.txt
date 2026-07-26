@@ -1,0 +1,4 @@
+ansible-core~=2.17.0
+argon2-cffi~=23.1
+PyYAML~=6.0
+cryptography>=38,<50

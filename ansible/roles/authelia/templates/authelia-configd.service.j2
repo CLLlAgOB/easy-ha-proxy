@@ -1,0 +1,44 @@
+[Unit]
+Description=Authelia configuration helper (root)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group={{ authelia_log_reader_group }}
+ExecStart=/usr/local/sbin/authelia-configd.py
+Restart=always
+RestartSec=2
+
+Environment="AUTHELIA_CONFIG_FILE={{ authelia_config_file }}"
+Environment="AUTHELIA_CONFIG_SOCKET={{ authelia_configd_socket }}"
+Environment="AUTHELIA_CONTAINER_NAME={{ authelia_container_name }}"
+Environment="AUTHELIA_CONFIG_PATH={{ authelia_config_path }}"
+Environment="AUTHELIA_VALIDATE_CONFIG={{ authelia_configd_validate_config | bool | ternary('true', 'false') }}"
+Environment="AUTHELIA_ENV_FILE={{ authelia_env_file }}"
+Environment="AUTHELIA_COMPOSE_FILE={{ authelia_root_dir }}/docker-compose.yml"
+Environment="EASY_HA_PROXY_CONFIG_DIR={{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}"
+Environment="AUTHELIA_HAPROXY_SOCKET={{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
+Environment="AUTHELIA_NOTIFICATION_ROOT={{ authelia_root_dir }}"
+Environment="AUTHELIA_NOTIFICATION_STATE_DIR=/var/lib/easy-ha-proxy"
+Environment="AUTHELIA_NOTIFICATION_UID={{ authelia_uid }}"
+Environment="AUTHELIA_NOTIFICATION_CLIENT_USER={{ authelia_log_reader_user }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-configd.py', rstrip=false) | hash('sha256') }}"
+
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths={{ authelia_root_dir }} {{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+StateDirectory=easy-ha-proxy
+StateDirectoryMode=0700
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,63 @@
+---
+# 20 — выпуск ТОЛЬКО по уже отфильтрованным и DNS-готовым спискам: issue_targets_explicit / issue_targets_single
+
+# EXPlicit (lineages: base-ecdsa/base-rsa либо base, если единственный тип был задан)
+- name: Issue/renew (explicit key_types, filtered)
+  vars:
+    lineage: "{{ item }}"
+    key_type: >-
+      {{ 'ecdsa' if lineage.endswith('-ecdsa') else
+         'rsa'   if lineage.endswith('-rsa')   else cert_key_type }}
+    base_domain: "{{ lineage | regex_replace('(-rsa|-ecdsa)$','') }}"
+    site: "{{ (cert_sites | selectattr('domain','equalto', base_domain) | list | first) }}"
+    obj: "{{ site }}"
+    san_flags: "{{ lookup('template', 'templates/_san_flags.j2', convert_data=False) }}"
+  ansible.builtin.command: >
+    /snap/bin/certbot certonly
+    --standalone
+    --non-interactive
+    --agree-tos
+    --email {{ certbot_email }}
+    --http-01-port 8000
+    --http-01-address 0.0.0.0
+    --preferred-challenges http-01
+    --key-type {{ key_type }}
+    {% if key_type == 'rsa' %}--rsa-key-size {{ rsa_key_size }}{% endif %}
+    {% if key_type == 'ecdsa' %}--elliptic-curve {{ ecdsa_curve }}{% endif %}
+    --cert-name {{ lineage }}
+    --keep-until-expiring
+    {{ san_flags }}
+  args:
+    creates: "/etc/letsencrypt/live/{{ lineage }}/fullchain.pem"
+  loop: "{{ issue_targets_explicit | default([]) }}"
+  when: (issue_targets_explicit | default([]) | length) > 0
+  register: _issue_explicit
+
+# SINGLE (cert_sites без key_types) → берём дефолтный тип ключа
+- name: Issue/renew (single → default key type, filtered)
+  vars:
+    lineage: "{{ item }}"
+    site: "{{ (cert_sites | selectattr('domain','equalto', lineage) | list | first) }}"
+    key_type: "{{ cert_key_type }}"
+    obj: "{{ site }}"
+    san_flags: "{{ lookup('template', 'templates/_san_flags.j2', convert_data=False) }}"
+  ansible.builtin.command: >
+    /snap/bin/certbot certonly
+    --standalone
+    --non-interactive
+    --agree-tos
+    --email {{ certbot_email }}
+    --http-01-port 8000
+    --http-01-address 0.0.0.0
+    --preferred-challenges http-01
+    --key-type {{ key_type }}
+    {% if key_type == 'rsa' %}--rsa-key-size {{ rsa_key_size }}{% endif %}
+    {% if key_type == 'ecdsa' %}--elliptic-curve {{ ecdsa_curve }}{% endif %}
+    --cert-name {{ lineage }}
+    --keep-until-expiring
+    {{ san_flags }}
+  args:
+    creates: "/etc/letsencrypt/live/{{ lineage }}/fullchain.pem"
+  loop: "{{ issue_targets_single | default([]) }}"
+  when: (issue_targets_single | default([]) | length) > 0
+  register: _issue_single

@@ -1,0 +1,127 @@
+---
+# roles/authelia/tasks/remove.yml 
+- name: Authelia | stop and completely remove stack and data
+  block:
+    - name: Check if Authelia project directory exists
+      stat:
+        path: /opt/authelia
+      register: authelia_project_dir
+
+    - name: Remove Authelia docker stack (containers, networks, volumes)
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - down
+          - --remove-orphans
+          - --volumes
+        chdir: /opt/authelia
+      register: authelia_compose_down
+      changed_when: >-
+        (
+          (authelia_compose_down.stdout | default(''))
+          ~
+          (authelia_compose_down.stderr | default(''))
+        )
+        is regex('(?i)(stopping|stopped|removing|removed)')
+      when: authelia_project_dir.stat.exists
+
+    - name: Remove Authelia project directory
+      file:
+        path: /opt/authelia
+        state: absent
+
+    - name: Remove Authelia logrotate config
+      file:
+        path: /etc/logrotate.d/authelia
+        state: absent
+
+    - name: Remove Authelia email templates directory
+      file:
+        path: /opt/authelia/email_templates
+        state: absent
+
+    - name: Remove Authelia Redis data dir sysctl config
+      file:
+        path: "{{ authelia_redis_sysctl_file }}"
+        state: absent
+
+    - name: Remove Redis data dir for Authelia
+      file:
+        path: "{{ authelia_redis_data_dir }}"
+        state: absent
+
+    - name: Remove haproxy Lua helpers
+      block:
+        - name: Remove haproxy-lua-http directory
+          file:
+            path: /etc/haproxy/lua/haproxy-lua-http
+            state: absent
+
+        - name: Remove json.lua
+          file:
+            path: /etc/haproxy/lua/json.lua
+            state: absent
+
+        - name: Remove auth-request.lua
+          file:
+            path: /etc/haproxy/lua/auth-request.lua
+            state: absent
+
+    - name: Stop and disable Authelia helper services
+      block:
+        - name: Stop and disable authelia-configd
+          ansible.builtin.systemd:
+            name: authelia-configd.service
+            state: stopped
+            enabled: no
+          ignore_errors: true
+
+        - name: Stop and disable authelia-usersd
+          ansible.builtin.systemd:
+            name: authelia-usersd.service
+            state: stopped
+            enabled: no
+          ignore_errors: true
+
+        - name: Stop and disable authelia-bansd
+          ansible.builtin.systemd:
+            name: authelia-bansd.service
+            state: stopped
+            enabled: no
+          ignore_errors: true
+
+        - name: Remove authelia-configd service unit
+          ansible.builtin.file:
+            path: /etc/systemd/system/authelia-configd.service
+            state: absent
+
+        - name: Remove authelia-usersd service unit
+          ansible.builtin.file:
+            path: /etc/systemd/system/authelia-usersd.service
+            state: absent
+
+        - name: Remove authelia-bansd service unit
+          ansible.builtin.file:
+            path: /etc/systemd/system/authelia-bansd.service
+            state: absent
+
+        - name: Remove authelia-configd script
+          ansible.builtin.file:
+            path: /usr/local/sbin/authelia-configd.py
+            state: absent
+
+        - name: Remove local Authelia notification dashboard state
+          ansible.builtin.file:
+            path: /var/lib/easy-ha-proxy/authelia-notification-state.json
+            state: absent
+
+        - name: Remove authelia-usersd script
+          ansible.builtin.file:
+            path: /usr/local/sbin/authelia-usersd.py
+            state: absent
+
+        - name: Remove authelia-bansd script
+          ansible.builtin.file:
+            path: /usr/local/sbin/authelia-bansd.py
+            state: absent

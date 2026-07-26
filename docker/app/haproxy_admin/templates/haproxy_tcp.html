@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – TCP proxies{% endblock %}
+{% block header_title %}TCP proxies{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+{% endblock %}
+
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="border-left: 4px solid var(--error);">
+  <div class="card-header">
+    <strong>Error</strong>
+  </div>
+  <div class="card-body">
+    <pre class="mono" style="white-space: pre-wrap;">{{ error }}</pre>
+  </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="border-left: 4px solid var(--ok);">
+  <div class="card-header">
+    <strong>Message</strong>
+  </div>
+  <div class="card-body">
+    <pre class="mono" style="white-space: pre-wrap;">{{ message }}</pre>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>TCP proxy list</h2>
+    <div class="table-meta">
+      Data is loaded from <code>config/tcp.yml</code> (key <code>tcp_proxies</code>).
+    </div>
+  </div>
+
+  <div class="card-body">
+    {% if tcp_proxies %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Bind</th>
+          <th>Zero trust</th>
+          <th>Ban check</th>
+          <th>Backend(s)</th>
+          <th style="width:1%;">&nbsp;</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in tcp_proxies %}
+        <tr>
+          <td>
+            <a class="tcp-name-link mono" href="{{ url_for('routes.haproxy_tcp_edit', name=t.name) }}">
+              {{ t.name }}
+            </a>
+          </td>
+          <td class="mono">
+            {{ t.bind_ip|default('0.0.0.0') }}:{{ t.bind_port }}
+          </td>
+          <td>
+            {% if t.zero_trust %}
+            <span class="tag tag-ok">on</span>
+            {% else %}
+            <span class="tag">off</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if t.ban_check is not defined or t.ban_check %}
+            <span class="tag tag-ok">on</span>
+            {% else %}
+            <span class="tag">off</span>
+            {% endif %}
+          </td>
+          <td class="mono">
+            {% if t.servers %}
+            {% for s in t.servers %}
+            {{ s.name|default('srv' ~ loop.index) }}={{ s.host }}:{{ s.port }}{% if not loop.last %}, {% endif %}
+            {% endfor %}
+            {% elif t.backend_host and t.backend_port %}
+            {{ t.backend_host }}:{{ t.backend_port }}
+            {% else %}
+            —
+            {% endif %}
+          </td>
+          <td style="text-align:right;">
+            <a class="btn btn-small"
+               href="{{ url_for('routes.haproxy_tcp_edit', name=t.name) }}">
+              Edit
+            </a>
+            <form method="post" action="{{ url_for('routes.haproxy_tcp_page') }}"
+                  style="display:inline;" data-confirm="Delete {{ t.name }}?">
+              <input type="hidden" name="action" value="delete">
+              <input type="hidden" name="name" value="{{ t.name }}">
+              <button type="submit" class="btn btn-small btn-danger">
+                ✕
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>There are no TCP proxy entries yet.</p>
+    {% endif %}
+  </div>
+</div>
+
+{# ───── Упрощённая форма добавления TCP proxies ──────────────────────────── #}
+<div class="card" style="margin-top:16px;">
+  <div class="card-header">
+    <h2>Add TCP proxy</h2>
+    <div class="table-meta">
+      Creates a minimal entry with one <code>backend_host/backend_port</code> pair.
+      Other parameters can be configured on the edit page.
+    </div>
+  </div>
+
+  <form method="post" action="{{ url_for('routes.haproxy_tcp_page') }}">
+    <input type="hidden" name="action" value="add">
+
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-new-name">TCP proxy name *</label>
+          <input id="field-new-name" name="name" type="text" class="form-input" required
+            placeholder="SynologyDriveServer">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-new-bind-ip">Bind IP</label>
+          <input id="field-new-bind-ip" name="bind_ip" type="text" class="form-input" placeholder="0.0.0.0"
+            value="0.0.0.0">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-new-bind-port">Bind port *</label>
+          <input id="field-new-bind-port" name="bind_port" type="number" min="1" max="65535" class="form-input" required
+            placeholder="6690">
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-new-backend-host">backend_host *</label>
+          <input id="field-new-backend-host" name="backend_host" type="text" class="form-input" required
+            placeholder="10.0.0.10">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-new-backend-port">backend_port *</label>
+          <input id="field-new-backend-port" name="backend_port" type="number" min="1" max="65535" class="form-input"
+            required placeholder="6690">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-new-balance">Load balancing</label>
+          <select id="field-new-balance" name="balance" class="form-input">
+            <option value="source" selected>source</option>
+            <option value="roundrobin">roundrobin</option>
+            <option value="leastconn">leastconn</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">
+            <input type="checkbox" name="zero_trust" checked>
+            Zero trust (tbl_ip_auth)
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <input type="checkbox" name="ban_check" checked>
+            Honor tbl_ban
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding: 0 16px 16px;">
+      <button type="submit" class="btn btn-primary">Add TCP proxy</button>
+    </div>
+  </form>
+</div>
+
+{% endblock %}

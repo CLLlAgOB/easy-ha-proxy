@@ -1,0 +1,78 @@
+---
+- name: Configure APT retries and timeouts
+  copy:
+    dest: /etc/apt/apt.conf.d/80-retries
+    mode: '0644'
+    content: |
+      Acquire::Retries "5";
+      Acquire::http::Timeout "30";
+      Acquire::https::Timeout "30";
+      Acquire::http::No-Cache "true";
+      
+- name: Update and upgrade apt packages
+  become: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  apt:
+    update_cache: yes
+    # A deliberate OS upgrade must see the freshest package versions, so
+    # override the play-wide cache validity window here.
+    cache_valid_time: 0
+    upgrade: yes
+    force_apt_get: yes
+
+# A systemd/timesyncd package upgrade can leave systemd-timesyncd stopped
+# (observed on Ubuntu 24.04). Authelia refuses to start without a synchronized
+# clock, so re-assert the time service right after upgrading packages.
+- name: Read the systemd-timesyncd unit load state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - systemd-timesyncd.service
+      - --property=LoadState
+      - --value
+  register: update_packages_timesyncd_unit
+  changed_when: false
+  failed_when: false
+
+- name: Ensure systemd-timesyncd stays enabled and running after the upgrade
+  ansible.builtin.systemd:
+    name: systemd-timesyncd.service
+    enabled: true
+    state: started
+  become: true
+  when: update_packages_timesyncd_unit.stdout | default('') | trim == 'loaded'
+
+- name: Check whether a reboot is required
+  stat:
+    path: /var/run/reboot-required
+  register: reboot_required
+
+- name: Report the required reboot
+  debug:
+    msg: >-
+      The system requires a reboot. The easy-ha-proxy assistant will ask
+      whether to schedule it after Ansible exits. When running this playbook
+      directly, reboot the server manually or explicitly enable the remote
+      reboot option.
+  when: reboot_required.stat.exists
+
+- name: Reboot an SSH-managed target when explicitly requested
+  ansible.builtin.reboot:
+    connect_timeout: 120
+  become: true
+  when:
+    - reboot_required.stat.exists
+    - easy_ha_proxy_reboot_after_upgrade | default(false) | bool
+    - (ansible_connection | default('smart')) != 'local'
+
+- name: Explain why a local Ansible connection is not rebooted
+  ansible.builtin.debug:
+    msg: >-
+      Automatic reboot was deferred because Ansible is running with a local
+      connection. Use the easy-ha-proxy assistant prompt or reboot manually.
+  when:
+    - reboot_required.stat.exists
+    - easy_ha_proxy_reboot_after_upgrade | default(false) | bool
+    - (ansible_connection | default('smart')) == 'local'

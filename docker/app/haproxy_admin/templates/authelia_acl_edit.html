@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}Authelia – access rules{% endblock %}
+
+{% block header_buttons %}
+{% include "_authelia_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<p style="margin-bottom: 10px; color: var(--text-secondary); font-size: 13px;">
+  Only rules are edited here <code>access_control.rules</code>.
+  General settings (port, logging, storage, Redis, etc.) are edited on the page
+  «Authelia settings».
+</p>
+
+<form method="post" id="authelia-acl-form">
+  <input type="hidden" name="total_rules" value="{{ total_rules }}">
+  <input type="hidden" name="active_group_domain" id="active_group_domain" value="{{ active_group_domain or '' }}">
+
+  <!-- Панель со списком доменов -->
+  <div class="card" style="margin-bottom: 15px;">
+    <div class="card-header">
+      <strong>Domains</strong>
+    </div>
+    <div class="card-body">
+      {% if groups %}
+      <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+        {% for group in groups %}
+        {% set dom = group.domain %}
+        {% if not dom %}
+        {% set dom = 'New / without a domain' %}
+        {% endif %}
+        <button type="button" class="btn btn-secondary btn-sm domain-pill"
+          data-domain-target="domain-group-{{ loop.index0 }}">
+          {{ dom }}
+          <span style="opacity: 0.7; font-size: 11px;">
+            ({{ group.rules|length }})
+          </span>
+        </button>
+        {% endfor %}
+      </div>
+      <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+        Click a domain to show or hide its rules.
+        Rules remain a single ordered list in the configuration.
+      </div>
+      {% else %}
+      <em>There are no rules yet.</em>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Groups правил by доменам -->
+  {% for group in groups %}
+  <div class="domain-group-wrapper" id="domain-group-{{ loop.index0 }}" data-domain="{{ group.domain or '' }}" {% if not
+    loop.first %}style="display: none;" {% endif %}>
+
+
+    <h3 style="margin-top: 10px; margin-bottom: 8px; font-size: 16px;">
+      Rules for domain:
+      <span class="mono">
+        {% if group.domain %}
+        {{ group.domain }}
+        {% else %}
+        — new / without a domain —
+        {% endif %}
+      </span>
+    </h3>
+
+    {% for rule in group.rules %}
+    {% set idx = rule.idx %}
+    <div class="card" style="background: var(--surface-1); margin-top: 10px;">
+      <div class="card-header"
+        style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+        <div>
+          <strong>Rule #{{ idx + 1 }}</strong>
+          {% if rule.domains %}
+          — <span class="mono">{{ rule.domains }}</span>
+          {% endif %}
+        </div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+          {% if idx > 0 %}
+          <button type="submit" name="move_rule_up" value="{{ idx }}" class="btn btn-secondary btn-sm"
+            title="Move rule up">
+            ↑
+          </button>
+          {% endif %}
+          {% if idx + 1 < total_rules %} <button type="submit" name="move_rule_down" value="{{ idx }}"
+            class="btn btn-secondary btn-sm" title="Move rule down">
+            ↓
+            </button>
+            {% endif %}
+            <button type="submit" name="delete_rule" value="{{ idx }}" class="btn btn-danger btn-sm">
+              Delete
+            </button>
+        </div>
+      </div>
+
+      <div class="card-body">
+
+        <!-- Domain(s) -->
+        <div style="margin-bottom: 10px;">
+          <label class="form-label" for="rule-{{ idx }}-domains">
+            Domain(s)
+          </label>
+          <input type="text" class="form-input" id="rule-{{ idx }}-domains" name="rule-{{ idx }}-domains"
+            value="{{ rule.domains }}" placeholder="ha.domain.local or several comma-separated values" />
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+            One domain (for example: <code>ha.domain.local</code>) or several comma-separated values.
+            Groups on this page are formed by this field.
+          </div>
+        </div>
+
+        <!-- Policy -->
+        <div style="margin-bottom: 10px;">
+          <label class="form-label" for="rule-{{ idx }}-policy">
+            Policy
+          </label>
+          <select class="form-input" id="rule-{{ idx }}-policy" name="rule-{{ idx }}-policy">
+            {% set p = rule.policy %}
+            <option value="two_factor" {% if p=="two_factor" %}selected{% endif %}>
+              two_factor — require 2FA
+            </option>
+            <option value="one_factor" {% if p=="one_factor" %}selected{% endif %}>
+              one_factor — password only
+            </option>
+            <option value="bypass" {% if p=="bypass" %}selected{% endif %}>
+              bypass — allow the request
+            </option>
+            <option value="deny" {% if p=="deny" %}selected{% endif %}>
+              deny — explicitly deny
+            </option>
+          </select>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+            <code>two_factor</code> — login + 2FA;
+            <code>one_factor</code> — only login;
+            <code>bypass</code> — allow;
+            <code>deny</code> — deny.
+          </div>
+        </div>
+
+        <!-- Субъекты -->
+        <div class="flex-container" style="margin-bottom: 10px;">
+          <div>
+            <label class="form-label" for="rule-{{ idx }}-groups">
+              Groups (group)
+            </label>
+            <input type="text" class="form-input" id="rule-{{ idx }}-groups" name="rule-{{ idx }}-groups"
+              value="{{ rule.groups }}" placeholder="admins, users" />
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+              Comma-separated group list, for example: <code>admins, users</code>.
+              In configuration becomes in
+              <code>subject: [&quot;group:admins&quot;, &quot;group:users&quot;]</code>.
+            </div>
+          </div>
+
+          <div>
+            <label class="form-label" for="rule-{{ idx }}-users">
+              Users (user)
+            </label>
+            <input type="text" class="form-input" id="rule-{{ idx }}-users" name="rule-{{ idx }}-users"
+              value="{{ rule.users }}" placeholder="vasya, petya" />
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+              Comma-separated usernames (if needed personal rules).
+            </div>
+          </div>
+        </div>
+
+        <!-- Flags subject -->
+        <div style="margin-bottom: 10px;">
+          <span class="form-label">Flags</span>
+          <div class="group-grid">
+            <label class="checkbox-pill">
+              <input type="checkbox" name="rule-{{ idx }}-flag_anonymous" {% if rule.flag_anonymous %}checked{% endif
+                %} />
+              <span>Anonymous</span>
+            </label>
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+            Adds to <code>subject</code> value <code>group:anonymous</code>.
+            If this option and the «Groups» and «Users» fields are empty,
+            the rule has no <code>subject</code> and applies to every
+            user who satisfies the required authentication
+            (<code>one_factor</code> / <code>two_factor</code>).
+          </div>
+        </div>
+
+        <!-- Ресурсы -->
+        <div style="margin-bottom: 10px;">
+          <label class="form-label" for="rule-{{ idx }}-resources">
+            Resources
+          </label>
+          <textarea class="form-input" id="rule-{{ idx }}-resources" name="rule-{{ idx }}-resources" rows="3"
+            style="height: auto; min-height: 80px; font-family: ui-monospace, monospace;"
+            placeholder="^/authelia(/.*)?$&#10;^/stats(/.*)?$">{{ rule.resources }}</textarea>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+            Path patterns, one per line (regular expressions).
+            For example: <code>^/authelia(/.*)?$</code>, <code>^/stats(/.*)?$</code>.
+            If the list is empty, the rule applies to all paths on this domain.
+          </div>
+        </div>
+
+      </div> <!-- card-body -->
+    </div> <!-- card -->
+    {% endfor %}
+  </div> <!-- domain-group-wrapper -->
+  {% endfor %}
+
+  <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+    <button type="submit" name="add_rule" value="1" class="btn">
+      + Add rule
+    </button>
+
+    <!-- Просто сохранить rules (валидация+запись, without рестарта Authelia) -->
+    <button type="submit" name="submit_action" value="save" class="btn">
+      💾 Save rules
+    </button>
+
+    <!-- Save and применить: сохранить rules and перезапустить Authelia -->
+    <button type="submit" name="submit_action" value="apply" class="btn btn-secondary">
+      💾 Save and apply (restart Authelia)
+    </button>
+
+    <a href="{{ url_for('authelia_acl.edit_rules') }}" class="btn btn-secondary">
+      Cancel (reload from configuration)
+    </a>
+  </div>
+</form>
+
+<!-- JS for переключения доменов on одной page -->
+<script src="{{ url_for('static', filename='js/authelia_acl.js') }}"></script>
+
+{% endblock %}

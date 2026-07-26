@@ -1,0 +1,339 @@
+"""Superadmin full-backup and disaster-recovery web workflow."""
+
+from __future__ import annotations
+
+import errno
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import uuid
+
+from flask import Blueprint, abort, jsonify, render_template, request, send_file
+
+from .backupd_client import BackupdError, backupd_request
+
+
+bp_system_backups = Blueprint(
+    "system_backups",
+    __name__,
+    url_prefix="/system/backups",
+)
+
+BACKUP_EXCHANGE_ROOT = Path(
+    os.environ.get(
+        "EASY_HA_PROXY_BACKUP_EXCHANGE_ROOT",
+        "/var/lib/easy-ha-proxy/backup-web",
+    )
+)
+UPLOAD_ROOT = BACKUP_EXCHANGE_ROOT / "uploads"
+DOWNLOAD_ROOT = BACKUP_EXCHANGE_ROOT / "backups"
+MAX_UPLOAD_BYTES = int(
+    os.environ.get("EASY_HA_PROXY_BACKUP_MAX_UPLOAD_BYTES", str(8 * 1024**3))
+)
+UPLOAD_DISK_RESERVE_BYTES = int(
+    os.environ.get("EASY_HA_PROXY_BACKUP_DISK_RESERVE_BYTES", str(512 * 1024**2))
+)
+IDENTIFIER_RE = re.compile(r"^[a-f0-9]{32}$")
+SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+
+
+def _daemon_response(result: dict, *, accepted: bool = False):
+    if result.get("ok"):
+        return jsonify(result), (202 if accepted else 200)
+    code = str(result.get("error_code") or "")
+    if code in {"busy", "conflict", "operation_active"} or result.get("conflict"):
+        status_code = 409
+    elif code in {"not_found", "missing"}:
+        status_code = 404
+    elif code == "too_large":
+        status_code = 413
+    elif code == "insufficient_space":
+        status_code = 507
+    elif code in {"invalid", "validation", "bad_request"} or result.get(
+        "validation_error"
+    ):
+        status_code = 400
+    else:
+        status_code = 502
+    return jsonify(result), status_code
+
+
+def _call_daemon(payload: dict, *, accepted: bool = False, timeout: float = 10.0):
+    try:
+        return _daemon_response(
+            backupd_request(payload, timeout=timeout),
+            accepted=accepted,
+        )
+    except BackupdError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 503
+
+
+def _json_payload(required: set[str], optional: set[str] | None = None):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400, description="a JSON object is required")
+    allowed = required | (optional or set())
+    if set(payload) - allowed or not required.issubset(payload):
+        abort(400, description="invalid request fields")
+    return payload
+
+
+def _passphrase(value) -> str:
+    if not isinstance(value, str) or len(value) < 12 or len(value) > 1024:
+        abort(400, description="the backup passphrase must contain 12 to 1024 characters")
+    if "\x00" in value or "\n" in value or "\r" in value:
+        abort(400, description="the backup passphrase contains unsupported characters")
+    return value
+
+
+def _identifier(value, label: str) -> str:
+    text = str(value or "").strip().lower()
+    if not IDENTIFIER_RE.fullmatch(text):
+        abort(400, description=f"invalid {label}")
+    return text
+
+
+@bp_system_backups.get("/")
+def page():
+    return render_template(
+        "system_backups.html",
+        max_upload_gib=round(MAX_UPLOAD_BYTES / 1024**3, 1),
+    )
+
+
+@bp_system_backups.get("/api/status")
+def status_view():
+    payload = {"action": "status"}
+    job_id = (request.args.get("job_id") or "").strip().lower()
+    if job_id:
+        payload["job_id"] = _identifier(job_id, "job id")
+    return _call_daemon(payload)
+
+
+@bp_system_backups.post("/api/jobs/backup")
+def start_backup():
+    payload = _json_payload(
+        {"passphrase", "include_ssh", "quiesce"},
+    )
+    if not isinstance(payload["include_ssh"], bool) or not isinstance(
+        payload["quiesce"], bool
+    ):
+        abort(400, description="include_ssh and quiesce must be boolean")
+    return _call_daemon(
+        {
+            "action": "start_backup",
+            "passphrase": _passphrase(payload["passphrase"]),
+            "include_ssh": payload["include_ssh"],
+            "quiesce": payload["quiesce"],
+        },
+        accepted=True,
+    )
+
+
+@bp_system_backups.post("/api/uploads")
+def upload_archive():
+    """Stream an encrypted archive directly to the dedicated host spool."""
+
+    request.max_content_length = MAX_UPLOAD_BYTES
+    length = request.content_length
+    if length is None:
+        return jsonify({"ok": False, "error": "Content-Length is required"}), 411
+    if length < 1:
+        return jsonify({"ok": False, "error": "the backup file is empty"}), 400
+    if length > MAX_UPLOAD_BYTES:
+        return jsonify({"ok": False, "error": "the backup file is too large"}), 413
+    if request.mimetype != "application/octet-stream":
+        return jsonify(
+            {"ok": False, "error": "application/octet-stream is required"}
+        ), 415
+    if not UPLOAD_ROOT.is_dir():
+        return jsonify({"ok": False, "error": "the restore upload spool is unavailable"}), 503
+    try:
+        free = shutil.disk_usage(UPLOAD_ROOT).free
+    except OSError as exc:
+        return jsonify({"ok": False, "error": f"cannot inspect free disk space: {exc}"}), 503
+    if free - UPLOAD_DISK_RESERVE_BYTES < length:
+        return jsonify({"ok": False, "error": "not enough free disk space for the upload"}), 507
+
+    upload_id = uuid.uuid4().hex
+    temporary = UPLOAD_ROOT / f".{upload_id}.part"
+    destination = UPLOAD_ROOT / f"{upload_id}.tar.gz.enc"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = None
+    written = 0
+    committed = False
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = None
+            while True:
+                chunk = request.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES or written > length:
+                    raise OSError(errno.EFBIG, "upload exceeds the declared size")
+                stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if written != length:
+            raise OSError(errno.EIO, "upload ended before the declared size")
+        os.replace(temporary, destination)
+        committed = True
+        directory_descriptor = os.open(
+            UPLOAD_ROOT,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        if committed:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+        status_code = 413 if exc.errno == errno.EFBIG else 400
+        return jsonify({"ok": False, "error": f"upload failed: {exc}"}), status_code
+
+    return jsonify({"ok": True, "upload_id": upload_id, "size": written}), 201
+
+
+@bp_system_backups.post("/api/uploads/<upload_id>/inspect")
+def inspect_archive(upload_id: str):
+    payload = _json_payload({"passphrase"})
+    return _call_daemon(
+        {
+            "action": "start_inspect",
+            "upload_id": _identifier(upload_id, "upload id"),
+            "passphrase": _passphrase(payload["passphrase"]),
+        },
+        accepted=True,
+    )
+
+
+@bp_system_backups.post("/api/backups/<backup_id>/stage")
+def stage_backup(backup_id: str):
+    """Prepare a root-owned stored backup for the normal inspect workflow."""
+
+    return _call_daemon(
+        {
+            "action": "stage_backup",
+            "backup_id": _identifier(backup_id, "backup id"),
+        },
+        timeout=10.0,
+    )
+
+
+@bp_system_backups.post("/api/jobs/restore")
+def start_restore():
+    payload = _json_payload(
+        {
+            "upload_id",
+            "inspection_job_id",
+            "passphrase",
+            "restore_ssh",
+            "confirmation",
+        },
+        {"scope"},
+    )
+    if payload["confirmation"] != "RESTORE":
+        abort(400, description="type RESTORE to confirm full replacement")
+    if not isinstance(payload["restore_ssh"], bool):
+        abort(400, description="restore_ssh must be boolean")
+    scope = payload.get("scope", "full")
+    if scope not in {"full", "config"}:
+        abort(400, description="scope must be full or config")
+    if scope == "config" and payload["restore_ssh"]:
+        abort(400, description="SSH keys are not part of a configuration-scope restore")
+    return _call_daemon(
+        {
+            "action": "start_restore",
+            "upload_id": _identifier(payload["upload_id"], "upload id"),
+            "inspection_job_id": _identifier(
+                payload["inspection_job_id"], "inspection job id"
+            ),
+            "passphrase": _passphrase(payload["passphrase"]),
+            "restore_ssh": payload["restore_ssh"],
+            "confirmation": "RESTORE",
+            "scope": scope,
+        },
+        accepted=True,
+    )
+
+
+@bp_system_backups.post("/api/delete")
+def delete_artifact():
+    payload = _json_payload({"kind", "id", "confirmation"})
+    if payload["kind"] not in {"backup", "upload"}:
+        abort(400, description="kind must be backup or upload")
+    if payload["confirmation"] != "DELETE":
+        abort(400, description="type DELETE to remove the artifact")
+    return _call_daemon(
+        {
+            "action": "delete",
+            "kind": payload["kind"],
+            "id": _identifier(payload["id"], "artifact id"),
+            "confirmation": "DELETE",
+        }
+    )
+
+
+def _backup_record(backup_id: str) -> dict:
+    try:
+        result = backupd_request({"action": "status"}, timeout=10.0)
+    except BackupdError as exc:
+        abort(503, description=str(exc))
+    if not result.get("ok"):
+        abort(503, description=str(result.get("error") or "backup service error"))
+    for item in result.get("backups") or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or item.get("backup_id") or "").lower()
+        if item_id == backup_id:
+            return item
+    abort(404, description="backup not found")
+
+
+def _download_path(backup_id: str, record: dict, checksum: bool) -> tuple[Path, str]:
+    key = "checksum_name" if checksum else "archive_name"
+    filename = str(record.get(key) or "")
+    if not SAFE_FILENAME_RE.fullmatch(filename) or Path(filename).name != filename:
+        abort(502, description="the backup service returned an unsafe artifact name")
+    if not filename.startswith(f"{backup_id}."):
+        abort(502, description="the backup artifact does not match its identifier")
+    candidate = DOWNLOAD_ROOT / filename
+    try:
+        file_stat = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+        root = DOWNLOAD_ROOT.resolve(strict=True)
+    except OSError:
+        abort(404, description="backup artifact not found")
+    if root not in resolved.parents or not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        abort(502, description="the backup artifact failed a safety check")
+    return resolved, filename
+
+
+@bp_system_backups.get("/download/<backup_id>")
+def download_backup(backup_id: str):
+    identifier = _identifier(backup_id, "backup id")
+    checksum = request.args.get("checksum") == "1"
+    path, filename = _download_path(identifier, _backup_record(identifier), checksum)
+    return send_file(
+        path,
+        as_attachment=True,
+        download_name=filename,
+        conditional=True,
+        max_age=0,
+    )

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Имя контейнера Authelia (по умолчанию то, что в docker-compose: container_name: authelia)
+CONTAINER="${AUTHELIA_CONTAINER:-{{ authelia_container_name | default('authelia') }}}"
+
+# Путь до configuration.yml внутри контейнера (если нужно указать явно).
+# По умолчанию Authelia ищет конфиг в /config, так что можно оставить пустым.
+CONFIG_PATH="${AUTHELIA_CONFIG_PATH:-{{ authelia_cli_config_path | default('') }}}"
+
+CONFIG_ARGS=()
+if [[ -n "$CONFIG_PATH" ]]; then
+  CONFIG_ARGS=(--config "$CONFIG_PATH")
+fi
+
+# Базовая команда: authelia storage bans ...
+BASE_CMD=(docker exec -i "$CONTAINER" authelia "${CONFIG_ARGS[@]}" storage bans)
+
+usage() {
+  cat >&2 <<EOF
+Usage:
+  $0 list-users           # показать баны по пользователям
+  $0 list-ips             # показать баны по IP
+  $0 revoke-user USER     # разбанить пользователя (по имени)
+  $0 revoke-ip IP         # разбанить IP (IPv4/IPv6/CIDR)
+
+Переменные окружения:
+  AUTHELIA_CONTAINER    - имя контейнера (по умолчанию '{{ authelia_container_name | default("authelia") }}')
+  AUTHELIA_CONFIG_PATH  - путь до configuration.yml внутри контейнера
+EOF
+  exit 1
+}
+
+cmd="${1:-}"
+[[ -z "$cmd" ]] && usage
+
+case "$cmd" in
+  list-users)
+    "${BASE_CMD[@]}" user list
+    ;;
+
+  list-ips)
+    "${BASE_CMD[@]}" ip list
+    ;;
+
+  revoke-user)
+    user="${2:-}"
+    if [[ -z "$user" ]]; then
+      echo "ERROR: Не указан USER" >&2
+      usage
+    fi
+    # Простая валидация имени пользователя
+    if [[ ! "$user" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+      echo "ERROR: недопустимые символы в имени пользователя '$user'" >&2
+      exit 1
+    fi
+    "${BASE_CMD[@]}" user revoke "$user"
+    ;;
+
+  revoke-ip)
+    ip="${2:-}"
+    if [[ -z "$ip" ]]; then
+      echo "ERROR: Не указан IP" >&2
+      usage
+    fi
+    # Разрешаем IPv4/IPv6/CIDR
+    if [[ ! "$ip" =~ ^[0-9a-fA-F:./]+$ ]]; then
+      echo "ERROR: недопустимый IP/CIDR '$ip'" >&2
+      exit 1
+    fi
+    "${BASE_CMD[@]}" ip revoke "$ip"
+    ;;
+
+  *)
+    echo "ERROR: неизвестная команда '$cmd'" >&2
+    usage
+    ;;
+esac

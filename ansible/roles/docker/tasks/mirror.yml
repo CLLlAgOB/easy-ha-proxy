@@ -1,0 +1,80 @@
+---
+# roles/docker/tasks/mirror.yml
+
+- name: Show info that Docker Hub is not reachable
+  ansible.builtin.debug:
+    msg: "Docker Hub is NOT reachable (hello-world pull failed), configuring registry mirrors."
+
+# --- Чекаем существует ли daemon.json ---
+- name: Check if /etc/docker/daemon.json exists
+  ansible.builtin.stat:
+    path: /etc/docker/daemon.json
+  register: docker_daemon_json_stat
+
+# --- Если файл есть — читаем ---
+- name: Read existing /etc/docker/daemon.json
+  ansible.builtin.slurp:
+    path: /etc/docker/daemon.json
+  register: docker_daemon_json_raw
+  when: docker_daemon_json_stat.stat.exists
+
+# --- Готовим JSON-структуру ---
+- name: Parse existing daemon.json or init empty
+  ansible.builtin.set_fact:
+    docker_daemon_json: >-
+      {{
+        (docker_daemon_json_raw.content | b64decode | from_json)
+        if (docker_daemon_json_stat.stat.exists | default(false))
+        else {}
+      }}
+
+# --- Массив зеркал ---
+- name: Set desired registry mirrors fact
+  ansible.builtin.set_fact:
+    docker_registry_mirrors:
+      - "https://mirror.gcr.io/"
+      - "https://dockerhub.timeweb.cloud"
+
+# --- Merge mirrors ---
+- name: Merge / set registry mirrors in daemon.json
+  ansible.builtin.set_fact:
+    docker_daemon_json: >-
+      {{
+        docker_daemon_json
+        | combine({'registry-mirrors': docker_registry_mirrors})
+      }}
+
+# --- Пишем файл ---
+- name: Write updated /etc/docker/daemon.json with registry mirrors
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: "{{ docker_daemon_json | to_nice_json }}"
+    mode: "0644"
+  notify: Restart Docker
+  register: docker_daemon_json_written
+
+- name: Apply Docker registry mirror configuration immediately
+  ansible.builtin.meta: flush_handlers
+  when: docker_daemon_json_written.changed
+
+# --- Ждём рестарт Docker (handlers run в конце play) ---
+- name: Wait for Docker restart to complete
+  ansible.builtin.pause:
+    seconds: 3
+
+# --- Повторное тестирование pull ---
+- name: Re-test connectivity to Docker Hub after enabling mirrors
+  ansible.builtin.command:
+    cmd: timeout 20 docker pull hello-world:latest
+  register: docker_mirror_pull_retry
+  changed_when: false
+  failed_when: false
+  tags: restore-network
+
+# --- Итоговое сообщение ---
+- name: Show final result after retry
+  ansible.builtin.debug:
+    msg: >
+      After configuring mirrors:
+      {{ 'SUCCESS — Docker can pull images.' if docker_mirror_pull_retry.rc == 0
+         else 'FAILED — Docker STILL cannot reach any registry, even via mirrors.' }}

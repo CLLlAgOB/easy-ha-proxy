@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – UDP forwarding{% endblock %}
+{% block header_title %}UDP forwarding{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+{% endblock %}
+
+
+{% block content %}
+
+{% for category, flashed_message in get_flashed_messages(with_categories=true) %}
+<div class="card" style="border-left: 4px solid var(--ok);">
+  <div class="card-header">
+    <strong>Applied</strong>
+  </div>
+  <div class="card-body">
+    <p style="margin:0;">{{ flashed_message }}</p>
+  </div>
+</div>
+{% endfor %}
+
+{% if error %}
+<div class="card" style="border-left: 4px solid var(--error);">
+  <div class="card-header">
+    <strong>Error</strong>
+  </div>
+  <div class="card-body">
+    <pre class="mono" style="white-space: pre-wrap;">{{ error }}</pre>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>UDP forwarding list</h2>
+    <div class="table-meta">
+      HAProxy handles only TCP/HTTP. UDP forwarding is installed by the kernel
+      from config/udp.yml. Backends see the proxy address (MASQUERADE).
+      Loopback addresses (127.0.0.0/8) are intentionally not supported.
+    </div>
+    <div class="table-meta" style="margin-top:8px;">
+      Saving waits for the systemd loader to finish. A success result means the
+      complete ruleset is already active; a failed apply restores the previous
+      YAML and rules automatically.
+    </div>
+  </div>
+
+  <div class="card-body">
+    {% if udp_status.ok %}
+    <div class="table-meta" style="margin-bottom:14px;">
+      <strong>Last successful apply:</strong>
+      <span class="mono" data-i18n-skip translate="no">{{ udp_status.applied_at }}</span>
+      · <strong>Active forwards:</strong> {{ udp_status.forwards }}
+      · <strong>Forwarded ports:</strong> {{ udp_status.ports }}
+    </div>
+    {% else %}
+    <div class="table-meta" style="margin-bottom:14px;">
+      <strong>Runtime status unavailable:</strong> {{ udp_status.error }}
+    </div>
+    {% endif %}
+
+    {% if udp_forwards %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Listen (udp)</th>
+          <th>Backend</th>
+          <th>Zero trust</th>
+          <th>Ban check</th>
+          <th>Enabled</th>
+          <th style="width:1%;">&nbsp;</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in udp_forwards %}
+        <tr>
+          <td class="mono">{{ u.name }}</td>
+          <td class="mono">{{ u.listen_port }}/udp</td>
+          <td class="mono">{{ u.backend_host }}:{{ u.backend_port }}</td>
+          <td>
+            {% if u.zero_trust %}
+            <span class="tag tag-ok">on</span>
+            {% else %}
+            <span class="tag">off</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if u.ban_check is not defined or u.ban_check %}
+            <span class="tag tag-ok">on</span>
+            {% else %}
+            <span class="tag">off</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if u.enabled is not defined or u.enabled %}
+            <span class="tag tag-ok">yes</span>
+            {% else %}
+            <span class="tag">no</span>
+            {% endif %}
+          </td>
+          <td style="text-align:right;">
+            <a class="btn btn-small"
+               href="{{ url_for('routes.haproxy_udp_page', edit=u.name) }}">
+              Edit
+            </a>
+            <form method="post" action="{{ url_for('routes.haproxy_udp_page') }}"
+                  style="display:inline;" data-confirm="Delete {{ u.name }}?">
+              <input type="hidden" name="action" value="delete">
+              <input type="hidden" name="name" value="{{ u.name }}">
+              <button type="submit" class="btn btn-small btn-danger">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>There are no UDP forwards yet.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% set form_udp = edit_forward or {} %}
+{# ───── Add/edit UDP forward ─────────────────────────────────────────────── #}
+<div class="card" style="margin-top:16px;">
+  <div class="card-header">
+    <h2>{% if original_name %}Edit UDP forward{% else %}Add UDP forward{% endif %}</h2>
+    <div class="table-meta">
+      Use one port (51820) or paired inclusive ranges of the same size
+      (19999-20010 → 9999-10010). A range may contain at most 1024 ports.
+      Use a container or LAN IPv4 backend; loopback addresses are rejected.
+    </div>
+  </div>
+
+  <form method="post" action="{{ url_for('routes.haproxy_udp_page') }}">
+    <input type="hidden" name="action" value="save">
+    {% if original_name %}
+    <input type="hidden" name="original_name" value="{{ original_name }}">
+    {% endif %}
+
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-udp-name">Name *</label>
+          <input id="field-udp-name" name="name" type="text" class="form-input" required
+            value="{{ form_udp.get('name', '') }}" placeholder="wireguard">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-udp-listen">Listen port or range *</label>
+          <input id="field-udp-listen" name="listen_port" type="text"
+            inputmode="numeric" pattern="[0-9]{1,5}(-[0-9]{1,5})?"
+            class="form-input" required value="{{ form_udp.get('listen_port', '') }}"
+            placeholder="51820 or 19999-20010">
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-udp-backend-host">backend_host *</label>
+          <input id="field-udp-backend-host" name="backend_host" type="text" class="form-input" required
+            value="{{ form_udp.get('backend_host', '') }}"
+            placeholder="10.0.0.10">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-udp-backend-port">Backend port or range *</label>
+          <input id="field-udp-backend-port" name="backend_port" type="text"
+            inputmode="numeric" pattern="[0-9]{1,5}(-[0-9]{1,5})?"
+            class="form-input" required value="{{ form_udp.get('backend_port', '') }}"
+            placeholder="51820 or 9999-10010">
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">
+            <input type="checkbox" name="zero_trust"
+              {% if form_udp.get('zero_trust', false) %}checked{% endif %}>
+            Zero trust (only authorized IPs)
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <input type="checkbox" name="ban_check"
+              {% if form_udp.get('ban_check', true) %}checked{% endif %}>
+            Honor tbl_ban (drop banned sources)
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <input type="checkbox" name="enabled"
+              {% if form_udp.get('enabled', true) %}checked{% endif %}>
+            Enabled
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding: 0 16px 16px;">
+      <button type="submit" class="btn btn-primary">Save and apply now</button>
+      {% if original_name %}
+      <a class="btn" href="{{ url_for('routes.haproxy_udp_page') }}">Cancel editing</a>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+{% endblock %}

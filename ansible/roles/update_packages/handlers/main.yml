@@ -1,0 +1,5 @@
+---
+- name: Reboot the system
+  ansible.builtin.reboot:
+  become: true
+  when: (ansible_connection | default('smart')) != 'local'

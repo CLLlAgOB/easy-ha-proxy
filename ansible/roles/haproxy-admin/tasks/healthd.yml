@@ -1,0 +1,77 @@
+---
+# roles/haproxy-admin/tasks/healthd.yml
+# Установка root-демона haproxy-healthd
+
+- name: "haproxy-healthd | Install script"
+  ansible.builtin.copy:
+    src: haproxy-healthd.py
+    dest: /usr/local/sbin/haproxy-healthd.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: healthd_script
+
+- name: "haproxy-healthd | Ensure config dir"
+  ansible.builtin.file:
+    path: "{{ app_dir | default('/opt/haproxy-admin') }}/config"
+    state: directory
+    owner: "{{ app_user | default('haproxyadmin') }}"
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0755"
+
+- name: "haproxy-healthd | Render config"
+  ansible.builtin.template:
+    src: healthd.json.j2
+    dest: "{{ healthd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/healthd.json') }}"
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0640"
+  register: healthd_cfg
+
+# Historically this root-owned daemon config lived under config/, but that
+# directory is recursively chowned to the app user after a backup restore,
+# which fought the render every apply (owner root <-> app_user ping-pong).
+# It now lives at the root dir level (sibling of docker-compose.yml); drop the
+# stale copy so the recurse no longer touches it. Skipped when an operator
+# explicitly pinned healthd_config_path back to the legacy location.
+- name: "haproxy-healthd | Remove the legacy config-dir healthd.json"
+  ansible.builtin.file:
+    path: "{{ app_dir | default('/opt/haproxy-admin') }}/config/healthd.json"
+    state: absent
+  when: >-
+    (healthd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/healthd.json'))
+    != ((app_dir | default('/opt/haproxy-admin')) ~ '/config/healthd.json')
+
+- name: "haproxy-healthd | Install systemd unit"
+  ansible.builtin.template:
+    src: haproxy-healthd.service.j2
+    dest: /etc/systemd/system/haproxy-healthd.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: healthd_unit
+
+- name: "haproxy-healthd | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: healthd_unit.changed
+
+- name: "haproxy-healthd | Enable service"
+  ansible.builtin.systemd:
+    name: haproxy-healthd.service
+    enabled: yes
+
+- name: "haproxy-healthd | Restart service if changed"
+  ansible.builtin.systemd:
+    name: haproxy-healthd.service
+    state: restarted
+  when: >-
+    healthd_script.changed
+    or healthd_unit.changed
+    or healthd_cfg.changed
+    or (hapadm_env_t.changed | default(false))
+
+- name: "haproxy-healthd | Ensure service started"
+  ansible.builtin.systemd:
+    name: haproxy-healthd.service
+    state: started

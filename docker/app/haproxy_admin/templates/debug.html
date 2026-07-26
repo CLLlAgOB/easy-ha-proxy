@@ -1,0 +1,176 @@
+{% extends 'base.html' %}
+{% block title %}HAProxy – Diagnostics{% endblock %}
+{% block header_title %}System diagnostics{% endblock %}
+
+{% block header_buttons %}
+<a class="btn" href="{{ url_for('routes.index') }}">← Home</a>
+{% endblock %}
+
+{% block content %}
+<!-- ───────── RAW-table ───────── -->
+<div class="card">
+  <div class="card-header">
+    <h2>RAW show table</h2>
+    <button class="btn" id="raw-refresh">Refresh</button>
+  </div>
+
+  <h3 style="margin-top:0">tbl_ban</h3>
+  <pre id="ban-raw">Loading…</pre>
+
+  <h3>tbl_err</h3>
+  <pre id="err-raw">Loading…</pre>
+
+  <h3>tbl_ip_auth</h3>
+  <pre id="auth-raw">Loading…</pre>
+</div>
+
+
+<!-- ───────── Allow lists (файлы and runtime) ───────── -->
+<div class="card" style="margin-top:30px">
+  <div class="card-header">
+    <h2>Allow lists (files and runtime ACL)</h2>
+    <button class="btn" id="wl-refresh">Refresh</button>
+  </div>
+
+  <div class="grid">
+    <div>
+      <h3>GEO allow list (file)</h3>
+      <div class="table-meta" id="geo-file-path">Path: …</div>
+      <pre id="geo-file">Loading…</pre>
+      <h3 style="margin-top:18px">GEO whitelist (runtime ACL)</h3>
+      <pre id="geo-runtime">Loading…</pre>
+    </div>
+    <div>
+      <h3>GLOBAL allow list (file)</h3>
+      <div class="table-meta" id="global-file-path">Path: …</div>
+      <pre id="global-file">Loading…</pre>
+      <h3 style="margin-top:18px">GLOBAL whitelist (runtime ACL)</h3>
+      <pre id="global-runtime">Loading…</pre>
+    </div>
+  </div>
+</div>
+
+<!-- ───────── прочая диагностика ───────── -->
+<div class="card" style="margin-top:30px">
+  <div class="card-header">
+    <h2>Log analytics (diagnostic)</h2>
+    <button class="btn" id="diag-refresh">Refresh</button>
+  </div>
+  <pre id="diag">Loading…</pre>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  /* ================ RAW tables ================= */
+  async function loadRawTables() {
+    const banPre = document.getElementById('ban-raw');
+    const errPre = document.getElementById('err-raw');
+    const authPre = document.getElementById('auth-raw');
+
+    [banPre, errPre, authPre].forEach(el => {
+      if (el) el.textContent = 'Loading…';
+    });
+
+    // простая экранизация for RAW (on будущее, if понадобится)
+    const esc = (s) => String(s)
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+    try {
+      const r = await fetch('{{ url_for("routes.api_tables_raw") }}');
+      const j = await r.json();
+
+      if (banPre) {
+        banPre.textContent = j.ban_raw ?? '—';
+      }
+
+      // tbl_ip_auth: новое field auth_raw
+      if (authPre) {
+        if ('auth_raw' in j) {
+          authPre.textContent = j.auth_raw ?? '—';
+        } else {
+          authPre.textContent = '—';
+        }
+      }
+
+      // Совместимость: раньше err_raw была строкой
+      if (typeof j.err_raw === 'string' || j.err_raw == null) {
+        if (errPre) {
+          errPre.textContent = j.err_raw ?? '—';
+        }
+      } else if (j.err_raw && typeof j.err_raw === 'object') {
+        const box = (errPre || document.getElementById('err-raw')).parentElement;
+        box.innerHTML = '';
+        Object.keys(j.err_raw).sort().forEach(name => {
+          const h = document.createElement('h3');
+          h.textContent = name;
+          const pre = document.createElement('pre');
+          pre.textContent = j.err_raw[name];
+          box.appendChild(h);
+          box.appendChild(pre);
+        });
+      } else if (errPre) {
+        errPre.textContent = '—';
+      }
+    } catch (e) {
+      if (banPre) banPre.textContent = 'ERROR: ' + e.message;
+      if (errPre) errPre.textContent = 'ERROR: ' + e.message;
+      if (authPre) authPre.textContent = 'ERROR: ' + e.message;
+    }
+  }
+
+
+  /* ================ whitelists ================= */
+  async function loadWhitelists() {
+    const geoPath = document.getElementById('geo-file-path');
+    const geoFile = document.getElementById('geo-file');
+    const geoRun = document.getElementById('geo-runtime');
+
+    const gloPath = document.getElementById('global-file-path');
+    const gloFile = document.getElementById('global-file');
+    const gloRun = document.getElementById('global-runtime');
+
+    [geoFile, geoRun, gloFile, gloRun].forEach(el => el.textContent = 'Loading…');
+
+    try {
+      const r = await fetch('{{ url_for("routes.api_whitelists") }}');
+      const j = await r.json();
+
+      geoPath.textContent = 'Path: ' + (j.geo_file_path || '—');
+      gloPath.textContent = 'Path: ' + (j.global_file_path || '—');
+
+      geoFile.textContent = j.geo_file ?? '(no data)';
+      geoRun.textContent = j.geo_runtime ?? '(no data)';
+
+      gloFile.textContent = j.global_file ?? '(no data)';
+      gloRun.textContent = j.global_runtime ?? '(no data)';
+    } catch (e) {
+      [geoFile, geoRun, gloFile, gloRun].forEach(el => el.textContent = 'ERROR: ' + e.message);
+    }
+  }
+
+  /* ================ diagnostic ================= */
+  async function loadDiag() {
+    const pre = document.getElementById('diag');
+    pre.textContent = 'Loading…';
+    try {
+      const r = await fetch('{{ url_for("routes.api_attackers") }}');
+      const j = await r.json();
+      pre.textContent = JSON.stringify(j.diagnostic, null, 2);
+    } catch (e) {
+      pre.textContent = 'ERROR: ' + e.message;
+    }
+  }
+
+  /* ================ init ================= */
+  document.getElementById('raw-refresh').onclick = loadRawTables;
+  document.getElementById('diag-refresh').onclick = loadDiag;
+  document.getElementById('wl-refresh').onclick = loadWhitelists;
+
+  document.addEventListener('DOMContentLoaded', () => {
+    loadRawTables();
+    loadWhitelists();
+    loadDiag();
+  });
+</script>
+{% endblock %}

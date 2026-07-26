@@ -1,0 +1,69 @@
+---
+# roles/authelia/tasks/bansd.yml
+# Helper + (опционально) root-демон authelia-bansd
+
+- name: "Authelia | bansd | install helper and (optional) bans daemon"
+  when: authelia_enabled | default(false) | bool
+  block:
+    # CLI helper для банов — в текущей версии deploy без условия
+    - name: "authelia-bans | Deploy helper script"
+      become: true
+      ansible.builtin.template:
+        src: authelia-bans.sh.j2
+        dest: "{{ authelia_bans_script_path }}"
+        owner: root
+        group: root
+        mode: "{{ authelia_bans_script_mode }}"
+
+    - name: "authelia-bansd | Install daemon script"
+      become: true
+      ansible.builtin.copy:
+        src: authelia-bansd.py
+        dest: /usr/local/sbin/authelia-bansd.py
+        owner: root
+        group: root
+        mode: "0750"
+      register: authelia_bansd_script
+      when: authelia_bans_daemon_enabled | default(true) | bool
+
+    - name: "authelia-bansd | Install systemd unit"
+      become: true
+      ansible.builtin.template:
+        src: authelia-bansd.service.j2
+        dest: /etc/systemd/system/authelia-bansd.service
+        owner: root
+        group: root
+        mode: "0640"
+      register: authelia_bansd_unit
+      when: authelia_bans_daemon_enabled | default(true) | bool
+
+    - name: "authelia-bansd | systemd daemon-reload if unit changed"
+      become: true
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      when:
+        - authelia_bans_daemon_enabled | default(true) | bool
+        - authelia_bansd_unit.changed
+
+    - name: "authelia-bansd | Enable service"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-bansd.service
+        enabled: yes
+      when: authelia_bans_daemon_enabled | default(true) | bool
+
+    - name: "authelia-bansd | Restart service if changed"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-bansd.service
+        state: restarted
+      when:
+        - authelia_bans_daemon_enabled | default(true) | bool
+        - (authelia_bansd_script is defined and authelia_bansd_script.changed) or (authelia_bansd_unit is defined and authelia_bansd_unit.changed)
+
+    - name: "authelia-bansd | Ensure service started"
+      become: true
+      ansible.builtin.systemd:
+        name: authelia-bansd.service
+        state: started
+      when: authelia_bans_daemon_enabled | default(true) | bool

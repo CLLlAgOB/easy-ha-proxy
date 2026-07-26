@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}Logs by {{ ip }} — HAProxy{% endblock %}
+{% block header_title %}Logs by IP {{ ip }}{% endblock %}
+
+{% block header_buttons %}
+  <a class="btn" href="{{ url_for('routes.index') }}">← Home</a>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2>Last 30 matches</h2>
+  </div>
+  {% if lines and lines|length %}
+    <pre style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.35;background:#0b0f14;color:#d0d6dc;padding:12px;border-radius:10px;max-height:70vh;overflow:auto;">
+{{ lines|join('\n') }}
+    </pre>
+  {% else %}
+    <div class="alert alert-info">No matches found.</div>
+  {% endif %}
+</div>
+{% endblock %}

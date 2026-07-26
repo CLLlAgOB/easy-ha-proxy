@@ -1,0 +1,96 @@
+- name: Ensure post-hooks directory exists
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/post
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Ensure /root/.ssh exists
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+# Кладём приватный ключ для SFTP в путь, который указан в defaults.rd g_ssh_key
+- name: Copy RDG SSH private key
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../credentials/.ssh/id_rdg_cert"
+    dest: "/root/.ssh/id_rdg_cert"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  diff: false
+
+# env-файл, чтобы хук жил сам по себе
+- name: RDG env for post-hook
+  copy:
+    dest: /etc/letsencrypt/rdg.env
+    mode: "0600"
+    owner: root
+    group: root
+    content: |
+      RDG_DOMAIN="{{ rdg_domain }}"
+      RDG_HOST="{{ rdg_host }}"
+      SSH_USER="{{ rdg_ssh_user }}"
+      SSH_KEY="{{ rdg_ssh_key }}"
+      SSH_PORT="{{ rdg_ssh_port }}"
+      PFX_PASSWORD="{{ rdg_pfx_password | default('') }}"
+      REMOTE_PATH="{{ rdg_remote_path | default('C:/SFTP/upload/rdg_cert.pfx') }}"
+  no_log: true
+  diff: false
+
+# Единый post-hook: делает PFX → заливает на RDG → reload haproxy
+- name: POST-hook — RDG deploy + HAProxy reload
+  copy:
+    dest: /etc/letsencrypt/renewal-hooks/post/900-post-deploy-rdg.sh
+    mode: "0755"
+    owner: root
+    group: root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/letsencrypt/rdg.env
+
+      # Certbot даёт переменные окружения:
+      #  RENEWED_LINEAGE (путь live/...), RENEWED_DOMAINS (через пробел)
+      if ! echo " ${RENEWED_DOMAINS:-} " | grep -q " ${RDG_DOMAIN} "; then
+        exit 0
+      fi
+
+      LIVE_DIR="${RENEWED_LINEAGE}"
+      if [ ! -f "${LIVE_DIR}/fullchain.pem" ] || [ ! -f "${LIVE_DIR}/privkey.pem" ]; then
+        exit 0
+      fi
+
+      TMP_PFX="$(mktemp /tmp/rdg_cert.XXXXXX.pfx)"
+      trap 'rm -f "${TMP_PFX}"' EXIT
+
+      if [ -n "${PFX_PASSWORD:-}" ]; then
+        openssl pkcs12 -export \
+          -inkey  "${LIVE_DIR}/privkey.pem" \
+          -in     "${LIVE_DIR}/fullchain.pem" \
+          -out    "${TMP_PFX}" \
+          -passout "pass:${PFX_PASSWORD}"
+      else
+        openssl pkcs12 -export \
+          -inkey  "${LIVE_DIR}/privkey.pem" \
+          -in     "${LIVE_DIR}/fullchain.pem" \
+          -out    "${TMP_PFX}" \
+          -passout pass:
+      fi
+
+      SFTP_BATCH="$(mktemp /tmp/sftp.XXXXXX.batch)"
+      trap 'rm -f "${TMP_PFX}" "${SFTP_BATCH}"' EXIT
+      cat > "${SFTP_BATCH}" <<EOF
+      put "${TMP_PFX}" "${REMOTE_PATH}"
+      EOF
+
+      sftp -b "${SFTP_BATCH}" -i "${SSH_KEY}" -P "${SSH_PORT}" \
+        -o StrictHostKeyChecking=no \
+        "${SSH_USER}@${RDG_HOST}"
+
+      systemctl reload haproxy 2>/dev/null || true

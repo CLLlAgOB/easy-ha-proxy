@@ -1,0 +1,8 @@
+---
+# Установка всех вспомогательных демонов haproxy-admin одним стейджем
+
+- import_tasks: certd.yml
+- import_tasks: controld.yml
+- import_tasks: backupd.yml
+- import_tasks: updated.yml
+- import_tasks: healthd.yml

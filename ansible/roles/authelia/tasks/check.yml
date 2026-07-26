@@ -1,0 +1,25 @@
+- name: Authelia | validate and (re)start stack
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: Validate Authelia docker-compose.yml
+      ansible.builtin.command:
+        cmd: docker compose -f /opt/authelia/docker-compose.yml config --quiet
+      register: authelia_compose_validate
+      changed_when: false
+      no_log: true
+      diff: false
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+
+    - name: Validate Authelia configuration.yml via CLI in container
+      ansible.builtin.command:
+        cmd: >
+          docker run --rm
+          {{ '--pull=never' if easy_ha_proxy_offline_restore | default(false) | bool else '' }}
+          -v /opt/authelia:/config
+          authelia/authelia:{{ authelia_version | default('4.39.20') }}
+          authelia config validate --config /config/configuration.yml
+      register: authelia_config_validate
+      changed_when: false
+      no_log: true
+      diff: false
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)

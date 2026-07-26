@@ -1,0 +1,21 @@
+---
+# Оркестратор стадий выпуска/продления
+
+- include_tasks: renew__00_targets.yml
+  tags: [cert, cert-renew, addsite]
+
+- include_tasks: renew__15_dns_check.yml
+  tags: [cert, cert-renew, addsite]
+
+- name: Issue certificates with temporary ACME DNAT cleanup
+  when: (issue_targets_count | default(0) | int) > 0
+  block:
+    - include_tasks: renew__10_nat_on.yml
+
+    - include_tasks: renew__20_issue.yml
+
+    - include_tasks: renew__30_assemble.yml
+
+  always:
+    - include_tasks: renew__40_nat_off.yml
+  tags: [cert, cert-renew, addsite]

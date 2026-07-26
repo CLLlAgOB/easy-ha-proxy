@@ -1,0 +1,49 @@
+[Unit]
+Description=easy-ha-proxy encrypted backup and restore broker
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group | default('hadmin') }}
+Environment="PYTHONUNBUFFERED=1"
+Environment="BACKUPD_SOCKET_PATH={{ backupd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.sock') }}"
+Environment="BACKUPD_ROOT_DIR={{ backupd_root_dir | default('/var/lib/easy-ha-proxy/backup-web') }}"
+Environment="BACKUPD_SOURCE_DIR={{ backupd_source_dir | default('/opt/easy-ha-proxy/source') }}"
+Environment="BACKUPD_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
+Environment="BACKUPD_APP_GROUP={{ app_group | default('hadmin') }}"
+Environment="BACKUPD_MAX_REQUEST_BYTES={{ backupd_max_request_bytes | default(65536) }}"
+Environment="BACKUPD_MAX_ARCHIVE_BYTES={{ backupd_max_archive_bytes | default(8589934592) }}"
+Environment="BACKUPD_MIN_FREE_BYTES={{ backupd_min_free_bytes | default(536870912) }}"
+Environment="BACKUPD_MAX_CAPTURE_BYTES={{ backupd_max_capture_bytes | default(65536) }}"
+Environment="BACKUPD_MAX_STATE_BYTES={{ backupd_max_state_bytes | default(262144) }}"
+Environment="BACKUPD_JOB_TIMEOUT_SECONDS={{ backupd_job_timeout_seconds | default(21600) }}"
+Environment="BACKUPD_LIST_LIMIT={{ backupd_list_limit | default(50) }}"
+Environment="BACKUPD_UPLOAD_TTL_SECONDS={{ backupd_upload_ttl_seconds | default(86400) }}"
+Environment="BACKUPD_RESTORE_ACTIVE_MARKER={{ backupd_restore_active_marker | default('/run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active') }}"
+Environment="BACKUPD_RESTART_REQUEST_MARKER={{ backupd_restart_request_marker | default('/run/easy-ha-proxy/easy-ha-proxy-backupd-restart.requested') }}"
+Environment="BACKUPD_OPERATION_LOCK={{ backupd_operation_lock_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock') }}"
+Environment="BACKUPD_SERVICE_NAME=easy-ha-proxy-backupd.service"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-backupd.py', rstrip=false) | hash('sha256') }}"
+ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backupd.py
+Restart=always
+RestartSec=3
+TimeoutStopSec={{ (backupd_job_timeout_seconds | default(21600) | int) + 30 }}
+KillMode=mixed
+LimitCORE=0
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+PrivateTmp=yes
+# The broker never runs privileged children itself: fixed-argv jobs are
+# spawned by PID 1 as systemd-run transient units, escaping this sandbox.
+# That keeps NoNewPrivileges here while the restore reconciliation can still
+# run snap-confined certbot (AppArmor profile switch) inside the job.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

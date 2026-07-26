@@ -1,0 +1,36 @@
+# /etc/systemd/system/haproxy-certd.service
+[Unit]
+Description=HAProxy certificate helper (root, Unix socket)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group }}
+# The daemon is self-contained and does not require a working directory.
+# WorkingDirectory=/opt/haproxy-admin
+
+Environment="PYTHONUNBUFFERED=1"
+Environment="HAPROXY_CERTD_DRY_RUN={{ haproxy_certd_dry_run | default('0') }}"
+Environment="HAPROXY_CERTD_SOCKET={{ certd_socket_path }}"
+Environment="HAPROXY_CERTD_SOCKET_GROUP={{ app_group }}"
+Environment="HAPROXY_CERTS_DIR={{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
+Environment="HAPROXY_CA_ROOT_DIR={{ haproxy_ca_root_dir | default('/etc/haproxy/certificate-authorities') }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-certd.py', rstrip=false) | hash('sha256') }}"
+
+ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py
+
+Restart=always
+RestartSec=3
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+PrivateTmp=yes
+ProtectHome=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

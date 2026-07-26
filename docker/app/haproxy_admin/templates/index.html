@@ -1,0 +1,201 @@
+{% extends 'base.html' %}
+{% block title %}HAProxy – Home{% endblock %}
+{% block header_title %}Home{% endblock %}
+
+{% block header_buttons %}
+<button class="btn btn-refresh" id="refresh-btn" onclick="Dashboard.manualRefresh()">
+  <span class="spinner"></span>
+  <span class="icon">⟳</span>
+  <span class="check">✔</span>
+  Refresh
+</button>
+
+<button class="btn" id="auto-btn">Auto-refresh: off</button>
+
+{% if is_superadmin %}
+<a class="btn" href="{{ url_for('routes.haproxy_stats_page') }}">
+  HAProxy statistics
+</a>
+{% endif %}
+
+{% if debug_routes_enabled %}
+  <a class="btn" href="{{ url_for('routes.debug') }}">
+    Diagnostics
+  </a>
+{% endif %}
+
+{% if is_superadmin %}
+<a class="btn" href="{{ url_for('authelia_acl.edit_rules') }}">
+  Authelia
+</a>
+<a class="btn" href="{{ url_for('routes.haproxy_sites_page') }}">
+  Haproxy config
+</a>
+{% endif %}
+<!-- Центрируемая группа in шапке (вариант B) -->
+<div class="controls-spacer"></div>
+<div class="card-header">
+  <div class="header-controls">
+    <div id="sites-meta" class="connection-badge"></div>
+    <button id="toggle-compact" class="btn-icon" type="button" title="Compact">≡</button>
+  </div>
+</div>
+<div class="controls-spacer"></div>
+{% endblock %}
+
+{% block content %}
+<div class="card" id="sites-panel" style="margin-bottom:20px">
+  <ul id="sites-list" class="site-list">
+    <li class="muted">Loading…</li>
+  </ul>
+</div>
+
+<!-- ЗАБЛОКИРОВАННЫЕ / ERR -->
+<div class="card">
+  <div class="flex-container">
+    <div class="box">
+      <div class="table-header">
+        <div class="table-title">Blocked IPs</div>
+        <div id="ban-meta" class="table-meta">Loading…</div>
+      </div>
+      <div class="table-container">
+        <div id="ban">Loading…</div>
+      </div>
+    </div>
+    <div class="box">
+      <div class="table-header">
+        <div class="table-title">Failed requests</div>
+        <div id="err-meta" class="table-meta">Loading…</div>
+      </div>
+      <div class="table-container">
+        <div id="err">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- форма unban -->
+  <div class="flex-container" style="margin-top:25px;gap:30px">
+    <div style="flex:1">
+      <h3>Unban IP</h3>
+      <form id="unban-form" style="display:flex;align-items:flex-end;gap:15px">
+        <div style="flex:1">
+          <label for="ip" class="form-label">Enter an IP address</label>
+          <input type="text" id="ip" name="ip" class="form-input" placeholder="192.0.2.1" required>
+        </div>
+        <button type="submit" class="btn btn-danger">Unblock</button>
+        <span id="unban-result" class="result-message"></span>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- БЕЛЫЕ СПИСКИ -->
+<div class="card" id="whitelists-panel">
+  <div class="card-header whitelist-header">
+    <div>
+      <h2>Allow lists</h2>
+      <div class="card-meta" id="whitelists-meta">Loading…</div>
+    </div>
+    <button class="btn" id="whitelists-refresh" type="button">Refresh</button>
+  </div>
+
+  <div class="whitelist-grid">
+    <section class="whitelist-column">
+      <div class="table-header">
+        <div class="table-title">GEO whitelist</div>
+        <div class="table-meta" id="whitelist-geo-meta">Loading…</div>
+      </div>
+      <form id="whitelist-form" class="whitelist-manage-form">
+        <div class="whitelist-input">
+          <label for="whitelist-ip" class="form-label">IP or CIDR network</label>
+          <input type="text" id="whitelist-ip" name="ip" class="form-input" placeholder="198.51.100.0/24" required>
+        </div>
+        <button type="submit" class="btn">Apply</button>
+        <span id="whitelist-result" class="result-message"></span>
+      </form>
+      <div class="whitelist-path" id="whitelist-geo-path">Path: …</div>
+      <div class="whitelist-list" id="whitelist-geo-list">
+        <div class="loading">Loading…</div>
+      </div>
+      <details class="whitelist-runtime">
+        <summary>Runtime ACL</summary>
+        <pre id="whitelist-geo-runtime">Loading…</pre>
+      </details>
+    </section>
+
+    <section class="whitelist-column">
+      <div class="table-header">
+        <div class="table-title">GLOBAL whitelist</div>
+        <div class="table-meta" id="whitelist-global-meta">Loading…</div>
+      </div>
+      <form id="whitelist-global-form" class="whitelist-manage-form">
+        <div class="whitelist-input">
+          <label for="whitelist-global-ip" class="form-label">IP or CIDR network</label>
+          <input type="text" id="whitelist-global-ip" name="ip" class="form-input"
+            placeholder="203.0.113.45 or 203.0.113.0/24" required>
+        </div>
+        <button type="submit" class="btn">Apply</button>
+        <span id="whitelist-global-result" class="result-message"></span>
+      </form>
+      <div class="whitelist-path" id="whitelist-global-path">Path: …</div>
+      <div class="whitelist-list" id="whitelist-global-list">
+        <div class="loading">Loading…</div>
+      </div>
+      <details class="whitelist-runtime">
+        <summary>Runtime ACL</summary>
+        <pre id="whitelist-global-runtime">Loading…</pre>
+      </details>
+    </section>
+  </div>
+</div>
+
+<!-- АНАЛИТИКА УГРОЗ -->
+<div class="card">
+  <div class="card-header">
+    <h2>Threat analytics</h2>
+    <button class="btn" onclick="Dashboard.fetchAttackers()">Refresh data</button>
+  </div>
+
+  <div class="grid">
+    <div>
+      <h3>Top HTTP 400 responses</h3>
+      <div id="top-400" class="loading">Analyzing data…</div>
+    </div>
+    <div>
+      <h3>Top HTTP 451 geo-block responses</h3>
+      <div id="top-451" class="loading">Analyzing data…</div>
+    </div>
+  </div>
+</div>
+<!-- ───────── Authorized IPs (tbl_ip_auth) ───────── -->
+<div class="card">
+  <div class="card-header">
+    <h2>Authorized IPs (tbl_ip_auth)</h2>
+    <button class="btn" id="ip-auth-refresh" type="button">Refresh</button>
+  </div>
+
+  <div class="card-meta" id="ip-auth-meta">Loading…</div>
+
+  <div id="ip-auth">
+    <div class="loading">Loading…</div>
+  </div>
+</div>
+
+<!-- АКТИВНЫЕ ПОДКЛЮЧЕНИЯ (короткий вид) -->
+<div class="card">
+  <div class="card-header">
+    <h2>Active connections</h2>
+    <button class="btn" onclick="Dashboard.fetchConnections()">Refresh</button>
+  </div>
+
+  <div class="table-header">
+    <div id="conn-meta" class="connection-badge">Loading…</div>
+  </div>
+  <div id="connections" class="loading">Loading…</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='js/sites.js') }}"></script>
+{% endblock %}

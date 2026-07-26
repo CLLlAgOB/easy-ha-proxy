@@ -1,0 +1,268 @@
+# easy-ha-proxy/ansible/roles/authelia/tasks/install.yml
+
+- name: Authelia enabled | deploy stack and dependencies
+  when: authelia_enabled | default(false) | bool
+  block:
+    # -------- HOST TIME SYNCHRONIZATION --------
+    # Authelia sessions and TOTP require an NTP-synchronized host clock. The
+    # logic is deliberately provider-agnostic: check the clock and, if it has
+    # drifted, force systemd-timesyncd to synchronize it. This behaves the same
+    # on bare-metal / cloud servers and on local test VMs — no hypervisor- or
+    # virtual-machine-specific handling.
+    - name: Read host NTP synchronization state
+      ansible.builtin.command:
+        argv:
+          - timedatectl
+          - show
+          - --property=NTPSynchronized
+          - --value
+      register: authelia_initial_time_sync
+      changed_when: false
+      failed_when: false
+
+    - name: Synchronize the host clock when it has drifted
+      when: authelia_initial_time_sync.stdout | default('') | trim != 'yes'
+      block:
+        - name: Detect systemd-timesyncd
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - show
+              - systemd-timesyncd.service
+              - --property=LoadState
+              - --value
+          register: authelia_timesyncd_unit
+          changed_when: false
+          failed_when: false
+
+        - name: Require a time synchronization provider
+          ansible.builtin.assert:
+            that:
+              - authelia_timesyncd_unit.rc == 0
+              - authelia_timesyncd_unit.stdout | trim == 'loaded'
+            fail_msg: >-
+              The host clock is not synchronized and systemd-timesyncd is not
+              available. Install it (for example `apt install
+              systemd-timesyncd`) or synchronize the clock with your own NTP
+              provider, verify `timedatectl show --property=NTPSynchronized
+              --value` returns `yes`, and retry.
+
+        - name: Force NTP time synchronization
+          block:
+            - name: Enable systemd-managed NTP
+              ansible.builtin.command:
+                argv:
+                  - timedatectl
+                  - set-ntp
+                  - "true"
+              changed_when: false
+
+            - name: Enable and restart systemd-timesyncd
+              ansible.builtin.systemd:
+                name: systemd-timesyncd.service
+                enabled: true
+                state: restarted
+
+            - name: Wait until the host clock is synchronized
+              ansible.builtin.command:
+                argv:
+                  - timedatectl
+                  - show
+                  - --property=NTPSynchronized
+                  - --value
+              register: authelia_time_sync
+              changed_when: false
+              retries: "{{ authelia_test_time_sync_retries | int }}"
+              delay: "{{ authelia_test_time_sync_delay | int }}"
+              until: authelia_time_sync.stdout | trim == 'yes'
+          rescue:
+            - name: Stop before deploying Authelia with an unsynchronized clock
+              ansible.builtin.fail:
+                msg: >-
+                  systemd-timesyncd could not synchronize the host clock within
+                  {{ (authelia_test_time_sync_retries | int)
+                     * (authelia_test_time_sync_delay | int) }} seconds. Check
+                  network access to the configured NTP servers and run
+                  `timedatectl timesync-status`; then retry.
+      # Not tagged restore-network: an offline restore still needs the clock
+      # healed, and an OS upgrade can leave systemd-timesyncd stopped.
+
+    - name: Verify final host NTP synchronization state
+      ansible.builtin.command:
+        argv:
+          - timedatectl
+          - show
+          - --property=NTPSynchronized
+          - --value
+      register: authelia_final_time_sync
+      changed_when: false
+      failed_when: false
+
+    - name: Stop before deploying Authelia with an inaccurate clock
+      ansible.builtin.assert:
+        that:
+          - authelia_final_time_sync.rc == 0
+          - authelia_final_time_sync.stdout | trim == 'yes'
+        fail_msg: >-
+          The host still does not report an NTP-synchronized clock. Authelia
+          would refuse to start. Run `timedatectl status` and
+          `timedatectl timesync-status`, correct the time provider, and retry.
+
+    - name: Install Authelia host-side maintenance dependencies
+      ansible.builtin.apt:
+        name:
+          - logrotate
+        state: present
+        update_cache: true
+      tags: restore-network
+
+    # -------- FILES, DIRECTORIES, AND PERMISSIONS --------
+    - name: Include Authelia filesystem preparation stage
+      import_tasks: fs.yml
+
+    # -------- REDIS SYSCTL SETTINGS --------
+    - name: Ensure vm.overcommit_memory=1 for Redis
+      when:
+        - authelia_session_redis_enabled | default(true)
+        - authelia_redis_tune_overcommit | default(true)
+      ansible.posix.sysctl:
+        name: vm.overcommit_memory
+        value: "{{ authelia_redis_overcommit_value | string }}"
+        state: present
+        sysctl_file: "{{ authelia_redis_sysctl_file }}"
+        reload: yes
+
+    # --- Authelia user database file ---
+    - name: Seed Authelia users database once (selfservice mode)
+      when: authelia_users_mode == 'selfservice'
+      become: true
+      ansible.builtin.template:
+        src: users_database.yml.j2
+        dest: "{{ authelia_users_host_path }}"
+        owner: authelia
+        group: authelia
+        mode: "0640"
+        force: false
+      register: authelia_users_t
+
+    - name: Allow {{ authelia_log_reader_user }} to read Authelia users file
+      ansible.posix.acl:
+        path: "{{ authelia_users_file }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        permissions: r
+        state: present
+
+    # Authelia logrotate configuration.
+    - name: Deploy logrotate config for Authelia
+      ansible.builtin.template:
+        src: logrotate-authelia.j2
+        dest: /etc/logrotate.d/authelia
+        owner: root
+        group: root
+        mode: "0644"
+      when: authelia_logrotate_enabled | default(true) | bool
+
+    # -------- EMAIL TEMPLATES (used by Authelia inside the container) --------
+    - name: Validate Authelia notification language
+      ansible.builtin.assert:
+        that:
+          - authelia_notification_language in ['en', 'ru']
+        fail_msg: >-
+          authelia_notification_language must be either 'en' or 'ru'.
+
+    - name: Deploy Event HTML template ({{ authelia_notification_language | upper }})
+      become: true
+      ansible.builtin.template:
+        src: "Event.html.{{ authelia_notification_language }}.j2"
+        dest: /opt/authelia/email_templates/Event.html
+        owner: authelia
+        group: authelia
+        mode: "0640"
+
+    - name: Deploy Event TXT template ({{ authelia_notification_language | upper }})
+      become: true
+      ansible.builtin.template:
+        src: "Event.txt.{{ authelia_notification_language }}.j2"
+        dest: /opt/authelia/email_templates/Event.txt
+        owner: authelia
+        group: authelia
+        mode: "0640"
+
+    - name: Deploy IdentityVerificationJWT HTML template ({{ authelia_notification_language | upper }})
+      become: true
+      ansible.builtin.template:
+        src: "IdentityVerificationJWT.html.{{ authelia_notification_language }}.j2"
+        dest: /opt/authelia/email_templates/IdentityVerificationJWT.html
+        owner: authelia
+        group: authelia
+        mode: "0640"
+
+    - name: Deploy IdentityVerificationJWT TXT template ({{ authelia_notification_language | upper }})
+      become: true
+      ansible.builtin.template:
+        src: "IdentityVerificationJWT.txt.{{ authelia_notification_language }}.j2"
+        dest: /opt/authelia/email_templates/IdentityVerificationJWT.txt
+        owner: authelia
+        group: authelia
+        mode: "0640"
+
+    - name: Deploy IdentityVerificationOTC HTML template ({{ authelia_notification_language | upper }})
+      become: true
+      ansible.builtin.template:
+        src: "IdentityVerificationOTC.html.{{ authelia_notification_language }}.j2"
+        dest: /opt/authelia/email_templates/IdentityVerificationOTC.html
+        owner: authelia
+        group: authelia
+        mode: "0640"
+
+    - name: Deploy IdentityVerificationOTC TXT template ({{ authelia_notification_language | upper }})
+      become: true
+      ansible.builtin.template:
+        src: "IdentityVerificationOTC.txt.{{ authelia_notification_language }}.j2"
+        dest: /opt/authelia/email_templates/IdentityVerificationOTC.txt
+        owner: authelia
+        group: authelia
+        mode: "0640"
+
+    # -------- INSTALL PINNED LUA SCRIPTS FROM THE ROLE --------
+    - name: Install bundled haproxy-lua-http http.lua
+      become: true
+      ansible.builtin.copy:
+        src: lua/http.lua
+        dest: /etc/haproxy/lua/haproxy-lua-http/http.lua
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install bundled json.lua
+      become: true
+      ansible.builtin.copy:
+        src: lua/json.lua
+        dest: /etc/haproxy/lua/json.lua
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install bundled auth-request.lua
+      become: true
+      ansible.builtin.copy:
+        src: lua/auth-request.lua
+        dest: /etc/haproxy/lua/auth-request.lua
+        owner: root
+        group: root
+        mode: "0644"
+
+    # -------- APPLY CONFIGURATION AND START --------
+    - name: Include Authelia config stage
+      import_tasks: config.yml
+
+# ------- Helper daemons -------
+    - name: Include Authelia configd stage
+      import_tasks: configd.yml
+
+    - name: Include Authelia bansd stage
+      import_tasks: bansd.yml    
+
+    - name: Include Authelia bansd stage
+      import_tasks: usersd.yml  

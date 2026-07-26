@@ -1,0 +1,133 @@
+{# templates/authelia_users.html #}
+{% extends "base.html" %}
+
+{% block title %}Authelia users{% endblock %}
+{% block header_title %}Authelia users{% endblock %}
+
+{% block header_buttons %}
+{% include "_authelia_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <div class="table-title">Error</div>
+    </div>
+    <div style="padding:12px 16px;color:var(--error);">
+        {{ error }}
+    </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <div class="table-title">Message</div>
+    </div>
+    <div style="padding:12px 16px;color:var(--success);">
+        {{ message }}
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>User list</h2>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+            <a href="{{ url_for('routes.authelia_user_new') }}" class="btn btn-primary">
+                + New user
+            </a>
+            <input type="text"
+                   id="user-search"
+                   class="form-input"
+                   placeholder="Search by username, email, or group…"
+                   style="max-width:260px;">
+            <div class="table-meta" id="users-meta">
+                {% if users %}
+                Total users: {{ users|length }}
+                {% else %}
+                There are no users yet
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="table-container">
+        {% if users %}
+        <table class="data-table" id="users-table">
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Display name</th>
+                    <th>Email</th>
+                    <th>Groups</th>
+                    <th>Disabled</th>
+                    <th style="text-align:right;">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="users-tbody">
+                {% for u in users %}
+                <tr data-username="{{ u.username }}"
+                    data-edit-url="{{ url_for('routes.authelia_user_edit', username=u.username) }}"
+                    data-search-text="{{ (
+                      (u.username or '') ~ ' ' ~
+                      (u.displayname or '') ~ ' ' ~
+                      (u.email or '') ~ ' ' ~
+                      ((u.groups or [])|join(' '))
+                    )|lower }}">
+                    <td><span class="mono">{{ u.username }}</span></td>
+                    <td>{{ u.displayname or '—' }}</td>
+                    <td>{{ u.email or '—' }}</td>
+                    <td>
+                        {% if u.groups %}
+                        {% for g in u.groups %}
+                        <span class="user-group-pill">{{ g }}</span>
+                        {% endfor %}
+                        {% else %}
+                        <span style="opacity:.7">no</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if u.disabled %}
+                        <span class="status-blocked">yes</span>
+                        {% else %}
+                        <span class="status-normal">no</span>
+                        {% endif %}
+                    </td>
+                    <td style="text-align:right;">
+                        <div style="display:flex;gap:8px;justify-content:flex-end;">
+                            <a href="{{ url_for('routes.authelia_user_edit', username=u.username) }}"
+                               class="btn btn-icon"
+                               title="Edit">
+                                ✎
+                            </a>
+                            <form method="post"
+                                  action="{{ url_for('routes.authelia_user_delete', username=u.username) }}"
+                                  data-confirm="Are you sure you want to delete user {{ u.username }}?">
+                                <button type="submit"
+                                        class="btn btn-danger btn-icon"
+                                        title="Delete">
+                                    ✕
+                                </button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div style="padding:16px;">
+            <p style="opacity:.7;margin:0;">No users found.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/authelia_users.js') }}"></script>
+{% endblock %}

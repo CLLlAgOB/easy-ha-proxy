@@ -1,0 +1,61 @@
+- name: AppArmor | install rsyslog profile dependencies
+  when: haproxy_enable_rsyslog_apparmor | bool
+  ansible.builtin.package:
+    name:
+      - apparmor
+      - apparmor-utils
+      - rsyslog
+    state: present
+  tags: restore-network
+
+- name: AppArmor | ensure local override dir exists
+  when: haproxy_enable_rsyslog_apparmor | bool
+  file:
+    path: /etc/apparmor.d/local
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: AppArmor | deploy local rules for rsyslogd (HAProxy chroot socket)
+  when: haproxy_enable_rsyslog_apparmor | bool
+  copy:
+    dest: /etc/apparmor.d/local/usr.sbin.rsyslogd
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (ansible-haproxy-flex)
+      # allow rsyslog to work with HAProxy chroot socket
+      {{ haproxy_chroot }}/ r,
+      {{ haproxy_chroot }}/dev/ rwk,
+      {{ haproxy_chroot }}/dev/log rwk,
+  notify: apparmor rsyslogd reload
+
+# Ничего не делаем, но безопасно подсветим ситуацию, если AppArmor выключен
+- name: AppArmor | info if disabled
+  when:
+    - haproxy_enable_rsyslog_apparmor | bool
+  stat:
+    path: /sys/module/apparmor/parameters/enabled
+  register: apparmor_enabled_flag
+
+- name: AppArmor | debug status
+  when:
+    - haproxy_enable_rsyslog_apparmor | bool
+    - apparmor_enabled_flag.stat.exists | default(false)
+  ansible.builtin.command:
+    argv:
+      - cat
+      - /sys/module/apparmor/parameters/enabled
+  register: apparmor_status
+  changed_when: false
+  check_mode: false
+
+- name: AppArmor | warn if not enforcing/complain
+  when:
+    - haproxy_enable_rsyslog_apparmor | bool
+    - apparmor_status.stdout is defined
+    - apparmor_status.stdout | trim | lower not in ['y','yes','enforcing','complain','enforce']
+  ansible.builtin.debug:
+    msg: "AppArmor seems disabled ({{ apparmor_status.stdout | default('unknown') }}). Local rsyslogd override was still installed."

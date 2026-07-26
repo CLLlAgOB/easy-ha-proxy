@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% block title %}Authelia — settings{% endblock %}
+
+{% block header_buttons %}
+{% include "_authelia_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="container">
+  <div class="card">
+    <div class="card-header">
+      <h2>Authelia — general settings</h2>
+
+      {% if msg %}
+      <span class="result-message {{ 'success' if msg_category == 'success' else 'error' }}">
+        {{ msg }}
+      </span>
+      {% endif %}
+    </div>
+
+    <p class="form-hint">
+      Edit the main Authelia settings here.
+      <br>
+      Access rules (<code>access_control.rules</code>) are configured on separate page.
+      Secret keys (<code>session.secret</code>, <code>storage.encryption_key</code>,
+      <code>identity_validation.reset_password.jwt_secret</code>) and low-level parameters
+      (server address, Redis, database path, and user file) are hidden and remain
+      managed by Ansible/manual configuration.
+    </p>
+
+    <form method="post">
+      <div class="grid">
+        <!-- Левая колонка: session and cookie -->
+        <div>
+          <div class="form-section-title">Sessions</div>
+
+          <div class="form-group">
+            <label class="form-label" for="session_name">Session cookie name</label>
+            <input type="text" class="form-input" id="session_name" name="session_name"
+              value="{{ form.session_name or '' }}">
+            <div class="form-hint">
+              Name of the cookie in which Authelia stores the session identifier
+              (for example, <code>authelia_session</code>).
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="session_same_site">SameSite</label>
+            <select class="form-input" id="session_same_site" name="session_same_site">
+              {% set ss = (form.session_same_site or 'lax') %}
+              {% for opt in ['lax','strict','none'] %}
+              <option value="{{ opt }}" {% if opt==ss %}selected{% endif %}>{{ opt }}</option>
+              {% endfor %}
+            </select>
+            <div class="form-hint">
+              Browser policy for cross-site cookies.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="session_expiration">Session lifetime</label>
+            <input type="text" class="form-input" id="session_expiration" name="session_expiration"
+              value="{{ form.session_expiration or '' }}">
+            <div class="form-hint">
+              How long a session lasts when «Remember me» is <strong>not</strong> enabled.
+              Format: <code>12h</code>, <code>30m</code>, <code>1d</code>, etc.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="session_inactivity">Inactivity timeout</label>
+            <input type="text" class="form-input" id="session_inactivity" name="session_inactivity"
+              value="{{ form.session_inactivity or '' }}">
+            <div class="form-hint">
+              If the user is inactive longer than this period, the session ends before
+              its overall <code>expiration</code>.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="session_remember_me">Remember-me duration</label>
+            <input type="text" class="form-input" id="session_remember_me" name="session_remember_me"
+              value="{{ form.session_remember_me or '' }}">
+            <div class="form-hint">
+              Session lifetime when enabled «Remember me».
+              Overrides <code>expiration</code>.
+              Value <code>-1</code> disables mode remember-me.
+            </div>
+          </div>
+
+          <div class="form-section-title">Cookie domain</div>
+
+          <div class="form-group">
+            <label class="form-label" for="cookie_domain">Domain</label>
+            <input type="text" class="form-input" id="cookie_domain" name="cookie_domain"
+              value="{{ form.cookie_domain or '' }}">
+            <div class="form-hint">
+              Domain to which the cookie applies (usually the organization's primary domain).
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cookie_authelia_url">Authelia portal URL</label>
+            <input type="text" class="form-input" id="cookie_authelia_url" name="cookie_authelia_url"
+              value="{{ form.cookie_authelia_url or '' }}">
+            <div class="form-hint">
+              Full Authelia portal URL where the user is sent to sign in.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cookie_default_redirection_url">Default URL after login</label>
+            <input type="text" class="form-input" id="cookie_default_redirection_url"
+              name="cookie_default_redirection_url" value="{{ form.cookie_default_redirection_url or '' }}">
+            <div class="form-hint">
+              Where to redirect the user after successful authentication when no custom
+              redirect URL is supplied.
+            </div>
+          </div>
+
+          <div class="form-section-title">Logs</div>
+
+          <div class="form-group">
+            <label class="form-label" for="log_level">Log level</label>
+            <select class="form-input" id="log_level" name="log_level">
+              {% set level = (form.log_level or 'warn') %}
+              {% for opt in ['trace','debug','info','warn','error'] %}
+              <option value="{{ opt }}" {% if opt==level %}selected{% endif %}>{{ opt }}</option>
+              {% endfor %}
+            </select>
+            <div class="form-hint">
+              <code>warn</code> — sensible default;
+              <code>info</code> produces more events;
+              <code>debug</code>/<code>trace</code> are intended for debugging.
+            </div>
+          </div>
+        </div>
+
+        <!-- Правая колонка: regulation and TOTP -->
+        <div>
+          <div class="form-section-title">Regulation (bans)</div>
+
+          <div class="form-group">
+            <label class="form-label" for="reg_modes">Modes (comma-separated)</label>
+            <input type="text" class="form-input" id="reg_modes" name="reg_modes" value="{{ form.reg_modes or '' }}">
+            <div class="form-hint">
+              Which identifiers are tracked for bans (for example: <code>ip</code>
+              or <code>user, ip</code>).
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="reg_max_retries">Maximum attempts</label>
+            <input type="number" class="form-input" id="reg_max_retries" name="reg_max_retries"
+              value="{{ form.reg_max_retries }}">
+            <div class="form-hint">
+              Number of failed attempts allowed before a ban.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="reg_find_time">Attempt window</label>
+            <input type="text" class="form-input" id="reg_find_time" name="reg_find_time"
+              value="{{ form.reg_find_time or '' }}">
+            <div class="form-hint">
+              Period over which failed attempts are counted (for example, <code>2m</code>).
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="reg_ban_time">Ban duration</label>
+            <input type="text" class="form-input" id="reg_ban_time" name="reg_ban_time"
+              value="{{ form.reg_ban_time or '' }}">
+            <div class="form-hint">
+              How long a user or IP is banned after exceeding <code>max_retries</code>.
+            </div>
+          </div>
+
+          <div class="form-section-title">TOTP</div>
+
+          <div class="form-group">
+            <label class="form-label" for="totp_issuer">Issuer</label>
+            <input type="text" class="form-input" id="totp_issuer" name="totp_issuer"
+              value="{{ form.totp_issuer or '' }}">
+            <div class="form-hint">
+              Name shown in the authenticator app (usually domain organization).
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="totp_period">Period (sec)</label>
+            <input type="number" class="form-input" id="totp_period" name="totp_period" value="{{ form.totp_period }}">
+            <div class="form-hint">
+              How often the one-time code changes. Usually <code>30</code> seconds.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="totp_skew">Allowed time skew</label>
+            <input type="number" class="form-input" id="totp_skew" name="totp_skew" value="{{ form.totp_skew }}">
+            <div class="form-hint">
+              Number of time steps tolerated in each direction to account for clock skew.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top: 24px; display:flex; gap:10px; flex-wrap:wrap;">
+        <!-- Просто сохранить (валидировать and записать, without перезапуска) -->
+        <button type="submit" class="btn" name="submit_action" value="save">
+          Save settings
+        </button>
+
+        <!-- Save and сразу применить (перезапуск Authelia through демон) -->
+        <button type="submit" class="btn btn-secondary" name="submit_action" value="apply">
+          Save and apply (restart Authelia)
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <section class="card" aria-labelledby="authelia-mail-moved-title">
+    <div class="card-header">
+      <div>
+        <h2 id="authelia-mail-moved-title">Email notifications</h2>
+        <p class="table-meta">
+          <a href="{{ url_for('routes.mail_settings_page') }}">Email delivery and the local notification fallback moved to the Mail settings page.</a>
+        </p>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+{% endblock %}

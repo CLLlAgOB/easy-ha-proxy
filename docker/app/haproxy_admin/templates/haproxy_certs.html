@@ -1,0 +1,471 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – certificates{% endblock %}
+{% block header_title %}HAProxy certificates and certificate authorities{% endblock %}
+
+{% block header_buttons %}
+{% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="border-left: 4px solid var(--error);">
+  <div class="card-header">
+    <h2>Error</h2>
+  </div>
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+    {{ error }}
+  </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="border-left: 4px solid var(--success);">
+  <div class="card-header">
+    <h2>Operation completed</h2>
+  </div>
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+    {{ message }}
+  </div>
+</div>
+{% endif %}
+
+{# Let's Encrypt account email #}
+<section class="card" aria-labelledby="acme-email-title">
+  <div class="card-header">
+    <div>
+      <h2 id="acme-email-title">Let's Encrypt account email</h2>
+      <div class="table-meta">Expiry warnings from Let's Encrypt are sent to this address. The same setting is available on the Mail settings page.</div>
+    </div>
+  </div>
+  <form id="acme-email-form" autocomplete="off">
+    <div class="form-group">
+      <label class="form-label" for="acme-email-input">Account email</label>
+      <input class="form-input" id="acme-email-input" name="acme_email" type="email"
+             maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+      <p class="vars-field-help">
+        Applies to future certificate registrations and renewals after the next certificate operation or stack update.
+      </p>
+    </div>
+    <div class="vars-form-actions">
+      <button type="submit" class="btn" id="acme-email-save">Save email</button>
+      <span id="acme-email-result" class="result-message" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+</section>
+
+{# Certificate authorities #}
+<div class="card">
+  <div class="card-header">
+    <h2>Certificate authorities</h2>
+    <div class="table-meta">
+      Manage the local root CA and trusted external root/intermediate certificates.
+      CA private keys cannot be imported or downloaded here.
+    </div>
+  </div>
+  <div style="padding: 12px 16px;">
+    <h3>Internal certificate authority</h3>
+    {% if internal_ca %}
+    <table class="table mono" style="margin-top:8px;">
+      <thead><tr><th>Name</th><th>Valid until</th><th>SHA-256</th><th style="text-align:right;">Actions</th></tr></thead>
+      <tbody><tr>
+        <td>{{ internal_ca.name }}</td>
+        <td>{{ internal_ca.not_after }}</td>
+        <td><code class="cert-digest" title="{{ internal_ca.sha256 }}">{{ internal_ca.sha256[:16] }}…</code></td>
+        <td style="text-align:right;">
+          <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id='internal') }}">
+            Download root certificate
+          </a>
+        </td>
+      </tr></tbody>
+    </table>
+    <div class="table-meta" style="margin-top:6px;">
+      Install this public root certificate in client trust stores. The root private key remains on the server.
+    </div>
+
+    <h4 style="margin-top:18px;">Issue or renew an internal certificate</h4>
+    <form method="post" style="margin-top:8px; max-width:720px;">
+      <input type="hidden" name="action" value="issue_internal_cert">
+      <label class="form-label" for="internal_domain">Primary domain</label>
+      <input class="form-input" id="internal_domain" name="domain" type="text"
+        placeholder="app.example.com" required>
+      <label class="form-label" for="internal_alt_names" style="margin-top:8px;">
+        Alternative domains (comma or space separated)
+      </label>
+      <input class="form-input" id="internal_alt_names" name="alt_names" type="text"
+        placeholder="www.example.com api.example.com">
+      <div style="margin-top:8px;">
+        <button class="btn" type="submit">Issue internal certificate</button>
+      </div>
+      <div class="table-meta" style="margin-top:6px;">
+        The certificate is installed in HAProxy immediately. Select Internal CA for the site so future renewals use the same source.
+      </div>
+    </form>
+
+    <details style="margin-top:18px;">
+      <summary>Root CA lifecycle</summary>
+      <div style="margin-top:10px; max-width:760px;">
+        <p class="table-meta" style="color:var(--error);">
+          Rotating the root creates a new root key and reissues every active HAProxy certificate signed by the old root.
+          Clients will stop trusting those sites until the new root certificate is installed in their trust stores.
+          Download a certificate backup before continuing.
+        </p>
+        <form method="post" style="margin-top:10px;">
+          <input type="hidden" name="action" value="rotate_internal_ca">
+          <label class="form-label" for="rotate_confirmation">Type ROTATE to confirm</label>
+          <input class="form-input" id="rotate_confirmation" name="confirmation" type="text"
+            autocomplete="off" pattern="ROTATE" required style="max-width:220px;">
+          <button class="btn btn-danger" type="submit" style="margin-top:8px;"
+            onclick="return confirm('Rotate the internal root CA and reissue all certificates signed by it?');">
+            Rotate root CA and reissue certificates
+          </button>
+        </form>
+        <form method="post" style="margin-top:18px;">
+          <input type="hidden" name="action" value="delete_internal_ca">
+          <label class="form-label" for="delete_ca_confirmation">Type DELETE to confirm</label>
+          <input class="form-input" id="delete_ca_confirmation" name="confirmation" type="text"
+            autocomplete="off" pattern="DELETE" required style="max-width:220px;">
+          <button class="btn btn-danger" type="submit" style="margin-top:8px;"
+            onclick="return confirm('Delete the internal root CA?');">
+            Delete unused internal CA
+          </button>
+          <div class="table-meta" style="margin-top:6px;">
+            Deletion is refused while any active HAProxy certificate is signed by this root.
+          </div>
+        </form>
+      </div>
+    </details>
+    {% else %}
+    <form method="post" style="margin-top:8px;">
+      <input type="hidden" name="action" value="create_internal_ca">
+      <button class="btn" type="submit">Create internal certificate authority</button>
+    </form>
+    {% endif %}
+
+    <h3 style="margin-top:20px;">External certificate authorities</h3>
+    {% if external_cas %}
+    <table class="table mono" style="margin-top:8px;">
+      <thead><tr><th>Name</th><th>Certificates</th><th>Valid until</th><th style="text-align:right;">Actions</th></tr></thead>
+      <tbody>
+      {% for ca in external_cas %}
+      <tr>
+        <td>{{ ca.name }}<div class="table-meta"><code>{{ ca.id }}</code></div></td>
+        <td>{{ ca.certificates }}</td>
+        <td>{{ ca.not_after }}</td>
+        <td style="text-align:right; white-space:nowrap;">
+          <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id=ca.id) }}">Download</a>
+          <form method="post" style="display:inline;">
+            <input type="hidden" name="action" value="delete_external_ca">
+            <input type="hidden" name="ca_id" value="{{ ca.id }}">
+            <button class="btn btn-small btn-danger" type="submit"
+              onclick="return confirm('Delete this external certificate authority?');">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="table-meta">No external certificate authorities have been imported.</div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+      <input type="hidden" name="action" value="import_external_ca">
+      <label class="form-label" for="ca_name">Short name</label>
+      <input class="form-input" id="ca_name" name="ca_name" type="text"
+        placeholder="company-pki" style="max-width:420px;">
+      <label class="form-label" for="ca_file" style="margin-top:8px;">Root/intermediate CA bundle (PEM)</label>
+      <input id="ca_file" name="ca_file" type="file" accept=".pem,.crt,.cer" required>
+      <div style="margin-top:8px;"><button class="btn" type="submit">Import certificate authority</button></div>
+      <div class="table-meta" style="margin-top:6px;">
+        Import public CA certificates here, then select this authority for a site and upload its server certificate, chain, and private key.
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ─────────────────── HAProxy certificates ─────────────────── #}
+<div class="card" style="margin-top: 20px;">
+  <div class="card-header">
+    <h2>HAProxy certificates ({{ haproxy_certs|length }})</h2>
+    <div class="table-meta">
+      Source: directory <code>haproxy_certs_dir</code>
+      (usually <code>/etc/haproxy/certs</code>).
+    </div>
+  </div>
+
+  <div style="padding: 12px 16px;">
+    {% if haproxy_certs %}
+    <table class="table mono" style="table-layout: fixed; width: 100%;">
+      <colgroup>
+        <col style="width:26%;">
+        <col style="width:34%;">
+        <col style="width:18%;">
+        <col style="width:12%;">
+        <col style="width:10%;">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Domains</th>
+          <th>File</th>
+          <th>Expiring</th>
+          <th>Status</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in haproxy_certs %}
+        {% set domains = item.domains or [] %}
+        {% set days = item.days_left %}
+        <tr>
+          {# Domains #}
+          <td>
+            {% if domains %}
+            <div>{{ domains[0] }}</div>
+            {% if domains|length > 1 %}
+            <div class="table-meta">
+              {{ domains[1:] | join(", ") }}
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">no DNS names</span>
+            {% endif %}
+          </td>
+
+          {# Path to файлу #}
+          <td>
+            <div class="mono" style="word-break: break-all;">
+              <code>{{ item.path }}</code>
+            </div>
+          </td>
+
+          {# Срок действия #}
+          <td>
+            {% if item.not_after %}
+            <div>{{ item.not_after }}</div>
+            {% if days is not none %}
+            <div style="margin-top: 4px;">
+              <span style="
+                      display:inline-block;
+                      padding:2px 10px;
+                      border-radius:999px;
+                      font-size:11px;
+                      background:rgba(255,255,255,0.04);
+                    ">
+                {% if days < 0 %} expired {{ -days }} days ago {% else %} {{ days }} days remaining {% endif %} </span>
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">undefined</span>
+            {% endif %}
+          </td>
+
+          {# Status (without повторения даты) #}
+          <td>
+            {% if item.state %}
+            <div>{{ item.state }}</div>
+            {% elif item.short %}
+            <div>{{ item.short }}</div>
+            {% else %}
+            <div>?</div>
+            {% endif %}
+          </td>
+
+          {# Actions #}
+          <td style="text-align: right; white-space: nowrap;">
+            <form method="post" style="display:inline;" class="cert-delete-haproxy"
+              data-domain="{{ domains[0] if domains else '' }}">
+              <input type="hidden" name="action" value="delete_haproxy">
+              <input type="hidden" name="path" value="{{ item.path }}">
+              <button type="submit" class="btn btn-small btn-danger">
+                Delete
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="table-meta">
+      No certificates were found in the HAProxy directory.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ─────────────────── Let's Encrypt certificates ─────────────────── #}
+<div class="card" style="margin-top: 20px;">
+  <div class="card-header">
+    <h2>Let's Encrypt certificates ({{ le_certs|length }})</h2>
+    <div class="table-meta">
+      Source: <code>/etc/letsencrypt/live/*/fullchain.pem</code>.<br>
+      Deletion is performed through <code>certbot delete --cert-name &lt;lineage&gt;</code>.
+    </div>
+  </div>
+
+  <div style="padding: 12px 16px;">
+    {% if le_certs %}
+    <table class="table mono" style="table-layout: fixed; width: 100%;">
+      <colgroup>
+        <col style="width:26%;">
+        <col style="width:34%;">
+        <col style="width:18%;">
+        <col style="width:12%;">
+        <col style="width:10%;">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Domains</th>
+          <th>File</th>
+          <th>Expiring</th>
+          <th>Status</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in le_certs %}
+        {% set domains = item.domains or [] %}
+        {% set days = item.days_left %}
+        <tr>
+          {# Domains #}
+          <td>
+            {% if domains %}
+            <div>{{ domains[0] }}</div>
+            {% if domains|length > 1 %}
+            <div class="table-meta">
+              {{ domains[1:] | join(", ") }}
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">no DNS names</span>
+            {% endif %}
+          </td>
+
+          {# Path to fullchain + lineage #}
+          <td>
+            <div class="mono" style="word-break: break-all;">
+              <code>{{ item.fullchain_path }}</code>
+            </div>
+            <div class="table-meta">
+              lineage: <code>{{ item.lineage }}</code>
+            </div>
+          </td>
+
+          {# Срок действия #}
+          <td>
+            {% if item.not_after %}
+            <div>{{ item.not_after }}</div>
+            {% if days is not none %}
+            <div style="margin-top: 4px;">
+              <span style="
+                      display:inline-block;
+                      padding:2px 10px;
+                      border-radius:999px;
+                      font-size:11px;
+                      background:rgba(255,255,255,0.04);
+                    ">
+                {% if days < 0 %} expired {{ -days }} days ago {% else %} {{ days }} days remaining {% endif %} </span>
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">undefined</span>
+            {% endif %}
+          </td>
+
+          {# Status (коротко, without даты) #}
+          <td>
+            {% if item.state %}
+            <div>{{ item.state }}</div>
+            {% elif item.short %}
+            <div>{{ item.short }}</div>
+            {% else %}
+            <div>?</div>
+            {% endif %}
+          </td>
+
+          {# Actions #}
+          <td style="text-align: right; white-space: nowrap;">
+            <form method="post" style="display:inline;" class="cert-delete-le" data-lineage="{{ item.lineage }}">
+              <input type="hidden" name="action" value="delete_le">
+              <input type="hidden" name="lineage" value="{{ item.lineage }}">
+              <button type="submit" class="btn btn-small btn-danger">
+                Delete LE
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="table-meta">
+      No Let's Encrypt certificates were found.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ─────────────────── Бэкап / восстановление ─────────────────── #}
+<div class="card" style="margin-top: 20px;">
+  <div class="card-header">
+    <h2>Certificate backup / restore</h2>
+  </div>
+  <div style="padding: 12px 16px;">
+    <p class="table-meta">
+      The backup contains directories
+      <code>{{ haproxy_certs_dir|default('/etc/haproxy/certs') }}</code>
+      and
+      <code>{{ letsencrypt_root_dir|default('/etc/letsencrypt') }}</code>, including certificate authority data.
+    </p>
+    <p class="table-meta" style="color:var(--error);">
+      This ZIP contains private server keys and the internal CA private key. Store it encrypted and restrict access.
+    </p>
+
+    <p style="margin-top: 8px;">
+      <a class="btn" href="{{ url_for('routes.haproxy_certs_backup') }}">
+        Download backup (.zip)
+      </a>
+    </p>
+
+    <form id="certs-restore-form" action="{{ url_for('routes.haproxy_certs_restore') }}" method="post"
+      enctype="multipart/form-data" style="margin-top: 12px;">
+
+      <label class="form-label" for="backup_file">
+        Restore from backup (.zip)
+      </label>
+
+      <div class="file-picker">
+        <input id="backup_file" name="archive" type="file" class="file-input-hidden" accept=".zip">
+
+        <button type="button" class="btn btn-icon" id="backup_choose_btn">
+          Choose file
+        </button>
+
+        <span class="file-name" id="backup_file_name">
+          No file selected
+        </span>
+      </div>
+
+      <div style="margin-top: 10px;">
+        <button type="submit" class="btn btn-danger" id="backup_restore_btn" disabled
+          onclick="return confirm('WARNING: existing certificates will be overwritten. Continue?');">
+          Restore from backup
+        </button>
+      </div>
+
+      <div class="table-meta" style="margin-top: 4px;">
+        Warning: files in certificate directories will be overwritten.
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/haproxy_certs.js') }}"></script>
+<script src="{{ url_for('static', filename='js/acme_email.js') }}"></script>
+{% endblock %}

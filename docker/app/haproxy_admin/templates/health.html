@@ -1,0 +1,507 @@
+{% extends "base.html" %}
+
+{% block title %}Status{% endblock %}
+{% block header_title %}Status{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.actions-cell { white-space: nowrap; text-align: right; }
+.action-buttons {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  box-shadow: var(--shadow);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform .12s ease, background .12s ease, border-color .12s ease;
+}
+
+.icon-btn:hover {
+  transform: translateY(-1px);
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(120,120,200,0.35);
+}
+
+.icon-btn:active { transform: translateY(0); }
+
+.icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+  transform: none;
+}
+
+.icon-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: var(--text-primary);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.badge {
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border:1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.03);
+}
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+#control-result {
+  display:none;
+  grid-column: 1 / -1;
+  margin-top: 12px;
+  border:1px solid var(--border);
+  border-radius: 16px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.03);
+  white-space: pre-wrap;
+}
+
+/* Monitoring layout and state indicators. */
+.monitoring-card .card-header {
+  margin-bottom: 18px;
+}
+.monitoring-toolbar,
+.monitoring-panel-header,
+.recent-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.monitoring-toolbar {
+  flex-wrap: wrap;
+}
+.monitoring-grid {
+  display: grid;
+  grid-template-columns: minmax(680px, 1.45fr) minmax(420px, .9fr);
+  align-items: start;
+  gap: 18px;
+}
+.monitoring-panel {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255,255,255,.018);
+}
+.monitoring-panel-header {
+  margin-bottom: 12px;
+}
+.monitoring-panel .table-wrap {
+  overflow-x: auto;
+}
+.recent-table-wrap {
+  max-height: 430px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.monitoring-table,
+.recent-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.monitoring-table th,
+.monitoring-table td,
+.recent-table th,
+.recent-table td {
+  padding: 9px 10px;
+  vertical-align: middle;
+  border-bottom: 1px solid rgba(255,255,255,.055);
+}
+.monitoring-table th,
+.recent-table th {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .025em;
+}
+.monitoring-table tbody tr:last-child td,
+.recent-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.monitoring-table tbody tr:hover,
+.recent-table tbody tr:hover {
+  background: rgba(255,255,255,.025);
+}
+.monitoring-table .action-buttons {
+  min-width: max-content;
+}
+.recent-card .card-header {
+  align-items: flex-start;
+  gap: 18px;
+}
+.recent-controls {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.recent-limit-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+}
+.recent-limit-control .input {
+  width: 92px;
+  min-width: 92px;
+  padding: 8px 10px;
+}
+.recent-service-filter {
+  position: relative;
+}
+.recent-service-filter > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.recent-service-filter > summary::-webkit-details-marker {
+  display: none;
+}
+.recent-service-summary {
+  margin-left: 6px;
+}
+.recent-service-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(440px, calc(100vw - 48px));
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow);
+}
+.recent-service-menu-title {
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.recent-service-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 12px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 2px;
+}
+.recent-service-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+.recent-service-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-service-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.recent-service-actions .btn {
+  padding: 7px 11px;
+  font-size: 12px;
+}
+.recent-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-secondary);
+  box-shadow: 0 1px 0 var(--border);
+}
+.recent-heading h2 {
+  margin: 0;
+}
+.recent-time {
+  width: 210px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.recent-unit {
+  width: 250px;
+  white-space: nowrap;
+}
+.recent-message {
+  min-width: 320px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.recent-row-error {
+  background: rgba(255,77,109,.08);
+}
+.recent-row-warning {
+  background: rgba(255,193,7,.055);
+}
+.recent-empty {
+  padding: 24px !important;
+  text-align: center;
+}
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  vertical-align: middle;
+}
+.status-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.status-dot.ok { background: var(--success); }
+.status-dot.bad { background: var(--error); }
+.status-dot.mid { background: var(--warning); }
+
+@media (max-width: 1350px) {
+  .monitoring-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .monitoring-card .card-header,
+  .recent-card .card-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .monitoring-toolbar {
+    justify-content: flex-start;
+  }
+  .recent-controls {
+    justify-content: flex-start;
+  }
+  .recent-service-filter,
+  .recent-service-filter > summary {
+    width: 100%;
+  }
+  .recent-service-menu {
+    position: static;
+    width: 100%;
+    margin-top: 8px;
+  }
+  .recent-service-options {
+    grid-template-columns: 1fr;
+  }
+  .monitoring-panel {
+    padding: 10px;
+  }
+  .icon-btn {
+    width: 32px;
+    height: 32px;
+  }
+}
+</style>
+
+<script>
+  // is used in static/js/health.js
+  window.HA_IS_SUPERADMIN = {{ 'true' if is_superadmin else 'false' }};
+</script>
+
+<div class="card monitoring-card">
+  <div class="card-header">
+    <div>
+      <div class="table-title">Monitoring</div>
+      <div class="table-subtitle">systemd + Docker (application objects only)</div>
+    </div>
+    <div class="monitoring-toolbar">
+      <span class="tag" id="control-msg" style="display:none;"></span>
+      <button class="btn" id="btnRefresh">Refresh</button>
+      <label class="badge" title="Auto-refresh">
+        <input type="checkbox" id="chkAuto" style="transform: translateY(1px);">
+        auto
+      </label>
+    </div>
+  </div>
+
+  <div class="monitoring-grid">
+      <section class="monitoring-panel">
+        <div class="monitoring-panel-header">
+          <div class="badge"><span style="width:8px;height:8px;border-radius:99px;background:var(--accent-secondary);display:inline-block"></span> systemd</div>
+          <span class="tag notranslate" translate="no" data-i18n-skip id="systemd-summary" title="Healthy / total">0/0</span>
+        </div>
+        <div class="table-wrap">
+          <table class="monitoring-table" id="tblSystemd">
+            <colgroup>
+              <col style="width:38%">
+              <col style="width:15%">
+              <col style="width:13%">
+              <col style="width:34%">
+            </colgroup>
+            <thead>
+              <tr>
+                <th style="text-align:left;">Unit</th>
+                <th style="text-align:left;">State</th>
+                <th style="text-align:left;">Sub</th>
+                <th class="actions-cell" style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="4" style="opacity:.7;">no data</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="monitoring-panel">
+        <div class="monitoring-panel-header">
+          <div class="badge"><span style="width:8px;height:8px;border-radius:99px;background:var(--accent-secondary);display:inline-block"></span> docker</div>
+          <span class="tag notranslate" translate="no" data-i18n-skip id="docker-summary" title="Running / total">0/0</span>
+        </div>
+        <div class="table-wrap">
+          <table class="monitoring-table" id="tblDocker">
+            <colgroup>
+              <col style="width:36%">
+              <col style="width:20%">
+              <col style="width:20%">
+              <col style="width:24%">
+            </colgroup>
+            <thead>
+              <tr>
+                <th style="text-align:left;">Container</th>
+                <th style="text-align:left;">State</th>
+                <th style="text-align:left;">Health</th>
+                <th class="actions-cell" style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="4" style="opacity:.7;">no data</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    <div id="control-result" class="mono notranslate" translate="no" data-i18n-skip></div>
+  </div>
+</div>
+
+<div class="card" id="card-logs" style="display:none;">
+  <div class="card-header">
+    <h2 id="logs-title">
+      <span>Logs:</span>
+      <span id="logs-title-target" class="mono notranslate" translate="no" data-i18n-skip></span>
+    </h2>
+    <div class="controls-right">
+      <button class="btn" id="btn-logs-close">Close</button>
+    </div>
+  </div>
+
+  <div class="card-body">
+    <div class="grid" style="grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px;">
+      <div>
+        <div class="muted" style="margin-bottom:6px;">Tail</div>
+        <input class="input" id="logs-tail" type="number" min="10" max="20000" value="200">
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:6px;">Since (sec)</div>
+        <input class="input" id="logs-since" type="number" min="60" max="604800" value="3600">
+      </div>
+      <div style="align-self:end;">
+        <button class="btn" id="btn-logs-reload">Refresh logs</button>
+      </div>
+      <div style="align-self:end;">
+        <span class="tag" id="logs-meta">—</span>
+      </div>
+    </div>
+
+    <pre class="mono notranslate" translate="no" data-i18n-skip id="logs-cmd" style="white-space: pre-wrap; margin-bottom: 10px;"></pre>
+    <pre class="mono notranslate" translate="no" data-i18n-skip id="logs-text" style="white-space: pre-wrap; max-height: 520px; overflow:auto;"></pre>
+  </div>
+</div>
+
+<div class="card recent-card">
+  <div class="card-header">
+    <div>
+      <div class="recent-heading">
+        <h2>Recent service logs</h2>
+        <span class="tag notranslate" translate="no" data-i18n-skip id="recent-summary">0</span>
+      </div>
+      <div class="table-subtitle">
+        <span>Newest journal entries across selected monitored systemd units.</span>
+        <span>Ten rows are visible at a time.</span>
+        <span>Default exclusions:</span>
+        <code class="notranslate" translate="no" data-i18n-skip>haproxy.service</code>,
+        <code class="notranslate" translate="no" data-i18n-skip>haproxy-healthd.service</code>.
+      </div>
+    </div>
+    <div class="recent-controls">
+      <label class="recent-limit-control">
+        <span>Lines</span>
+        <input class="input notranslate" translate="no" data-i18n-skip
+               id="recentLimit" type="number" min="1" max="500" value="50">
+      </label>
+      <details class="recent-service-filter" id="recentServiceFilter">
+        <summary class="btn">
+          <span>Services</span>
+          <span class="recent-service-summary notranslate" translate="no" data-i18n-skip
+                id="recentUnitsSummary">0/0</span>
+        </summary>
+        <div class="recent-service-menu">
+          <div class="recent-service-menu-title">Select services for the journal feed</div>
+          <div class="recent-service-options notranslate" translate="no" data-i18n-skip
+               id="recentUnitOptions"></div>
+          <div class="recent-service-actions">
+            <button class="btn" type="button" id="recentUnitsAll">All</button>
+            <button class="btn" type="button" id="recentUnitsNone">None</button>
+            <button class="btn" type="button" id="recentUnitsDefault">Defaults</button>
+          </div>
+        </div>
+      </details>
+      <button class="btn" id="btnRecentRefresh">Refresh events</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <div class="recent-table-wrap">
+      <table class="recent-table" id="tblRecent">
+        <colgroup>
+          <col style="width:210px">
+          <col style="width:250px">
+          <col>
+        </colgroup>
+        <thead>
+          <tr>
+            <th style="text-align:left;">Time</th>
+            <th style="text-align:left;">Unit</th>
+            <th style="text-align:left;">Message</th>
+          </tr>
+        </thead>
+        <tbody id="recent-log-body" class="notranslate" translate="no" data-i18n-skip></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/health.js') }}"></script>
+{% endblock %}

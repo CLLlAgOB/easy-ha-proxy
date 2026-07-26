@@ -1,0 +1,33 @@
+[Unit]
+Description=Authelia regulation bans helper daemon
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group={{ authelia_log_reader_group }}
+ExecStart=/usr/local/sbin/authelia-bansd.py
+Restart=always
+RestartSec=2
+
+Environment="AUTHELIA_BANS_SOCKET={{ authelia_bans_socket_path }}"
+Environment="AUTHELIA_BANS_SCRIPT={{ authelia_bans_script_path }}"
+Environment="AUTHELIA_BANS_SOCKET_GROUP={{ authelia_bans_socket_group }}"
+Environment="AUTHELIA_BANS_LOG_LEVEL=INFO"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-bansd.py', rstrip=false) | hash('sha256') }}"
+
+# Немного hardening, но процесс root, docker ему не мешаем
+NoNewPrivileges=true
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

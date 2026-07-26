@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – TCP proxies {{ tcp.name }}{% endblock %}
+{% block header_title %}Edit TCP proxy {{ tcp.name }}{% endblock %}
+
+{% block header_buttons %}
+{# Оборачиваем навигацию and кнопку удаления in one flex-контейнер #}
+<div style="display:flex; align-items:center; flex-wrap:wrap; gap:8px; width:100%;">
+  {% include "_haproxy_nav.html" %}
+  <button type="button" class="btn btn-danger" id="btn-show-delete" style="margin-left:auto;">
+    Delete TCP proxy
+  </button>
+</div>
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="card" style="border-left: 4px solid var(--error);">
+  <div class="card-header">
+    <strong>Error</strong>
+  </div>
+  <div class="card-body">
+    <pre class="mono" style="white-space: pre-wrap;">{{ error }}</pre>
+  </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="card" style="border-left: 4px solid var(--ok);">
+  <div class="card-header">
+    <strong>Message</strong>
+  </div>
+  <div class="card-body">
+    <pre class="mono" style="white-space: pre-wrap;">{{ message }}</pre>
+  </div>
+</div>
+{% endif %}
+
+{# ───── Основная форма редактирования TCP proxies ─────────────────────────── #}
+<div class="card">
+  <div class="card-header">
+    <h2>TCP proxy parameters</h2>
+  </div>
+
+  <form id="tcp-edit-form" method="post" data-original-name="{{ tcp.name }}">
+    <div class="card-body">
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-name">TCP proxy name *</label>
+          <input id="field-name" name="name" type="text" class="form-input" required placeholder="SynologyDriveServer"
+            value="{{ tcp.name }}">
+          <div class="form-help">
+            Used in names frontend/backend: <code>fe_tcp_{{ tcp.name }}</code>,
+            <code>be_tcp_{{ tcp.name }}</code>.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-bind-ip">Bind IP</label>
+          <input id="field-bind-ip" name="bind_ip" type="text" class="form-input" placeholder="0.0.0.0"
+            value="{{ tcp.bind_ip|default('0.0.0.0') }}">
+          <div class="form-help">
+            IP address on which the frontend listens. Default <code>0.0.0.0</code>.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-bind-port">Bind port *</label>
+          <input id="field-bind-port" name="bind_port" type="number" min="1" max="65535" class="form-input" required
+            value="{{ tcp.bind_port }}">
+          <div class="form-help">
+            External port on which HAProxy will listen.
+          </div>
+        </div>
+      </div>
+
+      <hr>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-backend-host">backend_host</label>
+          <input id="field-backend-host" name="backend_host" type="text" class="form-input" placeholder="10.0.0.10"
+            value="{{ tcp.backend_host|default('') }}">
+          <div class="form-help">
+            If no <code>servers</code> list is defined, the
+            <code>backend_host/backend_port</code> pair is used.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-backend-port">backend_port</label>
+          <input id="field-backend-port" name="backend_port" type="number" min="1" max="65535" class="form-input"
+            value="{{ tcp.backend_port|default('') }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-balance">Load balancing</label>
+          {% set bal = tcp.balance|default('source') %}
+          <select id="field-balance" name="balance" class="form-input">
+            <option value="source" {% if bal=='source' %}selected{% endif %}>source</option>
+            <option value="roundrobin" {% if bal=='roundrobin' %}selected{% endif %}>roundrobin</option>
+            <option value="leastconn" {% if bal=='leastconn' %}selected{% endif %}>leastconn</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label" for="field-inter">inter (health-check interval)</label>
+          <input id="field-inter" name="inter" type="text" class="form-input" placeholder="3s"
+            value="{{ tcp.inter|default('3s') }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-zero-trust">
+            <input id="field-zero-trust" name="zero_trust" type="checkbox" {% if tcp.zero_trust %}checked{% endif %}>
+            Zero trust (tbl_ip_auth)
+          </label>
+          <div class="form-help">
+            Require an IP entry in <code>tbl_ip_auth</code> (through Authelia).
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-ban-check">
+            <input id="field-ban-check" name="ban_check" type="checkbox" {% if tcp.ban_check is not defined or
+              tcp.ban_check %}checked{% endif %}>
+            Honor tbl_ban
+          </label>
+          <div class="form-help">
+            When enabled, IPs from <code>tbl_ban</code> will be rejected at the TCP layer.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="field-ssl-check">
+            <input id="field-ssl-check" name="ssl_check" type="checkbox" {% if tcp.ssl_check %}checked{% endif %}>
+            check-ssl for backend servers
+          </label>
+        </div>
+      </div>
+
+      <hr>
+
+      <h3>Backend servers (optional)</h3>
+      <p class="form-help">
+        If the server list is not defined, a single
+        <code>backend_host/backend_port</code>. If there is more than one server,
+        <code>backend_host/backend_port</code> are ignored.
+      </p>
+
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Host</th>
+            <th>Port</th>
+            <th>Backup</th>
+            <th style="width: 1%;">&nbsp;</th>
+          </tr>
+        </thead>
+        <tbody id="tcp-backends-body">
+          {% if tcp.servers %}
+          {% for s in tcp.servers %}
+          <tr class="tcp-backend-row">
+            <td><input type="text" class="form-input tcp-backend-name" value="{{ s.name|default('') }}"></td>
+            <td><input type="text" class="form-input tcp-backend-host" value="{{ s.host }}"></td>
+            <td><input type="number" min="1" max="65535" class="form-input tcp-backend-port" value="{{ s.port }}"></td>
+            <td style="text-align:center;">
+              <input type="checkbox" class="tcp-backend-backup" {% if s.backup %}checked{% endif %}>
+            </td>
+            <td style="text-align:center;">
+              <button type="button" class="btn btn-small btn-backend-remove" title="Delete backend">✕</button>
+            </td>
+          </tr>
+          {% endfor %}
+          {% else %}
+          <tr class="tcp-backend-row">
+            <td><input type="text" class="form-input tcp-backend-name" placeholder="srv1"></td>
+            <td><input type="text" class="form-input tcp-backend-host" placeholder="10.0.0.10"></td>
+            <td><input type="number" min="1" max="65535" class="form-input tcp-backend-port" placeholder="6690"></td>
+            <td style="text-align:center;">
+              <input type="checkbox" class="tcp-backend-backup">
+            </td>
+            <td style="text-align:center;">
+              <button type="button" class="btn btn-small btn-backend-remove" title="Delete backend">✕</button>
+            </td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+
+      {# Общая панель действий: слева +backend, справа Save #}
+      <div style="
+           display:flex;
+           justify-content:space-between;
+           align-items:center;
+           flex-wrap:wrap;
+           gap:12px;
+           margin-top:8px;">
+        <button type="button" class="btn" id="btn-add-backend">
+          + Add backend server
+        </button>
+
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:8px;">
+          <button type="submit" class="btn btn-primary" id="btn-save-tcp">
+            Save changes
+          </button>
+          <span id="tcp-save-status" class="mono" style="font-size:0.9em;"></span>
+        </div>
+      </div>
+
+    </div>
+  </form>
+</div>
+
+{# ───── Блок подтверждения удаления TCP proxies ──────────────────────────── #}
+<div class="card" id="delete-confirm" style="display:none; border-left: 4px solid var(--error); margin-top:16px;">
+  <div class="card-header">
+    <strong>Delete TCP proxy {{ tcp.name }}?</strong>
+  </div>
+  <div class="card-body">
+    <p>This action removes the entry from <code>tcp.yml</code>. The HAProxy configuration must be applied separately.</p>
+    <form id="form-delete-tcp" method="post" action="{{ url_for('routes.haproxy_tcp_page') }}">
+      <input type="hidden" name="action" value="delete">
+      <input type="hidden" name="name" value="{{ tcp.name }}">
+      <button type="submit" class="btn btn-danger">Yes, delete</button>
+      <button type="button" class="btn" id="btn-delete-cancel">Cancel</button>
+      <span id="tcp-delete-status" class="mono" style="margin-left: 12px; font-size: 0.9em;"></span>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/haproxy_tcp.js') }}"></script>
+{% endblock %}

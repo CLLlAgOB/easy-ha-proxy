@@ -1,0 +1,88 @@
+- name: Authelia | deploy configuration and users
+  when: authelia_enabled | default(false) | bool
+  block:
+    - name: Include managed mail notification state
+      ansible.builtin.include_tasks: mail_notify_state.yml
+
+    - name: Deploy Authelia configuration
+      become: true
+      template:
+        src: configuration.yml.j2
+        dest: /opt/authelia/configuration.yml
+        owner: authelia
+        group: authelia
+        mode: "0640"
+      register: authelia_cfg_t
+      no_log: true
+      diff: false
+
+    - name: Deploy Authelia users database (managed mode)
+      when: authelia_users_mode == 'managed'
+      template:
+        src: users_database.yml.j2
+        dest: "{{ authelia_users_host_path }}"
+        owner: authelia
+        group: authelia
+        mode: "0640"
+      register: authelia_users_t
+      no_log: true
+      diff: false
+
+
+    - name: Seed Authelia users database once (selfservice mode)
+      when: authelia_users_mode == 'selfservice'
+      template:
+        src: users_database.yml.j2
+        dest: "{{ authelia_users_host_path }}"
+        owner: authelia
+        group: authelia
+        mode: "0640"
+        force: false
+      register: authelia_users_t
+      no_log: true
+      diff: false
+
+
+    - name: Render .env file for Authelia docker stack
+      become: true
+      template:
+        src: authelia.env.j2
+        dest: "{{ authelia_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      register: authelia_env_t
+      no_log: true
+      diff: false
+
+    - name: Deploy Authelia docker-compose.yml
+      template:
+        src: docker-compose.yml.j2
+        dest: /opt/authelia/docker-compose.yml
+        owner: root
+        group: docker
+        mode: "0640"
+      register: authelia_compose_t
+
+    - name: Authelia | set flag if any config changed
+      set_fact:
+        authelia_configs_changed: >-
+          {{
+            (authelia_cfg_t.changed      | default(false))
+            or (authelia_users_t.changed   | default(false))
+            or (authelia_compose_t.changed | default(false))
+            or (authelia_env_t.changed     | default(false))
+          }}
+
+
+    - name: Run restart stage after config
+      import_tasks: restart.yml
+      when:
+        - task_stage | default('install') == 'config'
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+
+    - name: Run start stage after config
+      import_tasks: start.yml
+      when:
+        - task_stage | default('install') == 'install'
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)

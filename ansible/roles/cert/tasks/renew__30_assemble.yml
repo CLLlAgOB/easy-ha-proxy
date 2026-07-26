@@ -1,0 +1,10 @@
+---
+# 30 — сборка PEM и условный reload HAProxy
+- name: Trigger PEM assembly + HAProxy reload
+  ansible.builtin.debug:
+    msg: "Trigger PEM assembly & HAProxy reload (if present)"
+  when: (issue_targets_count | default(0) | int) > 0
+  changed_when: true
+  notify: build_pems_and_reload
+
+- meta: flush_handlers
