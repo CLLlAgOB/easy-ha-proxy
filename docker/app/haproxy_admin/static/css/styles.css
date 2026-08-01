@@ -2756,6 +2756,12 @@ tr.job-row-selected > td:first-child {
   min-width: 0;
 }
 
+/* Wide content (long digests, details) scrolls inside the card instead of
+   pushing the page and hiding the rightmost columns. */
+.table-wrap {
+  overflow-x: auto;
+}
+
 .updates-table {
   width: 100%;
   border-collapse: collapse;
@@ -2768,6 +2774,9 @@ tr.job-row-selected > td:first-child {
   border-bottom: 1px solid rgba(255,255,255,.055);
   vertical-align: top;
   text-align: left;
+  /* Break 64-char SHA digests so a cell never forces the table wider. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .updates-table th {
