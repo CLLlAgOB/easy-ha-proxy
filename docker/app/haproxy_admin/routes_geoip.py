@@ -8,6 +8,7 @@ from .routes import bp
 from .services_geoip import (
     configure_geoip_countries,
     get_geoip_status,
+    set_geoip_schedule,
     update_geoip_now,
 )
 
@@ -50,3 +51,11 @@ def haproxy_geoip_countries():
     return _response(
         configure_geoip_countries(payload.get("countries"), payload.get("revision"))
     )
+
+
+@bp.post("/haproxy/geoip/schedule")
+def haproxy_geoip_schedule():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict) or set(payload) != {"schedule"}:
+        return jsonify({"ok": False, "error": "schedule is required"}), 400
+    return _response(set_geoip_schedule(payload.get("schedule")))

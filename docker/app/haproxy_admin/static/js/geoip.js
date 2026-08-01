@@ -187,6 +187,12 @@
     ));
     setText("geoip-next-run", formatDate(timer.next_run_at));
     setText("geoip-last-trigger", formatDate(timer.last_trigger_at));
+    const scheduleSelect = elements["geoip-schedule-select"];
+    if (scheduleSelect
+        && ["daily", "weekly", "monthly"].includes(timer.schedule)
+        && document.activeElement !== scheduleSelect) {
+      scheduleSelect.value = timer.schedule;
+    }
     const serviceCompleted = service.result === "success"
       && service.active_state === "inactive"
       && service.sub_state === "dead";
@@ -205,7 +211,8 @@
 
   function setBusy(busy) {
     requestRunning = busy;
-    ["geoip-refresh", "geoip-update", "geoip-save-countries", "geoip-add-countries", "geoip-force-update"]
+    ["geoip-refresh", "geoip-update", "geoip-save-countries", "geoip-add-countries", "geoip-force-update",
+     "geoip-schedule-select", "geoip-save-schedule"]
       .forEach((id) => {
         const element = elements[id];
         if (element) element.disabled = busy;
@@ -367,6 +374,34 @@
     }
   }
 
+  async function saveSchedule() {
+    if (requestRunning) return;
+    const value = elements["geoip-schedule-select"]?.value;
+    setBusy(true);
+    setMessage(elements["geoip-schedule-status"], t("Saving update frequency…"));
+    try {
+      const payload = await requestJson("/haproxy/geoip/schedule", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({schedule: value})
+      });
+      if (payload.status) renderStatus(payload.status);
+      setMessage(
+        elements["geoip-schedule-status"],
+        payload.message || t("Update frequency saved."),
+        true
+      );
+    } catch (error) {
+      setMessage(
+        elements["geoip-schedule-status"],
+        `${t("Failed to save update frequency")}: ${error.message}`,
+        false
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     [
       "geoip-page-status", "geoip-sync-warning", "geoip-db-status", "geoip-db-records", "geoip-allowed-networks",
@@ -375,11 +410,13 @@
       "geoip-selected-countries", "geoip-countries-status", "geoip-timer-status",
       "geoip-next-run", "geoip-last-trigger", "geoip-service-result", "geoip-last-run",
       "geoip-journal", "geoip-refresh", "geoip-update", "geoip-force-update",
-      "geoip-country-input", "geoip-add-countries", "geoip-save-countries"
+      "geoip-country-input", "geoip-add-countries", "geoip-save-countries",
+      "geoip-schedule-select", "geoip-save-schedule", "geoip-schedule-status"
     ].forEach((id) => { elements[id] = byId(id); });
 
     elements["geoip-refresh"]?.addEventListener("click", () => loadStatus(true));
     elements["geoip-update"]?.addEventListener("click", updateDatabase);
+    elements["geoip-save-schedule"]?.addEventListener("click", saveSchedule);
     elements["geoip-add-countries"]?.addEventListener("click", () => {
       if (addCountries(elements["geoip-country-input"]?.value)) {
         elements["geoip-country-input"].value = "";

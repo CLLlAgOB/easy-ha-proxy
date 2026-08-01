@@ -89,6 +89,25 @@ def update_geoip_now(force: Any = False) -> dict[str, Any]:
     return result
 
 
+GEOIP_SCHEDULES = ("daily", "weekly", "monthly")
+
+
+def set_geoip_schedule(schedule: Any) -> dict[str, Any]:
+    """Set the automatic GeoIP update cadence (daily/weekly/monthly)."""
+    value = str(schedule or "").strip().lower()
+    if value not in GEOIP_SCHEDULES:
+        return {
+            "ok": False,
+            "validation_error": True,
+            "error": "schedule must be one of: " + ", ".join(GEOIP_SCHEDULES),
+        }
+    result = _request("geoip-schedule", {"schedule": value})
+    status = result.get("status")
+    if isinstance(status, dict):
+        _attach_runtime_config(status)
+    return result
+
+
 def normalize_countries(values: Any) -> list[str]:
     if not isinstance(values, list):
         raise ValueError("countries must be a list")

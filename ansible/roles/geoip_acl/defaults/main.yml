@@ -21,7 +21,10 @@ geoip_country_codes:
 geoip_mode: "allow"
 enable_geoip: false
 
-# The timer runs daily so it can retry a delayed monthly publication. The
-# updater performs no network request after the current month's DB is active.
-geoip_update_on_calendar: "daily"
+# DB-IP Country Lite is published monthly, so a weekly check is plenty: it
+# picks up a new monthly release within days and retries a delayed publication
+# without daily churn. The updater makes no network request once the current
+# month's DB is active. Override to "daily"/"monthly" if desired; a manual
+# update is always available from the web UI.
+geoip_update_on_calendar: "weekly"
 geoip_update_randomized_delay: "2h"

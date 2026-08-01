@@ -117,6 +117,18 @@
       <div><dt>Last service run</dt><dd id="geoip-last-run">—</dd></div>
     </dl>
 
+    <div class="geoip-schedule-control">
+      <label class="form-label" for="geoip-schedule-select">Update frequency</label>
+      <select id="geoip-schedule-select" class="form-input">
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly (recommended)</option>
+        <option value="monthly">Monthly</option>
+      </select>
+      <button type="button" id="geoip-save-schedule" class="btn">Save frequency</button>
+      <span id="geoip-schedule-status" class="mono"></span>
+    </div>
+    <p class="vars-field-help">DB-IP publishes a new database monthly, so weekly is plenty. The most frequent option is daily.</p>
+
     <label class="geoip-force-option" for="geoip-force-update">
       <input type="checkbox" id="geoip-force-update">
       Download the current monthly database again

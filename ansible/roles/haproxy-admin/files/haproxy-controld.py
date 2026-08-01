@@ -24,6 +24,7 @@ haproxy-controld — единый root-демон управления HAProxy:
    - "geoip-status" → local DB-IP release, selection, timer, and journal state
    - "geoip-update <b64-json>" → run the fixed GeoIP updater now
    - "geoip-configure <b64-json>" → transactionally replace selected countries
+   - "geoip-schedule <b64-json>" → set update cadence (daily/weekly/monthly)
    - "udp-apply-json" → synchronously install udp.yml and return runtime state
    - "udp-status" → return the last successfully installed UDP ruleset state
    - "udp-port-check <start> <end>" → inspect host UDP listener conflicts
@@ -150,6 +151,12 @@ GEOIP_UPDATE_COMMAND = "/usr/local/bin/update-geoip.sh"
 GEOIP_UPDATE_SERVICE = "easy-ha-proxy-geoip-update.service"
 GEOIP_UPDATE_TIMER = "easy-ha-proxy-geoip-update.timer"
 GEOIP_FORCE_MARKER = Path("/run/easy-ha-proxy/geoip-force-download")
+GEOIP_TIMER_DROPIN = Path(
+    "/etc/systemd/system/easy-ha-proxy-geoip-update.timer.d/zz-web-schedule.conf"
+)
+# Web-selectable update cadence. Whitelisted so the UI can never set a
+# sub-daily schedule or inject an arbitrary systemd calendar expression.
+GEOIP_ALLOWED_SCHEDULES = ("daily", "weekly", "monthly")
 GEOIP_MAX_SELECTION_BYTES = 16 * 1024
 GEOIP_MAX_STATE_BYTES = 128 * 1024
 GEOIP_MAX_COUNTRIES = 249
@@ -3098,6 +3105,7 @@ def geoip_status() -> dict[str, object]:
         "enabled": timer_raw.get("UnitFileState") == "enabled",
         "last_trigger_at": timer_raw.get("LastTriggerUSec") or None,
         "next_run_at": timer_raw.get("NextElapseUSecRealtime") or None,
+        "schedule": _geoip_schedule_current(),
     }
     if timer_raw.get("error"):
         timer["error"] = timer_raw["error"]
@@ -3120,6 +3128,76 @@ def geoip_status() -> dict[str, object]:
         and database.get("access_filter_enabled")
         == selection.get("access_filter_enabled")
     )
+    return result
+
+
+def _geoip_schedule_current() -> str:
+    """Return the effective OnCalendar keyword for the update timer.
+
+    Reads the merged unit (base + drop-ins) via ``systemctl cat``; the last
+    non-empty OnCalendar wins, matching systemd's override semantics.
+    """
+    try:
+        out = subprocess.run(
+            ["/usr/bin/systemctl", "cat", GEOIP_UPDATE_TIMER],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    value = ""
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("OnCalendar="):
+            value = stripped.split("=", 1)[1].strip()
+    return value
+
+
+def geoip_set_schedule(schedule: object) -> dict[str, object]:
+    """Override the update cadence via a systemd timer drop-in.
+
+    Only daily/weekly/monthly are accepted, so the UI can never schedule a
+    sub-daily run or inject an arbitrary systemd calendar expression.
+    """
+    value = str(schedule or "").strip().lower()
+    if value not in GEOIP_ALLOWED_SCHEDULES:
+        return {
+            "ok": False,
+            "error": "schedule must be one of: "
+            + ", ".join(GEOIP_ALLOWED_SCHEDULES),
+        }
+    content = (
+        "# Managed by the easy-ha-proxy web UI.\n"
+        "[Timer]\n"
+        "OnCalendar=\n"
+        f"OnCalendar={value}\n"
+    )
+    try:
+        GEOIP_TIMER_DROPIN.parent.mkdir(parents=True, exist_ok=True)
+        tmp = GEOIP_TIMER_DROPIN.with_name(GEOIP_TIMER_DROPIN.name + ".tmp")
+        tmp.write_text(content, encoding="ascii")
+        os.replace(tmp, GEOIP_TIMER_DROPIN)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot write timer override: {exc}"}
+    reload_ok, reload_detail = _run_geoip_command(
+        ["/usr/bin/systemctl", "daemon-reload"]
+    )
+    if not reload_ok:
+        return {"ok": False, "error": f"daemon-reload failed: {reload_detail}"}
+    restart_ok, restart_detail = _run_geoip_command(
+        ["/usr/bin/systemctl", "restart", GEOIP_UPDATE_TIMER]
+    )
+    if not restart_ok:
+        return {"ok": False, "error": f"timer restart failed: {restart_detail}"}
+    LOG.info("geoip: update schedule set to %s", value)
+    result = {
+        "ok": True,
+        "message": f"GeoIP update schedule set to {value}",
+        "schedule": value,
+    }
+    result["status"] = geoip_status()
     return result
 
 
@@ -3623,6 +3701,24 @@ def handle_client(conn: socket.socket) -> None:
                     request_payload.get("countries"),
                     request_payload.get("revision"),
                 )
+                payload = base64.b64encode(
+                    json.dumps(result, ensure_ascii=False).encode("utf-8")
+                ).decode("ascii")
+                prefix = "OK" if result.get("ok") else "ERROR"
+                conn.sendall(f"{prefix} {payload}\n".encode("ascii"))
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "error": str(exc)[:4000]}
+                payload = base64.b64encode(
+                    json.dumps(result, ensure_ascii=False).encode("utf-8")
+                ).decode("ascii")
+                conn.sendall(f"ERROR {payload}\n".encode("ascii"))
+            return
+
+        if cmd.startswith("geoip-schedule "):
+            try:
+                parts = cmd.split(" ", 1)
+                request_payload = _decode_geoip_payload(parts[1], {"schedule"})
+                result = geoip_set_schedule(request_payload.get("schedule"))
                 payload = base64.b64encode(
                     json.dumps(result, ensure_ascii=False).encode("utf-8")
                 ).decode("ascii")

@@ -2,7 +2,7 @@
 Description=Check for a monthly DB-IP Country Lite update
 
 [Timer]
-OnCalendar={{ geoip_update_on_calendar | default('daily') }}
+OnCalendar={{ geoip_update_on_calendar | default('weekly') }}
 Persistent=true
 RandomizedDelaySec={{ geoip_update_randomized_delay | default('2h') }}
 Unit=easy-ha-proxy-geoip-update.service

@@ -1,14 +1,47 @@
 ---
 - name: Configure APT retries and timeouts
-  copy:
+  ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/80-retries
+    owner: root
+    group: root
     mode: '0644'
     content: |
       Acquire::Retries "5";
       Acquire::http::Timeout "30";
       Acquire::https::Timeout "30";
       Acquire::http::No-Cache "true";
-      
+
+- name: Check whether needrestart is installed
+  ansible.builtin.stat:
+    path: /usr/sbin/needrestart
+  register: update_packages_needrestart
+
+- name: Ensure the needrestart drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/needrestart/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: update_packages_needrestart.stat.exists
+
+# The update broker starts this role in a separate transient systemd unit.
+# Restarting the broker from needrestart makes apt wait for the broker while
+# the broker waits for apt, so the update cannot finish.  The backup broker
+# uses the same long-running job model.  Neither service is supplied by an APT
+# package; their Ansible roles perform the required restarts after code changes.
+- name: Keep needrestart from stopping active maintenance brokers
+  ansible.builtin.copy:
+    dest: /etc/needrestart/conf.d/easy-ha-proxy.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by easy-ha-proxy.
+      $nrconf{override_rc}{qr(^easy-ha-proxy-updated\.service$)} = 0;
+      $nrconf{override_rc}{qr(^easy-ha-proxy-backupd\.service$)} = 0;
+  when: update_packages_needrestart.stat.exists
+
 - name: Update and upgrade apt packages
   become: true
   environment:

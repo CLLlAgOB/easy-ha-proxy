@@ -739,10 +739,18 @@ def _probe_daemons(
             },
         )
     if available:
+        outdated = [
+            item["label"] for item in artifacts if item.get("state") == "available"
+        ]
+        message = (
+            "Helper daemons to update: " + ", ".join(outdated)
+            if outdated
+            else "One or more helper daemons differ from the managed source."
+        )
         return _component(
             "daemons",
             "available",
-            "One or more helper daemons differ from the managed source.",
+            message,
             current_version=(
                 f"{sum(item['state'] == 'current' for item in artifacts)}"
                 f"/{len(artifacts)}"

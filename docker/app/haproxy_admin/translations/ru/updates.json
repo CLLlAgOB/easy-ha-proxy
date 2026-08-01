@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Helper daemons to update: {names}": "Обновить вспомогательные демоны: {names}",
+    "Host-service files to update: {names}": "Обновить файлы служб хоста: {names}"
+  }
+}

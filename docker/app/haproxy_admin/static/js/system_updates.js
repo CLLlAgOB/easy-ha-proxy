@@ -161,16 +161,30 @@
     }
     return String(value);
   }
+  function outdatedArtifactLabels(component) {
+    const artifacts = component && component.details && component.details.artifacts;
+    if (!Array.isArray(artifacts)) return [];
+    return artifacts
+      .filter((item) => item && item.state === "available")
+      .map((item) => item.label || item.id)
+      .filter(Boolean);
+  }
   function componentReason(component) {
     if (component.state !== "available") return t(String(component.reason));
     if (component.id === "all" || component.id === "source") {
       return t("A different remote managed source revision is available.");
     }
     if (component.id === "services") {
-      return t("The remote source contains different host-service files.");
+      const names = outdatedArtifactLabels(component);
+      return names.length
+        ? t("Host-service files to update: {names}", {names: names.join(", ")})
+        : t("The remote source contains different host-service files.");
     }
     if (component.id === "daemons") {
-      return t("One or more helper daemons differ from the managed source.");
+      const names = outdatedArtifactLabels(component);
+      return names.length
+        ? t("Helper daemons to update: {names}", {names: names.join(", ")})
+        : t("One or more helper daemons differ from the managed source.");
     }
     if (["authelia-container", "admin-container"].includes(component.id)) {
       const count = Number(component.available);
@@ -277,7 +291,11 @@
       : warnings.map((item) => t(String(item))).join(" ");
 
     byId("updates-components-body").innerHTML = available.map((component) => {
-      const details = detailsText(component.details);
+      // Components whose candidates are already named in the reason (daemons,
+      // host-service files) skip the raw digest dump to stay readable.
+      const details = Array.isArray(component.details && component.details.artifacts)
+        ? ""
+        : detailsText(component.details);
       return `<tr data-component-row="${escape(component.id)}">
         <td class="updates-select-column">
           <input type="checkbox" data-update-component="${escape(component.id)}"
