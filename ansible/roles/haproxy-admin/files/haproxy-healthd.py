@@ -1345,6 +1345,34 @@ def _alert_after_seconds(value: object, default: float = 300.0) -> float:
     return int(match.group(1)) * _INTERVAL_UNIT_SECONDS[match.group(2)]
 
 
+def _format_duration(seconds: float) -> str:
+    """Render a downtime span as days/hours/minutes instead of raw minutes."""
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _format_servers(servers: List[Dict[str, Any]]) -> str:
+    """One line per backend server: name, address:port when known, and state."""
+    lines: List[str] = []
+    for item in servers:
+        addr = str(item.get("addr") or "").strip()
+        state = "UP" if item.get("up") else "DOWN"
+        if addr:
+            lines.append(f"  - {item.get('name')} ({addr}): {state}")
+        else:
+            lines.append(f"  - {item.get('name')}: {state}")
+    return "\n".join(lines)
+
+
 def _haproxy_show_stat(socket_path: str) -> List[Dict[str, str]]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(5)
@@ -1431,6 +1459,7 @@ class SiteAlertEngine(threading.Thread):
         backend = f"be_{site_id}"
         servers_total = 0
         servers_up = 0
+        servers: List[Dict[str, Any]] = []
         backend_up: Optional[bool] = None
         for row in rows:
             if row.get("pxname") != backend:
@@ -1441,8 +1470,12 @@ class SiteAlertEngine(threading.Thread):
                 backend_up = not status.startswith("DOWN")
             elif svname != "FRONTEND":
                 servers_total += 1
-                if status.startswith("UP") or status.startswith("NO CHECK"):
+                is_up = status.startswith("UP") or status.startswith("NO CHECK")
+                if is_up:
                     servers_up += 1
+                servers.append(
+                    {"name": svname, "addr": row.get("addr") or "", "up": is_up}
+                )
         if backend_up is None:
             return None
         if backend_up is False or (servers_total > 0 and servers_up == 0):
@@ -1451,7 +1484,12 @@ class SiteAlertEngine(threading.Thread):
             state = "degraded"
         else:
             state = "ok"
-        return {"state": state, "up": servers_up, "total": servers_total}
+        return {
+            "state": state,
+            "up": servers_up,
+            "total": servers_total,
+            "servers": servers,
+        }
 
     # -- delivery -----------------------------------------------------------
     def _send_mail(self, recipient: str, subject: str, body: str) -> bool:
@@ -1512,7 +1550,6 @@ class SiteAlertEngine(threading.Thread):
     def run(self) -> None:
         if self._yaml is None:
             return
-        hostname = socket.gethostname()
         while not self._stop.wait(SITE_ALERTS_INTERVAL):
             try:
                 sites = self._load_sites()
@@ -1533,7 +1570,7 @@ class SiteAlertEngine(threading.Thread):
                     )
                     if condition is None:
                         continue
-                    self._evaluate(hostname, site, name, condition)
+                    self._evaluate(site, name, condition)
                 for stale in set(self._incidents) - seen:
                     self._incidents.pop(stale, None)
             except Exception:  # noqa: BLE001 - the loop must survive anything
@@ -1541,7 +1578,6 @@ class SiteAlertEngine(threading.Thread):
 
     def _evaluate(
         self,
-        hostname: str,
         site: Dict[str, Any],
         name: str,
         condition: Dict[str, Any],
@@ -1555,6 +1591,10 @@ class SiteAlertEngine(threading.Thread):
         )
         now = time.time()
         state = condition["state"]
+        summary = f"Backend servers up: {condition['up']}/{condition['total']}\n"
+        servers_block = _format_servers(condition.get("servers") or [])
+        if servers_block:
+            summary += servers_block + "\n"
         if state in triggers:
             if record["bad_since"] is None:
                 record["bad_since"] = now
@@ -1564,16 +1604,14 @@ class SiteAlertEngine(threading.Thread):
                 and now - record["alerted_at"] >= SITE_ALERTS_REPEAT_SECONDS
             )
             if elapsed >= threshold and (record["alerted_at"] is None or repeat_due):
-                minutes = int(elapsed // 60)
                 label = "DOWN" if state == "down" else "PARTIALLY DOWN"
                 sent = self._send_mail(
                     recipient,
                     f"[easy-ha-proxy] {name}: {label}",
                     (
                         f"Site: {name}\n"
-                        f"State: {label.lower()} for {minutes} min\n"
-                        f"Backend servers up: {condition['up']}/{condition['total']}\n"
-                        f"Server: {hostname}\n"
+                        f"State: {label.lower()} for {_format_duration(elapsed)}\n"
+                        + summary
                     ),
                 )
                 if sent:
@@ -1588,8 +1626,7 @@ class SiteAlertEngine(threading.Thread):
                     (
                         f"Site: {name}\n"
                         "State: available again\n"
-                        f"Backend servers up: {condition['up']}/{condition['total']}\n"
-                        f"Server: {hostname}\n"
+                        + summary
                     ),
                 )
                 LOG.info("site-alerts: recovery notice sent for %s", name)
