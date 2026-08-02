@@ -19,6 +19,15 @@
     "The server is back online.": "Сервер снова в сети.",
     "Rebooting… waiting for the server to come back.": "Перезагрузка… ждём возвращения сервера.",
     "An update is in progress; the reboot was refused.": "Идёт обновление; перезагрузка отклонена.",
-    "A restore is in progress; the reboot was refused.": "Идёт восстановление; перезагрузка отклонена."
+    "A restore is in progress; the reboot was refused.": "Идёт восстановление; перезагрузка отклонена.",
+    "Time remaining": "Осталось времени",
+    "Reboot scheduled": "Перезагрузка запланирована",
+    "The server will restart in a moment. You can still cancel.": "Сервер перезапустится через мгновение. Ещё можно отменить.",
+    "Rebooting the server…": "Перезагрузка сервера…",
+    "Waiting for the server to come back. This page reconnects automatically.": "Ждём возвращения сервера. Страница переподключится автоматически.",
+    "Server is back online": "Сервер снова в сети",
+    "The reboot finished successfully.": "Перезагрузка прошла успешно.",
+    "Server has not returned": "Сервер не вернулся",
+    "The server did not come back within 5 minutes. Check your provider console.": "Сервер не вернулся за 5 минут. Проверьте консоль провайдера."
   }
 }

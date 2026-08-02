@@ -147,6 +147,24 @@
     </div>
   </section>
 
+  <div id="updates-reboot-modal" class="config-modal" hidden
+       role="dialog" aria-modal="true" aria-labelledby="updates-reboot-modal-title">
+    <div class="config-modal-backdrop"></div>
+    <div class="config-modal-panel" tabindex="-1">
+      <div class="config-confirm-icon" aria-hidden="true">↻</div>
+      <h2 id="updates-reboot-modal-title">Reboot scheduled</h2>
+      <p id="updates-reboot-modal-text">The server will restart in a moment. You can still cancel.</p>
+      <div class="config-countdown" aria-live="polite">
+        <span>Time remaining</span>
+        <strong id="updates-reboot-modal-timer">5:00</strong>
+      </div>
+      <div class="config-modal-actions">
+        <button type="button" class="btn" id="updates-reboot-modal-cancel">Cancel reboot</button>
+        <button type="button" class="btn" id="updates-reboot-modal-close" hidden>Close</button>
+      </div>
+    </div>
+  </div>
+
   <section class="card updates-jobs-card" aria-labelledby="updates-jobs-title">
     <div class="card-header updates-card-header">
       <div>
