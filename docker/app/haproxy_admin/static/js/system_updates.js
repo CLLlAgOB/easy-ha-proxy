@@ -17,8 +17,10 @@
   let rebootPending = false;
   let rebootWatchTimer = null;
   let rebootWatchDeadline = 0;
-  let rebootWentDown = false;
-  const REBOOT_WATCH_MS = 5 * 60 * 1000;
+  let currentBootId = "";
+  let rebootBootId = "";
+  const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const REBOOT_WATCH_MS = 10 * 60 * 1000;
   const terminalStates = new Set([
     "completed", "failed", "cancelled", "interrupted", "partial", "skipped"
   ]);
@@ -580,15 +582,18 @@
     );
     // The inline card is driven purely by the server-reported state so it can
     // never get stuck; the live "waiting to come back" experience is the modal.
-    const scheduled = Boolean(payload.reboot_scheduled);
+    const ownedScheduled = Boolean(payload.reboot_scheduled);
+    const externalScheduled = Boolean(payload.reboot_scheduled_elsewhere);
+    const scheduled = ownedScheduled || externalScheduled;
     byId("updates-reboot-card").hidden = !(required || scheduled);
     byId("updates-reboot-idle").hidden = scheduled;
     byId("updates-reboot-pending").hidden = !scheduled;
-    if (!scheduled && rebootPending && !rebootWatchTimer) {
-      // A tracked reboot finished (server is back) or was canceled, and no
-      // modal is watching to report it.
-      rebootPending = false;
-      setMessage("updates-reboot-status", t("The server is back online."), true);
+    byId("updates-reboot-cancel").hidden = !ownedScheduled;
+    updateRebootButton();
+    // Reattach to a pending web-scheduled reboot after a tab reload. The boot
+    // id makes this safe even if the host is reachable before the app is ready.
+    if (ownedScheduled && !rebootPending && currentBootId) {
+      startRebootWatch(currentBootId);
     }
   }
   function handleCurrentJob(job) {
@@ -640,6 +645,8 @@
     const settings = options || {};
     try {
       const payload = await requestJson(endpoints.status);
+      const reportedBootId = String(payload.boot_id || "").toLowerCase();
+      if (BOOT_ID_RE.test(reportedBootId)) currentBootId = reportedBootId;
       const jobs = normalizeJobs(payload);
       renderDeployment(payload);
       const active = renderJobs(jobs);
@@ -721,6 +728,8 @@
   }
   function schedulePoll(delay) {
     window.clearTimeout(pollTimer);
+    pollTimer = null;
+    if (rebootPending) return;
     pollTimer = window.setTimeout(() => refreshStatus({quiet: true}), delay);
   }
 
@@ -826,7 +835,9 @@
   function updateRebootButton() {
     const input = byId("updates-reboot-confirm");
     const button = byId("updates-reboot-now");
-    if (button && input) button.disabled = input.value.trim() !== "REBOOT";
+    if (button && input) {
+      button.disabled = input.value.trim() !== "REBOOT" || !currentBootId;
+    }
   }
   function rebootModalText(id, value) { const el = byId(id); if (el) el.textContent = value; }
   function formatMMSS(sec) {
@@ -834,45 +845,49 @@
   }
   function closeRebootModal() {
     if (rebootWatchTimer) { window.clearTimeout(rebootWatchTimer); rebootWatchTimer = null; }
+    rebootPending = false;
     byId("updates-reboot-modal").hidden = true;
+    schedulePoll(250);
   }
   async function rebootWatchTick() {
+    rebootWatchTimer = null;
     const remaining = Math.max(0, Math.round((rebootWatchDeadline - Date.now()) / 1000));
     rebootModalText("updates-reboot-modal-timer", formatMMSS(remaining));
-    let up = false;
-    let scheduled = true;
+    let payload = null;
     try {
-      const resp = await fetch(endpoints.status, {cache: "no-store"});
-      // Any HTTP answer means the host is back, even an auth error after the
-      // session store was cleared by the reboot.
-      up = true;
-      if (resp.ok) {
-        const payload = await resp.json();
-        scheduled = Boolean(payload.reboot_scheduled);
-      } else {
-        scheduled = false;
+      const response = await fetch(endpoints.status, {
+        cache: "no-store",
+        headers: {"Accept": "application/json"}
+      });
+      const contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
+      // HAProxy can answer with an HTML 503 before the admin container is
+      // ready. Only the authenticated broker JSON response proves readiness.
+      if (response.ok && contentType.includes("application/json")) {
+        const candidate = await response.json();
+        if (candidate && candidate.ok === true && BOOT_ID_RE.test(String(candidate.boot_id || ""))) {
+          payload = candidate;
+        }
       }
-    } catch (_error) { up = false; }
+    } catch (_error) { payload = null; }
 
-    if (up && rebootWentDown) {
-      // The server went down and is answering again → the reboot is complete.
-      rebootPending = false;
+    const responseBootId = String(payload?.boot_id || "").toLowerCase();
+    if (payload && responseBootId !== rebootBootId) {
+      // A different kernel boot plus a valid status response means the whole
+      // admin path is ready. Reload the document and its versioned assets.
       byId("updates-reboot-modal-cancel").hidden = true;
       rebootModalText("updates-reboot-modal-title", t("Server is back online"));
       rebootModalText("updates-reboot-modal-text", t("The reboot finished successfully."));
       rebootModalText("updates-reboot-modal-timer", "");
-      rebootWatchTimer = window.setTimeout(() => { closeRebootModal(); refreshStatus(); }, 1800);
+      rebootWatchTimer = window.setTimeout(() => window.location.reload(), 1800);
       return;
     }
-    if (up && !scheduled && !rebootWentDown) {
-      // The reboot was canceled before the server ever went down.
-      rebootPending = false;
+    if (payload && responseBootId === rebootBootId && !payload.reboot_scheduled) {
+      // The same boot answered and our owned timer is gone: cancellation won.
       closeRebootModal();
-      refreshStatus();
+      setMessage("updates-reboot-status", t("Reboot canceled."), true);
       return;
     }
-    if (!up) {
-      rebootWentDown = true;
+    if (!payload) {
       byId("updates-reboot-modal-cancel").hidden = true;
       rebootModalText("updates-reboot-modal-title", t("Rebooting the server…"));
       rebootModalText("updates-reboot-modal-text", t("Waiting for the server to come back. This page reconnects automatically."));
@@ -884,16 +899,23 @@
     if (remaining <= 0) {
       byId("updates-reboot-modal-cancel").hidden = true;
       rebootModalText("updates-reboot-modal-title", t("Server has not returned"));
-      rebootModalText("updates-reboot-modal-text", t("The server did not come back within 5 minutes. Check your provider console."));
+      rebootModalText("updates-reboot-modal-text", t("The server did not come back within 10 minutes. Check your provider console."));
       rebootModalText("updates-reboot-modal-timer", "");
       byId("updates-reboot-modal-close").hidden = false;
       return;
     }
     rebootWatchTimer = window.setTimeout(rebootWatchTick, 3000);
   }
-  function startRebootWatch() {
+  function startRebootWatch(bootId) {
+    const normalizedBootId = String(bootId || "").toLowerCase();
+    if (!BOOT_ID_RE.test(normalizedBootId)) {
+      setMessage("updates-reboot-status", t("The current server boot could not be verified."), false);
+      return;
+    }
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
     rebootPending = true;
-    rebootWentDown = false;
+    rebootBootId = normalizedBootId;
     rebootWatchDeadline = Date.now() + REBOOT_WATCH_MS;
     byId("updates-reboot-modal-close").hidden = true;
     byId("updates-reboot-modal-cancel").hidden = false;
@@ -909,18 +931,26 @@
     if (!window.confirm(t("Reboot the server now? It will be briefly unreachable."))) return;
     setMessage("updates-reboot-status", t("Scheduling reboot…"));
     try {
-      const payload = await postJson(endpoints.reboot, {confirmation: "REBOOT"});
+      const payload = await postJson(endpoints.reboot, {
+        confirmation: "REBOOT",
+        expected_boot_id: currentBootId
+      });
       input.value = "";
       updateRebootButton();
-      setMessage("updates-reboot-status", payload.message || t("Reboot scheduled."), true);
-      startRebootWatch();
+      setMessage("updates-reboot-status", t(payload.message || "Reboot scheduled."), true);
+      startRebootWatch(payload.boot_id || currentBootId);
     } catch (error) {
       setMessage("updates-reboot-status", `${t("Reboot was refused")}: ${error.message}`, false);
     }
   }
   async function cancelReboot() {
+    const expectedBootId = rebootBootId || currentBootId;
+    if (!BOOT_ID_RE.test(expectedBootId)) {
+      setMessage("updates-reboot-status", t("The current server boot could not be verified."), false);
+      return;
+    }
     try {
-      await postJson(endpoints.rebootCancel, {});
+      await postJson(endpoints.rebootCancel, {expected_boot_id: expectedBootId});
     } catch (error) {
       setMessage("updates-reboot-status", `${t("Failed to cancel the reboot")}: ${error.message}`, false);
       return;

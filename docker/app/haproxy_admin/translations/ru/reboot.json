@@ -12,6 +12,7 @@
     "Reboot the server now? It will be briefly unreachable.": "Перезагрузить сервер сейчас? Он будет недоступен некоторое время.",
     "Scheduling reboot…": "Планирование перезагрузки…",
     "Reboot scheduled.": "Перезагрузка запланирована.",
+    "Reboot is already scheduled.": "Перезагрузка уже запланирована.",
     "Reboot was refused": "Перезагрузка отклонена",
     "Canceling reboot…": "Отмена перезагрузки…",
     "Reboot canceled.": "Перезагрузка отменена.",
@@ -20,7 +21,7 @@
     "Rebooting… waiting for the server to come back.": "Перезагрузка… ждём возвращения сервера.",
     "An update is in progress; the reboot was refused.": "Идёт обновление; перезагрузка отклонена.",
     "A restore is in progress; the reboot was refused.": "Идёт восстановление; перезагрузка отклонена.",
-    "Time remaining": "Осталось времени",
+    "Maximum wait time": "Максимальное время ожидания",
     "Reboot scheduled": "Перезагрузка запланирована",
     "The server will restart in a moment. You can still cancel.": "Сервер перезапустится через мгновение. Ещё можно отменить.",
     "Rebooting the server…": "Перезагрузка сервера…",
@@ -28,6 +29,7 @@
     "Server is back online": "Сервер снова в сети",
     "The reboot finished successfully.": "Перезагрузка прошла успешно.",
     "Server has not returned": "Сервер не вернулся",
-    "The server did not come back within 5 minutes. Check your provider console.": "Сервер не вернулся за 5 минут. Проверьте консоль провайдера."
+    "The server did not come back within 10 minutes. Check your provider console.": "Сервер не вернулся за 10 минут. Проверьте консоль провайдера.",
+    "The current server boot could not be verified.": "Не удалось подтвердить текущую загрузку сервера."
   }
 }

@@ -94,6 +94,13 @@ RESTART_REQUEST_MARKER = Path(
         "/run/easy-ha-proxy/easy-ha-proxy-backupd-restart.requested",
     )
 )
+REBOOT_MARKER = Path(
+    os.environ.get(
+        "BACKUPD_REBOOT_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json",
+    )
+)
+ASSISTANT_REBOOT_MARKER = Path("/run/easy-ha-proxy/reboot-scheduled")
 OPERATION_LOCK_PATH = Path(
     os.environ.get(
         "BACKUPD_OPERATION_LOCK",
@@ -244,6 +251,8 @@ def ensure_layout() -> None:
         (SOURCE_DIR, "source path"),
         (RESTORE_ACTIVE_MARKER, "restore marker"),
         (RESTART_REQUEST_MARKER, "restart marker"),
+        (REBOOT_MARKER, "reboot marker"),
+        (ASSISTANT_REBOOT_MARKER, "assistant reboot marker"),
         (OPERATION_LOCK_PATH, "operation lock"),
     ):
         ensure_absolute_path(path, label)
@@ -1150,6 +1159,8 @@ def acquire_operation() -> int:
     # receive a spurious busy response. Genuinely active jobs still fail fast.
     if SHUTDOWN_REQUESTED.is_set():
         raise BackupdError("backup daemon is shutting down", code="conflict")
+    if os.path.lexists(REBOOT_MARKER) or os.path.lexists(ASSISTANT_REBOOT_MARKER):
+        raise BackupdError("a server reboot is scheduled", code="conflict")
     deadline = time.monotonic() + 1.0
     while not OPERATION_THREAD_LOCK.acquire(blocking=False):
         if time.monotonic() >= deadline:
@@ -1165,6 +1176,11 @@ def acquire_operation() -> int:
         if SHUTDOWN_REQUESTED.is_set():
             release_operation(descriptor)
             raise BackupdError("backup daemon is shutting down", code="conflict")
+        if os.path.lexists(REBOOT_MARKER) or os.path.lexists(
+            ASSISTANT_REBOOT_MARKER
+        ):
+            release_operation(descriptor)
+            raise BackupdError("a server reboot is scheduled", code="conflict")
         return descriptor
     except (OSError, BlockingIOError) as exc:
         if descriptor >= 0:

@@ -124,6 +124,11 @@ CONFIG_TRANSACTION_DIR = Path(os.getenv(
 ))
 CONFIG_TRANSACTION_STATE = "transaction.json"
 CONFIG_TRANSACTION_VERSION = 1
+MAINTENANCE_REBOOT_MARKER = Path(os.getenv(
+    "EASY_HA_PROXY_REBOOT_MARKER",
+    "/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json",
+))
+ASSISTANT_REBOOT_MARKER = Path("/run/easy-ha-proxy/reboot-scheduled")
 CONFIG_TRANSACTION_ACTIVE_STATES = frozenset({
     "prepared",
     "pending_confirmation",
@@ -3383,6 +3388,29 @@ def handle_client(conn: socket.socket) -> None:
         raw = b"".join(chunks)
         line = raw.split(b"\n", 1)[0]
         cmd = line.decode("utf-8", "replace").strip()
+
+        # Once the update broker has committed a reboot timer, do not admit a
+        # new host mutation from another browser tab. Read-only inspection and
+        # transaction confirmation/rollback stay available.
+        reboot_blocked_exact = {"reload", "udp-apply", "udp-apply-json"}
+        reboot_blocked_prefixes = (
+            "certs-restore ",
+            "write-config ",
+            "apply-config ",
+            "begin-config-transaction ",
+            "geoip-update ",
+            "geoip-configure ",
+            "geoip-schedule ",
+        )
+        if (
+            os.path.lexists(MAINTENANCE_REBOOT_MARKER)
+            or os.path.lexists(ASSISTANT_REBOOT_MARKER)
+        ) and (
+            cmd in reboot_blocked_exact
+            or cmd.startswith(reboot_blocked_prefixes)
+        ):
+            conn.sendall(b"ERROR a server reboot is scheduled\n")
+            return
 
         # ---- reload ----
         if cmd == "reload":

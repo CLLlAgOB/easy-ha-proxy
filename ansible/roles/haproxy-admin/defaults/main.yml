@@ -96,6 +96,7 @@ backupd_upload_ttl_seconds: 86400
 backupd_restore_active_marker: /run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active
 backupd_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-backupd-restart.requested
 backupd_operation_lock_path: /run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock
+maintenance_reboot_marker_path: /run/easy-ha-proxy/easy-ha-proxy-web-reboot.json
 
 # Asynchronous software-update broker. It shares backupd's operation lock so
 # update and disaster-recovery jobs cannot mutate the host concurrently.
@@ -118,6 +119,7 @@ updated_active_marker: /run/easy-ha-proxy/easy-ha-proxy-update.active
 updated_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested
 updated_maintenance_lock_path: "{{ backupd_operation_lock_path }}"
 updated_haproxy_transaction_marker: /opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json
+updated_reboot_delay_seconds: 60
 
 # Authelia user-management daemon socket.
 authelia_users_socket: /run/easy-ha-proxy/authelia-usersd.sock

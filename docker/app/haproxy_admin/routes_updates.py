@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from flask import Blueprint, abort, jsonify, render_template, request
+from flask import Blueprint, abort, g, jsonify, render_template, request
 
 from .services_haproxy_config import get_haproxy_configuration_state
 from .updated_client import UpdatedError, updated_request
@@ -17,6 +17,10 @@ bp_system_updates = Blueprint(
 )
 
 IDENTIFIER_RE = re.compile(r"^[a-f0-9]{32}$")
+BOOT_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 IMAGE_CHANNELS = frozenset({"latest", "alpha"})
 SOURCE_CHANNELS = frozenset({"github", "local"})
 RELEASE_CHANNELS = frozenset({"stable", "alpha", "local"})
@@ -43,6 +47,8 @@ def _daemon_response(result: dict, *, accepted: bool = False):
         "config_pending",
         "operation_active",
         "stale_plan",
+        "stale_boot",
+        "not_required",
     } or result.get("conflict"):
         status_code = 409
     elif code in {"not_found", "missing"}:
@@ -78,6 +84,20 @@ def _identifier(value, label: str) -> str:
     if not IDENTIFIER_RE.fullmatch(text):
         abort(400, description=f"invalid {label}")
     return text
+
+
+def _boot_id(value) -> str:
+    text = str(value or "").strip().lower()
+    if not BOOT_ID_RE.fullmatch(text):
+        abort(400, description="invalid boot id")
+    return text
+
+
+def _actor() -> str:
+    value = str(getattr(g, "remote_user", "") or "").strip()
+    if not ACTOR_RE.fullmatch(value):
+        abort(403, description="authenticated actor is unavailable")
+    return value
 
 
 def _components(value) -> list[str]:
@@ -205,14 +225,28 @@ def start_apply():
 
 @bp_system_updates.post("/api/reboot")
 def reboot():
-    payload = _json_payload({"confirmation"})
+    payload = _json_payload({"confirmation", "expected_boot_id"})
     if payload["confirmation"] != "REBOOT":
         abort(400, description="type REBOOT to confirm the server reboot")
-    # The broker schedules a delayed, cancelable reboot and refuses while an
-    # update or restore is in progress.
-    return _call_daemon({"action": "reboot", "confirmation": "REBOOT"})
+    # The broker owns the delayed systemd timer and serializes it with every
+    # update/backup operation through the shared maintenance lock.
+    return _call_daemon(
+        {
+            "action": "reboot",
+            "confirmation": "REBOOT",
+            "expected_boot_id": _boot_id(payload["expected_boot_id"]),
+            "actor": _actor(),
+        }
+    )
 
 
 @bp_system_updates.post("/api/reboot/cancel")
 def cancel_reboot():
-    return _call_daemon({"action": "cancel_reboot"})
+    payload = _json_payload({"expected_boot_id"})
+    return _call_daemon(
+        {
+            "action": "cancel_reboot",
+            "expected_boot_id": _boot_id(payload["expected_boot_id"]),
+            "actor": _actor(),
+        }
+    )

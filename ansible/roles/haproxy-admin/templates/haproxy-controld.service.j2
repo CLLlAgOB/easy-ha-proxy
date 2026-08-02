@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile={{ haproxy_admin_env_file }}
+Environment="EASY_HA_PROXY_REBOOT_MARKER={{ maintenance_reboot_marker_path | default('/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json') }}"
 # Можно переопределять через .env:
 # SOCKET_PATH=/run/haproxy/admin.sock
 # HAPADM_BAN_TABLE=tbl_ban

@@ -71,6 +71,9 @@ def release_channel_from_settings(
     return "stable"
 REBOOT_REQUIRED_PATH = Path("/var/run/reboot-required")
 REBOOT_SCHEDULE_MARKER = Path("/run/easy-ha-proxy/reboot-scheduled")
+WEB_REBOOT_SCHEDULE_MARKER = Path(
+    "/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json"
+)
 REBOOT_DELAY_SECONDS = 30
 REBOOT_SYSTEMD_UNIT_PREFIX = "easy-ha-proxy-reboot"
 UPDATE_SOURCE_REFRESHED_ENV = "EASY_HA_PROXY_UPDATE_SOURCE_REFRESHED"
@@ -379,6 +382,11 @@ def reboot_required() -> bool:
 
 def reboot_schedule_is_active() -> bool:
     """Validate that the runtime marker still has an active systemd unit."""
+
+    # A web-scheduled timer is owned and canceled by the update broker. Treat
+    # it as active here so the CLI cannot schedule a competing reboot.
+    if os.path.lexists(WEB_REBOOT_SCHEDULE_MARKER):
+        return True
 
     if not REBOOT_SCHEDULE_MARKER.exists():
         return False

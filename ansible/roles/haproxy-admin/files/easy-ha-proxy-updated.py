@@ -102,6 +102,13 @@ RESTART_REQUEST_MARKER = Path(
         "/run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested",
     )
 )
+REBOOT_MARKER = Path(
+    os.environ.get(
+        "UPDATED_REBOOT_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json",
+    )
+)
+ASSISTANT_REBOOT_MARKER = Path("/run/easy-ha-proxy/reboot-scheduled")
 # This is deliberately the same lock used by backupd.  Holding it makes an
 # update conflict with backup, inspect, restore, and backup deletion.
 MAINTENANCE_LOCK_PATH = Path(
@@ -147,8 +154,12 @@ PLAN_TTL_SECONDS = env_int(
 LIST_LIMIT = env_int("UPDATED_LIST_LIMIT", 30, maximum=100)
 MAX_CONNECTIONS = env_int("UPDATED_MAX_CONNECTIONS", 16, maximum=64)
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 IDENTIFIER_RE = re.compile(r"^[0-9a-f]{32}$")
+BOOT_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -203,8 +214,10 @@ REQUEST_FIELDS = {
     "set_channels": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
     ),
-    "reboot": frozenset({"action", "confirmation"}),
-    "cancel_reboot": frozenset({"action"}),
+    "reboot": frozenset(
+        {"action", "confirmation", "expected_boot_id", "actor"}
+    ),
+    "cancel_reboot": frozenset({"action", "expected_boot_id", "actor"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -257,6 +270,8 @@ def ensure_layout() -> None:
         (MAINTENANCE_LOCK_PATH, "maintenance lock"),
         (ACTIVE_MARKER, "active marker"),
         (RESTART_REQUEST_MARKER, "restart marker"),
+        (REBOOT_MARKER, "reboot marker"),
+        (ASSISTANT_REBOOT_MARKER, "assistant reboot marker"),
         (HAPROXY_TRANSACTION_MARKER, "HAProxy transaction marker"),
         (HAPROXY_TRANSACTION_STATE, "HAProxy transaction state"),
     ):
@@ -525,11 +540,19 @@ def child_environment() -> dict[str, str]:
 
 SYSTEMD_RUN_PATH = "/usr/bin/systemd-run"
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
-SHUTDOWN_PATH = os.environ.get("UPDATED_SHUTDOWN_PATH", "/usr/sbin/shutdown")
-# Delayed + cancelable reboot: the HTTP response returns before the box goes
-# down, and there is a window to cancel with `shutdown -c`.
-REBOOT_DELAY = os.environ.get("UPDATED_REBOOT_DELAY", "+1")
+# Delayed + cancelable reboot: PID 1 owns a uniquely named timer, so the HTTP
+# response reaches the browser before the host goes down and cancellation can
+# never affect a shutdown scheduled by another administrator.
+REBOOT_DELAY_SECONDS = env_int(
+    "UPDATED_REBOOT_DELAY_SECONDS", 60, minimum=15, maximum=15 * 60
+)
+REBOOT_UNIT_PREFIX = "easy-ha-proxy-web-reboot"
+REBOOT_UNIT_RE = re.compile(
+    rf"^{re.escape(REBOOT_UNIT_PREFIX)}-[0-9a-f]{{12}}$"
+)
 REBOOT_CONFIRMATION = "REBOOT"
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+REBOOT_REQUIRED_PATH = Path("/var/run/reboot-required")
 # A restore in progress must never be interrupted by a reboot.
 BACKUPD_RESTORE_ACTIVE_MARKER = Path(
     os.environ.get(
@@ -537,8 +560,6 @@ BACKUPD_RESTORE_ACTIVE_MARKER = Path(
         "/run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active",
     )
 )
-# systemd records a scheduled shutdown/reboot here.
-SYSTEMD_SHUTDOWN_SCHEDULED = Path("/run/systemd/shutdown/scheduled")
 TRANSIENT_STOP_TIMEOUT = 30
 
 
@@ -1141,9 +1162,11 @@ def validate_applied_container_digests(
         )
 
 
-def acquire_operation() -> int:
+def acquire_operation(*, allow_scheduled_reboot: bool = False) -> int:
     if SHUTDOWN_REQUESTED.is_set():
         raise UpdatedError("the update broker is shutting down", code="conflict")
+    if not allow_scheduled_reboot and reboot_guard_present():
+        raise UpdatedError("a server reboot is scheduled", code="conflict")
     if not OPERATION_THREAD_LOCK.acquire(blocking=False):
         raise UpdatedError("another maintenance operation is active", code="busy")
     descriptor = -1
@@ -1154,6 +1177,9 @@ def acquire_operation() -> int:
             0o600,
         )
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not allow_scheduled_reboot and reboot_guard_present():
+            release_operation(descriptor)
+            raise UpdatedError("a server reboot is scheduled", code="conflict")
         return descriptor
     except (OSError, BlockingIOError) as exc:
         if descriptor >= 0:
@@ -1537,6 +1563,7 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
     if plan is not None:
         plan = dict(plan)
         plan["stale"] = plan_is_expired(plan)
+    boot_id = current_boot_id()
     return {
         "ok": True,
         "protocol_version": PROTOCOL_VERSION,
@@ -1544,39 +1571,86 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         "plan": plan,
         "jobs": jobs,
         "active_job": active_job(),
-        "reboot_required": Path("/var/run/reboot-required").exists(),
+        "boot_id": boot_id,
+        "reboot_required": REBOOT_REQUIRED_PATH.exists(),
         "reboot_scheduled": reboot_is_scheduled(),
+        "reboot_scheduled_elsewhere": os.path.lexists(ASSISTANT_REBOOT_MARKER),
+        "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
     }
 
 
+def current_boot_id() -> str:
+    try:
+        value = BOOT_ID_PATH.read_text(encoding="ascii").strip().lower()
+    except (OSError, UnicodeError) as exc:
+        raise UpdatedError("the current boot id is unavailable", code="conflict") from exc
+    if not BOOT_ID_RE.fullmatch(value):
+        raise UpdatedError("the current boot id is invalid", code="conflict")
+    return value
+
+
+def request_identity(request: dict[str, Any]) -> tuple[str, str]:
+    expected_boot_id = request.get("expected_boot_id")
+    if not isinstance(expected_boot_id, str) or not BOOT_ID_RE.fullmatch(
+        expected_boot_id
+    ):
+        raise UpdatedError("a valid expected boot id is required", code="validation")
+    actor = request.get("actor")
+    if not isinstance(actor, str) or not ACTOR_RE.fullmatch(actor):
+        raise UpdatedError("a valid authenticated actor is required", code="validation")
+    boot_id = current_boot_id()
+    if expected_boot_id != boot_id:
+        raise UpdatedError(
+            "the server boot changed; reload the page and try again",
+            code="stale_boot",
+        )
+    return boot_id, actor
+
+
+def reboot_marker_state() -> dict[str, Any] | None:
+    if not os.path.lexists(REBOOT_MARKER):
+        return None
+    try:
+        state = safe_json_file(REBOOT_MARKER)
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError) as exc:
+        LOG.error("The web reboot marker is unsafe or unreadable: %s", exc)
+        raise UpdatedError("the web reboot marker is unsafe", code="conflict") from exc
+    unit = state.get("unit")
+    marker_boot_id = state.get("boot_id")
+    if (
+        not isinstance(unit, str)
+        or not REBOOT_UNIT_RE.fullmatch(unit)
+        or not isinstance(marker_boot_id, str)
+        or not BOOT_ID_RE.fullmatch(marker_boot_id)
+    ):
+        raise UpdatedError("the web reboot marker is invalid", code="conflict")
+    if marker_boot_id != current_boot_id():
+        REBOOT_MARKER.unlink(missing_ok=True)
+        fsync_directory(REBOOT_MARKER.parent)
+        return None
+    return state
+
+
 def reboot_is_scheduled() -> bool:
-    return SYSTEMD_SHUTDOWN_SCHEDULED.exists()
+    return reboot_marker_state() is not None
 
 
-def request_reboot(request: dict[str, Any]) -> dict[str, Any]:
-    if request.get("confirmation") != REBOOT_CONFIRMATION:
-        raise UpdatedError("reboot requires an explicit confirmation")
-    job = active_job()
-    if job is not None:
-        return {
-            "ok": False,
-            "error": "An update is in progress; the reboot was refused.",
-            "error_code": "operation_active",
-            "active_job": job,
-        }
-    if BACKUPD_RESTORE_ACTIVE_MARKER.exists():
-        return {
-            "ok": False,
-            "error": "A restore is in progress; the reboot was refused.",
-            "error_code": "operation_active",
-        }
+def reboot_guard_present() -> bool:
+    return os.path.lexists(REBOOT_MARKER) or os.path.lexists(
+        ASSISTANT_REBOOT_MARKER
+    )
+
+
+def stop_reboot_unit(unit: str) -> None:
+    if not REBOOT_UNIT_RE.fullmatch(unit):
+        raise UpdatedError("the scheduled reboot unit is invalid", code="conflict")
     try:
         result = subprocess.run(
             [
-                SHUTDOWN_PATH,
-                "-r",
-                REBOOT_DELAY,
-                "easy-ha-proxy: reboot requested from the web UI",
+                SYSTEMCTL_PATH,
+                "stop",
+                f"{unit}.timer",
+                f"{unit}.service",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1585,32 +1659,166 @@ def request_reboot(request: dict[str, Any]) -> dict[str, Any]:
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise UpdatedError(f"failed to schedule the reboot: {exc}")
-    if result.returncode != 0:
+        raise UpdatedError(f"failed to stop the reboot timer: {exc}") from exc
+    remaining = []
+    for suffix in ("timer", "service"):
+        try:
+            properties = systemctl_properties(
+                f"{unit}.{suffix}", ["LoadState", "ActiveState"]
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise UpdatedError(
+                f"failed to verify the reboot timer stopped: {exc}"
+            ) from exc
+        # A failed D-Bus query can otherwise look like an empty, inactive
+        # result. Cancellation must be proven before its guard is removed.
+        if not {"LoadState", "ActiveState"}.issubset(properties):
+            raise UpdatedError("failed to verify the reboot timer stopped")
+        if properties.get("ActiveState") in {
+            "activating",
+            "active",
+            "reloading",
+            "deactivating",
+        }:
+            remaining.append(f"{unit}.{suffix}")
+    if remaining:
         raise UpdatedError(
-            "failed to schedule the reboot: "
-            + (result.stderr or result.stdout or "unknown error").strip()
+            "failed to stop the reboot timer: "
+            + (result.stderr or result.stdout or ", ".join(remaining)).strip()
         )
-    LOG.warning("reboot scheduled from the web UI (delay %s)", REBOOT_DELAY)
-    return {"ok": True, "message": "Reboot scheduled.", "reboot_scheduled": True}
+
+
+def request_reboot(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("confirmation") != REBOOT_CONFIRMATION:
+        raise UpdatedError("reboot requires an explicit confirmation")
+    boot_id, actor = request_identity(request)
+    existing = reboot_marker_state()
+    if existing is not None:
+        return {
+            "ok": True,
+            "message": "Reboot is already scheduled.",
+            "reboot_scheduled": True,
+            "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+            "boot_id": boot_id,
+        }
+    lock_fd = acquire_operation()
+    try:
+        existing = reboot_marker_state()
+        if existing is not None:
+            return {
+                "ok": True,
+                "message": "Reboot is already scheduled.",
+                "reboot_scheduled": True,
+                "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+                "boot_id": boot_id,
+            }
+        if not REBOOT_REQUIRED_PATH.exists():
+            raise UpdatedError(
+                "the operating system does not currently require a reboot",
+                code="not_required",
+            )
+        if BACKUPD_RESTORE_ACTIVE_MARKER.exists():
+            raise UpdatedError(
+                "a restore is in progress; the reboot was refused",
+                code="operation_active",
+            )
+        if haproxy_transaction_active():
+            raise UpdatedError(
+                "an HAProxy configuration confirmation is active",
+                code="config_pending",
+            )
+        unit = f"{REBOOT_UNIT_PREFIX}-{uuid.uuid4().hex[:12]}"
+        # Publish the root-owned guard before asking PID 1 to create the timer.
+        # The shared lock keeps update/backup workers out, while controld uses
+        # this marker to reject new host configuration mutations.
+        atomic_json(
+            REBOOT_MARKER,
+            {
+                "version": 1,
+                "unit": unit,
+                "boot_id": boot_id,
+                "actor": actor,
+                "scheduled_at": utc_now(),
+                "delay_seconds": REBOOT_DELAY_SECONDS,
+            },
+        )
+        result = subprocess.run(
+            [
+                SYSTEMD_RUN_PATH,
+                f"--unit={unit}",
+                "--description=easy-ha-proxy web controlled reboot",
+                f"--on-active={REBOOT_DELAY_SECONDS}s",
+                "--timer-property=AccuracySec=1s",
+                SYSTEMCTL_PATH,
+                "reboot",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            raise UpdatedError(
+                "failed to schedule the reboot: "
+                + (result.stderr or result.stdout or "unknown error").strip()
+            )
+    except Exception as exc:
+        cleanup_safe = True
+        if "unit" in locals():
+            try:
+                stop_reboot_unit(unit)
+            except UpdatedError as cleanup_exc:
+                # Keep the marker (and therefore every maintenance guard) if
+                # PID 1 may still own a live timer.  An administrator can then
+                # retry cancellation without an untracked reboot racing work.
+                cleanup_safe = False
+                LOG.error(
+                    "Could not prove the failed reboot timer was stopped: %s",
+                    cleanup_exc,
+                )
+        if cleanup_safe and os.path.lexists(REBOOT_MARKER):
+            REBOOT_MARKER.unlink(missing_ok=True)
+            fsync_directory(REBOOT_MARKER.parent)
+        if isinstance(exc, (OSError, subprocess.TimeoutExpired)):
+            raise UpdatedError(f"failed to schedule the reboot: {exc}") from exc
+        raise
+    finally:
+        # Hold the lock through timer creation and marker persistence so no
+        # update or backup can enter the scheduling gap.
+        release_operation(lock_fd)
+    LOG.warning(
+        "reboot scheduled from the web UI by %s (delay %ss)",
+        actor,
+        REBOOT_DELAY_SECONDS,
+    )
+    return {
+        "ok": True,
+        "message": "Reboot scheduled.",
+        "reboot_scheduled": True,
+        "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+        "boot_id": boot_id,
+    }
 
 
 def cancel_reboot(request: dict[str, Any]) -> dict[str, Any]:
+    boot_id, actor = request_identity(request)
+    lock_fd = acquire_operation(allow_scheduled_reboot=True)
     try:
-        subprocess.run(
-            [SHUTDOWN_PATH, "-c"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise UpdatedError(f"failed to cancel the reboot: {exc}")
-    LOG.info("reboot cancel requested from the web UI")
+        state = reboot_marker_state()
+        if state is None:
+            raise UpdatedError("no web-scheduled reboot exists", code="not_found")
+        stop_reboot_unit(str(state["unit"]))
+        REBOOT_MARKER.unlink()
+        fsync_directory(REBOOT_MARKER.parent)
+    finally:
+        release_operation(lock_fd)
+    LOG.info("reboot canceled from the web UI by %s", actor)
     return {
         "ok": True,
         "message": "Reboot canceled.",
-        "reboot_scheduled": reboot_is_scheduled(),
+        "reboot_scheduled": False,
+        "boot_id": boot_id,
     }
 
 
