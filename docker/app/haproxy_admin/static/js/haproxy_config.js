@@ -232,6 +232,9 @@
         error: data.error || uiText("Unknown error"),
       });
     }
+    if (data && data.unsaved_settings && data.error) {
+      return uiText(data.error);
+    }
     return uiText("Configuration validation failed (rc={rc})", {
       rc: data && data.rc != null ? data.rc : "—",
     });
@@ -320,6 +323,53 @@
     return field.value;
   }
 
+  function updateSwitchState(field) {
+    const type = String(field.dataset.fieldType || "").toLowerCase();
+    if (type !== "boolean" && type !== "bool") return;
+
+    const wrapper = field.closest(".vars-field");
+    const label = wrapper && wrapper.querySelector("[data-switch-label]");
+    if (label) label.textContent = uiText(field.checked ? "Enabled" : "Disabled");
+
+    if (field.dataset.fieldPath === "admin_authelia_enabled") {
+      const inheritedNote = wrapper && wrapper.querySelector("[data-authelia-inherited-note]");
+      const effectiveWarning = wrapper && wrapper.querySelector("[data-authelia-effective-warning]");
+      if (inheritedNote) inheritedNote.hidden = field.dataset.touched === "true";
+      if (effectiveWarning) effectiveWarning.hidden = !field.checked;
+    }
+  }
+
+  function adminIpEntries() {
+    const field = document.querySelector('[data-field-path="admin_allowed_ips"]');
+    if (!field) return [];
+    return String(field.value || "")
+      .split(/[\n,]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  function updateAdminIpAccessState() {
+    const toggle = document.querySelector('[data-field-path="admin_ips_enabled"]');
+    const count = adminIpEntries().length;
+    const countElement = document.querySelector("[data-admin-ip-count]");
+    const listWarning = document.querySelector("[data-admin-ip-warning-list]");
+    const emptyWarning = document.querySelector("[data-admin-ip-warning-empty]");
+    if (countElement) countElement.textContent = String(count);
+    if (listWarning) listWarning.hidden = !toggle || !toggle.checked || count === 0;
+    if (emptyWarning) emptyWarning.hidden = !toggle || !toggle.checked || count !== 0;
+  }
+
+  function addCurrentAdminIp(button) {
+    const field = document.querySelector('[data-field-path="admin_allowed_ips"]');
+    const currentIp = String(button.dataset.currentIp || "").trim();
+    if (!field || !currentIp) return;
+    const entries = adminIpEntries();
+    if (!entries.includes(currentIp)) entries.push(currentIp);
+    field.value = entries.join("\n");
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.focus();
+  }
+
   function collectGuidedValues() {
     const values = {};
     document.querySelectorAll("[data-vars-field]").forEach((field) => {
@@ -334,10 +384,22 @@
     return JSON.stringify(collectGuidedValues());
   }
 
+  function guidedHasUnsavedChanges() {
+    return guidedSnapshot() !== initialGuidedValues;
+  }
+
+  function rawHasUnsavedChanges() {
+    const editor = document.getElementById("vars-yaml-editor");
+    return !!editor && editor.value !== initialRawYaml;
+  }
+
   function updateGuidedDirtyState() {
     const button = document.getElementById("btn-save-vars");
+    const notice = document.getElementById("vars-unsaved-notice");
+    const dirty = guidedHasUnsavedChanges();
+    if (notice) notice.hidden = !dirty;
     if (!button || button.getAttribute("aria-busy") === "true") return;
-    button.disabled = guidedSnapshot() === initialGuidedValues;
+    button.disabled = !dirty;
   }
 
   function updateRawDirtyState() {
@@ -496,7 +558,7 @@
   }
 
   async function saveGuidedVars(event) {
-    event.preventDefault();
+    if (event) event.preventDefault();
     const button = document.getElementById("btn-save-vars");
     const statusElement = document.getElementById("vars-status");
     clearFieldErrors();
@@ -515,7 +577,7 @@
       if (!response.ok || !data.ok) {
         showFieldErrors(data);
         setStatus(statusElement, false, uiText(data.error || "Failed to save settings"));
-        return;
+        return null;
       }
 
       updateRevision(data);
@@ -529,12 +591,62 @@
       invalidateRenderedPreview();
       notifyConfigStateChanged();
       await refreshConfigurationSummary();
+      return data;
     } catch (error) {
       setStatus(statusElement, false, uiText("Request error: {error}", { error: error.message || error }));
+      return null;
     } finally {
       setButtonLoading(button, false);
       updateGuidedDirtyState();
     }
+  }
+
+  async function savePendingGuidedSettingsBeforeValidation() {
+    const guidedDirty = guidedHasUnsavedChanges();
+    const rawDirty = rawHasUnsavedChanges();
+    if (!guidedDirty && !rawDirty) return { ok: true };
+
+    if (rawDirty) {
+      const message = uiText(
+        "The advanced YAML editor has unsaved changes. Save or discard them before validation or apply."
+      );
+      setStatus(document.getElementById("vars-raw-status"), false, message);
+      const editor = document.getElementById("vars-yaml-editor");
+      const advanced = document.getElementById("vars-advanced");
+      if (advanced) advanced.open = true;
+      if (editor) {
+        editor.scrollIntoView({ behavior: "smooth", block: "center" });
+        editor.focus();
+      }
+      return { ok: false, error: message };
+    }
+
+    const approved = window.confirm(uiText(
+      "There are unsaved global settings. Save them and continue with validation?"
+    ));
+    if (!approved) {
+      const message = uiText(
+        "Validation and apply were cancelled because settings are still unsaved."
+      );
+      setStatus(document.getElementById("vars-status"), false, message);
+      const saveButton = document.getElementById("btn-save-vars");
+      if (saveButton) {
+        saveButton.scrollIntoView({ behavior: "smooth", block: "center" });
+        saveButton.focus();
+      }
+      return { ok: false, error: message, cancelled: true };
+    }
+
+    const saved = await saveGuidedVars(null);
+    if (!saved || !saved.ok) {
+      return {
+        ok: false,
+        error: uiText(
+          "Unable to save the pending settings. Validation and apply were not started."
+        ),
+      };
+    }
+    return { ok: true, saved: true };
   }
 
   async function saveRawVars() {
@@ -621,6 +733,19 @@
     const button = settings.button || document.getElementById("btn-check");
     const manageLoading = settings.manageLoading !== false;
     const applyButton = document.getElementById("btn-apply");
+    const pendingSettings = await savePendingGuidedSettingsBeforeValidation();
+    if (!pendingSettings.ok) {
+      const result = {
+        ok: false,
+        unsaved_settings: true,
+        cancelled: pendingSettings.cancelled === true,
+        error: pendingSettings.error,
+      };
+      const completedAt = new Date().toISOString();
+      renderValidationResult(result, completedAt);
+      persistValidationResult(result, completedAt);
+      return result;
+    }
     setStatus(statusElement, true, uiText("Starting validation…"));
     if (manageLoading) {
       setButtonLoading(button, true);
@@ -1283,10 +1408,19 @@
     document.querySelectorAll("[data-vars-field]").forEach((field) => {
       const markTouched = function () {
         field.dataset.touched = "true";
+        updateSwitchState(field);
+        if (["admin_ips_enabled", "admin_allowed_ips"].includes(field.dataset.fieldPath)) {
+          updateAdminIpAccessState();
+        }
         updateGuidedDirtyState();
       };
+      updateSwitchState(field);
       field.addEventListener("input", markTouched);
       field.addEventListener("change", markTouched);
+    });
+    updateAdminIpAccessState();
+    document.querySelectorAll("[data-add-current-admin-ip]").forEach((button) => {
+      button.addEventListener("click", function () { addCurrentAdminIp(button); });
     });
     if (rawEditor) rawEditor.addEventListener("input", updateRawDirtyState);
     const rawSaveButton = document.getElementById("btn-save-vars-raw");

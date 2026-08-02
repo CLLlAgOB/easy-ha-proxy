@@ -17,6 +17,7 @@ import traceback
 import io
 import base64
 import hashlib
+import ipaddress
 import re
 import zipfile
 from datetime import datetime
@@ -57,6 +58,7 @@ from .services_haproxy_vars import (
     save_acme_email,
     save_guided_vars,
     save_raw_vars,
+    validate_admin_access_for_client,
 )
 
 from .services_haproxy_sites import (
@@ -75,6 +77,15 @@ from .services_haproxy_tcp import (
     save_tcp_from_json,
     delete_tcp_proxy,
 )
+
+
+def _trusted_client_ip() -> str:
+    """Return the edge client IP after the trusted HAProxy header rewrite."""
+    raw = str(request.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        return ""
 
 
 @bp.get("/haproxy/config/preview")
@@ -292,6 +303,7 @@ def haproxy_config_page():
         vars_sections=vars_sections,
         vars_yaml=vars_yaml,
         vars_revision=vars_revision,
+        admin_client_ip=_trusted_client_ip(),
     )
 
 
@@ -316,6 +328,22 @@ def haproxy_config_check():
             ),
             500,
         )
+
+    try:
+        config_vars = _load_yaml(CONFIG_YAML)
+        if not isinstance(config_vars, dict):
+            raise ValueError("The candidate vars.yml root must be a mapping")
+        validate_admin_access_for_client(config_vars, _trusted_client_ip())
+    except ValueError as exc:
+        return jsonify(
+            {
+                "ok": False,
+                "error": str(exc),
+                "rc": None,
+                "stdout": "",
+                "stderr": str(exc),
+            }
+        ), 400
 
     rc, stdout, stderr = check_cfg(cfg_text)
     ok = rc == 0
@@ -371,6 +399,21 @@ def haproxy_config_apply():
             ), 400
 
         cfg_text = render_haproxy_cfg()
+        config_vars = _load_yaml(CONFIG_YAML)
+        if not isinstance(config_vars, dict):
+            raise ValueError("The candidate vars.yml root must be a mapping")
+        try:
+            validate_admin_access_for_client(config_vars, _trusted_client_ip())
+        except ValueError as exc:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": "admin_ip_lockout_risk",
+                    "stdout": "",
+                    "stderr": "",
+                }
+            ), 400
         preflight_result = preflight_cfg_confirmation(
             cfg_text,
             allow_external_drift=allow_external_drift,
@@ -626,6 +669,7 @@ def haproxy_config_save_vars():
     result = save_guided_vars(
         payload.get("values"),
         str(payload.get("revision") or ""),
+        client_ip=_trusted_client_ip(),
     )
     status = 200 if result.get("ok") else (409 if result.get("conflict") or result.get("pending") else 400)
     return jsonify(result), status

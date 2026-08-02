@@ -12,6 +12,7 @@ import time
 import json
 import socket
 import hashlib
+import ipaddress
 import secrets
 import difflib
 from datetime import datetime
@@ -734,6 +735,44 @@ def config_geoip_selection(bundle: Dict[str, bytes]) -> Dict[str, Any]:
     }
 
 
+def config_admin_allowlist(bundle: Dict[str, bytes]) -> Optional[list[str]]:
+    """Derive the root-managed admin.allow contents from candidate vars.yml."""
+    if set(bundle) != set(CONFIG_SOURCE_ORDER):
+        raise ValueError("The configuration source bundle is incomplete")
+    try:
+        variables = yaml.safe_load(bundle["vars.yml"].decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError("The candidate vars.yml is invalid") from exc
+    if not isinstance(variables, dict):
+        raise ValueError("The candidate vars.yml root must be a mapping")
+    if "admin_allowed_ips" not in variables:
+        return None
+    raw_entries = variables.get("admin_allowed_ips")
+    if not isinstance(raw_entries, list) or len(raw_entries) > 256:
+        raise ValueError("admin_allowed_ips must be a list of at most 256 entries")
+
+    entries: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_entries:
+        if not isinstance(raw, str):
+            raise ValueError("admin_allowed_ips entries must be strings")
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            canonical = (
+                str(ipaddress.ip_network(text, strict=False))
+                if "/" in text
+                else str(ipaddress.ip_address(text))
+            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid admin_allowed_ips entry: {text!r}") from exc
+        if canonical not in seen:
+            entries.append(canonical)
+            seen.add(canonical)
+    return entries
+
+
 def _source_bundle_sha256(bundle: Dict[str, bytes]) -> Dict[str, str]:
     return {
         name: hashlib.sha256(raw).hexdigest()
@@ -932,11 +971,15 @@ def _config_source_payload(
         name: base64.b64encode(raw).decode("ascii")
         for name, raw in previous_bundle.items()
     }
-    return {
+    payload: Dict[str, Any] = {
         "candidate": candidate,
         "previous": previous,
         "geoip_selection": config_geoip_selection(current_bundle),
-    }, baseline_source
+    }
+    admin_allowlist = config_admin_allowlist(current_bundle)
+    if admin_allowlist is not None:
+        payload["admin_allowlist"] = admin_allowlist
+    return payload, baseline_source
 
 
 def _config_preparation_failure(exc: ValueError) -> Dict[str, Any]:

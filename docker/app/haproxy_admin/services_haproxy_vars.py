@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import ipaddress
 import os
 import re
 import tempfile
@@ -71,12 +72,35 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
                 "admin_ips_enabled",
                 "Restrict the admin frontend by IP list",
                 "boolean",
-                help_text="The actual addresses are managed by the installer and whitelist tools.",
+                help_text=(
+                    "Configure the list below while this restriction is disabled. "
+                    "Save settings, then validate and apply the HAProxy configuration. "
+                    "When Authelia is enabled, both checks must pass."
+                ),
+            ),
+            _field(
+                "admin_allowed_ips",
+                "Admin frontend allowed IPs and networks",
+                "list",
+                rows=4,
+                default=[],
+                help_text=(
+                    "Enter one IP address or CIDR network per line. Add the current "
+                    "connection IP before enabling the restriction. These addresses "
+                    "are trusted admin sources and may bypass HAProxy filtering, bans, "
+                    "or rate limits."
+                ),
             ),
             _field(
                 "admin_authelia_enabled",
-                "Protect HAProxy Admin with Authelia",
+                "HAProxy Admin authentication via Authelia",
                 "boolean",
+                readonly=True,
+                help_text=(
+                    "Required for the administration control plane and inherited "
+                    "from global Authelia. Use the IP allow list as an additional "
+                    "access gate."
+                ),
             ),
             _field(
                 "enable_geoip",
@@ -280,6 +304,69 @@ def _display_value(value: Any, field_type: str) -> Any:
     return value
 
 
+def _normalize_admin_allowed_ips(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    else:
+        items = re.split(r"[\n,]+", str(value or ""))
+    if len(items) > 256:
+        raise ValueError("Admin frontend allowed IPs and networks: at most 256 entries")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in items:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            parsed = (
+                str(ipaddress.ip_network(text, strict=False))
+                if "/" in text
+                else str(ipaddress.ip_address(text))
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Admin frontend allowed IPs and networks: invalid IP/network {text!r}"
+            ) from exc
+        if parsed not in seen:
+            normalized.append(parsed)
+            seen.add(parsed)
+    return normalized
+
+
+def _client_is_in_admin_allowlist(client_ip: str, entries: list[str]) -> bool:
+    try:
+        address = ipaddress.ip_address(str(client_ip or "").strip())
+    except ValueError:
+        return False
+    for entry in entries:
+        network_text = entry
+        if "/" not in network_text:
+            bits = 32 if address.version == 4 else 128
+            network_text = f"{network_text}/{bits}"
+        try:
+            network = ipaddress.ip_network(network_text, strict=False)
+        except ValueError:
+            continue
+        if address.version == network.version and address in network:
+            return True
+    return False
+
+
+def validate_admin_access_for_client(data: dict[str, Any], client_ip: str) -> None:
+    if data.get("admin_ips_enabled") is not True:
+        return
+    entries = _normalize_admin_allowed_ips(data.get("admin_allowed_ips"))
+    if not entries:
+        raise ValueError(
+            "Add at least one trusted IP address or network before enabling the admin IP restriction"
+        )
+    if not _client_is_in_admin_allowlist(client_ip, entries):
+        raise ValueError(
+            "Add the current connection IP to the admin allow list before enabling or applying this restriction"
+        )
+
+
 def _hsts_editor_value(value: Any) -> int:
     """Return seconds for the numeric editor, including legacy duration values."""
     if value is None:
@@ -303,12 +390,29 @@ def _hsts_editor_value(value: Any) -> int:
 def get_vars_editor_model() -> dict[str, Any]:
     raw = _read_vars_bytes()
     data = _parse_vars(raw)
+    global_authelia_enabled = bool(data.get("authelia_enabled", True))
+    admin_allowed_ips = data.get("admin_allowed_ips")
+    admin_ip_count = (
+        sum(1 for entry in admin_allowed_ips if isinstance(entry, str) and entry.strip())
+        if isinstance(admin_allowed_ips, list)
+        else 0
+    )
     sections = deepcopy(VARS_EDITOR_SECTIONS)
     for section in sections:
         section["fields"] = list(section["fields"])
         for field in section["fields"]:
             stored_value = _get_path(data, field["path"])
             value = stored_value
+            if field["path"] == "admin_authelia_enabled":
+                # The control plane always inherits global Authelia. Preserve
+                # legacy YAML for compatibility, but never display an explicit
+                # per-admin override as effective or editable.
+                field["inherited"] = True
+                field["global_authelia_enabled"] = global_authelia_enabled
+                value = global_authelia_enabled
+                field["effective_value"] = global_authelia_enabled
+            elif field["path"] == "admin_ips_enabled":
+                field["admin_ip_count"] = admin_ip_count
             if value is None and field.get("default") is not None:
                 value = field["default"]
             if field["path"] == "site_defaults.hsts":
@@ -352,6 +456,8 @@ def _coerce_value(field: dict[str, Any], value: Any) -> Any:
             raise ValueError(f"{label}: maximum value is {maximum}")
         return parsed
     if field_type == "list":
+        if field["path"] == "admin_allowed_ips":
+            return _normalize_admin_allowed_ips(value)
         if isinstance(value, list):
             items = value
         else:
@@ -446,7 +552,12 @@ def _save_with_revision(content: bytes, expected_revision: str) -> dict[str, Any
         }
 
 
-def save_guided_vars(values: Any, expected_revision: str) -> dict[str, Any]:
+def save_guided_vars(
+    values: Any,
+    expected_revision: str,
+    *,
+    client_ip: str = "",
+) -> dict[str, Any]:
     if not isinstance(values, dict):
         return {"ok": False, "error": "The values payload must be an object"}
     unknown = sorted(set(values) - set(EDITABLE_FIELDS))
@@ -474,6 +585,17 @@ def save_guided_vars(values: Any, expected_revision: str) -> dict[str, Any]:
                 changed.append(path)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "revision": _revision(raw)}
+
+    if {"admin_ips_enabled", "admin_allowed_ips"}.intersection(changed):
+        try:
+            validate_admin_access_for_client(data, client_ip)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "field_errors": {"admin_allowed_ips": str(exc)},
+                "revision": _revision(raw),
+            }
 
     content = yaml.safe_dump(
         data,

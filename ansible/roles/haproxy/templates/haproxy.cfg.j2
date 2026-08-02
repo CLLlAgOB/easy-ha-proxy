@@ -17,7 +17,6 @@
 {% set site_defaults = runtime_vars.get('site_defaults', site_defaults | default({})) %}
 {% set enable_http80 = runtime_vars.get('enable_http80', enable_http80 | default(false)) %}
 {% set admin_ips_enabled = runtime_vars.get('admin_ips_enabled', admin_ips_enabled | default(true)) %}
-{% set admin_authelia_enabled = runtime_vars.get('admin_authelia_enabled', admin_authelia_enabled | default(authelia_enabled | default(true))) %}
 {% set enable_geoip = runtime_vars.get('enable_geoip', enable_geoip | default(false)) %}
 {% set geoip_mode = runtime_vars.get('geoip_mode', geoip_mode | default('allow')) %}
 {% set haproxy_nbthread = runtime_vars.get('haproxy_nbthread', haproxy_nbthread | default(none)) %}
@@ -62,8 +61,9 @@
 {% set peers_bind = peers_bind | default('127.0.0.1:10240') %}
 {# authelia global flags #}
 {% set authelia_enabled = authelia_enabled | default(true) %}
-{% set _admin_authelia_raw = admin_authelia_enabled | default(authelia_enabled) %}
-{% set admin_authelia_enabled = authelia_enabled and _admin_authelia_raw %}
+{# HAProxy Admin is a privileged control plane. It always inherits the global
+   Authelia state; a runtime vars.yml value must not downgrade authentication. #}
+{% set admin_authelia_enabled = authelia_enabled %}
 {# passthrough sites #}
 {% set passthru_sites = sites | selectattr('tcp_passthrough','defined') | selectattr('tcp_passthrough') | list %}
 {% set has_passthru = (passthru_sites | length > 0) %}

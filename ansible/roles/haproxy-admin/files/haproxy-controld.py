@@ -149,6 +149,11 @@ MAX_TRANSACTION_STATE_BYTES = int(os.getenv(
     "HAPROXY_CONFIG_TRANSACTION_STATE_MAX_BYTES", str(20 * 1024 * 1024)
 ))
 CONFIG_SOURCE_FILENAMES = frozenset({"vars.yml", "websites.yml", "tcp.yml"})
+ADMIN_ALLOWLIST_PATH = Path(os.getenv(
+    "HAPROXY_ADMIN_ALLOWLIST_PATH", "/etc/haproxy/admin.allow"
+))
+ADMIN_ALLOWLIST_MAX_ENTRIES = 256
+ADMIN_ALLOWLIST_MAX_BYTES = 64 * 1024
 GEOIP_DIRECTORY = Path("/etc/haproxy/geoip")
 GEOIP_SELECTION_PATH = GEOIP_DIRECTORY / "selection.json"
 GEOIP_RELEASES_PATH = GEOIP_DIRECTORY / "releases"
@@ -1856,9 +1861,39 @@ def haproxy_write_config_serialized(cfg_b64: str) -> None:
         _GUARDED_APPLY_LOCK.release()
 
 
+def _canonical_admin_allowlist_entries(value: object) -> list[str]:
+    if not isinstance(value, list) or len(value) > ADMIN_ALLOWLIST_MAX_ENTRIES:
+        raise ValueError("admin allow list must contain at most 256 entries")
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, str):
+            raise ValueError("admin allow list entries must be strings")
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            canonical = (
+                str(ipaddress.ip_network(text, strict=False))
+                if "/" in text
+                else str(ipaddress.ip_address(text))
+            )
+        except ValueError as exc:
+            raise ValueError(f"invalid admin allow list entry: {text!r}") from exc
+        if canonical not in seen:
+            result.append(canonical)
+            seen.add(canonical)
+    return result
+
+
 def _decode_config_transaction_sources(
     sources_b64: str,
-) -> tuple[dict[str, bytes], dict[str, bytes], dict[str, object] | None]:
+) -> tuple[
+    dict[str, bytes],
+    dict[str, bytes],
+    dict[str, object] | None,
+    list[str] | None,
+]:
     """Decode the fixed-name YAML mappings and optional GeoIP selection."""
     raw = base64.b64decode(sources_b64, validate=True)
     if not raw or len(raw) > MAX_TRANSACTION_SOURCES_PAYLOAD_BYTES:
@@ -1866,7 +1901,9 @@ def _decode_config_transaction_sources(
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict) or not {"candidate", "previous"}.issubset(payload):
         raise ValueError("config sources must contain candidate and previous mappings")
-    if not set(payload).issubset({"candidate", "previous", "geoip_selection"}):
+    if not set(payload).issubset({
+        "candidate", "previous", "geoip_selection", "admin_allowlist"
+    }):
         raise ValueError("config sources contain unsupported transaction fields")
 
     decoded: dict[str, dict[str, bytes]] = {}
@@ -1926,7 +1963,18 @@ def _decode_config_transaction_sources(
             "countries": countries,
             "access_filter_enabled": enabled,
         }
-    return decoded["candidate"], decoded["previous"], geoip_selection
+    admin_allowlist_raw = payload.get("admin_allowlist")
+    admin_allowlist = (
+        _canonical_admin_allowlist_entries(admin_allowlist_raw)
+        if admin_allowlist_raw is not None
+        else None
+    )
+    return (
+        decoded["candidate"],
+        decoded["previous"],
+        geoip_selection,
+        admin_allowlist,
+    )
 
 
 def _open_config_source_directory() -> int:
@@ -2018,6 +2066,7 @@ def _verify_live_transaction_candidate(state: dict[str, object]) -> None:
                 )
     finally:
         os.close(directory_fd)
+    _verify_transaction_admin_allowlist_candidate(state)
     _verify_transaction_geoip_candidate(state)
 
 
@@ -2077,6 +2126,180 @@ def _restore_config_sources(previous: dict[str, bytes]) -> list[str]:
     finally:
         os.close(directory_fd)
     return restored
+
+
+def _canonical_admin_allowlist_raw(entries: list[str]) -> bytes:
+    canonical = _canonical_admin_allowlist_entries(entries)
+    raw = (("\n".join(canonical) + "\n") if canonical else "").encode("ascii")
+    if len(raw) > ADMIN_ALLOWLIST_MAX_BYTES:
+        raise ValueError("admin allow list exceeds the size limit")
+    return raw
+
+
+def _open_admin_allowlist_directory() -> int:
+    path = ADMIN_ALLOWLIST_PATH
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise RuntimeError("admin allow list path is unsafe")
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        return os.open(path.parent, flags)
+    except OSError as exc:
+        raise RuntimeError("admin allow list directory is unavailable or unsafe") from exc
+
+
+def _read_admin_allowlist_raw() -> tuple[bool, bytes]:
+    directory_fd = _open_admin_allowlist_directory()
+    try:
+        try:
+            target_stat = os.stat(
+                ADMIN_ALLOWLIST_PATH.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False, b""
+        if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+            raise RuntimeError("admin allow list is not a regular file")
+        if target_stat.st_size > ADMIN_ALLOWLIST_MAX_BYTES:
+            raise RuntimeError("admin allow list exceeds the size limit")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        file_fd = os.open(ADMIN_ALLOWLIST_PATH.name, flags, dir_fd=directory_fd)
+        try:
+            current_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(current_stat.st_mode):
+                raise RuntimeError("admin allow list is not a regular file")
+            raw = b""
+            while True:
+                chunk = os.read(file_fd, 65536)
+                if not chunk:
+                    break
+                raw += chunk
+                if len(raw) > ADMIN_ALLOWLIST_MAX_BYTES:
+                    raise RuntimeError("admin allow list exceeds the size limit")
+        finally:
+            os.close(file_fd)
+        if b"\x00" in raw:
+            raise RuntimeError("admin allow list contains a NUL byte")
+        raw.decode("utf-8")
+        return True, raw
+    finally:
+        os.close(directory_fd)
+
+
+def _write_admin_allowlist_raw(raw: bytes) -> None:
+    if len(raw) > ADMIN_ALLOWLIST_MAX_BYTES or b"\x00" in raw:
+        raise ValueError("invalid admin allow list snapshot")
+    raw.decode("utf-8")
+    directory_fd = _open_admin_allowlist_directory()
+    temporary = f".admin.allow.transaction.{secrets.token_hex(8)}"
+    temporary_created = False
+    try:
+        directory_stat = os.fstat(directory_fd)
+        try:
+            target_stat = os.stat(
+                ADMIN_ALLOWLIST_PATH.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+                raise RuntimeError("admin allow list is not a regular file")
+            owner = target_stat.st_uid
+            group = target_stat.st_gid
+            mode = stat.S_IMODE(target_stat.st_mode)
+        except FileNotFoundError:
+            owner = directory_stat.st_uid
+            group = directory_stat.st_gid
+            mode = 0o640
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        temporary_fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+        temporary_created = True
+        try:
+            view = memoryview(raw)
+            while view:
+                written = os.write(temporary_fd, view)
+                view = view[written:]
+            os.fsync(temporary_fd)
+            os.fchmod(temporary_fd, mode)
+            os.fchown(temporary_fd, owner, group)
+        finally:
+            os.close(temporary_fd)
+        os.replace(
+            temporary,
+            ADMIN_ALLOWLIST_PATH.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        temporary_created = False
+        os.fsync(directory_fd)
+    finally:
+        if temporary_created:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
+def _remove_admin_allowlist() -> None:
+    directory_fd = _open_admin_allowlist_directory()
+    try:
+        try:
+            target_stat = os.stat(
+                ADMIN_ALLOWLIST_PATH.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+            raise RuntimeError("admin allow list is not a regular file")
+        os.unlink(ADMIN_ALLOWLIST_PATH.name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _verify_transaction_admin_allowlist_candidate(state: dict[str, object]) -> None:
+    admin_state = state.get("admin_allowlist")
+    if admin_state is None:
+        return
+    if not isinstance(admin_state, dict):
+        raise RuntimeError("persisted admin allow list state is invalid")
+    expected = str(admin_state.get("candidate_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("persisted admin allow list candidate hash is invalid")
+    present, raw = _read_admin_allowlist_raw()
+    if not present or not secrets.compare_digest(hashlib.sha256(raw).hexdigest(), expected):
+        raise RuntimeError("admin allow list changed before confirmation")
+
+
+def _restore_transaction_admin_allowlist(state: dict[str, object]) -> None:
+    admin_state = state.get("admin_allowlist")
+    if admin_state is None:
+        return
+    if not isinstance(admin_state, dict):
+        raise RuntimeError("persisted admin allow list state is invalid")
+    previous_present = admin_state.get("previous_present") is True
+    previous_encoded = admin_state.get("previous_b64")
+    if not isinstance(previous_encoded, str):
+        raise RuntimeError("persisted admin allow list snapshot is missing")
+    previous_raw = base64.b64decode(previous_encoded, validate=True)
+    if previous_present:
+        _write_admin_allowlist_raw(previous_raw)
+    else:
+        _remove_admin_allowlist()
+    present, current_raw = _read_admin_allowlist_raw()
+    if present != previous_present or (previous_present and not secrets.compare_digest(
+        current_raw, previous_raw
+    )):
+        raise RuntimeError("admin allow list rollback could not be verified")
 
 
 def _canonical_config_geoip_selection(selection: dict[str, object]) -> bytes:
@@ -2386,6 +2609,7 @@ def _sanitized_config_transaction_status(
             "reload_ok": bool(rollback.get("reload_ok")),
             "sources_ok": bool(rollback.get("sources_ok")),
             "geoip_ok": bool(rollback.get("geoip_ok", True)),
+            "admin_allowlist_ok": bool(rollback.get("admin_allowlist_ok", True)),
             "restored_sources": [
                 str(name) for name in (rollback.get("restored_sources") or [])
                 if str(name) in CONFIG_SOURCE_FILENAMES
@@ -2407,7 +2631,7 @@ def _rollback_config_transaction_locked(
     state: dict[str, object],
     reason: str,
 ) -> dict[str, object]:
-    """Restore YAML and GeoIP state before reloading the previous HAProxy config."""
+    """Restore YAML and managed ACL state before restoring the HAProxy config."""
     state["state"] = "rolling_back"
     state["rollback_reason"] = reason
     state["failure"] = str(state.get("failure") or "")
@@ -2428,6 +2652,14 @@ def _rollback_config_transaction_locked(
         sources_ok = True
     except Exception as exc:  # noqa: BLE001
         source_failure = f"config source rollback failed: {exc}"
+
+    admin_allowlist_ok = False
+    admin_allowlist_failure = ""
+    try:
+        _restore_transaction_admin_allowlist(state)
+        admin_allowlist_ok = True
+    except Exception as exc:  # noqa: BLE001
+        admin_allowlist_failure = f"admin allow list rollback failed: {exc}"
 
     geoip_ok = False
     geoip_failure = ""
@@ -2453,15 +2685,26 @@ def _rollback_config_transaction_locked(
     config_failure = str(config_result.get("failure") or "")
     failures = [
         value
-        for value in (source_failure, geoip_failure, config_failure)
+        for value in (
+            source_failure,
+            admin_allowlist_failure,
+            geoip_failure,
+            config_failure,
+        )
         if value
     ]
-    rollback_ok = bool(config_result.get("ok")) and sources_ok and geoip_ok
+    rollback_ok = (
+        bool(config_result.get("ok"))
+        and sources_ok
+        and admin_allowlist_ok
+        and geoip_ok
+    )
     state["state"] = "rolled_back" if rollback_ok else "rollback_failed"
     state["rollback"] = {
         "ok": rollback_ok,
         "reload_ok": bool(config_result.get("reload_ok")),
         "sources_ok": sources_ok,
+        "admin_allowlist_ok": admin_allowlist_ok,
         "geoip_ok": geoip_ok,
         "restored_sources": restored_sources,
         "checks": config_result.get("checks") or [],
@@ -2472,6 +2715,7 @@ def _rollback_config_transaction_locked(
     if rollback_ok:
         state.pop("previous_config_b64", None)
         state.pop("previous_sources", None)
+        state.pop("admin_allowlist", None)
         state.pop("geoip", None)
     _persist_config_transaction(state)
     return _sanitized_config_transaction_status(state)
@@ -2560,8 +2804,21 @@ def begin_config_transaction(
             candidate_sources,
             previous_sources,
             candidate_geoip_selection,
+            candidate_admin_allowlist,
         ) = _decode_config_transaction_sources(sources_b64)
         _verify_candidate_config_sources(candidate_sources)
+
+        candidate_admin_allowlist_raw = b""
+        previous_admin_allowlist_present = False
+        previous_admin_allowlist_raw = b""
+        if candidate_admin_allowlist is not None:
+            candidate_admin_allowlist_raw = _canonical_admin_allowlist_raw(
+                candidate_admin_allowlist
+            )
+            (
+                previous_admin_allowlist_present,
+                previous_admin_allowlist_raw,
+            ) = _read_admin_allowlist_raw()
 
         previous_geoip_selection = b""
         previous_geoip_selection_present = False
@@ -2614,6 +2871,16 @@ def begin_config_transaction(
             "failure": "",
             "rollback": None,
         }
+        if candidate_admin_allowlist is not None:
+            state["admin_allowlist"] = {
+                "candidate_sha256": hashlib.sha256(
+                    candidate_admin_allowlist_raw
+                ).hexdigest(),
+                "previous_present": previous_admin_allowlist_present,
+                "previous_b64": base64.b64encode(
+                    previous_admin_allowlist_raw
+                ).decode("ascii"),
+            }
         if candidate_geoip_selection is not None:
             candidate_selection_raw = _canonical_config_geoip_selection(
                 candidate_geoip_selection
@@ -2657,6 +2924,8 @@ def begin_config_transaction(
                 )
                 _persist_config_transaction(state)
 
+            if candidate_admin_allowlist is not None:
+                _write_admin_allowlist_raw(candidate_admin_allowlist_raw)
             haproxy_write_config_from_b64(cfg_b64)
             reload_ok, reload_output = cmd_reload()
             state["reload_output"] = reload_output
@@ -2806,6 +3075,7 @@ def confirm_config_transaction(
         state["confirmed_at"] = datetime.now(timezone.utc).isoformat()
         state.pop("previous_config_b64", None)
         state.pop("previous_sources", None)
+        state.pop("admin_allowlist", None)
         state.pop("geoip", None)
         _persist_config_transaction(state)
         return _sanitized_config_transaction_status(state)

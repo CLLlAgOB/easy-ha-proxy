@@ -200,7 +200,9 @@
                      {% if field.value %}checked{% endif %}
                      {% if field.readonly %}disabled data-readonly="true"{% endif %}>
               <span class="vars-switch-control" aria-hidden="true"></span>
-              <span class="vars-switch-label">Enabled</span>
+              <span class="vars-switch-label" data-switch-label>
+                {% if field.value %}Enabled{% else %}Disabled{% endif %}
+              </span>
             </label>
             {% elif field.options %}
             <select id="{{ field_id }}" class="form-input"
@@ -237,6 +239,36 @@
             {% endif %}
 
             {% if field.help %}<p class="vars-field-help">{{ field.help }}</p>{% endif %}
+            {% if field.path == 'admin_authelia_enabled' %}
+              {% if field.inherited %}
+              <p class="vars-field-note" data-authelia-inherited-note>Inherited from global Authelia.</p>
+              {% endif %}
+              {% if not field.global_authelia_enabled %}
+              <p class="vars-field-warning" data-authelia-effective-warning {% if not field.value %}hidden{% endif %}>
+                Effective protection is disabled because global Authelia is disabled.
+              </p>
+              {% endif %}
+            {% elif field.path == 'admin_ips_enabled' %}
+            <p class="vars-field-note">
+              Configured static admin IP entries:
+              <strong class="notranslate" translate="no" data-i18n-skip data-admin-ip-count>{{ field.admin_ip_count }}</strong>
+            </p>
+            <p class="vars-field-warning" data-admin-ip-warning-list {% if not field.value or not field.admin_ip_count %}hidden{% endif %}>
+              Only addresses in the configured admin IP list will be able to open this panel after apply.
+            </p>
+            <p class="vars-field-warning" data-admin-ip-warning-empty {% if not field.value or field.admin_ip_count %}hidden{% endif %}>
+              No static admin IP entries are configured. Enabling this restriction may lock you out.
+            </p>
+            {% elif field.path == 'admin_allowed_ips' and admin_client_ip %}
+            <div class="vars-current-ip">
+              <span>Current connection IP:</span>
+              <code class="notranslate" translate="no" data-i18n-skip>{{ admin_client_ip }}</code>
+              <button type="button" class="btn btn-small"
+                      data-add-current-admin-ip data-current-ip="{{ admin_client_ip }}">
+                Add my current IP
+              </button>
+            </div>
+            {% endif %}
             <div class="vars-field-error" data-field-error="{{ field.path }}" role="alert"></div>
           </div>
           {% endfor %}
@@ -250,6 +282,9 @@
     <div class="vars-form-actions">
       <button type="submit" class="btn" id="btn-save-vars">Save settings</button>
       <span id="vars-status" class="result-message" role="status" aria-live="polite"></span>
+      <span id="vars-unsaved-notice" class="vars-unsaved-notice" hidden>
+        Unsaved settings will be saved before validation or apply.
+      </span>
     </div>
   </form>
 

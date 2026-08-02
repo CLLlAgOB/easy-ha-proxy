@@ -1680,6 +1680,53 @@ input[type="submit"].btn {
   line-height: 1.45;
 }
 
+.vars-field-note,
+.vars-field-warning {
+  margin: 7px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.vars-field-note {
+  color: var(--text-secondary);
+  background: rgba(var(--accent-primary-rgb), .08);
+}
+
+.vars-field-warning {
+  color: var(--warning);
+  border: 1px solid rgba(245, 158, 11, .28);
+  background: rgba(245, 158, 11, .08);
+}
+
+.vars-field-warning[hidden] {
+  display: none;
+}
+
+.vars-current-ip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.vars-current-ip code {
+  color: var(--text-primary);
+}
+
+.vars-unsaved-notice {
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.vars-unsaved-notice[hidden] {
+  display: none;
+}
+
 .vars-field-error {
   min-height: 0;
   margin-top: 5px;

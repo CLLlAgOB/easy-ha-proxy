@@ -86,7 +86,7 @@ RUNTIME_CONFIG_MAX_BYTES = 2 * 1024 * 1024
 # installer-owned even if a stale copy is present in runtime vars.yml.
 RUNTIME_HAPROXY_VAR_KEYS = frozenset(
     {
-        "admin_authelia_enabled",
+        "admin_allowed_ips",
         "admin_ips_enabled",
         "admin_password",
         "enable_geoip",
