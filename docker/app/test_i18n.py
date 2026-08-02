@@ -212,6 +212,17 @@ class TranslationCatalogTests(unittest.TestCase):
         )
         self.assertEqual(translate_source(raw_journal, messages), raw_journal)
 
+    def test_authelia_log_rows_are_not_translated(self):
+        template = (APP_DIR / "templates" / "authelia_bans.html").read_text(
+            encoding="utf-8"
+        )
+
+        log_body = re.search(r"<tbody[^>]*>\s*{% for e in logs %}", template)
+        self.assertIsNotNone(log_body)
+        self.assertIn('class="notranslate"', log_body.group(0))
+        self.assertIn('translate="no"', log_body.group(0))
+        self.assertIn("data-i18n-skip", log_body.group(0))
+
     def test_raw_json_messages_bypass_server_localization(self):
         module_path = APP_DIR / "i18n.py"
         fake_flask = types.ModuleType("flask")
