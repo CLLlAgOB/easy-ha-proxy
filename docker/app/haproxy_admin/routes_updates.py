@@ -201,3 +201,18 @@ def start_apply():
         },
         accepted=True,
     )
+
+
+@bp_system_updates.post("/api/reboot")
+def reboot():
+    payload = _json_payload({"confirmation"})
+    if payload["confirmation"] != "REBOOT":
+        abort(400, description="type REBOOT to confirm the server reboot")
+    # The broker schedules a delayed, cancelable reboot and refuses while an
+    # update or restore is in progress.
+    return _call_daemon({"action": "reboot", "confirmation": "REBOOT"})
+
+
+@bp_system_updates.post("/api/reboot/cancel")
+def cancel_reboot():
+    return _call_daemon({"action": "cancel_reboot"})

@@ -12,7 +12,9 @@
      data-status-url="{{ url_for('system_updates.status_view') }}"
      data-check-url="{{ url_for('system_updates.start_check') }}"
      data-apply-url="{{ url_for('system_updates.start_apply') }}"
-     data-channels-url="{{ url_for('system_updates.save_channels') }}">
+     data-channels-url="{{ url_for('system_updates.save_channels') }}"
+     data-reboot-url="{{ url_for('system_updates.reboot') }}"
+     data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}">
   <section class="card updates-overview-card" aria-labelledby="updates-overview-title">
     <div class="card-header updates-card-header">
       <div>
@@ -124,8 +126,24 @@
     <div class="card-header">
       <div>
         <h2 id="updates-reboot-title">Server reboot required</h2>
-        <p class="table-meta">Restart the server later from the maintenance assistant or through an SSH console.</p>
+        <p class="table-meta">Some updates take effect only after a reboot. You can reboot now, or later from an SSH console.</p>
       </div>
+    </div>
+    <div class="card-body">
+      <div id="updates-reboot-idle">
+        <label class="form-label" for="updates-reboot-confirm">Type <code class="notranslate" translate="no">REBOOT</code> to confirm</label>
+        <div class="updates-reboot-controls">
+          <input id="updates-reboot-confirm" type="text" class="form-input" autocomplete="off"
+                 spellcheck="false" placeholder="REBOOT">
+          <button type="button" class="btn btn-danger" id="updates-reboot-now" disabled>Reboot now</button>
+        </div>
+        <p class="vars-field-help">The reboot is delayed about a minute and can be canceled. The server will be briefly unreachable; if it does not return, use your provider console.</p>
+      </div>
+      <div id="updates-reboot-pending" hidden>
+        <p id="updates-reboot-pending-text" class="mono">Reboot scheduled — the server will restart shortly and this page will reconnect.</p>
+        <button type="button" class="btn" id="updates-reboot-cancel">Cancel reboot</button>
+      </div>
+      <div id="updates-reboot-status" class="result-message" role="status" aria-live="polite"></div>
     </div>
   </section>
 

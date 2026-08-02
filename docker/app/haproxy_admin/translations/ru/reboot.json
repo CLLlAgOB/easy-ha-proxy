@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Some updates take effect only after a reboot. You can reboot now, or later from an SSH console.": "Некоторые обновления вступают в силу только после перезагрузки. Можно перезагрузить сейчас или позже через SSH-консоль.",
+    "Reboot now": "Перезагрузить сейчас",
+    "The reboot is delayed about a minute and can be canceled. The server will be briefly unreachable; if it does not return, use your provider console.": "Перезагрузка отложена примерно на минуту, её можно отменить. Сервер будет недоступен несколько минут; если не вернётся — используйте консоль провайдера.",
+    "Reboot scheduled — the server will restart shortly and this page will reconnect.": "Перезагрузка запланирована — сервер скоро перезапустится, страница переподключится.",
+    "Cancel reboot": "Отменить перезагрузку",
+    "Reboot the server now? It will be briefly unreachable.": "Перезагрузить сервер сейчас? Он будет недоступен некоторое время.",
+    "Scheduling reboot…": "Планирование перезагрузки…",
+    "Reboot scheduled.": "Перезагрузка запланирована.",
+    "Reboot was refused": "Перезагрузка отклонена",
+    "Canceling reboot…": "Отмена перезагрузки…",
+    "Reboot canceled.": "Перезагрузка отменена.",
+    "Failed to cancel the reboot": "Не удалось отменить перезагрузку",
+    "The server is back online.": "Сервер снова в сети.",
+    "Rebooting… waiting for the server to come back.": "Перезагрузка… ждём возвращения сервера.",
+    "An update is in progress; the reboot was refused.": "Идёт обновление; перезагрузка отклонена.",
+    "A restore is in progress; the reboot was refused.": "Идёт восстановление; перезагрузка отклонена."
+  }
+}

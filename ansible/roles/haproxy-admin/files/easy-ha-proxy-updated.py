@@ -203,6 +203,8 @@ REQUEST_FIELDS = {
     "set_channels": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
     ),
+    "reboot": frozenset({"action", "confirmation"}),
+    "cancel_reboot": frozenset({"action"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -523,6 +525,20 @@ def child_environment() -> dict[str, str]:
 
 SYSTEMD_RUN_PATH = "/usr/bin/systemd-run"
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
+SHUTDOWN_PATH = os.environ.get("UPDATED_SHUTDOWN_PATH", "/usr/sbin/shutdown")
+# Delayed + cancelable reboot: the HTTP response returns before the box goes
+# down, and there is a window to cancel with `shutdown -c`.
+REBOOT_DELAY = os.environ.get("UPDATED_REBOOT_DELAY", "+1")
+REBOOT_CONFIRMATION = "REBOOT"
+# A restore in progress must never be interrupted by a reboot.
+BACKUPD_RESTORE_ACTIVE_MARKER = Path(
+    os.environ.get(
+        "UPDATED_BACKUPD_RESTORE_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active",
+    )
+)
+# systemd records a scheduled shutdown/reboot here.
+SYSTEMD_SHUTDOWN_SCHEDULED = Path("/run/systemd/shutdown/scheduled")
 TRANSIENT_STOP_TIMEOUT = 30
 
 
@@ -1528,6 +1544,73 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         "plan": plan,
         "jobs": jobs,
         "active_job": active_job(),
+        "reboot_required": Path("/var/run/reboot-required").exists(),
+        "reboot_scheduled": reboot_is_scheduled(),
+    }
+
+
+def reboot_is_scheduled() -> bool:
+    return SYSTEMD_SHUTDOWN_SCHEDULED.exists()
+
+
+def request_reboot(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("confirmation") != REBOOT_CONFIRMATION:
+        raise UpdatedError("reboot requires an explicit confirmation")
+    job = active_job()
+    if job is not None:
+        return {
+            "ok": False,
+            "error": "An update is in progress; the reboot was refused.",
+            "error_code": "operation_active",
+            "active_job": job,
+        }
+    if BACKUPD_RESTORE_ACTIVE_MARKER.exists():
+        return {
+            "ok": False,
+            "error": "A restore is in progress; the reboot was refused.",
+            "error_code": "operation_active",
+        }
+    try:
+        result = subprocess.run(
+            [
+                SHUTDOWN_PATH,
+                "-r",
+                REBOOT_DELAY,
+                "easy-ha-proxy: reboot requested from the web UI",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdatedError(f"failed to schedule the reboot: {exc}")
+    if result.returncode != 0:
+        raise UpdatedError(
+            "failed to schedule the reboot: "
+            + (result.stderr or result.stdout or "unknown error").strip()
+        )
+    LOG.warning("reboot scheduled from the web UI (delay %s)", REBOOT_DELAY)
+    return {"ok": True, "message": "Reboot scheduled.", "reboot_scheduled": True}
+
+
+def cancel_reboot(request: dict[str, Any]) -> dict[str, Any]:
+    try:
+        subprocess.run(
+            [SHUTDOWN_PATH, "-c"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdatedError(f"failed to cancel the reboot: {exc}")
+    LOG.info("reboot cancel requested from the web UI")
+    return {
+        "ok": True,
+        "message": "Reboot canceled.",
+        "reboot_scheduled": reboot_is_scheduled(),
     }
 
 
@@ -1546,6 +1629,10 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_check(request)
     if action == "set_channels":
         return set_channels(request)
+    if action == "reboot":
+        return request_reboot(request)
+    if action == "cancel_reboot":
+        return cancel_reboot(request)
     return start_apply(request)
 
 

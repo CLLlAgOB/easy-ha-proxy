@@ -10,8 +10,11 @@
     status: app.dataset.statusUrl,
     check: app.dataset.checkUrl,
     apply: app.dataset.applyUrl,
-    channels: app.dataset.channelsUrl
+    channels: app.dataset.channelsUrl,
+    reboot: app.dataset.rebootUrl,
+    rebootCancel: app.dataset.rebootCancelUrl
   };
+  let rebootPending = false;
   const terminalStates = new Set([
     "completed", "failed", "cancelled", "interrupted", "partial", "skipped"
   ]);
@@ -571,7 +574,19 @@
     const required = Boolean(
       payload.reboot_required || job?.reboot_required || job?.result?.reboot_required
     );
-    byId("updates-reboot-card").hidden = !required;
+    const scheduled = Boolean(payload.reboot_scheduled);
+    const pendingView = scheduled || rebootPending;
+    byId("updates-reboot-card").hidden = !(required || pendingView);
+    byId("updates-reboot-idle").hidden = pendingView;
+    byId("updates-reboot-pending").hidden = !pendingView;
+    if (pendingView) {
+      rebootPending = true;
+    } else if (rebootPending) {
+      // We were awaiting a reboot and the server answered with no schedule:
+      // it either came back up or the reboot was canceled.
+      rebootPending = false;
+      setMessage("updates-reboot-status", t("The server is back online."), true);
+    }
   }
   function handleCurrentJob(job) {
     if (!job || jobId(job) !== currentJobId) return;
@@ -681,15 +696,23 @@
       schedulePoll(active ? 1500 : 10000);
       return payload;
     } catch (error) {
+      const reconnecting = Boolean(currentJobId) || rebootPending;
       setMessage(
         "updates-service-status",
-        currentJobId
+        reconnecting
           ? t("The update service is temporarily unavailable. Reconnecting…")
           : error.message,
         false,
-        !currentJobId
+        !reconnecting
       );
-      schedulePoll(currentJobId ? 2200 : 5000);
+      if (rebootPending) {
+        setMessage(
+          "updates-reboot-status",
+          t("Rebooting… waiting for the server to come back."),
+          false
+        );
+      }
+      schedulePoll(reconnecting ? 2200 : 5000);
       return null;
     }
   }
@@ -797,9 +820,49 @@
     }
   }
 
+  function updateRebootButton() {
+    const input = byId("updates-reboot-confirm");
+    const button = byId("updates-reboot-now");
+    if (button && input) button.disabled = input.value.trim() !== "REBOOT";
+  }
+  async function requestReboot() {
+    const input = byId("updates-reboot-confirm");
+    if (!input || input.value.trim() !== "REBOOT") return;
+    if (!window.confirm(t("Reboot the server now? It will be briefly unreachable."))) return;
+    setMessage("updates-reboot-status", t("Scheduling reboot…"));
+    try {
+      const payload = await postJson(endpoints.reboot, {confirmation: "REBOOT"});
+      rebootPending = true;
+      byId("updates-reboot-idle").hidden = true;
+      byId("updates-reboot-pending").hidden = false;
+      input.value = "";
+      updateRebootButton();
+      setMessage("updates-reboot-status", payload.message || t("Reboot scheduled."), true);
+      schedulePoll(1500);
+    } catch (error) {
+      setMessage("updates-reboot-status", `${t("Reboot was refused")}: ${error.message}`, false);
+    }
+  }
+  async function cancelReboot() {
+    setMessage("updates-reboot-status", t("Canceling reboot…"));
+    try {
+      const payload = await postJson(endpoints.rebootCancel, {});
+      rebootPending = false;
+      byId("updates-reboot-pending").hidden = true;
+      byId("updates-reboot-idle").hidden = false;
+      setMessage("updates-reboot-status", payload.message || t("Reboot canceled."), true);
+      schedulePoll(1000);
+    } catch (error) {
+      setMessage("updates-reboot-status", `${t("Failed to cancel the reboot")}: ${error.message}`, false);
+    }
+  }
+
   byId("updates-check").addEventListener("click", checkUpdates);
   byId("updates-apply").addEventListener("click", applyUpdates);
   byId("updates-save-channels").addEventListener("click", saveChannels);
+  byId("updates-reboot-confirm").addEventListener("input", updateRebootButton);
+  byId("updates-reboot-now").addEventListener("click", requestReboot);
+  byId("updates-reboot-cancel").addEventListener("click", cancelReboot);
   byId("updates-release-channel").addEventListener("change", updateChannelControls);
   byId("updates-impact-confirm").addEventListener("change", () => updateSelection());
   byId("updates-confirmation").addEventListener("input", () => updateSelection());
