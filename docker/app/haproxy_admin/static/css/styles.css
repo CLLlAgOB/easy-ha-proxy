@@ -3155,3 +3155,72 @@ tr.job-row-selected > td:first-child {
     max-width: 100%;
   }
 }
+
+/* Authelia bans and raw diagnostic log output. */
+.authelia-ban-table {
+  min-width: 720px;
+}
+
+.authelia-ban-action {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.authelia-ban-action .btn {
+  padding: 6px 10px;
+}
+
+.authelia-log-message-cell {
+  min-width: 320px;
+  max-width: 720px;
+  overflow-wrap: anywhere;
+}
+
+.authelia-log-error {
+  margin-top: 5px;
+  color: var(--error);
+  font-weight: 600;
+  white-space: pre-wrap;
+}
+
+.authelia-log-details {
+  margin-top: 8px;
+}
+
+.authelia-log-details summary {
+  width: fit-content;
+  color: var(--accent-cyan);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.authelia-log-details dl {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 8px 0;
+}
+
+.authelia-log-details dt,
+.authelia-log-raw-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.authelia-log-details dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.authelia-log-details pre {
+  max-height: 260px;
+  margin: 5px 0 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: rgba(0, 0, 0, .16);
+  border-radius: 6px;
+}

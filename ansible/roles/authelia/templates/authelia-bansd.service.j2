@@ -15,6 +15,9 @@ Environment="AUTHELIA_BANS_SOCKET={{ authelia_bans_socket_path }}"
 Environment="AUTHELIA_BANS_SCRIPT={{ authelia_bans_script_path }}"
 Environment="AUTHELIA_BANS_SOCKET_GROUP={{ authelia_bans_socket_group }}"
 Environment="AUTHELIA_BANS_LOG_LEVEL=INFO"
+Environment="AUTHELIA_BANS_COMMAND_TIMEOUT={{ authelia_bans_command_timeout | default(5) }}"
+Environment="AUTHELIA_BANS_MAX_REQUEST_BYTES={{ authelia_bans_max_request_bytes | default(65536) }}"
+Environment="AUTHELIA_BANS_MAX_WORKERS={{ authelia_bans_max_workers | default(4) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-bansd.py', rstrip=false) | hash('sha256') }}"
 
 # Немного hardening, но процесс root, docker ему не мешаем

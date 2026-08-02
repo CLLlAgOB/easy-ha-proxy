@@ -135,6 +135,9 @@ authelia_cli_config_path: ""         # normally left empty (/config/configuratio
 authelia_bans_daemon_enabled: true
 authelia_bans_socket_path: /run/easy-ha-proxy/authelia-bansd.sock
 authelia_bans_socket_group: hadmin  # group used by haproxy-admin app_user
+authelia_bans_command_timeout: 5
+authelia_bans_max_request_bytes: 65536
+authelia_bans_max_workers: 4
 
 # ----------------- USERS DATABASE (file backend) -----------------
 

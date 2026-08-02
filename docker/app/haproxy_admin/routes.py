@@ -3,6 +3,7 @@ from flask import (
     Response,
     abort,
     current_app,
+    flash,
     g,
     jsonify,
     redirect,
@@ -445,38 +446,45 @@ def authelia_bans():
     """
     Страница банов Authelia + формы разбана + логи Authelia.
     """
-    msg = None
-    err = None
+    log_ip = request.args.get("log_ip", "").strip()[:256]
+    log_user = request.args.get("log_user", "").strip()[:256]
+    log_level = request.args.get("log_level", "").strip()[:64]
 
-    # --- обработка разбана ---
+    # Use Post/Redirect/Get so refreshing the result page never repeats a
+    # privileged revoke operation. Preserve active log filters across it.
     if request.method == "POST":
         action = request.form.get("action", "")
         try:
             if action == "unban_user":
                 username = request.form.get("username", "")
-                msg, code = authelia_unban_user(username)
-                if code != 200:
-                    err = msg
-                    msg = None
+                message, code = authelia_unban_user(username)
             elif action == "unban_ip":
                 ip = request.form.get("ip", "")
-                msg, code = authelia_unban_ip(ip)
-                if code != 200:
-                    err = msg
-                    msg = None
+                message, code = authelia_unban_ip(ip)
+            else:
+                message, code = "Unknown unban action", 400
         except Exception as e:  # pylint: disable=broad-except
             traceback.print_exc()
-            err = str(e)
+            message, code = str(e), 500
+
+        flash(message, "success" if code == 200 else "error")
+        redirect_args = {
+            key: value
+            for key, value in {
+                "log_ip": log_ip,
+                "log_user": log_user,
+                "log_level": log_level,
+            }.items()
+            if value
+        }
+        return redirect(
+            url_for("routes.authelia_bans", **redirect_args),
+            code=303,
+        )
 
     # --- баны ---
     bans = get_authelia_bans()
-    if not err:
-        err = bans.get("error")
-
-    # --- фильтры логов (из query-параметров) ---
-    log_ip = request.args.get("log_ip", "").strip()
-    log_user = request.args.get("log_user", "").strip()
-    log_level = request.args.get("log_level", "").strip()
+    bans_error = bans.get("error")
 
     logs, logs_error = get_authelia_logs(
         ip=log_ip or None,
@@ -484,15 +492,10 @@ def authelia_bans():
         level=log_level or None,
     )
 
-    # если общая ошибка ещё не установлена — можно показать ошибку логов
-    if not err and logs_error:
-        err = logs_error
-
     return render_template(
         "authelia_bans.html",
         bans=bans,
-        message=msg,
-        error=err,
+        bans_error=bans_error,
         logs=logs,
         logs_error=logs_error,
         log_ip=log_ip,

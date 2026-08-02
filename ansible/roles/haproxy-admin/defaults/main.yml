@@ -25,10 +25,13 @@ hapadm_debug_on_empty: "1"
 # --- Authelia bans daemon integration ---
 authelia_bans_enabled: true
 authelia_bans_socket_path: /run/easy-ha-proxy/authelia-bansd.sock
+authelia_bans_socket_timeout: 10
+authelia_bans_max_response_bytes: 2097152
 authelia_root_dir: "/opt/authelia"
 # Path to the active Authelia JSON log.
 authelia_log_file: "{{ authelia_root_dir }}/logs/authelia.log"
 authelia_log_limit: 200
+authelia_log_max_scan_bytes: 16777216
 hapadm_ban_sync_interval: 10
 # Host path to the Authelia user database.
 authelia_users_file: "{{ authelia_root_dir }}/users_database.yml"

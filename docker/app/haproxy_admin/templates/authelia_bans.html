@@ -8,20 +8,23 @@
 
 {% block content %}
 
+{% for category, flashed_message in get_flashed_messages(with_categories=true) %}
+  <div class="alert {% if category == 'error' %}alert-error{% else %}alert-success{% endif %}"
+       style="margin-bottom:12px;">
+    <span {% if category == 'error' %}class="notranslate" translate="no" data-i18n-skip{% endif %}>{{ flashed_message }}</span>
+  </div>
+{% endfor %}
+
 {# ---- Карточка: текущие баны ---- #}
 <div class="card">
   <div class="card-header">
     <h2>Current bans</h2>
   </div>
 
-  {% if error %}
+  {% if bans_error %}
     <div class="alert alert-error" style="margin:12px 16px 0;">
-      {{ error }}
-    </div>
-  {% endif %}
-  {% if message %}
-    <div class="alert alert-success" style="margin:12px 16px 0;">
-      {{ message }}
+      <strong>Cannot load current bans:</strong>
+      <span class="notranslate" translate="no" data-i18n-skip>{{ bans_error }}</span>
     </div>
   {% endif %}
 
@@ -32,9 +35,39 @@
       </div>
       <div class="table-container">
         {% if bans.users %}
-          <pre class="mono" style="font-size:12px; padding:8px; margin:0; white-space:pre-wrap;">
-{{ bans.users }}
-          </pre>
+          <table class="data-table authelia-ban-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>User</th>
+                <th>Expires</th>
+                <th>Source</th>
+                <th>Reason</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for ban in bans.users %}
+              <tr>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.id }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.subject }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.expires }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.source }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.reason }}</td>
+                <td>
+                  <form method="post" class="authelia-ban-action" data-confirm="Unban this user?">
+                    <input type="hidden" name="action" value="unban_user">
+                    <input type="hidden" name="username" value="{{ ban.subject }}">
+                    <button class="btn btn-secondary" type="submit">Unban</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% elif bans.users_raw %}
+          <pre class="mono notranslate" translate="no" data-i18n-skip
+               style="font-size:12px; padding:8px; margin:0; white-space:pre-wrap;">{{ bans.users_raw }}</pre>
         {% else %}
           <div class="no-data" style="padding:8px 0;">
             There are no active user bans.
@@ -49,9 +82,39 @@
       </div>
       <div class="table-container">
         {% if bans.ips %}
-          <pre class="mono" style="font-size:12px; padding:8px; margin:0; white-space:pre-wrap;">
-{{ bans.ips }}
-          </pre>
+          <table class="data-table authelia-ban-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>IP</th>
+                <th>Expires</th>
+                <th>Source</th>
+                <th>Reason</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for ban in bans.ips %}
+              <tr>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.id }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.subject }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.expires }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.source }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.reason }}</td>
+                <td>
+                  <form method="post" class="authelia-ban-action" data-confirm="Unban this IP?">
+                    <input type="hidden" name="action" value="unban_ip">
+                    <input type="hidden" name="ip" value="{{ ban.subject }}">
+                    <button class="btn btn-secondary" type="submit">Unban</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% elif bans.ips_raw %}
+          <pre class="mono notranslate" translate="no" data-i18n-skip
+               style="font-size:12px; padding:8px; margin:0; white-space:pre-wrap;">{{ bans.ips_raw }}</pre>
         {% else %}
           <div class="no-data" style="padding:8px 0;">
             There are no active IP bans.
@@ -158,7 +221,7 @@
 
     {% if logs_error %}
       <div class="alert alert-error" style="margin-top:12px;">
-        {{ logs_error }}
+        <span class="notranslate" translate="no" data-i18n-skip>{{ logs_error }}</span>
       </div>
     {% endif %}
   </div>
@@ -202,13 +265,30 @@
                 </button>
               {% endif %}
             </td>
-            <td>
+            <td class="authelia-log-message-cell">
               {% if e.msg %}
-                {{ e.msg }}
-              {% elif e.error %}
-                {{ e.error }}
-              {% else %}
+                <div class="authelia-log-message">{{ e.msg }}</div>
+              {% endif %}
+              {% if e.error %}
+                <div class="authelia-log-error">{{ e.error }}</div>
+              {% endif %}
+              {% if not e.msg and not e.error %}
                 <pre class="mono" style="margin:0;white-space:pre-wrap;">{{ e.raw }}</pre>
+              {% endif %}
+              {% if e.msg or e.error %}
+                <details class="authelia-log-details">
+                  <summary>{{ _("Log details") }}</summary>
+                  {% if e.details %}
+                    <dl>
+                    {% for detail in e.details %}
+                      <dt>{{ detail.name }}</dt>
+                      <dd class="mono">{{ detail.value }}</dd>
+                    {% endfor %}
+                    </dl>
+                  {% endif %}
+                  <div class="authelia-log-raw-label">{{ _("Raw log entry") }}</div>
+                  <pre class="mono">{{ e.raw }}</pre>
+                </details>
               {% endif %}
             </td>
           </tr>
@@ -218,7 +298,11 @@
     </div>
   {% else %}
     <div class="no-data" style="padding:12px 16px 16px;">
-      No logs match the selected filters.
+      {% if log_ip or log_user or log_level %}
+        No logs match the selected filters.
+      {% else %}
+        Authelia log is empty.
+      {% endif %}
     </div>
   {% endif %}
 </div>

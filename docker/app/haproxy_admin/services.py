@@ -75,14 +75,30 @@ AUTHELIA_BANS_SOCKET: str = os.environ.get(
     "AUTHELIA_BANS_SOCKET", ""
 ).strip()
 
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+AUTHELIA_BANS_SOCKET_TIMEOUT: int = _bounded_env_int(
+    "AUTHELIA_BANS_SOCKET_TIMEOUT", 10, 2, 60
+)
+AUTHELIA_BANS_MAX_RESPONSE_BYTES: int = _bounded_env_int(
+    "AUTHELIA_BANS_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 4096, 16 * 1024 * 1024
+)
+
 # Логи Authelia (JSON)
 AUTHELIA_LOG_FILE: str = os.environ.get(
     "AUTHELIA_LOG_FILE", ""
 ).strip()
-try:
-    AUTHELIA_LOG_LIMIT: int = int(os.environ.get("AUTHELIA_LOG_LIMIT", "200"))
-except ValueError:
-    AUTHELIA_LOG_LIMIT = 200
+AUTHELIA_LOG_LIMIT: int = _bounded_env_int("AUTHELIA_LOG_LIMIT", 200, 1, 1000)
+AUTHELIA_LOG_MAX_SCAN_BYTES: int = _bounded_env_int(
+    "AUTHELIA_LOG_MAX_SCAN_BYTES", 16 * 1024 * 1024, 64 * 1024, 128 * 1024 * 1024
+)
 
 AUTHELIA_USERS_FILE: str = os.environ.get(
     "AUTHELIA_USERS_FILE", ""
@@ -344,6 +360,7 @@ def _call_authelia_bansd(action: str, **params) -> dict:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(2.0)
             s.connect(AUTHELIA_BANS_SOCKET)
+            s.settimeout(float(AUTHELIA_BANS_SOCKET_TIMEOUT))
             payload = json.dumps(req, ensure_ascii=False) + "\n"
             s.sendall(payload.encode("utf-8"))
 
@@ -353,12 +370,22 @@ def _call_authelia_bansd(action: str, **params) -> dict:
                 if not chunk:
                     break
                 data += chunk
+                if len(data) > AUTHELIA_BANS_MAX_RESPONSE_BYTES:
+                    return {
+                        "ok": False,
+                        "error": "reply from authelia-bansd is too large",
+                    }
 
             if not data:
                 return {"ok": False, "error": "empty reply from daemon"}
 
             line = data.split(b"\n", 1)[0]
             resp = json.loads(line.decode("utf-8"))
+            if not isinstance(resp, dict):
+                return {
+                    "ok": False,
+                    "error": "invalid reply from authelia-bansd",
+                }
             return resp
     except Exception as exc:  # noqa: BLE001
         logger.exception("authelia-bansd socket error")
@@ -367,6 +394,85 @@ def _call_authelia_bansd(action: str, **params) -> dict:
 
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9._@-]+$")
 IP_CIDR_RE = re.compile(r"^[0-9a-fA-F:./]+$")
+
+
+def _authelia_bans_error(resp: dict) -> str:
+    error = str(resp.get("error") or "authelia-bansd error").strip()
+    details: list[str] = []
+    for key, label in (("rc_users", "users"), ("rc_ips", "ips")):
+        value = resp.get(key)
+        if value not in (None, 0, "0"):
+            details.append(f"{label} rc={value}")
+    for key, label in (
+        ("stderr_users", "users"),
+        ("stderr_ips", "ips"),
+        ("stdout_users", "users output"),
+        ("stdout_ips", "ips output"),
+    ):
+        value = " ".join(str(resp.get(key) or "").split())
+        if value:
+            details.append(f"{label}: {value[:1000]}")
+    return f"{error}: {'; '.join(details)}" if details else error
+
+
+def _parse_authelia_ban_list(
+    output: object,
+    subject_header: str,
+) -> tuple[list[dict[str, str]], str]:
+    """Parse the aligned table produced by ``authelia storage bans * list``.
+
+    The CLI dynamically changes column widths and uses ``never`` instead of a
+    timestamp for permanent bans. Header offsets are therefore safer than a
+    whitespace split. Unknown future output is returned as raw text instead of
+    being mistaken for either an empty list or valid rows.
+    """
+    text = str(output or "").strip()
+    if not text:
+        return [], ""
+    if text.casefold().rstrip(".") == "no results":
+        return [], ""
+
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return [], text
+
+    header = lines[0]
+    matches = list(re.finditer(r"\S+", header))
+    expected = ["id", subject_header.casefold(), "expires", "source", "reason"]
+    if [match.group(0).casefold() for match in matches] != expected:
+        return [], text
+
+    starts = [match.start() for match in matches]
+    entries: list[dict[str, str]] = []
+    for line in lines[1:]:
+        values = [
+            line[start:(starts[index + 1] if index + 1 < len(starts) else None)].strip()
+            for index, start in enumerate(starts)
+        ]
+        if len(values) != 5 or not values[0] or not values[1]:
+            return [], text
+        entries.append(
+            {
+                "id": values[0],
+                "subject": values[1],
+                "expires": values[2],
+                "source": values[3],
+                "reason": values[4],
+            }
+        )
+    return entries, ""
+
+
+def _authelia_bans_result(users_output: object, ips_output: object) -> dict:
+    users, users_raw = _parse_authelia_ban_list(users_output, "Username")
+    ips, ips_raw = _parse_authelia_ban_list(ips_output, "IP")
+    return {
+        "users": users,
+        "ips": ips,
+        "users_raw": users_raw,
+        "ips_raw": ips_raw,
+        "error": None,
+    }
 
 
 def get_authelia_bans() -> dict:
@@ -382,19 +488,26 @@ def get_authelia_bans() -> dict:
         resp = _call_authelia_bansd("list")
         if not resp.get("ok"):
             return {
-                "users": "",
-                "ips": "",
-                "error": resp.get("error", "authelia-bansd error"),
+                "users": [],
+                "ips": [],
+                "users_raw": "",
+                "ips_raw": "",
+                "error": _authelia_bans_error(resp),
             }
-        return {
-            "users": resp.get("users", ""),
-            "ips": resp.get("ips", ""),
-            "error": None,
-        }
+        return _authelia_bans_result(
+            resp.get("users", ""),
+            resp.get("ips", ""),
+        )
 
     # 2) CLI fallback (если сокет не настроен)
     if not AUTHELIA_BANS_CMD:
-        return {"users": "", "ips": "", "error": 'AUTHELIA_BANS_CMD is not configured'}
+        return {
+            "users": [],
+            "ips": [],
+            "users_raw": "",
+            "ips_raw": "",
+            "error": 'AUTHELIA_BANS_CMD is not configured',
+        }
 
     helper = shlex.split(AUTHELIA_BANS_CMD)
     users = run_cmd([*helper, "list-users"])
@@ -415,7 +528,15 @@ def get_authelia_bans() -> dict:
         ips_out = ips
 
     error = "\n".join(error_parts) if error_parts else None
-    return {"users": users_out, "ips": ips_out, "error": error}
+    if error:
+        return {
+            "users": [],
+            "ips": [],
+            "users_raw": "",
+            "ips_raw": "",
+            "error": error,
+        }
+    return _authelia_bans_result(users_out, ips_out)
 
 
 def authelia_unban_user(username: str):
@@ -457,6 +578,10 @@ def authelia_unban_ip(ip: str):
     if not ip:
         return 'IP is required', 400
     if not IP_CIDR_RE.match(ip):
+        return "Invalid IP/CIDR", 400
+    try:
+        ipaddress.ip_network(ip, strict=False)
+    except ValueError:
         return "Invalid IP/CIDR", 400
 
     # 1) через демон
@@ -1029,23 +1154,130 @@ def get_backends_status() -> dict:
     return {"items": items}
 
 
-def _tail_authelia_log_lines(limit: int) -> list[str]:
-    """
-    Возвращает последние limit строк из лога Authelia.
-    Без супер-оптимизаций: читаем файл целиком и берём хвост.
-    Для ротируемого лога этого обычно более чем достаточно.
-    """
+def _iter_authelia_log_lines_reverse(max_bytes: int | None = None):
+    """Yield complete log lines newest-first without reading the whole file."""
     if not AUTHELIA_LOG_FILE:
+        return
+
+    byte_limit = max_bytes or AUTHELIA_LOG_MAX_SCAN_BYTES
+    chunk_size = 64 * 1024
+    with open(AUTHELIA_LOG_FILE, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        remaining = min(position, byte_limit)
+        pending = b""
+
+        while position > 0 and remaining > 0:
+            read_size = min(chunk_size, position, remaining)
+            position -= read_size
+            remaining -= read_size
+            handle.seek(position)
+            block = handle.read(read_size) + pending
+            parts = block.split(b"\n")
+            pending = parts[0]
+            for raw_line in reversed(parts[1:]):
+                if raw_line:
+                    yield raw_line.decode("utf-8", errors="replace").rstrip("\r")
+
+        # If the scan reached the beginning, ``pending`` is a complete first
+        # line. If the byte limit stopped us mid-file, it is only a fragment
+        # and must not be presented as a real log entry.
+        if position == 0 and pending:
+            yield pending.decode("utf-8", errors="replace").rstrip("\r")
+
+
+def _tail_authelia_log_lines(limit: int) -> list[str]:
+    """Return up to ``limit`` newest lines in their on-disk order."""
+    if limit <= 0 or not AUTHELIA_LOG_FILE:
         return []
+    newest_first: list[str] = []
+    for line in _iter_authelia_log_lines_reverse():
+        newest_first.append(line)
+        if len(newest_first) >= limit:
+            break
+    newest_first.reverse()
+    return newest_first
+
+
+def _parse_authelia_text_log_line(line: str) -> dict:
+    """Best-effort parser for Authelia's supported logfmt/text format."""
+    if "=" not in line:
+        return {}
     try:
-        with open(AUTHELIA_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        if limit <= 0:
-            return []
-        return lines[-limit:]
-    except Exception as exc:  # noqa: BLE001
-        logger.error("authelia log read error: %s", exc)
-        return []
+        tokens = shlex.split(line)
+    except ValueError:
+        return {}
+    result: dict[str, object] = {}
+    for token in tokens:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if key:
+            result[key] = value
+    return result if "time" in result or "level" in result or "msg" in result else {}
+
+
+def _parse_authelia_log_line(line: str) -> dict:
+    try:
+        parsed = json.loads(line)
+    except (TypeError, ValueError):
+        parsed = _parse_authelia_text_log_line(line)
+    if not isinstance(parsed, dict):
+        parsed = {}
+    parsed["raw"] = line
+    return parsed
+
+
+def _authelia_log_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple, bool, int, float)):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+_AUTHELIA_LOG_PRIMARY_FIELDS = {
+    "time",
+    "level",
+    "remote_ip",
+    "method",
+    "path",
+    "username",
+    "msg",
+    "error",
+    "raw",
+}
+
+
+def _authelia_log_entry(data: dict, line: str) -> dict:
+    details = [
+        {"name": str(key), "value": _authelia_log_text(value)}
+        for key, value in data.items()
+        if key not in _AUTHELIA_LOG_PRIMARY_FIELDS and value not in (None, "")
+    ]
+    details.sort(
+        key=lambda item: (
+            0 if item["name"] in {"provider", "providers"} else 1,
+            item["name"],
+        )
+    )
+    return {
+        "time": _authelia_log_text(data.get("time")),
+        "level": _authelia_log_text(data.get("level")),
+        "remote_ip": _authelia_log_text(data.get("remote_ip")),
+        "method": _authelia_log_text(data.get("method")),
+        "path": _authelia_log_text(data.get("path")),
+        "username": _authelia_log_text(data.get("username")),
+        "msg": _authelia_log_text(data.get("msg")),
+        "error": _authelia_log_text(data.get("error")),
+        "details": details,
+        "raw": line,
+    }
 
 
 def _read_authelia_users_from_file() -> tuple[list[dict], str | None]:
@@ -1134,12 +1366,18 @@ def get_authelia_logs(
     if not AUTHELIA_LOG_FILE:
         return [], 'AUTHELIA_LOG_FILE is not configured (no path to Authelia logs)'
 
-    eff_limit = limit or AUTHELIA_LOG_LIMIT
+    try:
+        eff_limit = int(limit) if limit is not None else AUTHELIA_LOG_LIMIT
+    except (TypeError, ValueError):
+        eff_limit = AUTHELIA_LOG_LIMIT
+    eff_limit = max(1, min(eff_limit, 1000))
 
-    raw_lines = _tail_authelia_log_lines(
-        eff_limit * 5)  # берём запас на фильтры
-    if not raw_lines:
-        return [], f"Authelia log file is empty or unavailable: {AUTHELIA_LOG_FILE}"
+    try:
+        if os.path.getsize(AUTHELIA_LOG_FILE) == 0:
+            return [], None
+    except OSError as exc:
+        logger.error("authelia log stat error: %s", exc)
+        return [], f"Cannot access Authelia log file: {exc}"
 
     ip = (ip or "").strip() or None
     username = (username or "").strip() or None
@@ -1149,53 +1387,43 @@ def get_authelia_logs(
 
     entries: list[dict] = []
 
-    # идём с конца (новые → старые), потом перевернём
-    for line in reversed(raw_lines):
-        line = line.strip()
-        if not line:
-            continue
+    username_folded = username.casefold() if username else None
 
-        try:
-            data = json.loads(line)
-        except Exception:
-            data = {"raw": line}
-        else:
-            data["raw"] = line
+    try:
+        # Read backwards until enough matches are found or the bounded byte
+        # budget is exhausted. This makes rare filters useful without loading
+        # a potentially hundreds-of-megabytes log into a web worker.
+        for line in _iter_authelia_log_lines_reverse():
+            if not line.strip():
+                continue
+            data = _parse_authelia_log_line(line)
+            entry = _authelia_log_entry(data, line)
 
-        # фильтр по уровню
-        if level:
-            if data.get("level", "").lower() != level:
+            if level and entry["level"].casefold() != level:
                 continue
 
-        # фильтр по IP
-        if ip:
-            rip = str(data.get("remote_ip", ""))
-            if ip != rip and ip not in data.get("raw", ""):
-                continue
+            if ip:
+                remote_ip = entry["remote_ip"].strip()
+                if remote_ip:
+                    if ip != remote_ip:
+                        continue
+                elif ip not in entry["raw"]:
+                    continue
 
-        # фильтр по пользователю
-        if username:
-            u = (data.get("username") or "").strip()
-            msg = data.get("msg") or ""
-            if username not in u and username not in msg:
-                continue
+            if username_folded:
+                searchable = "\n".join(
+                    (entry["username"], entry["msg"], entry["error"])
+                ).casefold()
+                if username_folded not in searchable:
+                    continue
 
-        entry = {
-            "time": data.get("time", ""),
-            "level": data.get("level", ""),
-            "remote_ip": data.get("remote_ip", ""),
-            "method": data.get("method", ""),
-            "path": data.get("path", ""),
-            "username": data.get("username", ""),
-            "msg": data.get("msg", ""),
-            "error": data.get("error", ""),
-            "raw": data.get("raw", line),
-        }
-        entries.append(entry)
-        if len(entries) >= eff_limit:
-            break
+            entries.append(entry)
+            if len(entries) >= eff_limit:
+                break
+    except OSError as exc:
+        logger.error("authelia log read error: %s", exc)
+        return [], f"Cannot read Authelia log file: {exc}"
 
-    # entries.reverse()  # старые → новые, чтобы сверху были более ранние
     return entries, None
 
 
