@@ -47,25 +47,31 @@
     os: "Operating-system packages; reboot may be required"
   };
   const ACTIVE_JOB_KEY = "easy_ha_proxy_update_job";
+  const PENDING_START_KEY = "easy_ha_proxy_update_pending_start";
   const RELOADED_JOB_KEY = "easy_ha_proxy_update_reloaded_job";
   const SELECTED_JOB_KEY = "easy_ha_proxy_update_selected_job";
   const LOG_OPEN_KEY = "easy_ha_proxy_update_log_open";
+  const START_RECONCILE_GRACE_MS = 15 * 1000;
   const dateFormat = new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
     dateStyle: "medium",
     timeStyle: "medium"
   });
 
+  let pendingStart = loadPendingStart();
+  let knownJobIds = new Set(pendingStart?.knownJobIds || []);
   let currentPlan = null;
   let currentJobId = storageGet(ACTIVE_JOB_KEY) || "";
-  let currentJobOperation = "";
-  let currentApplyComponents = [];
+  let currentJobOperation = pendingStart?.operation || "";
+  let currentApplyComponents = pendingStart?.components || [];
   let selectedJobId = storageGet(SELECTED_JOB_KEY) || "";
   let installedRelease = "stable";
   let activeJobSnapshot = null;
   let lastJobsHtml = "";
   let pollTimer = null;
   let requestRunning = false;
-  let operationRunning = false;
+  let operationRunning = Boolean(pendingStart);
+  let connectionFailureCount = 0;
+  let connectionWasLost = false;
   let logViewMode = "log";
   let renderedJobId = "";
   let renderedHadLog = false;
@@ -83,6 +89,60 @@
     } catch (_error) {
       // The server-side job list remains authoritative when storage is unavailable.
     }
+  }
+  function loadPendingStart() {
+    const raw = storageGet(PENDING_START_KEY);
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw);
+      const operation = String(value?.operation || "");
+      const startedAt = Number(value?.startedAt);
+      const components = Array.isArray(value?.components) ? value.components.map(String) : [];
+      const planId = String(value?.planId || "");
+      const knownJobIds = Array.isArray(value?.knownJobIds)
+        ? value.knownJobIds.map(String).filter((item) => /^[a-f0-9]{32}$/i.test(item)).slice(0, 100)
+        : [];
+      if (!["check", "apply"].includes(operation) || !Number.isFinite(startedAt) ||
+          startedAt <= 0 || startedAt > Date.now() + 60 * 1000 ||
+          (operation === "apply" && !/^[a-f0-9]{32}$/i.test(planId))) {
+        throw new Error("invalid pending update start");
+      }
+      return {operation, startedAt, components, planId, knownJobIds};
+    } catch (_error) {
+      storageSet(PENDING_START_KEY, "");
+      return null;
+    }
+  }
+  function storePendingStart(value) {
+    pendingStart = value;
+    storageSet(PENDING_START_KEY, value ? JSON.stringify(value) : "");
+  }
+  function beginPendingStart(operation, components, planId) {
+    storePendingStart({
+      operation,
+      components: Array.isArray(components) ? components.map(String) : [],
+      planId: String(planId || ""),
+      knownJobIds: Array.from(knownJobIds).slice(0, 100),
+      startedAt: Date.now()
+    });
+  }
+  function isTransientRequestError(error) {
+    const status = Number(error?.status || 0);
+    return !status || status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+  function reconnectDelay() {
+    const exponent = Math.min(Math.max(connectionFailureCount - 1, 0), 4);
+    return Math.min(15000, 1200 * (2 ** exponent)) + Math.floor(Math.random() * 300);
+  }
+  function markConnectionLost() {
+    connectionWasLost = true;
+    connectionFailureCount += 1;
+  }
+  function markConnectionRestored() {
+    const restored = connectionWasLost;
+    connectionWasLost = false;
+    connectionFailureCount = 0;
+    return restored;
   }
   function setMessage(id, message, ok, technical) {
     const element = byId(id);
@@ -108,7 +168,11 @@
     const response = await fetch(url, options || {});
     let payload;
     try { payload = await response.json(); }
-    catch (_error) { throw new Error(`${t("Unexpected server response")} (${response.status})`); }
+    catch (_error) {
+      const problem = new Error(`${t("Unexpected server response")} (${response.status})`);
+      problem.status = response.status;
+      throw problem;
+    }
     if (!response.ok || payload.ok === false) {
       const problem = new Error(payload.error || payload.message || `${t("Request failed")} (${response.status})`);
       problem.status = response.status;
@@ -137,6 +201,49 @@
     return Array.isArray(values) ? values.map(String) : [];
   }
   function isTerminal(job) { return terminalStates.has(jobState(job)); }
+
+  function pendingStartMatches(job) {
+    if (!pendingStart || jobOperation(job) !== pendingStart.operation) return false;
+    const id = jobId(job);
+    if (!/^[a-f0-9]{32}$/i.test(id) || pendingStart.knownJobIds.includes(id)) return false;
+    // A persisted baseline is immune to browser/server clock skew. The time
+    // check is only a fallback for a click that raced the very first status poll.
+    if (!pendingStart.knownJobIds.length) {
+      const createdAt = new Date(job?.created_at || job?.started_at || 0).getTime();
+      if (!Number.isFinite(createdAt) || createdAt < pendingStart.startedAt - 30000) return false;
+    }
+    if (pendingStart.operation !== "apply") return true;
+    if (String(job?.plan_id || "") !== pendingStart.planId) return false;
+    const actual = jobComponents(job).slice().sort();
+    const expected = pendingStart.components.slice().sort();
+    return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+  }
+  function reconcilePendingStart(jobs) {
+    if (!pendingStart) return "none";
+    const candidate = jobs.find(pendingStartMatches);
+    if (candidate) {
+      currentJobId = jobId(candidate);
+      currentJobOperation = jobOperation(candidate);
+      currentApplyComponents = jobComponents(candidate);
+      storageSet(ACTIVE_JOB_KEY, currentJobId);
+      storePendingStart(null);
+      if (currentJobOperation === "apply") {
+        focusJobLog(currentJobId);
+        setMessage("updates-apply-status", t("Connection restored. The update job was accepted."), true);
+      } else {
+        setMessage("updates-service-status", t("Connection restored. The update job was accepted."), true);
+      }
+      return "matched";
+    }
+    if (Date.now() - pendingStart.startedAt < START_RECONCILE_GRACE_MS) return "waiting";
+    const operation = pendingStart.operation;
+    storePendingStart(null);
+    currentJobOperation = "";
+    currentApplyComponents = [];
+    const message = t("Connection restored, but no matching update job was found. Review the job list before trying again.");
+    setMessage(operation === "apply" ? "updates-apply-status" : "updates-service-status", message, false);
+    return "missing";
+  }
 
   function versionText(value) {
     if (value == null || value === "") return "—";
@@ -645,21 +752,24 @@
     const settings = options || {};
     try {
       const payload = await requestJson(endpoints.status);
+      const connectionRestored = markConnectionRestored();
       const reportedBootId = String(payload.boot_id || "").toLowerCase();
       if (BOOT_ID_RE.test(reportedBootId)) currentBootId = reportedBootId;
       const jobs = normalizeJobs(payload);
       renderDeployment(payload);
       const active = renderJobs(jobs);
-      operationRunning = active;
+      const pendingResult = reconcilePendingStart(jobs);
+      knownJobIds = new Set(jobs.map(jobId).filter((id) => /^[a-f0-9]{32}$/i.test(id)));
+      operationRunning = active || Boolean(pendingStart);
       setBusy(requestRunning);
       const activeJob = jobs.find((job) => !isTerminal(job));
-      if (currentJobId && !jobs.some((job) => jobId(job) === currentJobId)) {
+      if (currentJobId && !pendingStart && !jobs.some((job) => jobId(job) === currentJobId)) {
         currentJobId = "";
         currentJobOperation = "";
         currentApplyComponents = [];
         storageSet(ACTIVE_JOB_KEY, "");
       }
-      if (!currentJobId && activeJob) {
+      if (!currentJobId && !pendingStart && activeJob) {
         currentJobId = jobId(activeJob);
         currentJobOperation = jobOperation(activeJob);
         currentApplyComponents = jobComponents(activeJob);
@@ -694,25 +804,38 @@
         warning.textContent = t("The previous update plan is no longer valid.");
       }
       renderReboot(payload, relevant);
-      if (!settings.quiet && !(relevant && jobId(relevant) === currentJobId && isTerminal(relevant))) {
+      if (connectionRestored && pendingResult !== "missing" &&
+          !(tracked && isTerminal(tracked))) {
         setMessage(
           "updates-service-status",
           active
+            ? t("Connection restored. The update operation is still running.")
+            : (pendingStart
+                ? t("Connection restored. Checking whether the update job was accepted…")
+                : t("Connection restored. Software-update service is ready.")),
+          true
+        );
+      } else if (pendingResult !== "missing" && !settings.quiet &&
+                 !(relevant && jobId(relevant) === currentJobId && isTerminal(relevant))) {
+        setMessage(
+          "updates-service-status",
+          active || pendingStart
             ? t("An update operation is running. Temporary connection errors are expected while services restart.")
             : t("Software-update service is ready."),
           true
         );
       }
-      schedulePoll(active ? 1500 : 10000);
+      schedulePoll(active || pendingStart ? 1500 : 10000);
       return payload;
     } catch (error) {
-      const reconnecting = Boolean(currentJobId) || rebootPending;
+      const reconnecting = isTransientRequestError(error);
+      markConnectionLost();
       setMessage(
         "updates-service-status",
         reconnecting
-          ? t("The update service is temporarily unavailable. Reconnecting…")
+          ? t("The update service is temporarily unavailable. Reconnecting automatically…")
           : error.message,
-        false,
+        reconnecting ? undefined : false,
         !reconnecting
       );
       if (rebootPending) {
@@ -722,7 +845,7 @@
           false
         );
       }
-      schedulePoll(reconnecting ? 2200 : 5000);
+      schedulePoll(reconnecting ? reconnectDelay() : 5000);
       return null;
     }
   }
@@ -771,6 +894,7 @@
     setBusy(true);
     renderPlan(null);
     setMessage("updates-service-status", t("Scheduling update check…"));
+    beginPendingStart("check", [], "");
     try {
       // Preview whichever release channel is currently selected, even if it has
       // not been saved yet; the broker derives its branch and image.
@@ -781,10 +905,22 @@
       currentApplyComponents = [];
       operationRunning = true;
       storageSet(ACTIVE_JOB_KEY, currentJobId);
+      storePendingStart(null);
       setMessage("updates-service-status", t("Update check started."), true);
       schedulePoll(600);
     } catch (error) {
-      setMessage("updates-service-status", error.message, false, true);
+      if (isTransientRequestError(error)) {
+        markConnectionLost();
+        operationRunning = true;
+        setMessage(
+          "updates-service-status",
+          t("The connection was interrupted while starting the update. Checking whether the job was accepted…")
+        );
+        schedulePoll(reconnectDelay());
+      } else {
+        storePendingStart(null);
+        setMessage("updates-service-status", error.message, false, true);
+      }
     } finally {
       setBusy(false);
     }
@@ -796,6 +932,7 @@
     if (!window.confirm(t("Apply the selected software updates now?"))) return;
     setBusy(true);
     setMessage("updates-apply-status", t("Scheduling selected updates…"));
+    beginPendingStart("apply", components, currentPlan.id);
     try {
       const payload = await postJson(endpoints.apply, {
         plan_id: currentPlan.id,
@@ -807,6 +944,7 @@
       currentApplyComponents = components.slice();
       operationRunning = true;
       storageSet(ACTIVE_JOB_KEY, currentJobId);
+      storePendingStart(null);
       focusJobLog(currentJobId);
       resetConfirmation();
       setMessage(
@@ -819,12 +957,22 @@
       schedulePoll(600);
     } catch (error) {
       if (error.payload?.error_code === "configuration_not_clean") {
+        storePendingStart(null);
         setMessage(
           "updates-apply-status",
           t("Resolve pending HAProxy configuration changes before updating source or host services."),
           false
         );
+      } else if (isTransientRequestError(error)) {
+        markConnectionLost();
+        operationRunning = true;
+        setMessage(
+          "updates-apply-status",
+          t("The connection was interrupted while starting the update. Checking whether the job was accepted…")
+        );
+        schedulePoll(reconnectDelay());
       } else {
+        storePendingStart(null);
         setMessage("updates-apply-status", error.message, false, true);
       }
     } finally {
@@ -1007,10 +1155,25 @@
         const job = normalizeJobs(payload).find((item) => jobId(item) === row.dataset.updateJob);
         if (job) showJob(job);
       })
-      .catch((error) => setMessage("updates-service-status", error.message, false, true));
+      .catch((error) => {
+        if (isTransientRequestError(error)) {
+          markConnectionLost();
+          setMessage(
+            "updates-service-status",
+            t("The update service is temporarily unavailable. Reconnecting automatically…")
+          );
+          schedulePoll(reconnectDelay());
+        } else {
+          setMessage("updates-service-status", error.message, false, true);
+        }
+      });
   });
   byId("updates-log-details").addEventListener("toggle", () => {
     storageSet(LOG_OPEN_KEY, byId("updates-log-details").open ? "1" : "");
+  });
+  window.addEventListener("online", () => schedulePoll(100));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && connectionWasLost) schedulePoll(100);
   });
   if (storageGet(LOG_OPEN_KEY)) byId("updates-log-details").open = true;
   window.setInterval(renderElapsed, 1000);
