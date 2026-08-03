@@ -27,12 +27,15 @@ import fnmatch
 import hmac
 import json
 import logging
+import math
 import os
 import pwd
 import grp
 import re
 import socket
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque, OrderedDict
@@ -1329,6 +1332,13 @@ SITE_ALERTS_MAIL_LOCK = os.getenv(
 SITE_ALERTS_REPEAT_SECONDS = max(
     600, int(os.getenv("HAPADM_SITE_ALERTS_REPEAT_SECONDS", "21600"))
 )
+SITE_ALERTS_STATE_PATH = Path(os.getenv(
+    "HAPADM_SITE_ALERTS_STATE_PATH",
+    "/var/lib/easy-ha-proxy/site-alerts.json",
+))
+SITE_ALERTS_STATE_MAX_BYTES = 1024 * 1024
+SITE_ALERTS_STATE_MAX_INCIDENTS = 1024
+SITE_ALERTS_STATE_VERSION = 1
 
 _INTERVAL_UNIT_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
 _INTERVAL_VALUE_RE = re.compile(r"^([1-9][0-9]*)(ms|s|m|h|d)$")
@@ -1398,13 +1408,42 @@ def _haproxy_show_stat(socket_path: str) -> List[Dict[str, str]]:
     return rows
 
 
+def _incident_timestamp(value: object, field: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"invalid incident {field}")
+    timestamp = float(value)
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError(f"invalid incident {field}")
+    return timestamp
+
+
+def _validated_incident_record(value: object) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("invalid incident record")
+    record = {
+        "bad_since": _incident_timestamp(value.get("bad_since"), "bad_since"),
+        "alerted_at": _incident_timestamp(value.get("alerted_at"), "alerted_at"),
+        "alerted_state": str(value.get("alerted_state") or ""),
+        "good_since": _incident_timestamp(value.get("good_since"), "good_since"),
+    }
+    if record["alerted_state"] not in {"", "down", "degraded"}:
+        raise ValueError("invalid incident alerted_state")
+    if record["alerted_at"] is not None and record["bad_since"] is None:
+        raise ValueError("alerted incident has no outage start")
+    if record["good_since"] is not None and record["alerted_at"] is None:
+        raise ValueError("unalerted incident has a recovery start")
+    return record
+
+
 class SiteAlertEngine(threading.Thread):
     def __init__(self) -> None:
         super().__init__(name="site-alerts", daemon=True)
         self._stop = threading.Event()
         # site name -> {"bad_since": float|None, "alerted_at": float|None,
-        #               "alerted_state": str}
-        self._incidents: Dict[str, Dict[str, Any]] = {}
+        #               "alerted_state": str, "good_since": float|None}
+        self._incidents: Dict[str, Dict[str, Any]] = self._load_incidents()
         self._yaml = None
         try:
             import yaml as _yaml  # type: ignore
@@ -1418,21 +1457,180 @@ class SiteAlertEngine(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
+    # -- durable incident state -------------------------------------------
+    @staticmethod
+    def _state_file_is_safe(path: Path, *, allow_missing: bool) -> bool:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return allow_missing
+        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+            return False
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            return False
+        return True
+
+    def _load_incidents(self) -> Dict[str, Dict[str, Any]]:
+        path = SITE_ALERTS_STATE_PATH
+        if not path.is_absolute():
+            LOG.warning("site-alerts: state path must be absolute")
+            return {}
+        if not self._state_file_is_safe(path, allow_missing=True):
+            LOG.warning("site-alerts: unsafe state file ignored: %s", path)
+            return {}
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            LOG.warning("site-alerts: cannot open state file: %s", exc)
+            return {}
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o022
+                or info.st_size <= 0
+                or info.st_size > SITE_ALERTS_STATE_MAX_BYTES
+            ):
+                raise ValueError("unsafe or oversized state file")
+            raw = bytearray()
+            while len(raw) <= SITE_ALERTS_STATE_MAX_BYTES:
+                chunk = os.read(descriptor, min(
+                    65536, SITE_ALERTS_STATE_MAX_BYTES + 1 - len(raw)
+                ))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            if len(raw) > SITE_ALERTS_STATE_MAX_BYTES:
+                raise ValueError("state file exceeds the size limit")
+            payload = json.loads(bytes(raw).decode("utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") != SITE_ALERTS_STATE_VERSION
+                or not isinstance(payload.get("incidents"), dict)
+                or len(payload["incidents"]) > SITE_ALERTS_STATE_MAX_INCIDENTS
+            ):
+                raise ValueError("invalid state document")
+            incidents: Dict[str, Dict[str, Any]] = {}
+            for name, record in payload["incidents"].items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or len(name) > 253
+                    or any(ord(character) < 32 for character in name)
+                ):
+                    raise ValueError("invalid incident site name")
+                incidents[name] = _validated_incident_record(record)
+            return incidents
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            LOG.warning("site-alerts: invalid state file ignored: %s", exc)
+            return {}
+        finally:
+            os.close(descriptor)
+
+    def _persist_incidents(self) -> bool:
+        path = SITE_ALERTS_STATE_PATH
+        temporary_path: Optional[str] = None
+        try:
+            if not path.is_absolute():
+                raise ValueError("state path must be absolute")
+            parent = path.parent
+            parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+            parent_info = parent.lstat()
+            if (
+                not stat.S_ISDIR(parent_info.st_mode)
+                or parent.is_symlink()
+                or parent_info.st_uid != os.geteuid()
+                or parent_info.st_mode & 0o022
+            ):
+                raise ValueError("state directory is unsafe")
+            if not self._state_file_is_safe(path, allow_missing=True):
+                raise ValueError("state file is unsafe")
+
+            active = {
+                name: _validated_incident_record(record)
+                for name, record in sorted(self._incidents.items())
+                if any(
+                    record.get(field) is not None
+                    for field in ("bad_since", "alerted_at", "good_since")
+                )
+            }
+            if len(active) > SITE_ALERTS_STATE_MAX_INCIDENTS:
+                raise ValueError("too many incident records")
+            raw = json.dumps(
+                {"version": SITE_ALERTS_STATE_VERSION, "incidents": active},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8") + b"\n"
+            if len(raw) > SITE_ALERTS_STATE_MAX_BYTES:
+                raise ValueError("state document exceeds the size limit")
+
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=".site-alerts.", dir=parent
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                descriptor = -1
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            os.replace(temporary_path, path)
+            temporary_path = None
+            directory_fd = os.open(
+                parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return True
+        except (OSError, TypeError, ValueError) as exc:
+            LOG.warning("site-alerts: cannot persist incident state: %s", exc)
+            return False
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+
     # -- configuration ------------------------------------------------------
-    def _load_sites(self) -> List[Dict[str, Any]]:
+    def _load_sites(self) -> Optional[List[Dict[str, Any]]]:
         if self._yaml is None:
-            return []
+            return None
         try:
             with open(SITE_ALERTS_WEBSITES, "r", encoding="utf-8") as stream:
                 data = self._yaml.safe_load(stream) or {}
         except FileNotFoundError:
-            return []
+            LOG.warning(
+                "site-alerts: configuration is temporarily unavailable: %s",
+                SITE_ALERTS_WEBSITES,
+            )
+            return None
         except Exception as exc:  # noqa: BLE001 - config must not kill healthd
             LOG.warning("site-alerts: cannot read %s: %s", SITE_ALERTS_WEBSITES, exc)
-            return []
-        sites = data.get("sites") if isinstance(data, dict) else None
+            return None
+        if not isinstance(data, dict):
+            LOG.warning("site-alerts: configuration root is not a mapping")
+            return None
+        sites = data.get("sites") or []
+        if not isinstance(sites, list):
+            LOG.warning("site-alerts: configuration sites value is not a list")
+            return None
         result: List[Dict[str, Any]] = []
-        for site in sites or []:
+        for site in sites:
             if isinstance(site, dict) and site.get("alert_enabled") is True:
                 result.append(site)
         return result
@@ -1553,13 +1751,18 @@ class SiteAlertEngine(threading.Thread):
         while not self._stop.wait(SITE_ALERTS_INTERVAL):
             try:
                 sites = self._load_sites()
+                if sites is None:
+                    continue
                 if not sites:
-                    self._incidents.clear()
+                    if self._incidents:
+                        self._incidents.clear()
+                        self._persist_incidents()
                     continue
                 rows = _haproxy_show_stat(SITE_ALERTS_HAPROXY_SOCKET)
                 if not rows:
                     continue
                 seen: set = set()
+                changed = False
                 for site in sites:
                     name = str(site.get("name") or site.get("domain") or "")
                     if not name:
@@ -1570,9 +1773,12 @@ class SiteAlertEngine(threading.Thread):
                     )
                     if condition is None:
                         continue
-                    self._evaluate(site, name, condition)
+                    changed = self._evaluate(site, name, condition) or changed
                 for stale in set(self._incidents) - seen:
                     self._incidents.pop(stale, None)
+                    changed = True
+                if changed:
+                    self._persist_incidents()
             except Exception:  # noqa: BLE001 - the loop must survive anything
                 LOG.exception("site-alerts: evaluation cycle failed")
 
@@ -1581,14 +1787,22 @@ class SiteAlertEngine(threading.Thread):
         site: Dict[str, Any],
         name: str,
         condition: Dict[str, Any],
-    ) -> None:
+    ) -> bool:
         mode = str(site.get("alert_mode") or "down")
         triggers = {"down"} if mode == "down" else {"down", "degraded"}
         threshold = _alert_after_seconds(site.get("alert_after"))
+        recovery_threshold = threshold
         recipient = str(site.get("alert_email") or "")
         record = self._incidents.setdefault(
-            name, {"bad_since": None, "alerted_at": None, "alerted_state": ""}
+            name,
+            {
+                "bad_since": None,
+                "alerted_at": None,
+                "alerted_state": "",
+                "good_since": None,
+            },
         )
+        before = dict(record)
         now = time.time()
         state = condition["state"]
         summary = f"Backend servers up: {condition['up']}/{condition['total']}\n"
@@ -1596,9 +1810,10 @@ class SiteAlertEngine(threading.Thread):
         if servers_block:
             summary += servers_block + "\n"
         if state in triggers:
+            record["good_since"] = None
             if record["bad_since"] is None:
                 record["bad_since"] = now
-            elapsed = now - record["bad_since"]
+            elapsed = max(0.0, now - record["bad_since"])
             repeat_due = (
                 record["alerted_at"] is not None
                 and now - record["alerted_at"] >= SITE_ALERTS_REPEAT_SECONDS
@@ -1620,19 +1835,36 @@ class SiteAlertEngine(threading.Thread):
                     record["alerted_state"] = state
         else:
             if record["alerted_at"] is not None:
-                self._send_mail(
-                    recipient,
-                    f"[easy-ha-proxy] {name}: RECOVERED",
-                    (
-                        f"Site: {name}\n"
-                        "State: available again\n"
-                        + summary
-                    ),
-                )
-                LOG.info("site-alerts: recovery notice sent for %s", name)
-            record["bad_since"] = None
-            record["alerted_at"] = None
-            record["alerted_state"] = ""
+                if record.get("good_since") is None:
+                    record["good_since"] = now
+                recovered_for = max(0.0, now - record["good_since"])
+                if recovered_for >= recovery_threshold:
+                    sent = self._send_mail(
+                        recipient,
+                        f"[easy-ha-proxy] {name}: RECOVERED",
+                        (
+                            f"Site: {name}\n"
+                            f"State: available again for "
+                            f"{_format_duration(recovered_for)}\n"
+                            + summary
+                        ),
+                    )
+                    if sent:
+                        LOG.info("site-alerts: recovery notice sent for %s", name)
+                    else:
+                        LOG.warning(
+                            "site-alerts: recovery notice not delivered for %s",
+                            name,
+                        )
+                    record["bad_since"] = None
+                    record["alerted_at"] = None
+                    record["alerted_state"] = ""
+                    record["good_since"] = None
+            else:
+                record["bad_since"] = None
+                record["alerted_state"] = ""
+                record["good_since"] = None
+        return before != record
 
 
 def main() -> None:

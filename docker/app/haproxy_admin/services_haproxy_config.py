@@ -52,6 +52,12 @@ HAPROXY_PENDING_TRANSACTION_PATH = (
 )
 CONFIG_GENERATION_HEADER = "X-Easy-HAProxy-Config-Generation"
 CONFIG_GENERATION_PREFIX = "easy-ha-proxy-config-generation-v1|"
+CONFIG_GENERATION_DIRECTIVE_RE = re.compile(
+    r"^([ \t]*http-request[ \t]+set-header[ \t]+"
+    r"X-Easy-HAProxy-Config-Generation[ \t]+)"
+    r"[0-9a-f]{64}([ \t]+if[ \t]+host_admin[ \t]*)(\r?)$",
+    re.IGNORECASE | re.MULTILINE,
+)
 CONFIG_SOURCE_ORDER = ("vars.yml", "websites.yml", "tcp.yml")
 MAX_HAPROXY_CFG_BACKUPS = 14
 MAX_YAML_BACKUPS = 14
@@ -1831,9 +1837,14 @@ def get_config_diff_summary(rendered_cfg: Optional[str] = None) -> Dict[str, Any
     if rendered_cfg is None:
         rendered_cfg = render_haproxy_cfg()
 
-    # 1. Сравниваем живой /etc/haproxy/haproxy.cfg с текущим рендером
+    # 1. Сравниваем живой /etc/haproxy/haproxy.cfg с текущим рендером.
+    # The exact source-byte generation is a confirmation-channel marker, not
+    # an operational HAProxy setting. Installer migrations may rewrite YAML
+    # without changing its meaning, which legitimately changes that marker.
+    # Keep all transaction hashes exact, but do not ask an administrator to
+    # reload HAProxy when this one value is the only difference.
     server_cfg = _read_file_text(HAPROXY_CFG_PATH)
-    server_differs = (server_cfg != rendered_cfg)
+    server_differs = not configs_operationally_equal(server_cfg, rendered_cfg)
 
     # 2. Смотрим, есть ли вообще сохранённое состояние
     applied_state = _load_applied_state()
@@ -2107,13 +2118,34 @@ def get_server_cfg_text() -> str:
     return _read_file_text(HAPROXY_CFG_PATH)
 
 
+def _config_for_operational_comparison(cfg_text: str) -> str:
+    """Mask only the exact, generated confirmation marker value.
+
+    The surrounding directive and condition remain part of the comparison, so
+    removing the header, changing its ACL, or inserting a malformed value is
+    still reported as runtime drift.
+    """
+    return CONFIG_GENERATION_DIRECTIVE_RE.sub(
+        r"\g<1><config-generation>\g<2>\g<3>", cfg_text or ""
+    )
+
+
+def configs_operationally_equal(server_cfg: str, rendered_cfg: str) -> bool:
+    return _config_for_operational_comparison(
+        server_cfg
+    ) == _config_for_operational_comparison(rendered_cfg)
+
+
 def make_cfg_html_diff(server_cfg: str, rendered_cfg: str) -> str:
     """
     Строит HTML-таблицу diff (side-by-side) между живым конфигом и рендером.
     Используем стандартный difflib.HtmlDiff.
     """
-    server_lines = (server_cfg or "").splitlines()
-    rendered_lines = (rendered_cfg or "").splitlines()
+    # Present the same operational comparison used by the status indicator.
+    # The private exact generation still participates in guarded apply and
+    # candidate reachability checks; it is merely noise in an operator diff.
+    server_lines = _config_for_operational_comparison(server_cfg).splitlines()
+    rendered_lines = _config_for_operational_comparison(rendered_cfg).splitlines()
 
     if not server_lines and not rendered_lines:
         return (
