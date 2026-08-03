@@ -11,6 +11,12 @@
     <div class="card-header">
       <h2>Authelia — general settings</h2>
 
+      {% for category, flashed_message in get_flashed_messages(with_categories=true) %}
+      <span class="result-message {{ 'success' if category == 'success' else ('warning' if category == 'warning' else 'error') }}">
+        {{ flashed_message }}
+      </span>
+      {% endfor %}
+
       {% if msg %}
       <span class="result-message {{ 'success' if msg_category == 'success' else 'error' }}">
         {{ msg }}
@@ -28,7 +34,16 @@
       managed by Ansible/manual configuration.
     </p>
 
+    {% if settings_load_error %}
+    <div class="alert alert-error" style="margin:16px;">
+      <strong>Cannot load Authelia settings.</strong>
+      Editing is disabled to prevent accidental overwrite.
+      <span class="notranslate" translate="no" data-i18n-skip>{{ settings_load_error }}</span>
+      <a href="{{ url_for('authelia_settings.edit_settings') }}" class="btn btn-secondary btn-sm">Reload</a>
+    </div>
+    {% else %}
     <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="grid">
         <!-- Левая колонка: session and cookie -->
         <div>
@@ -217,6 +232,7 @@
         </button>
       </div>
     </form>
+    {% endif %}
   </div>
 
   <section class="card" aria-labelledby="authelia-mail-moved-title">

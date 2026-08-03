@@ -126,6 +126,8 @@ updated_reboot_delay_seconds: 60
 
 # Authelia user-management daemon socket.
 authelia_users_socket: /run/easy-ha-proxy/authelia-usersd.sock
+authelia_users_socket_timeout: 10
+authelia_users_max_response_bytes: 2097152
 
 # haproxy-certd mode: 0 for production, 1 for dry-run.
 haproxy_certd_dry_run: "0"

@@ -65,6 +65,11 @@ SOCKET_PATH = os.environ.get(
     "AUTHELIA_USERS_SOCKET", "/run/easy-ha-proxy/authelia-usersd.sock")
 MAX_REQUEST_BYTES = 1024 * 1024
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$")
+EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
 
 LOG = logging.getLogger("authelia-usersd")
 logging.basicConfig(
@@ -79,7 +84,7 @@ def _backup_users_file() -> None:
         return
 
     # Создаём жёсткую ссылку текущего файла
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup_path = f"{USERS_FILE}.bak-{ts}"
     try:
         os.link(USERS_FILE, backup_path)
@@ -238,11 +243,17 @@ def _hash_password(plain: str) -> str:
 
 def _safe_user_view(username: str, raw: Dict[str, Any]) -> Dict[str, Any]:
     """Оставляем только безопасные поля для UI/ответов (без password)."""
+    raw_groups = raw.get("groups") or []
+    groups = (
+        [str(group) for group in raw_groups]
+        if isinstance(raw_groups, (list, tuple, set))
+        else [str(raw_groups)]
+    )
     return {
         "username": username,
         "displayname": raw.get("displayname", "") or "",
         "email": raw.get("email", "") or "",
-        "groups": list(raw.get("groups", []) or []),
+        "groups": groups,
         "disabled": bool(raw.get("disabled", False)),
     }
 
@@ -263,9 +274,15 @@ def _validated_fields(req: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key in ("displayname", "email"):
         if key in fields:
-            value = str(fields[key] or "").strip()
-            if len(value) > 320 or any(ord(ch) < 32 for ch in value):
+            raw_value = str(fields[key] or "")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_value):
                 raise ValueError(f"{key} is invalid")
+            value = raw_value.strip()
+            max_length = 254 if key == "email" else 320
+            if not value or len(value) > max_length:
+                raise ValueError(f"{key} is invalid")
+            if key == "email" and not EMAIL_RE.fullmatch(value):
+                raise ValueError("email is invalid")
             out[key] = value
     if "groups" in fields:
         groups = fields["groups"]
@@ -280,6 +297,41 @@ def _validated_fields(req: Dict[str, Any]) -> Dict[str, Any]:
     if "disabled" in fields:
         out["disabled"] = bool(fields["disabled"])
     return out
+
+
+def _password_from_request(req: Dict[str, Any]) -> str:
+    """Return a password unchanged; whitespace is a valid password character."""
+    value = req.get("password_plain")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("password_plain must be a string")
+    return value
+
+
+def _is_enabled_superadmin(user: Any) -> bool:
+    if not isinstance(user, dict) or bool(user.get("disabled", False)):
+        return False
+    groups = user.get("groups") or []
+    if not isinstance(groups, (list, tuple, set)):
+        groups = [groups]
+    return "superadmin" in {str(group).strip() for group in groups}
+
+
+def _removes_last_enabled_superadmin(
+    users_node: Dict[str, Any],
+    username: str,
+    replacement: Dict[str, Any] | None,
+) -> bool:
+    current = users_node.get(username)
+    if not _is_enabled_superadmin(current):
+        return False
+    if replacement is not None and _is_enabled_superadmin(replacement):
+        return False
+    return not any(
+        other_name != username and _is_enabled_superadmin(other_user)
+        for other_name, other_user in users_node.items()
+    )
 
 
 def _handle_list(req: Dict[str, Any]) -> Dict[str, Any]:
@@ -307,13 +359,23 @@ def _handle_get(req: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_update(req: Dict[str, Any]) -> Dict[str, Any]:
     username = _validated_username(req)
     fields = _validated_fields(req)
-    password_plain = (req.get("password_plain") or "").strip()
+    password_plain = _password_from_request(req)
 
     root, users_node = _load_users_data()
     user = users_node.get(username)
     if not isinstance(user, dict):
         # В режиме update не создаём нового, только изменяем существующего
         return {"ok": False, "error": f"user '{username}' not found"}
+
+    prospective_user = dict(user)
+    prospective_user.update(fields)
+    if _removes_last_enabled_superadmin(
+        users_node, username, prospective_user
+    ):
+        return {
+            "ok": False,
+            "error": "the last enabled superadmin cannot be disabled or demoted",
+        }
 
     user.setdefault("groups", [])
 
@@ -342,7 +404,7 @@ def _handle_update(req: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_create(req: Dict[str, Any]) -> Dict[str, Any]:
     username = _validated_username(req)
     fields = _validated_fields(req)
-    password_plain = (req.get("password_plain") or "").strip()
+    password_plain = _password_from_request(req)
 
     if not password_plain:
         return {"ok": False, "error": "password_plain is required for create"}
@@ -381,6 +443,12 @@ def _handle_delete(req: Dict[str, Any]) -> Dict[str, Any]:
     if username not in users_node:
         return {"ok": False, "error": f"user '{username}' not found"}
 
+    if _removes_last_enabled_superadmin(users_node, username, None):
+        return {
+            "ok": False,
+            "error": "the last enabled superadmin cannot be deleted",
+        }
+
     deleted = users_node.pop(username, None)
     _save_users_data(root)
     return {
@@ -390,8 +458,7 @@ def _handle_delete(req: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
-    """Маршрутизация по action."""
+def _dispatch_request(req: Dict[str, Any]) -> Dict[str, Any]:
     action = (req.get("action") or "").strip()
     if action == "list":
         return _handle_list(req)
@@ -404,6 +471,16 @@ def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
     if action == "delete":
         return _handle_delete(req)
     return {"ok": False, "error": f"unknown action: {action}"}
+
+
+def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
+    """Маршрутизация по action с безопасным ответом на ошибки валидации."""
+    if not isinstance(req, dict):
+        return {"ok": False, "error": "request must be a JSON object"}
+    try:
+        return _dispatch_request(req)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def serve() -> None:
@@ -466,12 +543,17 @@ def serve() -> None:
                 if not line:
                     continue
 
-                LOG.debug("Request: %s", line)
                 try:
                     req = json.loads(line)
                 except Exception as exc:  # noqa: BLE001
                     resp = {"ok": False, "error": f"invalid json: {exc}"}
                 else:
+                    if isinstance(req, dict):
+                        LOG.debug(
+                            "Request action=%r username=%r",
+                            req.get("action"),
+                            req.get("username"),
+                        )
                     resp = handle_request(req)
 
             except Exception as exc:  # noqa: BLE001

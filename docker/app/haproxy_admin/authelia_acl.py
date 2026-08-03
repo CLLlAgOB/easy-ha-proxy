@@ -28,6 +28,7 @@ bp_authelia_acl = Blueprint(
 
 # Значение по умолчанию — как в authelia-configd
 DEFAULT_SOCKET_PATH = "/run/easy-ha-proxy/authelia-configd.sock"
+CONFIGD_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def _configd_socket_path() -> str:
@@ -42,10 +43,15 @@ def _configd_request(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     sock_path = _configd_socket_path()
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
+    response_timeout = (
+        90.0 if payload.get("action") in {"rules_set", "restart"} else 10.0
+    )
 
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(2.0)
             s.connect(sock_path)
+            s.settimeout(response_timeout)
             s.sendall(data)
 
             buf = b""
@@ -54,6 +60,11 @@ def _configd_request(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if not chunk:
                     break
                 buf += chunk
+                if len(buf) > CONFIGD_MAX_RESPONSE_BYTES:
+                    return {
+                        "ok": False,
+                        "error": "response from authelia-configd is too large",
+                    }
     except OSError as exc:
         logger.error(
             "Failed to talk to authelia-configd on %s: %s", sock_path, exc
@@ -73,6 +84,8 @@ def _configd_request(payload: Dict[str, Any]) -> Dict[str, Any]:
         logger.error("Invalid JSON from authelia-configd: %r (%s)", line, exc)
         return {"ok": False, "error": f"invalid json from daemon: {exc}"}
 
+    if not isinstance(resp, dict):
+        return {"ok": False, "error": "invalid response from authelia-configd"}
     return resp
 
 
@@ -126,7 +139,8 @@ def load_rules_yaml() -> str:
       { "ok": true, "rules_yaml": "<yaml-список rules>" }
       или (на всякий случай) { "ok": true, "rules": [ ... ] }
 
-    В случае ошибки — возвращаем "[]\\n".
+    При ошибке выбрасываем исключение, чтобы интерфейс не подменял реальные
+    правила пустым редактируемым списком.
     """
     resp = _configd_request({"action": "rules_get"})
 
@@ -135,7 +149,9 @@ def load_rules_yaml() -> str:
             "authelia-configd rules_get failed: %s",
             resp.get("error"),
         )
-        return "[]\n"
+        raise RuntimeError(
+            str(resp.get("error") or "authelia-configd rules_get failed")
+        )
 
     rules_yaml = resp.get("rules_yaml")
     if isinstance(rules_yaml, str):
@@ -153,9 +169,11 @@ def load_rules_yaml() -> str:
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "Failed to dump rules list from configd response: %s", exc)
-            return "[]\n"
+            raise RuntimeError(
+                "failed to serialize rules from authelia-configd"
+            ) from exc
 
-    return "[]\n"
+    raise RuntimeError("invalid rules response from authelia-configd")
 
 
 def save_rules_from_yaml(rules_yaml: str) -> Tuple[bool, str]:
@@ -534,6 +552,7 @@ def _render_acl_template(
     ui_rules: List[Dict[str, Any]],
     *,
     active_group_domain: str | None = None,
+    load_error: str | None = None,
 ):
     """
     Единая точка отрисовки шаблона, чтобы везде одинаково считать
@@ -544,7 +563,7 @@ def _render_acl_template(
       - active_group_domain=""    → явно хотим группу "без домена / новые";
       - active_group_domain="foo" → явно хотим домен foo.
     """
-    if not ui_rules:
+    if not ui_rules and not load_error:
         ui_rules = [_empty_ui_rule()]
 
     ui_rules = _attach_indices(ui_rules)
@@ -562,6 +581,7 @@ def _render_acl_template(
         groups=groups,
         total_rules=total_rules,
         active_group_domain=active_group_domain or "",
+        acl_load_error=load_error,
     )
 
 
@@ -574,31 +594,19 @@ def edit_rules():
 
     # --- GET: просто показываем правила ---
     if request.method == "GET":
-        rules_yaml = load_rules_yaml()
-
-        backend_rules: List[Dict[str, Any]] = []
-        if rules_yaml:
-            try:
+        try:
+            rules_yaml = load_rules_yaml()
+            backend_rules: List[Dict[str, Any]] = []
+            obj: Any = []
+            if rules_yaml:
                 obj = yaml.safe_load(rules_yaml) or []
-            except Exception as exc:  # noqa: BLE001
-                current_app.logger.exception(
-                    "Failed to parse Authelia rules YAML: %s", exc
-                )
-                flash(
-                    'Failed to parse Authelia rules YAML; showing an empty list.',
-                    "danger",
-                )
-                obj = []
             if isinstance(obj, list):
                 backend_rules = [r for r in obj if isinstance(r, dict)]
             else:
-                current_app.logger.error(
-                    "Authelia rules YAML is not a list: %r", type(obj)
-                )
-                flash(
-                    'Invalid rules format in YAML (expected a list).',
-                    "danger",
-                )
+                raise ValueError("Authelia rules YAML is not a list")
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.exception("Failed to load Authelia rules")
+            return _render_acl_template([], load_error=str(exc))
 
         ui_rules = [_backend_rule_to_ui(r) for r in backend_rules]
         return _render_acl_template(ui_rules)

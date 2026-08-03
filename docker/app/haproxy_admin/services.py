@@ -106,6 +106,12 @@ AUTHELIA_USERS_FILE: str = os.environ.get(
 
 AUTHELIA_USERS_SOCKET: str = os.environ.get(
     "AUTHELIA_USERS_SOCKET", "/run/easy-ha-proxy/authelia-usersd.sock").strip()
+AUTHELIA_USERS_SOCKET_TIMEOUT: int = _bounded_env_int(
+    "AUTHELIA_USERS_SOCKET_TIMEOUT", 10, 2, 60
+)
+AUTHELIA_USERS_MAX_RESPONSE_BYTES: int = _bounded_env_int(
+    "AUTHELIA_USERS_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 4096, 16 * 1024 * 1024
+)
 
 
 # производные от SOCKET (для multi-process master-worker)
@@ -621,6 +627,7 @@ def _call_authelia_usersd(payload: dict) -> dict:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(2.0)
             s.connect(AUTHELIA_USERS_SOCKET)
+            s.settimeout(float(AUTHELIA_USERS_SOCKET_TIMEOUT))
             line = json.dumps(payload, ensure_ascii=False) + "\n"
             s.sendall(line.encode("utf-8"))
 
@@ -630,12 +637,23 @@ def _call_authelia_usersd(payload: dict) -> dict:
                 if not chunk:
                     break
                 data += chunk
+                if len(data) > AUTHELIA_USERS_MAX_RESPONSE_BYTES:
+                    return {
+                        "ok": False,
+                        "error": "reply from authelia-usersd is too large",
+                    }
 
             if not data:
                 return {"ok": False, "error": "empty reply from authelia-usersd"}
 
             resp_line = data.split(b"\n", 1)[0]
-            return json.loads(resp_line.decode("utf-8"))
+            resp = json.loads(resp_line.decode("utf-8"))
+            if not isinstance(resp, dict):
+                return {
+                    "ok": False,
+                    "error": "invalid reply from authelia-usersd",
+                }
+            return resp
     except Exception as exc:  # noqa: BLE001
         logger.exception("authelia-usersd socket error")
         return {"ok": False, "error": str(exc)}

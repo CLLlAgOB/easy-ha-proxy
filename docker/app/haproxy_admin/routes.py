@@ -319,7 +319,10 @@ def authelia_user_new():
 
     # В списке пользователей message читается из ?msg=
     # поэтому нужно слать msg=..., а не message=...
-    return redirect(url_for("routes.authelia_users", msg=f"User {username} created"))
+    return redirect(
+        url_for("routes.authelia_users", msg=f"User {username} created"),
+        code=303,
+    )
 
 
 @bp.route("/authelia/users/<username>", methods=["GET", "POST"])
@@ -341,7 +344,13 @@ def authelia_user_edit(username: str):
                 if g and g not in groups:
                     groups.append(g)
 
-        password_plain = (request.form.get("password") or "").strip() or None
+        groups = sorted(set(groups))
+
+        # Passwords are opaque values: do not trim leading/trailing spaces.
+        # If either password field is used, both values must match exactly.
+        password_raw = request.form.get("password") or ""
+        password_confirmation = request.form.get("password2") or ""
+        password_plain = password_raw or None
 
         # ---- валидация обязательных полей ----
         required_errors = []
@@ -349,6 +358,8 @@ def authelia_user_edit(username: str):
             required_errors.append("Enter the user display name.")
         if not email:
             required_errors.append("Enter the user email.")
+        if password_raw != password_confirmation:
+            required_errors.append("Password and confirmation do not match")
 
         if required_errors:
             # нужно снова собрать all_groups, чтобы форма отрисовалась корректно
@@ -401,7 +412,10 @@ def authelia_user_edit(username: str):
                 is_new=False,
             )
 
-        return redirect(url_for("routes.authelia_users", msg=f"User {username} updated"))
+        return redirect(
+            url_for("routes.authelia_users", msg=f"User {username} updated"),
+            code=303,
+        )
 
     # GET
     user, error = get_authelia_user(username)
@@ -434,11 +448,23 @@ def authelia_user_delete(username: str):
     if not username:
         return redirect(url_for("routes.authelia_users", msg="Empty username"))
 
+    if username == (getattr(g, "remote_user", "") or "").strip():
+        return redirect(
+            url_for(
+                "routes.authelia_users",
+                msg="The currently authenticated user cannot be deleted",
+            ),
+            code=303,
+        )
+
     ok, error = delete_authelia_user(username)
     if not ok and error:
         return redirect(url_for("routes.authelia_users", msg=f"Deletion error: {username}: {error}"))
 
-    return redirect(url_for("routes.authelia_users", msg=f"User {username} deleted"))
+    return redirect(
+        url_for("routes.authelia_users", msg=f"User {username} deleted"),
+        code=303,
+    )
 
 
 @bp.route("/authelia/bans", methods=["GET", "POST"])

@@ -38,7 +38,7 @@
 
     <div style="padding:16px;max-width:620px;">
         <form method="post">
-            {{ csrf_token() if csrf_token is defined }}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
             <div class="form-row">
                 <label for="username" class="form-label">

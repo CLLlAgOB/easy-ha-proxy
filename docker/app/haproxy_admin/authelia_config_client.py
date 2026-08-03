@@ -15,6 +15,7 @@ SOCKET_PATH = os.environ.get(
     "AUTHELIA_CONFIG_SOCKET",
     "/run/easy-ha-proxy/authelia-configd.sock",
 )
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def _send_request(payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
@@ -31,6 +32,11 @@ def _send_request(payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, An
                 if not chunk:
                     break
                 buf += chunk
+                if len(buf) > MAX_RESPONSE_BYTES:
+                    return {
+                        "ok": False,
+                        "error": "response from authelia-configd is too large",
+                    }
     except OSError as exc:
         LOG.error("authelia-configd socket error: %s", exc, exc_info=True)
         return {"ok": False, "error": f"socket error: {exc}"}
@@ -51,6 +57,8 @@ def _send_request(payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, An
             "error": f"invalid json from authelia-configd: {exc}",
         }
 
+    if not isinstance(resp, dict):
+        return {"ok": False, "error": "invalid response from authelia-configd"}
     return resp
 
 

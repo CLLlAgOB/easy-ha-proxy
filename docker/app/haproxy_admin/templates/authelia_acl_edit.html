@@ -13,7 +13,16 @@
   «Authelia settings».
 </p>
 
+{% if acl_load_error %}
+<div class="alert alert-error" style="margin-bottom:15px;">
+  <strong>Cannot load Authelia access rules.</strong>
+  Editing is disabled to prevent accidental overwrite.
+  <span class="notranslate" translate="no" data-i18n-skip>{{ acl_load_error }}</span>
+  <a href="{{ url_for('authelia_acl.edit_rules') }}" class="btn btn-secondary btn-sm">Reload</a>
+</div>
+{% else %}
 <form method="post" id="authelia-acl-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="total_rules" value="{{ total_rules }}">
   <input type="hidden" name="active_group_domain" id="active_group_domain" value="{{ active_group_domain or '' }}">
 
@@ -225,6 +234,7 @@
     </a>
   </div>
 </form>
+{% endif %}
 
 <!-- JS for переключения доменов on одной page -->
 <script src="{{ url_for('static', filename='js/authelia_acl.js') }}"></script>

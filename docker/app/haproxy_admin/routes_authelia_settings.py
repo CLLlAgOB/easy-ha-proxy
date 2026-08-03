@@ -3,7 +3,17 @@
 Маршруты для интерактивной страницы настроек Authelia (без access_control.rules).
 """
 
-from flask import Blueprint, render_template, request, current_app, g, jsonify
+from flask import (
+    Blueprint,
+    current_app,
+    flash,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from .services_authelia_settings import (
     load_settings_form_data,
@@ -178,6 +188,7 @@ def edit_settings():
     """Страница общих настроек Authelia (configuration.yml без access_control.rules)."""
     msg: str | None = None
     msg_category: str = "info"
+    settings_load_error: str | None = None
 
     if request.method == "POST":
         # Какая кнопка нажата: сохранить или сохранить+применить
@@ -226,6 +237,10 @@ def edit_settings():
                         msg = f"{base} Authelia restarted successfully."
                         msg_category = "success"
 
+        flash(msg or "Authelia settings update failed.", msg_category)
+        # Post/Redirect/Get prevents F5 from repeating a save or restart.
+        return redirect(url_for("authelia_settings.edit_settings"), code=303)
+
     # Всегда пробуем перечитать актуальные настройки из демона
     try:
         form_data = load_settings_form_data()
@@ -233,8 +248,7 @@ def edit_settings():
         current_app.logger.exception(
             "Failed to load Authelia settings from configd: %s", exc
         )
-        msg = f"Failed to read Authelia configuration: {exc}"
-        msg_category = "danger"
+        settings_load_error = f"Failed to read Authelia configuration: {exc}"
         form_data = {
             "server": {},
             "log": {},
@@ -253,6 +267,7 @@ def edit_settings():
         "authelia_settings.html",
         msg=msg,
         msg_category=msg_category,
+        settings_load_error=settings_load_error,
         form=form_data,
         **form_data,
     )
