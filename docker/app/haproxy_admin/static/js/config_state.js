@@ -3,10 +3,22 @@
   "use strict";
 
   const POLL_INTERVAL_MS = 20000;
+  // Load, focus and visibilitychange all fire around a navigation, so the
+  // status was fetched several times in a row; on a high-latency link each of
+  // those is a full round-trip that competes with the page's own requests.
+  const MIN_REFRESH_GAP_MS = 3000;
   const CHANGE_EVENT = "easy-ha-proxy:config-state-changed";
   let requestRunning = false;
   let refreshQueued = false;
   let pollTimer = null;
+  let lastRefreshAt = 0;
+
+  // Passive triggers settle for a recent result; an explicit change still
+  // refreshes immediately.
+  function refreshStateIfStale() {
+    if (Date.now() - lastRefreshAt < MIN_REFRESH_GAP_MS) return;
+    refreshState();
+  }
 
   function t(value, params) {
     return typeof window.t === "function" ? window.t(value, params) : String(value);
@@ -81,6 +93,7 @@
       renderState(indicator, {state: "unknown"});
     } finally {
       requestRunning = false;
+      lastRefreshAt = Date.now();
       if (refreshQueued) {
         refreshQueued = false;
         window.setTimeout(refreshState, 0);
@@ -92,8 +105,8 @@
 
   document.addEventListener("DOMContentLoaded", refreshState);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) refreshState();
+    if (!document.hidden) refreshStateIfStale();
   });
-  window.addEventListener("focus", refreshState);
+  window.addEventListener("focus", refreshStateIfStale);
   document.addEventListener(CHANGE_EVENT, refreshState);
 })();
