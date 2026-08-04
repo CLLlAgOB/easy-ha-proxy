@@ -325,7 +325,7 @@
 }
 </style>
 
-<script>
+<script nonce="{{ csp_nonce }}">
   // is used in static/js/health.js
   window.HA_IS_SUPERADMIN = {{ 'true' if is_superadmin else 'false' }};
 </script>

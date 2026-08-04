@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,8 @@ from urllib.parse import urlsplit
 
 from flask import Request, current_app, g, has_request_context, request
 
+
+logger = logging.getLogger("haproxy-admin")
 
 CATALOG_DIR = Path(__file__).with_name("translations")
 DEFAULT_LANGUAGE = os.environ.get("HAPROXY_ADMIN_DEFAULT_LANGUAGE", "en").strip().lower()
@@ -134,7 +137,15 @@ def translate(message: str, language: str | None = None, **values: Any) -> str:
                 if pattern is not None
                 else translated.replace(source, target)
             )
-    return translated.format(**values) if values else translated
+    if not values:
+        return translated
+    try:
+        return translated.format(**values)
+    except (IndexError, KeyError, ValueError):
+        # A stray brace or an unknown placeholder in a catalog entry must not
+        # turn a user-facing message into a 500; show the unformatted text.
+        logger.warning("Cannot format translated message: %r", translated)
+        return translated
 
 
 def init_request_language() -> None:

@@ -3,7 +3,7 @@
 {% block header_title %}Home{% endblock %}
 
 {% block header_buttons %}
-<button class="btn btn-refresh" id="refresh-btn" onclick="Dashboard.manualRefresh()">
+<button class="btn btn-refresh" id="refresh-btn" data-dashboard-action="manualRefresh">
   <span class="spinner"></span>
   <span class="icon">⟳</span>
   <span class="check">✔</span>
@@ -153,7 +153,7 @@
 <div class="card">
   <div class="card-header">
     <h2>Threat analytics</h2>
-    <button class="btn" onclick="Dashboard.fetchAttackers()">Refresh data</button>
+    <button class="btn" data-dashboard-action="fetchAttackers">Refresh data</button>
   </div>
 
   <div class="grid">
@@ -185,7 +185,7 @@
 <div class="card">
   <div class="card-header">
     <h2>Active connections</h2>
-    <button class="btn" onclick="Dashboard.fetchConnections()">Refresh</button>
+    <button class="btn" data-dashboard-action="fetchConnections">Refresh</button>
   </div>
 
   <div class="table-header">

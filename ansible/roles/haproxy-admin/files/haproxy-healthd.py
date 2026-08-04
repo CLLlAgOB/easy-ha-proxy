@@ -1818,7 +1818,17 @@ class SiteAlertEngine(threading.Thread):
                 record["alerted_at"] is not None
                 and now - record["alerted_at"] >= SITE_ALERTS_REPEAT_SECONDS
             )
-            if elapsed >= threshold and (record["alerted_at"] is None or repeat_due):
+            # A partial outage turning into a full one is news on its own:
+            # report it immediately instead of waiting for the repeat window.
+            # It cannot loop, because the alert records the new state.
+            escalated = (
+                record["alerted_at"] is not None
+                and record["alerted_state"] == "degraded"
+                and state == "down"
+            )
+            if elapsed >= threshold and (
+                record["alerted_at"] is None or repeat_due or escalated
+            ):
                 label = "DOWN" if state == "down" else "PARTIALLY DOWN"
                 sent = self._send_mail(
                     recipient,
@@ -1851,15 +1861,20 @@ class SiteAlertEngine(threading.Thread):
                     )
                     if sent:
                         LOG.info("site-alerts: recovery notice sent for %s", name)
+                        record["bad_since"] = None
+                        record["alerted_at"] = None
+                        record["alerted_state"] = ""
+                        record["good_since"] = None
                     else:
+                        # Keep the incident open so the next cycle retries the
+                        # notice. Clearing it here would drop the recovery
+                        # message permanently, unlike the outage path which
+                        # records an alert only once it was really delivered.
                         LOG.warning(
-                            "site-alerts: recovery notice not delivered for %s",
+                            "site-alerts: recovery notice not delivered for %s; "
+                            "keeping the incident open to retry",
                             name,
                         )
-                    record["bad_since"] = None
-                    record["alerted_at"] = None
-                    record["alerted_state"] = ""
-                    record["good_since"] = None
             else:
                 record["bad_since"] = None
                 record["alerted_state"] = ""

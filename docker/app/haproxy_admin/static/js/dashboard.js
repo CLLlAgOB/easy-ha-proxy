@@ -812,6 +812,18 @@ const Dashboard = (() => {
     if (whitelistsBtn) {
       whitelistsBtn.onclick = () => loadWhitelists(true);
     }
+
+    // Replaces inline onclick="Dashboard.x()" so the CSP can drop
+    // 'unsafe-inline' from script-src.
+    const actions = {
+      manualRefresh: () => { loadTables(true); loadWhitelists(true); },
+      fetchAttackers,
+      fetchConnections
+    };
+    document.querySelectorAll('[data-dashboard-action]').forEach((button) => {
+      const handler = actions[button.dataset.dashboardAction];
+      if (handler) button.addEventListener('click', () => handler());
+    });
   }
   return {
     init,

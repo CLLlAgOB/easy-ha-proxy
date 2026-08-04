@@ -61,7 +61,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce }}">
   /* ================ RAW tables ================= */
   async function loadRawTables() {
     const banPre = document.getElementById('ban-raw');

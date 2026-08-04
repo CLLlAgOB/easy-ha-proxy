@@ -2026,6 +2026,46 @@ def _handle_rules_get(req: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "rules_yaml": rules_yaml}
 
 
+def _protected_domains() -> set[str]:
+    """Domains whose rules must keep requiring authentication."""
+    raw = os.environ.get("EASY_HA_PROXY_PROTECTED_DOMAINS", "")
+    return {
+        item.strip().lower().rstrip(".")
+        for item in raw.split(",")
+        if item.strip()
+    }
+
+
+def _reject_unprotected_control_plane(rules: List[Any]) -> None:
+    """Refuse rules that drop authentication for the control-plane domains.
+
+    The administration and Authelia domains must never be reachable with a
+    "bypass" policy: the UI is the tool that edits these rules, so a single
+    mistake there would otherwise remove its own front door protection.
+    """
+    protected = _protected_domains()
+    if not protected:
+        return
+    for index, rule in enumerate(rules):
+        policy = str(rule.get("policy") or "").strip().lower()
+        if policy != "bypass":
+            continue
+        raw_domains = rule.get("domain")
+        if isinstance(raw_domains, str):
+            candidates = [raw_domains]
+        elif isinstance(raw_domains, list):
+            candidates = [str(item) for item in raw_domains]
+        else:
+            continue
+        for candidate in candidates:
+            name = candidate.strip().lower().rstrip(".")
+            if name in protected:
+                raise ValueError(
+                    f"rules[{index}]: policy 'bypass' is not allowed for the "
+                    f"protected domain {name}"
+                )
+
+
 def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
     """
     Новый API для UI: принять YAML-список правил и сохранить его в access_control.rules.
@@ -2054,6 +2094,7 @@ def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError(
                     f"rules[{i}] must be a dict, got {type(r).__name__}"
                 )
+        _reject_unprotected_control_plane(parsed)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 

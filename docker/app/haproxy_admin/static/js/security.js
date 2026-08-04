@@ -74,6 +74,20 @@
       }
     });
 
+    // Replaces inline onchange="this.form.submit()" so the CSP does not need
+    // 'unsafe-inline' for scripts.
+    document.addEventListener("change", (event) => {
+      const control = event.target;
+      if (
+        !(control instanceof HTMLElement)
+        || !control.hasAttribute("data-submit-on-change")
+      ) {
+        return;
+      }
+      const form = control.closest("form");
+      if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+    });
+
     const themeToggle = document.getElementById("theme-toggle");
     if (themeToggle) {
       themeToggle.addEventListener("click", () => {

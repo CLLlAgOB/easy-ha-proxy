@@ -111,23 +111,23 @@
           Clients will stop trusting those sites until the new root certificate is installed in their trust stores.
           Download a certificate backup before continuing.
         </p>
-        <form method="post" style="margin-top:10px;">
+        <form method="post" style="margin-top:10px;"
+          data-confirm="Rotate the internal root CA and reissue all certificates signed by it?">
           <input type="hidden" name="action" value="rotate_internal_ca">
           <label class="form-label" for="rotate_confirmation">Type ROTATE to confirm</label>
           <input class="form-input" id="rotate_confirmation" name="confirmation" type="text"
             autocomplete="off" pattern="ROTATE" required style="max-width:220px;">
-          <button class="btn btn-danger" type="submit" style="margin-top:8px;"
-            onclick="return confirm('Rotate the internal root CA and reissue all certificates signed by it?');">
+          <button class="btn btn-danger" type="submit" style="margin-top:8px;">
             Rotate root CA and reissue certificates
           </button>
         </form>
-        <form method="post" style="margin-top:18px;">
+        <form method="post" style="margin-top:18px;"
+          data-confirm="Delete the internal root CA?">
           <input type="hidden" name="action" value="delete_internal_ca">
           <label class="form-label" for="delete_ca_confirmation">Type DELETE to confirm</label>
           <input class="form-input" id="delete_ca_confirmation" name="confirmation" type="text"
             autocomplete="off" pattern="DELETE" required style="max-width:220px;">
-          <button class="btn btn-danger" type="submit" style="margin-top:8px;"
-            onclick="return confirm('Delete the internal root CA?');">
+          <button class="btn btn-danger" type="submit" style="margin-top:8px;">
             Delete unused internal CA
           </button>
           <div class="table-meta" style="margin-top:6px;">
@@ -155,11 +155,11 @@
         <td>{{ ca.not_after }}</td>
         <td style="text-align:right; white-space:nowrap;">
           <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id=ca.id) }}">Download</a>
-          <form method="post" style="display:inline;">
+          <form method="post" style="display:inline;"
+            data-confirm="Delete this external certificate authority?">
             <input type="hidden" name="action" value="delete_external_ca">
             <input type="hidden" name="ca_id" value="{{ ca.id }}">
-            <button class="btn btn-small btn-danger" type="submit"
-              onclick="return confirm('Delete this external certificate authority?');">Delete</button>
+            <button class="btn btn-small btn-danger" type="submit">Delete</button>
           </form>
         </td>
       </tr>
@@ -430,7 +430,8 @@
     </p>
 
     <form id="certs-restore-form" action="{{ url_for('routes.haproxy_certs_restore') }}" method="post"
-      enctype="multipart/form-data" style="margin-top: 12px;">
+      enctype="multipart/form-data" style="margin-top: 12px;"
+      data-confirm="WARNING: existing certificates will be overwritten. Continue?">
 
       <label class="form-label" for="backup_file">
         Restore from backup (.zip)
@@ -449,8 +450,7 @@
       </div>
 
       <div style="margin-top: 10px;">
-        <button type="submit" class="btn btn-danger" id="backup_restore_btn" disabled
-          onclick="return confirm('WARNING: existing certificates will be overwritten. Continue?');">
+        <button type="submit" class="btn btn-danger" id="backup_restore_btn" disabled>
           Restore from backup
         </button>
       </div>

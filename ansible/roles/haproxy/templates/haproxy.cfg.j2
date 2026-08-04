@@ -177,7 +177,10 @@ backend tbl_nosni_tcp
 #################################
 frontend fe_tls_router
     mode tcp
-    bind *:443
+    # IPv4 only, deliberately: the ban set, the zero-trust authorization set and
+    # the firewall rules are IPv4 (ipset "family inet", iptables), so accepting
+    # IPv6 here would serve clients that those protections cannot cover.
+    bind ipv4@*:443
     option tcplog
 
     acl ip_whitelist src -f {{ whitelist_global_file }}
@@ -215,7 +218,7 @@ frontend fe_https
 {% if has_passthru %}
     bind 127.0.0.1:8443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 accept-proxy no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
 {% else %}
-    bind *:443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+    bind ipv4@*:443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
 {% endif %}
     mode http
     option dontlognull
@@ -724,7 +727,7 @@ frontend fe_https
 # HTTP → HTTPS (:80)
 #################################
 frontend fe_http80
-    bind *:80
+    bind ipv4@*:80
     mode http
     option dontlognull
 
@@ -762,7 +765,10 @@ frontend fe_http80
 {% for t in tcp_proxies %}
 frontend fe_tcp_{{ san(t.name) }}
     mode tcp
-    bind {{ t.bind_ip | default('*') }}:{{ t.bind_port }}
+{# Wildcard binds stay IPv4-only on purpose (see fe_tls_router); an explicit
+   operator address is used as given. #}
+{% set _tcp_bind_ip = t.bind_ip | default('*') %}
+    bind {{ 'ipv4@*' if _tcp_bind_ip == '*' else _tcp_bind_ip }}:{{ t.bind_port }}
     option tcplog
 
     acl ip_whitelist src -f {{ whitelist_global_file }}
@@ -1015,7 +1021,7 @@ backend be_maintenance
 
 {% if export_prometheus | default(false) %}
 listen stats_prom
-    bind *:{{ prometheus_port | default(8404) }}
+    bind ipv4@*:{{ prometheus_port | default(8404) }}
     mode http
     stats enable
     stats uri /

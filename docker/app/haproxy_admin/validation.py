@@ -1,6 +1,7 @@
 """Validation shared by the UI editors and whole-file YAML uploads."""
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Any
 
@@ -11,6 +12,8 @@ DOMAIN_RE = re.compile(
     r"[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
 )
 HOST_RE = re.compile(r"^[A-Za-z0-9_.:%-]{1,253}$")
+# A single hostname label such as a container or LAN short name.
+HOSTNAME_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$")
 ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 INTERVAL_RE = re.compile(r"^[1-9][0-9]*(?:ms|s|m|h|d)$")
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[A-Za-z0-9-]{2,63}$")
@@ -43,8 +46,33 @@ def validate_domain(value: Any, label: str = "domain") -> str:
 
 
 def validate_host(value: Any, label: str) -> str:
+    """Accept an IPv4/IPv6 literal or a DNS name.
+
+    The character class alone would pass structurally impossible values such
+    as "1.2.3.4.5" or "---", which only fail later during the HAProxy
+    configuration check with a message that does not point at the field.
+    """
     text = str(value or "").strip()
     if not HOST_RE.fullmatch(text) or CONTROL_RE.search(text):
+        raise ValueError(f"{label}: invalid IP address or hostname")
+    literal = text
+    if literal.startswith("[") and literal.endswith("]"):
+        literal = literal[1:-1]
+    # An IPv6 literal may carry a zone index (fe80::1%eth0).
+    literal = literal.split("%", 1)[0]
+    try:
+        ipaddress.ip_address(literal)
+        return text
+    except ValueError:
+        pass
+    if ":" in text:
+        # Only an IP literal may contain a colon; a DNS name may not.
+        raise ValueError(f"{label}: invalid IP address or hostname")
+    labels = text.split(".")
+    if all(part.isdigit() for part in labels):
+        # Looks like an IP address but did not parse as one (1.2.3.4.5).
+        raise ValueError(f"{label}: invalid IP address or hostname")
+    if not DOMAIN_RE.fullmatch(text) and not HOSTNAME_LABEL_RE.fullmatch(text):
         raise ValueError(f"{label}: invalid IP address or hostname")
     return text
 

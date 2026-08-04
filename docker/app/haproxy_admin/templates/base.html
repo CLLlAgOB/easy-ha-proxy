@@ -10,7 +10,7 @@
   <link rel="stylesheet"
         href="{{ url_for('static', filename='css/styles.css') }}">
 
-  <script>
+  <script nonce="{{ csp_nonce }}">
     window.HAPROXY_ADMIN_I18N = {{ i18n_config | tojson }};
     window.HAPROXY_ADMIN_FLAG_BASE = {{ url_for('static', filename='vendor/flag-icons/flags/4x3/') | tojson }};
   </script>
@@ -58,7 +58,7 @@
         <input type="hidden" name="next" value="{{ request.full_path }}">
         <label class="visually-hidden" for="language-select">Interface language</label>
         <select id="language-select" name="language" aria-label="Interface language"
-                onchange="this.form.submit()">
+                data-submit-on-change>
           {% for language in supported_languages %}
           <option value="{{ language.code }}" {% if language.code == current_language %}selected{% endif %}>
             {{ language.label }}

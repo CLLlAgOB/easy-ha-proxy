@@ -14,6 +14,7 @@ services.py — таблицы ban/err, лог-аналитика, ipset-FW, с�
 from __future__ import annotations
 
 import csv
+import fcntl
 import os
 import socket
 import json
@@ -802,6 +803,59 @@ def _safe_reload_haproxy() -> str:
         return f"reload failed: {exc}"
 
 
+def _canonical_cidr(value: str) -> str | None:
+    """Return a canonical CIDR for an address or network, or None if invalid.
+
+    A bare address is a single host, so the prefix length follows its family:
+    /32 for IPv4 and /128 for IPv6. Emitting /32 for an IPv6 address would
+    allow a huge block instead of one host.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if "/" in text:
+            return str(ipaddress.ip_network(text, strict=False))
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    return f"{address}/{address.max_prefixlen}"
+
+
+def _toggle_cidr_in_file(path: str, cidr: str) -> tuple[bool, str | None]:
+    """Add or remove one CIDR under an exclusive lock.
+
+    Returns ``(removed, error)``. The file is rewritten in place rather than
+    replaced so the mode and ownership assigned by Ansible survive (HAProxy
+    must keep read access), while the lock stops two Gunicorn workers from
+    losing each other's edit during the read-modify-write.
+    """
+    try:
+        with open(path, "r+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                lines = handle.readlines()
+                removed = any(line.strip() == cidr for line in lines)
+                if removed:
+                    kept = [line for line in lines if line.strip() != cidr]
+                else:
+                    kept = [
+                        line if line.endswith("\n") else line + "\n"
+                        for line in lines
+                    ]
+                    kept.append(cidr + "\n")
+                handle.seek(0)
+                handle.writelines(kept)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        return False, str(exc)
+    return removed, None
+
+
 def add_to_whitelist(ip: str):
     """
     ТЕПЕРЬ: toggle-поведение.
@@ -810,63 +864,29 @@ def add_to_whitelist(ip: str):
     • Если ТАКОЙ CIDR уже есть в файле whitelist.geo — удаляем из файла и runtime ACL.
     • Если нет — добавляем и подгружаем в runtime ACL.
     """
-    try:
-        ipaddress.ip_address(ip)
-        cidr = f"{ip}/32"
-    except ValueError:
-        try:
-            cidr = str(ipaddress.ip_network(ip, strict=False))
-        except ValueError:
-            return "Invalid IP/network", 400
+    cidr = _canonical_cidr(ip)
+    if cidr is None:
+        return "Invalid IP/network", 400
 
     ensure_whitelist_file()
 
-    # читаем текущий файл
-    try:
-        with open(WHITELIST_FILE, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        logger.error("add_to_whitelist: read error: %s", e)
-        return f"Allow-list file read error: {e}", 500
+    removed, error = _toggle_cidr_in_file(WHITELIST_FILE, cidr)
+    if error is not None:
+        logger.error("add_to_whitelist: file error: %s", error)
+        return f"Allow-list file write error: {error}", 500
 
-    exists_exact = any(ln.strip() == cidr for ln in lines)
-
-    if exists_exact:
-        # ─── режим УДАЛЕНИЯ ───
-        new_lines = [ln for ln in lines if ln.strip() != cidr]
-        try:
-            with open(WHITELIST_FILE, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-        except OSError as e:
-            logger.error("add_to_whitelist: write error (remove): %s", e)
-            return f"Allow-list file write error: {e}", 500
-
+    if removed:
         rt_res = _safe_runtime_acl("remove", cidr, _del_acl_runtime)
         rl_res = _safe_reload_haproxy()
-
-        # КОРОТКОЕ сообщение пользователю
-        msg = f"Removed: {cidr}"
-        # Если хочешь, можно логировать подробности:
         logger.info("whitelist remove %s (rt=%s, reload=%s)",
                     cidr, rt_res, rl_res)
-
-        return msg, 200
-
-    # ─── режим ДОБАВЛЕНИЯ ───
-    try:
-        with open(WHITELIST_FILE, "a", encoding="utf-8") as f:
-            f.write(cidr + "\n")
-    except OSError as e:
-        logger.error("add_to_whitelist: write error (add): %s", e)
-        return f"Allow-list file write error: {e}", 500
+        return f"Removed: {cidr}", 200
 
     rt_res = _safe_runtime_acl("add", cidr, _add_acl_runtime)
     rl_res = _safe_reload_haproxy()
-
-    msg = f"Added: {cidr}"
     logger.info("whitelist add %s (rt=%s, reload=%s)", cidr, rt_res, rl_res)
 
-    return msg, 200
+    return f"Added: {cidr}", 200
 
 
 # ───── helpers для ГЛОБАЛЬНОГО файла ─────
@@ -911,64 +931,32 @@ def add_to_global_whitelist(ip: str):
     • Если такой CIDR уже есть в файле — удаляем и из файла, и из runtime ACL.
     • Если нет — добавляем и подгружаем.
     """
-    try:
-        ipaddress.ip_address(ip)
-        cidr = f"{ip}/32"
-    except ValueError:
-        try:
-            cidr = str(ipaddress.ip_network(ip, strict=False))
-        except ValueError:
-            return "Invalid IP/network", 400
+    cidr = _canonical_cidr(ip)
+    if cidr is None:
+        return "Invalid IP/network", 400
 
     ensure_whitelist_global_file()
 
-    try:
-        with open(WHITELIST_GLOBAL_FILE, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        logger.error("add_to_global_whitelist: read error: %s", e)
-        return f"Global allow-list file read error: {e}", 500
+    removed, error = _toggle_cidr_in_file(WHITELIST_GLOBAL_FILE, cidr)
+    if error is not None:
+        logger.error("add_to_global_whitelist: file error: %s", error)
+        return f"Global allow-list file write error: {error}", 500
 
-    exists_exact = any(ln.strip() == cidr for ln in lines)
-
-    if exists_exact:
-        # ─── УДАЛЕНИЕ ───
-        new_lines = [ln for ln in lines if ln.strip() != cidr]
-        try:
-            with open(WHITELIST_GLOBAL_FILE, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-        except OSError as e:
-            logger.error(
-                "add_to_global_whitelist: write error (remove): %s", e)
-            return f"Global allow-list file write error: {e}", 500
-
+    if removed:
         rt_res = _safe_runtime_acl(
             "remove-global", cidr, _del_acl_runtime_global
         )
         rl_res = _safe_reload_haproxy()
-
-        msg = f"Removed from global allow list: {cidr}"
         logger.info("global whitelist remove %s (rt=%s, reload=%s)",
                     cidr, rt_res, rl_res)
-
-        return msg, 200
-
-    # ─── ДОБАВЛЕНИЕ ───
-    try:
-        with open(WHITELIST_GLOBAL_FILE, "a", encoding="utf-8") as f:
-            f.write(cidr + "\n")
-    except OSError as e:
-        logger.error("add_to_global_whitelist: write error (add): %s", e)
-        return f"Global allow-list file write error: {e}", 500
+        return f"Removed from global allow list: {cidr}", 200
 
     rt_res = _safe_runtime_acl("add-global", cidr, _add_acl_runtime_global)
     rl_res = _safe_reload_haproxy()
-
-    msg = f"Added to global allow list: {cidr}"
     logger.info("global whitelist add %s (rt=%s, reload=%s)",
                 cidr, rt_res, rl_res)
 
-    return msg, 200
+    return f"Added to global allow list: {cidr}", 200
 
 
 # ───────── активные сессии (агрегация по IP) ─────────────────────

@@ -19,6 +19,8 @@ Environment="AUTHELIA_VALIDATE_CONFIG={{ authelia_configd_validate_config | bool
 Environment="AUTHELIA_ENV_FILE={{ authelia_env_file }}"
 Environment="AUTHELIA_COMPOSE_FILE={{ authelia_root_dir }}/docker-compose.yml"
 Environment="EASY_HA_PROXY_CONFIG_DIR={{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}"
+# Domains whose access rules must keep requiring authentication.
+Environment="EASY_HA_PROXY_PROTECTED_DOMAINS={{ [admin_domain | default(''), aut_domain | default('')] | select | join(',') }}"
 Environment="AUTHELIA_HAPROXY_SOCKET={{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
 Environment="AUTHELIA_NOTIFICATION_ROOT={{ authelia_root_dir }}"
 Environment="AUTHELIA_NOTIFICATION_STATE_DIR=/var/lib/easy-ha-proxy"

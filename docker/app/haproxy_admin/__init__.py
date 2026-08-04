@@ -149,10 +149,21 @@ def create_app() -> Flask:
             )
 
     csrf.init_app(app)
+
+    @app.before_request
+    def assign_csp_nonce():
+        # A per-request nonce lets the CSP allow this page's own inline
+        # bootstrap scripts without allowing injected ones.
+        g.csp_nonce = secrets.token_urlsafe(16)
+
     app.before_request(init_request_language)
     app.before_request(enforce_proxy_and_role)
     app.after_request(apply_security_headers)
     app.after_request(localize_json_response)
+
+    @app.context_processor
+    def inject_csp_nonce():
+        return {"csp_nonce": getattr(g, "csp_nonce", "")}
 
     @app.context_processor
     def inject_i18n_context():

@@ -106,11 +106,16 @@ def apply_security_headers(response):
     response.headers.setdefault(
         "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
     )
+    # Inline scripts carry the per-request nonce, so 'unsafe-inline' is not
+    # needed for script-src. style-src keeps it on purpose: the templates rely
+    # on inline style attributes, which cannot execute code.
+    nonce = getattr(g, "csp_nonce", "")
+    script_src = f"'self' 'nonce-{nonce}'" if nonce else "'self'"
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "
         "form-action 'self'; object-src 'none'; "
-        "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        f"script-src {script_src}; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'",
     )
     return response
