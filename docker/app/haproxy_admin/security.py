@@ -103,7 +103,10 @@ def apply_security_headers(response):
     # Static files are versioned in their URL, so a released asset never
     # changes under a given URL and the browser can keep it without the
     # revalidation round-trip that every navigation used to pay.
-    if request.endpoint == "static" and response.status_code == 200:
+    # 304 must carry it too: the browser refreshes the stored policy from the
+    # revalidation response, so omitting it there keeps the entry revalidating
+    # on every navigation.
+    if request.endpoint == "static" and response.status_code in (200, 304):
         response.headers["Cache-Control"] = (
             f"public, max-age={STATIC_CACHE_SECONDS}, immutable"
         )

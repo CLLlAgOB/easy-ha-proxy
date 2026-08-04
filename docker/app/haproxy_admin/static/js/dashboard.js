@@ -206,8 +206,11 @@ const Dashboard = (() => {
         const cc = /^[a-z]{2}$/.test(rawCc) ? rawCc : '';
         const flag = window.countryFlagMarkup(cc);
 
-        // Вставляем флаг перед содержимым ячейки
-        td.innerHTML = `${flag}${td.innerHTML}`;
+        // Вставляем флаг перед содержимым ячейки.
+        // insertAdjacentHTML не пересоздаёт остальные узлы: перезапись
+        // innerHTML отменяла ещё не завершившиеся загрузки флагов
+        // (NS_BINDING_ABORTED) при обновлении таблиц.
+        td.insertAdjacentHTML('afterbegin', flag);
       });
     } catch (e) {
       console.warn('decorateFlags:', e);

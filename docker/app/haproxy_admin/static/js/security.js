@@ -19,7 +19,11 @@
     }
     const base = String(window.HAPROXY_ADMIN_FLAG_BASE || "");
     const source = `${base}${encodeURIComponent(code)}.svg`;
-    return `<img class="country-flag" src="${window.escapeHtml(source)}" alt="" loading="lazy">`;
+    // Not lazy on purpose: a flag is a few hundred bytes and always inside a
+    // visible table, while the tables re-render every few seconds. A deferred
+    // load was regularly cancelled mid-flight (NS_BINDING_ABORTED), leaving an
+    // empty box where the flag should be.
+    return `<img class="country-flag" src="${window.escapeHtml(source)}" alt="" decoding="async">`;
   };
 
   const token = () => {
