@@ -33,9 +33,19 @@
     return false;
   }
 
+  // A string without an exact catalog hit is scanned against every rule, which
+  // is the expensive path. The same labels repeat across a page and on every
+  // dynamically rendered row, so remember what each source string resolves to.
+  const translationCache = new Map();
+  const TRANSLATION_CACHE_LIMIT = 5000;
+
   function translate(value, params) {
     if (value == null) return "";
     const source = String(value);
+    if (!params) {
+      const cached = translationCache.get(source);
+      if (cached !== undefined) return cached;
+    }
     const normalized = source.replace(/\s+/g, " ").trim();
     let result = Object.prototype.hasOwnProperty.call(messages, source)
       ? messages[source]
@@ -51,6 +61,10 @@
           result = result.split(item.source).join(item.target);
         }
       }
+    }
+    if (!params) {
+      if (translationCache.size >= TRANSLATION_CACHE_LIMIT) translationCache.clear();
+      translationCache.set(source, result);
     }
 
     if (params) {

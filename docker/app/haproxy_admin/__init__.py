@@ -26,7 +26,11 @@ from .i18n import (
     translate,
 )
 from .utils import ensure_whitelist_file
-from .security import apply_security_headers, enforce_proxy_and_role
+from .security import (
+    STATIC_CACHE_SECONDS,
+    apply_security_headers,
+    enforce_proxy_and_role,
+)
 
 # Import routes so they register themselves on their blueprints.
 from . import routes
@@ -55,6 +59,31 @@ _DEFAULT_SECRET_FILE = "/opt/haproxy-admin/config/secret.key"
 # The catalog is static for the life of the process (loaded from bundled
 # files), so building the asset once per worker is safe.
 _I18N_ASSET_CACHE: dict[str, dict[str, object]] = {}
+
+# Static files are addressed by a content version, so they can be cached hard.
+_STATIC_VERSIONS: dict[str, str] = {}
+
+
+def _static_version(static_folder: str | None, filename: str) -> str:
+    """Return a short content version for a static file (cached per process).
+
+    Derived from size and mtime, which changes whenever the image ships a new
+    asset, so a released file never keeps a stale cached copy.
+    """
+    if not static_folder:
+        return ""
+    cached = _STATIC_VERSIONS.get(filename)
+    if cached is not None:
+        return cached
+    try:
+        info = os.stat(os.path.join(static_folder, filename))
+    except OSError:
+        return ""
+    version = hashlib.sha256(
+        f"{info.st_size}:{info.st_mtime_ns}".encode("ascii")
+    ).hexdigest()[:12]
+    _STATIC_VERSIONS[filename] = version
+    return version
 
 
 def _i18n_messages_asset(language: str) -> dict[str, object]:
@@ -134,7 +163,18 @@ def create_app() -> Flask:
         SESSION_COOKIE_SECURE=True,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",
+        # Static URLs carry a content version (see add_static_version), so the
+        # browser may keep them instead of revalidating every asset on every
+        # navigation - each revalidation also cost an Authelia auth-request.
+        SEND_FILE_MAX_AGE_DEFAULT=STATIC_CACHE_SECONDS,
     )
+
+    @app.url_defaults
+    def add_static_version(endpoint: str, values: dict) -> None:
+        if endpoint == "static" and "filename" in values and "v" not in values:
+            version = _static_version(app.static_folder, values["filename"])
+            if version:
+                values["v"] = version
 
     @app.before_request
     def configure_request_body_limit():

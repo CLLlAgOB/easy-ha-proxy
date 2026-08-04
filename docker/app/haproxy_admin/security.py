@@ -12,6 +12,8 @@ from .i18n import translate
 
 
 PROXY_SECRET_HEADER = "X-Easy-HA-Proxy-Secret"
+# Kept in sync with the app factory's SEND_FILE_MAX_AGE_DEFAULT.
+STATIC_CACHE_SECONDS = 31536000
 ADMIN_GROUPS: FrozenSet[str] = frozenset({"admins", "superadmin"})
 SUPERADMIN_PREFIXES = (
     "/haproxy",
@@ -98,6 +100,13 @@ def enforce_proxy_and_role():
 
 
 def apply_security_headers(response):
+    # Static files are versioned in their URL, so a released asset never
+    # changes under a given URL and the browser can keep it without the
+    # revalidation round-trip that every navigation used to pay.
+    if request.endpoint == "static" and response.status_code == 200:
+        response.headers["Cache-Control"] = (
+            f"public, max-age={STATIC_CACHE_SECONDS}, immutable"
+        )
     response.headers.setdefault("Cache-Control", "no-store")
     response.headers.setdefault("Pragma", "no-cache")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
