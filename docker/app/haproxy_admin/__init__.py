@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import secrets
+import stat
 
 from flask import Flask, abort, g, jsonify, redirect, request, url_for
 from flask_wtf.csrf import CSRFError, CSRFProtect
@@ -68,7 +69,9 @@ def _static_version(static_folder: str | None, filename: str) -> str:
     """Return a short content version for a static file (cached per process).
 
     Derived from size and mtime, which changes whenever the image ships a new
-    asset, so a released file never keeps a stale cached copy.
+    asset, so a released file never keeps a stale cached copy. Only regular
+    files are versioned: some callers build a directory URL and append the file
+    name in JavaScript, and a query string there would land before the name.
     """
     if not static_folder:
         return ""
@@ -78,6 +81,9 @@ def _static_version(static_folder: str | None, filename: str) -> str:
     try:
         info = os.stat(os.path.join(static_folder, filename))
     except OSError:
+        return ""
+    if not stat.S_ISREG(info.st_mode):
+        _STATIC_VERSIONS[filename] = ""
         return ""
     version = hashlib.sha256(
         f"{info.st_size}:{info.st_mtime_ns}".encode("ascii")
