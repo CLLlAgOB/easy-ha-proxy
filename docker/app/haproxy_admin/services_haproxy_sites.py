@@ -31,6 +31,9 @@ from .validation import (
 
 DEFAULT_HAPROXY_CERTS_DIR = Path("/etc/haproxy/certs")
 ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
+# Must stay in step with DNS_PROFILE_RE in haproxy-certd.py: the profile name
+# is a file name in a root-owned directory on the other side.
+DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 #LE_LIVE_DIR = Path("/etc/letsencrypt/live")
 #CERT_WARN_DAYS = 30  # за сколько дней до истечения показывать предупреждение
 
@@ -201,6 +204,58 @@ def _normalize_site_geo_countries(value: Any) -> List[str]:
             + ", ".join(unavailable)
         )
     return normalized
+
+
+def _normalize_name_list(value: Any, label: str, limit: int) -> List[str]:
+    """Accept a list, or a textarea/comma separated string, of DNS names."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        items = [part for part in re.split(r"[,\s]+", value) if part]
+    elif isinstance(value, list):
+        items = []
+        for raw in value:
+            if not isinstance(raw, str):
+                raise ValueError(f"{label} must contain only strings")
+            text = raw.strip()
+            if text:
+                items.append(text)
+    else:
+        raise ValueError(f"{label} must be a list of DNS names")
+    if len(items) > limit:
+        raise ValueError(f"{label} must contain at most {limit} names")
+    return items
+
+
+def _normalize_site_alt_names(value: Any, domain: str) -> List[str]:
+    """Validate the additional routing names of a site.
+
+    These land in ``hdr(host) -i`` and ``ssl_fc_sni -i`` ACLs, so they are
+    matched literally and a wildcard among them would silently route nothing.
+    """
+    seen: List[str] = []
+    for raw in _normalize_name_list(value, "alt_names", 100):
+        name = validate_domain(raw, "alt_names")
+        if name == domain or name in seen:
+            continue
+        seen.append(name)
+    return seen
+
+
+def _normalize_site_cert_alt_names(
+    value: Any, *, allow_wildcard: bool, taken: List[str]
+) -> List[str]:
+    """Validate names that exist only to widen the certificate's SAN list."""
+    already = {name for name in taken if name}
+    seen: List[str] = []
+    for raw in _normalize_name_list(value, "cert_alt_names", 100):
+        name = validate_domain(
+            raw, "cert_alt_names", allow_wildcard=allow_wildcard
+        )
+        if name in already or name in seen:
+            continue
+        seen.append(name)
+    return seen
 
 
 def add_site_minimal(
@@ -441,6 +496,52 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
         )
     site_out["certificate_source"] = certificate_source
     site_out["le_managed"] = certificate_source == "letsencrypt"
+
+    # Routing names go into HAProxy ACLs verbatim, so they must be real names.
+    # They were never validated here, which let a stray value reach the
+    # generated configuration.
+    try:
+        alt_names = _normalize_site_alt_names(site_out.get("alt_names"), domain)
+    except ValueError as exc:
+        return False, str(exc)
+    if alt_names:
+        site_out["alt_names"] = alt_names
+    else:
+        site_out.pop("alt_names", None)
+
+    # DNS-01 validation, and with it wildcard certificates, only exists for
+    # Let's Encrypt lineages.
+    dns_profile = ""
+    if certificate_source == "letsencrypt":
+        dns_profile = str(site_out.get("dns_profile") or "").strip().lower()
+        if dns_profile and not DNS_PROFILE_RE.fullmatch(dns_profile):
+            return False, "Invalid DNS provider profile name"
+    if dns_profile:
+        site_out["dns_profile"] = dns_profile
+    else:
+        site_out.pop("dns_profile", None)
+
+    # Extra certificate names never reach an ACL: they only widen the SAN list,
+    # which is what makes a wildcard useful here — new subdomains can be routed
+    # later without touching the certificate.
+    try:
+        cert_alt_names = _normalize_site_cert_alt_names(
+            site_out.get("cert_alt_names"),
+            allow_wildcard=bool(dns_profile),
+            taken=[domain] + alt_names,
+        )
+    except ValueError as exc:
+        return False, str(exc)
+    if cert_alt_names:
+        if certificate_source == "external":
+            return False, (
+                "Extra certificate names do not apply to an external "
+                "certificate authority"
+            )
+        site_out["cert_alt_names"] = cert_alt_names
+    else:
+        site_out.pop("cert_alt_names", None)
+
     if certificate_source == "external":
         external_ca_id = str(site_out.get("external_ca_id") or "").strip().lower()
         if not external_ca_id:
@@ -728,7 +829,12 @@ def ensure_certs_before_apply() -> Dict[str, Any]:
             key_types = eff.get("key_types") or []
 
             if source == "letsencrypt":
-                res = issue_cert_for_domain(domain, alt_names, key_types)
+                res = issue_cert_for_domain(
+                    domain,
+                    list(alt_names) + list(eff.get("cert_alt_names") or []),
+                    key_types,
+                    dns_profile=str(eff.get("dns_profile") or ""),
+                )
             elif source == "internal":
                 res = issue_internal_cert_for_domain(domain, alt_names)
             else:

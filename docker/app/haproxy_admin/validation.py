@@ -15,6 +15,9 @@ HOST_RE = re.compile(r"^[A-Za-z0-9_.:%-]{1,253}$")
 # A single hostname label such as a container or LAN short name.
 HOSTNAME_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$")
 ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
+# A DNS-01 profile name is a file name in a root-owned directory on the certd
+# side; keep this in step with DNS_PROFILE_RE in haproxy-certd.py.
+DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 INTERVAL_RE = re.compile(r"^[1-9][0-9]*(?:ms|s|m|h|d)$")
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[A-Za-z0-9-]{2,63}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -38,11 +41,32 @@ def validate_identifier(value: Any, label: str) -> str:
     return text
 
 
-def validate_domain(value: Any, label: str = "domain") -> str:
+def validate_domain(
+    value: Any, label: str = "domain", *, allow_wildcard: bool = False
+) -> str:
+    """Validate a DNS name.
+
+    A wildcard is refused by default. HAProxy matches routing names literally
+    (``hdr(host) -i``, ``ssl_fc_sni -i``), so a ``*.example.com`` used as a
+    routing name would build a configuration that passes ``haproxy -c`` and
+    then never matches a request. Only names that exist purely to appear on a
+    certificate may be wildcards.
+    """
     text = str(value or "").strip().lower()
     if not DOMAIN_RE.fullmatch(text):
         raise ValueError(f"{label}: invalid DNS name")
-    return text.rstrip(".")
+    text = text.rstrip(".")
+    if text.startswith("*."):
+        if not allow_wildcard:
+            raise ValueError(
+                f"{label}: a wildcard is only allowed among the extra "
+                f"certificate names, and only with DNS-01 validation"
+            )
+        if len(text.split(".")) < 3:
+            raise ValueError(
+                f"{label}: a wildcard needs at least two labels beneath it"
+            )
+    return text
 
 
 def validate_host(value: Any, label: str) -> str:
@@ -206,6 +230,28 @@ def _validate_site(site: Any, index: int) -> None:
                 raise ValueError(
                     f"sites[{index}].geo_countries[{country_index}] must be an uppercase ISO alpha-2 code"
                 )
+    # Routing names are matched literally by HAProxy; only the certificate-only
+    # names may carry a wildcard, and then only with DNS-01.
+    dns_profile = site.get("dns_profile")
+    if dns_profile is not None:
+        if not DNS_PROFILE_RE.fullmatch(str(dns_profile).strip().lower()):
+            raise ValueError(
+                f"sites[{index}].dns_profile: may use a-z, 0-9 and dashes"
+            )
+    for key, allow_wildcard in (("alt_names", False), ("cert_alt_names", True)):
+        names = site.get(key)
+        if names is None:
+            continue
+        if not isinstance(names, list) or len(names) > 100:
+            raise ValueError(
+                f"sites[{index}].{key} must be a list of at most 100 DNS names"
+            )
+        for name_index, name in enumerate(names):
+            validate_domain(
+                name,
+                f"sites[{index}].{key}[{name_index}]",
+                allow_wildcard=allow_wildcard and bool(dns_profile),
+            )
     if site.get("access_gate") is not None and not isinstance(
         site["access_gate"], bool
     ):

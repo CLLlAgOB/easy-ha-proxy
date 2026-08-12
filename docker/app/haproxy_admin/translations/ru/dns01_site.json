@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Validation": "Проверка домена",
+    "HTTP-01 answers the challenge on port 80. DNS-01 writes a TXT record through a saved DNS provider profile, which works when port 80 is unreachable and is the only way to get a wildcard certificate.": "HTTP-01 отвечает на проверку по порту 80. DNS-01 создаёт TXT-запись через сохранённый профиль DNS-провайдера: это работает, когда порт 80 недоступен, и это единственный способ получить wildcard-сертификат.",
+    "DNS provider profile": "Профиль DNS-провайдера",
+    "Select a DNS provider profile": "Выберите профиль DNS-провайдера",
+    "A profile marked [!] is missing its Certbot plugin, and one marked [?] no longer exists; neither can issue a certificate. Profiles are created on the DNS providers page.": "Профиль с пометкой [!] остался без плагина Certbot, а с пометкой [?] — больше не существует; ни тот, ни другой выпустить сертификат не смогут. Профили создаются на странице DNS-провайдеров.",
+    "Open the DNS providers page": "Открыть страницу DNS-провайдеров",
+    "Extra certificate names": "Дополнительные имена в сертификате",
+    "One name per line. These are added to the certificate only and are never routed, which is where a wildcard belongs: new subdomains can then be added to alt names later without reissuing the certificate.": "По одному имени в строке. Эти имена попадают только в сертификат и никогда не участвуют в маршрутизации — именно здесь место wildcard: новые поддомены потом можно добавлять в alt names, не перевыпуская сертификат."
+  }
+}

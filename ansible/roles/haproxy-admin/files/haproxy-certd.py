@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import base64
 import cgi
+import contextlib
 import io
 import json
 import logging
 import os
+import re
+import secrets
 import shutil
 import socketserver
 import ssl
@@ -72,6 +75,54 @@ CERTBOT_BIN = Path(os.environ.get("CERTBOT_BIN", "/snap/bin/certbot"))
 CERTBOT_HTTP_PORT = 8000
 CERTBOT_HTTP_ADDR = "0.0.0.0"
 
+# --- DNS-01 -----------------------------------------------------------------
+#
+# Certbot здесь ставится snap'ом, поэтому и плагины — тоже snap'ы, версия в
+# версию с самим certbot: `snap install certbot-dns-<provider>`,
+# `snap set certbot trust-plugin-with-root=ok`,
+# `snap connect certbot:plugin certbot-dns-<provider>`. Пакетов apt тут нет.
+#
+# Провайдер и имена его ключей — фиксированный набор. Из браузера приходит
+# только имя профиля и значения; ни имя плагина, ни аргументы certbot из
+# запроса не берутся никогда.
+DNS_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "cloudflare": {
+        "plugin": "dns-cloudflare",
+        "snap": "certbot-dns-cloudflare",
+        "keys": ("dns_cloudflare_api_token",),
+    },
+    "digitalocean": {
+        "plugin": "dns-digitalocean",
+        "snap": "certbot-dns-digitalocean",
+        "keys": ("dns_digitalocean_token",),
+    },
+    "route53": {
+        "plugin": "dns-route53",
+        "snap": "certbot-dns-route53",
+        "keys": ("aws_access_key_id", "aws_secret_access_key"),
+    },
+    "rfc2136": {
+        "plugin": "dns-rfc2136",
+        "snap": "certbot-dns-rfc2136",
+        "keys": (
+            "dns_rfc2136_server",
+            "dns_rfc2136_port",
+            "dns_rfc2136_name",
+            "dns_rfc2136_secret",
+            "dns_rfc2136_algorithm",
+        ),
+    },
+}
+
+DNS_CREDENTIALS_DIR = Path(
+    os.environ.get("HAPROXY_DNS_CREDENTIALS_DIR", "/etc/easy-ha-proxy/dns-providers")
+)
+DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DNS_VALUE_MAX = 4096
+DNS_PROPAGATION_MIN = 10
+DNS_PROPAGATION_MAX = 1800
+DNS_PROPAGATION_DEFAULT = 60
+
 # Скрипт, который пересобирает PEM для HAProxy и делает reload
 HAPROXY_PEMS_SCRIPT = Path(
     os.environ.get(
@@ -87,6 +138,55 @@ DEFAULT_CA_ROOT_DIR = Path("/etc/haproxy/certificate-authorities")
 
 # Предупреждать, если до конца срока действия меньше N дней
 CERT_WARN_DAYS = 30
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose:
+# certificates are issued the same way without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="certd")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine something failed. Never disturbs issuance."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
+
+
+def report_alert_level(
+    rule: str,
+    subject: str,
+    *,
+    active: bool,
+    severity: str = "",
+    summary: str = "",
+    detail: str = "",
+) -> None:
+    """Report a level condition. Never disturbs the daemon."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(
+            rule,
+            subject,
+            active=active,
+            severity=severity,
+            summary=summary,
+            detail=detail,
+        )
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 
 # Dry-run: не трогаем файлы, certbot запускаем с --dry-run
 CERTD_DRY_RUN = os.environ.get("HAPROXY_CERTD_DRY_RUN", "0") == "1"
@@ -184,10 +284,25 @@ def _prepare_ca_subdir(name: str, create: bool = False) -> Path:
     return directory
 
 
-def _normalize_dns_name(value: str) -> str:
+def _normalize_dns_name(value: str, *, allow_wildcard: bool = False) -> str:
     name = (value or "").strip().rstrip(".").lower()
     if not name or len(name) > 253 or any(ch in name for ch in "/\\\x00\r\n"):
         raise ValueError("invalid DNS name")
+
+    if name.startswith("*."):
+        # A wildcard is only ever the leftmost label, and only where the caller
+        # said one is acceptable — everything else still refuses the character.
+        if not allow_wildcard:
+            raise ValueError("a wildcard name is not allowed here")
+        remainder = name[2:]
+        if "*" in remainder:
+            raise ValueError("only one wildcard label is allowed")
+        base = _normalize_dns_name(remainder)
+        if len(base.split(".")) < 2:
+            raise ValueError("a wildcard needs at least two labels beneath it")
+        return "*." + base
+    if "*" in name:
+        raise ValueError("a wildcard is only allowed as the leftmost label")
     try:
         ascii_name = name.encode("idna").decode("ascii")
     except UnicodeError as exc:
@@ -266,6 +381,187 @@ def _get_certbot_settings() -> Tuple[str, str, int, str]:
 # ───────────────────── Certbot execution ─────────────────────
 
 
+def _dns_profile_path(name: str) -> Path:
+    """Путь к файлу учётных данных профиля.
+
+    Имя сверяется с шаблоном, а не склеивается с путём как есть: этот файл
+    отдаётся certbot от root.
+    """
+
+    if not DNS_PROFILE_RE.match(str(name or "")):
+        raise ValueError("invalid DNS provider profile name")
+    return DNS_CREDENTIALS_DIR / f"{name}.ini"
+
+
+def _installed_dns_plugins() -> set[str]:
+    """Какие DNS-плагины certbot реально видит прямо сейчас."""
+
+    try:
+        proc = subprocess.run(
+            [str(CERTBOT_BIN), "plugins", "--non-interactive"],
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception:  # noqa: BLE001
+        return set()
+    found: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        entry = line.strip()
+        if entry.startswith("* "):
+            found.add(entry[2:].strip())
+    return found
+
+
+def list_dns_providers() -> Dict[str, Any]:
+    """Профили и доступность плагинов. Секреты не возвращаются никогда."""
+
+    available = _installed_dns_plugins()
+    profiles: List[Dict[str, Any]] = []
+    if DNS_CREDENTIALS_DIR.is_dir():
+        for path in sorted(DNS_CREDENTIALS_DIR.glob("*.ini")):
+            name = path.stem
+            if not DNS_PROFILE_RE.match(name):
+                continue
+            provider = ""
+            try:
+                for line in path.read_text("utf-8").splitlines():
+                    if line.startswith("# provider:"):
+                        provider = line.split(":", 1)[1].strip()
+                        break
+            except OSError:
+                continue
+            profiles.append(
+                {
+                    "name": name,
+                    "provider": provider,
+                    "plugin_available": (
+                        DNS_PROVIDERS.get(provider, {}).get("plugin") in available
+                    ),
+                    "updated_ts": int(path.stat().st_mtime),
+                }
+            )
+    return {
+        "profiles": profiles,
+        "providers": {
+            name: {
+                "plugin": spec["plugin"],
+                "snap": spec["snap"],
+                "keys": list(spec["keys"]),
+                "available": spec["plugin"] in available,
+            }
+            for name, spec in DNS_PROVIDERS.items()
+        },
+    }
+
+
+def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Записать учётные данные профиля с правами 0600."""
+
+    name = str(payload.get("name") or "").strip().lower()
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider not in DNS_PROVIDERS:
+        raise ValueError("unsupported DNS provider")
+    path = _dns_profile_path(name)
+
+    spec = DNS_PROVIDERS[provider]
+    supplied = payload.get("credentials")
+    if not isinstance(supplied, dict):
+        raise ValueError("credentials must be an object")
+    if set(supplied) - set(spec["keys"]):
+        raise ValueError("credentials contain an unsupported field")
+
+    lines = [f"# provider: {provider}"]
+    for key in spec["keys"]:
+        raw = supplied.get(key)
+        if raw is None or str(raw) == "":
+            continue
+        value = str(raw)
+        if len(value) > DNS_VALUE_MAX:
+            raise ValueError(f"{key} exceeds the size limit")
+        # A newline would let one value introduce another directive into the
+        # credentials file certbot reads as root.
+        if any(character in value for character in "\r\n\x00"):
+            raise ValueError(f"{key} contains a line break")
+        lines.append(f"{key} = {value}")
+    if len(lines) == 1:
+        raise ValueError("no credentials were supplied")
+
+    DNS_CREDENTIALS_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(DNS_CREDENTIALS_DIR, 0o700)
+    temporary = DNS_CREDENTIALS_DIR / f".{name}.{secrets.token_hex(8)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    LOG.info("Saved DNS provider profile %s (%s)", name, provider)
+    return {"name": name, "provider": provider}
+
+
+def delete_dns_provider(name: str) -> Dict[str, Any]:
+    path = _dns_profile_path(str(name or "").strip().lower())
+    existed = path.exists()
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    return {"name": path.stem, "deleted": existed}
+
+
+def _dns_provider_of(name: str) -> str:
+    path = _dns_profile_path(name)
+    try:
+        text = path.read_text("utf-8")
+    except FileNotFoundError as exc:
+        raise ValueError(f"no DNS provider profile named {path.stem}") from exc
+    except OSError as exc:
+        # A profile that cannot be read is a configuration problem to report,
+        # not an unhandled error to surface as a failed request.
+        raise ValueError("the DNS provider profile cannot be read") from exc
+    for line in text.splitlines():
+        if line.startswith("# provider:"):
+            provider = line.split(":", 1)[1].strip()
+            if provider in DNS_PROVIDERS:
+                return provider
+            break
+    raise ValueError("the DNS provider profile is unusable")
+
+
+def _dns_challenge_flags(profile: str, propagation: Any = None) -> List[str]:
+    """Аргументы certbot для DNS-01. Всё берётся из таблицы, не из запроса."""
+
+    provider = _dns_provider_of(profile)
+    spec = DNS_PROVIDERS[provider]
+    plugin = spec["plugin"]
+    if plugin not in _installed_dns_plugins():
+        raise ValueError(
+            f"the {plugin} certbot plugin is not installed; "
+            f"install and connect the {spec['snap']} snap first"
+        )
+    try:
+        seconds = int(propagation) if propagation is not None else DNS_PROPAGATION_DEFAULT
+    except (TypeError, ValueError):
+        seconds = DNS_PROPAGATION_DEFAULT
+    seconds = max(DNS_PROPAGATION_MIN, min(seconds, DNS_PROPAGATION_MAX))
+
+    flags = [f"--{plugin}", "--preferred-challenges", "dns-01"]
+    if provider != "route53":
+        # route53 reads the environment or the instance role; the others take
+        # a credentials file.
+        flags.extend([f"--{plugin}-credentials", str(_dns_profile_path(profile))])
+    flags.extend([f"--{plugin}-propagation-seconds", str(seconds)])
+    return flags
+
+
 def _run_certbot_for_lineage(
     lineage: str,
     domain: str,
@@ -275,12 +571,38 @@ def _run_certbot_for_lineage(
     rsa_key_size: int,
     ecdsa_curve: str,
     account_id: Optional[str] = None,
+    dns_profile: str = "",
+    dns_propagation: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Issue or renew one Certbot lineage."""
+    """Issue or renew one Certbot lineage.
+
+    With a DNS profile the challenge is DNS-01, which is the only way to get a
+    wildcard certificate; without one it stays the existing standalone HTTP-01
+    path.
+    """
     names = [domain] + [n for n in (alt_names or []) if n]
     san_flags: List[str] = []
     for n in names:
         san_flags.extend(["-d", n])
+
+    wildcard = any(str(n).startswith("*.") for n in names)
+    if wildcard and not dns_profile:
+        raise ValueError(
+            "a wildcard certificate requires DNS-01; select a DNS provider profile"
+        )
+
+    if dns_profile:
+        challenge_flags = _dns_challenge_flags(dns_profile, dns_propagation)
+    else:
+        challenge_flags = [
+            "--standalone",
+            "--http-01-port",
+            str(CERTBOT_HTTP_PORT),
+            "--http-01-address",
+            CERTBOT_HTTP_ADDR,
+            "--preferred-challenges",
+            "http-01",
+        ]
 
     cmd: List[str] = [
         str(CERTBOT_BIN),
@@ -289,13 +611,7 @@ def _run_certbot_for_lineage(
         "--agree-tos",
         "--email",
         email,
-        "--standalone",
-        "--http-01-port",
-        str(CERTBOT_HTTP_PORT),
-        "--http-01-address",
-        CERTBOT_HTTP_ADDR,
-        "--preferred-challenges",
-        "http-01",
+        *challenge_flags,
         "--key-type",
         key_type,
         "--cert-name",
@@ -920,6 +1236,30 @@ def _build_cert_item_for_list(path: Path) -> Optional[Dict[str, Any]]:
 # ───────────────────── реализация эндпоинтов ─────────────────────
 
 
+def handle_dns_providers_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    payload = list_dns_providers()
+    payload["ok"] = True
+    return 200, payload
+
+
+def handle_dns_provider_save(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        saved = save_dns_provider(body)
+    except ValueError as exc:
+        # Never echo the payload back: it carries the credentials that were
+        # just rejected.
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **saved}
+
+
+def handle_dns_provider_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        removed = delete_dns_provider(body.get("name"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **removed}
+
+
 def handle_certs_status(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     domains = body.get("domains") or []
     if not isinstance(domains, list) or len(domains) > 500:
@@ -940,22 +1280,49 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     domain = (body.get("domain") or "").strip()
     alt_names = body.get("alt_names") or []
     key_types = body.get("key_types") or []
+    dns_profile = str(body.get("dns_profile") or "").strip().lower()
+    dns_propagation = body.get("dns_propagation")
+    # Wildcards are only accepted alongside a DNS profile, because only DNS-01
+    # can validate them.
+    allow_wildcard = bool(dns_profile)
 
     if not domain:
         return 200, {"ok": False, "error": "domain is required"}
     try:
-        domain = _normalize_dns_name(domain)
+        domain = _normalize_dns_name(domain, allow_wildcard=allow_wildcard)
     except ValueError as exc:
         return 400, {"ok": False, "error": f"invalid domain: {exc}"}
 
     if not isinstance(alt_names, list):
         alt_names = []
     try:
-        alt_names = [_normalize_dns_name(str(x)) for x in alt_names if x]
+        alt_names = [
+            _normalize_dns_name(str(x), allow_wildcard=allow_wildcard)
+            for x in alt_names
+            if x
+        ]
     except ValueError as exc:
         return 400, {"ok": False, "error": f"invalid alternative domain: {exc}"}
     if len(alt_names) > 100:
         return 400, {"ok": False, "error": "too many alternative domains"}
+
+    wildcard_names = [n for n in [domain, *alt_names] if n.startswith("*.")]
+    if wildcard_names and not dns_profile:
+        return 400, {
+            "ok": False,
+            "error": (
+                "a wildcard certificate requires DNS-01; select a DNS provider "
+                "profile for this site"
+            ),
+        }
+    if dns_profile:
+        # Resolve the profile and the plugin before issuing anything: a bad
+        # profile should be a clear message, not a failed ACME attempt part way
+        # through a loop over key types.
+        try:
+            _dns_challenge_flags(dns_profile, dns_propagation)
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
 
     reserved_suffixes = (".test", ".example", ".invalid", ".localhost", ".local")
     reserved_names = [
@@ -1005,11 +1372,16 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     any_ok = False
 
+    # The lineage becomes a directory name under /etc/letsencrypt/live and a
+    # PEM file name in the HAProxy certificate directory, so a wildcard drops
+    # its leftmost label — the same name Certbot would pick on its own.
+    lineage_base = domain[2:] if domain.startswith("*.") else domain
+
     for kt in key_types:
         if len(key_types) == 1:
-            lineage = domain
+            lineage = lineage_base
         else:
-            lineage = f"{domain}-{kt}"
+            lineage = f"{lineage_base}-{kt}"
 
         res = _run_certbot_for_lineage(
             lineage=lineage,
@@ -1020,6 +1392,8 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
             rsa_key_size=rsa_key_size,
             ecdsa_curve=ecdsa_curve,
             account_id=account_id,
+            dns_profile=dns_profile,
+            dns_propagation=dns_propagation,
         )
         results.append(res)
         if res["rc"] == 0:
@@ -1070,6 +1444,14 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     }
     if error:
         response["error"] = error
+        # The browser sees this immediately, but issuance also runs before an
+        # apply, where nobody is watching the certificate page.
+        report_alert(
+            "certificate.renewal_failed",
+            domain,
+            f"Certificate issuance failed for {domain}",
+            error[:1000],
+        )
     return 200, response
 
 
@@ -1317,6 +1699,9 @@ def _ca_item(ca_id: str, kind: str, certificates: List[x509.Certificate]) -> Dic
 
 
 def _list_certificate_authorities() -> Dict[str, Any]:
+    expiry_watch = CertificateExpiryWatch()
+    expiry_watch.start()
+
     ca_root = _prepare_ca_root()
     internal: Optional[Dict[str, Any]] = None
     _, internal_cert_path = _internal_ca_paths()
@@ -2149,6 +2534,12 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_ca_export(body)
             elif path == "/api/v1/certs/ca/delete-external":
                 status, resp = handle_external_ca_delete(body)
+            elif path == "/api/v1/certs/dns-providers":
+                status, resp = handle_dns_providers_list(body)
+            elif path == "/api/v1/certs/dns-providers/save":
+                status, resp = handle_dns_provider_save(body)
+            elif path == "/api/v1/certs/dns-providers/delete":
+                status, resp = handle_dns_provider_delete(body)
             else:
                 status, resp = 404, {"ok": False, "error": "unknown path"}
         except Exception as exc:  # noqa: BLE001
@@ -2166,6 +2557,70 @@ class CertdHandler(BaseHTTPRequestHandler):
 
 
 # ───────────────────── main ─────────────────────
+
+
+# --- Certificate expiry watch ----------------------------------------------
+#
+# Nothing else polls expiry: the status call is driven by someone opening the
+# certificates page, so an alert built on it would only exist while a human is
+# already looking. This thread is the timer that makes "expires in six days"
+# something the gateway says on its own.
+CERT_WATCH_INTERVAL_SECONDS = int(
+    os.environ.get("CERTD_EXPIRY_WATCH_INTERVAL", str(6 * 3600))
+)
+
+
+class CertificateExpiryWatch(threading.Thread):
+    def __init__(self) -> None:
+        super().__init__(name="cert-expiry-watch", daemon=True)
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        if _ALERTS is None:
+            return
+        # A first pass right away, so a restart does not hide an expiry for
+        # another six hours.
+        while True:
+            try:
+                self.scan()
+            except Exception:  # pylint: disable=broad-except
+                LOG.exception("certificate expiry scan failed")
+            if self._stop.wait(CERT_WATCH_INTERVAL_SECONDS):
+                return
+
+    def scan(self) -> int:
+        """Report one observation per installed HAProxy certificate."""
+        directory = _get_haproxy_certs_dir()
+        reported = 0
+        try:
+            entries = sorted(directory.glob("*.pem"))
+        except OSError as exc:
+            LOG.warning("cannot list %s: %s", directory, exc)
+            return 0
+        for path in entries:
+            info = _load_cert_info(path)
+            if not info:
+                continue
+            days = int(info["days_left"])
+            domain = path.stem
+            expiring = days <= CERT_WARN_DAYS
+            report_alert_level(
+                "certificate.expiring",
+                domain,
+                active=expiring,
+                severity="critical" if days <= 7 else "warning",
+                summary=(
+                    f"The certificate for {domain} expires in {days} days"
+                    if days >= 0
+                    else f"The certificate for {domain} expired {-days} days ago"
+                ),
+                detail=f"Not after: {info['not_after']}",
+            )
+            reported += 1
+        return reported
 
 
 def main() -> None:

@@ -13,7 +13,7 @@
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import base64
 import os
 from urllib.parse import quote_plus
@@ -69,6 +69,48 @@ def _post(url: str, **kwargs) -> requests.Response:
 def _get(url: str, **kwargs) -> requests.Response:
     """Обёртка вокруг session.get для единообразия."""
     return _session.get(url, **kwargs)
+
+
+class CertdUnavailable(RuntimeError):
+    """certd не отвечает."""
+
+
+def _dns_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Запрос к certd по разделу DNS-провайдеров.
+
+    Ответ никогда не содержит сохранённых секретов: их не отдаёт сам демон.
+    """
+
+    url = f"{CERTD_API_BASE}/certs/{path}"
+    try:
+        resp = _post(url, json=payload, timeout=70.0)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning("haproxy-certd unreachable (%s): %s", url, exc)
+        raise CertdUnavailable(str(exc)) from exc
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise CertdUnavailable("certd returned a non-JSON response") from exc
+    if not isinstance(data, dict):
+        raise CertdUnavailable("certd returned an unexpected payload")
+    return data
+
+
+def dns_providers_list() -> Dict[str, Any]:
+    return _dns_request("dns-providers", {})
+
+
+def dns_provider_save(
+    name: str, provider: str, credentials: Dict[str, str]
+) -> Dict[str, Any]:
+    return _dns_request(
+        "dns-providers/save",
+        {"name": name, "provider": provider, "credentials": credentials},
+    )
+
+
+def dns_provider_delete(name: str) -> Dict[str, Any]:
+    return _dns_request("dns-providers/delete", {"name": name})
 
 
 def get_certs_status_for_domains(domains: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -409,21 +451,29 @@ def issue_cert_for_domain(
     domain: str,
     alt_names: List[str],
     key_types: List[str],
+    dns_profile: str = "",
+    dns_propagation: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Просит haproxy-certd выпустить/обновить сертификат для домена.
 
     Используется в routes_haproxy_sites (кнопка "Выпустить сертификат").
+    С профилем DNS-провайдера challenge будет DNS-01 — единственный способ
+    получить wildcard.
     """
     domain = (domain or "").strip()
     if not domain:
         res = {"ok": False, "error": "domain is empty"}
         return _normalize_cert_issue_response(res)
 
-    payload = {
+    payload: Dict[str, Any] = {
         "domain": domain,
         "alt_names": [str(x).strip() for x in (alt_names or []) if x],
         "key_types": key_types or [],
     }
+    if dns_profile:
+        payload["dns_profile"] = str(dns_profile).strip().lower()
+        if dns_propagation is not None:
+            payload["dns_propagation"] = dns_propagation
 
     url = f"{CERTD_API_BASE}/certs/issue"
 

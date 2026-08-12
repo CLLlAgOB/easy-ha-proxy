@@ -11,6 +11,8 @@
     state: present
   tags: restore-network
 
+- import_tasks: dns-plugins.yml
+
 - name: "haproxy-certd | Install script"
   ansible.builtin.copy:
     src: haproxy-certd.py

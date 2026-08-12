@@ -319,6 +319,60 @@
                                 </label>
                             </div>
 
+                            <label class="form-label" style="margin-top: 14px;">Validation</label>
+                            <div class="table-meta">
+                                HTTP-01 answers the challenge on port 80. DNS-01 writes a TXT record through a
+                                saved DNS provider profile, which works when port 80 is unreachable and is the
+                                only way to get a wildcard certificate.
+                            </div>
+                            {% set current_dns_profile = site.dns_profile|default('') %}
+                            <div style="margin-top: 6px; display:flex; flex-wrap:wrap; gap:16px;">
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="acme_challenge" id="acme_challenge_http" value="http-01"
+                                        {% if not current_dns_profile %}checked{% endif %}>
+                                    <span translate="no" data-i18n-skip>HTTP-01</span>
+                                </label>
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="acme_challenge" id="acme_challenge_dns" value="dns-01"
+                                        {% if current_dns_profile %}checked{% endif %}>
+                                    <span translate="no" data-i18n-skip>DNS-01</span>
+                                </label>
+                            </div>
+
+                            <div id="block-dns-01" style="margin-top:10px;{% if not current_dns_profile %} display:none;{% endif %}">
+                                <label class="form-label" for="dns_profile">DNS provider profile</label>
+                                {% set known_profiles = dns_profiles|default([])|map(attribute='name')|list %}
+                                <select id="dns_profile" name="dns_profile" class="form-input">
+                                    <option value="">Select a DNS provider profile</option>
+                                    {% for profile in dns_profiles|default([]) %}
+                                    <option value="{{ profile.name }}" translate="no" data-i18n-skip
+                                        {% if current_dns_profile == profile.name %}selected{% endif %}>{{ profile.name }} ({{ profile.provider }}){% if not profile.plugin_available %} [!]{% endif %}</option>
+                                    {% endfor %}
+                                    {% if current_dns_profile and current_dns_profile not in known_profiles %}
+                                    <option value="{{ current_dns_profile }}" translate="no" data-i18n-skip selected>{{ current_dns_profile }} [?]</option>
+                                    {% endif %}
+                                </select>
+                                <div class="table-meta" style="margin-top:4px;">
+                                    A profile marked [!] is missing its Certbot plugin, and one marked [?] no longer
+                                    exists; neither can issue a certificate. Profiles are created on the DNS providers page.
+                                </div>
+                                <div class="table-meta" style="margin-top:4px;">
+                                    <a href="{{ url_for('routes.dns_providers_page') }}">Open the DNS providers page</a>
+                                </div>
+
+                                <label class="form-label" for="field-cert-alt-names" style="margin-top: 12px;">
+                                    Extra certificate names
+                                </label>
+                                {% set cert_alt_list = site.cert_alt_names or [] %}
+                                <textarea id="field-cert-alt-names" name="cert_alt_names" class="form-input mono" rows="3"
+                                    placeholder="*.example.com">{{ cert_alt_list | join("\n") }}</textarea>
+                                <div class="table-meta">
+                                    One name per line. These are added to the certificate only and are never routed,
+                                    which is where a wildcard belongs: new subdomains can then be added to alt names
+                                    later without reissuing the certificate.
+                                </div>
+                            </div>
+
                             <button type="button" class="btn" id="btn-issue-cert" style="margin-top: 10px;">
                                 Issue/renew Let's Encrypt certificate
                             </button>

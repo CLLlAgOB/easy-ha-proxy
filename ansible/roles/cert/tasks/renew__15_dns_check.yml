@@ -8,7 +8,39 @@
 # Все запланированные цели из предыдущего шага (строки-линейки)
 - name: Aggregate planned targets
   set_fact:
-    _planned_lineages: "{{ (targets_explicit | default([])) + (targets_single | default([])) }}"
+    _all_planned_lineages: "{{ (targets_explicit | default([])) + (targets_single | default([])) }}"
+
+# A site with a DNS provider profile is validated over DNS-01 by haproxy-certd,
+# which owns the provider credentials. This role only knows the standalone
+# HTTP-01 path, and the certbot DNS plugins are installed by the haproxy-admin
+# role that runs later, so issuing here would use the wrong challenge and would
+# drop any wildcard name.
+- name: Collect the DNS-01 targets
+  set_fact:
+    _dns01_lineages: "{{ _dns01_json | from_json }}"
+  vars:
+    _dns01_json: >-
+      {%- set out = [] -%}
+      {%- for lin in _all_planned_lineages -%}
+        {%- set base = lin | regex_replace('(-rsa|-ecdsa)$','') -%}
+        {%- set site = (cert_sites | default([]) | selectattr('domain','equalto', base) | list | first) -%}
+        {%- if site and (site.dns_profile | default('')) -%}
+          {%- set _ = out.append(lin) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Keep only the HTTP-01 targets for this role
+  set_fact:
+    _planned_lineages: "{{ _all_planned_lineages | reject('in', _dns01_lineages) | list }}"
+
+- name: Report the targets left to haproxy-certd
+  ansible.builtin.debug:
+    msg: >-
+      DNS-01 targets are issued by haproxy-certd, not here:
+      {{ _dns01_lineages | join(', ') }}. Use the site page or apply the
+      HAProxy configuration to issue them.
+  when: (_dns01_lineages | default([]) | length) > 0
 
 # Нормализуем: из линейки → base + SAN из описания сайта
 - name: Normalize planned targets into uniform objects

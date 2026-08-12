@@ -663,6 +663,33 @@ if (effTcpPassForCheck === true) {
         }
       }
 
+      // ACME challenge. A saved DNS profile is what selects DNS-01, so there
+      // is no separate stored flag: no profile means HTTP-01.
+      var dnsChallengeEl = document.getElementById("acme_challenge_dns");
+      var dnsProfileEl = document.getElementById("dns_profile");
+      if (
+        certModeRadio &&
+        certModeRadio.value === "letsencrypt" &&
+        dnsChallengeEl &&
+        dnsChallengeEl.checked &&
+        dnsProfileEl &&
+        dnsProfileEl.value
+      ) {
+        site.dns_profile = dnsProfileEl.value;
+
+        // Certificate-only names, where a wildcard is allowed.
+        var certAltEl = document.getElementById("field-cert-alt-names");
+        if (certAltEl) {
+          var certAltLines = certAltEl.value
+            .split("\n")
+            .map(function (s) { return s.trim(); })
+            .filter(function (s) { return s.length > 0; });
+          if (certAltLines.length) {
+            site.cert_alt_names = certAltLines;
+          }
+        }
+      }
+
       // Key types (for LE-режима)
       var ktArr = [];
       var ecdsaEl = document.getElementById("key_type_ecdsa");
@@ -697,6 +724,8 @@ delete site.le_managed;
 delete site.key_types;
 delete site.certificate_source;
 delete site.external_ca_id;
+delete site.dns_profile;
+delete site.cert_alt_names;
 
 delete site.redirect_to_https;
 delete site.authelia_enabled;
@@ -925,6 +954,23 @@ delete site.geo_countries;
     if (certModeExternal) certModeExternal.addEventListener("change", updateCertModeUI);
     if (certModeInternal) certModeInternal.addEventListener("change", updateCertModeUI);
     updateCertModeUI();
+
+    // ------------------------------------------------------------------
+    // HTTP-01 / DNS-01 selector.
+    // ------------------------------------------------------------------
+    var challengeHttp = document.getElementById("acme_challenge_http");
+    var challengeDns = document.getElementById("acme_challenge_dns");
+    var blockDns = document.getElementById("block-dns-01");
+
+    function updateChallengeUI() {
+      if (!blockDns) return;
+      var useDns = !!(challengeDns && challengeDns.checked);
+      blockDns.style.display = useDns ? "" : "none";
+    }
+
+    if (challengeHttp) challengeHttp.addEventListener("change", updateChallengeUI);
+    if (challengeDns) challengeDns.addEventListener("change", updateChallengeUI);
+    updateChallengeUI();
 
     // ------------------------------------------------------------------
     // Модальное окно логов выпуска сертификата

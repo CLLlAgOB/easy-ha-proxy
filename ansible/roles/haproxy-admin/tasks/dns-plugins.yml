@@ -1,0 +1,64 @@
+---
+# roles/haproxy-admin/tasks/dns-plugins.yml
+# Установка certbot-плагинов DNS-01.
+#
+# Certbot здесь — snap, поэтому плагины тоже snap'ы, и их версия должна
+# совпадать с версией самого certbot. Пакетов apt (python3-certbot-dns-*) на
+# этой платформе нет: они относятся к certbot из репозитория дистрибутива.
+
+- name: "dns-plugins | Ensure the credentials directory"
+  ansible.builtin.file:
+    path: "{{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
+    state: directory
+    owner: root
+    group: root
+    # Root only: these files hold provider API tokens and are read by certbot
+    # as root. The unprivileged container never needs to see them.
+    mode: "0700"
+
+- name: "dns-plugins | Which certbot plugins are already present"
+  ansible.builtin.command: certbot plugins --non-interactive
+  register: certbot_plugins_present
+  changed_when: false
+  failed_when: false
+
+- name: "dns-plugins | Install the selected plugin snaps"
+  ansible.builtin.command: "snap install certbot-dns-{{ item }}"
+  loop: "{{ dns_plugins_enabled | default([]) }}"
+  when: >-
+    ("dns-" ~ item) not in (certbot_plugins_present.stdout | default(''))
+  register: dns_plugin_install
+  # The snap store occasionally answers with a version-mismatch hint on the
+  # first attempt and succeeds immediately afterwards.
+  retries: 3
+  delay: 5
+  until: dns_plugin_install is succeeded
+  changed_when: dns_plugin_install.rc == 0
+
+- name: "dns-plugins | Allow certbot plugins to run with root privileges"
+  ansible.builtin.command: snap set certbot trust-plugin-with-root=ok
+  when: (dns_plugins_enabled | default([])) | length > 0
+  changed_when: false
+
+- name: "dns-plugins | Connect each plugin to certbot"
+  ansible.builtin.command: "snap connect certbot:plugin certbot-dns-{{ item }}"
+  loop: "{{ dns_plugins_enabled | default([]) }}"
+  changed_when: false
+  failed_when: false
+
+- name: "dns-plugins | Confirm certbot can see them"
+  ansible.builtin.command: certbot plugins --non-interactive
+  register: certbot_plugins_after
+  changed_when: false
+  failed_when: false
+  when: (dns_plugins_enabled | default([])) | length > 0
+
+- name: "dns-plugins | Report any plugin certbot still cannot see"
+  ansible.builtin.debug:
+    msg: >-
+      certbot does not list dns-{{ item }}. DNS-01 for this provider will be
+      refused until the snap is installed at the same version as certbot.
+  loop: "{{ dns_plugins_enabled | default([]) }}"
+  when:
+    - (dns_plugins_enabled | default([])) | length > 0
+    - ("dns-" ~ item) not in (certbot_plugins_after.stdout | default(''))

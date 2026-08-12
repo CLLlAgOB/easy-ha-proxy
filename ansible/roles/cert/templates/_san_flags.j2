@@ -1,1 +1,3 @@
-{{ (['-d ' ~ obj.domain] + (obj.alt_names | default([]) | map('regex_replace', '^(.*)$', '-d \\1') | list)) | join(' ') }}
+{#- Routing names plus the certificate-only names, where wildcards live. -#}
+{%- set _names = [obj.domain] + (obj.alt_names | default([])) + (obj.cert_alt_names | default([])) -%}
+{{- _names | unique | map('regex_replace', '^(.*)$', '-d \\1') | join(' ') -}}
