@@ -33,6 +33,89 @@ authelia_log_file: "{{ authelia_root_dir }}/logs/authelia.log"
 authelia_log_limit: 200
 authelia_log_max_scan_bytes: 16777216
 hapadm_ban_sync_interval: 10
+
+# --- DNS-01 (wildcard certificates) ---
+# Certbot is installed from snap here, so its plugins are snaps too and must
+# match its version; the apt packages belong to a different certbot.
+# Empty by default: a plugin is only installed when an operator asks for that
+# provider. Supported values: cloudflare, digitalocean, route53, rfc2136.
+dns_plugins_enabled: []
+dns_credentials_dir: /etc/easy-ha-proxy/dns-providers
+
+# --- Change log ---
+# Small, high value and kept far longer than metrics: it is the record of who
+# changed what. Secrets are redacted before anything is written.
+audit_database_path: /var/lib/easy-ha-proxy/audit/audit.db
+
+# --- Historical metrics daemon (easy-ha-proxy-metricsd) ---
+metricsd_enabled: true
+metricsd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-metricsd.sock
+metricsd_config_path: "{{ app_dir }}/metricsd.json"
+metricsd_database_path: /var/lib/easy-ha-proxy/metrics/metrics.db
+# HAProxy is polled for live numbers; only one row per object per minute is
+# persisted, so a shorter interval costs resolution in the average, not rows.
+metricsd_poll_interval: 10
+metricsd_maintenance_interval: 300
+# Per-server rows dominate the table on a host with many backends, so they keep
+# minute resolution for a day and survive as hourly rows afterwards.
+metricsd_retention_one_minute_days: 7
+metricsd_retention_one_minute_server_hours: 24
+metricsd_retention_one_hour_days: 365
+metricsd_memory_max: 256M
+# Storage safety. "auto" sizes both limits from the filesystem the database
+# actually lives on: cap = min(5GiB, 10%), reserve = max(2GiB, min(10%, 10GiB)).
+# The reserve is enforced even when the cap is lifted -- monitoring is never
+# allowed to be the reason the disk fills up.
+metricsd_max_database_size: auto
+metricsd_reserved_free_space: auto
+# Trade resolution for survival under pressure: minute rows shrink to 3d/1d and
+# hourly rows to 180d/90d/30d before history writes are paused outright.
+metricsd_auto_reduce_retention: true
+metricsd_wal_soft_limit: 64MiB
+
+# --- Adaptive protection engine (easy-ha-proxy-guardd) ---
+# "monitor" observes and records; it cannot ban. "enforce" is rejected by the
+# daemon in this release, on purpose: the weights have not been reviewed
+# against real traffic yet, and a silent downgrade would leave an operator
+# believing the gateway is defending itself.
+guardd_mode: monitor
+guardd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-guardd.sock
+guardd_config_path: "{{ app_dir }}/guardd.json"
+guardd_database_path: /var/lib/easy-ha-proxy/security/security.db
+guardd_log_file: "{{ haproxy_log }}"
+guardd_poll_interval: 10
+guardd_maintenance_interval: 300
+# The log source exists to remember what an address did hours ago, so the
+# per-IP working set is capped in both dimensions rather than left to grow.
+# Measured on a 2-core/2 GiB production gateway: 4.3 KiB per tracked address,
+# so 5000 costs about 21 MiB. That same gateway saw 275 distinct addresses in
+# a full log file, so the default has a wide margin already; raise it only for
+# a host that genuinely fronts a much larger audience.
+guardd_max_tracked_ips: 5000
+guardd_max_paths_per_ip: 32
+# Parsing measured at ~30 us per line end to end, so this budget is roughly
+# 0.4 s of CPU in the worst case and covers well over 1000 req/s sustained.
+# The health endpoint reports lag_bytes when it cannot keep up.
+guardd_log_read_bytes_per_cycle: 4194304
+guardd_event_retention_days: 30
+guardd_memory_max: 256M
+
+# --- Alert engine (easy-ha-proxy-alertd) ---
+# Conditions and notification policy live in one place instead of inside each
+# feature. The seeded settings file is never overwritten afterwards: an
+# operator changing a threshold in the UI must not lose it on the next update.
+alertd_enabled: true
+alertd_email_enabled: true
+# Empty means the shared notification recipient from mail-notify.json.
+alertd_recipient: ""
+alertd_min_severity: info
+alertd_rules: {}
+alertd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-alertd.sock
+alertd_config_path: "{{ app_dir }}/alertd.json"
+alertd_database_path: /var/lib/easy-ha-proxy/alerts/alerts.db
+alertd_mail_state: /etc/easy-ha-proxy/mail-notify.json
+alertd_mail_lock: /run/easy-ha-proxy/authelia-mail.lock
+alertd_memory_max: 128M
 # Host path to the Authelia user database.
 authelia_users_file: "{{ authelia_root_dir }}/users_database.yml"
 

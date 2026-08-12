@@ -17,6 +17,10 @@
   HAProxy configuration
 </a>
 
+<a class="btn" href="{{ url_for('routes.config_history_page') }}">
+  Configuration history
+</a>
+
 <a class="btn" href="{{ url_for('routes.haproxy_geoip_page') }}">
   GeoIP database
 </a>
@@ -25,8 +29,32 @@
   Certificates
 </a>
 
+<a class="btn" href="{{ url_for('routes.dns_providers_page') }}">
+  DNS providers
+</a>
+
 <a class="btn" href="{{ url_for('routes.mail_settings_page') }}">
   Mail settings
+</a>
+
+<a class="btn" href="{{ url_for('routes.haproxy_backends_page') }}">
+  Backends
+</a>
+
+<a class="btn" href="{{ url_for('routes.monitoring_page') }}">
+  Monitoring
+</a>
+
+<a class="btn" href="{{ url_for('routes.adaptive_protection_page') }}">
+  Adaptive protection
+</a>
+
+<a class="btn" href="{{ url_for('routes.alerts_page') }}">
+  Alerts
+</a>
+
+<a class="btn" href="{{ url_for('routes.audit_page') }}">
+  Change log
 </a>
 
 <a class="btn" href="{{ url_for('routes.system_health_page') }}">

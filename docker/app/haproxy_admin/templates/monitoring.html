@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+
+{% block title %}Monitoring{% endblock %}
+{% block header_title %}Monitoring{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.mon-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.mon-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.mon-ranges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mon-range {
+  padding: 6px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(var(--accent-primary-rgb), .04);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.mon-range:hover { border-color: rgba(var(--accent-primary-rgb), .45); }
+
+.mon-range[aria-pressed="true"] {
+  background: rgba(var(--accent-primary-rgb), .18);
+  border-color: rgba(var(--accent-primary-rgb), .55);
+  font-weight: 600;
+}
+
+.mon-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 25px;
+}
+
+.mon-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.mon-card .mon-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-secondary);
+}
+
+.mon-card .mon-value {
+  font-size: 26px;
+  font-weight: 600;
+  margin-top: 6px;
+  line-height: 1.2;
+}
+
+.mon-card .mon-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.mon-classes {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.mon-classes span { white-space: nowrap; }
+.mon-2xx { color: #2e9e5b; }
+.mon-3xx { color: #4a86c8; }
+.mon-4xx { color: #c8a13a; }
+.mon-5xx { color: #cc4b4b; }
+
+.mon-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 20px;
+}
+
+.mon-chart {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.mon-chart h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.mon-chart .mon-sub { font-size: 12px; color: var(--text-secondary); }
+
+.mon-plot { width: 100%; height: 190px; display: block; margin-top: 10px; }
+.mon-plot .mon-axis { stroke: var(--border); stroke-width: 1; }
+.mon-plot .mon-gridline { stroke: var(--border); stroke-width: 1; opacity: .45; }
+.mon-plot .mon-tick { fill: var(--text-secondary); font-size: 10px; }
+.mon-plot .mon-line { fill: none; stroke-width: 2; }
+.mon-plot .mon-area { opacity: .12; }
+
+.mon-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.mon-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
+.mon-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 60px 0;
+  text-align: center;
+}
+
+.mon-notice {
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.mon-notice.warn { border-color: rgba(200, 161, 58, .5); background: rgba(200, 161, 58, .08); }
+.mon-notice.error { border-color: rgba(204, 75, 75, .5); background: rgba(204, 75, 75, .08); }
+.mon-notice[hidden] { display: none; }
+
+.mon-timeline-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 3fr minmax(150px, auto);
+  gap: 14px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.mon-timeline-row:last-child { border-bottom: none; }
+
+.mon-timeline-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mon-timeline-name small {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.mon-timeline-track {
+  display: flex;
+  height: 16px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(var(--accent-primary-rgb), .08);
+}
+
+.mon-timeline-track i { display: block; height: 100%; }
+.mon-span-up { background: #2e9e5b; }
+.mon-span-down { background: #cc4b4b; }
+.mon-span-other { background: #c8a13a; }
+
+.mon-timeline-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.mon-timeline-meta b { color: var(--text-primary); }
+
+.mon-storage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 24px;
+  font-size: 13px;
+}
+
+.mon-storage-grid div span { display: block; color: var(--text-secondary); font-size: 12px; }
+
+.mon-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(var(--accent-primary-rgb), .12);
+  overflow: hidden;
+  margin: 10px 0 14px;
+}
+
+.mon-bar i { display: block; height: 100%; background: var(--accent-primary); }
+.mon-bar.warn i { background: #c8a13a; }
+.mon-bar.crit i { background: #cc4b4b; }
+</style>
+
+<div class="mon-notice error" id="mon-unavailable" hidden>
+  Historical monitoring is unavailable. The collector is not answering, so no
+  history can be shown. HAProxy traffic is not affected.
+</div>
+
+<div class="mon-notice warn" id="mon-paused" hidden>
+  Historical monitoring is paused because the disk free-space safety threshold
+  was reached. HAProxy traffic is not affected.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Overview</h2>
+    <span class="mon-sub" id="mon-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="mon-toolbar">
+    <div class="mon-ranges" id="mon-ranges" role="group" aria-label="Time range">
+      {% for value in ranges %}
+        <button type="button" class="mon-range" data-range="{{ value }}"
+                aria-pressed="{{ 'true' if value == default_range else 'false' }}">{{ value }}</button>
+      {% endfor %}
+    </div>
+
+    <label for="mon-site">
+      Site
+      <select id="mon-site">
+        <option value="">All sites</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="mon-cards">
+    <div class="mon-card">
+      <div class="mon-label">Requests per second</div>
+      <div class="mon-value" id="mon-rps" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-requests-total"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Current connections</div>
+      <div class="mon-value" id="mon-conns" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-conns-peak"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Traffic</div>
+      <div class="mon-value" id="mon-traffic" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-traffic-split"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Responses</div>
+      <div class="mon-classes" id="mon-classes" data-i18n-skip translate="no"></div>
+      <div class="mon-sub" id="mon-error-ratio"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Backend health</div>
+      <div class="mon-value" id="mon-health" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-health-servers"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Graphs</h2>
+    <span class="mon-sub" id="mon-resolution"></span>
+  </div>
+
+  <div class="mon-charts">
+    <div class="mon-chart">
+      <h3>Requests</h3>
+      <div class="mon-sub">Requests per second</div>
+      <svg class="mon-plot" id="mon-plot-requests" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-requests"></div>
+    </div>
+
+    <div class="mon-chart">
+      <h3>Traffic</h3>
+      <div class="mon-sub">Bytes per second</div>
+      <svg class="mon-plot" id="mon-plot-traffic" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-traffic"></div>
+    </div>
+
+    <div class="mon-chart">
+      <h3>Response classes</h3>
+      <div class="mon-sub">Responses per second</div>
+      <svg class="mon-plot" id="mon-plot-responses" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-responses"></div>
+    </div>
+
+    <div class="mon-chart">
+      <h3>Response time</h3>
+      <div class="mon-sub">Milliseconds</div>
+      <svg class="mon-plot" id="mon-plot-latency" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-latency"></div>
+    </div>
+
+    <div class="mon-chart">
+      <h3>Connections</h3>
+      <div class="mon-sub">Concurrent connections</div>
+      <svg class="mon-plot" id="mon-plot-connections" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-connections"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Backend availability</h2>
+    <span class="mon-sub" id="mon-timeline-note"></span>
+  </div>
+
+  <div id="mon-timeline">
+    <div class="mon-empty">No state changes recorded for this period</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Monitoring storage</h2>
+    <span class="mon-sub" id="mon-storage-state" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="mon-bar" id="mon-storage-bar"><i style="width:0%"></i></div>
+
+  <div class="mon-storage-grid">
+    <div><span>Database</span><b id="mon-st-db" data-i18n-skip translate="no">—</b></div>
+    <div><span>Write-ahead log</span><b id="mon-st-wal" data-i18n-skip translate="no">—</b></div>
+    <div><span>Total</span><b id="mon-st-total" data-i18n-skip translate="no">—</b></div>
+    <div><span>Size limit</span><b id="mon-st-limit" data-i18n-skip translate="no">—</b></div>
+    <div><span>Filesystem free</span><b id="mon-st-free" data-i18n-skip translate="no">—</b></div>
+    <div><span>Free-space reserve</span><b id="mon-st-reserve" data-i18n-skip translate="no">—</b></div>
+    <div><span>Growth last 7 days</span><b id="mon-st-growth" data-i18n-skip translate="no">—</b></div>
+    <div><span>Trend</span><b id="mon-st-trend">—</b></div>
+    <div><span>Minute retention</span><b id="mon-st-ret-minute">—</b></div>
+    <div><span>Hourly retention</span><b id="mon-st-ret-hour">—</b></div>
+  </div>
+
+  <div class="mon-sub" style="margin-top:12px;">
+    Growth is the measured change over the period, not a prediction.
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/monitoring.js') }}"></script>
+{% endblock %}

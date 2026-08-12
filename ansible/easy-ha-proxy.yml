@@ -197,6 +197,20 @@
       task_stage: updated
       tags: ha-adm-updated
 
+    # Before its producers: this stage installs the shared alert client that
+    # metricsd and guardd import from their own directory.
+    - role: haproxy-admin
+      task_stage: alertd
+      tags: ha-adm-alertd
+
+    - role: haproxy-admin
+      task_stage: metricsd
+      tags: ha-adm-metricsd
+
+    - role: haproxy-admin
+      task_stage: guardd
+      tags: ha-adm-guardd
+
     - role: haproxy-admin
       task_stage: daemons
       tags:

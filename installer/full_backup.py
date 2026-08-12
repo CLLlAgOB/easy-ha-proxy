@@ -40,6 +40,11 @@ CORE_PATHS = (
     "/opt/authelia",
     "/opt/haproxy-admin",
     "/var/lib/haproxy",
+    # Who changed what, and the security engine's findings. Both are small and
+    # are the kind of continuity a restored gateway should not lose. The
+    # metrics database lives under the same root and is excluded below: it can
+    # be large and is not needed to restore a working gateway.
+    "/var/lib/easy-ha-proxy",
     "/var/log/haproxy",
     "/var/log/haproxy.log",
     "/var/log/letsencrypt",
@@ -69,6 +74,7 @@ CORE_DIRECTORY_PATHS = frozenset(
         "/etc/letsencrypt",
         "/opt/authelia",
         "/opt/haproxy-admin",
+        "/var/lib/easy-ha-proxy",
         "/var/lib/haproxy",
         "/var/log/haproxy",
         "/var/log/letsencrypt",
@@ -81,6 +87,10 @@ BACKUP_EXCLUDES = (
     "opt/authelia/notification.log",
     "var/lib/easy-ha-proxy/authelia-notification-state.json",
     "var/lib/easy-ha-proxy/authelia-notifications",
+    # Historical metrics can reach gigabytes and are not needed to restore a
+    # working gateway; the change log and the security database beside them
+    # are small and are kept.
+    "var/lib/easy-ha-proxy/metrics",
 )
 SSH_GLOBS = (
     "/etc/ssh/ssh_host_*",

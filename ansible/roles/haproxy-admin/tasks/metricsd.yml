@@ -1,0 +1,65 @@
+---
+# roles/haproxy-admin/tasks/metricsd.yml
+# Установка root-демона easy-ha-proxy-metricsd (историческая статистика HAProxy)
+
+- name: "easy-ha-proxy-metricsd | Install script"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-metricsd.py
+    dest: /usr/local/sbin/easy-ha-proxy-metricsd.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: metricsd_script
+
+# The daemon config sits beside healthd.json rather than inside config/, which
+# is recursively chowned to the app user after a backup restore.
+- name: "easy-ha-proxy-metricsd | Render config"
+  ansible.builtin.template:
+    src: metricsd.json.j2
+    dest: "{{ metricsd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/metricsd.json') }}"
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0640"
+  register: metricsd_cfg
+
+- name: "easy-ha-proxy-metricsd | Ensure state directory"
+  ansible.builtin.file:
+    path: "{{ (metricsd_database_path | default('/var/lib/easy-ha-proxy/metrics/metrics.db')) | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0750"
+
+- name: "easy-ha-proxy-metricsd | Install systemd unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-metricsd.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-metricsd.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: metricsd_unit
+
+- name: "easy-ha-proxy-metricsd | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: metricsd_unit.changed
+
+- name: "easy-ha-proxy-metricsd | Enable service"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-metricsd.service
+    enabled: yes
+
+- name: "easy-ha-proxy-metricsd | Restart service if changed"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-metricsd.service
+    state: restarted
+  when: >-
+    metricsd_script.changed
+    or metricsd_unit.changed
+    or metricsd_cfg.changed
+    or (hapadm_env_t.changed | default(false))
+
+- name: "easy-ha-proxy-metricsd | Ensure service started"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-metricsd.service
+    state: started
