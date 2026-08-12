@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Request log": "Журнал запросов",
+    "A bounded window over recent requests, kept so a failed request can be found again -- not a log pipeline. The query string is dropped before anything is stored, and no header, cookie or body is kept at all. The size cap is what actually holds the store down, not the retention window, and writing stops before the filesystem reserve is touched.": "Ограниченное окно последних запросов, чтобы упавший запрос можно было найти снова, — не система сбора логов. Query-строка отбрасывается до записи, заголовки, cookie и тела не сохраняются вообще. Размер держит именно лимит объёма, а не срок хранения, и запись останавливается раньше, чем будет тронут резерв свободного места.",
+    "The request log is switched off. Enable": "Журнал запросов выключен. Включите",
+    "and apply to start recording.": "и примените конфигурацию, чтобы начать запись.",
+    "The security engine is not answering, so recent requests cannot be read. HAProxy traffic is unaffected.": "Движок безопасности не отвечает, поэтому последние запросы прочитать нельзя. На трафик HAProxy это не влияет.",
+    "Search": "Поиск",
+    "Last hour": "Последний час",
+    "Last 6 hours": "Последние 6 часов",
+    "Last day": "Последние сутки",
+    "Last 3 days": "Последние 3 суток",
+    "Everything kept": "Всё, что хранится",
+    "404 or 5xx": "404 или 5xx",
+    "Client address": "Адрес клиента",
+    "Host": "Host",
+    "Path starts with": "Путь начинается с",
+    "Request ID": "Идентификатор запроса",
+    "from X-Request-ID": "из X-Request-ID",
+    "Nothing matches these filters": "Под эти фильтры ничего не подходит",
+    "Client": "Клиент",
+    "bad request": "битый запрос",
+    "records": "записей",
+    "paused": "запись приостановлена"
+  }
+}

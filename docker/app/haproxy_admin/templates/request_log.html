@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}Request log{% endblock %}
+{% block header_title %}Request log{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.rq-filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+.rq-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.rq-filters input,
+.rq-filters select {
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  min-width: 130px;
+}
+
+.rq-status {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rq-2xx { background: rgba(46,158,91,.15); color: #2e9e5b; }
+.rq-3xx { background: rgba(var(--accent-primary-rgb), .15); color: var(--accent-primary); }
+.rq-4xx { background: rgba(200,161,58,.18); color: #c8a13a; }
+.rq-5xx { background: rgba(204,75,75,.15); color: #cc4b4b; }
+
+.rq-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 40px 0;
+  text-align: center;
+}
+
+.rq-path {
+  font-family: 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.rq-more { margin-top: 14px; }
+</style>
+
+<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
+     background: rgba(var(--accent-primary-rgb), .07);">
+  A bounded window over recent requests, kept so a failed request can be found
+  again -- not a log pipeline. The query string is dropped before anything is
+  stored, and no header, cookie or body is kept at all. The size cap is what
+  actually holds the store down, not the retention window, and writing stops
+  before the filesystem reserve is touched.
+</div>
+
+<div id="rq-disabled" class="rt-notice" hidden
+     style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);">
+  The request log is switched off. Enable <code translate="no" data-i18n-skip>guardd_request_log_enabled</code>
+  and apply to start recording.
+</div>
+
+<div id="rq-unavailable" class="rt-notice" hidden
+     style="border-color: rgba(204,75,75,.45); background: rgba(204,75,75,.08);">
+  The security engine is not answering, so recent requests cannot be read.
+  HAProxy traffic is unaffected.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Search</h2>
+    <span class="mon-sub" id="rq-store" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="rq-filters">
+    <label>
+      Period
+      <select id="rq-range">
+        <option value="3600">Last hour</option>
+        <option value="21600">Last 6 hours</option>
+        <option value="86400" selected>Last day</option>
+        <option value="259200">Last 3 days</option>
+        <option value="0">Everything kept</option>
+      </select>
+    </label>
+    <label>
+      Status
+      <input type="text" id="rq-status" placeholder="404 or 5xx">
+    </label>
+    <label>
+      Client address
+      <input type="text" id="rq-client" placeholder="203.0.113.9">
+    </label>
+    <label>
+      Host
+      <input type="text" id="rq-host" placeholder="shop.example.com">
+    </label>
+    <label>
+      Backend
+      <input type="text" id="rq-backend" placeholder="be_shop">
+    </label>
+    <label>
+      Path starts with
+      <input type="text" id="rq-path" placeholder="/api">
+    </label>
+    <label>
+      Request ID
+      <input type="text" id="rq-request-id" placeholder="from X-Request-ID">
+    </label>
+    <button class="btn btn-primary" type="button" id="rq-search">Search</button>
+    <button class="btn" type="button" id="rq-reset">Reset</button>
+  </div>
+
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Status</th>
+          <th>Method</th>
+          <th>Host</th>
+          <th>Path</th>
+          <th>Backend</th>
+          <th>Client</th>
+          <th>Time</th>
+          <th>Request ID</th>
+        </tr>
+      </thead>
+      <tbody id="rq-body" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+
+  <div class="rq-empty" id="rq-empty">Nothing matches these filters</div>
+
+  <div class="rq-more">
+    <button class="btn" type="button" id="rq-more" hidden>Show more</button>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/request_log.js') }}"></script>
+{% endblock %}

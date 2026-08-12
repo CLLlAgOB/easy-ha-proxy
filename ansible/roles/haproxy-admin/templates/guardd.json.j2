@@ -14,6 +14,12 @@
     ])) | tojson }},
     "trusted_networks": {{ (guardd_trusted_networks | default([])) | tojson }}
   },
+  "request_log": {
+    "enabled": {{ (guardd_request_log_enabled | default(false)) | tojson }},
+    "retention_days": {{ guardd_request_log_retention_days | default(3) }},
+    "max_bytes": {{ guardd_request_log_max_bytes | default(268435456) }},
+    "reserved_free_bytes": {{ guardd_request_log_reserved_free_bytes | default(536870912) }}
+  },
   "limits": {
     "max_tracked_ips": {{ guardd_max_tracked_ips | default(5000) }},
     "max_paths_per_ip": {{ guardd_max_paths_per_ip | default(32) }},

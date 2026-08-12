@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 
 from .cache import get_country_code
 from .guardd_client import (
+    guardd_requests,
+    guardd_requests_status,
     GuarddUnavailable,
     guardd_health,
     guardd_ip,
@@ -110,3 +112,25 @@ def set_mode(value: Any) -> Dict[str, Any]:
 def unavailable_payload(exc: GuarddUnavailable) -> Dict[str, Any]:
     LOG.warning("guardd unavailable: %s", exc)
     return {"ok": False, "unavailable": True, "error": str(exc)}
+
+
+# The Log Explorer reads the same daemon. Filters are passed through by name
+# so a new one on the daemon side does not need a change here, but the set is
+# closed: an unknown key is dropped rather than forwarded.
+REQUEST_FILTERS = (
+    "since", "until", "client", "status", "host", "backend",
+    "request_id", "method", "path", "limit", "offset",
+)
+
+
+def requests(args) -> Dict[str, Any]:
+    params = {}
+    for key in REQUEST_FILTERS:
+        value = str(args.get(key) or "").strip()
+        if value:
+            params[key] = value[:200]
+    return guardd_requests(params)
+
+
+def requests_status() -> Dict[str, Any]:
+    return guardd_requests_status()

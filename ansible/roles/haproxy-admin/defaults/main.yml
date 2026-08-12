@@ -99,6 +99,16 @@ guardd_max_paths_per_ip: 32
 guardd_log_read_bytes_per_cycle: 4194304
 guardd_event_retention_days: 30
 guardd_memory_max: 256M
+# --- Request log (the Log Explorer store) ---
+# Off by default. A day of traffic on a small production gateway is ~310k
+# records, so the size cap is what actually holds, not the retention window,
+# and the free-space reserve has the last word: diagnostics must never be the
+# reason the disk fills up.
+guardd_request_log_enabled: false
+guardd_request_log_retention_days: 3
+guardd_request_log_max_bytes: 268435456
+guardd_request_log_reserved_free_bytes: 536870912
+guardd_request_log_path: /var/lib/easy-ha-proxy/requests/requests.db
 
 # --- Alert engine (easy-ha-proxy-alertd) ---
 # Conditions and notification policy live in one place instead of inside each

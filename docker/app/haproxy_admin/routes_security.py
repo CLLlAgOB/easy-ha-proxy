@@ -109,3 +109,29 @@ def api_adaptive_mode():
         getattr(g, "remote_user", "unknown"),
     )
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Log Explorer
+# ---------------------------------------------------------------------------
+
+
+@bp.get("/security/requests")
+def request_log_page():
+    return render_template("request_log.html")
+
+
+@bp.get("/api/security/requests")
+def api_request_log():
+    try:
+        return jsonify(security.requests(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/status")
+def api_request_log_status():
+    try:
+        return jsonify(security.requests_status())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503

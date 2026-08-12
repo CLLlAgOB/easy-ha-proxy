@@ -23,6 +23,7 @@ Design notes that the rest of the phase depends on:
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import grp
 import hmac
@@ -262,11 +263,61 @@ _ACCESS_HEAD = re.compile(
     r"(?P<frontend>\S+)\s+(?P<backend>\S+)\s+"
     r"(?P<times>\S+)\s+"
     r"(?P<status>-|\d{3})\s+"
+    r"(?P<bytes>-|\d+)\s+"
 )
 _ACCESS_TAIL = re.compile(
     r"(?P<method>[A-Z]{3,10})\s+(?P<uri>\S+)\s+(?P<proto>HTTP/[0-9.]+)\s*$"
 )
 _BAD_REQUEST_TAIL = re.compile(r"<BADREQ>\s*$")
+# Labelled fields in the unparsed middle of the record. They are found by name
+# rather than by position, which is what keeps the middle free to change.
+_ID_FIELD = re.compile(r"(?:^|\s)id=(?P<id>\S+)")
+_HOST_FIELD = re.compile(r"(?:^|\s)host=(?P<host>\S+)")
+_MONTHS = {
+    name: index
+    for index, name in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
+_STAMP = re.compile(
+    r"^(?P<day>\d{2})/(?P<month>[A-Za-z]{3})/(?P<year>\d{4}):"
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})"
+)
+
+
+def parse_stamp(value: str) -> int:
+    """Turn HAProxy's %t into a unix timestamp.
+
+    strptime costs about ten microseconds a line, which at the measured
+    27k lines/s is real work on a two-core gateway; this does the same job
+    with arithmetic.
+    """
+    match = _STAMP.match(value or "")
+    if match is None:
+        return 0
+    month = _MONTHS.get(match.group("month"))
+    if month is None:
+        return 0
+    try:
+        return int(
+            calendar.timegm(
+                (
+                    int(match.group("year")),
+                    month,
+                    int(match.group("day")),
+                    int(match.group("hour")),
+                    int(match.group("minute")),
+                    int(match.group("second")),
+                    0,
+                    0,
+                    0,
+                )
+            )
+        )
+    except (ValueError, OverflowError):
+        return 0
 
 
 def _utc_now() -> int:
@@ -298,6 +349,12 @@ class ParsedRequest:
     path: str
     host: str
     bad_request: bool = False
+    # Filled in only when the request log is on. They cost a little more
+    # parsing per line, so they stay optional rather than always paid for.
+    ts: int = 0
+    request_id: str = ""
+    bytes_out: int = 0
+    duration_ms: int = 0
 
     @property
     def denied_by_gateway(self) -> bool:
@@ -408,6 +465,12 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
     status = 0 if status_text == "-" else int(status_text)
 
     remainder = text[head.end():]
+    bytes_text = head.group("bytes")
+    bytes_out = 0 if bytes_text == "-" else int(bytes_text)
+    stamp = parse_stamp(head.group("stamp"))
+    identifier = _ID_FIELD.search(remainder)
+    request_id = identifier.group("id") if identifier else ""
+
     tail = _ACCESS_TAIL.search(remainder)
     if tail is None:
         if _BAD_REQUEST_TAIL.search(remainder):
@@ -420,10 +483,19 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
                 path="",
                 host="",
                 bad_request=True,
+                ts=stamp,
+                request_id=request_id,
+                bytes_out=bytes_out,
             )
         return None
 
     uri = tail.group("uri")
+    # The Host header, when the frontend captures it, is a labelled field; the
+    # absolute-form URI is the fallback and is rare in practice.
+    host_field = _HOST_FIELD.search(remainder)
+    host = host_field.group("host") if host_field else extract_host(uri)
+    if host in ("-", "{}"):
+        host = ""
     return ParsedRequest(
         client_ip=client,
         status=status,
@@ -431,8 +503,22 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         backend=head.group("backend"),
         method=tail.group("method"),
         path=normalize_path(uri),
-        host=extract_host(uri),
+        host=extract_host(uri) if not host else host[:MAX_HOST_LENGTH],
+        ts=stamp,
+        request_id=request_id,
+        bytes_out=bytes_out,
+        duration_ms=_total_time(head.group("times")),
     )
+
+
+def _total_time(times: str) -> int:
+    """The last field of %TR/%Tw/%Tc/%Tr/%Tt is the total, or -1 when unknown."""
+    tail = (times or "").rsplit("/", 1)[-1]
+    try:
+        value = int(tail)
+    except ValueError:
+        return 0
+    return max(0, value)
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +543,13 @@ class GuardConfig:
     max_paths_per_ip: int = DEFAULT_MAX_PATHS_PER_IP
     event_retention_days: int = 30
     maintenance_interval_seconds: int = 300
+    # The request log is a separate concern that happens to need the same read
+    # of the same file. It has its own switch, its own database and its own
+    # budget, so turning it on cannot change how the engine scores anything.
+    request_log_enabled: bool = False
+    request_log_retention_days: int = 3
+    request_log_max_bytes: int = 256 * 1024 * 1024
+    request_log_reserved_free_bytes: int = 512 * 1024 * 1024
 
 
 class ConfigError(ValueError):
@@ -488,6 +581,8 @@ def load_config(path: str) -> GuardConfig:
     sources = sources if isinstance(sources, dict) else {}
     exclusions = raw.get("exclusions")
     exclusions = exclusions if isinstance(exclusions, dict) else {}
+    request_log = raw.get("request_log")
+    request_log = request_log if isinstance(request_log, dict) else {}
 
     def _string_tuple(value: Any, fallback: Tuple[str, ...]) -> Tuple[str, ...]:
         if not isinstance(value, list):
@@ -522,6 +617,22 @@ def load_config(path: str) -> GuardConfig:
             default=DEFAULT_MAX_TRACKED_IPS,
             min_v=1000,
             max_v=500000,
+        ),
+        request_log_enabled=bool(request_log.get("enabled")),
+        request_log_retention_days=_clamp_int(
+            request_log.get("retention_days"), default=3, min_v=1, max_v=30
+        ),
+        request_log_max_bytes=_clamp_int(
+            request_log.get("max_bytes"),
+            default=256 * 1024 * 1024,
+            min_v=16 * 1024 * 1024,
+            max_v=16 * 1024 * 1024 * 1024,
+        ),
+        request_log_reserved_free_bytes=_clamp_int(
+            request_log.get("reserved_free_bytes"),
+            default=512 * 1024 * 1024,
+            min_v=64 * 1024 * 1024,
+            max_v=64 * 1024 * 1024 * 1024,
         ),
         max_paths_per_ip=_clamp_int(
             limits.get("max_paths_per_ip"),
@@ -1487,6 +1598,278 @@ class SecurityDatabase:
 
 
 # ---------------------------------------------------------------------------
+# Request log
+# ---------------------------------------------------------------------------
+
+REQUEST_LOG_PATH = os.environ.get(
+    "GUARDD_REQUEST_LOG", "/var/lib/easy-ha-proxy/requests/requests.db"
+)
+
+_REQUEST_SCHEMA: Tuple[str, ...] = (
+    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+    """
+    CREATE TABLE IF NOT EXISTS requests (
+        id          INTEGER PRIMARY KEY,
+        ts          INTEGER NOT NULL,
+        request_id  TEXT    NOT NULL DEFAULT '',
+        client      TEXT    NOT NULL DEFAULT '',
+        status      INTEGER NOT NULL DEFAULT 0,
+        frontend    TEXT    NOT NULL DEFAULT '',
+        backend     TEXT    NOT NULL DEFAULT '',
+        server      TEXT    NOT NULL DEFAULT '',
+        method      TEXT    NOT NULL DEFAULT '',
+        host        TEXT    NOT NULL DEFAULT '',
+        path        TEXT    NOT NULL DEFAULT '',
+        bytes_out   INTEGER NOT NULL DEFAULT 0,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        bad_request INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_requests_ts ON requests(ts)",
+    "CREATE INDEX IF NOT EXISTS ix_requests_rid ON requests(request_id)",
+    "CREATE INDEX IF NOT EXISTS ix_requests_client ON requests(client, ts)",
+    "CREATE INDEX IF NOT EXISTS ix_requests_status ON requests(status, ts)",
+)
+
+# LIKE needs an escape character so a path containing % or _ is matched
+# literally rather than as a wildcard.
+_LIKE_ESCAPE = "\\"
+
+
+class RequestLog:
+    """A bounded, searchable window over recent requests.
+
+    Deliberately not a log pipeline. A day of traffic on a small production
+    gateway is ~310k records, so the size cap -- not the retention window --
+    is what actually holds, and it is enforced by dropping the oldest rows.
+
+    What is stored is what the access log already contains after the engine's
+    own normalization: no query string, no headers, no bodies. The query is
+    dropped by normalize_path before it ever reaches here, which is why there
+    is no list of sensitive parameters to keep up to date.
+    """
+
+    def __init__(self, path: str, config: GuardConfig) -> None:
+        self.path = Path(path)
+        self.config = config
+        self._lock = threading.Lock()
+        self._pending: List[Tuple[Any, ...]] = []
+        self._paused = False
+        self._pause_reason = ""
+        self._last_maintenance = 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fresh = not self.path.exists()
+        self._conn = sqlite3.connect(
+            str(self.path), timeout=10, check_same_thread=False
+        )
+        self._conn.row_factory = sqlite3.Row
+        cursor = self._conn.cursor()
+        if fresh:
+            cursor.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        for statement in _REQUEST_SCHEMA:
+            cursor.execute(statement)
+        if cursor.execute("SELECT version FROM schema_version").fetchone() is None:
+            cursor.execute("INSERT INTO schema_version (version) VALUES (1)")
+        self._conn.commit()
+        cursor.close()
+
+    def close(self) -> None:
+        with self._lock, contextlib.suppress(Exception):
+            self._conn.close()
+
+    # -- ingest ---------------------------------------------------------
+    def add(self, record: ParsedRequest) -> None:
+        """Queue one record. Writing happens once per cycle, not per line."""
+        backend, _, server = (record.backend or "").partition("/")
+        self._pending.append(
+            (
+                record.ts or _utc_now(),
+                record.request_id[:64],
+                record.client_ip[:45],
+                record.status,
+                record.frontend[:64],
+                backend[:64],
+                "" if server in ("", "<NOSRV>") else server[:64],
+                record.method[:10],
+                record.host[:MAX_HOST_LENGTH],
+                record.path[:MAX_PATH_LENGTH],
+                record.bytes_out,
+                record.duration_ms,
+                1 if record.bad_request else 0,
+            )
+        )
+
+    def flush(self, now: Optional[int] = None) -> int:
+        """Write the queued records, then keep the store inside its budget."""
+        now = now if now is not None else _utc_now()
+        with self._lock:
+            pending, self._pending = self._pending, []
+            written = 0
+            if pending and not self._paused:
+                try:
+                    with self._conn:
+                        self._conn.executemany(
+                            "INSERT INTO requests (ts, request_id, client, status,"
+                            " frontend, backend, server, method, host, path,"
+                            " bytes_out, duration_ms, bad_request) VALUES"
+                            " (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            pending,
+                        )
+                    written = len(pending)
+                except sqlite3.Error as exc:
+                    LOG.warning("request log write failed: %s", exc)
+            if now - self._last_maintenance >= 60:
+                self._last_maintenance = now
+                self._maintain(now)
+            return written
+
+    # -- budget ---------------------------------------------------------
+    def _size(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                total += (self.path.parent / (self.path.name + suffix)).stat().st_size
+        return total
+
+    def _free_bytes(self) -> int:
+        with contextlib.suppress(OSError, AttributeError):
+            usage = os.statvfs(self.path.parent)
+            return usage.f_bavail * usage.f_frsize
+        return 0
+
+    def _maintain(self, now: int) -> None:
+        """Retention first, then the cap, then the filesystem reserve.
+
+        The order matters. Dropping expired rows is free storage, so it runs
+        before anything more aggressive. The reserve has the last word:
+        diagnostics must never be the reason the gateway runs out of disk,
+        which is the same rule the metrics collector follows.
+        """
+        cutoff = now - self.config.request_log_retention_days * 86400
+        with contextlib.suppress(sqlite3.Error):
+            with self._conn:
+                self._conn.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
+
+        for _ in range(8):
+            if self._size() <= self.config.request_log_max_bytes:
+                break
+            with contextlib.suppress(sqlite3.Error):
+                with self._conn:
+                    # A tenth at a time: enough to converge quickly, small
+                    # enough that one pass cannot stall the poll cycle.
+                    self._conn.execute(
+                        "DELETE FROM requests WHERE id IN ("
+                        "SELECT id FROM requests ORDER BY id LIMIT"
+                        " (SELECT MAX(1, COUNT(*) / 10) FROM requests))"
+                    )
+                    self._conn.execute("PRAGMA incremental_vacuum")
+
+        free = self._free_bytes()
+        reserve = self.config.request_log_reserved_free_bytes
+        if free and free < reserve:
+            if not self._paused:
+                self._paused = True
+                self._pause_reason = "the filesystem is below its free-space reserve"
+                LOG.warning(
+                    "Request log paused: %s. HAProxy traffic is not affected.",
+                    self._pause_reason,
+                )
+        elif self._paused and free > reserve * 1.2:
+            self._paused = False
+            self._pause_reason = ""
+            LOG.info("Request log resumed: free space recovered")
+
+    # -- read -----------------------------------------------------------
+    def search(
+        self,
+        *,
+        since: int = 0,
+        until: int = 0,
+        client: str = "",
+        status: str = "",
+        host: str = "",
+        backend: str = "",
+        request_id: str = "",
+        method: str = "",
+        path: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        clauses: List[str] = []
+        parameters: List[Any] = []
+        if since:
+            clauses.append("ts >= ?")
+            parameters.append(int(since))
+        if until:
+            clauses.append("ts <= ?")
+            parameters.append(int(until))
+        for column, value in (
+            ("client", client),
+            ("host", host),
+            ("backend", backend),
+            ("request_id", request_id),
+            ("method", method),
+        ):
+            if value:
+                clauses.append(column + " = ?")
+                parameters.append(str(value)[:200])
+        if path:
+            # A prefix match, so /api finds everything under it. Anchored on
+            # purpose: a leading wildcard would scan the whole table.
+            escaped = str(path)[:MAX_PATH_LENGTH]
+            for character in (_LIKE_ESCAPE, "%", "_"):
+                escaped = escaped.replace(character, _LIKE_ESCAPE + character)
+            clauses.append("path LIKE ? ESCAPE ?")
+            parameters.extend([escaped + "%", _LIKE_ESCAPE])
+        if status:
+            text = str(status).strip()
+            if len(text) == 3 and text.endswith("xx") and text[0].isdigit():
+                low = int(text[0]) * 100
+                clauses.append("status >= ? AND status < ?")
+                parameters.extend([low, low + 100])
+            elif text.isdigit():
+                clauses.append("status = ?")
+                parameters.append(int(text))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit = _clamp_int(limit, default=100, min_v=1, max_v=500)
+        offset = _clamp_int(offset, default=0, min_v=0, max_v=100000)
+        with self._lock:
+            total = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM requests" + where, parameters
+                ).fetchone()[0]
+            )
+            rows = self._conn.execute(
+                "SELECT * FROM requests" + where
+                + " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+                parameters + [limit, offset],
+            ).fetchall()
+        return {"total": total, "requests": [dict(row) for row in rows]}
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS rowcount, MIN(ts) AS oldest, MAX(ts) AS newest"
+                " FROM requests"
+            ).fetchone()
+        return {
+            "enabled": self.config.request_log_enabled,
+            "rows": int(row["rowcount"] or 0),
+            "oldest_ts": int(row["oldest"] or 0),
+            "newest_ts": int(row["newest"] or 0),
+            "database_bytes": self._size(),
+            "max_bytes": self.config.request_log_max_bytes,
+            "retention_days": self.config.request_log_retention_days,
+            "free_bytes": self._free_bytes(),
+            "paused": self._paused,
+            "pause_reason": self._pause_reason,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Enforcement primitives (unused while mode is monitor)
 # ---------------------------------------------------------------------------
 
@@ -1585,10 +1968,12 @@ class GuardEngine:
         database: SecurityDatabase,
         exclusions: Optional[ExclusionModel] = None,
         alerts: Optional[Any] = None,
+        requests: Optional["RequestLog"] = None,
     ) -> None:
         self.config = config
         self.database = database
         self.exclusions = exclusions or ExclusionModel(config)
+        self.requests = requests
         # A ban used to be a journal line only. Whether it is worth an email is
         # the alert engine's decision, not this daemon's; here it is only
         # reported.
@@ -1804,8 +2189,16 @@ class GuardEngine:
             if request is None:
                 continue
             parsed += 1
+            if self.requests is not None:
+                # Diagnostics and scoring are separate concerns that happen to
+                # need the same read of the same file. The request log keeps
+                # everything, including what the engine excludes: an operator
+                # looking for their own failed request must be able to find it.
+                self.requests.add(request)
             self.observe_request(request, now)
         self.lines_parsed += parsed
+        if self.requests is not None:
+            self.requests.flush(now)
         return len(lines)
 
     def observe_request(self, request: ParsedRequest, now: int) -> None:
@@ -2357,6 +2750,49 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return
 
+        if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status"):
+            requests = getattr(self.server, "requests", None)
+            if requests is None:
+                self._send_json(
+                    404,
+                    {"ok": False, "enabled": False, "error": "the request log is off"},
+                )
+                return
+            try:
+                if path.endswith("/status"):
+                    self._send_json(
+                        200, {"ok": True, "ts": _utc_now(), **requests.status()}
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query or "")
+
+                def one(name: str) -> str:
+                    return (query.get(name, [""])[0] or "").strip()
+
+                payload = requests.search(
+                    since=_clamp_int(
+                        one("since"), default=0, min_v=0, max_v=2_000_000_000
+                    ),
+                    until=_clamp_int(
+                        one("until"), default=0, min_v=0, max_v=2_000_000_000
+                    ),
+                    client=one("client"),
+                    status=one("status"),
+                    host=one("host"),
+                    backend=one("backend"),
+                    request_id=one("request_id"),
+                    method=one("method").upper(),
+                    path=one("path"),
+                    limit=_clamp_int(one("limit"), default=100, min_v=1, max_v=500),
+                    offset=_clamp_int(
+                        one("offset"), default=0, min_v=0, max_v=100000
+                    ),
+                )
+                self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
         if path == "/api/v1/guard/shadow":
             query = parse_qs(urlparse(self.path).query or "")
             try:
@@ -2450,6 +2886,9 @@ class GuardServer(ThreadingMixIn, UnixStreamServer):
         super().__init__(socket_path, handler_cls)
         self.engine = engine
         self.database = database
+        # Set after construction: the request log is optional and the server
+        # answers a "not enabled" 404 for its routes when it is absent.
+        self.requests: Optional[RequestLog] = None
 
 
 def _set_socket_perms(socket_path: str, group_name: str) -> None:
@@ -2476,7 +2915,10 @@ def main() -> None:
         LOG.error("%s", exc)
         raise SystemExit(2) from exc
 
-    if config.mode == MODE_OFF:
+    # The request log rides on the same tail of the same file, so it keeps
+    # working with the security engine switched off -- diagnostics should not
+    # depend on whether the operator wants scoring.
+    if config.mode == MODE_OFF and not config.request_log_enabled:
         LOG.info("Adaptive protection is off in %s; idling", CONFIG_PATH)
         stop = threading.Event()
         with contextlib.suppress(KeyboardInterrupt):
@@ -2484,7 +2926,14 @@ def main() -> None:
         return
 
     database = SecurityDatabase(DATABASE_PATH)
-    engine = GuardEngine(config, database, alerts=_alert_client())
+    requests = (
+        RequestLog(REQUEST_LOG_PATH, config)
+        if config.request_log_enabled
+        else None
+    )
+    engine = GuardEngine(
+        config, database, alerts=_alert_client(), requests=requests
+    )
 
     LOG.info(
         "Starting easy-ha-proxy-guardd: mode=%s socket=%s db=%s log=%s "
@@ -2504,6 +2953,7 @@ def main() -> None:
             os.unlink(SOCKET_PATH)
 
     server = GuardServer(SOCKET_PATH, GuardHandler, engine, database)
+    server.requests = requests
     try:
         _set_socket_perms(SOCKET_PATH, SOCKET_GROUP)
     except Exception as exc:  # pylint: disable=broad-except
@@ -2517,6 +2967,8 @@ def main() -> None:
         engine.stop()
         with contextlib.suppress(Exception):
             server.server_close()
+        if requests is not None:
+            requests.close()
         database.close()
         with contextlib.suppress(OSError):
             if os.path.exists(SOCKET_PATH):

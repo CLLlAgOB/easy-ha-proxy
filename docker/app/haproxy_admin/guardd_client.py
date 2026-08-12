@@ -96,3 +96,34 @@ def guardd_set_mode(mode: str) -> Dict[str, Any]:
         raise GuarddUnavailable("guardd returned a non-JSON response") from exc
     except Exception as exc:  # pylint: disable=broad-except
         raise GuarddUnavailable(str(exc)) from exc
+
+
+def _request_log_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Read a request-log endpoint.
+
+    The daemon answers 404 with a body when the log is switched off, which is
+    a different thing from the daemon being unreachable. Raising on status
+    here would turn "the feature is off" into "guardd is down" on the page.
+    """
+    url = "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="") + path
+    try:
+        response = _session().get(url, params=params or {}, timeout=DEFAULT_TIMEOUT)
+        data = response.json()
+    except GuarddUnavailable:
+        raise
+    except ValueError as exc:
+        raise GuarddUnavailable("guardd returned a non-JSON response") from exc
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise GuarddUnavailable("guardd returned an unexpected payload")
+    return data
+
+
+def guardd_requests(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Search the bounded request log."""
+    return _request_log_get("/api/v1/guard/requests", params=params)
+
+
+def guardd_requests_status() -> Dict[str, Any]:
+    return _request_log_get("/api/v1/guard/requests/status")

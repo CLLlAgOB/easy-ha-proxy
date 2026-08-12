@@ -452,6 +452,32 @@ the adaptive protection engine anchors its parser on the request line at the
 end, so this stays out of its way. Set `request_id_enabled: false` to turn the
 whole thing off.
 
+### Log Explorer
+
+Off by default. When it is on, the security engine writes every request it
+already reads into a separate bounded store, and the **Request log** page
+searches it by time, status, client address, host, backend, path prefix and
+request identifier -- so a user quoting one `X-Request-ID` is enough to find
+what happened.
+
+It is a window, not a log pipeline, and the numbers say why: a day of traffic
+on a small production gateway is about 310,000 records. The size cap is
+therefore what actually holds the store down, not the retention window, and
+the oldest rows are dropped to stay inside it. Below that sits the same rule
+the metrics collector follows -- writing stops before the filesystem
+free-space reserve is touched, because diagnostics must never be the reason
+the gateway runs out of disk.
+
+What is never stored: the query string, which the engine drops before anything
+reaches the store, and any header, cookie or body, which the access log does
+not contain in the first place. There is no list of sensitive parameters to
+keep up to date because there are no parameters.
+
+The store rides on the same read of the same file the security engine already
+does, so it costs no extra I/O -- but it is independent of it: requests from
+allow-listed addresses are excluded from scoring and still recorded here, and
+the explorer keeps working with adaptive protection switched off.
+
 ### Prometheus export
 
 Off by default, because Prometheus is not a required service here. When it is

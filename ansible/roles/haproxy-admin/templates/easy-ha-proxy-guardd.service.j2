@@ -15,6 +15,7 @@ Environment="GUARDD_SOCKET_PATH={{ guardd_socket_path | default('/run/easy-ha-pr
 Environment="GUARDD_SOCKET_GROUP={{ guardd_socket_group | default(app_group | default('hadmin')) }}"
 Environment="GUARDD_CONFIG={{ guardd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/guardd.json') }}"
 Environment="GUARDD_DATABASE={{ guardd_database_path | default('/var/lib/easy-ha-proxy/security/security.db') }}"
+Environment="GUARDD_REQUEST_LOG={{ guardd_request_log_path | default('/var/lib/easy-ha-proxy/requests/requests.db') }}"
 # Only the mode switch is mutating, and only with this shared token. Reads
 # stay open to the hadmin group like every other helper socket.
 Environment="GUARDD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
@@ -32,7 +33,7 @@ RestartSec=5
 RuntimeDirectory=easy-ha-proxy
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
-StateDirectory=easy-ha-proxy/security
+StateDirectory=easy-ha-proxy/security easy-ha-proxy/requests
 StateDirectoryMode=0750
 UMask=0007
 
