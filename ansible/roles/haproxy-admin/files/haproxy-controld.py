@@ -149,6 +149,43 @@ MAX_TRANSACTION_STATE_BYTES = int(os.getenv(
     "HAPROXY_CONFIG_TRANSACTION_STATE_MAX_BYTES", str(20 * 1024 * 1024)
 ))
 CONFIG_SOURCE_FILENAMES = frozenset({"vars.yml", "websites.yml", "tcp.yml"})
+
+# --- Configuration history -------------------------------------------------
+#
+# The guarded transaction already carries the managed sources so it can roll a
+# failed apply back, but it discards them once the change is confirmed. Keeping
+# a copy of every confirmed version is what turns "undo the last apply" into
+# "see what changed last Tuesday, and put that back".
+CONFIG_HISTORY_DIR = Path(os.getenv(
+    "HAPROXY_CONFIG_HISTORY_DIR",
+    "/var/lib/easy-ha-proxy/config-history",
+))
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: the
+# gateway still applies configuration without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="controld")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine something failed. Never disturbs the operation."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # noqa: BLE001 - reporting is best effort
+        pass
+CONFIG_HISTORY_KEEP = int(os.getenv("HAPROXY_CONFIG_HISTORY_KEEP", "50"))
+CONFIG_HISTORY_META = "meta.json"
 ADMIN_ALLOWLIST_PATH = Path(os.getenv(
     "HAPROXY_ADMIN_ALLOWLIST_PATH", "/etc/haproxy/admin.allow"
 ))
@@ -1274,10 +1311,44 @@ def logs_attackers() -> dict:
 # ───── обработка команд по сокету ─────
 
 
+STATE_DUMP_CMD = "/usr/local/sbin/haproxy-state-dump"
+
+
+def dump_server_state() -> None:
+    """Сохранить административное состояние серверов перед reload.
+
+    Ready/Drain/Maintenance и runtime-вес живут только в работающем процессе.
+    Без дампа сохранение любого сайта возвращало бы сервер, выведенный на
+    обслуживание, обратно под нагрузку. Ошибка дампа не должна мешать reload:
+    таймер обновляет тот же файл, и в худшем случае состояние будет чуть
+    старее.
+    """
+
+    if not os.path.exists(STATE_DUMP_CMD):
+        return
+    try:
+        proc = subprocess.run(
+            [STATE_DUMP_CMD],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            LOG.warning(
+                "Server state dump exited with %s: %s",
+                proc.returncode,
+                (proc.stderr or "").strip()[:200],
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.warning("Server state dump failed: %r", exc)
+
+
 def cmd_reload() -> tuple[bool, str]:
     """
     Выполнить systemctl reload haproxy.
     """
+    dump_server_state()
     try:
         LOG.info("Executing reload command: %s", SYSTEMCTL_CMD)
         proc = subprocess.run(
@@ -1744,6 +1815,18 @@ def _haproxy_apply_config_guarded_locked(
     result["rolled_back"] = True
     result["rollback"] = rollback
     result["rollback_ok"] = bool(rollback.get("ok"))
+    # The browser is told, but an apply can also be rolled back long after the
+    # operator closed the tab, and a failed rollback is the worst case there is.
+    report_alert(
+        "config.apply_failed",
+        "haproxy",
+        (
+            "HAProxy apply failed and was rolled back"
+            if rollback.get("ok")
+            else "HAProxy apply failed AND the rollback did not succeed"
+        ),
+        str(result.get("failure") or ""),
+    )
     return result
 
 
@@ -2068,6 +2151,142 @@ def _verify_live_transaction_candidate(state: dict[str, object]) -> None:
         os.close(directory_fd)
     _verify_transaction_admin_allowlist_candidate(state)
     _verify_transaction_geoip_candidate(state)
+
+
+def _read_current_config_sources() -> dict[str, bytes]:
+    """Read the managed YAML files as they are on disk right now."""
+
+    directory_fd = _open_config_source_directory()
+    sources: dict[str, bytes] = {}
+    try:
+        for filename in sorted(CONFIG_SOURCE_FILENAMES):
+            try:
+                content, _ = _read_config_source_at(directory_fd, filename)
+            except (RuntimeError, OSError):
+                continue
+            sources[filename] = content
+    finally:
+        os.close(directory_fd)
+    return sources
+
+
+def _config_history_entries() -> list[Path]:
+    if not CONFIG_HISTORY_DIR.is_dir():
+        return []
+    entries = [
+        path
+        for path in CONFIG_HISTORY_DIR.iterdir()
+        if path.is_dir() and (path / CONFIG_HISTORY_META).is_file()
+    ]
+    return sorted(entries, key=lambda path: path.name, reverse=True)
+
+
+def record_config_version(state: dict[str, object] | None = None) -> str:
+    """Keep the managed sources of a confirmed configuration.
+
+    Called after a transaction is confirmed, when the files on disk are the
+    version that is actually running. Failing to record history must never
+    undo a change that already succeeded, so every error is swallowed after
+    being logged.
+    """
+
+    try:
+        sources = _read_current_config_sources()
+        if not sources:
+            return ""
+        digest = hashlib.sha256()
+        for filename in sorted(sources):
+            digest.update(filename.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(sources[filename])
+        generation = digest.hexdigest()
+
+        existing = _config_history_entries()
+        if existing:
+            try:
+                latest = json.loads(
+                    (existing[0] / CONFIG_HISTORY_META).read_text("utf-8")
+                )
+                if latest.get("generation") == generation:
+                    # Confirming a transaction that changed nothing in the
+                    # managed sources should not create a duplicate version.
+                    return str(latest.get("id") or "")
+            except (OSError, ValueError):
+                pass
+
+        timestamp = datetime.now(timezone.utc)
+        version_id = f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}.{generation[:12]}"
+        target = CONFIG_HISTORY_DIR / version_id
+        staging = CONFIG_HISTORY_DIR / f".staging.{secrets.token_hex(8)}"
+        CONFIG_HISTORY_DIR.mkdir(parents=True, mode=0o750, exist_ok=True)
+        staging.mkdir(mode=0o750)
+        try:
+            for filename, content in sources.items():
+                path = staging / filename
+                path.write_bytes(content)
+                os.chmod(path, 0o640)
+            meta = {
+                "id": version_id,
+                "ts": int(timestamp.timestamp()),
+                "generation": generation,
+                "parent": existing[0].name if existing else "",
+                "files": sorted(sources),
+                "transaction_id": str((state or {}).get("id") or ""),
+                "cfg_sha256": str((state or {}).get("candidate_sha256") or ""),
+            }
+            (staging / CONFIG_HISTORY_META).write_text(
+                json.dumps(meta, ensure_ascii=False, sort_keys=True), "utf-8"
+            )
+            os.chmod(staging / CONFIG_HISTORY_META, 0o640)
+            # Renaming a fully built directory means a reader never sees a
+            # half-written version.
+            os.replace(staging, target)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+        for stale in _config_history_entries()[max(1, CONFIG_HISTORY_KEEP):]:
+            shutil.rmtree(stale, ignore_errors=True)
+        LOG.info("Recorded configuration version %s", version_id)
+        return version_id
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("Could not record the configuration version: %r", exc)
+        return ""
+
+
+def list_config_versions(limit: int = 50) -> list[dict[str, object]]:
+    versions: list[dict[str, object]] = []
+    for path in _config_history_entries()[: max(1, min(int(limit), 200))]:
+        try:
+            meta = json.loads((path / CONFIG_HISTORY_META).read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        meta["bytes"] = sum(
+            item.stat().st_size for item in path.iterdir() if item.is_file()
+        )
+        versions.append(meta)
+    return versions
+
+
+def get_config_version(version_id: str) -> dict[str, object]:
+    """Return one stored version, with its sources base64 encoded."""
+
+    name = str(version_id or "").strip()
+    # The identifier indexes a directory, so it is matched against what exists
+    # rather than joined onto a path.
+    if not name or name not in {path.name for path in _config_history_entries()}:
+        raise ValueError("unknown configuration version")
+    path = CONFIG_HISTORY_DIR / name
+    meta = json.loads((path / CONFIG_HISTORY_META).read_text("utf-8"))
+    sources: dict[str, str] = {}
+    for filename in sorted(CONFIG_SOURCE_FILENAMES):
+        candidate = path / filename
+        if candidate.is_file():
+            sources[filename] = base64.b64encode(
+                candidate.read_bytes()
+            ).decode("ascii")
+    meta["sources"] = sources
+    return meta
 
 
 def _restore_config_sources(previous: dict[str, bytes]) -> list[str]:
@@ -3073,6 +3292,10 @@ def confirm_config_transaction(
             ) from exc
         state["state"] = "confirmed"
         state["confirmed_at"] = datetime.now(timezone.utc).isoformat()
+        # The files on disk are now the version that is running, so this is the
+        # moment worth keeping. Recorded before the rollback material is
+        # dropped, and never allowed to fail the confirmation.
+        state["history_version"] = record_config_version(state)
         state.pop("previous_config_b64", None)
         state.pop("previous_sources", None)
         state.pop("admin_allowlist", None)
@@ -3874,6 +4097,39 @@ def handle_client(conn: socket.socket) -> None:
                     json.dumps(result, ensure_ascii=False).encode("utf-8")
                 ).decode("ascii")
                 conn.sendall(f"ERROR {payload}\n".encode("ascii"))
+            return
+
+        if cmd == "config-versions" or cmd.startswith("config-versions "):
+            try:
+                parts = cmd.split()
+                if len(parts) > 2:
+                    raise ValueError("config-versions accepts one optional limit")
+                limit = int(parts[1]) if len(parts) == 2 else 50
+                result = {"ok": True, "versions": list_config_versions(limit)}
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "failure": str(exc)[:4000]}
+            payload = base64.b64encode(
+                json.dumps(result, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+            conn.sendall(
+                f"{'OK' if result.get('ok') else 'ERROR'} {payload}\n".encode("ascii")
+            )
+            return
+
+        if cmd.startswith("config-version "):
+            try:
+                parts = cmd.split()
+                if len(parts) != 2:
+                    raise ValueError("config-version accepts exactly one id")
+                result = {"ok": True, "version": get_config_version(parts[1])}
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "failure": str(exc)[:4000]}
+            payload = base64.b64encode(
+                json.dumps(result, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+            conn.sendall(
+                f"{'OK' if result.get('ok') else 'ERROR'} {payload}\n".encode("ascii")
+            )
             return
 
         if cmd == "config-transaction-status" or cmd.startswith(
