@@ -12,6 +12,7 @@ import uuid
 
 from flask import Blueprint, abort, jsonify, render_template, request, send_file
 
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .backupd_client import BackupdError, backupd_request
 
 
@@ -60,14 +61,49 @@ def _daemon_response(result: dict, *, accepted: bool = False):
     return jsonify(result), status_code
 
 
+# Every job that changes the host goes through _call_daemon, so one audit
+# point covers them all. The payload also carries the archive passphrase, so
+# the summary is built from an allow-list and never from the payload itself.
+AUDITED_ACTIONS = {
+    "start_backup": ("backup.start", ("include_ssh", "quiesce")),
+    "start_restore": ("restore.start", ("upload_id", "scope", "restore_ssh")),
+    "delete": ("backup.delete", ("kind", "id")),
+}
+
+
 def _call_daemon(payload: dict, *, accepted: bool = False, timeout: float = 10.0):
+    entry = AUDITED_ACTIONS.get(str(payload.get("action") or ""))
     try:
-        return _daemon_response(
-            backupd_request(payload, timeout=timeout),
-            accepted=accepted,
-        )
+        result = backupd_request(payload, timeout=timeout)
     except BackupdError as exc:
+        if entry:
+            record_request(
+                entry[0],
+                object_type="backup",
+                object_id=str(payload.get("id") or payload.get("upload_id") or ""),
+                result=RESULT_FAILURE,
+                detail=str(exc)[:500],
+            )
         return jsonify({"ok": False, "error": str(exc)}), 503
+    if entry:
+        action, fields = entry
+        ok = bool(result.get("ok"))
+        record_request(
+            action,
+            object_type="backup",
+            object_id=str(
+                result.get("job_id")
+                or payload.get("id")
+                or payload.get("upload_id")
+                or ""
+            ),
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=", ".join(
+                f"{field}: {payload[field]}" for field in fields if field in payload
+            ),
+            detail="" if ok else str(result.get("error") or "")[:500],
+        )
+    return _daemon_response(result, accepted=accepted)
 
 
 def _json_payload(required: set[str], optional: set[str] | None = None):

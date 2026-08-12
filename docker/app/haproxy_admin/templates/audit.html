@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}Change log{% endblock %}
+{% block header_title %}Change log{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.au-filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 18px;
+}
+
+.au-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.au-filters select {
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  min-width: 140px;
+}
+
+.au-row { cursor: pointer; }
+
+.au-result {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.au-success { background: rgba(46,158,91,.15); color: #2e9e5b; }
+.au-failure { background: rgba(204,75,75,.15); color: #cc4b4b; }
+.au-denied { background: rgba(200,161,58,.18); color: #c8a13a; }
+
+.au-detail {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  font-size: 13px;
+}
+
+.au-detail[hidden] { display: none; }
+
+.au-detail pre {
+  margin: 6px 0 12px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--bg-secondary);
+  overflow-x: auto;
+  font-family: 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+}
+
+.au-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 40px 0;
+  text-align: center;
+}
+
+.au-more { margin-top: 14px; }
+</style>
+
+<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
+     background: rgba(var(--accent-primary-rgb), .07);">
+  Records are written when an action is taken and are never edited afterwards. Secrets are replaced before anything is stored, so a password change is recorded as having happened, never as a value.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Changes</h2>
+    <span class="mon-sub" id="au-status" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="au-filters">
+    <label>
+      Period
+      <select id="au-range">
+        {% for key in ranges %}
+          <option value="{{ key }}" {% if key == default_range %}selected{% endif %}>{{ key }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Who
+      <select id="au-actor"><option value="">Anyone</option></select>
+    </label>
+    <label>
+      Action
+      <select id="au-action"><option value="">Any action</option></select>
+    </label>
+    <label>
+      Object
+      <select id="au-object"><option value="">Any object</option></select>
+    </label>
+    <label>
+      Outcome
+      <select id="au-result"><option value="">Any outcome</option></select>
+    </label>
+  </div>
+
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Who</th>
+          <th>Action</th>
+          <th>Object</th>
+          <th>Change</th>
+          <th>Outcome</th>
+        </tr>
+      </thead>
+      <tbody id="au-body" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+
+  <div class="au-empty" id="au-empty">Nothing has been recorded for this period</div>
+
+  <div class="au-more">
+    <button class="btn" type="button" id="au-more" hidden>Show more</button>
+  </div>
+
+  <div class="au-detail" id="au-detail" hidden>
+    <h3 id="au-detail-title" data-i18n-skip translate="no"></h3>
+    <div id="au-detail-meta" data-i18n-skip translate="no"></div>
+    <div id="au-detail-bodies"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/audit.js') }}"></script>
+{% endblock %}

@@ -6,6 +6,7 @@ import logging
 
 from flask import g, render_template, request, jsonify
 
+from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .routes import bp
 from .healthd_client import (
     healthd_status,
@@ -158,13 +159,21 @@ def api_health_control():
     - Валидируем action относительно capabilities, чтобы нельзя было вызвать
       произвольную команду даже если кто-то подделает запрос.
     """
-    if not _is_superadmin():
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-
     payload = request.get_json(silent=True) or {}
     kind = (payload.get("kind") or "").strip().lower()
     name = (payload.get("name") or "").strip()
     action = (payload.get("action") or "").strip().lower()
+
+    if not _is_superadmin():
+        record_request(
+            "service.control",
+            object_type=kind or "service",
+            object_id=name,
+            result=RESULT_DENIED,
+            summary=f"action: {action}",
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "forbidden"}), 403
 
     if kind not in {"systemd", "docker"}:
         return jsonify({"ok": False, "error": "kind must be systemd|docker"}), 400
@@ -200,6 +209,14 @@ def api_health_control():
                     pass
 
         if action not in allowed:
+            record_request(
+                "service.control",
+                object_type=kind,
+                object_id=name,
+                result=RESULT_DENIED,
+                summary=f"action: {action}",
+                detail="action is not in the healthd capability list",
+            )
             return jsonify({"ok": False, "error": "action not allowed", "allowed": sorted(allowed)}), 403
 
     except Exception as e:  # pylint: disable=broad-except
@@ -213,7 +230,25 @@ def api_health_control():
             out = data.get("stdout") or ""
             err = data.get("stderr") or ""
             data["text"] = (out + ("\n" if out and err else "") + err).strip()
+        ok = bool(data.get("ok") or data.get("scheduled"))
+        record_request(
+            "service.control",
+            object_type=kind,
+            object_id=name,
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=f"action: {action}"
+            + (", scheduled" if data.get("scheduled") else ""),
+            detail="" if ok else str(data.get("error") or data.get("text") or "")[:500],
+        )
         return jsonify(data), (202 if data.get("scheduled") else (200 if data.get("ok") else 500))
     except Exception as e:  # pylint: disable=broad-except
         LOG.exception("healthd control error")
+        record_request(
+            "service.control",
+            object_type=kind,
+            object_id=name,
+            result=RESULT_FAILURE,
+            summary=f"action: {action}",
+            detail=str(e)[:500],
+        )
         return jsonify({"ok": False, "error": str(e)}), 502

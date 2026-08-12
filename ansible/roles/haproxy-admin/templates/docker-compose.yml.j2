@@ -32,6 +32,7 @@ services:
       HOME: "/tmp"
       HAPROXY_ADMIN_SECRET_FILE: "/var/lib/haproxy-admin/secret_key"
       HAPROXY_ADMIN_GEOIP_DB: "/etc/haproxy/geoip/current/dbip-country-lite.mmdb"
+      AUDIT_DATABASE: "{{ audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db') }}"
 
     volumes:
       - "{{ haproxy_admin_data_dir }}:/var/lib/haproxy-admin"
@@ -42,6 +43,9 @@ services:
       - "/var/log/haproxy.log:/var/log/haproxy.log:ro"
       - "/run/haproxy:/run/haproxy:ro"
       - "/run/easy-ha-proxy:/run/easy-ha-proxy:ro"
+      # The only writable state outside the app's own data directory: the
+      # change log. Scoped to that one directory rather than /var/lib.
+      - "{{ (audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db')) | dirname }}:{{ (audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db')) | dirname }}:rw"
       - "/opt/haproxy-admin/config:/opt/haproxy-admin/config"
       - "/opt/haproxy-admin/backups:/opt/haproxy-admin/backups"
       - "{{ backupd_uploads_dir }}:{{ backupd_uploads_dir }}:rw"

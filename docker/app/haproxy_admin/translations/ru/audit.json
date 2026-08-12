@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Change log": "Журнал изменений",
+    "Records are written when an action is taken and are never edited afterwards. Secrets are replaced before anything is stored, so a password change is recorded as having happened, never as a value.": "Записи создаются в момент действия и после этого не правятся. Секреты заменяются до записи: смена пароля фиксируется как факт, но не как значение.",
+    "Changes": "Изменения",
+    "Period": "Период",
+    "Who": "Кто",
+    "Anyone": "Любой",
+    "Any action": "Любое действие",
+    "Object": "Объект",
+    "Any object": "Любой объект",
+    "Outcome": "Результат",
+    "Any outcome": "Любой результат",
+    "When": "Когда",
+    "Change": "Что изменилось",
+    "From": "Откуда",
+    "Before": "До",
+    "After": "После",
+    "Nothing has been recorded for this period": "За этот период записей нет",
+    "Show more": "Показать ещё"
+  }
+}

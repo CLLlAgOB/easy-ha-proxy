@@ -17,6 +17,17 @@
         group: "{{ app_group }}"
         mode: "0755"
 
+    # The change log is the one piece of state the container writes outside
+    # its own data directory. Group-writable so a root helper can append to
+    # the same trail later without a second store.
+    - name: Ensure audit dir exists
+      ansible.builtin.file:
+        path: "{{ (audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db')) | dirname }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0770"
+
     - name: Ensure app config dir exists
       ansible.builtin.file:
         path: "{{ app_dir }}/config"

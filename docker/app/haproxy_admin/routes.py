@@ -12,6 +12,7 @@ from flask import (
     url_for,
 )
 from ipaddress import ip_address
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .utils import grep_last_logs_for_ip
 from .cache import get_country_code
 import os
@@ -122,7 +123,19 @@ def api_unban():
     ip = request.form.get("ip", "").strip()
     if not ip:
         return 'IP is required', 400
-    return unban_ip(ip)
+    try:
+        response = unban_ip(ip)
+    except Exception as exc:  # pylint: disable=broad-except
+        record_request(
+            "ban.lift",
+            object_type="ip",
+            object_id=ip,
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        raise
+    record_request("ban.lift", object_type="ip", object_id=ip)
+    return response
 
 
 def _whitelist_api_error(scope: str, exc: Exception):
@@ -136,9 +149,21 @@ def api_whitelist():
     if not ip:
         return 'IP is required', 400
     try:
-        return add_to_whitelist(ip)
+        response = add_to_whitelist(ip)
     except Exception as exc:  # pylint: disable=broad-except
+        record_request(
+            "whitelist.add",
+            object_type="ip",
+            object_id=ip,
+            result=RESULT_FAILURE,
+            summary="scope: geo",
+            detail=str(exc),
+        )
         return _whitelist_api_error("GEO", exc)
+    record_request(
+        "whitelist.add", object_type="ip", object_id=ip, summary="scope: geo"
+    )
+    return response
 
 
 @bp.route("/api/whitelist-global", methods=["POST"])
@@ -147,9 +172,21 @@ def api_whitelist_global():
     if not ip:
         return 'IP is required', 400
     try:
-        return add_to_global_whitelist(ip)
+        response = add_to_global_whitelist(ip)
     except Exception as exc:  # pylint: disable=broad-except
+        record_request(
+            "whitelist.add",
+            object_type="ip",
+            object_id=ip,
+            result=RESULT_FAILURE,
+            summary="scope: global",
+            detail=str(exc),
+        )
         return _whitelist_api_error("GLOBAL", exc)
+    record_request(
+        "whitelist.add", object_type="ip", object_id=ip, summary="scope: global"
+    )
+    return response
 
 
 @bp.route("/api/attackers")
@@ -301,6 +338,13 @@ def authelia_user_new():
         )
     except Exception as exc:
         current_app.logger.exception("Authelia: cannot create user")
+        record_request(
+            "user.create",
+            object_type="user",
+            object_id=username,
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
         return render_template(
             "authelia_user_new.html",
             error=f"Creation error: {exc}",
@@ -310,12 +354,27 @@ def authelia_user_new():
 
     if error:
         # логика, как при редактировании: просто показать ошибку и форму
+        record_request(
+            "user.create",
+            object_type="user",
+            object_id=username,
+            result=RESULT_FAILURE,
+            detail=str(error),
+        )
         return render_template(
             "authelia_user_new.html",
             error=f"Creation error: {error}",
             form=form,
             all_groups=all_groups,
         )
+
+    # The password never reaches the record: only that one was set.
+    record_request(
+        "user.create",
+        object_type="user",
+        object_id=username,
+        summary=summarize({}, {**fields, "password": "set"}),
+    )
 
     # В списке пользователей message читается из ?msg=
     # поэтому нужно слать msg=..., а не message=...
@@ -390,9 +449,28 @@ def authelia_user_edit(username: str):
             "groups": groups,
         }
 
+        # Read the stored user first so the record can say what moved. A
+        # failure here only costs the before/after detail, never the edit.
+        previous, _previous_error = get_authelia_user(username)
+        before = {
+            key: (previous or {}).get(key)
+            for key in ("displayname", "email", "disabled", "groups")
+        }
+        after = dict(fields)
+        if password_plain:
+            before["password"] = "kept"
+            after["password"] = "changed"
+
         user, error = update_authelia_user(
             username, fields, password_plain=password_plain)
         if error:
+            record_request(
+                "user.update",
+                object_type="user",
+                object_id=username,
+                result=RESULT_FAILURE,
+                detail=str(error),
+            )
             _, all_groups, _ = get_authelia_users()
             for g in groups:
                 if g not in all_groups:
@@ -412,6 +490,12 @@ def authelia_user_edit(username: str):
                 is_new=False,
             )
 
+        record_request(
+            "user.update",
+            object_type="user",
+            object_id=username,
+            summary=summarize(before, after),
+        )
         return redirect(
             url_for("routes.authelia_users", msg=f"User {username} updated"),
             code=303,
@@ -459,8 +543,16 @@ def authelia_user_delete(username: str):
 
     ok, error = delete_authelia_user(username)
     if not ok and error:
+        record_request(
+            "user.delete",
+            object_type="user",
+            object_id=username,
+            result=RESULT_FAILURE,
+            detail=str(error),
+        )
         return redirect(url_for("routes.authelia_users", msg=f"Deletion error: {username}: {error}"))
 
+    record_request("user.delete", object_type="user", object_id=username)
     return redirect(
         url_for("routes.authelia_users", msg=f"User {username} deleted"),
         code=303,
@@ -480,12 +572,15 @@ def authelia_bans():
     # privileged revoke operation. Preserve active log filters across it.
     if request.method == "POST":
         action = request.form.get("action", "")
+        target = ""
         try:
             if action == "unban_user":
                 username = request.form.get("username", "")
+                target = username
                 message, code = authelia_unban_user(username)
             elif action == "unban_ip":
                 ip = request.form.get("ip", "")
+                target = ip
                 message, code = authelia_unban_ip(ip)
             else:
                 message, code = "Unknown unban action", 400
@@ -493,6 +588,14 @@ def authelia_bans():
             traceback.print_exc()
             message, code = str(e), 500
 
+        if action in ("unban_user", "unban_ip"):
+            record_request(
+                "authelia_ban.lift",
+                object_type="user" if action == "unban_user" else "ip",
+                object_id=target,
+                result=RESULT_SUCCESS if code == 200 else RESULT_FAILURE,
+                detail="" if code == 200 else str(message)[:500],
+            )
         flash(message, "success" if code == 200 else "error")
         redirect_args = {
             key: value
