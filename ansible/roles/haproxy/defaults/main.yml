@@ -90,3 +90,16 @@ haproxy_chroot: "/var/lib/haproxy"
 
 # Включить автоматическое разрешение для rsyslogd работать с /var/lib/haproxy/dev/log
 haproxy_enable_rsyslog_apparmor: true
+
+######## 9. Сохранение административного состояния серверов ########
+# Ready/Drain/Maintenance и runtime-вес живут только в работающем процессе.
+# Без этого файла сохранение любого сайта — а оно выполняет reload — молча
+# возвращало бы сервер с обслуживания под нагрузку.
+#
+# Обратная сторона: состояние становится липким и после перезагрузки машины.
+# Забытый MAINT переживёт ребут; он виден на странице Backends.
+haproxy_server_state_enabled: true
+haproxy_server_state_file: "{{ haproxy_chroot }}/server-state"
+# Таймер покрывает аварийные перезапуски и применения через Ansible; штатный
+# reload из UI дампит состояние сам, непосредственно перед перезагрузкой.
+haproxy_server_state_interval: "60s"

@@ -1,0 +1,12 @@
+# /etc/systemd/system/haproxy-state-dump.timer
+[Unit]
+Description=Refresh the HAProxy server state file
+
+[Timer]
+OnBootSec={{ haproxy_server_state_interval | default('60s') }}
+OnUnitActiveSec={{ haproxy_server_state_interval | default('60s') }}
+AccuracySec=10s
+Unit=haproxy-state-dump.service
+
+[Install]
+WantedBy=timers.target

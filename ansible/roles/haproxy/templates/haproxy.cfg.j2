@@ -78,6 +78,13 @@ global
     maxconn 6000
     chroot /var/lib/haproxy
     stats socket {{ haproxy_socket }} mode 660 user root group {{ haproxy_socket_group }} level admin expose-fd listeners
+{% if haproxy_server_state_enabled | default(true) %}
+    # Administrative server state (Ready/Drain/Maintenance and runtime weight)
+    # is written here before every reload and read back at startup. Without it
+    # a server put into maintenance silently returns to service the next time
+    # any unrelated site is saved, because saving reloads HAProxy.
+    server-state-file {{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}
+{% endif %}
     stats timeout 30s
     user haproxy
     group haproxy
@@ -111,6 +118,11 @@ defaults
     mode http
     option dontlognull
     option http-keep-alive
+{% if haproxy_server_state_enabled | default(true) %}
+    # Missing or stale entries are ignored, so a server that was added or
+    # renamed since the last dump simply starts from the configuration.
+    load-server-state-from-file global
+{% endif %}
     timeout connect 5s
     timeout client 15m
     timeout server 15m

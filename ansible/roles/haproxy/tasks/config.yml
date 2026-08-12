@@ -197,6 +197,52 @@
     daemon_reload: true
   when: haproxy_secret_dropin.changed
 
+# The dumper must exist before the configuration that reads its output does,
+# otherwise the first reload after an upgrade restores nothing.
+- name: "server-state | Install the dump script"
+  ansible.builtin.template:
+    src: haproxy-state-dump.sh.j2
+    dest: /usr/local/sbin/haproxy-state-dump
+    owner: root
+    group: root
+    mode: "0755"
+  when: haproxy_server_state_enabled | default(true)
+
+- name: "server-state | Install the dump unit and timer"
+  ansible.builtin.template:
+    src: "haproxy-state-dump.{{ item }}.j2"
+    dest: "/etc/systemd/system/haproxy-state-dump.{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [service, timer]
+  register: haproxy_state_units
+  when: haproxy_server_state_enabled | default(true)
+
+- name: "server-state | systemd daemon-reload if the units changed"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: haproxy_state_units.changed | default(false)
+
+- name: "server-state | Enable the refresh timer"
+  ansible.builtin.systemd:
+    name: haproxy-state-dump.timer
+    enabled: true
+    state: started
+  when: haproxy_server_state_enabled | default(true)
+
+# A missing state file is not an error for HAProxy, but creating it up front
+# keeps the very first start quiet and makes the path obvious on disk.
+- name: "server-state | Seed an empty state file"
+  ansible.builtin.copy:
+    content: "1\n"
+    dest: "{{ haproxy_server_state_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  when: haproxy_server_state_enabled | default(true)
+
 - name: Copy HAProxy configuration
   template:
     src: haproxy.cfg.j2

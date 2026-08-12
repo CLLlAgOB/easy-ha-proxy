@@ -1,0 +1,37 @@
+#!/bin/sh
+# Dump HAProxy's administrative server state so a reload can restore it.
+#
+# Ready/Drain/Maintenance and runtime weights live only in the running process.
+# Without this dump, saving any site — which reloads HAProxy — would silently
+# return a server under maintenance to service.
+#
+# Written atomically: HAProxy reads this file at startup, and a half-written
+# one would be worse than a stale one.
+set -eu
+
+SOCKET="{{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
+STATE_FILE="{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}"
+TMP_FILE="${STATE_FILE}.tmp.$$"
+
+if [ ! -S "$SOCKET" ]; then
+    # HAProxy is not running; the existing file stays as the last known state.
+    exit 0
+fi
+
+trap 'rm -f "$TMP_FILE"' EXIT INT TERM
+
+if ! echo "show servers state" | socat stdio "$SOCKET" > "$TMP_FILE" 2>/dev/null; then
+    exit 0
+fi
+
+# The reply always starts with a version line. Anything shorter means the
+# runtime API answered with an error or nothing at all, and overwriting a good
+# state file with that would lose every server's state on the next reload.
+if [ "$(wc -l < "$TMP_FILE")" -lt 2 ]; then
+    exit 0
+fi
+
+chmod 0644 "$TMP_FILE"
+mv -f "$TMP_FILE" "$STATE_FILE"
+trap - EXIT INT TERM
+exit 0
