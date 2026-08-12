@@ -367,8 +367,406 @@ Certificate sources are selected per site in the web UI:
   private certificate by button. Download its public root from
   `/haproxy/certs` and install it only in the client trust stores you control.
 
+#### DNS-01 and wildcard certificates
+
+A Let's Encrypt site answers the ACME challenge over HTTP-01 on port 80 by
+default. Where that port is unreachable -- and always for a wildcard -- the
+site can validate over **DNS-01** instead.
+
+Save the provider credentials once on `/haproxy/certs/dns-providers` as a named
+profile. Cloudflare, DigitalOcean, Route 53, and RFC 2136 are supported.
+Credentials are written root-only under `/etc/easy-ha-proxy/dns-providers` and
+are never sent back to the browser: to change one, enter it again. Each
+provider needs its Certbot plugin, which is a snap here because Certbot itself
+is; list the ones you use in `dns_plugins_enabled` and the installer adds them.
+
+Then, in the site editor, switch **Validation** to DNS-01 and pick the profile.
+Two name lists apply:
+
+- **Alt names (SAN)** are routing names. HAProxy matches them literally, so a
+  wildcard is refused here -- it would build a configuration that validates and
+  then routes nothing.
+- **Extra certificate names** only widen the certificate. `*.example.com`
+  belongs here, and afterwards new subdomains can be added to alt names without
+  reissuing anything.
+
+Certbot records the chosen plugin and credentials path in its own renewal
+configuration, so renewals continue unattended. The install-time Ansible path
+only knows HTTP-01; it leaves DNS-01 sites to the gateway, which issues them
+when you press the button or apply the configuration.
+
 For installations created before 2026-07-04, perform one complete
 `sudo easy-ha-proxy update` before using targeted updates.
+
+### Alerts
+
+Every part of the gateway reports what it sees; one daemon decides what is
+worth telling you about. Before it existed, a full metrics disk or the security
+engine starting to ban people was something you found by reading the journal.
+
+A condition is either a **level** or an **event**, and the difference is what
+makes the rest work. A backend being down is a level: it stays true, it can
+recover, and waiting five minutes before shouting is right. A failed backup is
+an event: it already happened, there is no "still failing" to observe and no
+recovery to wait for.
+
+What the engine holds back is the point:
+
+- nothing is sent until a level has held for its delay;
+- a firing condition stays quiet until its repeat window;
+- a burst is capped, so one bad minute cannot become forty messages -- the
+  held-back ones stay in the history;
+- recovery is announced, and is never held back by the cap;
+- a condition that gets worse says so at once instead of waiting.
+
+A level nobody reports any more is treated as resolved. A producer that dies
+must not leave an alert pinned open.
+
+Delay and recipient can also belong to the object rather than the rule: a site
+keeps its own `alert_after` and `alert_email` from its settings.
+
+Email uses the same notification settings as certificate notices. The optional
+**webhook** posts one JSON object per notification over HTTPS only. The host is
+resolved once and the connection is made to exactly that address, so a name
+that answers differently on the second lookup cannot redirect the request into
+your network; loopback and link-local are refused, private addresses only with
+an explicit switch, and redirects are never followed. The URL and the secret
+header are stored root-only and are never sent back to the browser.
+
+Reporting is best effort by contract. A stopped alert daemon costs a
+notification -- never a metrics sample, a ban, or a reload.
+
+### Configuration history
+
+Applying a configuration change is already guarded: the gateway snapshots the
+running configuration, applies the candidate, verifies that the control plane
+still answers, and restores the previous one automatically if anything fails --
+with a confirmation window, after which an unconfirmed change rolls itself
+back. **Configuration history** adds the part that was missing: every confirmed
+version is kept, so a change from last week can still be inspected.
+
+What is compared is the managed model -- sites, TCP proxies and variables --
+not the generated HAProxy file. A moved backend reads as
+
+```text
+site  shop      modified
+        backend_ip: 192.168.1.10 → 192.168.1.11
+site  docs      added
+```
+
+rather than as a thousand-line diff of generated output. Reordering entries in
+a file is not reported as a change, because the order carries no meaning and
+would bury the edit that does.
+
+Versions live in `/var/lib/easy-ha-proxy/config-history/`, each holding the
+three managed YAML files plus metadata: when, which transaction, the parent
+version and a content hash. The last 50 are kept. Recording is best-effort --
+a change that already succeeded is never undone because its history could not
+be written -- and confirming a change that altered nothing adds no duplicate.
+
+Restoring a version puts its files back and applies them through the ordinary
+guarded path -- nothing about the restore is special. The configuration is
+rendered and validated, the guard that stops you removing your own
+administrative access runs against your current address, and the change still
+has to be confirmed before its deadline or it rolls itself back. If any of that
+refuses, the managed files are returned to exactly what they were, so a
+rejected restore leaves nothing behind.
+
+Nothing writes or deletes history itself: a version exists because a change was
+confirmed.
+
+### Change log
+
+**Change log** answers who changed what, when, from what to what, and whether
+it worked. A record is written when the action is taken and is never edited
+afterwards; the interface offers no way to write or delete one, because the API
+has none.
+
+Refused attempts are recorded too. An operator without the superadmin role who
+tries to drain a server produces a `denied` record with their name on it --
+that is precisely what the log exists for.
+
+Secrets never reach the file. Values under key names that look sensitive --
+password, token, secret, passphrase, private key, session, credential -- are
+replaced before anything is stored, recursively, so a secret nested inside a
+site definition is caught too. A changed password is recorded as
+`password: changed`: the comparison is made on the real values so the change is
+noticed, but only the fact is kept.
+
+The log is stored at `/var/lib/easy-ha-proxy/audit/audit.db`, is included in
+the encrypted disaster-recovery archive, and is kept for a year with a hard row
+cap so it cannot grow without limit. If the log itself cannot be written the
+operation still proceeds -- auditing must not become a way to break the
+gateway -- and the failure count is visible rather than silent.
+
+Every administrative change made through the interface is recorded: sites, TCP
+proxies and UDP forwards; certificates, certificate authorities and DNS
+provider profiles; Authelia users, settings and unbans; manual bans and
+allow-list entries; GeoIP selection and schedule; the configuration apply,
+confirm, rollback, revert and restore path; the vars editors; service
+start/stop/restart; backup, restore and software-update jobs; and runtime
+backend operations.
+
+What is still outside the trail: actions the privileged helpers take on their
+own timers rather than on an operator's request -- automatic certificate
+renewal, the GeoIP update timer, and adaptive bans applied by the security
+engine. Those have their own logs and, for bans, their own page.
+
+### DNS-01 and wildcard certificates
+
+A wildcard certificate cannot be validated over HTTP, and HTTP-01 is useless
+when port 80 is unreachable. **DNS providers** holds the credentials that let
+Certbot answer the DNS-01 challenge instead.
+
+Certbot is installed from snap on this platform, so its DNS plugins are snaps
+too and must be at the same version. List the providers you need in
+`dns_plugins_enabled` (`cloudflare`, `digitalocean`, `route53`, `rfc2136`) and
+apply; nothing is installed for a provider you have not asked for. The page
+shows, per provider, whether Certbot can actually see its plugin, so a missing
+one is visible before an issuance fails rather than after.
+
+Credentials live in `/etc/easy-ha-proxy/dns-providers/`, directory `0700` and
+files `0600`, written by the root certificate daemon. They are never returned
+to the browser: the form always starts empty, and saving replaces what is
+stored. A value containing a line break is refused, because the file is read by
+Certbot as root and one value must not be able to introduce another directive.
+
+Only the profile name travels from the browser. The plugin name, the
+credentials path and every Certbot argument come from a fixed table, and a
+profile whose plugin is not installed is refused with the snap to install. A
+wildcard name without a DNS profile is refused before Certbot runs, so it
+cannot waste a rate-limited attempt discovering that HTTP-01 will not do.
+
+### Backend maintenance
+
+**Backends** lists every proxied backend and its servers with the current
+state, weight and session count, and offers three operations per server:
+Ready, Drain and Maintenance, plus a runtime weight. Drain stops new traffic
+while existing work finishes; Maintenance takes the server out immediately.
+
+The state survives. HAProxy keeps administrative server state only in the
+running process, so before this existed a server put into maintenance quietly
+returned to service the next time any unrelated site was saved -- saving
+reloads HAProxy. The gateway now writes `show servers state` to
+`/var/lib/haproxy/server-state` before every reload it performs, and on a
+timer for anything it does not perform itself, and HAProxy reads it back at
+startup.
+
+The consequence is worth knowing: maintenance is now sticky **across a reboot
+too**. A server left in maintenance stays there until someone puts it back.
+Set `haproxy_server_state_enabled: false` to return to the old behaviour, where
+every reload resets each server to the generated configuration.
+
+The browser never sends runtime API command text. It names an operation and a
+server, and the application re-validates both against what HAProxy currently
+reports before assembling the command. Backends that keep the gateway
+reachable -- the administration interface, Authelia, the ACME challenge and
+maintenance responders, and the stick tables -- are not offered at all, because
+draining the one serving the page you are clicking in would lock you out.
+Changing a state requires the superadmin role.
+
+### Adaptive protection (monitor only)
+
+`easy-ha-proxy-guardd.service` watches for behaviour the existing rate limits
+cannot see. HAProxy's stick tables measure intensity over short windows, so a
+scanner that requests `/.env`, then `/.git/config`, then `/phpmyadmin` a few
+minutes apart never trips them; the access log shows exactly that pattern. The
+engine therefore reads both -- the log for what an address did, the runtime
+tables for how hard it is pushing and whether it is already banned.
+
+It ships observing. **Adaptive protection** offers three modes -- off, observe
+and enforce -- and the choice made there overrides the deployed default and
+survives a restart. Start in observe, read the shadow review below, and only
+then decide.
+
+Enforcing bans through the same `tbl_ban` the HAProxy rules already use, with
+its own reason code, so an adaptive ban appears in the existing ban list and
+can be lifted with the existing unban button. Stick-table entries carry the
+table's expiry rather than a per-key one, so the engine owns the schedule:
+repeat findings escalate 5 minutes, 30 minutes, 6 hours, 24 hours, and each ban
+is lifted when its time is up. An expired ban is not reapplied on the same
+evidence -- fresh findings are required -- so the ladder counts repeat
+behaviour rather than how long one scan stays in the window.
+
+Four things are never banned, whatever the score, and none of them are
+configurable:
+
+- an address that has **ever** completed authentication, not merely one holding
+  a live session -- the runtime authorization expires, and a lapsed session
+  must not turn a real user into a ban candidate;
+- anything the HAProxy ACLs already exempt;
+- IPv6, because the ban path cannot reach it;
+- an address whose ban HAProxy placed itself -- the engine re-reads the reason
+  code before removing anything, so lifting an adaptive ban never clears a
+  rate-limit one.
+
+Turning enforcement back off lifts every ban the engine applied. Bans left
+behind by a crash are swept up on the next cycle, because a stick-table entry
+outlives the process that placed it.
+
+The engine never acts on anything HAProxy already exempts. It mirrors the same
+four ACLs -- the global whitelist, the admin allow-list, the GeoIP whitelist,
+and addresses that completed Authelia authentication -- and it treats a 451 as
+a request GeoIP already refused. Bans, when they eventually arrive, will be
+IPv4 only: `tbl_ban` is an IPv4 stick table and the firewall ruleset is `inet`,
+so addresses that cannot be acted upon are recorded as such instead of
+accumulating a score nothing can use.
+
+Only significant events are stored, never the traffic itself. Query strings are
+removed while the line is parsed -- an access log genuinely contains things
+like `?token=...` -- and paths are normalised and length-capped before they
+reach the database. The per-address working set is bounded in both directions:
+a capped number of addresses, and a capped path history each.
+
+Findings come in three strengths. A request for a path only a scanner wants --
+`/.env`, `/.git/config`, `/phpmyadmin` -- is high confidence and carries a
+category. Weaker signals are enumeration of distinct missing paths, repeated
+requests with no valid host, and the short-window rate and error counters
+HAProxy already keeps. A missing stylesheet or image is not a signal at all.
+Scores combine these with each category capped, because fifty different
+WordPress URLs are one finding -- "looked for WordPress" -- rather than fifty,
+and the interesting case is an address that tried several unrelated
+technologies. `LOW_AND_SLOW_SCANNER` is deliberately rate-blind: the slower a
+scan is, the less the existing limits can see it.
+
+Contributions fade with age rather than being decremented on a timer, so the
+score is a pure function of the stored events. Retuning any weight re-scores
+the whole history immediately instead of requiring another week of
+observation.
+
+Measured over one full day of real traffic on a two-core gateway -- 310,697 log
+lines, 308,251 requests:
+
+| | |
+| --- | --- |
+| Parsing and detection | 37.7 µs per request, 11.7 s of CPU for the day |
+| Cost at 100 requests/second | 0.38% of one core |
+| Peak memory | 26 MiB |
+| Requests reduced to events | 308,251 → 285 (0.9 per 1000 requests) |
+| Addresses that would reach HIGH_RISK | 1 of 90 scored |
+
+That single address had tried two unrelated technology categories, probed
+without a valid host, and matched the slow-scanner rule -- the profile the
+engine exists to find.
+
+#### Shadow review
+
+**Adaptive protection** in the HAProxy navigation is where that review happens.
+It reports how many addresses were scored, how many enforcement *would* have
+banned, and -- the number that decides whether enforcement is safe to enable --
+how many of those later completed authentication. An address the engine wanted
+to act on that turns out to belong to a real user is the failure mode worth
+catching before anything is blocked.
+
+Selecting an address shows every finding that contributed to its score, when it
+happened, how many points it was worth and why: `counted`, `category cap
+reached`, or `already refused by the gateway`. Nothing on the page can ban
+anything; there is no control for it, because the engine cannot.
+
+A weight simulator re-scores the stored history against different weights,
+caps and decay without saving anything, so a proposed change can be judged
+against traffic that already happened instead of waiting another week. Lowering
+the category cap below an event's own weight has no effect by design -- the cap
+limits repetition of a finding, not the value of a single one.
+
+### Monitoring page
+
+**Monitoring** in the HAProxy navigation shows what the collector recorded.
+The overview cards report requests per second, current connections, traffic,
+the 2xx/3xx/4xx/5xx split and backend health for the selected period; below
+them are graphs for requests, traffic, response classes, response time and
+connections. Periods run from 1 hour to 1 year, and the site filter switches
+between the edge totals -- every frontend added together -- and a single
+backend.
+
+Resolution is chosen server-side: minute rows for a day or less, hourly rows
+above that, grouped further for the longest periods so a chart never returns
+more than 1500 points. The page states which resolution it is showing.
+
+An availability section draws one bar per backend and per server: green while
+up, red while down, amber for maintenance and drain states, with the current
+state, availability percentage and total unavailable time for the period.
+State changes are stored as transitions rather than as a sample per minute, so
+a server that has been up for a month costs one row, and the bar still covers
+the whole window.
+
+A storage card reports the database, WAL and total size against the configured
+limit, filesystem free space against the reserve, measured growth over the last
+week and the retention currently in force. Growth is labelled as a measurement
+of the past, not a forecast.
+
+The page is read-only and degrades honestly: if the collector is not answering
+it says so instead of drawing zeroes, and while history writes are paused it
+shows why. Neither state affects HAProxy.
+
+### Historical metrics collection
+
+`easy-ha-proxy-metricsd.service` records how the gateway behaved over time. It
+polls the HAProxy runtime socket every 10 seconds, keeps the samples in memory,
+and writes one row per proxy object per minute to a local SQLite database. It
+reads HAProxy and writes its own files -- nothing else -- so a collector that
+is stopped, broken, or disabled has no effect on traffic.
+
+Data is kept at two resolutions. Minute rows cover the last 7 days for
+frontends and backends and the last 24 hours for individual servers; hourly
+rollups cover a year. Server rows dominate the table on a host with many
+backends, which is why they lose minute resolution first. Backend and server
+`UP`/`DOWN` changes are stored as transitions rather than as a status sample
+per minute.
+
+Defaults live in the `metricsd_*` variables of the `haproxy-admin` role and are
+rendered into `/opt/haproxy-admin/metricsd.json`. Setting `metricsd_enabled` to
+`false` leaves the service installed and idle. The database is deliberately
+outside the disaster-recovery archive: it can grow large and is not needed to
+restore a working gateway.
+
+The collector exposes a read-only Unix socket for the administration UI:
+
+```text
+/run/easy-ha-proxy/easy-ha-proxy-metricsd.sock
+  GET /api/v1/metrics/health    collector and database status
+  GET /api/v1/metrics/storage   sizes, limits, storage state and growth trend
+```
+
+#### Storage safety
+
+Monitoring is never allowed to be the reason the disk fills up. Two limits are
+enforced against the filesystem the database actually sits on, which may be a
+dedicated volume rather than the root filesystem:
+
+- a cap on everything monitoring owns -- the database, its write-ahead log and
+  its shared-memory file together. `auto` resolves to the smaller of 5 GiB and
+  a tenth of the filesystem;
+- a free-space reserve that is enforced even when the cap is lifted. `auto`
+  resolves to at least 2 GiB, at most 10 GiB, otherwise a tenth of the
+  filesystem.
+
+As either limit is approached the collector reports `WARNING`, then
+`PRESSURE`, and trims retention one step at a time -- minute rows down to 3
+days and then 1 day, hourly rows down to 180, 90 and finally 30 days -- always
+rolling minutes up into hours before deleting them. Losing resolution comes
+before losing long-term visibility.
+
+If trimming is not enough the state becomes `CRITICAL` and history writes stop:
+
+```text
+Historical monitoring paused.
+Disk free-space safety threshold reached.
+HAProxy traffic is not affected.
+```
+
+While paused the collector keeps polling and keeps counting in memory, so no
+traffic is double-counted when it resumes; the affected minutes are dropped
+rather than queued. Writing resumes only once free space is back above the
+reserve by a clear margin, so the collector cannot flap around the threshold.
+
+Reclaiming space always uses incremental vacuum. A full `VACUUM` is never
+issued: it needs room for a second copy of the database, which is exactly what
+is missing when the disk is under pressure.
+
+The service is reported on the **Health** page like every other helper. A
+collector whose last successful poll is too old is shown as degraded even while
+the process itself is running.
 
 ### Important paths
 
@@ -380,7 +778,9 @@ For installations created before 2026-07-04, perform one complete
   root-only internal CA private key;
 - `/opt/authelia` and `/opt/haproxy-admin` — container configuration and data;
 - `/run/easy-ha-proxy` — constrained helper sockets;
-- `/run/haproxy/admin.sock` — HAProxy runtime socket.
+- `/run/haproxy/admin.sock` — HAProxy runtime socket;
+- `/var/lib/easy-ha-proxy/metrics/metrics.db` — historical metrics, excluded
+  from the encrypted backup.
 
 ### Encrypted backup and restore
 
@@ -444,18 +844,22 @@ public repository.
 
 ## Development checks
 
-The public translation regression check `docker/app/test_i18n.py` is excluded
-from the runtime Docker image by `.dockerignore`.
+Every test lives in `.tests/`, which is outside the Docker build context, so
+none of it reaches the runtime image. `.github/workflows/ci.yml` runs exactly
+the commands below on Python 3.10, 3.11 and 3.12.
 
 ```bash
 python3 -m py_compile installer/easy_ha_proxy.py
 python3 -m compileall -q docker/app \
   ansible/roles/authelia/files \
   ansible/roles/haproxy-admin/files
-python3 docker/app/test_i18n.py -v
+PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
+
+ansible-galaxy collection install -r ansible/requirements.yml
+ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
 
 UI translations are JSON catalogs under
