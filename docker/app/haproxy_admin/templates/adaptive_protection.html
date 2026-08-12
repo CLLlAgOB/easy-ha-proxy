@@ -1,0 +1,363 @@
+{% extends "base.html" %}
+
+{% block title %}Adaptive protection{% endblock %}
+{% block header_title %}Adaptive protection{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.ap-banner {
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(var(--accent-primary-rgb), .45);
+  background: rgba(var(--accent-primary-rgb), .07);
+  font-size: 14px;
+}
+
+.ap-banner.error {
+  border-color: rgba(204, 75, 75, .5);
+  background: rgba(204, 75, 75, .08);
+}
+
+.ap-banner[hidden] { display: none; }
+
+.ap-modes {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.ap-mode {
+  flex: 1;
+  min-width: 190px;
+  text-align: left;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(var(--accent-primary-rgb), .04);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ap-mode small {
+  display: block;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+
+.ap-mode:hover { border-color: rgba(var(--accent-primary-rgb), .45); }
+
+.ap-mode[aria-pressed="true"] {
+  background: rgba(var(--accent-primary-rgb), .18);
+  border-color: rgba(var(--accent-primary-rgb), .6);
+}
+
+.ap-mode[data-mode="enforce"][aria-pressed="true"] {
+  background: rgba(204, 75, 75, .16);
+  border-color: rgba(204, 75, 75, .6);
+}
+
+.ap-mode:disabled { opacity: .5; cursor: progress; }
+
+.ap-guardrails {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(46, 158, 91, .07);
+  padding: 12px 15px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ap-confirm {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(204, 75, 75, .5);
+  background: rgba(204, 75, 75, .08);
+  font-size: 14px;
+}
+
+.ap-confirm[hidden] { display: none; }
+
+.ap-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.ap-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.ap-card .ap-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-secondary);
+}
+
+.ap-card .ap-value { font-size: 26px; font-weight: 600; margin-top: 6px; }
+.ap-card.danger .ap-value { color: #cc4b4b; }
+.ap-card.warn .ap-value { color: #c8a13a; }
+
+.ap-states {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+.ap-states span { white-space: nowrap; }
+
+.ap-sim {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px 20px;
+  margin-bottom: 16px;
+}
+
+.ap-sim label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ap-sim input[type="number"] {
+  width: 82px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.ap-sim-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+.ap-pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ap-NORMAL { background: rgba(46,158,91,.15); color: #2e9e5b; }
+.ap-WATCH { background: rgba(74,134,200,.15); color: #4a86c8; }
+.ap-SUSPICIOUS { background: rgba(200,161,58,.18); color: #c8a13a; }
+.ap-HIGH_RISK { background: rgba(204,75,75,.15); color: #cc4b4b; }
+.ap-HOSTILE { background: rgba(204,75,75,.28); color: #cc4b4b; }
+
+.ap-flag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+.ap-flag.fp { background: rgba(200,161,58,.2); color: #c8a13a; }
+.ap-flag.noenforce { background: rgba(120,120,140,.2); color: var(--text-secondary); }
+
+.ap-row-link { cursor: pointer; }
+
+.ap-detail { margin-top: 18px; }
+.ap-detail[hidden] { display: none; }
+
+.ap-timeline {
+  border-left: 2px solid var(--border);
+  margin: 12px 0 0 6px;
+  padding-left: 14px;
+}
+
+.ap-entry {
+  display: grid;
+  grid-template-columns: 150px 1fr auto;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ap-entry:last-child { border-bottom: none; }
+.ap-entry .ap-points { font-weight: 600; text-align: right; white-space: nowrap; }
+.ap-entry.zero { opacity: .55; }
+
+.ap-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 30px 0;
+  text-align: center;
+}
+</style>
+
+<div class="ap-banner" id="ap-mode">
+  Monitor mode — findings are recorded and scored, but nothing is blocked.
+  HAProxy keeps enforcing its own rules unchanged.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Mode</h2>
+    <span class="mon-sub" id="ap-mode-source"></span>
+  </div>
+
+  <div class="ap-modes" id="ap-mode-switch" role="group" aria-label="Protection mode">
+    <button type="button" class="ap-mode" data-mode="off">
+      Off
+      <small>Nothing is collected</small>
+    </button>
+    <button type="button" class="ap-mode" data-mode="monitor">
+      Observe
+      <small>Record and score, never block</small>
+    </button>
+    <button type="button" class="ap-mode" data-mode="enforce">
+      Enforce
+      <small>Ban what crosses the threshold</small>
+    </button>
+  </div>
+
+  <p class="mon-sub" id="ap-mode-effect"></p>
+
+  <div class="ap-guardrails">
+    These are never banned, whatever the score: addresses that have
+    authenticated before, the global whitelist, the admin allow-list, the GeoIP
+    whitelist, and IPv6 — the ban path is IPv4 only. Turning enforcement back
+    off lifts every ban it applied.
+  </div>
+
+  <div class="ap-confirm" id="ap-confirm" hidden>
+    <p id="ap-confirm-text"></p>
+    <div class="ap-sim-actions">
+      <button class="btn" type="button" id="ap-confirm-yes">Confirm</button>
+      <button class="btn" type="button" id="ap-confirm-no">Cancel</button>
+    </div>
+  </div>
+
+  <div class="mon-sub" id="ap-mode-result" data-i18n-skip translate="no"></div>
+</div>
+
+<div class="ap-banner error" id="ap-unavailable" hidden>
+  The adaptive protection engine is not answering, so no findings can be shown.
+  HAProxy traffic is not affected.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Shadow review</h2>
+    <span class="mon-sub" id="ap-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="ap-cards">
+    <div class="ap-card">
+      <div class="ap-label">Addresses scored</div>
+      <div class="ap-value" id="ap-scored" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card danger">
+      <div class="ap-label">Would be banned</div>
+      <div class="ap-value" id="ap-wouldban" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card warn">
+      <div class="ap-label">Likely false positives</div>
+      <div class="ap-value" id="ap-falsepos" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card">
+      <div class="ap-label">Cannot be banned</div>
+      <div class="ap-value" id="ap-unenforceable" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card">
+      <div class="ap-label">Exempt</div>
+      <div class="ap-value" id="ap-excluded" data-i18n-skip translate="no">—</div>
+    </div>
+  </div>
+
+  <div class="ap-states" id="ap-states" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub">
+    A likely false positive is an address the engine scored that later
+    completed authentication. Review those before enabling enforcement.
+  </p>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Weight simulator</h2>
+    <span class="mon-sub">Re-scores the stored history; nothing is saved</span>
+  </div>
+
+  <div class="ap-sim" id="ap-weights">
+    {% for event_type in event_types %}
+      <label>
+        <span data-i18n-skip translate="no">{{ event_type }}</span>
+        <input type="number" min="0" max="100" step="1"
+               data-weight="{{ event_type }}" placeholder="—">
+      </label>
+    {% endfor %}
+    <label>
+      Category cap
+      <input type="number" min="1" max="100" step="1" id="ap-cap" placeholder="—">
+    </label>
+    <label>
+      Decay (hours)
+      <input type="number" min="0" max="720" step="1" id="ap-decay" placeholder="—">
+    </label>
+  </div>
+
+  <div class="ap-sim-actions">
+    <button class="btn" type="button" id="ap-apply">Apply</button>
+    <button class="btn" type="button" id="ap-reset">Reset to configured</button>
+    <span class="mon-sub" id="ap-sim-note"></span>
+  </div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Reputation</h2>
+    <span class="mon-sub">Select a row to see why</span>
+  </div>
+
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th>Country</th>
+          <th>Score</th>
+          <th>State</th>
+          <th>Findings</th>
+          <th>Events</th>
+          <th>Last seen</th>
+        </tr>
+      </thead>
+      <tbody id="ap-table" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+
+  <div class="ap-empty" id="ap-table-empty">No addresses have been scored yet</div>
+
+  <div class="ap-detail" id="ap-detail" hidden>
+    <h3 id="ap-detail-title" data-i18n-skip translate="no"></h3>
+    <div class="mon-sub" id="ap-detail-summary"></div>
+    <div class="ap-timeline" id="ap-detail-timeline" data-i18n-skip translate="no"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/adaptive_protection.js') }}"></script>
+{% endblock %}

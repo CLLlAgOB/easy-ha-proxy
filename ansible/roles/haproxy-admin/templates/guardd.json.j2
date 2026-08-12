@@ -1,0 +1,23 @@
+{
+  "mode": {{ (guardd_mode | default('monitor')) | string | tojson }},
+  "poll_interval_seconds": {{ guardd_poll_interval | default(10) }},
+  "maintenance_interval_seconds": {{ guardd_maintenance_interval | default(300) }},
+  "sources": {
+    "haproxy_socket": {{ (guardd_haproxy_socket | default(socket_path | default('/run/haproxy/admin.sock'))) | tojson }},
+    "log_file": {{ (guardd_log_file | default(haproxy_log | default('/var/log/haproxy.log'))) | tojson }}
+  },
+  "exclusions": {
+    "whitelist_files": {{ (guardd_whitelist_files | default([
+      whitelist_global_file | default('/etc/haproxy/whitelist.ip'),
+      admin_ips_file | default('/etc/haproxy/admin.allow'),
+      whitelist_geo_file | default('/etc/haproxy/geoip/whitelist.geo')
+    ])) | tojson }},
+    "trusted_networks": {{ (guardd_trusted_networks | default([])) | tojson }}
+  },
+  "limits": {
+    "max_tracked_ips": {{ guardd_max_tracked_ips | default(5000) }},
+    "max_paths_per_ip": {{ guardd_max_paths_per_ip | default(32) }},
+    "log_read_bytes_per_cycle": {{ guardd_log_read_bytes_per_cycle | default(4194304) }},
+    "event_retention_days": {{ guardd_event_retention_days | default(30) }}
+  }
+}

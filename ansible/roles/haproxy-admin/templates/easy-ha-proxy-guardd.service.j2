@@ -1,0 +1,62 @@
+# /etc/systemd/system/easy-ha-proxy-guardd.service
+[Unit]
+Description=easy-ha-proxy-guardd (root, adaptive protection engine)
+After=network.target haproxy.service rsyslog.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group | default('hadmin') }}
+
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-{{ haproxy_admin_env_file }}
+Environment="GUARDD_SOCKET_PATH={{ guardd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-guardd.sock') }}"
+Environment="GUARDD_SOCKET_GROUP={{ guardd_socket_group | default(app_group | default('hadmin')) }}"
+Environment="GUARDD_CONFIG={{ guardd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/guardd.json') }}"
+Environment="GUARDD_DATABASE={{ guardd_database_path | default('/var/lib/easy-ha-proxy/security/security.db') }}"
+# Only the mode switch is mutating, and only with this shared token. Reads
+# stay open to the hadmin group like every other helper socket.
+Environment="GUARDD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-guardd.py', rstrip=false) | hash('sha256') }}"
+
+ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-guardd.py
+
+Restart=always
+RestartSec=5
+
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+StateDirectory=easy-ha-proxy/security
+StateDirectoryMode=0750
+UMask=0007
+
+# The engine reads the HAProxy runtime socket, the access log and the ACL
+# files, and writes only its own state directory. Nothing here needs to modify
+# the system, so the sandbox can be tight.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+ReadOnlyPaths=/run/haproxy /etc/haproxy {{ guardd_log_file | default('/var/log/haproxy.log') }}
+
+# Per-IP working memory is bounded by configuration; this is the backstop that
+# keeps a mistake in that accounting from crowding out HAProxy.
+MemoryMax={{ guardd_memory_max | default('320M') }}
+
+[Install]
+WantedBy=multi-user.target

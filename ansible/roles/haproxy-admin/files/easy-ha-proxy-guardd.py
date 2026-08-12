@@ -1,0 +1,2527 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""easy-ha-proxy-guardd — adaptive protection engine (foundation).
+
+This is the plumbing layer: it reads what HAProxy already knows, turns it into
+sanitised security events, and remembers who must never be acted upon. It does
+not yet contain detection rules, and in this release it cannot ban anything --
+`enforce` is rejected by configuration validation.
+
+Design notes that the rest of the phase depends on:
+
+* Events are stored raw and weight-free. The score is computed when it is
+  asked for, so weights can be retuned and the whole history re-scored without
+  waiting another week for fresh data.
+* Exclusions mirror the HAProxy configuration exactly (global whitelist, admin
+  allow-list, GeoIP whitelist, and IPs that authenticated through Authelia).
+  An engine that flags traffic the gateway already exempts produces a review
+  queue nobody can use.
+* Enforcement is IPv4-only, because `tbl_ban` is an IPv4 stick table and the
+  firewall ruleset is `inet`. Addresses that cannot be acted upon are recorded
+  as such rather than silently scored.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import grp
+import hmac
+import ipaddress
+import json
+import logging
+import os
+import pwd
+import re
+import socket
+import sqlite3
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from socketserver import ThreadingMixIn, UnixStreamServer
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
+
+LOG = logging.getLogger("easy-ha-proxy-guardd")
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. It is optional on
+# purpose: a gateway without the alert daemon still defends itself.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+
+def _alert_client():
+    """An alert client if one can be built, otherwise nothing."""
+    if AlertClient is None:
+        return None
+    client = AlertClient(source="guardd")
+    return client if client.configured else None
+
+SOCKET_PATH = os.environ.get(
+    "GUARDD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-guardd.sock"
+)
+SOCKET_GROUP = os.environ.get("GUARDD_SOCKET_GROUP", "hadmin")
+CONFIG_PATH = os.environ.get("GUARDD_CONFIG", "/opt/haproxy-admin/guardd.json")
+DATABASE_PATH = os.environ.get(
+    "GUARDD_DATABASE", "/var/lib/easy-ha-proxy/security/security.db"
+)
+
+SCHEMA_VERSION = 3
+
+MODE_OFF = "off"
+MODE_MONITOR = "monitor"
+MODE_ENFORCE = "enforce"
+SUPPORTED_MODES = (MODE_OFF, MODE_MONITOR, MODE_ENFORCE)
+
+# Changing the mode changes what happens to traffic, so it is the one thing
+# this daemon accepts over its socket -- and only with the shared token.
+CONTROL_TOKEN = os.environ.get("GUARDD_TOKEN", "").strip()
+
+# Progressive ban durations by strike. Stick-table entries carry the table's
+# expiry rather than a per-key one, so the schedule is kept here and enforced
+# by lifting the entry when its time is up.
+BAN_DURATIONS: Tuple[int, ...] = (5 * 60, 30 * 60, 6 * 3600, 24 * 3600)
+STRIKE_WINDOW_SECONDS = 7 * 86400
+
+RUNTIME_TIMEOUT_SECONDS = 5
+RUNTIME_MAX_BYTES = 8 * 1024 * 1024
+
+# The adaptive reason code written into tbl_ban's gpt0. Codes 10/20/30 already
+# belong to the HAProxy rules, so adaptive bans stay distinguishable in the
+# existing ban list -- and a kill switch can lift exactly these.
+ADAPTIVE_BAN_CODE = 40
+
+# Sanitising limits. A request line is attacker-controlled text.
+MAX_PATH_LENGTH = 200
+MAX_HOST_LENGTH = 128
+MAX_LOG_LINE_BYTES = 8192
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_MULTI_SLASH = re.compile(r"/{2,}")
+
+# Per-IP working memory. The whole point of the log source is remembering what
+# an address did hours ago, so this has to be bounded on purpose: a scan from a
+# botnet must not be able to grow it without limit. Measured cost on a
+# 2-core/2 GiB gateway is 4.3 KiB per address with a full 32-path history.
+DEFAULT_MAX_TRACKED_IPS = 5000
+DEFAULT_MAX_PATHS_PER_IP = 32
+
+# --- Detection ------------------------------------------------------------
+#
+# Three tiers of confidence. A single hit on a high-confidence path is a strong
+# signal; a scattering of 404s is barely a signal at all. Only combinations of
+# different categories are meant to reach a punitive score, which is why the
+# contribution of any one category is capped.
+
+# Category -> first path segment. Matching on the first segment is O(1) per
+# request and still catches "/phpmyadmin/index.php" from "phpmyadmin".
+SCANNER_SEGMENTS: Dict[str, str] = {
+    ".env": "secrets",
+    ".git": "vcs",
+    ".svn": "vcs",
+    ".hg": "vcs",
+    ".aws": "secrets",
+    ".ssh": "secrets",
+    ".DS_Store": "secrets",
+    "phpmyadmin": "database-admin",
+    "pma": "database-admin",
+    "myadmin": "database-admin",
+    "adminer.php": "database-admin",
+    "wp-login.php": "wordpress",
+    "wp-admin": "wordpress",
+    "wp-content": "wordpress",
+    "wp-includes": "wordpress",
+    "xmlrpc.php": "wordpress",
+    "server-status": "server-info",
+    "server-info": "server-info",
+    "phpinfo.php": "server-info",
+    "actuator": "app-framework",
+    "solr": "app-framework",
+    "jenkins": "app-framework",
+    "struts": "app-framework",
+    "cgi-bin": "legacy-cgi",
+    "vendor": "dependency",
+    "backup.zip": "backup",
+    "backup.sql": "backup",
+    "backup.tar.gz": "backup",
+    "database.sql": "backup",
+    "dump.sql": "backup",
+    "config.php": "config",
+    "configuration.php": "config",
+    "web.config": "config",
+    "docker-compose.yml": "config",
+    "id_rsa": "secrets",
+    "credentials": "secrets",
+}
+# Full paths that only mean something in their entirety.
+SCANNER_PATHS: Dict[str, str] = {
+    "/.env": "secrets",
+    "/.git/config": "vcs",
+    "/.aws/credentials": "secrets",
+    "/.ssh/id_rsa": "secrets",
+}
+
+# A 404 on one of these is a broken page, not reconnaissance. Without this the
+# single largest false-positive source is a front end asking for assets that
+# were renamed by a deploy.
+ASSET_SUFFIXES: Tuple[str, ...] = (
+    ".css", ".js", ".mjs", ".map", ".json", ".xml", ".txt",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".mp4", ".webm", ".mp3", ".wav", ".pdf",
+)
+
+EVENT_SCANNER_PATH = "SCANNER_PATH"
+EVENT_SCANNER_MULTI = "SCANNER_MULTI_CATEGORY"
+EVENT_LOW_AND_SLOW = "LOW_AND_SLOW_SCANNER"
+EVENT_NOT_FOUND_ENUM = "NOT_FOUND_ENUMERATION"
+EVENT_INVALID_HOST = "INVALID_HOST_ACTIVITY"
+EVENT_NOSNI_PROBING = "NOSNI_PROBING"
+EVENT_RATE_EXCEEDED = "RATE_EXCEEDED"
+EVENT_ERROR_RATE_EXCEEDED = "ERROR_RATE_EXCEEDED"
+EVENT_LEGACY_BAN = "LEGACY_HAPROXY_BAN"
+# Actions rather than findings: they carry no weight and never feed the score.
+EVENT_BAN_APPLIED = "BAN_APPLIED"
+EVENT_BAN_LIFTED = "BAN_LIFTED"
+
+DEFAULT_WEIGHTS: Dict[str, int] = {
+    EVENT_SCANNER_PATH: 25,
+    EVENT_SCANNER_MULTI: 20,
+    EVENT_LOW_AND_SLOW: 30,
+    EVENT_NOT_FOUND_ENUM: 15,
+    EVENT_INVALID_HOST: 10,
+    EVENT_NOSNI_PROBING: 10,
+    EVENT_RATE_EXCEEDED: 15,
+    EVENT_ERROR_RATE_EXCEEDED: 15,
+    EVENT_LEGACY_BAN: 30,
+}
+
+# One category is one finding. Fifty different /wp-* URLs say "looked for
+# WordPress" once, not fifty times.
+DEFAULT_CATEGORY_CAP = 25
+DEFAULT_SCORE_WINDOW_SECONDS = 24 * 3600
+# Contributions fade with age instead of being decremented on a timer: the
+# score is derived from the stored events, so it has to be a function of them.
+DEFAULT_DECAY_SECONDS = 6 * 3600
+
+DEFAULT_THRESHOLDS: Tuple[Tuple[int, str], ...] = (
+    (80, "HOSTILE"),
+    (60, "HIGH_RISK"),
+    (40, "SUSPICIOUS"),
+    (20, "WATCH"),
+    (0, "NORMAL"),
+)
+# The score at which enforcement would act, and the one at which an address is
+# interesting enough that authenticating afterwards counts as a warning sign.
+WOULD_BAN_SCORE = 60
+WATCH_SCORE = 20
+
+RECOMMENDED_ACTIONS: Dict[str, str] = {
+    "NORMAL": "none",
+    "WATCH": "observe",
+    "SUSPICIOUS": "throttle",
+    "HIGH_RISK": "temporary_ban",
+    "HOSTILE": "long_ban",
+}
+
+# Cooldowns keep one continuous incident from scoring on every cycle.
+COOLDOWN_SECONDS: Dict[str, int] = {
+    EVENT_SCANNER_PATH: 300,
+    EVENT_SCANNER_MULTI: 900,
+    EVENT_LOW_AND_SLOW: 3600,
+    EVENT_NOT_FOUND_ENUM: 900,
+    EVENT_INVALID_HOST: 600,
+    EVENT_NOSNI_PROBING: 600,
+    EVENT_RATE_EXCEEDED: 60,
+    EVENT_ERROR_RATE_EXCEEDED: 60,
+}
+
+# Thresholds for the derived detections.
+MULTI_CATEGORY_MIN = 3
+MULTI_CATEGORY_WINDOW = 2 * 3600
+LOW_AND_SLOW_MIN_HITS = 5
+LOW_AND_SLOW_MIN_CATEGORIES = 3
+LOW_AND_SLOW_WINDOW = 6 * 3600
+NOT_FOUND_MIN_DISTINCT = 6
+NOT_FOUND_WINDOW = 3600
+INVALID_HOST_MIN = 5
+INVALID_HOST_WINDOW = 6 * 3600
+
+# rsyslog writes "<ts> <host> haproxy[pid]: <log-format>".
+_SYSLOG_PREFIX = re.compile(r"^\S+\s+\S+\s+haproxy\[\d+\]:\s*")
+# Anchored at both ends: the middle of the line carries an optional ban_log
+# fragment with quoted, space-bearing text, so it is never parsed positionally.
+_ACCESS_HEAD = re.compile(
+    r"^(?P<client>\[[0-9A-Fa-f:]+\]|[0-9.]+):(?P<port>\d+)\s+"
+    r"\[(?P<stamp>[^\]]*)\]\s+"
+    r"(?P<frontend>\S+)\s+(?P<backend>\S+)\s+"
+    r"(?P<times>\S+)\s+"
+    r"(?P<status>-|\d{3})\s+"
+)
+_ACCESS_TAIL = re.compile(
+    r"(?P<method>[A-Z]{3,10})\s+(?P<uri>\S+)\s+(?P<proto>HTTP/[0-9.]+)\s*$"
+)
+_BAD_REQUEST_TAIL = re.compile(r"<BADREQ>\s*$")
+
+
+def _utc_now() -> int:
+    return int(time.time())
+
+
+def _clamp_int(value: Any, *, default: int, min_v: int, max_v: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(min_v, min(max_v, parsed))
+
+
+# ---------------------------------------------------------------------------
+# Request sanitising
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ParsedRequest:
+    """One access-log line, reduced to what is safe to keep."""
+
+    client_ip: str
+    status: int
+    frontend: str
+    backend: str
+    method: str
+    path: str
+    host: str
+    bad_request: bool = False
+
+    @property
+    def denied_by_gateway(self) -> bool:
+        """HAProxy already refused this one on its own rules."""
+
+        return self.status in (400, 403, 451)
+
+
+def normalize_path(value: str) -> str:
+    """Reduce a request target to a comparable path, dropping the query.
+
+    The query string is removed before anything is stored: the access log
+    genuinely contains things like `?token=...`, and a security database is the
+    last place a password-reset token should end up.
+    """
+
+    if not value:
+        return "/"
+    text = value.strip()
+    # An HTTP/2 request line carries the absolute form, so the host travels
+    # inside the target rather than in a captured header.
+    if text.startswith(("http://", "https://")):
+        text = urlparse(text).path or "/"
+    for separator in ("?", "#"):
+        index = text.find(separator)
+        if index >= 0:
+            text = text[:index]
+    with contextlib.suppress(Exception):
+        # One decoding pass only: decoding repeatedly invents paths that were
+        # never requested.
+        text = unquote(text)
+    text = _CONTROL_CHARS.sub("", text)
+    text = _MULTI_SLASH.sub("/", text)
+    if not text.startswith("/"):
+        text = "/" + text
+    segments: List[str] = []
+    for segment in text.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(segment)
+    normalized = "/" + "/".join(segments)
+    return normalized[:MAX_PATH_LENGTH]
+
+
+def is_asset(path: str) -> bool:
+    """A missing stylesheet is a deploy artefact, not reconnaissance."""
+
+    lowered = path.lower()
+    return lowered.endswith(ASSET_SUFFIXES)
+
+
+def classify_path(path: str) -> str:
+    """Return the scanner category for a normalised path, or "".
+
+    Matching is by first path segment so the lookup stays O(1) per request:
+    the cost of this runs on every logged line.
+    """
+
+    if not path or path == "/":
+        return ""
+    exact = SCANNER_PATHS.get(path)
+    if exact:
+        return exact
+    segment = path.split("/", 2)[1] if len(path) > 1 else ""
+    if not segment:
+        return ""
+    category = SCANNER_SEGMENTS.get(segment)
+    if category:
+        return category
+    return SCANNER_SEGMENTS.get(segment.lower(), "")
+
+
+def extract_host(value: str) -> str:
+    """Host from an absolute-form target, empty when the line has none.
+
+    HTTP/2 requests log the absolute URI, so the host is available; HTTP/1.1
+    requests usually log the origin form and simply do not carry it.
+    """
+
+    if not value.startswith(("http://", "https://")):
+        return ""
+    host = (urlparse(value).hostname or "").strip().lower()
+    return _CONTROL_CHARS.sub("", host)[:MAX_HOST_LENGTH]
+
+
+def parse_access_line(line: str) -> Optional[ParsedRequest]:
+    """Parse one HAProxy access-log line, or None if it is not one.
+
+    HAProxy also writes health-check and warning lines to the same file; those
+    are not access records and must not be mistaken for traffic.
+    """
+
+    if not line:
+        return None
+    text = _SYSLOG_PREFIX.sub("", line.strip())
+    head = _ACCESS_HEAD.match(text)
+    if head is None:
+        return None
+
+    client = head.group("client")
+    if client.startswith("["):
+        client = client[1:-1]
+    status_text = head.group("status")
+    status = 0 if status_text == "-" else int(status_text)
+
+    remainder = text[head.end():]
+    tail = _ACCESS_TAIL.search(remainder)
+    if tail is None:
+        if _BAD_REQUEST_TAIL.search(remainder):
+            return ParsedRequest(
+                client_ip=client,
+                status=status,
+                frontend=head.group("frontend"),
+                backend=head.group("backend"),
+                method="",
+                path="",
+                host="",
+                bad_request=True,
+            )
+        return None
+
+    uri = tail.group("uri")
+    return ParsedRequest(
+        client_ip=client,
+        status=status,
+        frontend=head.group("frontend"),
+        backend=head.group("backend"),
+        method=tail.group("method"),
+        path=normalize_path(uri),
+        host=extract_host(uri),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GuardConfig:
+    mode: str = MODE_MONITOR
+    poll_interval_seconds: int = 10
+    haproxy_socket: str = "/run/haproxy/admin.sock"
+    log_file: str = "/var/log/haproxy.log"
+    log_read_bytes_per_cycle: int = 4 * 1024 * 1024
+    whitelist_files: Tuple[str, ...] = (
+        "/etc/haproxy/whitelist.ip",
+        "/etc/haproxy/admin.allow",
+        "/etc/haproxy/geoip/whitelist.geo",
+    )
+    trusted_networks: Tuple[str, ...] = ()
+    max_tracked_ips: int = DEFAULT_MAX_TRACKED_IPS
+    max_paths_per_ip: int = DEFAULT_MAX_PATHS_PER_IP
+    event_retention_days: int = 30
+    maintenance_interval_seconds: int = 300
+
+
+class ConfigError(ValueError):
+    """A configuration that must not be silently repaired."""
+
+
+def load_config(path: str) -> GuardConfig:
+    raw: Dict[str, Any] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            raw = loaded
+        else:
+            LOG.warning("Config %s is not an object; using defaults", path)
+    except FileNotFoundError:
+        LOG.info("Config %s not found; using defaults", path)
+    except (OSError, ValueError) as exc:
+        LOG.warning("Cannot read config %s (%s); using defaults", path, exc)
+
+    mode = str(raw.get("mode") or MODE_MONITOR).strip().lower()
+    if mode not in SUPPORTED_MODES:
+        LOG.warning("Unknown mode %r; falling back to %s", mode, MODE_MONITOR)
+        mode = MODE_MONITOR
+
+    limits = raw.get("limits")
+    limits = limits if isinstance(limits, dict) else {}
+    sources = raw.get("sources")
+    sources = sources if isinstance(sources, dict) else {}
+    exclusions = raw.get("exclusions")
+    exclusions = exclusions if isinstance(exclusions, dict) else {}
+
+    def _string_tuple(value: Any, fallback: Tuple[str, ...]) -> Tuple[str, ...]:
+        if not isinstance(value, list):
+            return fallback
+        items = tuple(str(item).strip() for item in value if str(item).strip())
+        return items if items else fallback
+
+    return GuardConfig(
+        mode=mode,
+        poll_interval_seconds=_clamp_int(
+            raw.get("poll_interval_seconds"), default=10, min_v=5, max_v=60
+        ),
+        haproxy_socket=str(
+            sources.get("haproxy_socket") or "/run/haproxy/admin.sock"
+        ).strip(),
+        log_file=str(
+            sources.get("log_file") or "/var/log/haproxy.log"
+        ).strip(),
+        log_read_bytes_per_cycle=_clamp_int(
+            limits.get("log_read_bytes_per_cycle"),
+            default=4 * 1024 * 1024,
+            min_v=64 * 1024,
+            max_v=64 * 1024 * 1024,
+        ),
+        whitelist_files=_string_tuple(
+            exclusions.get("whitelist_files"),
+            GuardConfig.whitelist_files,
+        ),
+        trusted_networks=_string_tuple(exclusions.get("trusted_networks"), ()),
+        max_tracked_ips=_clamp_int(
+            limits.get("max_tracked_ips"),
+            default=DEFAULT_MAX_TRACKED_IPS,
+            min_v=1000,
+            max_v=500000,
+        ),
+        max_paths_per_ip=_clamp_int(
+            limits.get("max_paths_per_ip"),
+            default=DEFAULT_MAX_PATHS_PER_IP,
+            min_v=8,
+            max_v=256,
+        ),
+        event_retention_days=_clamp_int(
+            limits.get("event_retention_days"), default=30, min_v=1, max_v=365
+        ),
+        maintenance_interval_seconds=_clamp_int(
+            raw.get("maintenance_interval_seconds"),
+            default=300,
+            min_v=60,
+            max_v=3600,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# HAProxy runtime access
+# ---------------------------------------------------------------------------
+
+
+def runtime_command(socket_path: str, command: str) -> str:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(RUNTIME_TIMEOUT_SECONDS)
+        sock.connect(socket_path)
+        sock.sendall(f"{command}\n".encode("utf-8"))
+        chunks: List[bytes] = []
+        total = 0
+        while total < RUNTIME_MAX_BYTES:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+_TABLE_ROW = re.compile(r"^0x[0-9a-f]+:\s+key=(?P<key>\S+)\s+(?P<rest>.*)$")
+_TABLE_FIELD = re.compile(r"(?P<name>[a-z_0-9()]+)=(?P<value>\S+)")
+
+
+def parse_table(payload: str) -> Dict[str, Dict[str, str]]:
+    """Parse `show table <name>` into {key: {field: value}}."""
+
+    rows: Dict[str, Dict[str, str]] = {}
+    for line in payload.splitlines():
+        match = _TABLE_ROW.match(line.strip())
+        if match is None:
+            continue
+        fields = {
+            item.group("name"): item.group("value")
+            for item in _TABLE_FIELD.finditer(match.group("rest"))
+        }
+        rows[match.group("key")] = fields
+    return rows
+
+
+def list_tables(payload: str) -> List[str]:
+    names: List[str] = []
+    for line in payload.splitlines():
+        match = re.search(r"\btable:\s*([^\s,]+)", line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+# ---------------------------------------------------------------------------
+# Exclusions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScoringPolicy:
+    """Everything that turns stored events into a number.
+
+    Kept separate from the events on purpose: retuning any of this re-scores
+    the entire history instead of requiring another week of observation.
+    """
+
+    weights: Dict[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_WEIGHTS)
+    )
+    category_cap: int = DEFAULT_CATEGORY_CAP
+    window_seconds: int = DEFAULT_SCORE_WINDOW_SECONDS
+    decay_seconds: int = DEFAULT_DECAY_SECONDS
+
+    def weight(self, event_type: str) -> int:
+        return int(self.weights.get(event_type, 0))
+
+
+def policy_from_query(
+    query: Dict[str, List[str]], base: ScoringPolicy
+) -> ScoringPolicy:
+    """Build a what-if policy from request parameters.
+
+    Every key is an allow-listed event type and every value is clamped, so the
+    simulator can only ask "what if this weight were different" -- it cannot
+    describe anything the engine would not otherwise compute.
+    """
+
+    weights = dict(base.weights)
+    for name, values in query.items():
+        if not name.startswith("w."):
+            continue
+        event_type = name[2:]
+        if event_type not in DEFAULT_WEIGHTS:
+            continue
+        weights[event_type] = _clamp_int(
+            values[0], default=base.weight(event_type), min_v=0, max_v=100
+        )
+    return ScoringPolicy(
+        weights=weights,
+        category_cap=_clamp_int(
+            query.get("cap", [None])[0],
+            default=base.category_cap,
+            min_v=1,
+            max_v=100,
+        ),
+        window_seconds=_clamp_int(
+            query.get("window", [None])[0],
+            default=base.window_seconds,
+            min_v=3600,
+            max_v=30 * 86400,
+        ),
+        decay_seconds=_clamp_int(
+            query.get("decay", [None])[0],
+            default=base.decay_seconds,
+            min_v=0,
+            max_v=30 * 86400,
+        ),
+    )
+
+
+def state_for(score: int) -> str:
+    for threshold, name in DEFAULT_THRESHOLDS:
+        if score >= threshold:
+            return name
+    return "NORMAL"
+
+
+def score_events(
+    events: Iterable[Dict[str, Any]], now: int, policy: ScoringPolicy
+) -> Dict[str, Any]:
+    """Derive a 0..100 score and its explanation from stored events.
+
+    Contributions fade with age rather than being decremented on a timer, and
+    each scanner category is capped, so a bot grinding through fifty WordPress
+    URLs counts as one finding rather than fifty.
+    """
+
+    total = 0.0
+    per_category: Dict[str, float] = {}
+    contributions: List[Dict[str, Any]] = []
+    counted = 0
+
+    for event in events:
+        ts = int(event.get("ts", 0))
+        age = max(0, now - ts)
+        if age > policy.window_seconds:
+            continue
+        event_type = str(event.get("event_type", ""))
+        base = policy.weight(event_type)
+        if base <= 0:
+            continue
+        if int(event.get("handled", 0)):
+            # HAProxy already refused this request; banning on top of a GeoIP
+            # denial adds nothing.
+            contributions.append(
+                {
+                    "ts": ts,
+                    "event_type": event_type,
+                    "category": str(event.get("category", "")),
+                    "points": 0,
+                    "reason": "already refused by the gateway",
+                }
+            )
+            continue
+        decay = 1.0
+        if policy.decay_seconds > 0:
+            decay = max(0.0, 1.0 - age / policy.decay_seconds)
+        points = base * decay
+        if points <= 0:
+            continue
+
+        category = str(event.get("category", "")) or event_type
+        used = per_category.get(category, 0.0)
+        # The cap stops repetition from inflating a finding, but it must never
+        # clip a single event below its own weight -- otherwise raising a
+        # weight above the cap would have no effect at all.
+        ceiling = max(policy.category_cap, base)
+        allowed = max(0.0, ceiling - used)
+        granted = min(points, allowed)
+        per_category[category] = used + granted
+        total += granted
+        counted += 1
+        contributions.append(
+            {
+                "ts": ts,
+                "event_type": event_type,
+                "category": str(event.get("category", "")),
+                "points": round(granted, 2),
+                "reason": (
+                    "category cap reached"
+                    if granted < points
+                    else "counted"
+                ),
+            }
+        )
+
+    score = int(min(100.0, round(total)))
+    state = state_for(score)
+    return {
+        "score": score,
+        "state": state,
+        "recommended_action": RECOMMENDED_ACTIONS.get(state, "none"),
+        "events_counted": counted,
+        "categories": {
+            name: round(value, 2) for name, value in per_category.items()
+        },
+        "contributions": contributions,
+    }
+
+
+@dataclass
+class Verdict:
+    excluded: bool
+    reason: str
+
+
+class ExclusionModel:
+    """Who guardd must never act on.
+
+    Mirrors the ACLs in the HAProxy configuration: the global whitelist, the
+    admin allow-list, the GeoIP whitelist, and -- read live from the runtime --
+    the addresses that completed Authelia authentication. HAProxy exempts all
+    of these from its own bans, so scoring them would only produce noise.
+    """
+
+    def __init__(self, config: GuardConfig) -> None:
+        self.config = config
+        self._lock = threading.Lock()
+        self._networks: List[Any] = []
+        self._signatures: Dict[str, Tuple[int, int]] = {}
+        self._authenticated: Set[str] = set()
+        self.reload_files(force=True)
+
+    # -- static files -----------------------------------------------------
+
+    def reload_files(self, *, force: bool = False) -> bool:
+        signatures: Dict[str, Tuple[int, int]] = {}
+        for path in self.config.whitelist_files:
+            try:
+                stat = os.stat(path)
+                signatures[path] = (int(stat.st_mtime), int(stat.st_size))
+            except OSError:
+                signatures[path] = (0, 0)
+        if not force and signatures == self._signatures:
+            return False
+
+        networks: List[Any] = []
+        for path in self.config.whitelist_files:
+            networks.extend(self._read_acl_file(path))
+        for entry in self.config.trusted_networks:
+            network = self._parse_network(entry)
+            if network is not None:
+                networks.append(network)
+
+        with self._lock:
+            self._networks = networks
+            self._signatures = signatures
+        LOG.info(
+            "Exclusion list reloaded: %d networks from %d files",
+            len(networks),
+            len(self.config.whitelist_files),
+        )
+        return True
+
+    @staticmethod
+    def _parse_network(entry: str) -> Optional[Any]:
+        try:
+            return ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            return None
+
+    def _read_acl_file(self, path: str) -> List[Any]:
+        networks: List[Any] = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                for raw in handle:
+                    line = raw.split("#", 1)[0].strip()
+                    if not line:
+                        continue
+                    # HAProxy pattern files allow a trailing label after the
+                    # pattern; only the first token is the address.
+                    network = self._parse_network(line.split()[0])
+                    if network is not None:
+                        networks.append(network)
+        except OSError:
+            return []
+        return networks
+
+    # -- runtime ----------------------------------------------------------
+
+    def refresh_authenticated(self, rows: Dict[str, Dict[str, str]]) -> None:
+        """Addresses currently holding an Authelia authorization."""
+
+        authenticated = {
+            key
+            for key, fields in rows.items()
+            if _safe_int(fields.get("gpc0")) > 0
+        }
+        with self._lock:
+            self._authenticated = authenticated
+
+    # -- queries ----------------------------------------------------------
+
+    def verdict(self, ip: str) -> Verdict:
+        with self._lock:
+            if ip in self._authenticated:
+                return Verdict(True, "authenticated")
+            networks = list(self._networks)
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return Verdict(True, "unparsable")
+        if address.is_loopback or address.is_link_local:
+            return Verdict(True, "local")
+        for network in networks:
+            if address.version == network.version and address in network:
+                return Verdict(True, "whitelisted")
+        return Verdict(False, "")
+
+    @property
+    def authenticated_count(self) -> int:
+        with self._lock:
+            return len(self._authenticated)
+
+    @property
+    def network_count(self) -> int:
+        with self._lock:
+            return len(self._networks)
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def enforceable(ip: str) -> bool:
+    """Whether a ban could ever be applied to this address.
+
+    `tbl_ban` is an IPv4 stick table and the firewall ruleset is `inet`, so an
+    IPv6 client cannot be banned through this path at all. Recording that is
+    more honest than accumulating a score nothing can act on.
+    """
+
+    try:
+        return ipaddress.ip_address(ip).version == 4
+    except ValueError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Bounded per-IP memory
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IpActivity:
+    """What one address has been doing, in a fixed amount of space."""
+
+    first_seen: int = 0
+    last_seen: int = 0
+    requests: int = 0
+    errors: int = 0
+    not_found: int = 0
+    gateway_denied: int = 0
+    bad_requests: int = 0
+    paths: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
+    hosts: Set[str] = field(default_factory=set)
+    # Detection state, all bounded: category -> last seen, and the distinct
+    # 404 paths that were not assets.
+    categories: "OrderedDict[str, int]" = field(default_factory=OrderedDict)
+    scanner_hits: int = 0
+    missing_paths: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
+    invalid_host_hits: int = 0
+    invalid_host_since: int = 0
+
+    def note_path(self, path: str, ts: int, limit: int) -> bool:
+        """Remember a path by hash. True when it had not been seen before."""
+
+        digest = hash(path) & 0xFFFFFFFF
+        fresh = digest not in self.paths
+        self.paths[digest] = ts
+        self.paths.move_to_end(digest)
+        while len(self.paths) > limit:
+            self.paths.popitem(last=False)
+        return fresh
+
+    def note_category(self, category: str, ts: int, limit: int = 16) -> None:
+        self.categories[category] = ts
+        self.categories.move_to_end(category)
+        while len(self.categories) > limit:
+            self.categories.popitem(last=False)
+
+    def note_missing(self, path: str, ts: int, limit: int) -> bool:
+        digest = hash(path) & 0xFFFFFFFF
+        fresh = digest not in self.missing_paths
+        self.missing_paths[digest] = ts
+        self.missing_paths.move_to_end(digest)
+        while len(self.missing_paths) > limit:
+            self.missing_paths.popitem(last=False)
+        return fresh
+
+    def recent_categories(self, since: int) -> List[str]:
+        return [
+            name for name, ts in self.categories.items() if ts >= since
+        ]
+
+    def distinct_missing(self, since: int) -> int:
+        return sum(1 for ts in self.missing_paths.values() if ts >= since)
+
+
+class IpMemory:
+    """LRU over addresses, with a hard ceiling on both dimensions."""
+
+    def __init__(self, max_ips: int, max_paths: int) -> None:
+        self.max_ips = max_ips
+        self.max_paths = max_paths
+        self._entries: "OrderedDict[str, IpActivity]" = OrderedDict()
+        self._lock = threading.Lock()
+        self.evictions = 0
+
+    def touch(self, ip: str, ts: int) -> IpActivity:
+        with self._lock:
+            activity = self._entries.get(ip)
+            if activity is None:
+                activity = IpActivity(first_seen=ts)
+                self._entries[ip] = activity
+            activity.last_seen = ts
+            self._entries.move_to_end(ip)
+            while len(self._entries) > self.max_ips:
+                self._entries.popitem(last=False)
+                self.evictions += 1
+            return activity
+
+    def get(self, ip: str) -> Optional[IpActivity]:
+        with self._lock:
+            return self._entries.get(ip)
+
+    def prune(self, older_than: int) -> int:
+        with self._lock:
+            stale = [
+                ip
+                for ip, activity in self._entries.items()
+                if activity.last_seen < older_than
+            ]
+            for ip in stale:
+                self._entries.pop(ip, None)
+        return len(stale)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
+# ---------------------------------------------------------------------------
+# Log cursor
+# ---------------------------------------------------------------------------
+
+
+class LogCursor:
+    """Incremental reader for a file that rsyslog rotates underneath us.
+
+    Position is (inode, offset): when the inode changes the file was rotated
+    and reading restarts at the beginning of the new one; when the file shrinks
+    it was truncated in place. Neither case may replay old history, because
+    re-importing yesterday's scan would invent events that already happened.
+    """
+
+    def __init__(self, path: str, state: Dict[str, Any]) -> None:
+        self.path = path
+        self.inode = _safe_int(state.get("inode"))
+        self.offset = _safe_int(state.get("offset"))
+        self.rotations = _safe_int(state.get("rotations"))
+        self.lag_bytes = 0
+        self.last_error: Optional[str] = None
+
+    def state(self) -> Dict[str, Any]:
+        return {
+            "inode": self.inode,
+            "offset": self.offset,
+            "rotations": self.rotations,
+        }
+
+    def read(self, max_bytes: int) -> List[str]:
+        """Return complete lines, leaving a partial trailing line for later."""
+
+        try:
+            stat = os.stat(self.path)
+        except OSError as exc:
+            self.last_error = str(exc)
+            return []
+        self.last_error = None
+
+        inode = int(stat.st_ino)
+        size = int(stat.st_size)
+
+        if self.inode == 0:
+            # First ever start: begin at the end. Importing the existing file
+            # would score traffic from before the daemon existed.
+            self.inode, self.offset = inode, size
+            return []
+        if inode != self.inode:
+            self.inode, self.offset = inode, 0
+            self.rotations += 1
+            LOG.info("Log rotated; following the new file from the start")
+        elif size < self.offset:
+            self.offset = 0
+            self.rotations += 1
+            LOG.info("Log truncated in place; restarting from the beginning")
+
+        if size <= self.offset:
+            self.lag_bytes = 0
+            return []
+
+        self.lag_bytes = max(0, size - self.offset - max_bytes)
+        lines: List[str] = []
+        try:
+            with open(self.path, "rb") as handle:
+                handle.seek(self.offset)
+                data = handle.read(max_bytes)
+        except OSError as exc:
+            self.last_error = str(exc)
+            return []
+
+        consumed = data.rfind(b"\n") + 1
+        if consumed <= 0:
+            # No complete line yet; wait rather than splitting a record.
+            return []
+        self.offset += consumed
+        for raw in data[:consumed].splitlines():
+            if len(raw) > MAX_LOG_LINE_BYTES:
+                raw = raw[:MAX_LOG_LINE_BYTES]
+            lines.append(raw.decode("utf-8", "replace"))
+        return lines
+
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+_SCHEMA_STATEMENTS: Tuple[str, ...] = (
+    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+    """
+    CREATE TABLE IF NOT EXISTS ip_state (
+        ip               TEXT PRIMARY KEY,
+        family           INTEGER NOT NULL,
+        enforceable      INTEGER NOT NULL,
+        first_seen       INTEGER NOT NULL,
+        last_seen        INTEGER NOT NULL,
+        excluded         INTEGER NOT NULL DEFAULT 0,
+        exclusion_reason TEXT    NOT NULL DEFAULT '',
+        banned_until     INTEGER NOT NULL DEFAULT 0,
+        ban_code         INTEGER NOT NULL DEFAULT 0,
+        authenticated_at INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID
+    """,
+    # Deliberately weight-free: the score is derived when it is requested, so
+    # retuning weights re-scores the whole history instead of starting over.
+    # `handled` records that HAProxy already refused the request this event
+    # describes -- a GeoIP 451, for instance. It is a fact about what happened,
+    # not a weight, so it belongs beside the event rather than in the scoring
+    # configuration; the score simply declines to count it.
+    """
+    CREATE TABLE IF NOT EXISTS security_events (
+        id         INTEGER PRIMARY KEY,
+        ts         INTEGER NOT NULL,
+        ip         TEXT    NOT NULL,
+        event_type TEXT    NOT NULL,
+        source     TEXT    NOT NULL,
+        site       TEXT    NOT NULL DEFAULT '',
+        category   TEXT    NOT NULL DEFAULT '',
+        detail     TEXT    NOT NULL DEFAULT '',
+        handled    INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_events_ip_ts ON security_events (ip, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_events_ts ON security_events (ts)",
+    """
+    CREATE TABLE IF NOT EXISTS event_cooldowns (
+        fingerprint TEXT PRIMARY KEY,
+        last_ts     INTEGER NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS guard_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+)
+
+def _add_column_if_missing(
+    cursor: sqlite3.Cursor, table: str, column: str, definition: str
+) -> None:
+    """Add a column unless it is already there.
+
+    The schema statements above create tables in their newest shape, so a
+    database can legitimately already have a column that a migration step also
+    wants to add. Checking first keeps the ladder safe to re-run instead of
+    failing the daemon at startup.
+    """
+
+    existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        return
+    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+_MIGRATIONS: Dict[int, Callable[[sqlite3.Cursor], None]] = {
+    # v1 stored events without knowing whether HAProxy had already refused the
+    # request. Existing rows default to "not handled", which is the safe
+    # reading: they keep counting exactly as they did before.
+    2: lambda cursor: _add_column_if_missing(
+        cursor, "security_events", "handled", "INTEGER NOT NULL DEFAULT 0"
+    ),
+    # The strongest false-positive signal there is: an address the engine
+    # scored that later completed Authelia authentication.
+    3: lambda cursor: _add_column_if_missing(
+        cursor, "ip_state", "authenticated_at", "INTEGER NOT NULL DEFAULT 0"
+    ),
+}
+
+
+class SecurityDatabase:
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fresh = not self.path.exists()
+        self._conn = sqlite3.connect(
+            str(self.path), timeout=10, check_same_thread=False
+        )
+        self._conn.row_factory = sqlite3.Row
+        cursor = self._conn.cursor()
+        if fresh:
+            cursor.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            for statement in _SCHEMA_STATEMENTS:
+                cursor.execute(statement)
+            row = cursor.execute("SELECT version FROM schema_version").fetchone()
+            if row is None:
+                cursor.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+                cursor.close()
+                return
+            current = int(row["version"])
+            if current > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"security database schema v{current} is newer than the "
+                    f"supported v{SCHEMA_VERSION}"
+                )
+            while current < SCHEMA_VERSION:
+                step = _MIGRATIONS.get(current + 1)
+                if step is not None:
+                    step(cursor)
+                current += 1
+                LOG.info("Migrated security database to schema v%d", current)
+            cursor.execute("UPDATE schema_version SET version = ?", (current,))
+            cursor.close()
+
+    def close(self) -> None:
+        with self._lock:
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.close()
+
+    def get_state(self, key: str, default: str = "") -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM guard_state WHERE key = ?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_state(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO guard_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def observe_ip(
+        self, ip: str, ts: int, verdict: Verdict
+    ) -> None:
+        try:
+            family = ipaddress.ip_address(ip).version
+        except ValueError:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO ip_state "
+                "(ip, family, enforceable, first_seen, last_seen, excluded, "
+                " exclusion_reason) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (ip) DO UPDATE SET last_seen = excluded.last_seen, "
+                "excluded = excluded.excluded, "
+                "exclusion_reason = excluded.exclusion_reason",
+                (
+                    ip,
+                    family,
+                    1 if enforceable(ip) else 0,
+                    ts,
+                    ts,
+                    1 if verdict.excluded else 0,
+                    verdict.reason,
+                ),
+            )
+
+    def record_events(self, events: Iterable[Dict[str, Any]]) -> int:
+        payload = [
+            (
+                int(event["ts"]),
+                str(event["ip"]),
+                str(event["event_type"]),
+                str(event["source"]),
+                str(event.get("site", "")),
+                str(event.get("category", "")),
+                str(event.get("detail", ""))[:MAX_PATH_LENGTH],
+                1 if event.get("handled") else 0,
+            )
+            for event in events
+        ]
+        if not payload:
+            return 0
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT INTO security_events "
+                "(ts, ip, event_type, source, site, category, detail, handled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                payload,
+            )
+        return len(payload)
+
+    def record_authenticated(self, ips: Iterable[str], ts: int) -> int:
+        """Remember that these addresses hold an Authelia authorization.
+
+        Only addresses the engine has already scored are updated: the point is
+        to mark findings that turned out to belong to a real user, not to build
+        a second directory of everyone who logged in.
+        """
+
+        payload = [(ts, ip) for ip in ips]
+        if not payload:
+            return 0
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.executemany(
+                "UPDATE ip_state SET authenticated_at = ? WHERE ip = ?", payload
+            )
+            updated = cursor.rowcount or 0
+            cursor.close()
+        return updated
+
+    def set_ban(self, ip: str, until: int, code: int, now: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE ip_state SET banned_until = ?, ban_code = ?, last_seen = ? "
+                "WHERE ip = ?",
+                (until, code, now, ip),
+            )
+
+    def clear_ban(self, ip: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE ip_state SET banned_until = 0, ban_code = 0 WHERE ip = ?",
+                (ip,),
+            )
+
+    def scheduled_bans(self) -> Dict[str, int]:
+        """Addresses this daemon believes it has banned, and until when."""
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ip, banned_until FROM ip_state WHERE banned_until > 0"
+            ).fetchall()
+        return {str(row["ip"]): int(row["banned_until"]) for row in rows}
+
+    def last_ban_ts(self, ip: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(ts) AS value FROM security_events "
+                "WHERE ip = ? AND event_type = ?",
+                (ip, EVENT_BAN_APPLIED),
+            ).fetchone()
+        return int(row["value"] or 0) if row else 0
+
+    def newest_finding_ts(self, ip: str) -> int:
+        """Timestamp of the most recent event that carries weight."""
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(ts) AS value FROM security_events "
+                "WHERE ip = ? AND event_type NOT IN (?, ?)",
+                (ip, EVENT_BAN_APPLIED, EVENT_BAN_LIFTED),
+            ).fetchone()
+        return int(row["value"] or 0) if row else 0
+
+    def strike_count(self, ip: str, since: int) -> int:
+        """How many times this address has been banned recently."""
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS value FROM security_events "
+                "WHERE ip = ? AND event_type = ? AND ts >= ?",
+                (ip, EVENT_BAN_APPLIED, since),
+            ).fetchone()
+        return int(row["value"]) if row else 0
+
+    def ip_facts(self, ip: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT first_seen, last_seen, excluded, exclusion_reason, "
+                "authenticated_at FROM ip_state WHERE ip = ?",
+                (ip,),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def events_for(
+        self, ip: str, since: int, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, event_type, source, site, category, detail, handled "
+                "FROM security_events WHERE ip = ? AND ts >= ? "
+                "ORDER BY ts DESC, id DESC LIMIT ?",
+                (ip, since, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_addresses(self, since: int, limit: int = 500) -> List[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ip, COUNT(*) AS hits FROM security_events "
+                "WHERE ts >= ? GROUP BY ip ORDER BY hits DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+        return [str(row["ip"]) for row in rows]
+
+    def cooldown_passed(self, fingerprint: str, ts: int, window: int) -> bool:
+        """True when this fingerprint may produce an event again."""
+
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT last_ts FROM event_cooldowns WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if row is not None and ts - int(row["last_ts"]) < window:
+                return False
+            self._conn.execute(
+                "INSERT INTO event_cooldowns (fingerprint, last_ts) VALUES (?, ?) "
+                "ON CONFLICT (fingerprint) DO UPDATE SET last_ts = excluded.last_ts",
+                (fingerprint, ts),
+            )
+        return True
+
+    def apply_retention(self, *, events_before: int) -> Dict[str, int]:
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "DELETE FROM security_events WHERE ts < ?", (events_before,)
+            )
+            events = cursor.rowcount or 0
+            cursor.execute(
+                "DELETE FROM event_cooldowns WHERE last_ts < ?", (events_before,)
+            )
+            cooldowns = cursor.rowcount or 0
+            cursor.execute(
+                "DELETE FROM ip_state WHERE last_seen < ? AND banned_until = 0",
+                (events_before,),
+            )
+            addresses = cursor.rowcount or 0
+            cursor.close()
+        return {
+            "events": events,
+            "cooldowns": cooldowns,
+            "addresses": addresses,
+        }
+
+    def incremental_vacuum(self, pages: int = 256) -> None:
+        with self._lock, self._conn:
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.execute(f"PRAGMA incremental_vacuum({int(pages)})")
+
+    def stats(self) -> Dict[str, Any]:
+        with self._lock:
+            cursor = self._conn.cursor()
+            version = cursor.execute(
+                "SELECT version FROM schema_version"
+            ).fetchone()
+            events = cursor.execute(
+                "SELECT COUNT(*) AS value, MIN(ts) AS oldest, MAX(ts) AS newest "
+                "FROM security_events"
+            ).fetchone()
+            addresses = cursor.execute(
+                "SELECT COUNT(*) AS value, "
+                "SUM(CASE WHEN excluded = 1 THEN 1 ELSE 0 END) AS excluded, "
+                "SUM(CASE WHEN enforceable = 0 THEN 1 ELSE 0 END) AS unenforceable "
+                "FROM ip_state"
+            ).fetchone()
+            by_type = cursor.execute(
+                "SELECT event_type, COUNT(*) AS value FROM security_events "
+                "GROUP BY event_type ORDER BY value DESC LIMIT 20"
+            ).fetchall()
+            cursor.close()
+        return {
+            "schema_version": int(version["version"]) if version else 0,
+            "events": {
+                "rows": int(events["value"]),
+                "oldest_ts": events["oldest"],
+                "newest_ts": events["newest"],
+                "by_type": {
+                    str(row["event_type"]): int(row["value"]) for row in by_type
+                },
+            },
+            "addresses": {
+                "rows": int(addresses["value"] or 0),
+                "excluded": int(addresses["excluded"] or 0),
+                "unenforceable": int(addresses["unenforceable"] or 0),
+            },
+        }
+
+    def storage(self) -> Dict[str, Any]:
+        def size(path: Path) -> int:
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+
+        database = size(self.path)
+        wal = size(self.path.with_name(self.path.name + "-wal"))
+        shm = size(self.path.with_name(self.path.name + "-shm"))
+        return {
+            "database_bytes": database,
+            "wal_bytes": wal,
+            "shm_bytes": shm,
+            "total_bytes": database + wal + shm,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Enforcement primitives (unused while mode is monitor)
+# ---------------------------------------------------------------------------
+
+
+class Enforcer:
+    """The ban path, isolated so the monitor guarantee stays checkable.
+
+    Applying a ban is refused unless the active mode is `enforce`, so a
+    detection rule cannot reach HAProxy by accident. The commands are the ones
+    the HAProxy configuration already uses -- gpc0 as the ban flag, gpt0 as the
+    reason code -- which keeps adaptive bans visible in the existing ban list
+    and removable by the existing unban button.
+
+    Lifting is deliberately *not* gated on the mode: turning enforcement off
+    has to be able to undo what it did.
+    """
+
+    def __init__(self, config: GuardConfig, mode: Optional[str] = None) -> None:
+        self.config = config
+        self.mode = mode or config.mode
+        self.refused = 0
+        self.applied = 0
+        self.lifted = 0
+
+    @property
+    def allowed(self) -> bool:
+        return self.mode == MODE_ENFORCE
+
+    def ban(self, ip: str, *, code: int = ADAPTIVE_BAN_CODE) -> bool:
+        if not self.allowed:
+            self.refused += 1
+            return False
+        if not enforceable(ip):
+            return False
+        runtime_command(
+            self.config.haproxy_socket,
+            f"set table tbl_ban key {ip} data.gpc0 1 data.gpt0 {int(code)}",
+        )
+        self.applied += 1
+        return True
+
+    def adaptive_bans(self) -> Dict[str, Dict[str, str]]:
+        """Only the entries this daemon owns, identified by their reason code."""
+
+        rows = parse_table(
+            runtime_command(self.config.haproxy_socket, "show table tbl_ban")
+        )
+        return {
+            ip: fields
+            for ip, fields in rows.items()
+            if _safe_int(fields.get("gpt0")) == ADAPTIVE_BAN_CODE
+            and _safe_int(fields.get("gpc0")) > 0
+        }
+
+    def lift(self, ip: str) -> bool:
+        """Clear an adaptive ban, and only an adaptive one.
+
+        `clear table` would happily remove a ban HAProxy placed itself under
+        its own rules, so the entry is re-read and its reason code checked
+        before anything is removed.
+        """
+
+        rows = parse_table(
+            runtime_command(
+                self.config.haproxy_socket, f"show table tbl_ban key {ip}"
+            )
+        )
+        fields = rows.get(ip)
+        if fields is None:
+            return False
+        if _safe_int(fields.get("gpt0")) != ADAPTIVE_BAN_CODE:
+            LOG.info(
+                "Leaving the ban on %s alone: reason code %s is not ours",
+                ip,
+                fields.get("gpt0"),
+            )
+            return False
+        runtime_command(
+            self.config.haproxy_socket, f"clear table tbl_ban key {ip}"
+        )
+        self.lifted += 1
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+class GuardEngine:
+    """Collects from both sources; contains no detection rules yet."""
+
+    def __init__(
+        self,
+        config: GuardConfig,
+        database: SecurityDatabase,
+        exclusions: Optional[ExclusionModel] = None,
+        alerts: Optional[Any] = None,
+    ) -> None:
+        self.config = config
+        self.database = database
+        self.exclusions = exclusions or ExclusionModel(config)
+        # A ban used to be a journal line only. Whether it is worth an email is
+        # the alert engine's decision, not this daemon's; here it is only
+        # reported.
+        self.alerts = alerts
+        # The rendered config supplies the default; an operator's choice in the
+        # interface overrides it and survives a restart.
+        override = database.get_state("mode_override", "")
+        self.enforcer = Enforcer(
+            config, override if override in SUPPORTED_MODES else config.mode
+        )
+        self.policy = ScoringPolicy()
+        self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
+        cursor_state: Dict[str, Any] = {}
+        with contextlib.suppress(ValueError):
+            cursor_state = json.loads(
+                self.database.get_state("log_cursor", "{}")
+            )
+        self.cursor = LogCursor(config.log_file, cursor_state)
+
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._known_bans: Set[str] = set()
+
+        self.last_poll_ts: Optional[int] = None
+        self.last_error: Optional[str] = None
+        self.consecutive_failures = 0
+        self.polls_total = 0
+        self.lines_read = 0
+        self.lines_parsed = 0
+        self.events_recorded = 0
+        self.excluded_observations = 0
+
+    # -- lifecycle --------------------------------------------------------
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="guardd-collector", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=10)
+
+    def _run(self) -> None:
+        interval = self.config.poll_interval_seconds
+        next_maintenance = (
+            time.monotonic() + self.config.maintenance_interval_seconds
+        )
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                self.poll()
+            except Exception as exc:  # pylint: disable=broad-except
+                self.consecutive_failures += 1
+                self.last_error = str(exc)
+                if self.consecutive_failures in (1, 10) or (
+                    self.consecutive_failures % 60 == 0
+                ):
+                    LOG.warning(
+                        "Poll failed (%d in a row): %s",
+                        self.consecutive_failures,
+                        exc,
+                    )
+            if time.monotonic() >= next_maintenance:
+                try:
+                    self.run_maintenance()
+                except Exception:  # pylint: disable=broad-except
+                    LOG.exception("Maintenance pass failed")
+                next_maintenance = (
+                    time.monotonic() + self.config.maintenance_interval_seconds
+                )
+            elapsed = time.monotonic() - started
+            self._stop.wait(max(0.5, interval - elapsed))
+
+    # -- collection -------------------------------------------------------
+
+    def poll(self) -> Dict[str, int]:
+        now = _utc_now()
+        self.exclusions.reload_files()
+        tables = self.read_tables()
+        from_tables = self.ingest_tables(tables, now)
+        from_log = self.ingest_log(now)
+
+        # Runs in every mode: expiry and the kill switch have to keep working
+        # after enforcement is turned off.
+        enforcement = self.apply_enforcement(now)
+
+        self.polls_total += 1
+        self.last_poll_ts = now
+        self.consecutive_failures = 0
+        self.last_error = None
+        self.database.set_state("log_cursor", json.dumps(self.cursor.state()))
+        return {
+            "table_events": from_tables,
+            "log_lines": from_log,
+            "banned": len(enforcement["applied"]),
+            "lifted": len(enforcement["lifted"]),
+        }
+
+    def read_tables(self) -> Dict[str, Dict[str, Dict[str, str]]]:
+        socket_path = self.config.haproxy_socket
+        available = list_tables(runtime_command(socket_path, "show table"))
+        # The per-site rate and error tables are generated, so they are matched
+        # by prefix rather than listed; tbl_nosni_tcp carries the direct-IP
+        # probing signal that never reaches the HTTP log at all.
+        wanted = [
+            name
+            for name in available
+            if name in ("tbl_ban", "tbl_ip_auth", "tbl_err_other", "tbl_nosni_tcp")
+            or name.startswith(("tbl_err_", "tbl_rate_"))
+        ]
+        result: Dict[str, Dict[str, Dict[str, str]]] = {}
+        for name in wanted:
+            result[name] = parse_table(
+                runtime_command(socket_path, f"show table {name}")
+            )
+        return result
+
+    def ingest_tables(
+        self, tables: Dict[str, Dict[str, Dict[str, str]]], now: int
+    ) -> int:
+        auth_rows = tables.get("tbl_ip_auth", {})
+        self.exclusions.refresh_authenticated(auth_rows)
+        authenticated = [
+            ip
+            for ip, fields in auth_rows.items()
+            if _safe_int(fields.get("gpc0")) > 0
+        ]
+        if authenticated:
+            self.database.record_authenticated(authenticated, now)
+
+        bans = tables.get("tbl_ban", {})
+        active = {
+            ip for ip, fields in bans.items() if _safe_int(fields.get("gpc0")) > 0
+        }
+        events: List[Dict[str, Any]] = []
+        for ip in sorted(active - self._known_bans):
+            # An observation, not a decision: HAProxy banned this address on
+            # its own rules and guardd is recording that it happened.
+            events.append(
+                {
+                    "ts": now,
+                    "ip": ip,
+                    "event_type": "LEGACY_HAPROXY_BAN",
+                    "source": "stick-table",
+                    "category": "ban",
+                    "detail": f"code={_safe_int(bans[ip].get('gpt0'))}",
+                }
+            )
+            self.database.observe_ip(ip, now, self.exclusions.verdict(ip))
+        self._known_bans = active
+        written = self.database.record_events(events)
+        self.events_recorded += written
+        return written + self.ingest_rate_tables(tables, now)
+
+    def ingest_rate_tables(
+        self, tables: Dict[str, Dict[str, Dict[str, str]]], now: int
+    ) -> int:
+        """Turn the short-window counters into events, with their site.
+
+        These say how hard an address is pushing right now. On their own they
+        duplicate what HAProxy already enforces; their value is combining with
+        the slow behavioural signals the log provides.
+        """
+
+        written = 0
+        for name, rows in tables.items():
+            if name.startswith("tbl_rate_"):
+                event_type, field_prefix = EVENT_RATE_EXCEEDED, "http_req_rate"
+            elif name.startswith("tbl_err_"):
+                event_type, field_prefix = (
+                    EVENT_ERROR_RATE_EXCEEDED,
+                    "http_err_rate",
+                )
+            elif name == "tbl_nosni_tcp":
+                event_type, field_prefix = EVENT_NOSNI_PROBING, "conn_rate"
+            else:
+                continue
+            site = name.split("_", 2)[-1] if name.count("_") >= 2 else ""
+            for ip, fields in rows.items():
+                value = 0
+                for key, raw in fields.items():
+                    if key.startswith(field_prefix):
+                        value = _safe_int(raw)
+                        break
+                if value <= 0:
+                    continue
+                if self.exclusions.verdict(ip).excluded:
+                    continue
+                if self._emit(
+                    ip,
+                    event_type,
+                    now,
+                    source="stick-table",
+                    site=site,
+                    detail=f"{field_prefix}={value}",
+                    fingerprint=f"{ip}|{event_type}|{name}",
+                ):
+                    written += 1
+        return written
+
+    def ingest_log(self, now: int) -> int:
+        lines = self.cursor.read(self.config.log_read_bytes_per_cycle)
+        if not lines:
+            return 0
+        self.lines_read += len(lines)
+        parsed = 0
+        for line in lines:
+            request = parse_access_line(line)
+            if request is None:
+                continue
+            parsed += 1
+            self.observe_request(request, now)
+        self.lines_parsed += parsed
+        return len(lines)
+
+    def observe_request(self, request: ParsedRequest, now: int) -> None:
+        """Fold one request into the address's memory and emit any findings."""
+
+        ip = request.client_ip
+        verdict = self.exclusions.verdict(ip)
+        if verdict.excluded:
+            self.excluded_observations += 1
+            return
+
+        activity = self.memory.touch(ip, now)
+        activity.requests += 1
+        if request.bad_request:
+            activity.bad_requests += 1
+            self._note_invalid_host(ip, activity, now, request)
+            return
+
+        handled = request.denied_by_gateway
+        if request.status == 404:
+            activity.not_found += 1
+        elif handled:
+            # A 451 means GeoIP already refused this before any counter saw it.
+            activity.gateway_denied += 1
+        elif request.status >= 400:
+            activity.errors += 1
+
+        if request.path:
+            activity.note_path(request.path, now, self.config.max_paths_per_ip)
+        if request.host and len(activity.hosts) < 16:
+            activity.hosts.add(request.host)
+
+        category = classify_path(request.path)
+        if category:
+            activity.scanner_hits += 1
+            activity.note_category(category, now)
+            self._emit(
+                ip,
+                EVENT_SCANNER_PATH,
+                now,
+                source="haproxy-log",
+                category=category,
+                detail=request.path,
+                handled=handled,
+                fingerprint=f"{ip}|{EVENT_SCANNER_PATH}|{category}",
+            )
+            self._check_multi_category(ip, activity, now)
+            self._check_low_and_slow(ip, activity, now)
+        elif request.status == 404 and not is_asset(request.path):
+            # Enumeration without a known signature: only distinct, non-asset
+            # paths count, which is what separates a scanner from a stale link.
+            if activity.note_missing(
+                request.path, now, self.config.max_paths_per_ip
+            ):
+                self._check_not_found_enumeration(ip, activity, now)
+
+        if request.status == 400 or request.backend.endswith("/<NOSRV>"):
+            self._note_invalid_host(ip, activity, now, request)
+
+    # -- derived detections ----------------------------------------------
+
+    def _emit(
+        self,
+        ip: str,
+        event_type: str,
+        now: int,
+        *,
+        source: str,
+        category: str = "",
+        site: str = "",
+        detail: str = "",
+        handled: bool = False,
+        fingerprint: Optional[str] = None,
+    ) -> bool:
+        window = COOLDOWN_SECONDS.get(event_type, 60)
+        key = fingerprint or f"{ip}|{event_type}"
+        if not self.database.cooldown_passed(key, now, window):
+            return False
+        self.database.observe_ip(ip, now, self.exclusions.verdict(ip))
+        self.database.record_events(
+            [
+                {
+                    "ts": now,
+                    "ip": ip,
+                    "event_type": event_type,
+                    "source": source,
+                    "category": category,
+                    "site": site,
+                    "detail": detail,
+                    "handled": handled,
+                }
+            ]
+        )
+        self.events_recorded += 1
+        return True
+
+    def _check_multi_category(
+        self, ip: str, activity: IpActivity, now: int
+    ) -> None:
+        categories = activity.recent_categories(now - MULTI_CATEGORY_WINDOW)
+        if len(categories) < MULTI_CATEGORY_MIN:
+            return
+        # One host is almost never WordPress and phpMyAdmin and Git at once;
+        # several different technologies is a much stronger signal than the
+        # same number of hits on one of them.
+        self._emit(
+            ip,
+            EVENT_SCANNER_MULTI,
+            now,
+            source="haproxy-log",
+            detail=f"categories={len(categories)}",
+        )
+
+    def _check_low_and_slow(
+        self, ip: str, activity: IpActivity, now: int
+    ) -> None:
+        since = now - LOW_AND_SLOW_WINDOW
+        categories = activity.recent_categories(since)
+        if (
+            activity.scanner_hits < LOW_AND_SLOW_MIN_HITS
+            or len(categories) < LOW_AND_SLOW_MIN_CATEGORIES
+        ):
+            return
+        # Deliberately rate-blind: the slower the scan, the less the existing
+        # stick-table limits can see it, and the more this detection matters.
+        self._emit(
+            ip,
+            EVENT_LOW_AND_SLOW,
+            now,
+            source="haproxy-log",
+            detail=f"hits={activity.scanner_hits} categories={len(categories)}",
+        )
+
+    def _check_not_found_enumeration(
+        self, ip: str, activity: IpActivity, now: int
+    ) -> None:
+        distinct = activity.distinct_missing(now - NOT_FOUND_WINDOW)
+        if distinct < NOT_FOUND_MIN_DISTINCT:
+            return
+        self._emit(
+            ip,
+            EVENT_NOT_FOUND_ENUM,
+            now,
+            source="haproxy-log",
+            detail=f"distinct={distinct}",
+        )
+
+    def _note_invalid_host(
+        self, ip: str, activity: IpActivity, now: int, request: ParsedRequest
+    ) -> None:
+        if activity.invalid_host_since < now - INVALID_HOST_WINDOW:
+            activity.invalid_host_since = now
+            activity.invalid_host_hits = 0
+        activity.invalid_host_hits += 1
+        if activity.invalid_host_hits < INVALID_HOST_MIN:
+            return
+        self._emit(
+            ip,
+            EVENT_INVALID_HOST,
+            now,
+            source="haproxy-log",
+            detail=f"hits={activity.invalid_host_hits}",
+            handled=request.denied_by_gateway,
+        )
+
+    # -- reputation -------------------------------------------------------
+
+    def reputation(
+        self,
+        ip: str,
+        now: Optional[int] = None,
+        policy: Optional[ScoringPolicy] = None,
+        scheduled: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        now = now or _utc_now()
+        policy = policy or self.policy
+        # Passed in when scoring a whole table, so one query answers for every
+        # address instead of one per row.
+        if scheduled is None:
+            scheduled = self.database.scheduled_bans()
+        events = self.database.events_for(ip, now - policy.window_seconds)
+        result = score_events(events, now, policy)
+        result["ip"] = ip
+        result["enforceable"] = enforceable(ip)
+        verdict = self.exclusions.verdict(ip)
+        result["excluded"] = verdict.excluded
+        result["exclusion_reason"] = verdict.reason
+
+        facts = self.database.ip_facts(ip)
+        authenticated_at = int(facts.get("authenticated_at") or 0)
+        result["authenticated_at"] = authenticated_at
+        result["first_seen"] = int(facts.get("first_seen") or 0)
+        result["last_seen"] = int(facts.get("last_seen") or 0)
+        result["event_count"] = len(events)
+
+        if verdict.excluded:
+            # An exempt address is reported with its evidence intact but no
+            # standing: HAProxy would not act on it either.
+            result["score"] = 0
+            result["state"] = "NORMAL"
+            result["recommended_action"] = "none"
+
+        result["blockers"] = self.ban_blockers(result)
+        result["would_ban"] = (
+            result["score"] >= WOULD_BAN_SCORE and not result["blockers"]
+        )
+        result["banned_until"] = int(scheduled.get(ip, 0))
+        # The review question that matters: did an address the engine wanted to
+        # act on turn out to belong to somebody who then logged in?
+        result["likely_false_positive"] = bool(
+            authenticated_at and result["score"] >= WATCH_SCORE
+        )
+        return result
+
+    def reputation_table(
+        self,
+        now: Optional[int] = None,
+        limit: int = 200,
+        policy: Optional[ScoringPolicy] = None,
+    ) -> List[Dict[str, Any]]:
+        now = now or _utc_now()
+        policy = policy or self.policy
+        scheduled = self.database.scheduled_bans()
+        rows = [
+            self.reputation(ip, now, policy, scheduled)
+            for ip in self.database.active_addresses(
+                now - policy.window_seconds, limit=limit
+            )
+        ]
+        rows.sort(key=lambda item: item["score"], reverse=True)
+        return rows
+
+    # -- enforcement ------------------------------------------------------
+
+    def ban_blockers(self, reputation: Dict[str, Any]) -> List[str]:
+        """Why this address must not be banned, whatever its score.
+
+        These are not tunable. The first two exist because banning the person
+        administering the gateway is the failure this whole phase has to avoid,
+        and the third because a ban simply would not work.
+        """
+
+        blockers: List[str] = []
+        if reputation.get("excluded"):
+            blockers.append(f"exempt ({reputation.get('exclusion_reason')})")
+        if reputation.get("authenticated_at"):
+            # Ever authenticated, not merely authenticated right now: the
+            # runtime authorization expires, and a lapsed session must not turn
+            # a real user into a ban candidate.
+            blockers.append("has authenticated before")
+        if not reputation.get("enforceable"):
+            blockers.append("IPv4-only ban path")
+        return blockers
+
+    def ban_duration(self, ip: str, now: int) -> int:
+        strikes = self.database.strike_count(ip, now - STRIKE_WINDOW_SECONDS)
+        index = min(strikes, len(BAN_DURATIONS) - 1)
+        return BAN_DURATIONS[index]
+
+    def apply_enforcement(self, now: Optional[int] = None) -> Dict[str, Any]:
+        """Ban what qualifies, lift what has served its time.
+
+        Runs on every cycle regardless of mode, because expiry and the kill
+        switch have to work even after enforcement has been turned back off.
+        """
+
+        now = now or _utc_now()
+        applied: List[str] = []
+        lifted: List[str] = []
+
+        scheduled = self.database.scheduled_bans()
+        enforcing = self.enforcer.allowed
+        for ip, until in scheduled.items():
+            # Turning enforcement off undoes what it did; leaving addresses
+            # banned by a feature that is no longer on would be a trap.
+            if enforcing and until > now:
+                continue
+            if self.enforcer.lift(ip):
+                lifted.append(ip)
+                self._emit(
+                    ip,
+                    EVENT_BAN_LIFTED,
+                    now,
+                    source="guardd",
+                    detail="expired" if enforcing else "enforcement disabled",
+                    fingerprint=f"{ip}|{EVENT_BAN_LIFTED}|{until}",
+                )
+            self.database.clear_ban(ip)
+
+        if not enforcing:
+            # A ban this daemon placed can outlive it: the stick table keeps the
+            # entry for the table's expiry, so anything left over is swept here.
+            for ip in self.enforcer.adaptive_bans():
+                if ip in scheduled:
+                    continue
+                if self.enforcer.lift(ip):
+                    lifted.append(ip)
+            return {"applied": applied, "lifted": lifted, "enforcing": False}
+
+        for row in self.reputation_table(now, limit=200):
+            ip = row["ip"]
+            if row["score"] < WOULD_BAN_SCORE:
+                continue
+            if scheduled.get(ip, 0) > now:
+                continue
+            blockers = self.ban_blockers(row)
+            if blockers:
+                continue
+            # Findings decay over hours, so a score that justified one ban is
+            # still there when it expires. Requiring fresh evidence keeps the
+            # progressive ladder counting repeat incidents rather than simply
+            # measuring how long a single scan stays in the window.
+            last_ban = self.database.last_ban_ts(ip)
+            if last_ban and self.database.newest_finding_ts(ip) <= last_ban:
+                continue
+            duration = self.ban_duration(ip, now)
+            if not self.enforcer.ban(ip):
+                continue
+            self.database.set_ban(ip, now + duration, ADAPTIVE_BAN_CODE, now)
+            applied.append(ip)
+            categories = ", ".join(sorted(row.get("categories") or {}))
+            self._emit(
+                ip,
+                EVENT_BAN_APPLIED,
+                now,
+                source="guardd",
+                detail=f"score={row['score']} seconds={duration} [{categories}]",
+                fingerprint=f"{ip}|{EVENT_BAN_APPLIED}|{now}",
+            )
+            LOG.warning(
+                "Adaptive ban applied to %s for %ds (score %d)",
+                ip,
+                duration,
+                row["score"],
+            )
+            self._report_ban(ip, duration, row, categories)
+        return {"applied": applied, "lifted": lifted, "enforcing": True}
+
+    def _report_ban(
+        self, ip: str, duration: int, row: Dict[str, Any], categories: str
+    ) -> None:
+        """Tell the alert engine an address was acted upon.
+
+        Best effort by contract: enforcement must not depend on the alert
+        daemon being up, so anything that goes wrong here is swallowed.
+        """
+        if self.alerts is None:
+            return
+        with contextlib.suppress(Exception):
+            self.alerts.observe(
+                "security.hostile_ip",
+                ip,
+                summary=f"Adaptive protection banned {ip} for {duration}s",
+                detail=(
+                    f"score {row.get('score')} over {categories or 'no category'}; "
+                    f"the ban lifts automatically when it expires"
+                ),
+            )
+
+    def set_mode(self, mode: str, now: Optional[int] = None) -> Dict[str, Any]:
+        """Switch between observing and enforcing, and reconcile immediately."""
+
+        mode = str(mode or "").strip().lower()
+        if mode not in SUPPORTED_MODES:
+            raise ValueError(f"mode must be one of {', '.join(SUPPORTED_MODES)}")
+        now = now or _utc_now()
+        previous = self.enforcer.mode
+        self.database.set_state("mode_override", mode)
+        self.enforcer.mode = mode
+        LOG.warning("Adaptive protection mode changed: %s -> %s", previous, mode)
+        result = self.apply_enforcement(now)
+        return {"mode": mode, "previous": previous, **result}
+
+    def shadow_review(
+        self,
+        now: Optional[int] = None,
+        limit: int = 200,
+        policy: Optional[ScoringPolicy] = None,
+    ) -> Dict[str, Any]:
+        """What enforcement would have done, and where it would have been wrong."""
+
+        now = now or _utc_now()
+        policy = policy or self.policy
+        rows = self.reputation_table(now, limit=limit, policy=policy)
+        by_state: Dict[str, int] = {}
+        for row in rows:
+            by_state[row["state"]] = by_state.get(row["state"], 0) + 1
+        return {
+            "mode": self.enforcer.mode,
+            "configured_mode": self.config.mode,
+            "mode_overridden": self.enforcer.mode != self.config.mode,
+            "supported_modes": list(SUPPORTED_MODES),
+            "enforcement_possible": self.enforcer.allowed,
+            "ban_durations_seconds": list(BAN_DURATIONS),
+            "policy": {
+                "weights": dict(policy.weights),
+                "category_cap": policy.category_cap,
+                "window_seconds": policy.window_seconds,
+                "decay_seconds": policy.decay_seconds,
+            },
+            "summary": {
+                "scored": len(rows),
+                "would_ban": sum(1 for row in rows if row["would_ban"]),
+                "likely_false_positive": sum(
+                    1 for row in rows if row["likely_false_positive"]
+                ),
+                "unenforceable": sum(
+                    1 for row in rows if not row["enforceable"] and row["score"] > 0
+                ),
+                "excluded": sum(1 for row in rows if row["excluded"]),
+                "banned_now": sum(1 for row in rows if row["banned_until"]),
+                "blocked_from_ban": sum(
+                    1
+                    for row in rows
+                    if row["score"] >= WOULD_BAN_SCORE and row["blockers"]
+                ),
+                "by_state": by_state,
+            },
+            "addresses": [
+                {key: value for key, value in row.items() if key != "contributions"}
+                for row in rows
+            ],
+        }
+
+    # -- maintenance ------------------------------------------------------
+
+    def run_maintenance(self) -> Dict[str, Any]:
+        now = _utc_now()
+        cutoff = now - self.config.event_retention_days * 86400
+        deleted = self.database.apply_retention(events_before=cutoff)
+        if any(deleted.values()):
+            self.database.incremental_vacuum()
+        pruned = self.memory.prune(now - 6 * 3600)
+        LOG.info(
+            "Maintenance: deleted=%s pruned_ips=%d tracked=%d",
+            json.dumps(deleted),
+            pruned,
+            len(self.memory),
+        )
+        return {"deleted": deleted, "pruned_ips": pruned}
+
+    # -- reporting --------------------------------------------------------
+
+    def health(self) -> Dict[str, Any]:
+        now = _utc_now()
+        last_poll = self.last_poll_ts
+        stale_after = max(60, self.config.poll_interval_seconds * 6)
+        return {
+            "mode": self.enforcer.mode,
+            "configured_mode": self.config.mode,
+            "mode_overridden": self.enforcer.mode != self.config.mode,
+            "enforcement_possible": self.enforcer.allowed,
+            "enforcement_refusals": self.enforcer.refused,
+            "bans_applied": self.enforcer.applied,
+            "bans_lifted": self.enforcer.lifted,
+            "bans_active": len(self.database.scheduled_bans()),
+            "running": bool(self._thread and self._thread.is_alive()),
+            "degraded": last_poll is None or (now - last_poll) > stale_after,
+            "last_poll_ts": last_poll,
+            "polls_total": self.polls_total,
+            "consecutive_failures": self.consecutive_failures,
+            "last_error": self.last_error,
+            "log": {
+                "path": self.config.log_file,
+                "lines_read": self.lines_read,
+                "lines_parsed": self.lines_parsed,
+                "lag_bytes": self.cursor.lag_bytes,
+                "rotations": self.cursor.rotations,
+                "last_error": self.cursor.last_error,
+            },
+            "memory": {
+                "tracked_ips": len(self.memory),
+                "max_tracked_ips": self.memory.max_ips,
+                "max_paths_per_ip": self.memory.max_paths,
+                "evictions": self.memory.evictions,
+            },
+            "exclusions": {
+                "networks": self.exclusions.network_count,
+                "authenticated": self.exclusions.authenticated_count,
+                "observations_skipped": self.excluded_observations,
+            },
+            "events_recorded": self.events_recorded,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Unix socket API
+# ---------------------------------------------------------------------------
+
+
+class GuardHandler(BaseHTTPRequestHandler):
+    server_version = "easy-ha-proxy-guardd/1.0"
+
+    def address_string(self) -> str:  # noqa: N802
+        return "unix"
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: N802
+        LOG.debug(fmt, *args)
+
+    def _send_json(self, code: int, payload: Dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        engine: GuardEngine = self.server.engine  # type: ignore[attr-defined]
+        database: SecurityDatabase = self.server.database  # type: ignore[attr-defined]
+        path = urlparse(self.path).path
+
+        if path == "/api/v1/guard/health":
+            try:
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "ts": _utc_now(),
+                        "engine": engine.health(),
+                        "database": database.stats(),
+                        "storage": database.storage(),
+                    },
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/reputation":
+            try:
+                rows = engine.reputation_table()
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "ts": _utc_now(),
+                        "mode": engine.config.mode,
+                        "addresses": [
+                            {
+                                key: value
+                                for key, value in row.items()
+                                if key != "contributions"
+                            }
+                            for row in rows
+                        ],
+                    },
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/shadow":
+            query = parse_qs(urlparse(self.path).query or "")
+            try:
+                policy = policy_from_query(query, engine.policy)
+                limit = _clamp_int(
+                    query.get("limit", [None])[0], default=200, min_v=1, max_v=500
+                )
+                payload = engine.shadow_review(limit=limit, policy=policy)
+                payload["ok"] = True
+                payload["ts"] = _utc_now()
+                self._send_json(200, payload)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/ip":
+            query = parse_qs(urlparse(self.path).query or "")
+            address = (query.get("ip", [""])[0] or "").strip()
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "invalid ip"})
+                return
+            try:
+                now = _utc_now()
+                policy = policy_from_query(query, engine.policy)
+                payload = engine.reputation(address, now, policy)
+                payload["events"] = database.events_for(
+                    address, now - policy.window_seconds, limit=200
+                )
+                payload["ok"] = True
+                self._send_json(200, payload)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        self._send_json(404, {"ok": False, "error": "not found"})
+
+    def _control_auth_ok(self) -> bool:
+        if not CONTROL_TOKEN:
+            return False
+        supplied = (self.headers.get("X-Guardd-Token", "") or "").strip()
+        return hmac.compare_digest(supplied, CONTROL_TOKEN)
+
+    def do_POST(self) -> None:  # noqa: N802
+        engine: GuardEngine = self.server.engine  # type: ignore[attr-defined]
+        path = urlparse(self.path).path
+
+        if path != "/api/v1/guard/mode":
+            self._send_json(404, {"ok": False, "error": "not found"})
+            return
+        if not self._control_auth_ok():
+            self._send_json(403, {"ok": False, "error": "forbidden"})
+            return
+
+        try:
+            length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 4096:
+            self._send_json(400, {"ok": False, "error": "invalid Content-Length"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": f"bad json: {exc}"})
+            return
+
+        try:
+            result = engine.set_mode(str(payload.get("mode", "")))
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        except Exception as exc:  # pylint: disable=broad-except
+            self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+        result["ok"] = True
+        self._send_json(200, result)
+
+
+class GuardServer(ThreadingMixIn, UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        socket_path: str,
+        handler_cls: type[BaseHTTPRequestHandler],
+        engine: GuardEngine,
+        database: SecurityDatabase,
+    ) -> None:
+        super().__init__(socket_path, handler_cls)
+        self.engine = engine
+        self.database = database
+
+
+def _set_socket_perms(socket_path: str, group_name: str) -> None:
+    gid = grp.getgrnam(group_name).gr_gid
+    uid = pwd.getpwnam("root").pw_uid
+    os.chown(socket_path, uid, gid)
+    os.chmod(socket_path, 0o660)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    try:
+        config = load_config(CONFIG_PATH)
+    except ConfigError as exc:
+        LOG.error("%s", exc)
+        raise SystemExit(2) from exc
+
+    if config.mode == MODE_OFF:
+        LOG.info("Adaptive protection is off in %s; idling", CONFIG_PATH)
+        stop = threading.Event()
+        with contextlib.suppress(KeyboardInterrupt):
+            stop.wait()
+        return
+
+    database = SecurityDatabase(DATABASE_PATH)
+    engine = GuardEngine(config, database, alerts=_alert_client())
+
+    LOG.info(
+        "Starting easy-ha-proxy-guardd: mode=%s socket=%s db=%s log=%s "
+        "interval=%ss exclusions=%d networks",
+        config.mode,
+        SOCKET_PATH,
+        DATABASE_PATH,
+        config.log_file,
+        config.poll_interval_seconds,
+        engine.exclusions.network_count,
+    )
+
+    engine.start()
+
+    with contextlib.suppress(OSError):
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+
+    server = GuardServer(SOCKET_PATH, GuardHandler, engine, database)
+    try:
+        _set_socket_perms(SOCKET_PATH, SOCKET_GROUP)
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.warning("Failed to set socket permissions: %s", exc)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        LOG.info("Interrupted")
+    finally:
+        engine.stop()
+        with contextlib.suppress(Exception):
+            server.server_close()
+        database.close()
+        with contextlib.suppress(OSError):
+            if os.path.exists(SOCKET_PATH):
+                os.unlink(SOCKET_PATH)
+
+
+if __name__ == "__main__":
+    main()

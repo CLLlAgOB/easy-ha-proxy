@@ -1,0 +1,63 @@
+---
+# roles/haproxy-admin/tasks/guardd.yml
+# Установка root-демона easy-ha-proxy-guardd (adaptive protection, monitor)
+
+- name: "easy-ha-proxy-guardd | Install script"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-guardd.py
+    dest: /usr/local/sbin/easy-ha-proxy-guardd.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: guardd_script
+
+- name: "easy-ha-proxy-guardd | Render config"
+  ansible.builtin.template:
+    src: guardd.json.j2
+    dest: "{{ guardd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/guardd.json') }}"
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0640"
+  register: guardd_cfg
+
+- name: "easy-ha-proxy-guardd | Ensure state directory"
+  ansible.builtin.file:
+    path: "{{ (guardd_database_path | default('/var/lib/easy-ha-proxy/security/security.db')) | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0750"
+
+- name: "easy-ha-proxy-guardd | Install systemd unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-guardd.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-guardd.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: guardd_unit
+
+- name: "easy-ha-proxy-guardd | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: guardd_unit.changed
+
+- name: "easy-ha-proxy-guardd | Enable service"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-guardd.service
+    enabled: yes
+
+- name: "easy-ha-proxy-guardd | Restart service if changed"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-guardd.service
+    state: restarted
+  when: >-
+    guardd_script.changed
+    or guardd_unit.changed
+    or guardd_cfg.changed
+    or (hapadm_env_t.changed | default(false))
+
+- name: "easy-ha-proxy-guardd | Ensure service started"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-guardd.service
+    state: started
