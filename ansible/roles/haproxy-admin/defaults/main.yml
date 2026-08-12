@@ -221,3 +221,10 @@ authelia_healthcheck_url: "http://authelia:9091/api/health"
 
 # Optional variable-controlled socket group.
 haproxy_certd_socket_group: "hadmin"
+
+# --- Prometheus export ---
+# Mirrors metrics_export_enabled in the haproxy role: one switch turns on both
+# the HAProxy path and the endpoint behind it. The token is the second gate
+# and has no default, because a shipped default token is not a gate.
+metrics_export_enabled: false
+metrics_export_token: ""

@@ -48,6 +48,7 @@ from . import routes_audit
 from . import routes_config_history
 from . import routes_dns_providers
 from . import routes_alerts
+from . import routes_prometheus
 
 from .routes_authelia_settings import bp_authelia_settings
 from .authelia_acl import bp_authelia_acl

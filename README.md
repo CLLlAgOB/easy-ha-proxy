@@ -436,6 +436,30 @@ header are stored root-only and are never sent back to the browser.
 Reporting is best effort by contract. A stopped alert daemon costs a
 notification -- never a metrics sample, a ban, or a reload.
 
+### Prometheus export
+
+Off by default, because Prometheus is not a required service here. When it is
+switched on, `/metrics` on the administration domain serves what the gateway
+already knows: backend health, monitoring storage state, adaptive protection
+counts, alert state, certificate days remaining, and whether the last backup
+and update succeeded.
+
+A scraper cannot complete an Authelia login, so this is the only path besides
+the local readiness probe that HAProxy lets past it -- and it is let past only
+for an address in `metrics_scrape_sources`, which defaults to this host alone.
+That is one gate. The endpoint itself demands a bearer token, which is the
+other, and enabling the export without setting one stops the installation
+rather than quietly publishing the metrics. The request is marked with a
+least-privilege identity that the application accepts for that single GET and
+refuses everywhere else.
+
+No visitor address appears anywhere in the output. Reputation is exported as
+counts per state, not per address, and every label is bounded and stripped of
+anything that could end a line.
+
+A daemon that is not answering costs its own metrics and nothing else;
+`easy_ha_proxy_source_up` says which one it was.
+
 ### Configuration history
 
 Applying a configuration change is already guarded: the gateway snapshots the

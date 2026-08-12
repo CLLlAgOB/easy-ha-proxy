@@ -308,6 +308,16 @@ frontend fe_https
     acl admin_control_plane_probe_method method GET
     http-request set-var(txn.admin_control_plane_probe) bool(true) if host_admin local_control_plane_probe admin_control_plane_probe_path admin_control_plane_probe_method
     acl admin_control_plane_probe var(txn.admin_control_plane_probe) -m bool
+{% if metrics_export_enabled | default(false) %}
+    # A Prometheus scraper cannot complete an Authelia login, so this one path
+    # is let through for an allow-listed source. That is one gate; the
+    # application still requires a bearer token, which is the other.
+    acl metrics_scrape_source src {{ (metrics_scrape_sources | default(['127.0.0.1'])) | join(' ') }}
+    acl metrics_scrape_path path -i /metrics
+    acl metrics_scrape_method method GET
+    http-request set-var(txn.admin_metrics_scrape) bool(true) if host_admin metrics_scrape_source metrics_scrape_path metrics_scrape_method
+    acl admin_metrics_scrape var(txn.admin_metrics_scrape) -m bool
+{% endif %}
 {% endif %}
 
 {% if aut_domain is defined and authelia_enabled %}
@@ -580,12 +590,14 @@ frontend fe_https
     # ---- Admin-домен / защита ----
 {% if admin_domain is defined %}
 {% if admin_ips_enabled %}
-    http-request deny status 403 if host_admin !allowed_admin !admin_control_plane_probe
+    http-request deny status 403 if host_admin !allowed_admin !admin_control_plane_probe{% if metrics_export_enabled | default(false) %} !admin_metrics_scrape{% endif %}
+
 {% endif %}
 {% if (not admin_authelia_enabled) and admin_password %}
     acl AuthOK http_auth(stats-auth)
     http-request auth realm "HAProxy Stats" if host_admin path_stats !AuthOK
-    http-request auth realm "ADMIN UI"     if host_admin !path_stats !AuthOK !admin_control_plane_probe
+    http-request auth realm "ADMIN UI"     if host_admin !path_stats !AuthOK !admin_control_plane_probe{% if metrics_export_enabled | default(false) %} !admin_metrics_scrape{% endif %}
+
 {% endif %}
 {% endif %}
 
@@ -642,6 +654,9 @@ frontend fe_https
 
 {% if authelia_hosts | length > 0 %}
 {% set admin_probe_condition = ' !admin_control_plane_probe' if admin_domain is defined else '' %}
+{% if admin_domain is defined and (metrics_export_enabled | default(false)) %}
+{% set admin_probe_condition = admin_probe_condition ~ ' !admin_metrics_scrape' %}
+{% endif %}
     acl authelia_protected hdr(host) -i {{ authelia_hosts | unique | join(' ') }}
     http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
     http-request deny if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
@@ -667,6 +682,12 @@ frontend fe_https
     http-request set-header X-Easy-HAProxy-Config-Generation {{ config_generation }} if host_admin
     http-request set-header Remote-User easy-ha-proxy-healthcheck if host_admin admin_control_plane_probe
     http-request set-header Remote-Groups healthcheck if host_admin admin_control_plane_probe
+{% if metrics_export_enabled | default(false) %}
+    # A least-privilege identity: the application accepts it for GET /metrics
+    # and refuses it everywhere else, so a forged header buys nothing.
+    http-request set-header Remote-User easy-ha-proxy-metrics if host_admin admin_metrics_scrape
+    http-request set-header Remote-Groups metrics if host_admin admin_metrics_scrape
+{% endif %}
 {% if (not admin_authelia_enabled) and admin_password %}
     http-request set-header Remote-User %[http_auth_user] if host_admin AuthOK
     http-request set-header Remote-Groups superadmin if host_admin AuthOK

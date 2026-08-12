@@ -1,3 +1,14 @@
+- name: "Prometheus export | The token is the second gate, so it cannot be empty"
+  ansible.builtin.assert:
+    that:
+      - (metrics_export_token | default('')) | length >= 24
+    fail_msg: >-
+      metrics_export_enabled is true but metrics_export_token is empty or too
+      short. The allow-listed source is one gate and the bearer token is the
+      other; without it the endpoint would answer 401 to the scraper and the
+      export would look broken rather than unconfigured.
+  when: metrics_export_enabled | default(false) | bool
+
 - name: Initialize the optional HAProxy Admin runtime source
   ansible.builtin.set_fact:
     easy_ha_proxy_runtime_vars: {}

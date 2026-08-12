@@ -103,3 +103,12 @@ haproxy_server_state_file: "{{ haproxy_chroot }}/server-state"
 # Таймер покрывает аварийные перезапуски и применения через Ansible; штатный
 # reload из UI дампит состояние сам, непосредственно перед перезагрузкой.
 haproxy_server_state_interval: "60s"
+
+# --- Prometheus export ---
+# Off by default: Prometheus is never a required service here. When it is
+# switched on, /metrics on the admin domain is let past Authelia for the
+# sources below and the application still demands a bearer token. Keep the
+# list as narrow as the scraper actually needs; the default is this host.
+metrics_export_enabled: false
+metrics_scrape_sources:
+  - 127.0.0.1
