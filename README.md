@@ -436,6 +436,22 @@ header are stored root-only and are never sent back to the browser.
 Reporting is best effort by contract. A stopped alert daemon costs a
 notification -- never a metrics sample, a ban, or a reload.
 
+### Request identifier
+
+Every request gets one identifier, minted at the edge. It is written to the
+access log, forwarded upstream as `X-Request-ID`, and returned to the client
+in the same header -- so a user can quote one string from a failed page and it
+can be found in the log and in the application behind it.
+
+A client-supplied `X-Request-ID` is discarded, not echoed. Trusting it would
+let anyone make two unrelated requests share an identifier, and a log search
+that returns two different requests is worse than one that returns none.
+
+The identifier is placed before the request line in the log format on purpose:
+the adaptive protection engine anchors its parser on the request line at the
+end, so this stays out of its way. Set `request_id_enabled: false` to turn the
+whole thing off.
+
 ### Prometheus export
 
 Off by default, because Prometheus is not a required service here. When it is

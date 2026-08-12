@@ -112,3 +112,10 @@ haproxy_server_state_interval: "60s"
 metrics_export_enabled: false
 metrics_scrape_sources:
   - 127.0.0.1
+
+# --- Request identifier ---
+# One identifier per request, minted at the edge, written to the access log,
+# forwarded upstream as X-Request-ID and returned to the client. A supplied
+# header is always discarded first: two requests sharing an identifier make
+# the log worse, not better.
+request_id_enabled: true

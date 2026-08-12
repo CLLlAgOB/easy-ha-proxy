@@ -137,8 +137,19 @@ defaults
     compression type {{ haproxy_compression_types | default('text/html text/css text/plain application/javascript application/json application/xml image/svg+xml') }}
 {% endif %}
 
+{% if request_id_enabled | default(true) %}
+    # One identifier per request, generated here and nowhere else. It goes into
+    # the log, upstream to the application, and back to the client, so a user
+    # can quote a single string and it can be found in all three places.
+    unique-id-format "%[uuid()]"
+    unique-id-header X-Request-ID
+{% endif %}
+
     # Важно: txn.ban_log может быть пустой
-    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %r"
+    # The identifier sits before %r on purpose: the access-log parser in
+    # easy-ha-proxy-guardd anchors on the request line at the end of the line
+    # and treats everything between the status and it as unparsed middle.
+    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs{% if request_id_enabled | default(true) %} id=%ID{% endif %} %r"
 
     errorfile 400 /etc/haproxy/errors/400.http
     errorfile 403 /etc/haproxy/errors/403.http
@@ -626,6 +637,13 @@ frontend fe_https
     http-request del-header X-Easy-HAProxy-Config-Generation
     http-request del-header X-Forwarded-For
     http-request set-header X-Forwarded-For %[src]
+{% if request_id_enabled | default(true) %}
+    # The identifier is minted at the edge, never accepted from the client.
+    # Echoing a supplied one would let anyone make two unrelated requests share
+    # an identifier, and a log search that returns two answers is worse than
+    # one that returns none. unique-id-header re-adds ours after this.
+    http-request del-header X-Request-ID
+{% endif %}
 {% if authelia_enabled %}
     # ---- Заголовки для Authelia ForwardAuth ----
     http-request set-var(req.scheme) str(https) if { ssl_fc }
@@ -692,6 +710,13 @@ frontend fe_https
     http-request set-header Remote-User %[http_auth_user] if host_admin AuthOK
     http-request set-header Remote-Groups superadmin if host_admin AuthOK
 {% endif %}
+{% endif %}
+
+{% if request_id_enabled | default(true) %}
+    # Handed back so a user can quote one string from a failed page and it can
+    # be found in the log. Set on the frontend rather than per backend, so an
+    # error page carries it too -- that is when it is needed most.
+    http-response set-header X-Request-ID %[unique-id]
 {% endif %}
 
     # ---- Маршрутизация ----
