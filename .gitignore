@@ -4,7 +4,6 @@
 Vagrantfile
 .agents/
 .codex/
-.tests/
 .ansible/
 .venv/
 venv/

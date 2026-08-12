@@ -13,8 +13,8 @@ import types
 import unittest
 
 
-APP_DIR = Path(__file__).resolve().parent
-ROOT = APP_DIR.parents[1]
+ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = ROOT / "docker" / "app"
 
 
 def load_services_module():
@@ -244,14 +244,19 @@ class AutheliaBansDaemonTests(unittest.TestCase):
         self.bansd.COMMAND_TIMEOUT = 0.05
         started = time.monotonic()
         try:
+            # The child sleeps far longer than the budget below, so finishing
+            # early can only mean the timeout fired. An earlier version slept
+            # two seconds and allowed one, which left the assertion measuring
+            # interpreter startup as much as the timeout -- and failing on a
+            # loaded machine.
             rc, _stdout, error = self.bansd.run_cmd(
-                [sys.executable, "-c", "import time; time.sleep(2)"]
+                [sys.executable, "-c", "import time; time.sleep(30)"]
             )
         finally:
             self.bansd.COMMAND_TIMEOUT = original
         self.assertEqual(rc, 124)
         self.assertIn("timed out", error)
-        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertLess(time.monotonic() - started, 5.0)
 
     def test_daemon_revalidates_privileged_arguments(self):
         original = self.bansd.SCRIPT_PATH

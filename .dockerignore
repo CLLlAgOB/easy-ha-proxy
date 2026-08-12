@@ -7,5 +7,4 @@ docker/app/**/__pycache__/
 docker/app/**/*.py[cod]
 docker/app/**/*.mmdb
 docker/app/**/*.mmdb.gz
-docker/app/test_*.py
 docker/app/haproxy_admin/translations/README.md

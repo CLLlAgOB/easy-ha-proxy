@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, alpha]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The host daemons run on the platform interpreter rather than a
+        # bundled one, so every supported release is exercised: 3.10 is
+        # Ubuntu 22.04, 3.11 is Debian 12, 3.12 is Ubuntu 24.04 and the
+        # admin UI image.
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            docker/app/requirements.txt
+            installer/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r docker/app/requirements.txt -r installer/requirements.txt
+
+      - name: Byte-compile the installer, the UI and every daemon
+        run: |
+          python -m py_compile installer/easy_ha_proxy.py
+          python -m compileall -q docker/app ansible/roles/authelia/files ansible/roles/haproxy-admin/files
+
+      # Everything lives in .tests/, so one discovery covers the installer,
+      # the helper daemons and the admin UI.
+      - name: Regression tests
+        env:
+          PYTHONPATH: installer
+        run: python -m unittest discover -s .tests -p 'test_*.py'
+
+  shell:
+    name: Shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse the installer and helper scripts
+        run: >-
+          bash -n
+          install.sh
+          install-local.sh
+          install-remote.sh
+          easy-ha-proxy-helper.sh
+          installer/easy-ha-proxy
+
+  ansible:
+    name: Ansible syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: installer/requirements.txt
+
+      - name: Install Ansible and the pinned collections
+        run: |
+          pip install -r installer/requirements.txt
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      # vars.yml, the inventories and group_vars are deliberately untracked, so
+      # the playbook is parsed against a throwaway inventory. This validates
+      # task and role structure, not host-specific variable resolution.
+      - name: Syntax-check the playbook
+        run: ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml

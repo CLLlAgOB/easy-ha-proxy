@@ -17,7 +17,8 @@ import tempfile
 import unittest
 
 
-APP_DIR = Path(__file__).resolve().parent / "haproxy_admin"
+APP_DIR = (Path(__file__).resolve().parents[1]
+           / "docker" / "app" / "haproxy_admin")
 INIT_PY = APP_DIR / "__init__.py"
 
 
