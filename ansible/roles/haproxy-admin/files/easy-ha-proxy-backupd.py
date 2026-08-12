@@ -11,6 +11,7 @@ logs.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import errno
 import fcntl
@@ -204,6 +205,17 @@ REQUEST_FIELDS = {
         }
     ),
     "delete": frozenset({"action", "kind", "id", "confirmation"}),
+    "destinations": frozenset({"action"}),
+    "destination_save": frozenset(
+        {
+            "action", "name", "type", "host", "port", "user", "path",
+            "private_key", "host_key", "keep_daily", "keep_weekly",
+            "keep_monthly",
+        }
+    ),
+    "destination_delete": frozenset({"action", "name"}),
+    "destination_test": frozenset({"action", "name"}),
+    "upload": frozenset({"action", "backup_id", "destination"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -2192,6 +2204,440 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Off-host copies
+# ---------------------------------------------------------------------------
+#
+# The disaster-recovery archive is useless on the machine it protects. This
+# sends the already-encrypted archive somewhere else and nothing more: no
+# plaintext ever leaves, and the passphrase is not involved in the transfer at
+# all -- the file is encrypted long before it gets here.
+#
+# Only SFTP is implemented. It uses the OpenSSH client that is already on the
+# host, which means the host key handling, the ciphers and the key formats are
+# somebody else's well-tested problem rather than ours.
+
+DESTINATIONS_DIR = Path(
+    os.environ.get(
+        "BACKUPD_DESTINATIONS_DIR", "/etc/easy-ha-proxy/backup-destinations"
+    )
+)
+DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DESTINATION_TYPES = ("sftp",)
+SFTP_TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_SFTP_TIMEOUT", "900"))
+# Re-downloading to verify is exact but costs the transfer twice. Above this
+# the daemon asks the far end to hash instead, and says which it used.
+VERIFY_DOWNLOAD_MAX_BYTES = int(
+    os.environ.get("BACKUPD_VERIFY_DOWNLOAD_MAX", str(2 * 1024 * 1024 * 1024))
+)
+
+
+def keep_count(value: Any, *, default: int, cap: int) -> int:
+    """A retention count, where zero means zero rather than "unset"."""
+    if value is None or value == "":
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise BackupdError("a retention count must be a number", code="invalid") from None
+    return max(0, min(cap, number))
+
+
+def destination_path(name: Any) -> Path:
+    text = str(name or "").strip().lower()
+    if not DESTINATION_NAME_RE.fullmatch(text):
+        raise BackupdError(
+            "the destination name may use a-z, 0-9 and dashes", code="invalid"
+        )
+    return DESTINATIONS_DIR / (text + ".json")
+
+
+def destination_key_path(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".key")
+
+
+def destination_known_hosts(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".known_hosts")
+
+
+def write_private(path: Path, content: bytes) -> None:
+    """Replace a root-only file. private_file refuses to overwrite by design."""
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    private_file(path, content)
+
+
+def ensure_destinations_dir() -> None:
+    DESTINATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DESTINATIONS_DIR, 0o700)
+
+
+def load_destination(name: Any) -> dict[str, Any]:
+    path = destination_path(name)
+    try:
+        record = safe_json_file(path)
+    except BackupdError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise BackupdError(f"cannot read the destination: {exc}", code="invalid") from exc
+    if not record:
+        raise BackupdError("no such destination", code="not_found")
+    return record
+
+
+def public_destination(record: dict[str, Any]) -> dict[str, Any]:
+    """What the browser may see. Never the key, never a fingerprint secret."""
+    return {
+        "name": record.get("name", ""),
+        "type": record.get("type", ""),
+        "host": record.get("host", ""),
+        "port": record.get("port", 22),
+        "user": record.get("user", ""),
+        "path": record.get("path", ""),
+        "has_key": bool(record.get("key_installed")),
+        "host_key_pinned": bool(record.get("host_key_pinned")),
+        "keep_daily": record.get("keep_daily", 7),
+        "keep_weekly": record.get("keep_weekly", 4),
+        "keep_monthly": record.get("keep_monthly", 6),
+        "updated_at": record.get("updated_at", ""),
+    }
+
+
+def list_destinations(_request: dict[str, Any]) -> dict[str, Any]:
+    ensure_destinations_dir()
+    items = []
+    for path in sorted(DESTINATIONS_DIR.glob("*.json")):
+        with contextlib.suppress(Exception):
+            items.append(public_destination(safe_json_file(path)))
+    return {"ok": True, "destinations": items, "types": list(DESTINATION_TYPES)}
+
+
+def save_destination(request: dict[str, Any]) -> dict[str, Any]:
+    ensure_destinations_dir()
+    name = str(request.get("name") or "").strip().lower()
+    path_target = destination_path(name)
+    kind = str(request.get("type") or "").strip().lower()
+    if kind not in DESTINATION_TYPES:
+        raise BackupdError("unsupported destination type", code="invalid")
+
+    host = str(request.get("host") or "").strip()
+    if not host or len(host) > 253 or any(ch.isspace() for ch in host):
+        raise BackupdError("a host is required", code="invalid")
+    user = str(request.get("user") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user):
+        raise BackupdError("the user name is not valid", code="invalid")
+    try:
+        port = int(request.get("port") or 22)
+    except (TypeError, ValueError):
+        raise BackupdError("the port must be a number", code="invalid") from None
+    if not 1 <= port <= 65535:
+        raise BackupdError("the port is out of range", code="invalid")
+    remote = str(request.get("path") or "").strip()
+    if not remote.startswith("/") or ".." in remote or len(remote) > 512:
+        raise BackupdError(
+            "the remote path must be absolute and free of '..'", code="invalid"
+        )
+
+    existing: dict[str, Any] = {}
+    with contextlib.suppress(BackupdError):
+        existing = load_destination(name)
+
+    key = str(request.get("private_key") or "")
+    if key:
+        if "PRIVATE KEY" not in key:
+            raise BackupdError("that does not look like a private key", code="invalid")
+        # The key never goes through the archive path and never leaves this
+        # directory; the browser cannot read it back.
+        write_private(destination_key_path(name), key.encode("utf-8"))
+    elif not existing.get("key_installed"):
+        raise BackupdError("a private key is required", code="invalid")
+
+    host_key = str(request.get("host_key") or "").strip()
+    if host_key:
+        write_private(
+            destination_known_hosts(name), (host_key + "\n").encode("utf-8")
+        )
+    elif not existing.get("host_key_pinned"):
+        raise BackupdError(
+            "the host key is required: pin the one you expect rather than"
+            " accepting whatever answers",
+            code="invalid",
+        )
+
+    record = {
+        "name": name,
+        "type": kind,
+        "host": host,
+        "port": port,
+        "user": user,
+        "path": remote.rstrip("/") or "/",
+        "key_installed": True,
+        "host_key_pinned": True,
+        # "or" would read a deliberate zero as "not supplied" and quietly
+        # restore the default, so an operator asking to keep no weeklies would
+        # silently keep four of them.
+        "keep_daily": keep_count(request.get("keep_daily"), default=7, cap=365),
+        "keep_weekly": keep_count(request.get("keep_weekly"), default=4, cap=260),
+        "keep_monthly": keep_count(request.get("keep_monthly"), default=6, cap=120),
+        "updated_at": utc_now(),
+    }
+    atomic_json(path_target, record, mode=0o600)
+    return {"ok": True, "destination": public_destination(record)}
+
+
+def delete_destination(request: dict[str, Any]) -> dict[str, Any]:
+    name = str(request.get("name") or "").strip().lower()
+    path_target = destination_path(name)
+    removed = False
+    for candidate in (
+        path_target,
+        destination_key_path(name),
+        destination_known_hosts(name),
+    ):
+        with contextlib.suppress(FileNotFoundError):
+            candidate.unlink()
+            removed = True
+    return {"ok": True, "deleted": removed}
+
+
+def sftp_base_command(record: dict[str, Any], binary: str) -> list[str]:
+    """Options shared by every call to the OpenSSH client.
+
+    The host key is pinned to what the operator saved. Accepting whatever
+    answers would make an off-host copy a way to hand the archive to whoever
+    can answer on that address -- encrypted, but still theirs to keep and
+    attack offline.
+    """
+    name = record["name"]
+    return [
+        binary,
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={destination_known_hosts(name)}",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "ConnectTimeout=20",
+        "-i", str(destination_key_path(name)),
+        "-P" if binary.endswith("sftp") else "-p", str(record.get("port") or 22),
+    ]
+
+
+def run_sftp(record: dict[str, Any], batch: str) -> subprocess.CompletedProcess:
+    command = sftp_base_command(record, "/usr/bin/sftp")
+    command += ["-b", "-", f"{record['user']}@{record['host']}"]
+    return subprocess.run(
+        command,
+        input=batch.encode("utf-8"),
+        capture_output=True,
+        timeout=SFTP_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
+def run_ssh(record: dict[str, Any], remote_command: list[str]) -> subprocess.CompletedProcess:
+    command = sftp_base_command(record, "/usr/bin/ssh")
+    command += [f"{record['user']}@{record['host']}", "--"] + remote_command
+    return subprocess.run(
+        command, capture_output=True, timeout=SFTP_TIMEOUT_SECONDS, check=False
+    )
+
+
+def remote_quote(value: str) -> str:
+    """Quote a path for the sftp batch language, which splits on whitespace."""
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def verify_remote_copy(
+    record: dict[str, Any], remote_file: str, expected: str, size: int
+) -> tuple[bool, str, str]:
+    """Prove the far end holds the same bytes. Returns (ok, method, detail).
+
+    Two ways, in order of cost. Asking the far end to hash is exact and cheap
+    but needs a shell there; re-downloading is exact and always possible but
+    pays for the transfer twice, so it is skipped for very large archives.
+    Nothing is deleted anywhere unless one of them succeeded.
+    """
+    probe = run_ssh(record, ["sha256sum", "--", remote_file])
+    if probe.returncode == 0:
+        answer = (probe.stdout or b"").decode("utf-8", "replace").split()
+        if answer and answer[0] == expected:
+            return True, "remote-hash", ""
+        if answer:
+            return False, "remote-hash", "the far end reports different content"
+
+    if size > VERIFY_DOWNLOAD_MAX_BYTES:
+        return (
+            False,
+            "none",
+            "the far end cannot hash and the archive is too large to re-read",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="backupd-verify-") as work:
+        local = Path(work) / "verify.bin"
+        result = run_sftp(
+            record, f"get {remote_quote(remote_file)} {remote_quote(str(local))}\n"
+        )
+        if result.returncode != 0 or not local.exists():
+            return False, "download", "the copy could not be read back"
+        if sha256_file(local) != expected:
+            return False, "download", "the copy read back does not match"
+    return True, "download", ""
+
+
+def remote_listing(record: dict[str, Any]) -> list[str]:
+    """Archive names already on the far end, newest last."""
+    result = run_sftp(record, f"ls -1 {remote_quote(record['path'])}\n")
+    if result.returncode != 0:
+        return []
+    names = []
+    for row in (result.stdout or b"").decode("utf-8", "replace").splitlines():
+        candidate = row.strip().rsplit("/", 1)[-1]
+        if candidate.startswith("easy-ha-proxy-") and candidate.endswith(".tar.gz.enc"):
+            names.append(candidate)
+    return sorted(names)
+
+
+def retention_victims(names: list[str], record: dict[str, Any]) -> list[str]:
+    """Which remote archives fall outside the keep policy.
+
+    Grouped by the date in the file name, which is how the archives are named
+    anyway. One per day is kept as a daily, then one per ISO week, then one
+    per month; anything else goes.
+    """
+    by_day: dict[str, str] = {}
+    for name in sorted(names):
+        match = re.search(r"(\d{4})(\d{2})(\d{2})", name)
+        if match is None:
+            continue
+        # The last archive of a day represents that day.
+        by_day["-".join(match.groups())] = name
+
+    days = sorted(by_day, reverse=True)
+    keep: set[str] = set()
+    for day in days[: max(0, int(record.get("keep_daily") or 0))]:
+        keep.add(by_day[day])
+
+    seen_weeks: set[str] = set()
+    for day in days:
+        year, month, number = (int(part) for part in day.split("-"))
+        week = dt.date(year, month, number).isocalendar()
+        token = f"{week[0]}-{week[1]}"
+        if token in seen_weeks:
+            continue
+        seen_weeks.add(token)
+        if len(seen_weeks) <= int(record.get("keep_weekly") or 0):
+            keep.add(by_day[day])
+
+    seen_months: set[str] = set()
+    for day in days:
+        token = day[:7]
+        if token in seen_months:
+            continue
+        seen_months.add(token)
+        if len(seen_months) <= int(record.get("keep_monthly") or 0):
+            keep.add(by_day[day])
+
+    return [name for name in names if name not in keep]
+
+
+def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
+    """Copy one finished archive to one destination, then prune the far end."""
+    backup_id = identifier(request.get("backup_id"), "backup id")
+    record = load_destination(request.get("destination"))
+
+    archive = backup_archive_path(backup_id)
+    checksum = backup_checksum_path(backup_id)
+    if not archive.is_file():
+        raise BackupdError("no such backup", code="not_found")
+    expected = read_checksum_file(checksum, checksum.stat()) if checksum.is_file() else ""
+    if not expected:
+        expected = sha256_file(archive)
+    size = archive.stat().st_size
+
+    remote_dir = record["path"]
+    remote_file = f"{remote_dir}/{archive.name}"
+    # Upload beside the final name and rename, so an interrupted transfer
+    # cannot look like a complete backup to whoever prunes next.
+    staging = remote_file + ".part"
+    batch = (
+        f"-mkdir {remote_quote(remote_dir)}\n"
+        f"put {remote_quote(str(archive))} {remote_quote(staging)}\n"
+        f"-rm {remote_quote(remote_file)}\n"
+        f"rename {remote_quote(staging)} {remote_quote(remote_file)}\n"
+    )
+    if checksum.is_file():
+        batch += (
+            f"put {remote_quote(str(checksum))} "
+            f"{remote_quote(remote_dir + '/' + checksum.name)}\n"
+        )
+    result = run_sftp(record, batch)
+    if result.returncode != 0:
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:500]
+        report_alert(
+            "backup.failed",
+            f"{backup_id}@{record['name']}",
+            "The off-host copy of the backup failed",
+            detail,
+        )
+        raise BackupdError(f"the upload failed: {detail}", code="upstream")
+
+    verified, method, detail = verify_remote_copy(
+        record, remote_file, expected, size
+    )
+    response = {
+        "ok": True,
+        "backup_id": backup_id,
+        "destination": record["name"],
+        "bytes": size,
+        "verified": verified,
+        "verified_by": method,
+        "pruned": [],
+    }
+    if not verified:
+        # The new copy is not proven, so nothing old is removed: a broken
+        # upload must never be the reason the last good copy disappears.
+        response["ok"] = False
+        response["error"] = detail or "the copy could not be verified"
+        report_alert(
+            "backup.failed",
+            f"{backup_id}@{record['name']}",
+            "The off-host copy could not be verified",
+            response["error"],
+        )
+        return response
+
+    victims = retention_victims(remote_listing(record), record)
+    if victims:
+        prune = "".join(
+            f"-rm {remote_quote(remote_dir + '/' + name)}\n"
+            f"-rm {remote_quote(remote_dir + '/' + name + '.sha256')}\n"
+            for name in victims
+        )
+        run_sftp(record, prune)
+        response["pruned"] = victims
+    return response
+
+
+def test_destination(request: dict[str, Any]) -> dict[str, Any]:
+    """Prove the credentials and the path work before a real backup needs them."""
+    record = load_destination(request.get("name"))
+    marker = f"{record['path']}/.easy-ha-proxy-write-test"
+    with tempfile.TemporaryDirectory(prefix="backupd-test-") as work:
+        probe = Path(work) / "probe"
+        probe.write_text(utc_now() + "\n", encoding="utf-8")
+        result = run_sftp(
+            record,
+            f"-mkdir {remote_quote(record['path'])}\n"
+            f"put {remote_quote(str(probe))} {remote_quote(marker)}\n"
+            f"rm {remote_quote(marker)}\n",
+        )
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "error": (result.stderr or b"").decode("utf-8", "replace").strip()[:500],
+        }
+    return {"ok": True, "destination": record["name"]}
+
+
 def dispatch(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise BackupdError("request must be a JSON object")
@@ -2211,6 +2657,16 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_inspect(request)
     if action == "start_restore":
         return start_restore(request)
+    if action == "destinations":
+        return list_destinations(request)
+    if action == "destination_save":
+        return save_destination(request)
+    if action == "destination_delete":
+        return delete_destination(request)
+    if action == "destination_test":
+        return test_destination(request)
+    if action == "upload":
+        return upload_backup(request)
     return delete_item(request)
 
 
