@@ -32,6 +32,10 @@ Environment="UPDATED_REBOOT_DELAY_SECONDS={{ updated_reboot_delay_seconds | defa
 Environment="UPDATED_HAPROXY_TRANSACTION_MARKER={{ updated_haproxy_transaction_marker | default('/opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json') }}"
 Environment="UPDATED_HAPROXY_TRANSACTION_STATE={{ updated_haproxy_transaction_state | default('/var/lib/easy-ha-proxy/haproxy-config-guard/transaction.json') }}"
 Environment="UPDATED_SERVICE_NAME=easy-ha-proxy-updated.service"
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-updated.py', rstrip=false) | hash('sha256') }}"
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py
 Restart=always

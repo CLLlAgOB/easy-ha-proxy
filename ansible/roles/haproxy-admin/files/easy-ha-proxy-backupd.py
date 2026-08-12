@@ -142,6 +142,30 @@ STAGE_RECORD_PREFIX = "stage-"
 STAGE_RECORD_SUFFIX = ".json"
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: the
+# job still runs on a gateway without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="backupd")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine a job failed. Never disturbs the job itself."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 MANIFEST_MARKER = "EASY_HA_PROXY_BACKUP_MANIFEST_JSON="
 BACKUP_FILE_MARKER = "EASY_HA_PROXY_FULL_BACKUP_FILE="
 MANIFEST_KEYS = (
@@ -1243,6 +1267,18 @@ def finish_failed(
         error=message,
     )
     LOG.warning("Job %s failed: %s", job_id, message)
+    # A failed backup that nobody hears about is the same as no backup.
+    operation = ""
+    try:
+        operation = str(load_job(job_id, include_logs=False).get("operation") or "")
+    except Exception:  # pylint: disable=broad-except
+        pass
+    report_alert(
+        "restore.failed" if operation == "restore" else "backup.failed",
+        job_id,
+        f"The {operation or 'backup'} job failed",
+        message,
+    )
 
 
 def store_backup_artifact(

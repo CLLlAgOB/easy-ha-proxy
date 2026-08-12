@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+
+{% block title %}Alerts{% endblock %}
+{% block header_title %}Alerts{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.al-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.al-critical { background: rgba(204,75,75,.15); color: #cc4b4b; }
+.al-warning { background: rgba(200,161,58,.18); color: #c8a13a; }
+.al-info { background: rgba(var(--accent-primary-rgb), .15); color: var(--accent-primary); }
+.al-ok { background: rgba(46,158,91,.15); color: #2e9e5b; }
+
+.al-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 28px 0;
+  text-align: center;
+}
+
+.al-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.al-tile {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.al-tile .al-value {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.al-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
+.al-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.al-form input,
+.al-form select {
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.al-rules td input {
+  width: 90px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.al-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+</style>
+
+<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
+     background: rgba(var(--accent-primary-rgb), .07);">
+  Every feature reports what it sees; this page decides what is worth telling you about. A condition has to hold for its delay before anything is sent, a repeat is held back until the repeat window, and recovery is always announced. A burst is capped so one bad minute cannot become forty messages — the ones held back stay in the history below.
+</div>
+
+<div id="al-unavailable" class="rt-notice" hidden
+     style="border-color: rgba(204,75,75,.45); background: rgba(204,75,75,.08);">
+  The alert daemon is not answering. HAProxy traffic is unaffected, but nothing is being sent right now.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Now</h2>
+    <span class="mon-sub" id="al-status" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="al-grid">
+    <div class="al-tile">
+      <div class="mon-sub">Firing</div>
+      <div class="al-value" id="al-count-firing" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="al-tile">
+      <div class="mon-sub">Waiting out their delay</div>
+      <div class="al-value" id="al-count-pending" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="al-tile">
+      <div class="mon-sub">Channels</div>
+      <div class="al-value" id="al-channels" data-i18n-skip translate="no">—</div>
+    </div>
+  </div>
+
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Condition</th>
+          <th>Subject</th>
+          <th>Severity</th>
+          <th>State</th>
+          <th>Since</th>
+          <th>Summary</th>
+        </tr>
+      </thead>
+      <tbody id="al-active-body" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+  <div class="al-empty" id="al-active-empty">Nothing is firing</div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>History</h2>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Condition</th>
+          <th>Subject</th>
+          <th>What happened</th>
+          <th>Severity</th>
+          <th>Delivery</th>
+        </tr>
+      </thead>
+      <tbody id="al-history-body" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+  <div class="al-empty" id="al-history-empty">Nothing has been recorded yet</div>
+</div>
+
+<div class="card" id="al-settings">
+  <div class="card-header">
+    <h2>Delivery</h2>
+  </div>
+
+  <div class="al-form">
+    <label>
+      Alerting
+      <select id="al-enabled">
+        <option value="true">On</option>
+        <option value="false">Off</option>
+      </select>
+    </label>
+    <label>
+      Minimum severity
+      <select id="al-min-severity">
+        <option value="info">Everything</option>
+        <option value="warning">Warning and above</option>
+        <option value="critical">Critical only</option>
+      </select>
+    </label>
+    <label>
+      Email
+      <select id="al-email-enabled">
+        <option value="true">On</option>
+        <option value="false">Off</option>
+      </select>
+    </label>
+    <label>
+      Recipient
+      <input type="email" id="al-recipient" placeholder="leave empty for the shared address">
+    </label>
+  </div>
+
+  <div class="table-meta" style="margin-top:10px;">
+    Email uses the notification settings the certificate notices already use. A
+    site with its own alert address keeps it: that address belongs to the site,
+    not to this page.
+  </div>
+
+  <h3 style="margin-top:22px;">Webhook</h3>
+  <div class="table-meta">
+    One JSON object per notification, over HTTPS only. The address is resolved
+    once and the connection is made to exactly that address, so a name that
+    answers differently on a second lookup cannot redirect the request inward.
+    Loopback and link-local destinations are refused, private ones only with
+    the switch below. Redirects are never followed. The URL and the header
+    value are stored root-only and are never sent back to this page.
+  </div>
+
+  <div class="al-form" style="margin-top:12px;">
+    <label>
+      URL
+      <input type="url" id="al-webhook-url" placeholder="https://hooks.example.com/...">
+    </label>
+    <label>
+      Header name
+      <input type="text" id="al-webhook-header-name" placeholder="X-Token">
+    </label>
+    <label>
+      Header value
+      <input type="password" id="al-webhook-header-value" autocomplete="new-password">
+    </label>
+    <label>
+      Private destinations
+      <select id="al-webhook-allow-private">
+        <option value="false">Refuse</option>
+        <option value="true">Allow</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="al-actions">
+    <button class="btn btn-primary" type="button" id="al-save">Save delivery settings</button>
+    <button class="btn" type="button" id="al-test">Send a test message</button>
+    <span class="mon-sub" id="al-save-result" data-i18n-skip translate="no"></span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Conditions</h2>
+  </div>
+  <div class="table-meta">
+    A delay of zero means the first observation is enough. The repeat window is
+    how long a condition stays quiet before it says so again. A site with its
+    own value in its settings overrides the delay here.
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table al-rules">
+      <thead>
+        <tr>
+          <th>Condition</th>
+          <th>Kind</th>
+          <th>Severity</th>
+          <th>Enabled</th>
+          <th>Delay, s</th>
+          <th>Repeat, s</th>
+        </tr>
+      </thead>
+      <tbody id="al-rules-body"></tbody>
+    </table>
+  </div>
+  <div class="al-actions">
+    <button class="btn btn-primary" type="button" id="al-save-rules">Save conditions</button>
+    <span class="mon-sub" id="al-rules-result" data-i18n-skip translate="no"></span>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/alerts.js') }}"></script>
+{% endblock %}

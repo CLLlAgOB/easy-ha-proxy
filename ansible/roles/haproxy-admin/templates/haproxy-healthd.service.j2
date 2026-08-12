@@ -17,6 +17,10 @@ EnvironmentFile=-{{ haproxy_admin_env_file }}
 Environment="HEALTHD_SOCKET_PATH={{ healthd_socket_path | default('/run/easy-ha-proxy/haproxy-healthd.sock') }}"
 Environment="HEALTHD_CONFIG={{ healthd_config_path | default('/opt/haproxy-admin/healthd.json') }}"
 Environment="HEALTHD_SOCKET_GROUP={{ healthd_socket_group | default('hadmin') }}"
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-healthd.py', rstrip=false) | hash('sha256') }}"
 
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-healthd.py

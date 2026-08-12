@@ -15,6 +15,10 @@ Environment="HAPROXY_ADMIN_ALLOWLIST_PATH={{ admin_ips_file | default('/etc/hapr
 # HAPADM_BAN_SYNC_INTERVAL=10
 # HAPROXY_CONTROL_SOCKET=/run/easy-ha-proxy/haproxy-controld.sock
 # HAPROXY_SYSTEMCTL_CMD=systemctl reload haproxy
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-controld.py', rstrip=false) | hash('sha256') }}"
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-controld.py
 Restart=always

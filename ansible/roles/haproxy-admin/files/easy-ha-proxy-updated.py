@@ -179,6 +179,30 @@ CONTAINER_COMPONENTS = frozenset(
 )
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: the
+# job still runs on a gateway without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="updated")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine a job failed. Never disturbs the job itself."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 HAPROXY_TRANSACTION_ACTIVE_STATES = frozenset(
     {"prepared", "pending_confirmation", "rolling_back", "rollback_failed"}
 )
@@ -1219,6 +1243,12 @@ def finish_failed(job_id: str, exc: Exception, log: str = "") -> None:
         updates["output"] = {"log": candidate_log}
     update_job(job_id, **updates)
     LOG.warning("Update job %s failed: %s", job_id, exc)
+    report_alert(
+        "update.failed",
+        job_id,
+        "A software update job failed",
+        (str(exc) or exc.__class__.__name__)[:1000],
+    )
 
 
 def check_worker(

@@ -1,0 +1,78 @@
+---
+# roles/haproxy-admin/tasks/alertd.yml
+# Установка root-демона easy-ha-proxy-alertd (движок оповещений).
+
+- name: "easy-ha-proxy-alertd | Install script"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-alertd.py
+    dest: /usr/local/sbin/easy-ha-proxy-alertd.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: alertd_script
+
+# The reporting side of the alert engine, imported by the helper daemons from
+# their own directory. Installed with them rather than with alertd so a daemon
+# never imports a version older than itself.
+- name: "easy-ha-proxy-alertd | Install the shared alert client"
+  ansible.builtin.copy:
+    src: easy_ha_proxy_alert_client.py
+    dest: /usr/local/sbin/easy_ha_proxy_alert_client.py
+    owner: root
+    group: root
+    mode: "0644"
+  register: alert_client_script
+
+- name: "easy-ha-proxy-alertd | Ensure state directory"
+  ansible.builtin.file:
+    path: "{{ (alertd_database_path | default('/var/lib/easy-ha-proxy/alerts/alerts.db')) | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0750"
+
+# The settings file is written by the daemon itself when an operator changes
+# something, so Ansible only seeds it and never overwrites an existing one.
+- name: "easy-ha-proxy-alertd | Seed the settings file"
+  ansible.builtin.template:
+    src: alertd.json.j2
+    dest: "{{ alertd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/alertd.json') }}"
+    owner: root
+    group: "{{ app_group | default('hadmin') }}"
+    mode: "0640"
+    force: false
+  register: alertd_cfg
+
+- name: "easy-ha-proxy-alertd | Install systemd unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-alertd.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-alertd.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: alertd_unit
+
+- name: "easy-ha-proxy-alertd | systemd daemon-reload if unit changed"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: alertd_unit.changed
+
+- name: "easy-ha-proxy-alertd | Enable service"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-alertd.service
+    enabled: true
+
+- name: "easy-ha-proxy-alertd | Restart service if changed"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-alertd.service
+    state: restarted
+  when: >-
+    alertd_script.changed
+    or alert_client_script.changed
+    or alertd_unit.changed
+    or (hapadm_env_t.changed | default(false))
+
+- name: "easy-ha-proxy-alertd | Ensure service started"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-alertd.service
+    state: started
