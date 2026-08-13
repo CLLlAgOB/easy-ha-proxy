@@ -658,3 +658,39 @@ class ScheduleWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnershipGuardTests(unittest.TestCase):
+    """The relaxation that lets these tests run must not reach a deployment.
+
+    The daemon chowns its state to root:hadmin. That cannot work when the
+    module is exercised by an ordinary user, and the whole suite used to be
+    run as root, which hid it -- green locally, red on CI. The fix is to let
+    the chown be skipped when the process is not root, and the thing worth
+    testing is that it is never skipped when it is.
+    """
+
+    def test_a_refused_chown_is_fatal_for_root(self):
+        with mock.patch.object(backupd.os, "geteuid", return_value=0),              mock.patch.object(backupd.os, "fchown", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                backupd._set_owner(3, 0, 0, fd=True)
+
+    def test_and_tolerated_for_anyone_else(self):
+        with mock.patch.object(backupd.os, "geteuid", return_value=1000),              mock.patch.object(backupd.os, "fchown", side_effect=PermissionError):
+            backupd._set_owner(3, 0, 0, fd=True)
+
+    def test_the_file_is_already_restrictive_before_the_chown(self):
+        # This is why skipping it is safe: the descriptor is opened 0600, so a
+        # chown that does not happen leaves the file stricter, never looser.
+        source = (
+            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
+        ).read_text(encoding="utf-8")
+        block = source.split("def atomic_json(")[1].split("def ")[0]
+        self.assertLess(block.index("0o600"), block.index("_set_owner"))
+
+    def test_the_owner_check_still_demands_root_when_running_as_root(self):
+        source = (
+            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
+        ).read_text(encoding="utf-8")
+        block = source.split("def safe_json_file(")[1].split("def ")[0]
+        self.assertIn("if expected_uid == 0 and os.geteuid() != 0:", block)

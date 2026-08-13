@@ -326,6 +326,26 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _set_owner(target, uid: int, gid: int, *, fd: bool = False) -> None:
+    """Give the file its intended ownership, where that is possible at all.
+
+    The daemon runs as root, so this always applies in a deployment. It does
+    not apply when the module is exercised by a test as an ordinary user, and
+    there it must not be fatal -- every caller has already created the file
+    with a restrictive mode, so failing to widen it to a group leaves the file
+    stricter than intended, never looser.
+    """
+    try:
+        if fd:
+            os.fchown(target, uid, gid)
+        else:
+            os.chown(target, uid, gid)
+    except PermissionError:
+        if os.geteuid() == 0:
+            raise
+        LOG.debug("not root: leaving ownership of %s as it is", target)
+
+
 def atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o640) -> None:
     encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode(
         "utf-8"
@@ -343,7 +363,7 @@ def atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o640) -> No
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.fchown(descriptor, 0, APP_GROUP_GID)
+            _set_owner(descriptor, 0, APP_GROUP_GID, fd=True)
             os.fchmod(descriptor, mode)
         finally:
             os.close(descriptor)
@@ -358,6 +378,13 @@ def atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o640) -> No
 
 
 def safe_json_file(path: Path, *, expected_uid: int = 0) -> dict[str, Any]:
+    # The point of the owner check is that nobody but the daemon's own account
+    # can have written this file. In a deployment that account is root, which
+    # is what expected_uid means. When the module is exercised by an ordinary
+    # user the same rule has to be read against that user, or the check refuses
+    # files it wrote itself a moment earlier.
+    if expected_uid == 0 and os.geteuid() != 0:
+        expected_uid = os.geteuid()
     info = path.lstat()
     if (
         not stat.S_ISREG(info.st_mode)
@@ -698,7 +725,7 @@ def copy_upload_to_job(upload_id: str, job_id: str) -> tuple[Path, str, int]:
             or copied != before.st_size
         ):
             raise BackupdError("upload changed while it was being copied")
-        os.fchown(destination_fd, 0, 0)
+        _set_owner(destination_fd, 0, 0, fd=True)
         os.fchmod(destination_fd, 0o600)
         os.fsync(destination_fd)
         actual_checksum = digest.hexdigest()
@@ -1354,7 +1381,7 @@ def store_backup_artifact(
     try:
         os.replace(candidate, destination)
         os.replace(checksum_source, checksum_destination)
-        os.chown(destination, 0, APP_GROUP_GID)
+        _set_owner(destination, 0, APP_GROUP_GID)
         os.chmod(destination, 0o640)
         descriptor = os.open(
             checksum_temporary,
@@ -1371,7 +1398,7 @@ def store_backup_artifact(
             while view:
                 written = os.write(descriptor, view)
                 view = view[written:]
-            os.fchown(descriptor, 0, APP_GROUP_GID)
+            _set_owner(descriptor, 0, APP_GROUP_GID, fd=True)
             os.fchmod(descriptor, 0o640)
             os.fsync(descriptor)
         finally:

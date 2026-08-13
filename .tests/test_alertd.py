@@ -499,6 +499,16 @@ class MailChannelTests(EngineTestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The relay serialises on a lock under /run, which exists for the root
+        # daemon and for nobody else. Without redirecting it the tests fail on
+        # the lock before they reach what they are actually about.
+        lock = mock.patch.object(
+            alertd,
+            "MAIL_LOCK_PATH",
+            str(Path(self.directory.name) / "mail.lock"),
+        )
+        lock.start()
+        self.addCleanup(lock.stop)
         self.channel = alertd.EmailChannel()
 
     def write_state(self, **overrides):

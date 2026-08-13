@@ -35,6 +35,14 @@ exit 0
 """
 
 
+# The publish scripts are gitignored on purpose, so a fresh checkout --
+# which is what CI runs -- does not have them. Skipping keeps the cover
+# where the scripts do exist without failing where they cannot.
+@unittest.skipUnless(
+    (ROOT / "build_and_publish_latest.sh").is_file(),
+    "the release scripts are not part of the repository",
+)
+
 class BuildReleaseTests(unittest.TestCase):
     def run_build(
         self,
