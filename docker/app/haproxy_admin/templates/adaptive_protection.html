@@ -189,11 +189,18 @@
 
 .ap-entry {
   display: grid;
-  grid-template-columns: 150px 1fr auto;
+  /* time · what · the tuning context · points */
+  grid-template-columns: 150px minmax(140px, auto) 1fr auto;
   gap: 12px;
   padding: 6px 0;
   font-size: 13px;
   border-bottom: 1px solid var(--border);
+}
+
+.ap-entry .ap-context {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .ap-entry:last-child { border-bottom: none; }

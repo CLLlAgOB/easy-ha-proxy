@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from .cache import get_country_code
@@ -93,9 +94,80 @@ def shadow(args: Dict[str, str]) -> Dict[str, Any]:
     return payload
 
 
+# Which knob each finding is about. The page exists so an operator can decide
+# whether a limit is wrong, and that decision needs three things the daemon
+# does not have: the real site name behind the sanitised table name, the limit
+# that was configured, and the name of the setting to change.
+_LIMIT_FOR_EVENT = {
+    "RATE_EXCEEDED": ("max_req_rate", "rate_window", "requests"),
+    "ERROR_RATE_EXCEEDED": ("err_limit", "err_window", "errors"),
+}
+
+
+def _site_limits() -> Dict[str, Dict[str, Any]]:
+    """Map the sanitised stick-table suffix back to a real site and its limits."""
+    from .services_haproxy_config import CONFIG_YAML, _load_yaml, jinja_combine
+    from .services_haproxy_sites import get_websites_list
+
+    defaults = (_load_yaml(CONFIG_YAML) or {}).get("site_defaults") or {}
+    table: Dict[str, Dict[str, Any]] = {}
+    for site in get_websites_list():
+        name = str(site.get("name") or "")
+        if not name:
+            continue
+        effective = jinja_combine(defaults, site, True)
+        table[re.sub(r"[^A-Za-z0-9_]", "_", name)] = {
+            "site": name,
+            "domain": str(effective.get("domain") or name),
+            "max_req_rate": effective.get("max_req_rate"),
+            "rate_window": effective.get("rate_window") or defaults.get("rate_window"),
+            "err_limit": effective.get("err_limit") or defaults.get("err_limit"),
+            "err_window": effective.get("err_window") or defaults.get("err_window"),
+        }
+    return table
+
+
+def _explain(contribution: Dict[str, Any], limits: Dict[str, Dict[str, Any]]) -> None:
+    """Say what was measured, against what, and which setting moves it."""
+    known = limits.get(str(contribution.get("site") or ""))
+    if known:
+        contribution["site_name"] = known["site"]
+        contribution["site_domain"] = known["domain"]
+
+    mapping = _LIMIT_FOR_EVENT.get(str(contribution.get("event_type") or ""))
+    detail = str(contribution.get("detail") or "")
+    match = re.search(r"=(\d+)$", detail)
+    if not (mapping and match):
+        return
+    setting, window_key, unit = mapping
+    observed = int(match.group(1))
+    contribution["observed"] = observed
+    contribution["unit"] = unit
+    contribution["setting"] = setting
+    if not known:
+        return
+    limit = known.get(setting)
+    window = known.get(window_key)
+    if isinstance(limit, int) and limit > 0:
+        contribution["limit"] = limit
+        contribution["window"] = window
+        contribution["over_by"] = max(0, observed - limit)
+        # A little headroom, so raising it to exactly the observed peak does
+        # not put the operator back here on the next slightly busier minute.
+        contribution["suggested"] = int(observed * 1.5)
+
+
 def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:
     payload = guardd_ip(value, simulator_params(args))
     _annotate(payload)
+    try:
+        limits = _site_limits()
+    except Exception:  # pylint: disable=broad-except
+        # Enrichment is a convenience; the findings themselves must still show.
+        LOG.warning("cannot read site limits for the findings", exc_info=True)
+        limits = {}
+    for contribution in payload.get("contributions") or []:
+        _explain(contribution, limits)
     return payload
 
 

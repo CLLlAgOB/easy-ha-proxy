@@ -66,6 +66,9 @@
     "authenticated": "аутентифицирован",
     "whitelisted": "в белом списке",
     "local": "локальный",
-    "unparsable": "неразбираемый"
+    "unparsable": "неразбираемый",
+    "over": "сверх",
+    "raise": "поднять",
+    "requests": "запросов"
   }
 }

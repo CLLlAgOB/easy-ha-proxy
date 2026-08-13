@@ -810,6 +810,8 @@ def score_events(
                     "category": str(event.get("category", "")),
                     "points": 0,
                     "reason": "already refused by the gateway",
+                    "site": str(event.get("site", "")),
+                    "detail": str(event.get("detail", "")),
                 }
             )
             continue
@@ -842,6 +844,10 @@ def score_events(
                     if granted < points
                     else "counted"
                 ),
+                # What the finding was about, not just that there was one:
+                # which site, and the counter reading that triggered it.
+                "site": str(event.get("site", "")),
+                "detail": str(event.get("detail", "")),
             }
         )
 

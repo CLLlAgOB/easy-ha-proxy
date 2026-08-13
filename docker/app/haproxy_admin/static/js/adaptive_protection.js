@@ -372,6 +372,37 @@
           : item.event_type;
         entry.appendChild(what);
 
+        // What was measured, against what, and which setting moves it. Without
+        // this the page can say a limit was hit but not which one or by how
+        // much, which is exactly what an operator needs to decide whether the
+        // limit is wrong.
+        const bits = [];
+        if (item.site_domain || item.site_name) {
+          bits.push(item.site_domain || item.site_name);
+        }
+        if (item.observed != null && item.limit != null) {
+          bits.push(
+            `${item.observed} ${uiText(item.unit || "")} / ${uiText("limit")} ` +
+            `${item.limit}${item.window ? " / " + item.window : ""}`
+          );
+          if (item.over_by > 0) bits.push(`+${item.over_by} ${uiText("over")}`);
+        } else if (item.detail) {
+          bits.push(item.detail);
+        }
+        if (item.setting) {
+          bits.push(
+            `${uiText("raise")} ${item.setting}` +
+            (item.suggested ? ` → ${item.suggested}` : "")
+          );
+        }
+        if (bits.length) {
+          const context = document.createElement("span");
+          context.className = "ap-context";
+          context.setAttribute("data-i18n-skip", "");
+          context.textContent = bits.join(" · ");
+          entry.appendChild(context);
+        }
+
         const points = document.createElement("span");
         points.className = "ap-points";
         points.textContent =
