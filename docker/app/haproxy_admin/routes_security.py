@@ -9,7 +9,7 @@ import logging
 
 from flask import g, jsonify, render_template, request
 
-from .audit import RESULT_DENIED, RESULT_FAILURE, record_request
+from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .guardd_client import GuarddUnavailable
 from .routes import bp
 from . import services_security as security
@@ -127,6 +127,46 @@ def api_request_log():
         return jsonify(security.requests(request.args))
     except GuarddUnavailable as exc:
         return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/requests/enabled")
+def api_request_log_enabled():
+    """Start or stop recording requests.
+
+    Superadmin only and audited, like the enforcement switch: this decides
+    whether the gateway keeps a record of what every visitor asked for.
+    """
+    payload = request.get_json(silent=True) or {}
+    wanted = bool(payload.get("enabled"))
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "request_log.enabled",
+            object_type="request_log",
+            object_id=str(wanted).lower(),
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_request_log(wanted)
+    except GuarddUnavailable as exc:
+        record_request(
+            "request_log.enabled",
+            object_type="request_log",
+            object_id=str(wanted).lower(),
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "request_log.enabled",
+        object_type="request_log",
+        object_id=str(wanted).lower(),
+        after={"enabled": result.get("enabled")},
+        result=RESULT_SUCCESS,
+        summary="recording requests" if result.get("enabled") else "recording stopped",
+    )
+    return jsonify(result)
 
 
 @bp.get("/api/security/requests/status")

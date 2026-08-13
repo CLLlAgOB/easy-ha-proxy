@@ -15,6 +15,7 @@ from .cache import get_country_code
 from .guardd_client import (
     guardd_requests,
     guardd_requests_status,
+    guardd_set_request_log,
     GuarddUnavailable,
     guardd_health,
     guardd_ip,
@@ -134,3 +135,7 @@ def requests(args) -> Dict[str, Any]:
 
 def requests_status() -> Dict[str, Any]:
     return guardd_requests_status()
+
+
+def set_request_log(enabled: Any) -> Dict[str, Any]:
+    return guardd_set_request_log(bool(enabled))

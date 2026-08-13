@@ -139,9 +139,36 @@
     offset += (payload.requests || []).length;
   }
 
+  async function setRecording(enabled) {
+    const note = byId("rq-switch-status");
+    if (note) note.textContent = "…";
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    const response = await fetch("/api/security/requests/enabled", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRFToken": meta ? meta.getAttribute("content") || "" : ""
+      },
+      body: JSON.stringify({ enabled: enabled })
+    });
+    const payload = await response.json().catch(function () { return {}; });
+    if (!response.ok || payload.ok === false) {
+      if (note) note.textContent = payload.error || "It was not changed";
+      return;
+    }
+    if (note) note.textContent = "";
+    await refreshStore();
+    await search(false);
+  }
+
   async function refreshStore() {
     const { status, payload } = await getJson("/api/security/requests/status", {});
     const element = byId("rq-store");
+    const stop = byId("rq-disable");
+    // 200 means the store exists; 404 is the daemon saying it is switched off.
+    if (stop) stop.hidden = status !== 200;
     if (!element) return;
     if (status !== 200) {
       element.textContent = "";
@@ -178,6 +205,10 @@
     }
     const more = byId("rq-more");
     if (more) more.addEventListener("click", () => search(true));
+    const enable = byId("rq-enable");
+    if (enable) enable.addEventListener("click", () => setRecording(true));
+    const stop = byId("rq-disable");
+    if (stop) stop.addEventListener("click", () => setRecording(false));
     const range = byId("rq-range");
     if (range) range.addEventListener("change", run);
     document.querySelectorAll(".rq-filters input").forEach((input) => {

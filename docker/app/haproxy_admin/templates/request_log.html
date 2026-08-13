@@ -76,8 +76,16 @@
 
 <div id="rq-disabled" class="rt-notice" hidden
      style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);">
-  The request log is switched off. Enable <code translate="no" data-i18n-skip>guardd_request_log_enabled</code>
-  and apply to start recording.
+  <div>
+    Requests are not being recorded. Turning this on stores the address, host and
+    path of every request for a few days, which is why it waits to be asked for.
+    The protection engine reads the same log either way; this only decides
+    whether a searchable copy is kept.
+  </div>
+  <button type="button" class="btn" id="rq-enable" style="margin-top:8px;">
+    Start recording
+  </button>
+  <span id="rq-switch-status" class="table-meta" data-i18n-skip></span>
 </div>
 
 <div id="rq-unavailable" class="rt-notice" hidden
@@ -90,6 +98,7 @@
   <div class="card-header">
     <h2>Search</h2>
     <span class="mon-sub" id="rq-store" data-i18n-skip translate="no"></span>
+    <button type="button" class="btn btn-small" id="rq-disable" hidden>Stop recording</button>
   </div>
 
   <div class="rq-filters">

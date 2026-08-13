@@ -25,6 +25,10 @@
     "Client": "Клиент",
     "bad request": "битый запрос",
     "records": "записей",
-    "paused": "запись приостановлена"
+    "paused": "запись приостановлена",
+    "Requests are not being recorded. Turning this on stores the address, host and path of every request for a few days, which is why it waits to be asked for. The protection engine reads the same log either way; this only decides whether a searchable copy is kept.": "Запросы не записываются. Включение сохраняет адрес, хост и путь каждого запроса на несколько дней — поэтому оно и ждёт вашего решения. Движок защиты читает тот же лог в любом случае; здесь решается только, останется ли от него копия, по которой можно искать.",
+    "Start recording": "Начать запись",
+    "Stop recording": "Остановить запись",
+    "It was not changed": "Изменить не удалось"
   }
 }

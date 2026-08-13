@@ -125,5 +125,32 @@ def guardd_requests(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _request_log_get("/api/v1/guard/requests", params=params)
 
 
+def guardd_set_request_log(enabled: bool) -> Dict[str, Any]:
+    """Start or stop recording requests.
+
+    Carries the shared token like the mode switch does: this one decides
+    whether the gateway keeps a record of what every visitor asked for.
+    """
+    url = (
+        "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="")
+        + "/api/v1/guard/requests/enabled"
+    )
+    try:
+        response = _session().post(
+            url,
+            json={"enabled": bool(enabled)},
+            timeout=30,
+            headers={"X-Guardd-Token": GUARDD_TOKEN} if GUARDD_TOKEN else {},
+        )
+        data = response.json()
+    except ValueError as exc:
+        raise GuarddUnavailable("guardd returned a non-JSON response") from exc
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise GuarddUnavailable("guardd returned an unexpected payload")
+    return data
+
+
 def guardd_requests_status() -> Dict[str, Any]:
     return _request_log_get("/api/v1/guard/requests/status")

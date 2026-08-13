@@ -276,10 +276,33 @@ class WiringTests(unittest.TestCase):
 
     def test_diagnostics_do_not_depend_on_the_security_mode(self):
         # Turning scoring off must not silently turn the explorer off too.
+        # want_requests is the configured value with the operator's switch
+        # layered over it, so the idle path now respects both.
         self.assertIn(
-            "if config.mode == MODE_OFF and not config.request_log_enabled:",
+            "if config.mode == MODE_OFF and not want_requests:",
             self.SOURCE,
         )
+        self.assertIn("want_requests = _request_log_wanted(database, config)", self.SOURCE)
+
+    def test_the_switch_outlives_a_restart_and_ansible(self):
+        # guardd.json is a template Ansible owns and rewrites, so a choice
+        # made in the web interface has to live where Ansible does not reach.
+        # The enforcement mode already works this way; so does this.
+        self.assertIn('REQUEST_LOG_OVERRIDE_KEY = "request_log_override"', self.SOURCE)
+        block = self.SOURCE.split("def _request_log_wanted")[1].split("def _set_request_log")[0]
+        self.assertIn("database.get_state(REQUEST_LOG_OVERRIDE_KEY", block)
+        self.assertIn("config.request_log_enabled", block)
+
+    def test_turning_it_off_writes_out_what_is_queued(self):
+        # The rows are already visible in the page; dropping them on the way
+        # out would make the switch lose data it had just shown.
+        block = self.SOURCE.split("def _set_request_log")[1].split("class GuardServer")[0]
+        self.assertLess(block.index("store.flush()"), block.index("store.close()"))
+
+    def test_the_switch_is_reachable_and_guarded(self):
+        self.assertIn('if path == "/api/v1/guard/requests/enabled":', self.SOURCE)
+        block = self.SOURCE.split('if path == "/api/v1/guard/requests/enabled":')[1]
+        self.assertIn("_control_auth_ok()", block.split("_set_request_log")[0])
 
     def test_the_engine_keeps_what_it_excludes_from_scoring(self):
         # An operator looking for their own failed request has to find it even

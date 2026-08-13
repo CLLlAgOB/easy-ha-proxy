@@ -17,10 +17,33 @@ class RouteTests(unittest.TestCase):
         self.service = (APP_DIR / "services_security.py").read_text(encoding="utf-8")
         self.client = (APP_DIR / "guardd_client.py").read_text(encoding="utf-8")
 
-    def test_the_explorer_is_read_only(self):
+    def test_the_explorer_reads_and_never_deletes(self):
         block = self.routes.split("# Log Explorer")[1]
-        self.assertNotIn("@bp.post", block)
         self.assertNotIn("@bp.delete", block)
+        # Exactly one thing in this section changes anything: the switch that
+        # decides whether requests are recorded at all.
+        self.assertEqual(block.count("@bp.post"), 1)
+        self.assertIn('@bp.post("/api/security/requests/enabled")', block)
+
+    def test_the_recording_switch_is_guarded_like_a_mutation(self):
+        # It decides whether the gateway keeps a record of what every visitor
+        # asked for, so it is superadmin-only and it lands in the change log.
+        block = self.routes.split('@bp.post("/api/security/requests/enabled")')[1]
+        block = block.split("@bp.get")[0]
+        self.assertIn('getattr(g, "is_superadmin", False)', block)
+        self.assertIn("RESULT_DENIED", block)
+        self.assertIn('"request_log.enabled"', block)
+
+    def test_the_page_offers_the_switch_instead_of_naming_a_variable(self):
+        page = (APP_DIR / "templates" / "request_log.html").read_text(encoding="utf-8")
+        script = (APP_DIR / "static" / "js" / "request_log.js").read_text(encoding="utf-8")
+        # The old notice told the operator to set guardd_request_log_enabled
+        # and gave them no way to do it.
+        self.assertNotIn("guardd_request_log_enabled", page)
+        self.assertIn('id="rq-enable"', page)
+        self.assertIn('id="rq-disable"', page)
+        self.assertIn("/api/security/requests/enabled", script)
+        self.assertIn('"X-CSRFToken"', script)
 
     def test_a_stopped_daemon_degrades_instead_of_erroring(self):
         self.assertIn("GuarddUnavailable", self.routes)

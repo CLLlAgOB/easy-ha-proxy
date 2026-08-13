@@ -495,7 +495,11 @@ whole thing off.
 
 ### Log Explorer
 
-Off by default. When it is on, the security engine writes every request it
+Off by default, with **Start recording** on the page itself -- no
+configuration apply and no restart. The choice is kept in the engine's own
+state, so it outlives both a restart and Ansible re-rendering its
+configuration file, and `guardd_request_log_enabled` remains the shipped
+default it starts from. When it is on, the security engine writes every request it
 already reads into a separate bounded store, and the **Request log** page
 searches it by time, status, client address, host, backend, path prefix and
 request identifier -- so a user quoting one `X-Request-ID` is enough to find

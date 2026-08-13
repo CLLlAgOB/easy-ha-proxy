@@ -1856,7 +1856,8 @@ class RequestLog:
                 " FROM requests"
             ).fetchone()
         return {
-            "enabled": self.config.request_log_enabled,
+            "enabled": True,
+            "configured": self.config.request_log_enabled,
             "rows": int(row["rowcount"] or 0),
             "oldest_ts": int(row["oldest"] or 0),
             "newest_ts": int(row["newest"] or 0),
@@ -2841,6 +2842,29 @@ class GuardHandler(BaseHTTPRequestHandler):
         engine: GuardEngine = self.server.engine  # type: ignore[attr-defined]
         path = urlparse(self.path).path
 
+        if path == "/api/v1/guard/requests/enabled":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+                if length <= 0 or length > 4096:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            try:
+                result = _set_request_log(
+                    self.server, engine, bool(payload.get("enabled"))
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("cannot change the request log")
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, **result})
+            return
+
         if path != "/api/v1/guard/mode":
             self._send_json(404, {"ok": False, "error": "not found"})
             return
@@ -2871,6 +2895,49 @@ class GuardHandler(BaseHTTPRequestHandler):
             return
         result["ok"] = True
         self._send_json(200, result)
+
+
+REQUEST_LOG_OVERRIDE_KEY = "request_log_override"
+
+
+def _request_log_wanted(database: "SecurityDatabase", config: GuardConfig) -> bool:
+    """Whether to keep the request store, config plus any operator switch.
+
+    Kept in guardd's own state rather than in guardd.json, exactly like the
+    enforcement mode: the file is a template Ansible owns and rewrites, so a
+    choice made in the web interface has to live somewhere Ansible does not
+    reach.
+    """
+    override = database.get_state(REQUEST_LOG_OVERRIDE_KEY, "")
+    if override in ("on", "off"):
+        return override == "on"
+    return bool(config.request_log_enabled)
+
+
+def _set_request_log(server: "GuardServer", engine: "GuardEngine", enabled: bool):
+    """Turn the store on or off now, and remember the choice."""
+    engine.database.set_state(REQUEST_LOG_OVERRIDE_KEY, "on" if enabled else "off")
+    if enabled and server.requests is None:
+        store = RequestLog(REQUEST_LOG_PATH, engine.config)
+        server.requests = store
+        engine.requests = store
+        LOG.warning("Request log enabled from the web interface")
+    elif not enabled and server.requests is not None:
+        store = server.requests
+        server.requests = None
+        engine.requests = None
+        # Anything already queued is written before the handle goes away;
+        # dropping it would lose requests the operator can see in the page
+        # right now.
+        with contextlib.suppress(Exception):
+            store.flush()
+        with contextlib.suppress(Exception):
+            store.close()
+        LOG.warning("Request log disabled from the web interface")
+    return {
+        "enabled": server.requests is not None,
+        "configured": bool(engine.config.request_log_enabled),
+    }
 
 
 class GuardServer(ThreadingMixIn, UnixStreamServer):
@@ -2918,19 +2985,18 @@ def main() -> None:
     # The request log rides on the same tail of the same file, so it keeps
     # working with the security engine switched off -- diagnostics should not
     # depend on whether the operator wants scoring.
-    if config.mode == MODE_OFF and not config.request_log_enabled:
+    # The database first: it holds the operator's switch, and that switch
+    # decides whether there is anything to do at all.
+    database = SecurityDatabase(DATABASE_PATH)
+    want_requests = _request_log_wanted(database, config)
+    if config.mode == MODE_OFF and not want_requests:
         LOG.info("Adaptive protection is off in %s; idling", CONFIG_PATH)
         stop = threading.Event()
         with contextlib.suppress(KeyboardInterrupt):
             stop.wait()
         return
 
-    database = SecurityDatabase(DATABASE_PATH)
-    requests = (
-        RequestLog(REQUEST_LOG_PATH, config)
-        if config.request_log_enabled
-        else None
-    )
+    requests = RequestLog(REQUEST_LOG_PATH, config) if want_requests else None
     engine = GuardEngine(
         config, database, alerts=_alert_client(), requests=requests
     )
