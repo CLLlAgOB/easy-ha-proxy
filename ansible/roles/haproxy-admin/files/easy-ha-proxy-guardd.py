@@ -31,6 +31,7 @@ import ipaddress
 import json
 import logging
 import os
+import pathlib
 import pwd
 import re
 import socket
@@ -983,6 +984,34 @@ class ExclusionModel:
     def network_count(self) -> int:
         with self._lock:
             return len(self._networks)
+
+
+HAPROXY_CONFIG_PATH = os.environ.get("HAPROXY_CFG", "/etc/haproxy/haproxy.cfg")
+
+# The thresholds are written into the generated configuration as ACLs, which
+# makes that file the authority on what "exceeded" means. Reading them from
+# there keeps one number in one place: change max_req_rate in the interface,
+# apply, and the engine agrees without being told separately.
+_THRESHOLD_RE = re.compile(
+    r"^\s*acl\s+\S+\s+(?:src_http_req_rate|src_http_err_rate|sc0_conn_rate)"
+    r"\((?P<table>[A-Za-z0-9_.-]+)\)\s+gt\s+(?P<limit>\d+)\s*$",
+    re.MULTILINE,
+)
+
+
+def read_thresholds(path: str = "") -> Dict[str, int]:
+    """Map each counter table to the value HAProxy treats as too much."""
+    try:
+        text = pathlib.Path(path or HAPROXY_CONFIG_PATH).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError as exc:
+        LOG.warning("cannot read %s for thresholds: %s", path or HAPROXY_CONFIG_PATH, exc)
+        return {}
+    return {
+        match.group("table"): int(match.group("limit"))
+        for match in _THRESHOLD_RE.finditer(text)
+    }
 
 
 def _safe_int(value: Any) -> int:
@@ -2147,9 +2176,16 @@ class GuardEngine:
         These say how hard an address is pushing right now. On their own they
         duplicate what HAProxy already enforces; their value is combining with
         the slow behavioural signals the log provides.
+
+        A reading only counts when it is over the ceiling the configuration
+        sets for that table. It used to count whenever it was non-zero, which
+        made "RATE_EXCEEDED" the name for having made one request: on a live
+        gateway that was 534 findings across 40 addresses in a day, 497 of
+        them at a rate of exactly 1 against limits of 200 and above.
         """
 
         written = 0
+        thresholds = read_thresholds()
         for name, rows in tables.items():
             if name.startswith("tbl_rate_"):
                 event_type, field_prefix = EVENT_RATE_EXCEEDED, "http_req_rate"
@@ -2163,13 +2199,20 @@ class GuardEngine:
             else:
                 continue
             site = name.split("_", 2)[-1] if name.count("_") >= 2 else ""
+            limit = thresholds.get(name)
+            if limit is None:
+                # Without the configured ceiling there is no way to tell a
+                # busy client from an ordinary one, and guessing produced a
+                # finding for every visitor who made a single request.
+                LOG.debug("no configured threshold for %s; not scoring it", name)
+                continue
             for ip, fields in rows.items():
                 value = 0
                 for key, raw in fields.items():
                     if key.startswith(field_prefix):
                         value = _safe_int(raw)
                         break
-                if value <= 0:
+                if value <= limit:
                     continue
                 if self.exclusions.verdict(ip).excluded:
                     continue
@@ -2179,7 +2222,7 @@ class GuardEngine:
                     now,
                     source="stick-table",
                     site=site,
-                    detail=f"{field_prefix}={value}",
+                    detail=f"{field_prefix}={value} limit={limit}",
                     fingerprint=f"{ip}|{event_type}|{name}",
                 ):
                     written += 1

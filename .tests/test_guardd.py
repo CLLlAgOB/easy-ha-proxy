@@ -847,6 +847,22 @@ class DetectionTests(EngineTestCase):
 
 
 class RateTableTests(EngineTestCase):
+    # Every case here needs the ceilings the generated configuration sets,
+    # because a counter reading means nothing without them.
+    THRESHOLDS = {
+        "tbl_rate_shop": 100,
+        "tbl_err_shop": 20,
+        "tbl_nosni_tcp": 5,
+    }
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(
+            guardd, "read_thresholds", return_value=dict(self.THRESHOLDS)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_rate_and_error_tables_become_events_with_their_site(self):
         tables = {
             "tbl_rate_shop": {"203.0.113.9": {"http_req_rate(10s)": "120"}},
@@ -859,9 +875,32 @@ class RateTableTests(EngineTestCase):
         self.assertIn(guardd.EVENT_ERROR_RATE_EXCEEDED, events)
         self.assertIn(guardd.EVENT_NOSNI_PROBING, events)
         self.assertEqual(events[guardd.EVENT_RATE_EXCEEDED]["site"], "shop")
+        # Both numbers, so the page can say what was measured against what.
+        self.assertEqual(
+            events[guardd.EVENT_RATE_EXCEEDED]["detail"],
+            "http_req_rate=120 limit=100",
+        )
+
+    def test_a_reading_under_the_ceiling_is_not_an_event(self):
+        # This is the whole bug. One request against a limit of 400 used to be
+        # recorded as RATE_EXCEEDED, and a mail client polling once a minute
+        # sat permanently at WATCH because of it.
+        tables = {"tbl_rate_shop": {"203.0.113.9": {"http_req_rate(10s)": "1"}}}
+        self.assertEqual(self.engine.ingest_rate_tables(tables, 1000), 0)
+
+    def test_a_reading_exactly_at_the_ceiling_is_not_an_event(self):
+        # HAProxy bans on "gt", so the engine must agree on the boundary.
+        tables = {"tbl_rate_shop": {"203.0.113.9": {"http_req_rate(10s)": "100"}}}
+        self.assertEqual(self.engine.ingest_rate_tables(tables, 1000), 0)
 
     def test_a_zero_counter_is_not_an_event(self):
         tables = {"tbl_rate_shop": {"203.0.113.9": {"http_req_rate(10s)": "0"}}}
+        self.assertEqual(self.engine.ingest_rate_tables(tables, 1000), 0)
+
+    def test_a_table_with_no_configured_ceiling_scores_nothing(self):
+        # Better silent than inventing a threshold: guessing is what produced
+        # a finding for every visitor.
+        tables = {"tbl_rate_unknown": {"203.0.113.9": {"http_req_rate(10s)": "9999"}}}
         self.assertEqual(self.engine.ingest_rate_tables(tables, 1000), 0)
 
     def test_one_continuous_incident_does_not_score_every_cycle(self):

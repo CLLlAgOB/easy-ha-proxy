@@ -136,25 +136,32 @@ def _explain(contribution: Dict[str, Any], limits: Dict[str, Dict[str, Any]]) ->
 
     mapping = _LIMIT_FOR_EVENT.get(str(contribution.get("event_type") or ""))
     detail = str(contribution.get("detail") or "")
-    match = re.search(r"=(\d+)$", detail)
-    if not (mapping and match):
+    observed_match = re.search(r"(?:req|err)_rate=(\d+)", detail)
+    if not (mapping and observed_match):
         return
     setting, window_key, unit = mapping
-    observed = int(match.group(1))
+    observed = int(observed_match.group(1))
     contribution["observed"] = observed
     contribution["unit"] = unit
     contribution["setting"] = setting
-    if not known:
+
+    # The daemon reads the ceiling out of the generated configuration and puts
+    # it in the finding, so that number is what actually applied at the time.
+    # websites.yml is only the fallback, and it can disagree if the setting was
+    # changed after the finding was recorded.
+    limit_match = re.search(r"limit=(\d+)", detail)
+    limit = int(limit_match.group(1)) if limit_match else known and known.get(setting)
+    if not isinstance(limit, int) or limit <= 0:
         return
-    limit = known.get(setting)
-    window = known.get(window_key)
-    if isinstance(limit, int) and limit > 0:
-        contribution["limit"] = limit
-        contribution["window"] = window
-        contribution["over_by"] = max(0, observed - limit)
-        # A little headroom, so raising it to exactly the observed peak does
-        # not put the operator back here on the next slightly busier minute.
-        contribution["suggested"] = int(observed * 1.5)
+    contribution["limit"] = limit
+    if known:
+        contribution["window"] = known.get(window_key)
+    contribution["over_by"] = max(0, observed - limit)
+    # Headroom above the peak, so raising it to exactly what was seen does not
+    # put the operator back here on the next slightly busier minute -- but
+    # never a number below the limit already in force, which would read as
+    # advice to tighten it.
+    contribution["suggested"] = max(limit + 1, int(observed * 1.5))
 
 
 def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:
