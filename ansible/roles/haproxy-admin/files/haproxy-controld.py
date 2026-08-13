@@ -1412,7 +1412,7 @@ def _enforce_config_policy(raw: bytes) -> None:
         "log", "nbthread", "maxconn", "chroot", "stats", "user", "group",
         "daemon", "ca-base", "crt-base", "ssl-default-bind-ciphersuites",
         "ssl-default-bind-ciphers", "ssl-default-bind-options", "localpeer",
-        "lua-prepend-path", "lua-load",
+        "lua-prepend-path", "lua-load", "server-state-file",
     }
     in_global = False
     saw_global = False
@@ -1459,6 +1459,15 @@ def _enforce_config_policy(raw: bytes) -> None:
             lua_path = line.split(None, 1)[1].strip()
             if not lua_path.startswith("/etc/haproxy/lua/"):
                 raise ValueError("HAProxy Lua search path must stay under /etc/haproxy/lua")
+        elif token == "server-state-file":
+            # Pinned to the chroot this policy already requires, so a pasted
+            # configuration cannot point HAProxy at an arbitrary file to read
+            # as server state.
+            state_path = line.split(None, 1)[1].strip()
+            if not state_path.startswith("/var/lib/haproxy/"):
+                raise ValueError(
+                    "HAProxy server state file must stay under /var/lib/haproxy"
+                )
 
     if not saw_global or not all(required.values()):
         raise ValueError("required HAProxy privilege-drop directives are missing")

@@ -152,6 +152,124 @@ class HAProxyControlPolicyTests(unittest.TestCase):
                 self.base.replace(b"user haproxy", b"user root")
             )
 
+    def test_rejects_a_server_state_file_outside_the_chroot(self) -> None:
+        # Allowing the directive must not mean allowing any path: HAProxy
+        # reads this file at startup, and the policy already pins the chroot.
+        elsewhere = self.base.replace(
+            b"    daemon", b"    daemon\n    server-state-file /etc/shadow"
+        )
+        with self.assertRaisesRegex(ValueError, "server state file"):
+            self.controld._enforce_config_policy(elsewhere)
+
+    def test_accepts_the_state_file_inside_the_chroot(self) -> None:
+        inside = self.base.replace(
+            b"    daemon",
+            b"    daemon\n    server-state-file /var/lib/haproxy/server-state",
+        )
+        self.controld._enforce_config_policy(inside)
+
+
+class GeneratedConfigurationPassesItsOwnPolicyTests(unittest.TestCase):
+    """The product must not generate a configuration it then refuses.
+
+    Both the check button and every apply run the candidate through
+    _enforce_config_policy. A global directive that the template emits but the
+    policy does not list blocks the entire configuration editor -- which is
+    how `server-state-file` shipped broken for a day: the drain feature added
+    it to the template, the allow-list beside it was never touched, and the
+    hand-written fixtures above never noticed because they are not the
+    configuration the product actually writes.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.controld = load_module(
+            "easy_ha_controld_generated",
+            ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py",
+        )
+
+    def render(self, **flags) -> bytes:
+        import re as _re
+
+        from jinja2 import Environment, FileSystemLoader
+
+        def combine(value, other, recursive=False):
+            base = {} if value is None else dict(value)
+            for key, item in dict(other or {}).items():
+                if recursive and isinstance(base.get(key), dict) and isinstance(item, dict):
+                    base[key] = combine(base[key], item, recursive=True)
+                else:
+                    base[key] = item
+            return base
+
+        environment = Environment(
+            loader=FileSystemLoader(
+                str(ROOT / "ansible/roles/haproxy/templates")
+            ),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+        environment.filters["regex_replace"] = (
+            lambda value, pattern, repl: "" if value is None else _re.sub(
+                pattern, repl, str(value)
+            )
+        )
+        environment.filters["combine"] = combine
+        context = {
+            "sites": [
+                {
+                    "name": "shop",
+                    "domain": "shop.example.test",
+                    "backend_ip": "10.0.0.10",
+                    "backend_port": 8080,
+                }
+            ],
+            "tcp_proxies": [],
+            "tcp": [],
+            "site_defaults": {},
+            "haproxy_threads": 2,
+            "admin_domain": "ha.example.test",
+            "aut_domain": "aut.example.test",
+            "easy_ha_proxy_runtime_vars": {},
+            "easy_ha_proxy_runtime_websites": {},
+            "easy_ha_proxy_runtime_tcp": {},
+        }
+        context.update(flags)
+        return environment.get_template("haproxy.cfg.j2").render(
+            **context
+        ).encode("utf-8")
+
+    def test_every_shipped_combination_survives_the_policy(self) -> None:
+        for label, flags in (
+            ("defaults", {}),
+            ("server state off", {"haproxy_server_state_enabled": False}),
+            ("authelia off", {"authelia_enabled": False}),
+            ("geoip on", {"enable_geoip": True}),
+            ("metrics on", {"metrics_export_enabled": True}),
+            (
+                "everything on",
+                {
+                    "authelia_enabled": True,
+                    "enable_geoip": True,
+                    "metrics_export_enabled": True,
+                    "enable_http80": True,
+                },
+            ),
+        ):
+            with self.subTest(label):
+                self.controld._enforce_config_policy(self.render(**flags))
+
+    def test_the_state_file_the_template_writes_is_the_one_allowed(self) -> None:
+        # Not just "some path is accepted": the default the role ships has to
+        # be inside the directory the policy pins.
+        rendered = self.render().decode("utf-8")
+        line = next(
+            item.strip()
+            for item in rendered.splitlines()
+            if item.strip().startswith("server-state-file")
+        )
+        self.assertTrue(line.endswith("/var/lib/haproxy/server-state"), line)
+
 
 class ApplicationSecurityBoundaryTests(unittest.TestCase):
     @classmethod
