@@ -30,6 +30,7 @@ Environment="BACKUPD_SERVICE_NAME=easy-ha-proxy-backupd.service"
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+Environment="BACKUPD_DESTINATIONS_DIR={{ backupd_destinations_dir | default('/etc/easy-ha-proxy/backup-destinations') }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-backupd.py', rstrip=false) | hash('sha256') }}"
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backupd.py
 Restart=always

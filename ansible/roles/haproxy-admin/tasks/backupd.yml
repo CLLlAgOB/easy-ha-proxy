@@ -85,3 +85,56 @@
   ansible.builtin.systemd:
     name: easy-ha-proxy-backupd.service
     state: started
+
+# --- The scheduled off-host copy -------------------------------------------
+#
+# The timer only asks the daemon to run; the daemon holds the maintenance lock
+# that keeps a scheduled backup from racing a restore or an update.
+
+- name: "easy-ha-proxy-backupd | Ensure the destinations directory"
+  ansible.builtin.file:
+    path: "{{ backupd_destinations_dir | default('/etc/easy-ha-proxy/backup-destinations') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "easy-ha-proxy-backupd | Install the schedule runner"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-backup-run.py
+    dest: /usr/local/sbin/easy-ha-proxy-backup-run.py
+    owner: root
+    group: root
+    mode: "0755"
+  register: backup_runner
+
+- name: "easy-ha-proxy-backupd | Install the schedule unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-backup.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: backup_schedule_unit
+
+- name: "easy-ha-proxy-backupd | Install the schedule timer"
+  ansible.builtin.template:
+    src: easy-ha-proxy-backup.timer.j2
+    dest: /etc/systemd/system/easy-ha-proxy-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: backup_schedule_timer
+
+- name: "easy-ha-proxy-backupd | Reload systemd for the schedule"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: backup_schedule_unit.changed or backup_schedule_timer.changed
+
+# The timer is armed on the host; whether it does anything is the daemon's
+# schedule file, which the operator owns through the interface.
+- name: "easy-ha-proxy-backupd | Enable the schedule timer"
+  ansible.builtin.systemd:
+    name: easy-ha-proxy-backup.timer
+    enabled: "{{ backup_schedule_enabled | default(true) | bool }}"
+    state: "{{ 'started' if (backup_schedule_enabled | default(true) | bool) else 'stopped' }}"

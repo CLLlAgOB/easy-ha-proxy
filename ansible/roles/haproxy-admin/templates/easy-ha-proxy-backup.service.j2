@@ -1,0 +1,15 @@
+# /etc/systemd/system/easy-ha-proxy-backup.service
+[Unit]
+Description=Scheduled easy-ha-proxy backup and off-host copy
+After=network-online.target easy-ha-proxy-backupd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+# The daemon owns the maintenance lock, so the timer only asks it to run and
+# waits for the answer. Doing the work here would race a restore or an update.
+ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backup-run.py
+TimeoutStartSec={{ backup_schedule_timeout | default('8h') }}
+Nice=10
+IOSchedulingClass=idle

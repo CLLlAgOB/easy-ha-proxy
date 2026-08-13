@@ -68,7 +68,20 @@ AUDITED_ACTIONS = {
     "start_backup": ("backup.start", ("include_ssh", "quiesce")),
     "start_restore": ("restore.start", ("upload_id", "scope", "restore_ssh")),
     "delete": ("backup.delete", ("kind", "id")),
+    "destination_save": ("backup_destination.save", ("name", "type", "host", "user")),
+    "destination_delete": ("backup_destination.delete", ("name",)),
+    "destination_test": ("backup_destination.test", ("name",)),
+    "upload": ("backup.upload", ("backup_id", "destination")),
 }
+
+DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _destination_name(value) -> str:
+    text = str(value or "").strip().lower()
+    if not DESTINATION_NAME_RE.fullmatch(text):
+        abort(400, description="the destination name may use a-z, 0-9 and dashes")
+    return text
 
 
 def _call_daemon(payload: dict, *, accepted: bool = False, timeout: float = 10.0):
@@ -372,4 +385,65 @@ def download_backup(backup_id: str):
         download_name=filename,
         conditional=True,
         max_age=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Off-host destinations
+# ---------------------------------------------------------------------------
+
+
+@bp_system_backups.get("/api/destinations")
+def list_destinations_view():
+    return _call_daemon({"action": "destinations"})
+
+
+@bp_system_backups.post("/api/destinations")
+def save_destination_view():
+    payload = _json_payload(
+        {"name", "type", "host", "user", "path"},
+        {
+            "port", "private_key", "host_key", "keep_daily", "keep_weekly",
+            "keep_monthly",
+        },
+    )
+    command = {"action": "destination_save", "name": _destination_name(payload["name"])}
+    for key in (
+        "type", "host", "user", "path", "port", "private_key", "host_key",
+        "keep_daily", "keep_weekly", "keep_monthly",
+    ):
+        if key in payload:
+            command[key] = payload[key]
+    return _call_daemon(command)
+
+
+@bp_system_backups.post("/api/destinations/delete")
+def delete_destination_view():
+    payload = _json_payload({"name"})
+    return _call_daemon(
+        {"action": "destination_delete", "name": _destination_name(payload["name"])}
+    )
+
+
+@bp_system_backups.post("/api/destinations/test")
+def test_destination_view():
+    payload = _json_payload({"name"})
+    # The far end may be slow to answer; the daemon has its own timeout.
+    return _call_daemon(
+        {"action": "destination_test", "name": _destination_name(payload["name"])},
+        timeout=90.0,
+    )
+
+
+@bp_system_backups.post("/api/destinations/upload")
+def upload_backup_view():
+    payload = _json_payload({"backup_id", "destination"})
+    return _call_daemon(
+        {
+            "action": "upload",
+            "backup_id": _identifier(payload["backup_id"], "backup id"),
+            "destination": _destination_name(payload["destination"]),
+        },
+        accepted=False,
+        timeout=1800.0,
     )

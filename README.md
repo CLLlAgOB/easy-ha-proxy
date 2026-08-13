@@ -436,6 +436,38 @@ header are stored root-only and are never sent back to the browser.
 Reporting is best effort by contract. A stopped alert daemon costs a
 notification -- never a metrics sample, a ban, or a reload.
 
+### Off-host backup copies
+
+An encrypted archive sitting on the server it would be used to rebuild is not
+a backup of that server. A **destination** on `/system/backups` pushes the
+finished archive somewhere else over SFTP. Only the already-encrypted file
+moves: the passphrase stays on the gateway and nothing is unpacked on the way.
+
+Two rules make this safe rather than merely convenient.
+
+The far end must be the one you pinned. The host key is saved with the
+destination and strict checking stays on -- copying to whoever answers on that
+address is a way to hand someone an archive to attack at their leisure. Saving
+a destination without a host key is refused, not defaulted. Take it from
+`ssh-keyscan` and check it against what the far end reports.
+
+Nothing older is deleted until the new copy is proven. Verification asks the
+far end to hash the file, and falls back to reading it back and hashing it
+here when there is no shell there. If neither works, the copy is reported as
+unverified and the retention policy does not run at all. The archive is also
+uploaded under a `.part` name and renamed, so an interrupted transfer cannot
+look like a finished backup to whatever prunes next.
+
+A **schedule** can make and send a backup unattended. That needs a passphrase
+stored on this host, which is a real weakening and is treated as one: the
+schedule refuses to arm without it rather than quietly producing a weaker
+archive, and it protects the archive wherever it is sent rather than against
+someone who already owns the gateway. The timer only asks the daemon to run,
+so a scheduled backup takes the same maintenance lock as everything else and
+cannot race a restore or an update.
+
+S3-compatible storage is not implemented yet.
+
 ### Request identifier
 
 Every request gets one identifier, minted at the edge. It is written to the

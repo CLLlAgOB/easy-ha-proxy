@@ -292,7 +292,11 @@ class InstrumentationTests(unittest.TestCase):
             "ca.import", "acme_email.update", "site.create", "site.update",
             "site.delete", "tcp_proxy.create", "tcp_proxy.delete",
         ),
-        "routes_backup.py": ("backup.start", "restore.start", "backup.delete"),
+        "routes_backup.py": (
+            "backup.start", "restore.start", "backup.delete",
+            "backup_destination.save", "backup_destination.delete",
+            "backup_destination.test", "backup.upload",
+        ),
         "routes_updates.py": (
             "update.channels", "update.apply", "system.reboot",
             "system.reboot_cancel",

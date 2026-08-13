@@ -347,5 +347,162 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn("passphrase", block)
 
 
+class ScheduleTests(DestinationTestCase):
+    def setUp(self):
+        super().setUp()
+        base = Path(self.directory.name)
+        for name, value in (
+            ("SCHEDULE_PATH", base / "schedule.json"),
+            ("SCHEDULE_PASSPHRASE_PATH", base / "schedule.key"),
+        ):
+            patcher = mock.patch.object(backupd, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.save()
+
+    def test_it_starts_off_and_stores_nothing(self):
+        schedule = backupd.load_schedule()
+        self.assertFalse(schedule["enabled"])
+        self.assertFalse(schedule["passphrase_stored"])
+        self.assertEqual(schedule["destinations"], [])
+
+    def test_it_cannot_be_armed_without_a_stored_passphrase(self):
+        # An unattended backup has to encrypt with something; refusing is
+        # better than quietly making a weaker archive.
+        with self.assertRaises(backupd.BackupdError) as caught:
+            backupd.save_schedule(
+                {"action": "schedule_save", "enabled": True, "destinations": ["offsite"]}
+            )
+        self.assertIn("passphrase", str(caught.exception))
+
+    def test_it_cannot_be_armed_without_a_destination(self):
+        with self.assertRaises(backupd.BackupdError):
+            backupd.save_schedule({
+                "action": "schedule_save", "enabled": True,
+                "destinations": [], "passphrase": "correct horse battery",
+            })
+
+    def test_a_destination_that_does_not_exist_is_refused(self):
+        with self.assertRaises(backupd.BackupdError):
+            backupd.save_schedule({
+                "action": "schedule_save", "enabled": True,
+                "destinations": ["nowhere"], "passphrase": "correct horse battery",
+            })
+
+    def test_arming_it_stores_the_passphrase_root_only(self):
+        backupd.save_schedule({
+            "action": "schedule_save", "enabled": True,
+            "destinations": ["offsite"], "passphrase": "correct horse battery",
+        })
+        self.assertEqual(
+            backupd.SCHEDULE_PASSPHRASE_PATH.stat().st_mode & 0o777, 0o600
+        )
+        self.assertTrue(backupd.load_schedule()["enabled"])
+
+    def test_the_passphrase_never_comes_back(self):
+        backupd.save_schedule({
+            "action": "schedule_save", "enabled": True,
+            "destinations": ["offsite"], "passphrase": "correct horse battery",
+        })
+        blob = json.dumps(backupd.schedule_status({"action": "schedule"}))
+        self.assertNotIn("correct horse battery", blob)
+        self.assertIn('"passphrase_stored": true', blob)
+
+    def test_clearing_the_passphrase_removes_the_file(self):
+        backupd.save_schedule({
+            "action": "schedule_save", "enabled": True,
+            "destinations": ["offsite"], "passphrase": "correct horse battery",
+        })
+        backupd.save_schedule(
+            {"action": "schedule_save", "enabled": False, "passphrase": ""}
+        )
+        self.assertFalse(backupd.SCHEDULE_PASSPHRASE_PATH.exists())
+
+    def test_a_run_while_switched_off_does_nothing(self):
+        result = backupd.run_scheduled_backup({"action": "run_scheduled"})
+        self.assertTrue(result["ok"])
+        self.assertIn("off", result["skipped"])
+
+    def test_a_backup_that_does_not_finish_is_not_uploaded(self):
+        backupd.save_schedule({
+            "action": "schedule_save", "enabled": True,
+            "destinations": ["offsite"], "passphrase": "correct horse battery",
+        })
+        with (
+            mock.patch.object(backupd, "start_backup", return_value={"job_id": "j" * 32}),
+            mock.patch.object(
+                backupd, "load_job", return_value={"status": "failed", "error": "boom"}
+            ),
+            mock.patch.object(backupd, "upload_backup") as upload,
+            mock.patch.object(backupd, "report_alert") as reported,
+            mock.patch.object(backupd.time, "sleep", lambda _seconds: None),
+        ):
+            result = backupd.run_scheduled_backup({"action": "run_scheduled"})
+        self.assertFalse(result["ok"])
+        upload.assert_not_called()
+        self.assertTrue(reported.called)
+
+    def test_a_finished_backup_is_sent_to_every_destination(self):
+        backupd.save_schedule({
+            "action": "schedule_save", "enabled": True,
+            "destinations": ["offsite"], "passphrase": "correct horse battery",
+        })
+        completed = {
+            "status": "completed",
+            "output": {"backup_id": "a" * 32},
+        }
+        with (
+            mock.patch.object(backupd, "start_backup", return_value={"job_id": "j" * 32}),
+            mock.patch.object(backupd, "load_job", return_value=completed),
+            mock.patch.object(
+                backupd, "upload_backup", return_value={"ok": True, "pruned": []}
+            ) as upload,
+            mock.patch.object(backupd.time, "sleep", lambda _seconds: None),
+        ):
+            result = backupd.run_scheduled_backup({"action": "run_scheduled"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(upload.call_args.args[0]["destination"], "offsite")
+        self.assertEqual(upload.call_args.args[0]["backup_id"], "a" * 32)
+
+    def test_the_outcome_is_remembered_for_the_page(self):
+        backupd.save_schedule({
+            "action": "schedule_save", "enabled": True,
+            "destinations": ["offsite"], "passphrase": "correct horse battery",
+        })
+        backupd.record_schedule_outcome("copied to 1 destination(s)")
+        schedule = backupd.load_schedule()
+        self.assertTrue(schedule["last_run"])
+        self.assertIn("copied", schedule["last_result"])
+        # And the settings are not lost by writing the outcome.
+        self.assertTrue(schedule["enabled"])
+        self.assertEqual(schedule["destinations"], ["offsite"])
+
+
+class ScheduleWiringTests(unittest.TestCase):
+    def test_the_timer_asks_the_daemon_rather_than_doing_the_work(self):
+        unit = (
+            ROOT / "ansible/roles/haproxy-admin/templates/easy-ha-proxy-backup.service.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("easy-ha-proxy-backup-run.py", unit)
+        self.assertIn("Type=oneshot", unit)
+        runner = (
+            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backup-run.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"action": "run_scheduled"', runner)
+        # Nothing about the backup itself is decided in the runner: it never
+        # reads the stored passphrase and never sends one. (The word appears
+        # in its docstring, explaining exactly that.)
+        self.assertNotIn("SCHEDULE_PASSPHRASE", runner)
+        self.assertNotIn('"passphrase"', runner)
+        self.assertNotIn("destinations\"]", runner)
+
+    def test_the_timer_is_persistent_so_a_missed_run_still_happens(self):
+        timer = (
+            ROOT / "ansible/roles/haproxy-admin/templates/easy-ha-proxy-backup.timer.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("RandomizedDelaySec=", timer)
+
+
 if __name__ == "__main__":
     unittest.main()

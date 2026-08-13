@@ -238,3 +238,14 @@ haproxy_certd_socket_group: "hadmin"
 # and has no default, because a shipped default token is not a gate.
 metrics_export_enabled: false
 metrics_export_token: ""
+
+# --- Off-host backup copies ---
+# The timer is armed by default but does nothing until the operator saves a
+# destination, stores a passphrase and switches the schedule on: an unattended
+# backup needs a passphrase that lives on this host, and that is a decision to
+# take deliberately rather than by default.
+backupd_destinations_dir: /etc/easy-ha-proxy/backup-destinations
+backup_schedule_enabled: true
+backup_schedule_oncalendar: "*-*-* 03:20:00"
+backup_schedule_jitter: 20m
+backup_schedule_timeout: 8h

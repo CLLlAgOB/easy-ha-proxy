@@ -216,6 +216,14 @@ REQUEST_FIELDS = {
     "destination_delete": frozenset({"action", "name"}),
     "destination_test": frozenset({"action", "name"}),
     "upload": frozenset({"action", "backup_id", "destination"}),
+    "schedule": frozenset({"action"}),
+    "schedule_save": frozenset(
+        {
+            "action", "enabled", "destinations", "include_ssh", "quiesce",
+            "passphrase",
+        }
+    ),
+    "run_scheduled": frozenset({"action"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -2225,6 +2233,9 @@ DESTINATIONS_DIR = Path(
 DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 DESTINATION_TYPES = ("sftp",)
 SFTP_TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_SFTP_TIMEOUT", "900"))
+SCHEDULED_BACKUP_TIMEOUT = int(
+    os.environ.get("BACKUPD_SCHEDULED_TIMEOUT", str(6 * 3600))
+)
 # Re-downloading to verify is exact but costs the transfer twice. Above this
 # the daemon asks the far end to hash instead, and says which it used.
 VERIFY_DOWNLOAD_MAX_BYTES = int(
@@ -2638,6 +2649,182 @@ def test_destination(request: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "destination": record["name"]}
 
 
+# ---------------------------------------------------------------------------
+# The scheduled copy
+# ---------------------------------------------------------------------------
+#
+# An unattended backup has to encrypt with something, and the only place that
+# something can live is this host. That is a real weakening and it is stated
+# plainly rather than hidden: the stored passphrase protects the archive
+# wherever it is *sent*, not against someone who already owns the gateway.
+# Without a stored passphrase the schedule refuses to run rather than making a
+# weaker archive on its own initiative.
+
+SCHEDULE_PATH = Path(
+    os.environ.get("BACKUPD_SCHEDULE", "/etc/easy-ha-proxy/backup-schedule.json")
+)
+SCHEDULE_PASSPHRASE_PATH = Path(
+    os.environ.get(
+        "BACKUPD_SCHEDULE_PASSPHRASE", "/etc/easy-ha-proxy/backup-schedule.key"
+    )
+)
+
+
+def load_schedule() -> dict[str, Any]:
+    try:
+        record = safe_json_file(SCHEDULE_PATH)
+    except Exception:  # noqa: BLE001 - a broken file must not stop the daemon
+        record = {}
+    return {
+        "enabled": bool(record.get("enabled")),
+        "destinations": [
+            str(item)
+            for item in (record.get("destinations") or [])
+            if isinstance(item, str)
+        ],
+        "include_ssh": bool(record.get("include_ssh")),
+        "quiesce": record.get("quiesce", True) is not False,
+        "passphrase_stored": SCHEDULE_PASSPHRASE_PATH.is_file(),
+        "last_run": record.get("last_run", ""),
+        "last_result": record.get("last_result", ""),
+    }
+
+
+def schedule_status(_request: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "schedule": load_schedule()}
+
+
+def save_schedule(request: dict[str, Any]) -> dict[str, Any]:
+    current = load_schedule()
+    names = request.get("destinations")
+    if names is None:
+        names = current["destinations"]
+    if not isinstance(names, list):
+        raise BackupdError("destinations must be a list", code="invalid")
+    chosen = []
+    for item in names:
+        name = str(item or "").strip().lower()
+        # Refuse a name that does not resolve, so the schedule cannot be armed
+        # pointing at nothing.
+        load_destination(name)
+        chosen.append(name)
+
+    passphrase = request.get("passphrase")
+    if isinstance(passphrase, str) and passphrase:
+        write_private(
+            SCHEDULE_PASSPHRASE_PATH, require_passphrase(passphrase).encode("utf-8")
+        )
+    elif passphrase == "":
+        with contextlib.suppress(FileNotFoundError):
+            SCHEDULE_PASSPHRASE_PATH.unlink()
+
+    enabled = request.get("enabled")
+    enabled = current["enabled"] if enabled is None else bool(enabled)
+    if enabled and not SCHEDULE_PASSPHRASE_PATH.is_file():
+        raise BackupdError(
+            "a stored passphrase is required before the schedule can run",
+            code="invalid",
+        )
+    if enabled and not chosen:
+        raise BackupdError(
+            "choose at least one destination before enabling the schedule",
+            code="invalid",
+        )
+
+    record = {
+        "enabled": enabled,
+        "destinations": chosen,
+        "include_ssh": bool(request.get("include_ssh", current["include_ssh"])),
+        "quiesce": request.get("quiesce", current["quiesce"]) is not False,
+        "last_run": current["last_run"],
+        "last_result": current["last_result"],
+    }
+    atomic_json(SCHEDULE_PATH, record, mode=0o600)
+    return {"ok": True, "schedule": load_schedule()}
+
+
+def record_schedule_outcome(result: str) -> None:
+    try:
+        record = safe_json_file(SCHEDULE_PATH)
+    except Exception:  # noqa: BLE001
+        record = {}
+    record["last_run"] = utc_now()
+    record["last_result"] = result[:500]
+    with contextlib.suppress(Exception):
+        atomic_json(SCHEDULE_PATH, record, mode=0o600)
+
+
+def run_scheduled_backup(_request: dict[str, Any]) -> dict[str, Any]:
+    """Make a backup and send it away. Invoked by the timer, not by a person.
+
+    Runs inline rather than as a background job: the timer wants an exit code,
+    and the maintenance lock the backup takes is what keeps it from racing a
+    restore or an update.
+    """
+    schedule = load_schedule()
+    if not schedule["enabled"]:
+        return {"ok": True, "skipped": "the schedule is off"}
+    if not schedule["passphrase_stored"]:
+        record_schedule_outcome("no stored passphrase")
+        raise BackupdError("no stored passphrase", code="invalid")
+
+    passphrase = SCHEDULE_PASSPHRASE_PATH.read_text(encoding="utf-8").strip()
+    started = start_backup(
+        {
+            "action": "start_backup",
+            "passphrase": passphrase,
+            "include_ssh": schedule["include_ssh"],
+            "quiesce": schedule["quiesce"],
+        }
+    )
+    passphrase = ""
+    job_id = started["job_id"]
+
+    deadline = time.monotonic() + SCHEDULED_BACKUP_TIMEOUT
+    state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        time.sleep(5)
+        with contextlib.suppress(BackupdError):
+            state = load_job(job_id, include_logs=False)
+        if state.get("status") in TERMINAL_STATUSES:
+            break
+    if state.get("status") != "completed":
+        record_schedule_outcome(f"the backup did not complete: {state.get('status')}")
+        report_alert(
+            "backup.failed",
+            job_id,
+            "The scheduled backup did not complete",
+            str(state.get("error") or "")[:500],
+        )
+        return {"ok": False, "job_id": job_id, "error": "the backup did not complete"}
+
+    backup_id = ((state.get("output") or {}).get("backup_id")) or ""
+    uploads = []
+    failures = []
+    for name in schedule["destinations"]:
+        try:
+            outcome = upload_backup(
+                {"action": "upload", "backup_id": backup_id, "destination": name}
+            )
+        except BackupdError as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        uploads.append(outcome)
+        if not outcome.get("ok"):
+            failures.append(f"{name}: {outcome.get('error')}")
+
+    record_schedule_outcome(
+        "; ".join(failures) if failures else f"copied to {len(uploads)} destination(s)"
+    )
+    return {
+        "ok": not failures,
+        "job_id": job_id,
+        "backup_id": backup_id,
+        "uploads": uploads,
+        "errors": failures,
+    }
+
+
 def dispatch(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise BackupdError("request must be a JSON object")
@@ -2667,6 +2854,12 @@ def dispatch(request: Any) -> dict[str, Any]:
         return test_destination(request)
     if action == "upload":
         return upload_backup(request)
+    if action == "schedule":
+        return schedule_status(request)
+    if action == "schedule_save":
+        return save_schedule(request)
+    if action == "run_scheduled":
+        return run_scheduled_backup(request)
     return delete_item(request)
 
 

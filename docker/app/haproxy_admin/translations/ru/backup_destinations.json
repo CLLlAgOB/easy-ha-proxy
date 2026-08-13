@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Copies on another machine": "Копии на другой машине",
+    "An encrypted archive sitting on the server it would rebuild is not a backup of that server. A destination pushes the finished archive somewhere else over SFTP. Only the already-encrypted file is sent: the passphrase stays here and nothing is unpacked on the way.": "Зашифрованный архив, лежащий на том же сервере, который он должен восстановить, — не резервная копия этого сервера. Назначение отправляет готовый архив в другое место по SFTP. Уходит только уже зашифрованный файл: парольная фраза остаётся здесь, и по пути ничего не распаковывается.",
+    "The host key you pin is the one that will be accepted, and nothing older is removed on the far end until the new copy has been verified there. The private key and the host key are stored root-only and are never sent back to this page.": "Принят будет ровно тот host key, который вы закрепили, а старое на той стороне не удаляется, пока новая копия там не проверена. Закрытый ключ и host key хранятся с доступом только для root и обратно на эту страницу не возвращаются.",
+    "Keep": "Хранить",
+    "Remote directory": "Каталог на той стороне",
+    "Keep daily": "Дневных",
+    "Keep weekly": "Недельных",
+    "Keep monthly": "Месячных",
+    "Private key": "Закрытый ключ",
+    "Leave the key empty when editing an existing destination to keep the one already stored.": "При редактировании существующего назначения оставьте поле ключа пустым, чтобы сохранить уже записанный.",
+    "Host key": "Host key",
+    "and check it against what the far end reports. This is the whole defence against sending the archive to whoever answers on that address.": "и сверьте с тем, что сообщает та сторона. Это и есть вся защита от отправки архива тому, кто ответил по этому адресу.",
+    "Take it from": "Возьмите его командой",
+    "Save destination": "Сохранить назначение",
+    "No destination yet": "Назначений пока нет",
+    "Test": "Проверить",
+    "Editing": "Редактируется",
+    "Deleted": "Удалено",
+    "Could not delete it": "Удалить не удалось",
+    "Testing": "Проверка",
+    "The destination answered and the path is writable": "Назначение ответило, каталог доступен для записи",
+    "The destination did not answer": "Назначение не ответило",
+    "The backup service is not answering": "Служба резервного копирования не отвечает",
+    "It was not saved": "Не сохранено"
+  }
+}

@@ -1,0 +1,11 @@
+# /etc/systemd/system/easy-ha-proxy-backup.timer
+[Unit]
+Description=Scheduled easy-ha-proxy backup and off-host copy
+
+[Timer]
+OnCalendar={{ backup_schedule_oncalendar | default('*-*-* 03:20:00') }}
+RandomizedDelaySec={{ backup_schedule_jitter | default('20m') }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
