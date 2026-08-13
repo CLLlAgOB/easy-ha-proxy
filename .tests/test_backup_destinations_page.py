@@ -91,6 +91,28 @@ class PageTests(unittest.TestCase):
         self.assertIsNotNone(tag)
         self.assertIn("data-i18n-skip", tag.group(0))
 
+    def test_the_form_shows_only_the_fields_that_kind_needs(self):
+        for element_id in (
+            "dest-type", "dest-sftp-fields", "dest-s3-fields",
+            "dest-endpoint", "dest-bucket", "dest-access-key",
+            "dest-secret-key", "dest-allow-insecure",
+        ):
+            self.assertIn(f'id="{element_id}"', self.template)
+        self.assertIn("function showKind()", self.javascript)
+        self.assertIn('byId("dest-s3-fields").hidden = kind !== "s3";', self.javascript)
+
+    def test_only_the_chosen_kind_is_sent(self):
+        # Sending SFTP fields alongside an S3 destination would have the
+        # daemon validate a host that the operator never entered.
+        block = self.javascript.split("async function save")[1]
+        self.assertIn('if (kind === "s3") {', block)
+        self.assertIn("body.secret_key = secret;", block)
+        self.assertIn("body.private_key = key;", block)
+
+    def test_the_s3_secret_starts_empty_too(self):
+        self.assertIn('byId("dest-secret-key").value = "";', self.javascript)
+        self.assertIn("if (secret) body.secret_key = secret;", self.javascript)
+
     def test_the_page_explains_why_the_host_key_matters(self):
         self.assertIn("whoever answers on that address", self.template)
         self.assertIn("ssh-keyscan", self.template)

@@ -13,7 +13,6 @@
     "Keep weekly": "Недельных",
     "Keep monthly": "Месячных",
     "Private key": "Закрытый ключ",
-    "Leave the key empty when editing an existing destination to keep the one already stored.": "При редактировании существующего назначения оставьте поле ключа пустым, чтобы сохранить уже записанный.",
     "Host key": "Host key",
     "and check it against what the far end reports. This is the whole defence against sending the archive to whoever answers on that address.": "и сверьте с тем, что сообщает та сторона. Это и есть вся защита от отправки архива тому, кто ответил по этому адресу.",
     "Take it from": "Возьмите его командой",
@@ -27,6 +26,16 @@
     "The destination answered and the path is writable": "Назначение ответило, каталог доступен для записи",
     "The destination did not answer": "Назначение не ответило",
     "The backup service is not answering": "Служба резервного копирования не отвечает",
-    "It was not saved": "Не сохранено"
+    "It was not saved": "Не сохранено",
+    "S3-compatible": "S3-совместимое",
+    "Endpoint": "Endpoint",
+    "Region": "Регион",
+    "Bucket": "Бакет",
+    "Prefix": "Префикс",
+    "Access key": "Access key",
+    "Secret key": "Secret key",
+    "Allow a plain http endpoint": "Разрешить endpoint по обычному http",
+    "The upload carries the archive's SHA-256 in its signature, so the storage service refuses a body that does not match it. A successful upload is already proof the far end holds these exact bytes, with no second transfer to check.": "Загрузка несёт SHA-256 архива внутри подписи, поэтому хранилище отвергает тело, которое ей не соответствует. Успешная загрузка уже сама по себе доказывает, что на той стороне лежат ровно эти байты, и второй передачи для проверки не нужно.",
+    "Leave a key or secret empty when editing an existing destination to keep the one already stored.": "При редактировании существующего назначения оставьте поле ключа или секрета пустым, чтобы сохранить уже записанный."
   }
 }

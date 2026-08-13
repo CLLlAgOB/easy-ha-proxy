@@ -401,16 +401,18 @@ def list_destinations_view():
 @bp_system_backups.post("/api/destinations")
 def save_destination_view():
     payload = _json_payload(
-        {"name", "type", "host", "user", "path"},
+        {"name", "type"},
         {
-            "port", "private_key", "host_key", "keep_daily", "keep_weekly",
-            "keep_monthly",
+            "host", "user", "path", "port", "private_key", "host_key",
+            "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
+            "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
         },
     )
     command = {"action": "destination_save", "name": _destination_name(payload["name"])}
     for key in (
         "type", "host", "user", "path", "port", "private_key", "host_key",
-        "keep_daily", "keep_weekly", "keep_monthly",
+        "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
+        "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
     ):
         if key in payload:
             command[key] = payload[key]

@@ -56,19 +56,34 @@
     return element;
   }
 
+  function showKind() {
+    const kind = byId("dest-type").value;
+    byId("dest-sftp-fields").hidden = kind !== "sftp";
+    byId("dest-s3-fields").hidden = kind !== "s3";
+  }
+
   function fill(destination) {
     byId("dest-name").value = destination.name || "";
+    byId("dest-type").value = destination.type || "sftp";
     byId("dest-host").value = destination.host || "";
     byId("dest-port").value = String(destination.port || 22);
     byId("dest-user").value = destination.user || "";
     byId("dest-path").value = destination.path || "";
+    byId("dest-endpoint").value = destination.endpoint || "";
+    byId("dest-region").value = destination.region || "";
+    byId("dest-bucket").value = destination.bucket || "";
+    byId("dest-prefix").value = destination.prefix || "";
+    byId("dest-access-key").value = destination.access_key || "";
+    byId("dest-allow-insecure").checked = Boolean(destination.allow_insecure);
     byId("dest-keep-daily").value = String(destination.keep_daily ?? 7);
     byId("dest-keep-weekly").value = String(destination.keep_weekly ?? 4);
     byId("dest-keep-monthly").value = String(destination.keep_monthly ?? 6);
-    // Both are stored root-only and never returned; leaving them empty keeps
-    // what is already there.
+    // Every secret is stored root-only and never returned; leaving the field
+    // empty keeps what is already there.
     byId("dest-key").value = "";
     byId("dest-host-key").value = "";
+    byId("dest-secret-key").value = "";
+    showKind();
     status(`${t("Editing")}: ${destination.name}`);
   }
 
@@ -105,7 +120,9 @@
       cell(row, destination.name);
       cell(
         row,
-        `${destination.user}@${destination.host}:${destination.port}${destination.path}`
+        destination.type === "s3"
+          ? `${destination.bucket}/${destination.prefix || ""} @ ${destination.endpoint}`
+          : `${destination.user}@${destination.host}:${destination.port}${destination.path}`
       );
       cell(
         row,
@@ -131,21 +148,33 @@
 
   async function save(event) {
     event.preventDefault();
+    const kind = byId("dest-type").value;
     const body = {
       name: byId("dest-name").value.trim().toLowerCase(),
-      type: "sftp",
-      host: byId("dest-host").value.trim(),
-      port: Number(byId("dest-port").value || 22),
-      user: byId("dest-user").value.trim(),
-      path: byId("dest-path").value.trim(),
+      type: kind,
       keep_daily: Number(byId("dest-keep-daily").value || 0),
       keep_weekly: Number(byId("dest-keep-weekly").value || 0),
       keep_monthly: Number(byId("dest-keep-monthly").value || 0)
     };
-    const key = byId("dest-key").value.trim();
-    if (key) body.private_key = key;
-    const hostKey = byId("dest-host-key").value.trim();
-    if (hostKey) body.host_key = hostKey;
+    if (kind === "s3") {
+      body.endpoint = byId("dest-endpoint").value.trim();
+      body.region = byId("dest-region").value.trim();
+      body.bucket = byId("dest-bucket").value.trim();
+      body.prefix = byId("dest-prefix").value.trim();
+      body.access_key = byId("dest-access-key").value.trim();
+      body.allow_insecure = byId("dest-allow-insecure").checked;
+      const secret = byId("dest-secret-key").value;
+      if (secret) body.secret_key = secret;
+    } else {
+      body.host = byId("dest-host").value.trim();
+      body.port = Number(byId("dest-port").value || 22);
+      body.user = byId("dest-user").value.trim();
+      body.path = byId("dest-path").value.trim();
+      const key = byId("dest-key").value.trim();
+      if (key) body.private_key = key;
+      const hostKey = byId("dest-host-key").value.trim();
+      if (hostKey) body.host_key = hostKey;
+    }
 
     status(t("Saving…"));
     const { ok, payload } = await api("/api/destinations", body);
@@ -153,6 +182,7 @@
       status(t("Saved"));
       byId("dest-key").value = "";
       byId("dest-host-key").value = "";
+      byId("dest-secret-key").value = "";
       refresh();
     } else {
       status(payload.error || payload.description || t("It was not saved"));
@@ -163,6 +193,8 @@
     const form = byId("backup-destination-form");
     if (!form) return;
     form.addEventListener("submit", save);
+    byId("dest-type").addEventListener("change", showKind);
+    showKind();
     refresh();
   });
 })();

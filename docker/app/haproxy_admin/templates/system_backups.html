@@ -224,21 +224,11 @@
           <input id="dest-name" class="form-input" type="text" required
                  placeholder="offsite" pattern="[a-z0-9][a-z0-9-]*">
         </label>
-        <label>Host
-          <input id="dest-host" class="form-input" type="text" required
-                 placeholder="backup.example.com">
-        </label>
-        <label>Port
-          <input id="dest-port" class="form-input" type="number" value="22"
-                 min="1" max="65535">
-        </label>
-        <label>User
-          <input id="dest-user" class="form-input" type="text" required
-                 placeholder="gateway">
-        </label>
-        <label>Remote directory
-          <input id="dest-path" class="form-input" type="text" required
-                 placeholder="/srv/backups/gateway">
+        <label>Kind
+          <select id="dest-type" class="form-input">
+            <option value="sftp">SFTP</option>
+            <option value="s3">S3-compatible</option>
+          </select>
         </label>
         <label>Keep daily
           <input id="dest-keep-daily" class="form-input" type="number" value="7"
@@ -253,22 +243,82 @@
                  min="0" max="120">
         </label>
       </div>
-      <label>Private key
-        <textarea id="dest-key" class="form-input mono" rows="4"
-                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-      </label>
+
+      <div id="dest-sftp-fields">
+        <div class="form-grid">
+          <label>Host
+            <input id="dest-host" class="form-input" type="text"
+                   placeholder="backup.example.com">
+          </label>
+          <label>Port
+            <input id="dest-port" class="form-input" type="number" value="22"
+                   min="1" max="65535">
+          </label>
+          <label>User
+            <input id="dest-user" class="form-input" type="text"
+                   placeholder="gateway">
+          </label>
+          <label>Remote directory
+            <input id="dest-path" class="form-input" type="text"
+                   placeholder="/srv/backups/gateway">
+          </label>
+        </div>
+        <label>Private key
+          <textarea id="dest-key" class="form-input mono" rows="4"
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+        </label>
+        <label>Host key
+          <textarea id="dest-host-key" class="form-input mono" rows="2"
+                    placeholder="backup.example.com ssh-ed25519 AAAA..."></textarea>
+        </label>
+        <p class="muted">
+          Take it from <code translate="no" data-i18n-skip>ssh-keyscan backup.example.com</code>
+          and check it against what the far end reports. This is the whole
+          defence against sending the archive to whoever answers on that address.
+        </p>
+      </div>
+
+      <div id="dest-s3-fields" hidden>
+        <div class="form-grid">
+          <label>Endpoint
+            <input id="dest-endpoint" class="form-input" type="url"
+                   placeholder="https://s3.eu-central-1.amazonaws.com">
+          </label>
+          <label>Region
+            <input id="dest-region" class="form-input" type="text"
+                   placeholder="eu-central-1">
+          </label>
+          <label>Bucket
+            <input id="dest-bucket" class="form-input" type="text"
+                   placeholder="gateway-backups">
+          </label>
+          <label>Prefix
+            <input id="dest-prefix" class="form-input" type="text"
+                   placeholder="gateway-1">
+          </label>
+          <label>Access key
+            <input id="dest-access-key" class="form-input" type="text">
+          </label>
+          <label>Secret key
+            <input id="dest-secret-key" class="form-input" type="password"
+                   autocomplete="new-password">
+          </label>
+        </div>
+        <label class="form-checkbox-inline">
+          <input id="dest-allow-insecure" type="checkbox">
+          <span>Allow a plain http endpoint</span>
+        </label>
+        <p class="muted">
+          The upload carries the archive's SHA-256 in its signature, so the
+          storage service refuses a body that does not match it. A successful
+          upload is already proof the far end holds these exact bytes, with no
+          second transfer to check.
+        </p>
+      </div>
+
       <p class="muted">
-        Leave the key empty when editing an existing destination to keep the
-        one already stored.
-      </p>
-      <label>Host key
-        <textarea id="dest-host-key" class="form-input mono" rows="2"
-                  placeholder="backup.example.com ssh-ed25519 AAAA..."></textarea>
-      </label>
-      <p class="muted">
-        Take it from <code translate="no" data-i18n-skip>ssh-keyscan backup.example.com</code>
-        and check it against what the far end reports. This is the whole
-        defence against sending the archive to whoever answers on that address.
+        Leave a key or secret empty when editing an existing destination to
+        keep the one already stored.
       </p>
       <button type="submit" class="btn" id="dest-save">Save destination</button>
       <div id="dest-status" class="result-message" role="status" aria-live="polite"

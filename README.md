@@ -466,7 +466,14 @@ someone who already owns the gateway. The timer only asks the daemon to run,
 so a scheduled backup takes the same maintenance lock as everything else and
 cannot race a restore or an update.
 
-S3-compatible storage is not implemented yet.
+**S3-compatible storage** works the same way, with a better proof. The
+upload carries the archive's SHA-256 inside its SigV4 signature, so the
+storage service refuses a body that does not hash to it -- a successful upload
+is already evidence the far end holds exactly these bytes, with no second
+transfer. Signing is done against the standard library rather than by adding
+an SDK to the gateway, and it is verified against a real S3 implementation
+rather than only against itself. A plain `http://` endpoint needs an explicit
+opt-in.
 
 ### Request identifier
 

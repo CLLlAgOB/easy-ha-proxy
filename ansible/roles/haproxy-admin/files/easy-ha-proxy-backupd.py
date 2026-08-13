@@ -17,6 +17,7 @@ import errno
 import fcntl
 import grp
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ import re
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -210,7 +212,8 @@ REQUEST_FIELDS = {
         {
             "action", "name", "type", "host", "port", "user", "path",
             "private_key", "host_key", "keep_daily", "keep_weekly",
-            "keep_monthly",
+            "keep_monthly", "endpoint", "region", "bucket", "prefix",
+            "access_key", "secret_key", "allow_insecure",
         }
     ),
     "destination_delete": frozenset({"action", "name"}),
@@ -2231,7 +2234,7 @@ DESTINATIONS_DIR = Path(
     )
 )
 DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
-DESTINATION_TYPES = ("sftp",)
+DESTINATION_TYPES = ("sftp", "s3")
 SFTP_TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_SFTP_TIMEOUT", "900"))
 SCHEDULED_BACKUP_TIMEOUT = int(
     os.environ.get("BACKUPD_SCHEDULED_TIMEOUT", str(6 * 3600))
@@ -2307,6 +2310,13 @@ def public_destination(record: dict[str, Any]) -> dict[str, Any]:
         "path": record.get("path", ""),
         "has_key": bool(record.get("key_installed")),
         "host_key_pinned": bool(record.get("host_key_pinned")),
+        "endpoint": record.get("endpoint", ""),
+        "region": record.get("region", ""),
+        "bucket": record.get("bucket", ""),
+        "prefix": record.get("prefix", ""),
+        "access_key": record.get("access_key", ""),
+        "has_secret": bool(record.get("secret_installed")),
+        "allow_insecure": bool(record.get("allow_insecure")),
         "keep_daily": record.get("keep_daily", 7),
         "keep_weekly": record.get("keep_weekly", 4),
         "keep_monthly": record.get("keep_monthly", 6),
@@ -2331,6 +2341,13 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
     if kind not in DESTINATION_TYPES:
         raise BackupdError("unsupported destination type", code="invalid")
 
+    existing_probe: dict[str, Any] = {}
+    with contextlib.suppress(BackupdError):
+        existing_probe = load_destination(name)
+
+    if kind == "s3":
+        return save_s3_destination(request, name, path_target, existing_probe)
+
     host = str(request.get("host") or "").strip()
     if not host or len(host) > 253 or any(ch.isspace() for ch in host):
         raise BackupdError("a host is required", code="invalid")
@@ -2349,9 +2366,7 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
             "the remote path must be absolute and free of '..'", code="invalid"
         )
 
-    existing: dict[str, Any] = {}
-    with contextlib.suppress(BackupdError):
-        existing = load_destination(name)
+    existing = existing_probe
 
     key = str(request.get("private_key") or "")
     if key:
@@ -2396,6 +2411,63 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "destination": public_destination(record)}
 
 
+def save_s3_destination(
+    request: dict[str, Any],
+    name: str,
+    path_target: Path,
+    existing: dict[str, Any],
+) -> dict[str, Any]:
+    import urllib.parse
+
+    endpoint = str(request.get("endpoint") or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in ("https", "http") or not parsed.netloc:
+        raise BackupdError(
+            "the endpoint must be a full https:// URL", code="invalid"
+        )
+    allow_insecure = bool(request.get("allow_insecure"))
+    if parsed.scheme == "http" and not allow_insecure:
+        raise BackupdError(
+            "the endpoint is plain http; tick 'allow insecure' only for a"
+            " storage service on a trusted network",
+            code="invalid",
+        )
+
+    bucket = str(request.get("bucket") or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,62}", bucket):
+        raise BackupdError("the bucket name is not valid", code="invalid")
+    prefix = str(request.get("prefix") or "").strip().strip("/")
+    if ".." in prefix or len(prefix) > 256:
+        raise BackupdError("the prefix is not valid", code="invalid")
+    access_key = str(request.get("access_key") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9/+=_-]{3,128}", access_key):
+        raise BackupdError("the access key is not valid", code="invalid")
+
+    secret = str(request.get("secret_key") or "")
+    if secret:
+        write_private(destination_secret_path(name), secret.encode("utf-8"))
+    elif not existing.get("secret_installed"):
+        raise BackupdError("a secret key is required", code="invalid")
+
+    record = {
+        "name": name,
+        "type": "s3",
+        "endpoint": endpoint,
+        "region": str(request.get("region") or "us-east-1").strip()[:64],
+        "bucket": bucket,
+        "prefix": prefix,
+        "access_key": access_key,
+        "secret_installed": True,
+        "allow_insecure": allow_insecure,
+        "keep_daily": keep_count(request.get("keep_daily"), default=7, cap=365),
+        "keep_weekly": keep_count(request.get("keep_weekly"), default=4, cap=260),
+        "keep_monthly": keep_count(request.get("keep_monthly"), default=6, cap=120),
+        "updated_at": utc_now(),
+    }
+    atomic_json(path_target, record, mode=0o600)
+    return {"ok": True, "destination": public_destination(record)}
+
+
 def delete_destination(request: dict[str, Any]) -> dict[str, Any]:
     name = str(request.get("name") or "").strip().lower()
     path_target = destination_path(name)
@@ -2404,6 +2476,7 @@ def delete_destination(request: dict[str, Any]) -> dict[str, Any]:
         path_target,
         destination_key_path(name),
         destination_known_hosts(name),
+        destination_secret_path(name),
     ):
         with contextlib.suppress(FileNotFoundError):
             candidate.unlink()
@@ -2550,6 +2623,248 @@ def retention_victims(names: list[str], record: dict[str, Any]) -> list[str]:
     return [name for name in names if name not in keep]
 
 
+# ---------------------------------------------------------------------------
+# S3-compatible destinations
+# ---------------------------------------------------------------------------
+#
+# Signed with SigV4 against the standard library rather than by adding an SDK
+# to the gateway. That is a deliberate trade: a hundred lines of HMAC here, or
+# boto3 and its dependency tree on a two-core box that already runs HAProxy.
+#
+# The integrity proof falls out of the protocol. A signed PUT carries the
+# payload's SHA-256 in x-amz-content-sha256, and the service refuses the
+# request if the body does not hash to it -- so a 200 already means the far
+# end holds exactly these bytes, with no second transfer to check.
+
+S3_ALGORITHM = "AWS4-HMAC-SHA256"
+S3_TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_S3_TIMEOUT", "900"))
+S3_SERVICE = "s3"
+_S3_UNRESERVED = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+
+
+def destination_secret_path(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".secret")
+
+
+def s3_quote(value: str, *, keep_slash: bool = True) -> str:
+    """Percent-encode the way SigV4 requires, which is not urllib's default."""
+    allowed = _S3_UNRESERVED + ("/" if keep_slash else "")
+    out = []
+    for byte in str(value).encode("utf-8"):
+        char = chr(byte)
+        out.append(char if char in allowed else f"%{byte:02X}")
+    return "".join(out)
+
+
+def s3_signing_key(secret: str, stamp: str, region: str) -> bytes:
+    key = ("AWS4" + secret).encode("utf-8")
+    for part in (stamp, region, S3_SERVICE, "aws4_request"):
+        key = hmac.new(key, part.encode("utf-8"), hashlib.sha256).digest()
+    return key
+
+
+def s3_authorization(
+    *,
+    method: str,
+    canonical_uri: str,
+    canonical_query: str,
+    headers: dict[str, str],
+    payload_sha: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+    amz_date: str,
+) -> str:
+    """Build the Authorization header for one request.
+
+    Header names are lower-cased and sorted, values collapsed -- SigV4 signs a
+    canonical form, so anything that differs between what is signed and what
+    is sent is a 403 that looks like bad credentials.
+    """
+    canonical_headers = "".join(
+        f"{name}:{' '.join(str(value).split())}\n"
+        for name, value in sorted(headers.items())
+    )
+    signed_headers = ";".join(sorted(headers))
+    canonical_request = "\n".join(
+        [
+            method,
+            canonical_uri,
+            canonical_query,
+            canonical_headers,
+            signed_headers,
+            payload_sha,
+        ]
+    )
+    stamp = amz_date[:8]
+    scope = f"{stamp}/{region}/{S3_SERVICE}/aws4_request"
+    to_sign = "\n".join(
+        [
+            S3_ALGORITHM,
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ]
+    )
+    signature = hmac.new(
+        s3_signing_key(secret_key, stamp, region),
+        to_sign.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return (
+        f"{S3_ALGORITHM} Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+
+
+def s3_request(
+    record: dict[str, Any],
+    method: str,
+    key: str = "",
+    *,
+    query: dict[str, str] | None = None,
+    body: Any = None,
+    body_sha: str = "",
+    length: int = 0,
+) -> tuple[int, dict[str, str], bytes]:
+    """One signed request. Returns (status, headers, body)."""
+    import http.client
+    import urllib.parse
+
+    endpoint = urllib.parse.urlparse(record["endpoint"])
+    if endpoint.scheme not in ("https", "http"):
+        raise BackupdError("the endpoint must be http or https", code="invalid")
+    if endpoint.scheme == "http" and not record.get("allow_insecure"):
+        raise BackupdError(
+            "the endpoint is plain http; enable 'allow insecure' only for a"
+            " storage service on a trusted network",
+            code="invalid",
+        )
+
+    secret = destination_secret_path(record["name"]).read_text(encoding="utf-8").strip()
+    # A bucket-level call addresses the bucket and carries the prefix in the
+    # query; putting the prefix in the path too turns a listing into a request
+    # for an object that does not exist.
+    prefix = str(record.get("prefix") or "").strip("/")
+    segments = [
+        segment
+        for segment in (record.get("bucket") or "", prefix if key else "", key)
+        if segment
+    ]
+    canonical_uri = "/" + s3_quote("/".join(segments))
+
+    items = sorted((query or {}).items())
+    canonical_query = "&".join(
+        f"{s3_quote(name, keep_slash=False)}={s3_quote(value, keep_slash=False)}"
+        for name, value in items
+    )
+
+    amz_date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    payload_sha = body_sha or hashlib.sha256(b"").hexdigest()
+    host = endpoint.netloc
+    headers = {
+        "host": host,
+        "x-amz-content-sha256": payload_sha,
+        "x-amz-date": amz_date,
+    }
+    authorization = s3_authorization(
+        method=method,
+        canonical_uri=canonical_uri,
+        canonical_query=canonical_query,
+        headers=headers,
+        payload_sha=payload_sha,
+        access_key=record["access_key"],
+        secret_key=secret,
+        region=record.get("region") or "us-east-1",
+        amz_date=amz_date,
+    )
+    secret = ""
+
+    send_headers = dict(headers)
+    send_headers["Authorization"] = authorization
+    if length:
+        send_headers["Content-Length"] = str(length)
+
+    target = canonical_uri + (f"?{canonical_query}" if canonical_query else "")
+    if endpoint.scheme == "https":
+        connection = http.client.HTTPSConnection(
+            host, timeout=S3_TIMEOUT_SECONDS, context=ssl.create_default_context()
+        )
+    else:
+        connection = http.client.HTTPConnection(host, timeout=S3_TIMEOUT_SECONDS)
+    try:
+        connection.request(method, target, body=body, headers=send_headers)
+        response = connection.getresponse()
+        payload = response.read(1024 * 1024)
+        return response.status, dict(response.getheaders()), payload
+    finally:
+        connection.close()
+
+
+def s3_listing(record: dict[str, Any]) -> list[str]:
+    """Archive names already in the bucket."""
+    prefix = str(record.get("prefix") or "").strip("/")
+    query = {"list-type": "2"}
+    if prefix:
+        query["prefix"] = prefix + "/"
+    status, _headers, body = s3_request(record, "GET", query=query)
+    if status != 200:
+        return []
+    text = body.decode("utf-8", "replace")
+    names = []
+    for match in re.finditer(r"<Key>([^<]+)</Key>", text):
+        candidate = match.group(1).rsplit("/", 1)[-1]
+        if candidate.startswith("easy-ha-proxy-") and candidate.endswith(".tar.gz.enc"):
+            names.append(candidate)
+    return sorted(names)
+
+
+def s3_upload(
+    record: dict[str, Any], archive: Path, checksum: Path, expected: str
+) -> dict[str, Any]:
+    """PUT the archive, then the checksum beside it.
+
+    No .part dance here: an S3 PUT is atomic, an object appears whole or not
+    at all, so there is nothing half-written for a later prune to mistake for
+    a finished backup.
+    """
+    size = archive.stat().st_size
+    with archive.open("rb") as stream:
+        status, _headers, body = s3_request(
+            record, "PUT", archive.name, body=stream, body_sha=expected, length=size
+        )
+    if status not in (200, 201):
+        detail = body.decode("utf-8", "replace").strip()[:400]
+        raise BackupdError(f"the upload failed ({status}): {detail}", code="upstream")
+
+    if checksum.is_file():
+        payload = checksum.read_bytes()
+        s3_request(
+            record,
+            "PUT",
+            checksum.name,
+            body=payload,
+            body_sha=hashlib.sha256(payload).hexdigest(),
+            length=len(payload),
+        )
+    # The service verified the body against the hash carried in the signature,
+    # so a success here is the integrity proof; re-reading would prove nothing
+    # more and cost the transfer twice.
+    return {"bytes": size, "verified": True, "verified_by": "signed-put"}
+
+
+def s3_prune(record: dict[str, Any], victims: list[str]) -> list[str]:
+    removed = []
+    for name in victims:
+        for key in (name, name + ".sha256"):
+            status, _headers, _body = s3_request(record, "DELETE", key)
+            if status in (200, 204) and key == name:
+                removed.append(name)
+    return removed
+
+
 def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
     """Copy one finished archive to one destination, then prune the far end."""
     backup_id = identifier(request.get("backup_id"), "backup id")
@@ -2563,6 +2878,20 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
     if not expected:
         expected = sha256_file(archive)
     size = archive.stat().st_size
+
+    if record.get("type") == "s3":
+        outcome = s3_upload(record, archive, checksum, expected)
+        response = {
+            "ok": True,
+            "backup_id": backup_id,
+            "destination": record["name"],
+            "pruned": [],
+            **outcome,
+        }
+        victims = retention_victims(s3_listing(record), record)
+        if victims:
+            response["pruned"] = s3_prune(record, victims)
+        return response
 
     remote_dir = record["path"]
     remote_file = f"{remote_dir}/{archive.name}"
@@ -2631,6 +2960,23 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
 def test_destination(request: dict[str, Any]) -> dict[str, Any]:
     """Prove the credentials and the path work before a real backup needs them."""
     record = load_destination(request.get("name"))
+    if record.get("type") == "s3":
+        # A listing proves the credentials, the region and the bucket in one
+        # call, without leaving anything behind to clean up.
+        try:
+            status, _headers, body = s3_request(
+                record, "GET", query={"list-type": "2", "max-keys": "1"}
+            )
+        except BackupdError as exc:
+            return {"ok": False, "error": str(exc)}
+        if status != 200:
+            return {
+                "ok": False,
+                "error": f"the storage service answered {status}: "
+                + body.decode("utf-8", "replace").strip()[:300],
+            }
+        return {"ok": True, "destination": record["name"]}
+
     marker = f"{record['path']}/.easy-ha-proxy-write-test"
     with tempfile.TemporaryDirectory(prefix="backupd-test-") as work:
         probe = Path(work) / "probe"

@@ -347,6 +347,158 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn("passphrase", block)
 
 
+class S3SigningTests(DestinationTestCase):
+    """Signing is checked against a real MinIO in the live probe; these lock
+    the shapes that make that signature reproducible."""
+
+    def save_s3(self, **overrides):
+        payload = {
+            "action": "destination_save",
+            "name": "objects",
+            "type": "s3",
+            "endpoint": "https://s3.example.test",
+            "region": "eu-central-1",
+            "bucket": "gateway-backups",
+            "prefix": "gw1",
+            "access_key": "AKIAEXAMPLE",
+            "secret_key": "s3cr3t-key-value",
+        }
+        payload.update(overrides)
+        return backupd.save_destination(payload)
+
+    def test_the_secret_is_root_only_and_never_returned(self):
+        self.save_s3()
+        secret = backupd.destination_secret_path("objects")
+        self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
+        blob = json.dumps(backupd.list_destinations({"action": "destinations"}))
+        self.assertNotIn("s3cr3t-key-value", blob)
+        self.assertIn("AKIAEXAMPLE", blob)
+
+    def test_plain_http_needs_an_explicit_opt_in(self):
+        with self.assertRaises(backupd.BackupdError) as caught:
+            self.save_s3(endpoint="http://s3.example.test")
+        self.assertIn("http", str(caught.exception))
+        self.save_s3(endpoint="http://s3.example.test", allow_insecure=True)
+
+    def test_a_bad_bucket_or_key_is_refused(self):
+        for field, value in (
+            ("bucket", "Not A Bucket"),
+            ("bucket", ""),
+            ("access_key", "has space"),
+            ("prefix", "../escape"),
+            ("endpoint", "s3.example.test"),
+        ):
+            with self.assertRaises(backupd.BackupdError, msg=f"{field}={value}"):
+                self.save_s3(**{field: value})
+
+    def test_the_percent_encoding_follows_sigv4_not_urllib(self):
+        # urlencode leaves ~ alone but escapes /, and SigV4 wants the reverse
+        # in a path; a mismatch here is a 403 that reads like bad credentials.
+        self.assertEqual(backupd.s3_quote("a~b"), "a~b")
+        self.assertEqual(backupd.s3_quote("a/b"), "a/b")
+        self.assertEqual(backupd.s3_quote("a/b", keep_slash=False), "a%2Fb")
+        self.assertEqual(backupd.s3_quote("a b"), "a%20b")
+        self.assertEqual(backupd.s3_quote("+"), "%2B")
+
+    def test_the_signing_key_is_derived_in_four_steps(self):
+        # The published derivation: date, region, service, aws4_request.
+        import hashlib as _hashlib
+        import hmac as _hmac
+
+        expected = ("AWS4" + "secret").encode()
+        for part in ("20260812", "eu-central-1", "s3", "aws4_request"):
+            expected = _hmac.new(expected, part.encode(), _hashlib.sha256).digest()
+        self.assertEqual(
+            backupd.s3_signing_key("secret", "20260812", "eu-central-1"), expected
+        )
+
+    def test_the_same_inputs_always_sign_the_same(self):
+        arguments = dict(
+            method="PUT",
+            canonical_uri="/bucket/key",
+            canonical_query="",
+            headers={"host": "s3.example.test", "x-amz-date": "20260812T101500Z"},
+            payload_sha="a" * 64,
+            access_key="AKIAEXAMPLE",
+            secret_key="secret",
+            region="eu-central-1",
+            amz_date="20260812T101500Z",
+        )
+        first = backupd.s3_authorization(**arguments)
+        self.assertEqual(first, backupd.s3_authorization(**arguments))
+        self.assertIn("AWS4-HMAC-SHA256", first)
+        self.assertIn("20260812/eu-central-1/s3/aws4_request", first)
+        self.assertIn("SignedHeaders=host;x-amz-date", first)
+
+    def test_a_changed_body_changes_the_signature(self):
+        arguments = dict(
+            method="PUT",
+            canonical_uri="/bucket/key",
+            canonical_query="",
+            headers={"host": "s3.example.test"},
+            payload_sha="a" * 64,
+            access_key="AKIAEXAMPLE",
+            secret_key="secret",
+            region="us-east-1",
+            amz_date="20260812T101500Z",
+        )
+        other = {**arguments, "payload_sha": "b" * 64}
+        self.assertNotEqual(
+            backupd.s3_authorization(**arguments),
+            backupd.s3_authorization(**other),
+        )
+
+    def test_a_bucket_call_addresses_the_bucket_not_the_prefix(self):
+        # A live listing came back NoSuchKey because the prefix was put in the
+        # path as well as the query.
+        self.save_s3()
+        record = backupd.load_destination("objects")
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def read(self, _size):
+                return b"<ListBucketResult></ListBucketResult>"
+
+            def getheaders(self):
+                return []
+
+        class FakeConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, method, target, body=None, headers=None):
+                captured["target"] = target
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        import http.client
+
+        with mock.patch.object(http.client, "HTTPSConnection", FakeConnection):
+            backupd.s3_request(record, "GET", query={"list-type": "2", "prefix": "gw1/"})
+        self.assertTrue(captured["target"].startswith("/gateway-backups?"))
+        self.assertNotIn("/gw1?", captured["target"])
+
+        with mock.patch.object(http.client, "HTTPSConnection", FakeConnection):
+            backupd.s3_request(record, "GET", "archive.tar.gz.enc")
+        self.assertEqual(captured["target"], "/gateway-backups/gw1/archive.tar.gz.enc")
+
+    def test_an_s3_upload_needs_no_second_transfer_to_be_verified(self):
+        source = (
+            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
+        ).read_text(encoding="utf-8")
+        block = source.split("def s3_upload")[1].split("def s3_prune")[0]
+        self.assertIn('"verified_by": "signed-put"', block)
+        # The service checks the body against the hash in the signature, which
+        # a live probe confirms by watching a tampered PUT get rejected.
+        self.assertIn("body_sha=expected", block)
+
+
 class ScheduleTests(DestinationTestCase):
     def setUp(self):
         super().setUp()
