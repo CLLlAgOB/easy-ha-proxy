@@ -104,6 +104,29 @@ def validate_host(value: Any, label: str) -> str:
     return text
 
 
+def validate_cidr(value: Any, label: str) -> str:
+    """Accept one address or network, and return it in canonical form.
+
+    HAProxy takes both on a ``src`` ACL. Canonicalising here means the
+    generated configuration cannot contain "10.0.0.5/24", which HAProxy reads
+    as the whole network while the operator plainly meant one host.
+    """
+    text = str(value or "").strip()
+    if not text or CONTROL_RE.search(text) or len(text) > 64:
+        raise ValueError(f"{label}: invalid IP address or network")
+    try:
+        if "/" in text:
+            network = ipaddress.ip_network(text, strict=False)
+            if network.num_addresses == 1:
+                return str(network.network_address)
+            return str(network)
+        return str(ipaddress.ip_address(text))
+    except ValueError as exc:
+        raise ValueError(
+            f"{label}: invalid IP address or network ({text!r})"
+        ) from exc
+
+
 def validate_port(value: Any, label: str) -> int:
     try:
         port = int(value)
@@ -255,6 +278,18 @@ def _validate_site(site: Any, index: int) -> None:
                 f"sites[{index}].{key}[{name_index}]",
                 allow_wildcard=allow_wildcard and bool(dns_profile),
             )
+    # A site restricted to named addresses. Non-empty means the site answers
+    # nobody else, and the gates that exist to sort strangers out -- GeoIP,
+    # Authelia, zero-trust, the adaptive counters -- stop applying to it.
+    allow_ips = site.get("allow_ips")
+    if allow_ips is not None:
+        if not isinstance(allow_ips, list) or len(allow_ips) > 64:
+            raise ValueError(
+                f"sites[{index}].allow_ips must be a list of at most 64 "
+                "addresses or networks"
+            )
+        for entry_index, entry in enumerate(allow_ips):
+            validate_cidr(entry, f"sites[{index}].allow_ips[{entry_index}]")
     # Client certificates are a separate layer from Authelia: a site may use
     # either, both, or neither, so nothing here consults authelia_enabled.
     mtls_mode = site.get("mtls_mode")

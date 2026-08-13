@@ -24,6 +24,7 @@ from .services_haproxy_config import (
 )
 from .validation import (
     CA_ID_RE,
+    validate_cidr,
     validate_domain,
     validate_host,
     validate_identifier,
@@ -41,6 +42,28 @@ ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 #LE_LIVE_DIR = Path("/etc/letsencrypt/live")
 #CERT_WARN_DAYS = 30  # за сколько дней до истечения показывать предупреждение
+
+
+def _normalize_allow_ips(value: Any) -> List[str]:
+    """Canonicalise the per-site access list, keeping the operator's order.
+
+    Order is kept because the operator reads this list back; duplicates are
+    dropped because two identical entries in a src ACL are noise, not intent.
+    """
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        value = [part for part in re.split(r"[,;\s]+", value) if part]
+    if not isinstance(value, list):
+        raise ValueError("The access list must be a list of addresses or networks")
+    if len(value) > 64:
+        raise ValueError("The access list may hold at most 64 addresses")
+    seen: List[str] = []
+    for index, entry in enumerate(value):
+        canonical = validate_cidr(entry, f"allow_ips[{index}]")
+        if canonical not in seen:
+            seen.append(canonical)
+    return seen
 
 
 def client_auth_ca_ids() -> Optional[set]:
@@ -565,6 +588,18 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
         site_out["cert_alt_names"] = cert_alt_names
     else:
         site_out.pop("cert_alt_names", None)
+
+    # A site restricted to named addresses. Everything else about the site
+    # still works -- the backend, the certificate -- but nobody outside this
+    # list ever reaches it, and for those inside it the sorting gates are off.
+    try:
+        allow_ips = _normalize_allow_ips(site_out.get("allow_ips"))
+    except ValueError as exc:
+        return False, str(exc)
+    if allow_ips:
+        site_out["allow_ips"] = allow_ips
+    else:
+        site_out.pop("allow_ips", None)
 
     # Client certificates. Deliberately independent of certificate_source: the
     # authority that signs this site's server certificate has no bearing on

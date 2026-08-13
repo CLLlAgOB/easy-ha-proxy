@@ -644,6 +644,27 @@ profile whose plugin is not installed is refused with the snap to install. A
 wildcard name without a DNS profile is refused before Certbot runs, so it
 cannot waste a rate-limited attempt discovering that HTTP-01 will not do.
 
+### Restricting a site to named addresses
+
+A site can be made private to a short list of addresses or networks, under
+**Open only to these addresses** in the site editor. Anything else gets 403
+before the request reaches a backend.
+
+Naming the addresses is the whole access policy for such a site, so the gates
+that exist to sort strangers out stop applying to it: the country filter,
+Authelia, zero-trust, and the adaptive error and rate limits. Their rules are
+not weakened for it -- they are not generated for it at all, so the configuration
+says plainly that this site has one way in. A client certificate, if the site
+also asks for one, still applies: that is a second lock you set deliberately,
+not an ambient filter.
+
+One thing this cannot undo. A ban is enforced per connection, before any host
+name is known, so an address banned for what it did on another site is refused
+here too. Put it in the global whitelist if that matters.
+
+Turning Authelia off for the site also means the backend stops receiving the
+`Remote-User` headers -- worth checking if it relies on them.
+
 ### Importing a certificate or an authority
 
 There is one field for all of it, under **Certificates**. Give it a PEM, a DER

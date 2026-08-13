@@ -185,6 +185,7 @@ backend tbl_ip_auth
 {% set err_window = s.err_window | default(sd.err_window | default('20s')) %}
 {% set rate_window = s.rate_window | default(sd.rate_window | default('20s')) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
+{% if not (s.allow_ips | default([])) %}
 
 backend tbl_err_{{ id }}
     stick-table type ip size {{ s.err_size | default('50k') }} expire {{ err_window }} store http_err_rate({{ err_window }})
@@ -192,6 +193,7 @@ backend tbl_err_{{ id }}
 {% if max_req_rate > 0 %}
 backend tbl_rate_{{ id }}
     stick-table type ip size {{ s.rate_size | default('200k') }} expire {{ rate_window }} store http_req_rate({{ rate_window }})
+{% endif %}
 {% endif %}
 
 {% endfor %}
@@ -417,7 +419,10 @@ frontend fe_https
     {% set geo_bypass = [] %}
     {% for site in sites %}
       {% set s = sd | combine(site, recursive=True) %}
-      {% if s.geo_disable | default(false) %}
+      {% if s.allow_ips | default([]) %}
+        {# Only the named addresses reach this site at all. #}
+        {% set geo_disabled = true %}
+      {% elif s.geo_disable | default(false) %}
         {% set geo_disabled = true %}
       {% elif site.geo is defined %}
         {% set geo_disabled = site.geo is sameas false %}
@@ -443,7 +448,10 @@ frontend fe_https
     {% set geo_names = [] %}
     {% for site in sites %}
       {% set s = sd | combine(site, recursive=True) %}
-      {% if s.geo_disable | default(false) %}
+      {% if s.allow_ips | default([]) %}
+        {# Only the named addresses reach this site at all. #}
+        {% set geo_disabled = true %}
+      {% elif s.geo_disable | default(false) %}
         {% set geo_disabled = true %}
       {% elif site.geo is defined %}
         {% set geo_disabled = site.geo is sameas false %}
@@ -484,7 +492,10 @@ frontend fe_https
       {% set s = sd | combine(site, recursive=True) %}
       {% set id = sanitize(s.name) %}
       {% set site_geo_countries = site.geo_countries | default([]) %}
-      {% if s.geo_disable | default(false) %}
+      {% if s.allow_ips | default([]) %}
+        {# Only the named addresses reach this site at all. #}
+        {% set geo_disabled = true %}
+      {% elif s.geo_disable | default(false) %}
         {% set geo_disabled = true %}
       {% elif site.geo is defined %}
         {% set geo_disabled = site.geo is sameas false %}
@@ -518,7 +529,8 @@ frontend fe_https
 {% set id = sanitize(s.name) %}
 {# The gate itself must stay reachable for unauthorized IPs, otherwise nobody
    could ever log in to become authorized. #}
-{% if (s.zero_trust | default(false)) and not (s.access_gate | default(false)) %}
+{% if (s.zero_trust | default(false)) and not (s.access_gate | default(false))
+      and not (s.allow_ips | default([])) %}
     http-request deny status 451 if host_{{ id }} !ip_auth_ok !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
@@ -533,7 +545,9 @@ frontend fe_https
 {% set id = sanitize(s.name) %}
 {% set _err_mode = s.err_ignore_rules | default(sd.err_ignore_rules_default | default(false)) %}
 {% if _err_mode != 'ignore' %}
+{% if not (s.allow_ips | default([])) %}
     http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool }
+{% endif %}
     http-request set-var(txn._err_tracked) bool(true) if host_{{ id }} !{ var(txn._err_tracked) -m bool }
 {% endif %}
 {% endfor %}
@@ -562,11 +576,13 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set err_limit = s.err_limit | default(sd.err_limit | default(20)) %}
+{% if not (s.allow_ips | default([])) %}
     acl too_many_errs_{{ id }} src_http_err_rate(tbl_err_{{ id }}) gt {{ err_limit }}
     http-request set-var(txn.ban_code)   int(10) if too_many_errs_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn.ban_reason) str("ERR_LIMIT_SITE name={{ s.name }} limit={{ err_limit }}") if too_many_errs_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
+{% endif %}
 {% endfor %}
 
 {% set other_err_limit = sd.other_err_limit | default(20) %}
@@ -582,7 +598,9 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 %}
+{# A request-rate ceiling exists to slow down strangers. On a site only the
+   named addresses can reach, it can only ever throttle the operator. #}
+{% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
     http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
@@ -639,9 +657,29 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 and not (s.rate_ban | default(false)) %}
+{% if max_req_rate > 0 and not (s.rate_ban | default(false)) and not (s.allow_ips | default([])) %}
     http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
+{% endif %}
+{% endfor %}
+
+    # ---- Сайты, доступные только с перечисленных адресов ----
+    # Naming the addresses is the whole access policy for these sites. The
+    # gates that exist to sort strangers out -- GeoIP, Authelia, zero-trust,
+    # the adaptive error and rate counters -- are not emitted for them at all,
+    # because there are no strangers left to sort.
+    #
+    # One thing this cannot undo: tbl_ban is checked per connection, before
+    # any host name is known, so an address banned for its behaviour on some
+    # other site is still refused here. Put it in the global whitelist if that
+    # matters.
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set allow_ips = s.allow_ips | default([]) %}
+{% if allow_ips %}
+    acl site_ips_{{ id }} src {{ allow_ips | join(' ') }}
+    http-request deny status 403 if host_{{ id }} !site_ips_{{ id }}
 {% endif %}
 {% endfor %}
 
@@ -732,7 +770,8 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {# Access-gate sites are meaningless without Authelia, so they are always
    forward-auth protected regardless of their authelia_enabled value. #}
-{% if (s.authelia_enabled | default(false)) or (s.access_gate | default(false)) %}
+{% if ((s.authelia_enabled | default(false)) or (s.access_gate | default(false)))
+      and not (s.allow_ips | default([])) %}
 {% set hostnames = [s.domain] + (s.alt_names | default([])) %}
 {% for hn in hostnames %}{% set _ = authelia_hosts.append(hn) %}{% endfor %}
 {% endif %}

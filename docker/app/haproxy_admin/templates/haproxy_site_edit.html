@@ -586,6 +586,22 @@
                         </option>
                     </select>
 
+                    {% set allow_list = site.allow_ips or [] %}
+                    <label class="form-label" for="allow_ips" style="margin-top: 10px;">Open only to these addresses</label>
+                    <textarea id="allow_ips" name="allow_ips" class="form-input mono" rows="3"
+                        spellcheck="false" translate="no"
+                        placeholder="203.0.113.7&#10;198.51.100.0/24">{{ allow_list | join("\n") }}</textarea>
+                    <div class="table-meta">
+                        One address or network per line. Leave empty to serve everyone.
+                        <strong>Naming the addresses is the whole access policy for this site:</strong>
+                        GeoIP, Authelia, zero-trust and the adaptive error and rate limits stop
+                        applying to it, because there is nobody left for them to sort. A client
+                        certificate, if you set one below, still applies.
+                        One thing this cannot undo — a ban is checked per connection, before the
+                        host name is known, so an address banned for what it did on another site
+                        is refused here too; put it in the global whitelist if that matters.
+                    </div>
+
                     {% set client_auth_cas = (([internal_ca] if internal_ca else []) + (external_cas|default([]))) | selectattr('client_auth') | list %}
                     {% set raw_mtls_mode = site.mtls_mode|default('disabled') %}
                     <label class="form-label" for="mtls_mode" style="margin-top: 10px;">Client certificate (mTLS)</label>

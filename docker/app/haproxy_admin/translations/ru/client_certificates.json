@@ -37,6 +37,8 @@
     "Replace and install": "Заменить и установить",
     "Select a file first.": "Сначала выберите файл.",
     "Unreadable file": "Файл не читается",
-    "It was not installed": "Установить не удалось"
+    "It was not installed": "Установить не удалось",
+    "Open only to these addresses": "Открыт только для этих адресов",
+    "One address or network per line. Leave empty to serve everyone. Naming the addresses is the whole access policy for this site: GeoIP, Authelia, zero-trust and the adaptive error and rate limits stop applying to it, because there is nobody left for them to sort. A client certificate, if you set one below, still applies. One thing this cannot undo — a ban is checked per connection, before the host name is known, so an address banned for what it did on another site is refused here too; put it in the global whitelist if that matters.": "По одному адресу или подсети в строке. Пусто — сайт открыт всем. Перечисление адресов и есть вся политика доступа для этого сайта: GeoIP, Authelia, zero-trust и адаптивные лимиты ошибок и запросов к нему больше не применяются — отсеивать некого. Клиентский сертификат, если вы зададите его ниже, продолжает действовать. Чего это не отменяет: бан проверяется на соединении, до того как известно имя хоста, поэтому адрес, забаненный за поведение на другом сайте, будет отклонён и здесь; если это важно, добавьте его в глобальный белый список."
   }
 }

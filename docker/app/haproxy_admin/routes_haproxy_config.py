@@ -169,6 +169,17 @@ def merge_site_from_edit_form(name, existing, form):
             site.pop("dns_profile", None)
             site.pop("cert_alt_names", None)
 
+    if "allow_ips" in form:
+        entries = [
+            value.strip()
+            for value in re.split(r"[,;\s]+", form.get("allow_ips") or "")
+            if value.strip()
+        ]
+        if entries:
+            site["allow_ips"] = entries
+        else:
+            site.pop("allow_ips", None)
+
     # Two controls, one setting: the authority is meaningless without a mode
     # and a mode is refused without an authority, so they move together.
     if "mtls_mode" in form:

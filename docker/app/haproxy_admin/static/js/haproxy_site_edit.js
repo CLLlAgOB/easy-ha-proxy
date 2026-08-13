@@ -650,6 +650,19 @@ if (effTcpPassForCheck === true) {
         site.enable_splice_backend = spliceVal;
       }
 
+      // Only these addresses may reach the site. Sent as a list; an empty
+      // textarea removes the key and the site is public again.
+      var allowEl = document.getElementById("allow_ips");
+      if (allowEl) {
+        var allowLines = allowEl.value
+          .split(/[\s,;]+/)
+          .map(function (s) { return s.trim(); })
+          .filter(function (s) { return s.length > 0; });
+        if (allowLines.length) {
+          site.allow_ips = allowLines;
+        }
+      }
+
       // Client certificates. Independent of the certificate source above:
       // which authority signs this site's server certificate says nothing
       // about which authority may vouch for a visitor.
@@ -744,6 +757,8 @@ delete site.zero_trust;
 // passthrough site never reaches.
 delete site.mtls_mode;
 delete site.mtls_ca_id;
+// A passthrough site is routed on SNI before any HTTP rule runs.
+delete site.allow_ips;
 
 delete site.backend_ssl;
 delete site.backend_ssl_verify;
