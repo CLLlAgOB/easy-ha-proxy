@@ -28,7 +28,18 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 UMask=0007
 PrivateTmp=yes
-ProtectHome=yes
+# tmpfs rather than yes. This daemon runs snap-confined certbot, and snapd
+# insists on a per-user data directory under the home of the account it runs
+# as -- /root here -- taken from the passwd entry, not from $HOME, so pointing
+# HOME elsewhere does not help. ProtectHome=yes mounts /root read-only, which
+# certbot reports as
+#   cannot create snap home dir: mkdir /root/snap: read-only file system
+# and then refuses to start, so no certificate can be issued from the web
+# interface. A tmpfs still hides every real home directory from this service;
+# it just lets snapd create the scratch directory it wants. Nothing certbot
+# keeps lives there -- the account and the certificates are under
+# /etc/letsencrypt -- so losing it on restart costs nothing.
+ProtectHome=tmpfs
 RestrictSUIDSGID=yes
 LockPersonality=yes
 
