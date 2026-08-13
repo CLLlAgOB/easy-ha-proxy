@@ -138,6 +138,21 @@ class TranslationCatalogTests(unittest.TestCase):
             self.assertIsNotNone(tag, element_id)
             self.assertIn("data-i18n-skip", tag.group(0))
             self.assertIn('translate="no"', tag.group(0))
+        # certbot's own stderr reaches these three. Translating it turned
+        # "read-only file system" into "read-только файл system", which is
+        # neither language and cannot be searched for.
+        site_edit = (APP_DIR / "templates" / "haproxy_site_edit.html").read_text(
+            encoding="utf-8"
+        )
+        for element_id in (
+            "issue-cert-status",
+            "upload-cert-status",
+            "issue-internal-cert-status",
+        ):
+            tag = re.search(rf'<[^>]+id="{element_id}"[^>]*>', site_edit)
+            self.assertIsNotNone(tag, element_id)
+            self.assertIn("data-i18n-skip", tag.group(0))
+            self.assertIn('translate="no"', tag.group(0))
         self.assertIn('class="diff notranslate"', service)
         self.assertIn('translate("/etc/haproxy/haproxy.cfg (on server)")', service)
 
