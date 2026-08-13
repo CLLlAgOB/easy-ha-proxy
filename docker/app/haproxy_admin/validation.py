@@ -18,6 +18,9 @@ ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 # A DNS-01 profile name is a file name in a root-owned directory on the certd
 # side; keep this in step with DNS_PROFILE_RE in haproxy-certd.py.
 DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+# A CA identifier becomes a file name under /etc/haproxy/mtls and a token in
+# the generated configuration, so it stays to what _safe_slug already allows.
+CA_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,119}$")
 INTERVAL_RE = re.compile(r"^[1-9][0-9]*(?:ms|s|m|h|d)$")
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[A-Za-z0-9-]{2,63}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -252,6 +255,22 @@ def _validate_site(site: Any, index: int) -> None:
                 f"sites[{index}].{key}[{name_index}]",
                 allow_wildcard=allow_wildcard and bool(dns_profile),
             )
+    # Client certificates are a separate layer from Authelia: a site may use
+    # either, both, or neither, so nothing here consults authelia_enabled.
+    mtls_mode = site.get("mtls_mode")
+    if mtls_mode is not None and mtls_mode not in ("disabled", "optional", "required"):
+        raise ValueError(
+            f"sites[{index}].mtls_mode must be disabled, optional or required"
+        )
+    if mtls_mode in ("optional", "required"):
+        ca_id = str(site.get("mtls_ca_id") or "").strip()
+        if not ca_id:
+            raise ValueError(
+                f"sites[{index}].mtls_ca_id is required when client "
+                "certificates are enabled"
+            )
+        if not CA_ID_RE.fullmatch(ca_id):
+            raise ValueError(f"sites[{index}].mtls_ca_id: invalid identifier")
     if site.get("access_gate") is not None and not isinstance(
         site["access_gate"], bool
     ):

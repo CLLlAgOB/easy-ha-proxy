@@ -289,7 +289,8 @@ class InstrumentationTests(unittest.TestCase):
             "config.revert", "config.upload", "vars.update",
             "certificate.issue", "certificate.delete", "certificate.export",
             "certificate.restore", "ca.create", "ca.rotate", "ca.delete",
-            "ca.import", "acme_email.update", "site.create", "site.update",
+            "ca.import", "ca.client_auth", "ca.revoke_client",
+            "acme_email.update", "site.create", "site.update",
             "site.delete", "tcp_proxy.create", "tcp_proxy.delete",
         ),
         "routes_backup.py": (

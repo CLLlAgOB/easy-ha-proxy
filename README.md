@@ -20,7 +20,9 @@ and encrypted disaster-recovery backups from one assistant.
   (authorized-IP) access control.
 - Automatic Let's Encrypt issuance and renewal, an internal CA with a
   downloadable public root certificate, and verified external CA chains.
-- Authelia authentication with Redis and a file-backed user database.
+- Authelia authentication with Redis and a file-backed user database, and
+  optional per-site client certificates (mTLS) as an independent layer in
+  front of it.
 - A web UI for sites, TCP proxies, UDP forwarding, certificates, Authelia users
   and policies, runtime bans, health information, and safe HAProxy configuration
   changes.
@@ -641,6 +643,54 @@ credentials path and every Certbot argument come from a fixed table, and a
 profile whose plugin is not installed is refused with the snap to install. A
 wildcard name without a DNS profile is refused before Certbot runs, so it
 cannot waste a rate-limited attempt discovering that HTTP-01 will not do.
+
+### Client certificates (mTLS)
+
+A site can require a client certificate before anything else runs. This is a
+separate layer from Authelia, not a replacement for it: the certificate is
+checked first, and a site may use either, both, or neither.
+
+Importing a certificate authority does not make it a client authority. Tick it
+under **Client certificate authentication** on the Certificates page, then
+choose it on the site. The authority that signs this gateway's own server
+certificates has no business deciding who may connect to it, so that decision
+is always explicit.
+
+Three modes per site:
+
+- **Disabled** — nothing changes.
+- **Optional** — a certificate that fails to verify is refused, a visitor
+  without one is served. Useful while the certificates are still being handed
+  out.
+- **Required** — no certificate, no access.
+
+One bind serves every site on port 443, so all of them share one CA bundle.
+That is why a site names its authority: a certificate that is valid for the
+gateway is still refused by a site that trusts a different authority. Sites are
+told apart by the issuer's Common Name, and two authorities that share one are
+refused at the moment you try to trust both — the point where it can still be
+explained.
+
+Enabling mTLS anywhere makes the handshake ask every connection for a
+certificate. Only the trusted authorities' names are advertised, so a browser
+holding nothing issued by them prompts for nothing. A certificate this gateway
+does not know does not break the connection either: the TLS error is recorded
+rather than fatal, and the decision is made per site — otherwise one site's
+setting could cut off visitors to every other site on the same address.
+
+**Refused client certificates** takes SHA-256 fingerprints, one per line, and
+refuses exactly those without discarding the authority that signed them. Saving
+reloads HAProxy, because that is when the list takes effect.
+
+A verified certificate reaches the backend as `X-Client-Cert-Subject`,
+`-Issuer`, `-Serial` and `-Fingerprint`. Like the Authelia headers, they are
+stripped from every incoming request first, so a client cannot claim an
+identity by sending one.
+
+The administration domain is deliberately not offered here. The safety net for
+a configuration change is a probe from the machine itself, which client
+certificates would have to be exempt from — so the one check that guards an
+apply could not see the setting most likely to lock you out.
 
 ### Backend maintenance
 

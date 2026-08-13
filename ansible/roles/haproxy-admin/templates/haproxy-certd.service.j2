@@ -17,6 +17,7 @@ Environment="HAPROXY_CERTD_SOCKET_GROUP={{ app_group }}"
 Environment="HAPROXY_CERTS_DIR={{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
 Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
 Environment="HAPROXY_CA_ROOT_DIR={{ haproxy_ca_root_dir | default('/etc/haproxy/certificate-authorities') }}"
+Environment="HAPROXY_MTLS_DIR={{ haproxy_mtls_dir | default('/etc/haproxy/mtls') }}"
 Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.

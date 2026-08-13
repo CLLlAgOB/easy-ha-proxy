@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Client certificate authentication": "Аутентификация по клиентскому сертификату",
+    "An authority listed above only vouches for servers. Tick it here to also let it vouch for visitors, then choose it on a site. Nothing becomes a client authority on its own: the authority that signs this gateway's own certificates has no say in who may connect to it.": "Центр сертификации из списка выше ручается только за серверы. Отметьте его здесь, чтобы он ручался и за посетителей, а затем выберите его у сайта. Сам по себе никто клиентским центром не становится: тот, кто подписывает сертификаты самого шлюза, не решает, кому к нему подключаться.",
+    "Trust": "Доверять",
+    "Authority": "Центр сертификации",
+    "Issuer names matched": "Сопоставляемые имена издателя",
+    "No Common Name — this authority cannot be told apart from another": "Нет Common Name — этот центр невозможно отличить от другого",
+    "Save client authentication": "Сохранить клиентскую аутентификацию",
+    "Turning an authority off here denies every request that relied on it, immediately. Sites keep their setting, so turning it back on restores them.": "Выключение центра здесь немедленно закрывает доступ всем, кто на него опирался. Настройка у сайтов сохраняется, поэтому обратное включение всё восстановит.",
+    "Import or create a certificate authority first.": "Сначала импортируйте или создайте центр сертификации.",
+    "Refused client certificates": "Отклоняемые клиентские сертификаты",
+    "SHA-256 fingerprints, one per line": "Отпечатки SHA-256, по одному в строке",
+    "Save refused certificates": "Сохранить отклоняемые сертификаты",
+    "Refuses one certificate without discarding the authority that signed it. Colons and upper case are accepted. Saving reloads HAProxy, because that is when the list takes effect.": "Отклоняет один сертификат, не отказываясь от подписавшего его центра. Двоеточия и верхний регистр допустимы. Сохранение перезагружает HAProxy — именно в этот момент список вступает в силу.",
+    "Client certificate (mTLS)": "Клиентский сертификат (mTLS)",
+    "Optional — accepted if presented": "Необязательно — принимается, если предъявлен",
+    "Required — no certificate, no access": "Обязательно — без сертификата доступа нет",
+    "A separate layer from Authelia, not a replacement for it: the certificate is checked first, and a site can use either, both, or neither. Optional refuses a certificate that fails to verify but lets a visitor without one through — useful while handing certificates out.": "Отдельный слой, а не замена Authelia: сертификат проверяется первым, и сайт может использовать любой из них, оба сразу или ни одного. «Необязательно» отклоняет сертификат, не прошедший проверку, но пропускает посетителя вовсе без сертификата — удобно, пока сертификаты ещё раздаются.",
+    "Trusted client authority": "Доверенный клиентский центр сертификации",
+    "Select an authority": "Выберите центр сертификации",
+    "Only this authority is accepted for this site. Others may be trusted by the gateway for other sites; their certificates are refused here.": "Для этого сайта принимается только этот центр. Шлюз может доверять и другим — для других сайтов; здесь их сертификаты отклоняются.",
+    "No authority is trusted for client authentication yet.": "Пока ни один центр не доверен для клиентской аутентификации.",
+    "Enable one on the Certificates page": "Включите его на странице сертификатов"
+  }
+}

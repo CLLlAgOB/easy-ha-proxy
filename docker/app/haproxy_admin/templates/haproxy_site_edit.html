@@ -586,6 +586,41 @@
                         </option>
                     </select>
 
+                    {% set client_auth_cas = (([internal_ca] if internal_ca else []) + (external_cas|default([]))) | selectattr('client_auth') | list %}
+                    {% set raw_mtls_mode = site.mtls_mode|default('disabled') %}
+                    <label class="form-label" for="mtls_mode" style="margin-top: 10px;">Client certificate (mTLS)</label>
+                    <select name="mtls_mode" id="mtls_mode" class="form-input">
+                        <option value="disabled" {% if raw_mtls_mode not in ['optional', 'required'] %}selected{% endif %}>Disabled</option>
+                        <option value="optional" {% if raw_mtls_mode == 'optional' %}selected{% endif %}>Optional — accepted if presented</option>
+                        <option value="required" {% if raw_mtls_mode == 'required' %}selected{% endif %}>Required — no certificate, no access</option>
+                    </select>
+                    <div class="table-meta">
+                        A separate layer from Authelia, not a replacement for it: the certificate is
+                        checked first, and a site can use either, both, or neither.
+                        <strong>Optional</strong> refuses a certificate that fails to verify but lets a
+                        visitor without one through — useful while handing certificates out.
+                    </div>
+
+                    <label class="form-label" for="mtls_ca_id" style="margin-top: 10px;">Trusted client authority</label>
+                    <select name="mtls_ca_id" id="mtls_ca_id" class="form-input">
+                        <option value="">Select an authority</option>
+                        {% for ca in client_auth_cas %}
+                        <option value="{{ ca.id }}" {% if site.mtls_ca_id|default('') == ca.id %}selected{% endif %}>
+                            {{ ca.name }} ({{ ca.id }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <div class="table-meta">
+                        {% if client_auth_cas %}
+                        Only this authority is accepted for this site. Others may be trusted by the
+                        gateway for other sites; their certificates are refused here.
+                        {% else %}
+                        No authority is trusted for client authentication yet.
+                        <a href="{{ url_for('routes.haproxy_certs_page') }}">Enable one on the Certificates page</a>,
+                        then come back.
+                        {% endif %}
+                    </div>
+
                     <label class="form-label" for="zero_trust" style="margin-top: 10px;">zero_trust</label>
                     <select name="zero_trust" id="zero_trust" class="form-input">
                         <option value="" {% if raw_zt is none %}selected{% endif %}>

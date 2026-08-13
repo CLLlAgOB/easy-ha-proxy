@@ -605,6 +605,32 @@ def delete_external_ca(ca_id: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {"ok": False, "error": "unexpected response from haproxy-certd"}
 
 
+def set_client_auth_cas(ca_ids: List[str]) -> Dict[str, Any]:
+    """Replace the set of authorities trusted to authenticate clients.
+
+    The whole list is sent, not a single toggle: two requests racing over one
+    file would otherwise decide the trust set by arrival order.
+    """
+    url = f"{CERTD_API_BASE}/certs/ca/client-auth"
+    try:
+        response = _post(url, json={"ids": ca_ids}, timeout=30.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {"ok": False, "error": "unexpected response from haproxy-certd"}
+
+
+def set_revoked_client_certificates(fingerprints: List[str]) -> Dict[str, Any]:
+    """Replace the list of client certificates refused by fingerprint."""
+    url = f"{CERTD_API_BASE}/certs/ca/revoked"
+    try:
+        response = _post(url, json={"fingerprints": fingerprints}, timeout=30.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {"ok": False, "error": "unexpected response from haproxy-certd"}
+
+
 def list_all_certs() -> Dict[str, Any]:
     """Запрашивает у haproxy-certd полный список сертификатов."""
 

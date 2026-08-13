@@ -23,6 +23,7 @@ from .services_haproxy_config import (
     jinja_combine,
 )
 from .validation import (
+    CA_ID_RE,
     validate_domain,
     validate_host,
     validate_identifier,
@@ -30,12 +31,35 @@ from .validation import (
 )
 
 DEFAULT_HAPROXY_CERTS_DIR = Path("/etc/haproxy/certs")
+# certd derives one issuers file per authority that is trusted to authenticate
+# clients. The directory is mounted read-only into the container, so this is
+# the same evidence HAProxy itself will use rather than a second opinion.
+MTLS_DIR = Path("/etc/haproxy/mtls")
 ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 # Must stay in step with DNS_PROFILE_RE in haproxy-certd.py: the profile name
 # is a file name in a root-owned directory on the other side.
 DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 #LE_LIVE_DIR = Path("/etc/letsencrypt/live")
 #CERT_WARN_DAYS = 30  # за сколько дней до истечения показывать предупреждение
+
+
+def client_auth_ca_ids() -> Optional[set]:
+    """Authorities a site may name for client certificates.
+
+    ``None`` means the answer is unknown -- the directory does not exist,
+    which is the case on a gateway where nobody has ever opened the feature
+    and in every test that does not set one up. An unknown answer must not
+    block a save; a known one must.
+    """
+    try:
+        if not MTLS_DIR.is_dir():
+            return None
+        return {
+            path.stem[len("issuers-"):]
+            for path in MTLS_DIR.glob("issuers-*.list")
+        }
+    except OSError:
+        return None
 
 
 def _get_haproxy_certs_dir() -> Path:
@@ -541,6 +565,34 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
         site_out["cert_alt_names"] = cert_alt_names
     else:
         site_out.pop("cert_alt_names", None)
+
+    # Client certificates. Deliberately independent of certificate_source: the
+    # authority that signs this site's server certificate has no bearing on
+    # which authority may vouch for a visitor, and reusing one for the other
+    # by default is exactly the accident worth preventing.
+    mtls_mode = str(site_out.get("mtls_mode") or "disabled").strip().lower()
+    if mtls_mode not in ("disabled", "optional", "required"):
+        return False, "Client certificate mode must be disabled, optional or required"
+    if mtls_mode == "disabled":
+        site_out.pop("mtls_mode", None)
+        site_out.pop("mtls_ca_id", None)
+    else:
+        mtls_ca_id = str(site_out.get("mtls_ca_id") or "").strip().lower()
+        if not mtls_ca_id:
+            return False, "Select a certificate authority for client certificates"
+        if not CA_ID_RE.fullmatch(mtls_ca_id):
+            return False, "Invalid client certificate authority identifier"
+        trusted = client_auth_ca_ids()
+        # An authority that was never marked for client authentication has no
+        # issuers file, and the configuration would name a file that does not
+        # exist. Refuse here, where it can be explained, rather than at reload.
+        if trusted is not None and mtls_ca_id not in trusted:
+            return False, (
+                f"The certificate authority {mtls_ca_id!r} is not trusted for "
+                "client authentication. Enable it on the Certificates page first."
+            )
+        site_out["mtls_mode"] = mtls_mode
+        site_out["mtls_ca_id"] = mtls_ca_id
 
     if certificate_source == "external":
         external_ca_id = str(site_out.get("external_ca_id") or "").strip().lower()

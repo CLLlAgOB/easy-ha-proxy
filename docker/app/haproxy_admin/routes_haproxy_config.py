@@ -166,6 +166,17 @@ def merge_site_from_edit_form(name, existing, form):
             site.pop("dns_profile", None)
             site.pop("cert_alt_names", None)
 
+    # Two controls, one setting: the authority is meaningless without a mode
+    # and a mode is refused without an authority, so they move together.
+    if "mtls_mode" in form:
+        mode = (form.get("mtls_mode") or "").strip()
+        if mode in ("optional", "required"):
+            site["mtls_mode"] = mode
+            site["mtls_ca_id"] = (form.get("mtls_ca_id") or "").strip().lower()
+        else:
+            site.pop("mtls_mode", None)
+            site.pop("mtls_ca_id", None)
+
     for field in FORM_TRISTATE_FIELDS:
         if field not in form:
             continue
@@ -1187,6 +1198,8 @@ def haproxy_certs_page():
         ensure_internal_ca,
         issue_internal_cert_for_domain,
         rotate_internal_ca,
+        set_client_auth_cas,
+        set_revoked_client_certificates,
         upload_external_ca,
     )
 
@@ -1205,6 +1218,8 @@ def haproxy_certs_page():
         "delete_internal_ca": ("ca.delete", "internal_ca"),
         "import_external_ca": ("ca.import", "external_ca"),
         "delete_external_ca": ("ca.delete", "external_ca"),
+        "set_client_auth_cas": ("ca.client_auth", "client_auth"),
+        "set_revoked_client_certs": ("ca.revoke_client", "client_certificate"),
     }
 
     if request.method == "POST":
@@ -1308,6 +1323,43 @@ def haproxy_certs_page():
             else:
                 error = res.get("error") or "Failed to delete the certificate authority"
 
+        elif action == "set_client_auth_cas":
+            # The form posts the whole set, so an unchecked box is a removal.
+            ca_ids = [
+                value.strip().lower()
+                for value in request.form.getlist("client_auth_ca")
+                if value.strip()
+            ]
+            audit_target = ",".join(sorted(ca_ids))
+            res = set_client_auth_cas(ca_ids)
+            if res.get("ok"):
+                message = res.get("message") or "Client authentication updated."
+                if res.get("reload_error"):
+                    error = (
+                        "The trust list was saved but HAProxy did not reload: "
+                        + str(res["reload_error"])
+                    )
+            else:
+                error = res.get("error") or "Failed to update client authentication"
+
+        elif action == "set_revoked_client_certs":
+            fingerprints = [
+                value.strip()
+                for value in re.split(r"[,;\s]+", request.form.get("fingerprints") or "")
+                if value.strip()
+            ]
+            audit_target = str(len(fingerprints))
+            res = set_revoked_client_certificates(fingerprints)
+            if res.get("ok"):
+                message = res.get("message") or "The revocation list was saved."
+                if res.get("reload_error"):
+                    error = (
+                        "The list was saved but HAProxy did not reload, so it is "
+                        "not in force yet: " + str(res["reload_error"])
+                    )
+            else:
+                error = res.get("error") or "Failed to save the revocation list"
+
         else:
             error = "Unknown action"
 
@@ -1337,6 +1389,7 @@ def haproxy_certs_page():
         le_certs=le_certs,
         internal_ca=authorities.get("internal"),
         external_cas=authorities.get("external") or [],
+        revoked_client_certs=authorities.get("revoked_client_certificates") or [],
         message=message,
         error=error,
     )
@@ -1440,6 +1493,7 @@ def haproxy_site_edit(name):
         message=message,
         original_name=name,
         is_new=False,
+        internal_ca=authorities.get("internal"),
         external_cas=authorities.get("external") or [],
         dns_profiles=_available_dns_profiles(),
         geoip_country_codes=get_configured_geoip_countries(),

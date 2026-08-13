@@ -216,6 +216,23 @@ MAX_COMPRESSION_RATIO = int(
 )
 CA_LOCK = threading.Lock()
 
+# ── client authentication material ────────────────────────────────────────
+#
+# The CA root is 0700 root: HAProxy cannot read it, and neither can the web
+# container. Everything the frontend needs for client certificates is derived
+# into this directory instead, which holds only public certificates and the
+# names taken out of them.
+MTLS_DIR = Path(os.environ.get("HAPROXY_MTLS_DIR", "/etc/haproxy/mtls"))
+MTLS_TRUST_FILE = "client-auth.json"
+MTLS_BUNDLE_NAME = "clients-ca.pem"
+MTLS_REVOKED_NAME = "revoked.list"
+# A pattern file loads fine with nothing but a comment in it; an empty one
+# earns a warning on every start. Both files exist from the first boot so the
+# configuration can reference them before anyone has imported anything.
+MTLS_EMPTY_MARKER = "# managed by easy-ha-proxy; edit through the web interface\n"
+MTLS_MAX_REVOKED = 2000
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 # ───────────────────── утилиты работы с YAML ─────────────────────
 
@@ -1703,12 +1720,22 @@ def _list_certificate_authorities() -> Dict[str, Any]:
     expiry_watch.start()
 
     ca_root = _prepare_ca_root()
+    client_auth_ids = set(_load_client_auth_ids())
+
+    def _decorate(item: Dict[str, Any], certs: List[x509.Certificate]) -> Dict[str, Any]:
+        # The names a site would match against. Shown so an operator can see
+        # what "trusted for client authentication" actually turns into, and
+        # so the site editor can refuse a CA that has nothing to match on.
+        item["client_auth"] = item["id"] in client_auth_ids
+        item["subject_cns"] = _subject_cns(certs)
+        return item
+
     internal: Optional[Dict[str, Any]] = None
     _, internal_cert_path = _internal_ca_paths()
     if internal_cert_path.is_file():
         certs = _load_pem_certificates(internal_cert_path.read_bytes())
         if certs:
-            internal = _ca_item("internal", "internal", certs)
+            internal = _decorate(_ca_item("internal", "internal", certs), certs)
 
     external: List[Dict[str, Any]] = []
     external_dir = _prepare_ca_subdir("external")
@@ -1716,12 +1743,295 @@ def _list_certificate_authorities() -> Dict[str, Any]:
         for path in sorted(external_dir.glob("*.pem")):
             try:
                 certs = _validate_ca_bundle(path.read_bytes())
-                item = _ca_item(path.stem, "external", certs)
+                item = _decorate(_ca_item(path.stem, "external", certs), certs)
                 item["path"] = str(path)
                 external.append(item)
             except (OSError, ValueError) as exc:
                 LOG.warning("Skipping invalid CA bundle %s: %s", path, exc)
-    return {"internal": internal, "external": external}
+    return {
+        "internal": internal,
+        "external": external,
+        "client_auth_ids": sorted(client_auth_ids),
+        "revoked_client_certificates": _load_revoked_fingerprints(),
+    }
+
+
+# ───────────────────── client certificate authentication ─────────────────────
+#
+# Importing a CA does not make it a client-auth CA. A CA becomes one only when
+# it is explicitly marked here, because the CA that signs this gateway's own
+# server certificates has no business deciding who may connect to it.
+#
+# What gets written, and why the frontend needs exactly this:
+#
+#   clients-ca.pem       one bundle, because a bind takes one ca-file. It is
+#                        also what the server advertises in CertificateRequest,
+#                        so only these CA names reach a browser -- a visitor
+#                        holding nothing from them is never prompted.
+#   issuers-<id>.list    the subject CNs of one CA. The bundle is shared by the
+#                        whole bind, so "verified" is not the same as "verified
+#                        for this site"; the site matches the issuer against
+#                        its own CA's names.
+#   revoked.list         SHA-256 fingerprints, hex, lower case -- the exact
+#                        form ssl_c_der,sha2(256),hex,lower produces.
+
+
+def _mtls_dir(create: bool = False) -> Path:
+    directory = MTLS_DIR
+    if directory.is_symlink():
+        raise ValueError("the client authentication directory must not be a symlink")
+    if create:
+        directory.mkdir(parents=True, mode=0o755, exist_ok=True)
+    if directory.exists():
+        if not directory.is_dir():
+            raise ValueError("the client authentication path is not a directory")
+        os.chmod(directory, 0o755)
+    return directory
+
+
+def _write_public_file(path: Path, data: bytes) -> None:
+    """Replace a world-readable file in one step, never half-written."""
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def _client_auth_trust_path() -> Path:
+    return _prepare_ca_root() / MTLS_TRUST_FILE
+
+
+def _load_client_auth_ids() -> List[str]:
+    path = _client_auth_trust_path()
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        LOG.warning("cannot read the client authentication list: %s", exc)
+        return []
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    if not isinstance(ids, list):
+        return []
+    return [str(value) for value in ids if isinstance(value, str)]
+
+
+def _ca_certificates(ca_id: str) -> List[x509.Certificate]:
+    """Load one CA bundle by identifier, internal or imported."""
+    if ca_id == "internal":
+        _, path = _internal_ca_paths()
+        if not path.is_file():
+            raise ValueError("the internal certificate authority does not exist")
+        return _load_pem_certificates(path.read_bytes())
+    safe = _safe_slug(ca_id).lower()
+    external_dir = _prepare_ca_subdir("external")
+    path = _ensure_within(external_dir, external_dir / f"{safe}.pem")
+    if not path.is_file():
+        raise ValueError(f"certificate authority {safe!r} was not found")
+    return _validate_ca_bundle(path.read_bytes())
+
+
+def _subject_cns(certificates: List[x509.Certificate]) -> List[str]:
+    """Every name that could appear as the issuer of a client certificate.
+
+    A bundle may hold a root and the intermediate that actually signs clients,
+    and only the direct issuer shows up in ssl_c_i_dn -- so all of them count.
+    """
+    names: List[str] = []
+    for cert in certificates:
+        for attribute in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME):
+            value = str(attribute.value).strip()
+            if value and value not in names:
+                names.append(value)
+    return names
+
+
+def _issuer_list_path(ca_id: str) -> Path:
+    return _mtls_dir() / f"issuers-{ca_id}.list"
+
+
+def _rebuild_client_auth_material(ids: List[str]) -> Dict[str, List[str]]:
+    """Derive everything HAProxy reads from the CAs marked for client auth."""
+    directory = _mtls_dir(create=True)
+
+    resolved: Dict[str, List[str]] = {}
+    bundle: List[bytes] = []
+    seen_cns: Dict[str, str] = {}
+    for ca_id in ids:
+        certificates = _ca_certificates(ca_id)
+        names = _subject_cns(certificates)
+        if not names:
+            raise ValueError(
+                f"certificate authority {ca_id!r} has no Common Name, so a "
+                "certificate it signed cannot be told apart from another "
+                "authority's"
+            )
+        for name in names:
+            owner = seen_cns.get(name.lower())
+            if owner and owner != ca_id:
+                raise ValueError(
+                    f"{ca_id!r} and {owner!r} both use the Common Name "
+                    f"{name!r}; a site could not tell their certificates apart"
+                )
+            seen_cns[name.lower()] = ca_id
+        resolved[ca_id] = names
+        bundle.extend(
+            cert.public_bytes(serialization.Encoding.PEM) for cert in certificates
+        )
+
+    for ca_id, names in resolved.items():
+        _write_public_file(
+            _issuer_list_path(ca_id),
+            ("".join(f"{name}\n" for name in names)).encode("utf-8"),
+        )
+    # A CA that is no longer trusted must stop being an answer for any site
+    # that still names it. Deleting the file would do that, but it would also
+    # make the live configuration reference something that no longer exists,
+    # so the next reload would fail and the change would not take effect at
+    # all. Emptying it has the same effect on access -- the ACL matches
+    # nothing, every request to that site is denied -- and leaves a
+    # configuration that still loads.
+    try:
+        live_config = HAPROXY_CFG.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        live_config = ""
+    for path in directory.glob("issuers-*.list"):
+        if path.stem[len("issuers-"):] in resolved:
+            continue
+        if path.name in live_config:
+            _write_public_file(path, MTLS_EMPTY_MARKER.encode("utf-8"))
+        else:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+    _write_public_file(
+        directory / MTLS_BUNDLE_NAME,
+        b"".join(bundle) if bundle else MTLS_EMPTY_MARKER.encode("utf-8"),
+    )
+    revoked_path = directory / MTLS_REVOKED_NAME
+    if not revoked_path.is_file():
+        _write_public_file(revoked_path, MTLS_EMPTY_MARKER.encode("utf-8"))
+    return resolved
+
+
+def _load_revoked_fingerprints() -> List[str]:
+    path = _mtls_dir() / MTLS_REVOKED_NAME
+    if not path.is_file():
+        return []
+    values: List[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        candidate = line.strip().lower()
+        if candidate and not candidate.startswith("#"):
+            values.append(candidate)
+    return values
+
+
+def handle_ca_client_auth(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """Replace the set of CAs trusted to authenticate clients."""
+    raw = body.get("ids")
+    if not isinstance(raw, list) or len(raw) > 64:
+        return 400, {"ok": False, "error": "ids must be a list of CA identifiers"}
+    ids: List[str] = []
+    for value in raw:
+        if not isinstance(value, str):
+            return 400, {"ok": False, "error": "ids must be a list of CA identifiers"}
+        candidate = value.strip().lower()
+        if not candidate:
+            continue
+        try:
+            candidate = "internal" if candidate == "internal" else _safe_slug(candidate).lower()
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        if candidate not in ids:
+            ids.append(candidate)
+
+    with CA_LOCK:
+        try:
+            resolved = _rebuild_client_auth_material(ids)
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            return 500, {"ok": False, "error": f"cannot write client authentication material: {exc}"}
+        path = _client_auth_trust_path()
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"version": 1, "ids": ids}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+
+    rc, _out, err = _reload_haproxy()
+    return 200, {
+        "ok": True,
+        "ids": ids,
+        "issuers": resolved,
+        "reload_rc": rc,
+        "reload_error": "" if rc == 0 else err.strip()[:400],
+        "message": (
+            f"Client authentication trusts {len(ids)} certificate authorities."
+            if ids
+            else "No certificate authority is trusted for client authentication."
+        ),
+    }
+
+
+def handle_ca_revoked(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """Replace the list of client certificates refused by fingerprint.
+
+    Refusing one certificate should not mean discarding the authority that
+    signed it, and a small gateway is unlikely to run a CRL distribution
+    point -- so revocation here is a list of fingerprints the frontend
+    matches directly.
+    """
+    raw = body.get("fingerprints")
+    if not isinstance(raw, list) or len(raw) > MTLS_MAX_REVOKED:
+        return 400, {
+            "ok": False,
+            "error": f"fingerprints must be a list of at most {MTLS_MAX_REVOKED} entries",
+        }
+    values: List[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            return 400, {"ok": False, "error": "each fingerprint must be a string"}
+        # Accept what the tools print: colons, spaces, upper case.
+        candidate = re.sub(r"[^0-9a-fA-F]", "", entry).lower()
+        if not candidate:
+            continue
+        if not SHA256_HEX_RE.fullmatch(candidate):
+            return 400, {
+                "ok": False,
+                "error": f"{entry.strip()!r} is not a SHA-256 fingerprint",
+            }
+        if candidate not in values:
+            values.append(candidate)
+
+    with CA_LOCK:
+        try:
+            directory = _mtls_dir(create=True)
+            _write_public_file(
+                directory / MTLS_REVOKED_NAME,
+                (MTLS_EMPTY_MARKER + "".join(f"{value}\n" for value in values)).encode(
+                    "utf-8"
+                ),
+            )
+        except (OSError, ValueError) as exc:
+            return 500, {"ok": False, "error": f"cannot write the revocation list: {exc}"}
+
+    # HAProxy reads a pattern file when it loads the configuration, so the new
+    # list is only in force after a reload. Revocation that takes effect at
+    # some unspecified later time is not revocation.
+    rc, _out, err = _reload_haproxy()
+    return 200, {
+        "ok": True,
+        "fingerprints": values,
+        "reload_rc": rc,
+        "reload_error": "" if rc == 0 else err.strip()[:400],
+        "message": f"{len(values)} client certificates are refused.",
+    }
 
 
 def handle_internal_ca_ensure(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -1943,6 +2253,14 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
     if not path.is_file():
         return 404, {"ok": False, "error": "certificate authority was not found"}
     path.unlink()
+    # Leaving a deleted authority in the client-auth list would keep its names
+    # in an issuers file that nothing can regenerate.
+    trusted = _load_client_auth_ids()
+    if ca_id in trusted:
+        remaining = [value for value in trusted if value != ca_id]
+        status, response = handle_ca_client_auth({"ids": remaining})
+        if not response.get("ok"):
+            return status, response
     return 200, {"ok": True, "message": f"External certificate authority deleted: {ca_id}"}
 
 
@@ -2534,6 +2852,10 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_ca_export(body)
             elif path == "/api/v1/certs/ca/delete-external":
                 status, resp = handle_external_ca_delete(body)
+            elif path == "/api/v1/certs/ca/client-auth":
+                status, resp = handle_ca_client_auth(body)
+            elif path == "/api/v1/certs/ca/revoked":
+                status, resp = handle_ca_revoked(body)
             elif path == "/api/v1/certs/dns-providers":
                 status, resp = handle_dns_providers_list(body)
             elif path == "/api/v1/certs/dns-providers/save":
@@ -2640,6 +2962,25 @@ def main() -> None:
     if ca_root.exists():
         _prepare_ca_subdir("internal")
         _prepare_ca_subdir("external")
+
+    # The frontend may reference the bundle and the revocation list before
+    # anyone has imported a certificate authority, and HAProxy will not start
+    # if a file named in the configuration is missing.
+    # A CA can disappear between restarts (a restore from an older backup, a
+    # file removed by hand). One unresolvable entry must not cost the other
+    # authorities their material.
+    startup_ids: List[str] = []
+    for ca_id in _load_client_auth_ids():
+        try:
+            _ca_certificates(ca_id)
+        except (OSError, ValueError) as exc:
+            LOG.warning("dropping %r from client authentication: %s", ca_id, exc)
+            continue
+        startup_ids.append(ca_id)
+    try:
+        _rebuild_client_auth_material(startup_ids)
+    except (OSError, ValueError) as exc:
+        LOG.error("cannot prepare client authentication material: %s", exc)
 
     # удаляем старый сокет, если остался
     try:

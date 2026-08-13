@@ -650,6 +650,16 @@ if (effTcpPassForCheck === true) {
         site.enable_splice_backend = spliceVal;
       }
 
+      // Client certificates. Independent of the certificate source above:
+      // which authority signs this site's server certificate says nothing
+      // about which authority may vouch for a visitor.
+      var mtlsModeEl = document.getElementById("mtls_mode");
+      var mtlsCaEl = document.getElementById("mtls_ca_id");
+      if (mtlsModeEl && (mtlsModeEl.value === "optional" || mtlsModeEl.value === "required")) {
+        site.mtls_mode = mtlsModeEl.value;
+        site.mtls_ca_id = mtlsCaEl ? mtlsCaEl.value : "";
+      }
+
       // Certificate source. Keep le_managed for backward compatibility.
       var certModeRadio = document.querySelector('input[name="cert_mode"]:checked');
       if (certModeRadio) {
@@ -730,6 +740,10 @@ delete site.cert_alt_names;
 delete site.redirect_to_https;
 delete site.authelia_enabled;
 delete site.zero_trust;
+// The client certificate is checked in the HTTP frontend, which a
+// passthrough site never reaches.
+delete site.mtls_mode;
+delete site.mtls_ca_id;
 
 delete site.backend_ssl;
 delete site.backend_ssl_verify;

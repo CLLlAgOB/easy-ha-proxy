@@ -248,10 +248,32 @@ frontend fe_tls_router
 # FRONTEND HTTPS (:443) с TLS-терминацией
 #################################
 frontend fe_https
+{# ---- Client certificates (mTLS) ------------------------------------------
+   A bind takes one ca-file, so every site that wants client certificates
+   shares one bundle and the per-site decision happens below, on the issuer.
+
+   "verify optional" asks for a certificate without requiring one, and the
+   two ignore-err options keep a bad certificate from killing the handshake.
+   That is deliberate: the bind is shared with every other site on :443, and
+   a visitor to a site that never asked for mTLS must not be cut off because
+   their client offered a certificate this gateway does not know. The error
+   is not ignored, only deferred -- ssl_c_verify is checked per site.
+
+   Only the CA names in the bundle are advertised in the certificate request,
+   so a browser holding nothing issued by them prompts for nothing.          #}
+{% set mtls_sites = [] %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% if (s.mtls_mode | default('disabled')) in ['optional', 'required'] and s.mtls_ca_id | default('') %}
+{% set _ = mtls_sites.append(s) %}
+{% endif %}
+{% endfor %}
+{% set mtls_dir = haproxy_mtls_dir | default('/etc/haproxy/mtls') %}
+{% set mtls_bind = ' ca-file ' ~ mtls_dir ~ '/clients-ca.pem verify optional ca-ignore-err all crt-ignore-err all' if mtls_sites else '' %}
 {% if has_passthru %}
-    bind 127.0.0.1:8443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 accept-proxy no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+    bind 127.0.0.1:8443 ssl crt {{ haproxy_certs_dir }}{{ mtls_bind }} alpn h2,http/1.1 accept-proxy no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
 {% else %}
-    bind ipv4@*:443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+    bind ipv4@*:443 ssl crt {{ haproxy_certs_dir }}{{ mtls_bind }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
 {% endif %}
     mode http
     option dontlognull
@@ -628,6 +650,36 @@ frontend fe_https
     http-request deny status 400 if sni_found !valid_sni
     http-request deny status 400 if !valid_host
 
+{% if mtls_sites %}
+    # ---- Клиентские сертификаты ----
+    # This gate runs before Authelia on purpose. The two are independent
+    # layers: a site may ask for a certificate, a login, both, or neither,
+    # and a request that fails here never reaches the identity provider.
+    acl mtls_present  ssl_c_used
+    acl mtls_verified ssl_c_verify eq 0
+    # openssl x509 -in client.crt -outform der | openssl dgst -sha256
+    acl mtls_revoked  ssl_c_der,sha2(256),hex,lower -f {{ mtls_dir }}/revoked.list
+{# Numbered, not named after the authority: sanitize() collapses dots and
+   dashes to underscores, so "corp.pki" and "corp-pki" would share one ACL
+   name and HAProxy would quietly merge two authorities into one. The file
+   name on each line says which authority it is. #}
+{% set mtls_ca_ids = mtls_sites | map(attribute='mtls_ca_id') | unique | list %}
+{% for ca_id in mtls_ca_ids %}
+    # The bundle is shared by the whole bind, so "the certificate verified" is
+    # not yet "the certificate came from this site's authority".
+    acl mtls_ca_{{ loop.index }} ssl_c_i_dn(CN) -f {{ mtls_dir }}/issuers-{{ ca_id }}.list
+{% endfor %}
+{% for s in mtls_sites %}
+{% set id = sanitize(s.name) %}
+{% if (s.mtls_mode | default('disabled')) == 'required' %}
+    http-request deny status 403 if host_{{ id }} !mtls_present
+{% endif %}
+    http-request deny status 403 if host_{{ id }} mtls_present !mtls_verified
+    http-request deny status 403 if host_{{ id }} mtls_present !mtls_ca_{{ mtls_ca_ids.index(s.mtls_ca_id) + 1 }}
+    http-request deny status 403 if host_{{ id }} mtls_present mtls_revoked
+{% endfor %}
+{% endif %}
+
     # ---- Доверенная proxy-граница для admin UI ----
     http-request del-header Remote-User
     http-request del-header Remote-Groups
@@ -637,6 +689,25 @@ frontend fe_https
     http-request del-header X-Easy-HAProxy-Config-Generation
     http-request del-header X-Forwarded-For
     http-request set-header X-Forwarded-For %[src]
+{% if mtls_sites %}
+    # Same rule as the Authelia headers above: deleted for everyone first, so
+    # a client cannot claim a certificate identity by sending the header.
+    http-request del-header X-Client-Cert-Subject
+    http-request del-header X-Client-Cert-Issuer
+    http-request del-header X-Client-Cert-Serial
+    http-request del-header X-Client-Cert-Fingerprint
+{% set mtls_hostnames = [] %}
+{% for s in mtls_sites %}
+{% for hn in [s.domain] + (s.alt_names | default([])) %}{% set _ = mtls_hostnames.append(hn) %}{% endfor %}
+{% endfor %}
+    acl mtls_host hdr(host) -i {{ mtls_hostnames | unique | join(' ') }}
+    # Only where the site asked for a certificate and it survived every check
+    # above -- a site that never enabled mTLS learns nothing about the client.
+    http-request set-header X-Client-Cert-Subject     %[ssl_c_s_dn] if mtls_host mtls_present mtls_verified
+    http-request set-header X-Client-Cert-Issuer      %[ssl_c_i_dn] if mtls_host mtls_present mtls_verified
+    http-request set-header X-Client-Cert-Serial      %[ssl_c_serial,hex] if mtls_host mtls_present mtls_verified
+    http-request set-header X-Client-Cert-Fingerprint %[ssl_c_der,sha2(256),hex,lower] if mtls_host mtls_present mtls_verified
+{% endif %}
 {% if request_id_enabled | default(true) %}
     # The identifier is minted at the edge, never accepted from the client.
     # Echoing a supplied one would let anyone make two unrelated requests share

@@ -5,6 +5,7 @@
 
 ######## 1. Базовые пути ######################################################
 haproxy_certs_dir: "/etc/haproxy/certs"     # куда складываем fullchain+privkey *.pem
+haproxy_mtls_dir: "/etc/haproxy/mtls"      # публичные CA клиентов, списки издателей и отзывов
 haproxy_socket: "/run/haproxy/admin.sock"
 haproxy_socket_group: "hadmin"
 # The web UI owns these three runtime source files after the initial seed.
