@@ -86,6 +86,9 @@ from .services_haproxy_tcp import (
 # the error-exclusion rules are built by script and have no form control at
 # all. So these are the only keys a plain submit is allowed to speak for;
 # everything else is carried over from the stored site untouched.
+# Certificate material is small; anything larger is not a certificate, and the
+# daemon on the other side has its own limit besides.
+MAX_CERT_UPLOAD_BYTES = 4 * 1024 * 1024
 FORM_TEXT_FIELDS = ("backend_host", "health_uri", "hsts", "waf")
 FORM_NUMBER_FIELDS = ("max_req_rate", "health_status")
 FORM_TRISTATE_FIELDS = (
@@ -1393,6 +1396,63 @@ def haproxy_certs_page():
         message=message,
         error=error,
     )
+
+
+def _material_upload(action):
+    """Shared body for the inspect and import steps of the one upload field.
+
+    The browser sends the same file twice -- once to be told what it is, once
+    to act on it -- rather than the gateway holding an unexamined upload
+    between two requests.
+    """
+    from .certd_client import (
+        import_certificate_material,
+        inspect_certificate_material,
+    )
+
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"ok": False, "error": "Select a file"}), 400
+    payload = uploaded.read(MAX_CERT_UPLOAD_BYTES + 1)
+    if len(payload) > MAX_CERT_UPLOAD_BYTES:
+        return jsonify({"ok": False, "error": "The file is too large"}), 413
+
+    common = {
+        "password": request.form.get("password") or "",
+        "name": (request.form.get("name") or "").strip(),
+        "domain": (request.form.get("domain") or "").strip(),
+    }
+    if action == "inspect":
+        return jsonify(
+            inspect_certificate_material(payload, uploaded.filename, **common)
+        )
+    result = import_certificate_material(
+        payload,
+        uploaded.filename,
+        replace=(request.form.get("replace") or "").lower() in ("1", "true", "on"),
+        **common,
+    )
+    record_request(
+        "certificate.import",
+        object_type="certificate",
+        object_id=common["domain"] or common["name"] or uploaded.filename,
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary="; ".join(result.get("completed") or []) or "nothing was installed",
+        detail=str(result.get("error") or "")[:500],
+    )
+    return jsonify(result)
+
+
+@bp.post("/haproxy/certs/inspect")
+def haproxy_certs_inspect():
+    """Report what an uploaded file contains, without installing anything."""
+    return _material_upload("inspect")
+
+
+@bp.post("/haproxy/certs/import")
+def haproxy_certs_import():
+    """Install what the file contains: authorities and/or a server certificate."""
+    return _material_upload("import")
 
 
 @bp.get("/haproxy/certs/ca/<ca_id>/download")

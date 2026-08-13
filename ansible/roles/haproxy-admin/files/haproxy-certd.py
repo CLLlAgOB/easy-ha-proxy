@@ -2187,11 +2187,31 @@ def handle_internal_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
     return 200, {"ok": True, "message": "Internal certificate authority deleted."}
 
 
+def _uploaded_file(form: "cgi.FieldStorage", field: str) -> Any:
+    """Return the attached file for ``field``, or None.
+
+    A cgi.FieldStorage part that holds a file answers neither ``bool()`` nor
+    ``in`` -- both raise TypeError, because its ``list`` is None. So the
+    obvious way to ask whether the operator attached anything is the one way
+    that cannot be used, and asking it crashed the request handler instead of
+    returning an error.
+    """
+    try:
+        item = form[field]
+    except (KeyError, TypeError):
+        return None
+    if isinstance(item, list):
+        item = item[0] if item else None
+    if item is None or not getattr(item, "filename", ""):
+        return None
+    return item
+
+
 def handle_external_ca_upload_form(
     form: "cgi.FieldStorage",
 ) -> Tuple[int, Dict[str, Any]]:
-    file_item = form["ca_file"] if "ca_file" in form else None
-    if not file_item or not getattr(file_item, "filename", ""):
+    file_item = _uploaded_file(form, "ca_file")
+    if file_item is None:
         return 400, {"ok": False, "error": "ca_file is required"}
     raw = file_item.file.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
@@ -2262,6 +2282,386 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         if not response.get("ok"):
             return status, response
     return 200, {"ok": True, "message": f"External certificate authority deleted: {ca_id}"}
+
+
+# ───────────────────── one upload, sorted by what it turns out to be ─────
+#
+# An operator holding a file from their certificate authority should not have
+# to know whether it is PEM, DER or PKCS#12, nor which of the two forms on
+# this page it belongs in, before they can upload it. So there is one field:
+# read whatever arrives, work out what each piece is, and say so before
+# touching anything.
+#
+# The sorting rule is the certificate's own Basic Constraints. CA:TRUE is an
+# authority and goes to the trust store; anything else is an end-entity
+# certificate and, if its private key came along, becomes a server
+# certificate. Nothing is guessed from the file name or the extension.
+
+
+def _certificate_is_authority(cert: x509.Certificate) -> bool:
+    try:
+        return bool(
+            cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+        )
+    except x509.ExtensionNotFound:
+        return False
+
+
+def _is_self_signed(cert: x509.Certificate) -> bool:
+    return cert.subject == cert.issuer
+
+
+def _load_private_key_blocks(data: bytes, secret: Optional[bytes]) -> List[Any]:
+    blocks: List[bytes] = []
+    for label in (
+        b"PRIVATE KEY",
+        b"RSA PRIVATE KEY",
+        b"EC PRIVATE KEY",
+        b"ENCRYPTED PRIVATE KEY",
+    ):
+        blocks.extend(_extract_pem_blocks(data, label))
+    keys: List[Any] = []
+    for block in blocks:
+        for candidate in (secret, None):
+            try:
+                keys.append(
+                    serialization.load_pem_private_key(
+                        block, password=candidate, backend=default_backend()
+                    )
+                )
+                break
+            except (TypeError, ValueError):
+                continue
+        else:
+            raise ValueError(
+                "a private key in this file is encrypted; enter its password"
+            )
+    return keys
+
+
+def _decode_uploaded_material(
+    data: bytes, password: str = ""
+) -> Tuple[List[x509.Certificate], List[Any], str]:
+    """Return (certificates, private keys, detected format)."""
+    secret = password.encode("utf-8") if password else None
+
+    if b"-----BEGIN" in data:
+        certificates = _load_pem_certificates(data)
+        keys = _load_private_key_blocks(data, secret)
+        if not certificates and not keys:
+            raise ValueError("this PEM file holds no certificate and no private key")
+        return certificates, keys, "PEM"
+
+    # PKCS#12 before DER: a .p12 is also a binary blob, and trying to read it
+    # as a certificate produces a misleading "not a certificate" instead of
+    # "the password is wrong".
+    try:
+        from cryptography.hazmat.primitives.serialization import pkcs12
+
+        key, cert, extra = pkcs12.load_key_and_certificates(
+            data, secret, default_backend()
+        )
+    except ValueError as exc:
+        message = str(exc).lower()
+        if "mac" in message or "password" in message or "invalid" in message:
+            pkcs12_error: Optional[str] = (
+                "this looks like a PKCS#12 file and the password is missing or wrong"
+                if not password
+                else "the PKCS#12 password is wrong"
+            )
+        else:
+            pkcs12_error = None
+    except Exception:  # noqa: BLE001
+        pkcs12_error = None
+    else:
+        certificates = ([cert] if cert is not None else []) + list(extra or [])
+        keys = [key] if key is not None else []
+        if not certificates and not keys:
+            raise ValueError("this PKCS#12 file is empty")
+        return certificates, keys, "PKCS#12"
+
+    try:
+        return [x509.load_der_x509_certificate(data, default_backend())], [], "DER"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return [], [
+            serialization.load_der_private_key(
+                data, password=secret, backend=default_backend()
+            )
+        ], "DER"
+    except Exception:  # noqa: BLE001
+        pass
+
+    if pkcs12_error:
+        raise ValueError(pkcs12_error)
+    raise ValueError(
+        "unrecognised file: expected PEM, DER or PKCS#12 (.p12/.pfx)"
+    )
+
+
+def _chain_for_leaf(
+    leaf: x509.Certificate, authorities: List[x509.Certificate]
+) -> List[x509.Certificate]:
+    """Order the intermediates from the leaf upwards.
+
+    A self-signed root is left out: HAProxy sends the file as-is, and a client
+    that does not already trust the root will not start trusting it because
+    the server offered a copy.
+    """
+    chain: List[x509.Certificate] = []
+    remaining = [ca for ca in authorities if not _is_self_signed(ca)]
+    current = leaf
+    while True:
+        issuer = next(
+            (ca for ca in remaining if ca.subject == current.issuer), None
+        )
+        if issuer is None:
+            break
+        chain.append(issuer)
+        remaining.remove(issuer)
+        current = issuer
+    return chain
+
+
+def _describe_certificate(cert: x509.Certificate) -> Dict[str, Any]:
+    return {
+        "subject": _certificate_label(cert),
+        "issuer": (
+            cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            if cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+            else cert.issuer.rfc4514_string()
+        ),
+        "not_before": _cert_not_before(cert).strftime("%Y-%m-%d"),
+        "not_after": _cert_not_after(cert).strftime("%Y-%m-%d"),
+        "sha256": cert.fingerprint(hashes.SHA256()).hex(),
+        # Only for an end-entity certificate. _get_cert_dns_names falls back to
+        # the Common Name when there is no SAN, which for an authority means
+        # reporting "Corp Root CA" as though it were a host name.
+        "dns_names": (
+            [] if _certificate_is_authority(cert) else sorted(_get_cert_dns_names(cert))
+        ),
+        "self_signed": _is_self_signed(cert),
+    }
+
+
+def _sort_uploaded_material(
+    data: bytes, password: str, name: str, domain: str
+) -> Dict[str, Any]:
+    certificates, keys, detected = _decode_uploaded_material(data, password)
+
+    authorities = [c for c in certificates if _certificate_is_authority(c)]
+    leaves = [c for c in certificates if not _certificate_is_authority(c)]
+
+    paired: Optional[Tuple[x509.Certificate, Any]] = None
+    for leaf in leaves:
+        for key in keys:
+            if _public_key_bytes(leaf.public_key()) == _public_key_bytes(
+                key.public_key()
+            ):
+                paired = (leaf, key)
+                break
+        if paired:
+            break
+
+    problems: List[str] = []
+    actions: List[str] = []
+
+    ca_id = ""
+    if authorities:
+        root = next((c for c in authorities if _is_self_signed(c)), authorities[0])
+        ca_id = _safe_slug(name or _certificate_label(root)).lower()
+        if ca_id == "internal":
+            problems.append("the identifier 'internal' is reserved")
+            ca_id = ""
+        else:
+            actions.append(
+                f"import {len(authorities)} certificate authorities as {ca_id!r}"
+                if len(authorities) > 1
+                else f"import the certificate authority {ca_id!r}"
+            )
+
+    server: Optional[Dict[str, Any]] = None
+    target = ""
+    if paired:
+        leaf, _key = paired
+        names = sorted(_get_cert_dns_names(leaf))
+        target = domain or (names[0] if names else "")
+        if not target:
+            problems.append(
+                "the certificate carries no host name, so there is nothing to "
+                "install it under; choose a domain"
+            )
+        else:
+            chain = _chain_for_leaf(leaf, authorities)
+            server = {
+                **_describe_certificate(leaf),
+                "domain": target,
+                "chain_length": len(chain),
+            }
+            actions.append(f"install a server certificate for {target}")
+            if not chain and not _is_self_signed(leaf):
+                problems.append(
+                    "no intermediate certificate came with it, so clients that "
+                    "do not already hold the chain may reject this certificate"
+                )
+    elif leaves:
+        problems.append(
+            "a server certificate was found but not its private key, so it "
+            "cannot be installed; upload both together"
+        )
+    elif keys and not authorities:
+        problems.append("a private key was found but no certificate to go with it")
+
+    return {
+        "format": detected,
+        "authorities": [_describe_certificate(c) for c in authorities],
+        "server_certificate": server,
+        "ca_id": ca_id,
+        "domain": target,
+        "actions": actions,
+        "problems": problems,
+        "_authorities": authorities,
+        "_paired": paired,
+    }
+
+
+def _import_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in plan.items() if not key.startswith("_")
+    }
+
+
+def handle_certs_inspect_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+    """Say what a file is, and change nothing."""
+    file_item = _uploaded_file(form, "file")
+    if file_item is None:
+        return 400, {"ok": False, "error": "file is required"}
+    data = file_item.file.read(MAX_REQUEST_BYTES + 1)
+    if len(data) > MAX_REQUEST_BYTES:
+        return 413, {"ok": False, "error": "the upload is too large"}
+    try:
+        plan = _sort_uploaded_material(
+            data,
+            form.getfirst("password", "") or "",
+            (form.getfirst("name", "") or "").strip(),
+            (form.getfirst("domain", "") or "").strip(),
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **_import_summary(plan)}
+
+
+def handle_certs_import_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+    """Do what the inspection described."""
+    file_item = _uploaded_file(form, "file")
+    if file_item is None:
+        return 400, {"ok": False, "error": "file is required"}
+    data = file_item.file.read(MAX_REQUEST_BYTES + 1)
+    if len(data) > MAX_REQUEST_BYTES:
+        return 413, {"ok": False, "error": "the upload is too large"}
+    replace = (form.getfirst("replace", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+    try:
+        plan = _sort_uploaded_material(
+            data,
+            form.getfirst("password", "") or "",
+            (form.getfirst("name", "") or "").strip(),
+            (form.getfirst("domain", "") or "").strip(),
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+
+    if not plan["actions"]:
+        return 400, {
+            "ok": False,
+            "error": "; ".join(plan["problems"])
+            or "there is nothing in this file to install",
+        }
+
+    done: List[str] = []
+    authorities: List[x509.Certificate] = plan["_authorities"]
+    ca_path: Optional[Path] = None
+
+    if authorities and plan["ca_id"]:
+        canonical = b"".join(
+            cert.public_bytes(serialization.Encoding.PEM) for cert in authorities
+        )
+        external_dir = _prepare_ca_subdir("external", create=True)
+        try:
+            ca_path = _ensure_within(
+                external_dir, external_dir / f"{plan['ca_id']}.pem"
+            )
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        if ca_path.is_file() and ca_path.read_bytes() != canonical and not replace:
+            return 409, {
+                "ok": False,
+                "error": (
+                    f"a different certificate authority is already stored as "
+                    f"{plan['ca_id']!r}. Choose another name, or confirm the "
+                    "replacement."
+                ),
+                "needs_replace": True,
+                **_import_summary(plan),
+            }
+        _write_public_file(ca_path, canonical)
+        done.append(f"certificate authority {plan['ca_id']!r} imported")
+
+    if plan["_paired"]:
+        leaf, key = plan["_paired"]
+        chain = _chain_for_leaf(leaf, authorities)
+        pem = b"".join(
+            cert.public_bytes(serialization.Encoding.PEM) for cert in [leaf] + chain
+        ) + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        try:
+            certificates, _ = _validate_server_pem(pem, plan["domain"])
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc), "completed": done}
+
+        # Only when the same upload also carried the authority: verifying
+        # against an unrelated one already in the store would prove nothing.
+        if ca_path is not None:
+            verified, detail = _verify_external_chain(certificates, ca_path)
+            if not verified:
+                return 400, {
+                    "ok": False,
+                    "error": f"the chain does not verify against {plan['ca_id']!r}: {detail}",
+                    "completed": done,
+                }
+
+        hap_dir = _get_haproxy_certs_dir()
+        hap_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            destination = _ensure_within(
+                hap_dir, hap_dir / f"{_safe_slug(plan['domain'])}.pem"
+            )
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc), "completed": done}
+        ok, reload_rc, _out, reload_stderr = _activate_server_pem(destination, pem)
+        if not ok:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "HAProxy rejected the certificate and the previous one was "
+                    f"restored: {reload_stderr.strip()[:300]}"
+                ),
+                "completed": done,
+            }
+        done.append(f"server certificate installed for {plan['domain']}")
+
+    return 200, {
+        "ok": True,
+        "completed": done,
+        "message": "; ".join(done),
+        **_import_summary(plan),
+    }
 
 
 def handle_certs_backup(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -2513,9 +2913,8 @@ def handle_certs_upload_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, A
       - site_name (опц.)
       - domain    (опц.)
     """
-    file_item = form["cert_file"] if "cert_file" in form else None
-
-    if not file_item or not getattr(file_item, "filename", ""):
+    file_item = _uploaded_file(form, "cert_file")
+    if file_item is None:
         return 200, {"ok": False, "error": "cert_file is required"}
 
     site_name = (form.getfirst("site_name", "") or "").strip()
@@ -2777,7 +3176,12 @@ class CertdHandler(BaseHTTPRequestHandler):
         path = self.path
 
         # Certificate and CA imports use multipart/form-data.
-        if path in ("/api/v1/certs/upload", "/api/v1/certs/ca/upload"):
+        if path in (
+            "/api/v1/certs/upload",
+            "/api/v1/certs/ca/upload",
+            "/api/v1/certs/inspect",
+            "/api/v1/certs/import",
+        ):
             ctype, pdict = cgi.parse_header(
                 self.headers.get("Content-Type", ""))
             if ctype != "multipart/form-data":
@@ -2806,20 +3210,33 @@ class CertdHandler(BaseHTTPRequestHandler):
                     413, {"ok": False, "error": "upload is too large"}
                 )
 
-            form = cgi.FieldStorage(  # type: ignore[arg-type]
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                },
-                keep_blank_values=True,
-            )
+            # Everything below is wrapped, unlike the JSON branch further
+            # down, which always was. An exception escaping here does not
+            # reach the caller as an error: it unwinds out of the handler and
+            # the connection closes unanswered, so the browser is told only
+            # that the remote end hung up. An upload that fails must say why.
+            try:
+                form = cgi.FieldStorage(  # type: ignore[arg-type]
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        "REQUEST_METHOD": "POST",
+                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                    },
+                    keep_blank_values=True,
+                )
 
-            if path == "/api/v1/certs/ca/upload":
-                status, resp = handle_external_ca_upload_form(form)
-            else:
-                status, resp = handle_certs_upload_form(form)
+                if path == "/api/v1/certs/ca/upload":
+                    status, resp = handle_external_ca_upload_form(form)
+                elif path == "/api/v1/certs/inspect":
+                    status, resp = handle_certs_inspect_form(form)
+                elif path == "/api/v1/certs/import":
+                    status, resp = handle_certs_import_form(form)
+                else:
+                    status, resp = handle_certs_upload_form(form)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("certificate upload failed")
+                status, resp = 500, {"ok": False, "error": str(exc)}
             return self._send_json(status, resp)
 
         try:

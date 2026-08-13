@@ -25,6 +25,18 @@
     "Select an authority": "Выберите центр сертификации",
     "Only this authority is accepted for this site. Others may be trusted by the gateway for other sites; their certificates are refused here.": "Для этого сайта принимается только этот центр. Шлюз может доверять и другим — для других сайтов; здесь их сертификаты отклоняются.",
     "No authority is trusted for client authentication yet.": "Пока ни один центр не доверен для клиентской аутентификации.",
-    "Enable one on the Certificates page": "Включите его на странице сертификатов"
+    "Enable one on the Certificates page": "Включите его на странице сертификатов",
+    "Import a certificate or an authority": "Импорт сертификата или центра сертификации",
+    "One field for all of it. Choose a PEM, a DER file, or a PKCS#12 bundle (.p12/.pfx) and it is read to find out what is inside: certificates that are authorities go to the trust store below, and an end-entity certificate that arrived with its private key becomes a server certificate. Nothing is installed until you have seen what was found.": "Одно поле на всё. Выберите PEM, DER или контейнер PKCS#12 (.p12/.pfx) — файл будет прочитан, чтобы понять, что внутри: сертификаты-центры попадут в хранилище доверия ниже, а конечный сертификат, пришедший вместе с закрытым ключом, станет серверным. Ничего не устанавливается, пока вы не увидите, что найдено.",
+    "Password (PKCS#12 or an encrypted key only)": "Пароль (только для PKCS#12 или зашифрованного ключа)",
+    "Name for the authority (optional)": "Имя для центра сертификации (необязательно)",
+    "taken from the certificate if left empty": "если пусто — возьмётся из сертификата",
+    "Domain for the server certificate (optional)": "Домен для серверного сертификата (необязательно)",
+    "Examine the file": "Разобрать файл",
+    "Install": "Установить",
+    "Replace and install": "Заменить и установить",
+    "Select a file first.": "Сначала выберите файл.",
+    "Unreadable file": "Файл не читается",
+    "It was not installed": "Установить не удалось"
   }
 }

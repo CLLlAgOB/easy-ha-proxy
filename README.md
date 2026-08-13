@@ -644,6 +644,32 @@ profile whose plugin is not installed is refused with the snap to install. A
 wildcard name without a DNS profile is refused before Certbot runs, so it
 cannot waste a rate-limited attempt discovering that HTTP-01 will not do.
 
+### Importing a certificate or an authority
+
+There is one field for all of it, under **Certificates**. Give it a PEM, a DER
+file, or a PKCS#12 bundle (`.p12`/`.pfx`, with its password) and it reads the
+file to find out what is inside rather than trusting the extension.
+
+Sorting is by the certificate's own Basic Constraints: `CA:TRUE` is an
+authority and goes to the trust store, anything else is an end-entity
+certificate and, if its private key came along, becomes a server certificate.
+So a bundle holding a root, an intermediate, the server certificate and its key
+-- which is what a certificate authority typically hands over -- can be
+uploaded as it arrived.
+
+Examining a file installs nothing. It reports what it found and what it would
+do; only then does Install act. That is also why the same file is uploaded
+twice: the gateway never holds an unexamined upload between two requests.
+
+What HAProxy is given is the leaf and the intermediates, in order. The root is
+deliberately left out: a client that does not already trust it will not start
+trusting it because the server attached a copy.
+
+When the same upload also carried the authority, the chain is verified against
+it before anything is installed. An authority already stored under that name is
+never silently overwritten -- identical content is accepted, different content
+has to be confirmed.
+
 ### Client certificates (mTLS)
 
 A site can require a client certificate before anything else runs. This is a

@@ -583,6 +583,62 @@ def upload_external_ca(name: str, pem_bytes: bytes, filename: str) -> Dict[str, 
     return data if isinstance(data, dict) else {"ok": False, "error": "unexpected response from haproxy-certd"}
 
 
+def inspect_certificate_material(
+    payload: bytes, filename: str, password: str = "", name: str = "", domain: str = ""
+) -> Dict[str, Any]:
+    """Ask what a file is. Changes nothing on the gateway."""
+    return _material_request("inspect", payload, filename, password, name, domain)
+
+
+def import_certificate_material(
+    payload: bytes,
+    filename: str,
+    password: str = "",
+    name: str = "",
+    domain: str = "",
+    replace: bool = False,
+) -> Dict[str, Any]:
+    """Import whatever the file turned out to contain."""
+    return _material_request(
+        "import", payload, filename, password, name, domain, replace=replace
+    )
+
+
+def _material_request(
+    action: str,
+    payload: bytes,
+    filename: str,
+    password: str,
+    name: str,
+    domain: str,
+    replace: bool = False,
+) -> Dict[str, Any]:
+    url = f"{CERTD_API_BASE}/certs/{action}"
+    data = {"password": password, "name": name, "domain": domain}
+    if replace:
+        data["replace"] = "true"
+    try:
+        response = _post(
+            url,
+            data=data,
+            files={
+                "file": (
+                    filename or "upload.pem",
+                    payload,
+                    "application/octet-stream",
+                )
+            },
+            timeout=60.0,
+        )
+        result = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return result if isinstance(result, dict) else {
+        "ok": False,
+        "error": "unexpected response from haproxy-certd",
+    }
+
+
 def export_ca_certificate(ca_id: str) -> Dict[str, Any]:
     """Return a public CA certificate bundle encoded by certd."""
     url = f"{CERTD_API_BASE}/certs/ca/export"

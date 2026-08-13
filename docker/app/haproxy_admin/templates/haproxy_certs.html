@@ -143,6 +143,48 @@
     </form>
     {% endif %}
 
+    <h3 style="margin-top:24px;">Import a certificate or an authority</h3>
+    <div class="table-meta" style="max-width:820px;">
+      One field for all of it. Choose a PEM, a DER file, or a PKCS#12 bundle
+      (<code>.p12</code>/<code>.pfx</code>) and it is read to find out what is inside:
+      certificates that are authorities go to the trust store below, and an end-entity
+      certificate that arrived with its private key becomes a server certificate.
+      Nothing is installed until you have seen what was found.
+    </div>
+    <div style="margin-top:10px; max-width:820px;">
+      <div class="file-picker">
+        <input id="material-file" type="file" class="file-input-hidden"
+          accept=".pem,.crt,.cer,.der,.p12,.pfx,.key">
+        <button type="button" class="btn btn-icon" id="material-choose">Choose file</button>
+        <span class="file-name" id="material-name">No file selected</span>
+      </div>
+
+      <label class="form-label" for="material-password" style="margin-top:10px;">
+        Password (PKCS#12 or an encrypted key only)
+      </label>
+      <input class="form-input" id="material-password" type="password"
+        autocomplete="new-password" style="max-width:420px;">
+
+      <label class="form-label" for="material-ca-name" style="margin-top:10px;">
+        Name for the authority (optional)
+      </label>
+      <input class="form-input" id="material-ca-name" type="text"
+        placeholder="taken from the certificate if left empty" style="max-width:420px;">
+
+      <label class="form-label" for="material-domain" style="margin-top:10px;">
+        Domain for the server certificate (optional)
+      </label>
+      <input class="form-input" id="material-domain" type="text"
+        placeholder="taken from the certificate if left empty" style="max-width:420px;">
+
+      <div style="margin-top:10px;">
+        <button type="button" class="btn" id="material-inspect">Examine the file</button>
+        <button type="button" class="btn" id="material-import" hidden>Install</button>
+      </div>
+      <div id="material-report" class="table-meta" style="margin-top:10px;"
+        data-i18n-skip></div>
+    </div>
+
     <h3 style="margin-top:20px;">External certificate authorities</h3>
     {% if external_cas %}
     <table class="table mono" style="margin-top:8px;">
