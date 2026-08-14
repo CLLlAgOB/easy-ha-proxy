@@ -177,7 +177,12 @@ document.addEventListener("DOMContentLoaded", function () {
           if (payload.ok) {
             importBtn.hidden = true;
             delete importBtn.dataset.replace;
-            window.setTimeout(function () { window.location.reload(); }, 1200);
+            // A GET, not reload(): this page is reached by form POSTs, and
+            // reload() offers to resend the last one -- which replays whatever
+            // action it was and reports a failure for work already done.
+            window.setTimeout(function () {
+              window.location.assign(window.location.pathname);
+            }, 1200);
             return;
           }
           materialReport.appendChild(line(payload.error || "It was not installed", "error"));

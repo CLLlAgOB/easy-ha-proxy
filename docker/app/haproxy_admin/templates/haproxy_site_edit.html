@@ -593,7 +593,7 @@
                         placeholder="203.0.113.7&#10;198.51.100.0/24">{{ allow_list | join("\n") }}</textarea>
                     <div class="table-meta">
                         One address or network per line. Leave empty to serve everyone.
-                        <strong>Naming the addresses is the whole access policy for this site:</strong>
+                        Naming the addresses is the whole access policy for this site:
                         GeoIP, Authelia, zero-trust and the adaptive error and rate limits stop
                         applying to it, because there is nobody left for them to sort. A client
                         certificate, if you set one below, still applies.
@@ -613,7 +613,7 @@
                     <div class="table-meta">
                         A separate layer from Authelia, not a replacement for it: the certificate is
                         checked first, and a site can use either, both, or neither.
-                        <strong>Optional</strong> refuses a certificate that fails to verify but lets a
+                        Optional refuses a certificate that fails to verify but lets a
                         visitor without one through — useful while handing certificates out.
                     </div>
 
