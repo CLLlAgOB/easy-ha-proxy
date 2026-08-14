@@ -1,0 +1,18 @@
+# /etc/systemd/system/easy-ha-proxy-unit-failed@.service
+# Instantiated by OnFailure= on the jobs whose failure has an alert rule.
+# The instance name is the unit that failed, so one handler covers them all.
+[Unit]
+Description=Report %i to the easy-ha-proxy alert engine
+After=easy-ha-proxy-alertd.service
+
+[Service]
+Type=oneshot
+User=root
+Environment="ALERTD_SOCKET_PATH=/run/easy-ha-proxy/easy-ha-proxy-alertd.sock"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-unit-failed.py %i
+# Reporting a failure must never become a failure of its own: a stopped alert
+# daemon costs a notification, and systemd must not start chasing this unit.
+SuccessExitStatus=0 1
+TimeoutStartSec=60
+Nice=10

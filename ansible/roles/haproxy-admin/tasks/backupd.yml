@@ -108,6 +108,23 @@
     mode: "0755"
   register: backup_runner
 
+- name: "easy-ha-proxy-backupd | Install the unit-failure reporter"
+  ansible.builtin.copy:
+    src: easy-ha-proxy-unit-failed.py
+    dest: /usr/local/sbin/easy-ha-proxy-unit-failed.py
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "easy-ha-proxy-backupd | Install the unit-failure reporter unit"
+  ansible.builtin.template:
+    src: easy-ha-proxy-unit-failed@.service.j2
+    dest: /etc/systemd/system/easy-ha-proxy-unit-failed@.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: backup_failure_unit
+
 - name: "easy-ha-proxy-backupd | Install the schedule unit"
   ansible.builtin.template:
     src: easy-ha-proxy-backup.service.j2
@@ -129,7 +146,9 @@
 - name: "easy-ha-proxy-backupd | Reload systemd for the schedule"
   ansible.builtin.systemd:
     daemon_reload: true
-  when: backup_schedule_unit.changed or backup_schedule_timer.changed
+  when: >-
+    backup_schedule_unit.changed or backup_schedule_timer.changed
+    or backup_failure_unit.changed
 
 # The timer is armed on the host; whether it does anything is the daemon's
 # schedule file, which the operator owns through the interface.

@@ -3,6 +3,9 @@
 Description=Scheduled easy-ha-proxy backup and off-host copy
 After=network-online.target easy-ha-proxy-backupd.service
 Wants=network-online.target
+# The daemon reports its own failures; this covers the ones that happen before
+# it is ever reached, which is how a broken runner stayed invisible.
+OnFailure=easy-ha-proxy-unit-failed@%n.service
 
 [Service]
 Type=oneshot
