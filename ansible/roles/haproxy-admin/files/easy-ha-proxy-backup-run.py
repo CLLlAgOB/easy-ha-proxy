@@ -21,7 +21,9 @@ TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_SCHEDULED_TIMEOUT", str(8 * 3600))
 
 
 def main() -> int:
-    request = json.dumps({"action": "run_scheduled"}).encode("utf-8")
+    # The daemon reads one newline-terminated JSON line and refuses anything
+    # else. Closing the write side is not a substitute for the terminator.
+    request = (json.dumps({"action": "run_scheduled"}) + "\n").encode("utf-8")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(TIMEOUT_SECONDS)
