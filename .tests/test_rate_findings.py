@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -45,7 +46,10 @@ REAL_CONFIG = """
 
 class ThresholdParsingTests(unittest.TestCase):
     def setUp(self):
-        self.path = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        # enterContext arrived in 3.11 and the matrix still covers 3.10.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.path = Path(temporary.name)
         self.config = self.path / "haproxy.cfg"
         self.config.write_text(REAL_CONFIG, encoding="utf-8")
 
