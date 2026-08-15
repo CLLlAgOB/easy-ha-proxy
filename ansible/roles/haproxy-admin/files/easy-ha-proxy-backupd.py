@@ -2301,6 +2301,27 @@ def destination_known_hosts(name: str) -> Path:
     return DESTINATIONS_DIR / (str(name).strip().lower() + ".known_hosts")
 
 
+def normalize_private_key(material: str) -> bytes:
+    """Make a pasted key into a file OpenSSH will actually open.
+
+    Two things a textarea gets wrong and OpenSSH will not forgive.
+
+    The terminating newline: OpenSSH's own parser wants one after the
+    footer, and without it falls back to the PEM reader, which reports
+    `error in libcrypto` -- a message that describes a corrupt key and says
+    nothing about the byte that is missing. The browser sends a trimmed
+    field, so the newline is never there and no SFTP destination could ever
+    authenticate. One production key was rejected for exactly this while
+    being, in every other respect, perfectly valid.
+
+    And CRLF: a key copied out of a Windows terminal carries carriage
+    returns into the base64, which is the same failure wearing a different
+    hat.
+    """
+    text = material.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return (text + "\n").encode("utf-8")
+
+
 def write_private(path: Path, content: bytes) -> None:
     """Replace a root-only file. private_file refuses to overwrite by design."""
     with contextlib.suppress(FileNotFoundError):
@@ -2401,7 +2422,7 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
             raise BackupdError("that does not look like a private key", code="invalid")
         # The key never goes through the archive path and never leaves this
         # directory; the browser cannot read it back.
-        write_private(destination_key_path(name), key.encode("utf-8"))
+        write_private(destination_key_path(name), normalize_private_key(key))
     elif not existing.get("key_installed"):
         raise BackupdError("a private key is required", code="invalid")
 
