@@ -36,6 +36,23 @@
     "Secret key": "Secret key",
     "Allow a plain http endpoint": "Разрешить endpoint по обычному http",
     "The upload carries the archive's SHA-256 in its signature, so the storage service refuses a body that does not match it. A successful upload is already proof the far end holds these exact bytes, with no second transfer to check.": "Загрузка несёт SHA-256 архива внутри подписи, поэтому хранилище отвергает тело, которое ей не соответствует. Успешная загрузка уже сама по себе доказывает, что на той стороне лежат ровно эти байты, и второй передачи для проверки не нужно.",
-    "Leave a key or secret empty when editing an existing destination to keep the one already stored.": "При редактировании существующего назначения оставьте поле ключа или секрета пустым, чтобы сохранить уже записанный."
+    "Leave a key or secret empty when editing an existing destination to keep the one already stored.": "При редактировании существующего назначения оставьте поле ключа или секрета пустым, чтобы сохранить уже записанный.",
+    "the destination name may use a-z, 0-9 and dashes": "в имени назначения допустимы только латинские строчные буквы, цифры и дефис",
+    "a JSON object is required": "требуется объект JSON",
+    "invalid request fields": "недопустимый набор полей в запросе",
+    "the backup passphrase must contain 12 to 1024 characters": "парольная фраза резервной копии должна содержать от 12 до 1024 символов",
+    "the backup passphrase contains unsupported characters": "парольная фраза резервной копии содержит недопустимые символы",
+    "include_ssh and quiesce must be boolean": "include_ssh и quiesce должны быть логическими значениями",
+    "type RESTORE to confirm full replacement": "введите RESTORE для подтверждения полной замены",
+    "restore_ssh must be boolean": "restore_ssh должен быть логическим значением",
+    "scope must be full or config": "область должна быть full или config",
+    "SSH keys are not part of a configuration-scope restore": "ключи SSH не входят в восстановление области config",
+    "kind must be backup or upload": "тип должен быть backup или upload",
+    "type DELETE to remove the artifact": "введите DELETE, чтобы удалить архив",
+    "backup not found": "резервная копия не найдена",
+    "backup artifact not found": "файл резервной копии не найден",
+    "the backup artifact does not match its identifier": "файл резервной копии не соответствует своему идентификатору",
+    "the backup artifact failed a safety check": "файл резервной копии не прошёл проверку безопасности",
+    "the backup service returned an unsafe artifact name": "служба резервного копирования вернула небезопасное имя файла"
   }
 }

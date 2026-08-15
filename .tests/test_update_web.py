@@ -174,7 +174,11 @@ class UpdateWebSecurityBoundaryTests(unittest.TestCase):
         security_source = SECURITY_PATH.read_text(encoding="utf-8")
         initializer = INITIALIZER_PATH.read_text(encoding="utf-8")
         self.assertIn('"/system/updates/api/"', security_source)
-        self.assertIn('"/system/updates/api/"', initializer)
+        # The initializer no longer carries the list itself: both of its
+        # error handlers ask api_errors, which is where the prefixes live.
+        api_errors = (APP_ROOT / "api_errors.py").read_text(encoding="utf-8")
+        self.assertIn('"/system/updates/api/"', api_errors)
+        self.assertIn("caller_parses_json", initializer)
 
 
 class UpdateRouteContractTests(unittest.TestCase):
