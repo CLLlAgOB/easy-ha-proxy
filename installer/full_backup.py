@@ -91,6 +91,16 @@ BACKUP_EXCLUDES = (
     # working gateway; the change log and the security database beside them
     # are small and are kept.
     "var/lib/easy-ha-proxy/metrics",
+    # Finished archives live under the tree being archived, so without these
+    # every backup swallowed all its predecessors and each run roughly doubled:
+    # 14.9 MiB, then 47.1, then 94.9 on one gateway inside a week. They are
+    # already encrypted and compressed, so they do not even shrink on the way
+    # in -- and an old archive is no help in rebuilding the machine anyway.
+    # The job records beside them are kept: they are small and they are the
+    # only history of what ran.
+    "var/lib/easy-ha-proxy/backup-web/backups",
+    "var/lib/easy-ha-proxy/backup-web/uploads",
+    "var/lib/easy-ha-proxy/update-web",
 )
 SSH_GLOBS = (
     "/etc/ssh/ssh_host_*",
