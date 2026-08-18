@@ -21,6 +21,7 @@ Environment="ALERTD_MAIL_LOCK={{ alertd_mail_lock | default('/run/easy-ha-proxy/
 # one, so both are gated by the shared token. Reads stay open to the hadmin
 # group like every other helper socket.
 Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+Environment="ALERTD_GATEWAY_NAME={{ alertd_gateway_name | default(haproxy_admin_domain | default('')) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-alertd.py', rstrip=false) | hash('sha256') }}"
 
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-alertd.py
