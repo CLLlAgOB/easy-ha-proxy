@@ -87,6 +87,8 @@
     byId("schedule-enabled").checked = Boolean(schedule.enabled);
     byId("schedule-quiesce").checked = schedule.quiesce !== false;
     byId("schedule-include-ssh").checked = Boolean(schedule.include_ssh);
+    if (schedule.time) byId("schedule-time").value = schedule.time;
+    byId("schedule-next-run").textContent = schedule.next_run || "—";
     byId("schedule-last-run").textContent = schedule.last_run || "—";
     byId("schedule-last-result").textContent = schedule.last_result || "—";
     byId("schedule-passphrase-state").textContent = schedule.passphrase_stored
@@ -116,6 +118,7 @@
     const body = {
       enabled: byId("schedule-enabled").checked,
       destinations: chosen(),
+      time: byId("schedule-time").value,
       quiesce: byId("schedule-quiesce").checked,
       include_ssh: byId("schedule-include-ssh").checked
     };

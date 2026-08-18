@@ -474,7 +474,7 @@ def schedule_view():
 def save_schedule_view():
     payload = _json_payload(
         set(),
-        {"enabled", "destinations", "include_ssh", "quiesce", "passphrase"},
+        {"enabled", "destinations", "include_ssh", "quiesce", "passphrase", "time"},
     )
     command = {"action": "schedule_save"}
 
@@ -488,6 +488,13 @@ def save_schedule_view():
             if not isinstance(payload[key], bool):
                 abort(400, description=f"{key} must be boolean")
             command[key] = payload[key]
+
+    if "time" in payload:
+        # Shape only; the daemon owns the range and the systemd syntax.
+        wanted = str(payload["time"] or "").strip()
+        if not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", wanted):
+            abort(400, description="the time must be given as HH:MM on a 24-hour clock")
+        command["time"] = wanted
 
     if "destinations" in payload:
         names = payload["destinations"]
@@ -510,7 +517,10 @@ def save_schedule_view():
 
 @bp_system_backups.post("/api/schedule/run")
 def run_schedule_view():
-    # The same job the timer runs, started by hand. It can take as long as a
-    # full backup and an upload, so it gets the upload timeout rather than
-    # the default.
-    return _call_daemon({"action": "run_scheduled"}, timeout=1800.0)
+    # The same job the timer runs, started by hand -- on_demand so that
+    # pressing the button works before the schedule itself is switched on,
+    # which is exactly when someone wants to see it work. It can take as long
+    # as a full backup and an upload, so it gets the upload timeout.
+    return _call_daemon(
+        {"action": "run_scheduled", "on_demand": True}, timeout=1800.0
+    )

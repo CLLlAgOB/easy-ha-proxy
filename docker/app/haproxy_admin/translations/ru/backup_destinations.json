@@ -55,12 +55,7 @@
     "the backup artifact failed a safety check": "файл резервной копии не прошёл проверку безопасности",
     "the backup service returned an unsafe artifact name": "служба резервного копирования вернула небезопасное имя файла",
     "Every night, without being asked": "Каждую ночь, без напоминаний",
-    "A destination says where a copy goes. This says when. The timer on this host already runs once a night; until the schedule is switched on it finds nothing to do and exits.": "Назначение говорит, куда уходит копия. Здесь задаётся когда. Таймер на этом сервере уже срабатывает раз в сутки; пока расписание не включено, он не находит работы и завершается.",
-    "The passphrase is stored root-only so an unattended run can encrypt without anyone present. It is the only thing that can open these archives afterwards, so keep it somewhere that survives losing this server. Leave the field empty to keep the passphrase already stored.": "Парольная фраза хранится с доступом только для root, чтобы ночной запуск мог зашифровать архив без участия человека. Открыть эти архивы больше нечем, поэтому храните её там, где она переживёт потерю этого сервера. Оставьте поле пустым, чтобы сохранить уже записанную.",
     "Run the backup on a schedule": "Запускать резервное копирование по расписанию",
-    "Send each copy to": "Отправлять каждую копию",
-    "Pause services while the archive is taken": "Приостанавливать службы на время снятия архива",
-    "Include the host SSH keys": "Включать SSH-ключи сервера",
     "Passphrase": "Парольная фраза",
     "Save schedule": "Сохранить расписание",
     "Run it now": "Запустить сейчас",
@@ -74,6 +69,14 @@
     "enabled must be boolean": "enabled должен быть логическим значением",
     "destinations must be a list": "destinations должен быть списком",
     "include_ssh must be boolean": "include_ssh должен быть логическим значением",
-    "quiesce must be boolean": "quiesce должен быть логическим значением"
+    "quiesce must be boolean": "quiesce должен быть логическим значением",
+    "the time must be given as HH:MM on a 24-hour clock": "время задаётся в виде ЧЧ:ММ по 24-часовым часам",
+    "Time of day": "Время суток",
+    "Server local time. A few minutes of jitter are added so a fleet of gateways does not call on the same destination at the same second.": "Локальное время сервера. Добавляется разброс в несколько минут, чтобы несколько шлюзов не пришли на одно назначение в одну и ту же секунду.",
+    "Stored root-only so an unattended run can encrypt without anyone present. It is the only thing that can open these archives afterwards, so keep it somewhere that survives losing this server. Leave the field empty to keep the passphrase already stored.": "Хранится с доступом только для root, чтобы ночной запуск мог зашифровать архив без участия человека. Открыть эти архивы больше нечем, поэтому храните её там, где она переживёт потерю этого сервера. Оставьте поле пустым, чтобы сохранить уже записанную.",
+    "A destination says where a copy goes. This says when.": "Назначение говорит, куда уходит копия. Здесь задаётся когда.",
+    "Next run": "Следующий запуск",
+    "choose at least one destination before running it": "выберите хотя бы одно назначение, прежде чем запускать",
+    "the schedule is off": "расписание выключено"
   }
 }

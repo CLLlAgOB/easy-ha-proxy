@@ -160,13 +160,19 @@ class TranslationTests(unittest.TestCase):
         messages = catalogue()
         markup = TEMPLATE.read_text(encoding="utf-8")
         section = markup.split('id="backup-schedule"')[1].split("</section>")[0]
-        # The prose, which is everything before the form. What follows is
-        # rendered by the script and deliberately left untranslated.
-        prose = section.split("<form")[0]
-        paragraphs = re.findall(r"<p class=\"muted\">(.*?)</p>", prose, re.DOTALL)
+        # Every paragraph of prose in the section, whichever helper class
+        # it carries. The one placeholder the script replaces is inside a
+        # translate="no" block and is skipped below.
+        paragraphs = re.findall(
+            r"<p class=\"(?:muted|table-meta|vars-field-help)\">(.*?)</p>",
+            section,
+            re.DOTALL,
+        )
         self.assertTrue(paragraphs)
         for paragraph in paragraphs:
             flat = " ".join(paragraph.split())
+            if flat in ("Loading…",):
+                continue  # replaced by the script before anyone reads it
             with self.subTest(paragraph=flat[:50]):
                 self.assertNotIn("<", flat, "a tag inside a sentence splits it")
                 self.assertIn(flat, messages)

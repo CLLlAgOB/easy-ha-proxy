@@ -223,10 +223,10 @@ REQUEST_FIELDS = {
     "schedule_save": frozenset(
         {
             "action", "enabled", "destinations", "include_ssh", "quiesce",
-            "passphrase",
+            "passphrase", "time",
         }
     ),
-    "run_scheduled": frozenset({"action"}),
+    "run_scheduled": frozenset({"action", "on_demand"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -3063,6 +3063,89 @@ SCHEDULE_PASSPHRASE_PATH = Path(
     )
 )
 
+# The hour is systemd's business, not this file's: the timer is what actually
+# wakes the job, so changing the time means rewriting the timer and reloading
+# it. A drop-in keeps the packaged unit intact -- and clears OnCalendar before
+# setting it, because systemd treats the setting as a list and would otherwise
+# fire at both the old time and the new one.
+BACKUP_TIMER_UNIT = "easy-ha-proxy-backup.timer"
+TIMER_DROPIN_DIR = Path(
+    os.environ.get(
+        "BACKUPD_TIMER_DROPIN",
+        "/etc/systemd/system/easy-ha-proxy-backup.timer.d",
+    )
+)
+TIMER_DROPIN_PATH = TIMER_DROPIN_DIR / "schedule.conf"
+DEFAULT_SCHEDULE_TIME = "03:20"
+_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+
+
+def schedule_time(value: Any, *, default: str = DEFAULT_SCHEDULE_TIME) -> str:
+    """A 24-hour HH:MM, or the default. Never anything systemd could choke on."""
+    text = str(value or "").strip()
+    if not text:
+        return default
+    if not _TIME_RE.fullmatch(text):
+        raise BackupdError(
+            "the time must be given as HH:MM on a 24-hour clock", code="invalid"
+        )
+    return text
+
+
+def write_timer_time(value: str) -> None:
+    """Point the timer at a new hour and make systemd notice."""
+    TIMER_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(TIMER_DROPIN_DIR, 0o755)
+    body = "\n".join(
+        (
+            "# Written by easy-ha-proxy-backupd from the Backups page.",
+            "# The empty OnCalendar clears the packaged one; without it",
+            "# systemd would keep both and run the backup twice.",
+            "[Timer]",
+            "OnCalendar=",
+            f"OnCalendar=*-*-* {value}:00",
+            "",
+        )
+    )
+    temporary = TIMER_DROPIN_PATH.with_suffix(".conf.tmp")
+    temporary.write_text(body, encoding="utf-8")
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, TIMER_DROPIN_PATH)
+    for command in (
+        [SYSTEMCTL_PATH, "daemon-reload"],
+        # Restart rather than reload: a timer recomputes its next elapse only
+        # when restarted, so without this the change would take effect a day
+        # late.
+        [SYSTEMCTL_PATH, "restart", BACKUP_TIMER_UNIT],
+    ):
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise BackupdError(
+                "the schedule was saved but the timer could not be updated: "
+                + result.stderr.decode("utf-8", "replace").strip()[:200],
+                code="invalid",
+            )
+
+
+def timer_next_run() -> str:
+    """What systemd says the next firing will be, or nothing if it is inert."""
+    try:
+        properties = systemctl_properties(
+            BACKUP_TIMER_UNIT, ["NextElapseUSecRealtime", "ActiveState"]
+        )
+    except Exception:  # noqa: BLE001 - reporting must not break the page
+        return ""
+    if properties.get("ActiveState") != "active":
+        return ""
+    return properties.get("NextElapseUSecRealtime", "") or ""
+
 
 def load_schedule() -> dict[str, Any]:
     try:
@@ -3081,6 +3164,11 @@ def load_schedule() -> dict[str, Any]:
         "passphrase_stored": SCHEDULE_PASSPHRASE_PATH.is_file(),
         "last_run": record.get("last_run", ""),
         "last_result": record.get("last_result", ""),
+        # The stored time is what the operator asked for; next_run is what
+        # systemd will actually do about it, which is the honest answer when
+        # the timer is stopped or the drop-in never landed.
+        "time": schedule_time(record.get("time"), default=DEFAULT_SCHEDULE_TIME),
+        "next_run": timer_next_run(),
     }
 
 
@@ -3125,6 +3213,10 @@ def save_schedule(request: dict[str, Any]) -> dict[str, Any]:
             code="invalid",
         )
 
+    wanted_time = schedule_time(
+        request.get("time"), default=current.get("time", DEFAULT_SCHEDULE_TIME)
+    )
+
     record = {
         "enabled": enabled,
         "destinations": chosen,
@@ -3132,8 +3224,15 @@ def save_schedule(request: dict[str, Any]) -> dict[str, Any]:
         "quiesce": request.get("quiesce", current["quiesce"]) is not False,
         "last_run": current["last_run"],
         "last_result": current["last_result"],
+        "time": wanted_time,
     }
     atomic_json(SCHEDULE_PATH, record, mode=0o600)
+    # Only when the hour actually moved. Saving a destination or a passphrase
+    # is a far more common act than changing the time, and each rewrite costs
+    # a daemon-reload and restarts the timer -- which also discards the
+    # randomised delay it had already picked.
+    if wanted_time != current.get("time", DEFAULT_SCHEDULE_TIME):
+        write_timer_time(wanted_time)
     return {"ok": True, "schedule": load_schedule()}
 
 
@@ -3148,16 +3247,24 @@ def record_schedule_outcome(result: str) -> None:
         atomic_json(SCHEDULE_PATH, record, mode=0o600)
 
 
-def run_scheduled_backup(_request: dict[str, Any]) -> dict[str, Any]:
-    """Make a backup and send it away. Invoked by the timer, not by a person.
+def run_scheduled_backup(request: dict[str, Any]) -> dict[str, Any]:
+    """Make a backup and send it away. Invoked by the timer or by a person.
 
     Runs inline rather than as a background job: the timer wants an exit code,
     and the maintenance lock the backup takes is what keeps it from racing a
     restore or an update.
     """
     schedule = load_schedule()
-    if not schedule["enabled"]:
+    # The timer asks whether the schedule is on; a person pressing the button
+    # has already answered that by pressing it. Everything else the run needs
+    # -- a stored passphrase, somewhere to send it -- is still required.
+    on_demand = bool(request.get("on_demand"))
+    if not schedule["enabled"] and not on_demand:
         return {"ok": True, "skipped": "the schedule is off"}
+    if on_demand and not schedule["destinations"]:
+        raise BackupdError(
+            "choose at least one destination before running it", code="invalid"
+        )
     if not schedule["passphrase_stored"]:
         record_schedule_outcome("no stored passphrase")
         raise BackupdError("no stored passphrase", code="invalid")
