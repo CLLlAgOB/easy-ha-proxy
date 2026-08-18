@@ -144,7 +144,12 @@ class AccessLineParserTests(unittest.TestCase):
         self.assertEqual(request.path, "/.env")
         self.assertEqual(request.host, "")
         self.assertEqual(request.status, 400)
-        self.assertTrue(request.denied_by_gateway)
+        # This line is a scanner reaching for /.env, and a 400 is the gateway
+        # rejecting one malformed request -- not blocking the address, which
+        # goes on being served everything else. Counting it as handled scored
+        # the probe at zero, which is how 77% of the evidence on a live
+        # gateway came to be discarded.
+        self.assertFalse(request.denied_by_gateway)
 
     def test_a_geo_denial_is_recognised_as_handled_by_the_gateway(self):
         request = guardd.parse_access_line(LIVE_LINES["h1_geo_denied"])

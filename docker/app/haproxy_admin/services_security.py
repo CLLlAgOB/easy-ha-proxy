@@ -173,9 +173,42 @@ def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:
         # Enrichment is a convenience; the findings themselves must still show.
         LOG.warning("cannot read site limits for the findings", exc_info=True)
         limits = {}
-    for contribution in payload.get("contributions") or []:
+    contributions = payload.get("contributions") or []
+    for contribution in contributions:
         _explain(contribution, limits)
+    _withhold_advice_from_attackers(contributions)
     return payload
+
+
+# Findings that say the address is not a misconfigured client but something
+# probing the gateway.
+_HOSTILE_MARKERS = ("SCANNER", "INVALID_HOST", "NOSNI", "LEGACY_HAPROXY_BAN")
+
+
+def _withhold_advice_from_attackers(contributions: List[Dict[str, Any]]) -> None:
+    """Do not offer to raise a limit for an address that is attacking.
+
+    The suggestion exists for the opposite case -- a real application that
+    opens twenty connections at once and trips a threshold nobody tuned. Shown
+    beside a request for /vendor/phpunit/.../eval-stdin.php and
+    /cgi-bin/../bin/sh it becomes advice to widen the door for a scanner,
+    which is how an operator ends up making the gateway more permissive
+    towards the one address that least deserves it.
+
+    The measurement stays: what was observed, against which limit, and by how
+    much. Only the recommendation goes.
+    """
+    hostile = any(
+        marker in str(contribution.get("event_type") or "")
+        for contribution in contributions
+        for marker in _HOSTILE_MARKERS
+    )
+    if not hostile:
+        return
+    for contribution in contributions:
+        if "suggested" in contribution:
+            contribution.pop("suggested")
+            contribution["advice_withheld"] = "the address is probing the gateway"
 
 
 def health() -> Dict[str, Any]:

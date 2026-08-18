@@ -357,11 +357,27 @@ class ParsedRequest:
     bytes_out: int = 0
     duration_ms: int = 0
 
+    # A refusal counts as "already handled" only when it was about who the
+    # client is, not about what it sent. 451 is a geo block or a failed IP
+    # authorisation and 403 a per-site address rule: in both the address can
+    # reach nothing, so scoring it further changes nothing.
+    IDENTITY_REFUSALS = (403, 451)
+
     @property
     def denied_by_gateway(self) -> bool:
-        """HAProxy already refused this one on its own rules."""
+        """HAProxy refused this one for who the client is, not what it sent.
 
-        return self.status in (400, 403, 451)
+        400 used to be in this set, and it is the opposite case: the gateway
+        rejected one malformed request and carried on serving that same
+        address everything else it asked for. Treating it as a shield threw
+        away most of the evidence -- on a live gateway 77% of all security
+        events scored nothing, including 85% of scanner findings, because a
+        scanner's requests are malformed by nature. One address sent 134
+        malformed requests while being served 5935 normal ones and scored
+        zero for every one of them.
+        """
+
+        return self.status in self.IDENTITY_REFUSALS
 
 
 def normalize_path(value: str) -> str:
