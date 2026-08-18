@@ -2578,6 +2578,9 @@ def remote_quote(value: str) -> str:
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
 def verify_remote_copy(
     record: dict[str, Any], remote_file: str, expected: str, size: int
 ) -> tuple[bool, str, str]:
@@ -2591,9 +2594,15 @@ def verify_remote_copy(
     probe = run_ssh(record, ["sha256sum", "--", remote_file])
     if probe.returncode == 0:
         answer = (probe.stdout or b"").decode("utf-8", "replace").split()
-        if answer and answer[0] == expected:
-            return True, "remote-hash", ""
-        if answer:
+        # A server restricted to SFTP answers every command with a banner and
+        # exits 0 -- "This service allows sftp connections only." -- so a zero
+        # exit is not evidence that anything was hashed. Taking the first word
+        # of that as a digest reported a mismatch for a copy that was fine,
+        # and, because an unproven copy is never pruned, would have let the
+        # far end fill up while insisting the backup had failed.
+        if answer and _SHA256_RE.fullmatch(answer[0]):
+            if answer[0] == expected:
+                return True, "remote-hash", ""
             return False, "remote-hash", "the far end reports different content"
 
     if size > VERIFY_DOWNLOAD_MAX_BYTES:

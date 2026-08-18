@@ -297,7 +297,11 @@ class UploadTests(DestinationTestCase):
             return mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
         def ssh(record, command):
-            return mock.Mock(returncode=0, stdout=b"0000  x", stderr=b"")
+            # A real digest that differs. Anything not shaped like one
+            # is now treated as chatter from the far end, not an answer.
+            return mock.Mock(
+                returncode=0, stdout=b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  x", stderr=b""
+            )
 
         result = self.run_upload(sftp, ssh)
         self.assertFalse(result["ok"])
