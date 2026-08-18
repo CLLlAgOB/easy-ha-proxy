@@ -53,6 +53,27 @@
     "backup artifact not found": "файл резервной копии не найден",
     "the backup artifact does not match its identifier": "файл резервной копии не соответствует своему идентификатору",
     "the backup artifact failed a safety check": "файл резервной копии не прошёл проверку безопасности",
-    "the backup service returned an unsafe artifact name": "служба резервного копирования вернула небезопасное имя файла"
+    "the backup service returned an unsafe artifact name": "служба резервного копирования вернула небезопасное имя файла",
+    "Every night, without being asked": "Каждую ночь, без напоминаний",
+    "A destination says where a copy goes. This says when. The timer on this host already runs once a night; until the schedule is switched on it finds nothing to do and exits.": "Назначение говорит, куда уходит копия. Здесь задаётся когда. Таймер на этом сервере уже срабатывает раз в сутки; пока расписание не включено, он не находит работы и завершается.",
+    "The passphrase is stored root-only so an unattended run can encrypt without anyone present. It is the only thing that can open these archives afterwards, so keep it somewhere that survives losing this server. Leave the field empty to keep the passphrase already stored.": "Парольная фраза хранится с доступом только для root, чтобы ночной запуск мог зашифровать архив без участия человека. Открыть эти архивы больше нечем, поэтому храните её там, где она переживёт потерю этого сервера. Оставьте поле пустым, чтобы сохранить уже записанную.",
+    "Run the backup on a schedule": "Запускать резервное копирование по расписанию",
+    "Send each copy to": "Отправлять каждую копию",
+    "Pause services while the archive is taken": "Приостанавливать службы на время снятия архива",
+    "Include the host SSH keys": "Включать SSH-ключи сервера",
+    "Passphrase": "Парольная фраза",
+    "Save schedule": "Сохранить расписание",
+    "Run it now": "Запустить сейчас",
+    "Last run": "Последний запуск",
+    "Passphrase stored": "Парольная фраза сохранена",
+    "Add a destination first, then choose it here.": "Сначала добавьте назначение, затем выберите его здесь.",
+    "no — the schedule cannot run without one": "нет — без неё расписание не запустится",
+    "Running. A full backup and its upload can take several minutes.": "Выполняется. Полный бэкап и его отправка могут занять несколько минут.",
+    "Done. The archive was copied to N destination(s).": "Готово. Архив скопирован в N назначений.",
+    "It did not run": "Не запустилось",
+    "enabled must be boolean": "enabled должен быть логическим значением",
+    "destinations must be a list": "destinations должен быть списком",
+    "include_ssh must be boolean": "include_ssh должен быть логическим значением",
+    "quiesce must be boolean": "quiesce должен быть логическим значением"
   }
 }

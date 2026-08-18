@@ -72,6 +72,10 @@ AUDITED_ACTIONS = {
     "destination_delete": ("backup_destination.delete", ("name",)),
     "destination_test": ("backup_destination.test", ("name",)),
     "upload": ("backup.upload", ("backup_id", "destination")),
+    # The passphrase travels in this payload, which is why the summary
+    # is built from named fields and never from the payload itself.
+    "schedule_save": ("backup_schedule.save", ("enabled", "destinations")),
+    "run_scheduled": ("backup_schedule.run", ()),
 }
 
 DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
@@ -449,3 +453,64 @@ def upload_backup_view():
         accepted=False,
         timeout=1800.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# The nightly schedule
+#
+# The daemon has carried this since the destinations were built, and the
+# systemd timer has been firing daily all along -- but nothing here exposed
+# it, so an operator could say where a copy should go and never say when.
+# Every firing found the schedule off and exited without doing anything.
+# ---------------------------------------------------------------------------
+
+
+@bp_system_backups.get("/api/schedule")
+def schedule_view():
+    return _call_daemon({"action": "schedule"})
+
+
+@bp_system_backups.post("/api/schedule")
+def save_schedule_view():
+    payload = _json_payload(
+        set(),
+        {"enabled", "destinations", "include_ssh", "quiesce", "passphrase"},
+    )
+    command = {"action": "schedule_save"}
+
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            abort(400, description="enabled must be boolean")
+        command["enabled"] = payload["enabled"]
+
+    for key in ("include_ssh", "quiesce"):
+        if key in payload:
+            if not isinstance(payload[key], bool):
+                abort(400, description=f"{key} must be boolean")
+            command[key] = payload[key]
+
+    if "destinations" in payload:
+        names = payload["destinations"]
+        if not isinstance(names, list):
+            abort(400, description="destinations must be a list")
+        command["destinations"] = [_destination_name(name) for name in names]
+
+    if "passphrase" in payload:
+        supplied = payload["passphrase"]
+        # An empty string is how the page asks for the stored passphrase to be
+        # forgotten, so it must reach the daemon rather than be validated as
+        # if it were a new one.
+        if supplied == "":
+            command["passphrase"] = ""
+        else:
+            command["passphrase"] = _passphrase(supplied)
+
+    return _call_daemon(command)
+
+
+@bp_system_backups.post("/api/schedule/run")
+def run_schedule_view():
+    # The same job the timer runs, started by hand. It can take as long as a
+    # full backup and an upload, so it gets the upload timeout rather than
+    # the default.
+    return _call_daemon({"action": "run_scheduled"}, timeout=1800.0)

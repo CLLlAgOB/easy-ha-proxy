@@ -325,6 +325,64 @@
            data-i18n-skip translate="no"></div>
     </form>
   </section>
+
+  <section class="card" id="backup-schedule" aria-labelledby="backup-schedule-title">
+    <header class="card-header">
+      <h2 id="backup-schedule-title">Every night, without being asked</h2>
+    </header>
+    <p class="muted">
+      A destination says where a copy goes. This says when. The timer on this
+      host already runs once a night; until the schedule is switched on it
+      finds nothing to do and exits.
+    </p>
+    <p class="muted">
+      The passphrase is stored root-only so an unattended run can encrypt
+      without anyone present. It is the only thing that can open these
+      archives afterwards, so keep it somewhere that survives losing this
+      server. Leave the field empty to keep the passphrase already stored.
+    </p>
+
+    <form id="backup-schedule-form" autocomplete="off">
+      <label class="form-check">
+        <input type="checkbox" id="schedule-enabled">
+        Run the backup on a schedule
+      </label>
+
+      <fieldset class="form-fieldset">
+        <legend>Send each copy to</legend>
+        <div id="schedule-destinations" data-i18n-skip translate="no">
+          <p class="muted">Loading…</p>
+        </div>
+      </fieldset>
+
+      <label class="form-check">
+        <input type="checkbox" id="schedule-quiesce" checked>
+        Pause services while the archive is taken
+      </label>
+      <label class="form-check">
+        <input type="checkbox" id="schedule-include-ssh">
+        Include the host SSH keys
+      </label>
+
+      <label>Passphrase
+        <input id="schedule-passphrase" class="form-input" type="password"
+               autocomplete="new-password" minlength="12" maxlength="1024">
+      </label>
+
+      <div class="form-actions">
+        <button type="submit" class="btn" id="schedule-save">Save schedule</button>
+        <button type="button" class="btn" id="schedule-run">Run it now</button>
+      </div>
+      <div id="schedule-status" class="result-message" role="status" aria-live="polite"
+           data-i18n-skip translate="no"></div>
+    </form>
+
+    <dl class="backup-schedule-facts">
+      <div><dt>Last run</dt><dd id="schedule-last-run" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Result</dt><dd id="schedule-last-result" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Passphrase stored</dt><dd id="schedule-passphrase-state" data-i18n-skip translate="no">—</dd></div>
+    </dl>
+  </section>
 </div>
 {% endblock %}
 
@@ -332,4 +390,5 @@
 {{ super() }}
 <script src="{{ url_for('static', filename='js/system_backups.js') }}"></script>
 <script src="{{ url_for('static', filename='js/backup_destinations.js') }}"></script>
+<script src="{{ url_for('static', filename='js/backup_schedule.js') }}"></script>
 {% endblock %}
