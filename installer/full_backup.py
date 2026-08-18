@@ -343,10 +343,22 @@ def create_payload(
     paths: list[str],
     *,
     excludes: tuple[str, ...] = BACKUP_EXCLUDES,
-) -> None:
+) -> list[str]:
+    """Archive the listed paths and return whatever tar wanted to say.
+
+    tar distinguishes its exit codes: 2 is a fatal error, 1 means some files
+    changed underneath it while they were being read. On a gateway the second
+    is routine and unavoidable -- haproxy.log is appended to several times a
+    second -- so treating exit 1 as failure makes the backup succeed or fail
+    by coin toss, which is what happened here: one run finished, the next
+    died on the same file set minutes later.
+
+    So exit 1 is reported, not fatal, and the warnings travel into the
+    manifest where a restore can see which files were caught mid-write.
+    """
     if not paths:
         raise BackupError("No files were found for the backup payload.")
-    run(
+    result = run(
         [
             "tar",
             "--acls",
@@ -358,9 +370,18 @@ def create_payload(
             "/",
             *(f"--exclude={value}" for value in excludes),
             *relative_paths(paths),
-        ]
+        ],
+        check=False,
+        capture=True,
     )
+    warnings = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+    if result.returncode >= 2:
+        # Without tar's own words the operator gets an exit status and a
+        # hundred-path command line, which says nothing about what went wrong.
+        detail = " | ".join(warnings[-10:]) or "tar gave no reason"
+        raise BackupError(f"tar failed with exit code {result.returncode}: {detail}")
     os.chmod(destination, 0o600)
+    return warnings
 
 
 def command_output(argv: list[str]) -> str:
@@ -549,9 +570,9 @@ def create_backup(args: argparse.Namespace) -> Path:
         payload = work / "payload.tar.gz"
         ssh_payload = work / "ssh.tar.gz"
         with Quiesce(args.quiesce):
-            create_payload(payload, core)
+            payload_warnings = create_payload(payload, core)
             if included_ssh and ssh:
-                create_payload(ssh_payload, ssh)
+                payload_warnings += create_payload(ssh_payload, ssh)
 
         payload_expanded_bytes = validate_payload(payload)
         ssh_payload_expanded_bytes = (
@@ -575,6 +596,10 @@ def create_backup(args: argparse.Namespace) -> Path:
             "ssh_payload_sha256": sha256_file(ssh_payload) if ssh_payload.exists() else None,
             "payload_expanded_bytes": payload_expanded_bytes,
             "ssh_payload_expanded_bytes": ssh_payload_expanded_bytes,
+            # Kept so a restore can see which files tar caught mid-write, and
+            # so "it succeeded with warnings" is a state anyone can inspect
+            # rather than something buried in a journal.
+            "payload_warnings": payload_warnings,
         }
         write_json(work / "manifest.json", manifest)
         (work / "system-state.txt").write_text(
