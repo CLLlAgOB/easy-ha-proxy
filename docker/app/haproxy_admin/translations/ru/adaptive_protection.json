@@ -69,6 +69,8 @@
     "unparsable": "неразбираемый",
     "over": "сверх",
     "raise": "поднять",
-    "requests": "запросов"
+    "requests": "запросов",
+    "What a score means. The engine bans an address once it reaches the marked band; below it the score only ranks how much attention the address deserves.": "Что означает счёт. Движок банит адрес, когда счёт достигает отмеченной полосы; ниже неё счёт лишь показывает, насколько адрес заслуживает внимания.",
+    "bans from here": "отсюда банит"
   }
 }

@@ -2664,6 +2664,16 @@ class GuardEngine:
                 "category_cap": policy.category_cap,
                 "window_seconds": policy.window_seconds,
                 "decay_seconds": policy.decay_seconds,
+                # The page said "ban what crosses the threshold" without ever
+                # saying what the threshold was, so a score of 43 meant
+                # nothing to the person reading it. The bands live here, not
+                # in the page, because the daemon is what applies them.
+                "bands": [
+                    {"from": threshold, "state": name,
+                     "bans": threshold >= WOULD_BAN_SCORE}
+                    for threshold, name in DEFAULT_THRESHOLDS
+                ],
+                "would_ban_score": WOULD_BAN_SCORE,
             },
             "summary": {
                 "scored": len(rows),

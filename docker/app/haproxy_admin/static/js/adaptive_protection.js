@@ -221,6 +221,39 @@
     if (cap) cap.placeholder = String(policy.category_cap);
     const decay = byId("ap-decay");
     if (decay) decay.placeholder = String(Math.round((policy.decay_seconds || 0) / 3600));
+    renderBands(policy);
+  }
+
+  // The page told the operator it would "ban what crosses the threshold" and
+  // never said what the threshold was, so a score of 43 carried no meaning.
+  // The daemon owns the numbers; this only draws them.
+  function renderBands(policy) {
+    const host = byId("ap-bands");
+    if (!host) return;
+    const bands = policy.bands || [];
+    if (!bands.length) return;
+    host.textContent = "";
+    const ordered = bands.slice().sort((a, b) => b.from - a.from);
+    ordered.forEach((band, index) => {
+      const upper = index === 0 ? "" : ordered[index - 1].from - 1;
+      const item = document.createElement("div");
+      item.className = "ap-band" + (band.bans ? " bans" : "");
+      const range = document.createElement("span");
+      range.className = "ap-band-range";
+      range.textContent = upper === "" ? `${band.from}+` : `${band.from}–${upper}`;
+      const name = document.createElement("span");
+      name.className = `ap-state ap-${band.state}`;
+      name.textContent = band.state;
+      item.appendChild(range);
+      item.appendChild(name);
+      if (band.bans) {
+        const mark = document.createElement("span");
+        mark.className = "mon-sub";
+        mark.textContent = uiText("bans from here");
+        item.appendChild(mark);
+      }
+      host.appendChild(item);
+    });
   }
 
   function renderSummary(summary) {

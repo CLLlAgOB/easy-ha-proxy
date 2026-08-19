@@ -162,6 +162,30 @@
 .ap-NORMAL { background: rgba(46,158,91,.15); color: #2e9e5b; }
 .ap-WATCH { background: rgba(74,134,200,.15); color: #4a86c8; }
 .ap-SUSPICIOUS { background: rgba(200,161,58,.18); color: #c8a13a; }
+
+.ap-bands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.ap-bands .ap-band {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.ap-bands .ap-band-range { font-weight: 600; }
+
+.ap-bands .ap-band.bans {
+  border-color: rgba(204,75,75,.45);
+  background: rgba(204,75,75,.08);
+}
 .ap-HIGH_RISK { background: rgba(204,75,75,.15); color: #cc4b4b; }
 .ap-HOSTILE { background: rgba(204,75,75,.28); color: #cc4b4b; }
 
@@ -296,6 +320,13 @@
   </div>
 
   <div class="ap-states" id="ap-states" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub">
+    What a score means. The engine bans an address once it reaches the marked
+    band; below it the score only ranks how much attention the address
+    deserves.
+  </p>
+  <div class="ap-bands" id="ap-bands" data-i18n-skip translate="no"></div>
 
   <p class="mon-sub">
     A likely false positive is an address the engine scored that later
