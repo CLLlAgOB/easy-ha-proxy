@@ -3224,3 +3224,122 @@ tr.job-row-selected > td:first-child {
   background: rgba(0, 0, 0, .16);
   border-radius: 6px;
 }
+
+/* ── Grouped header navigation ─────────────────────────────────────────
+   Eighteen buttons wrapped onto three rows and pushed the page below the
+   fold. Six menus and one link fit a single line, and the group holding the
+   current page is marked so the header still answers "where am I".
+
+   Built on <details>, which means it works with no script: these rules only
+   have to place the panel and stop it stretching the header. */
+
+.nav-groups {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.nav-group {
+  position: relative;
+}
+
+/* The summary carries .btn, so it inherits every button style; only the
+   marker and the cursor need saying. */
+.nav-group-summary {
+  list-style: none;
+  user-select: none;
+}
+
+.nav-group-summary::-webkit-details-marker,
+.nav-group-summary::marker {
+  display: none;
+  content: "";
+}
+
+.nav-group-caret {
+  font-size: 10px;
+  line-height: 1;
+  opacity: .75;
+  transition: transform var(--transition-speed) ease;
+}
+
+.nav-group[open] > .nav-group-summary .nav-group-caret {
+  transform: rotate(180deg);
+}
+
+/* The group containing the current page keeps a visible edge whether it is
+   open or not. */
+.nav-group-current > .nav-group-summary {
+  background: var(--accent-secondary);
+  color: #0f0f15;
+}
+
+.nav-group-items {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 230px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .35);
+}
+
+/* Near the right edge a left-aligned panel would leave the viewport, and a
+   horizontal scrollbar on the whole page is worse than a panel that opens
+   the other way. */
+.nav-group:last-of-type .nav-group-items {
+  left: auto;
+  right: 0;
+}
+
+.nav-group-item {
+  display: block;
+  padding: 9px 12px;
+  border-radius: 8px;
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 14px;
+  white-space: nowrap;
+  transition: background var(--transition-speed) ease;
+}
+
+.nav-group-item:hover,
+.nav-group-item:focus-visible {
+  background: var(--surface-2);
+}
+
+.nav-group-item-current {
+  color: var(--accent-secondary);
+  font-weight: 600;
+}
+
+/* On a narrow screen there is no room beside anything, so the panel becomes
+   part of the flow instead of floating over content it would cover. */
+@media (max-width: 720px) {
+  .nav-groups {
+    width: 100%;
+  }
+
+  .nav-group {
+    width: 100%;
+  }
+
+  .nav-group-summary {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .nav-group-items {
+    position: static;
+    min-width: 0;
+    margin-top: 6px;
+    box-shadow: none;
+  }
+}

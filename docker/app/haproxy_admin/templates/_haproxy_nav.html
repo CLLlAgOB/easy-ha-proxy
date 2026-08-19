@@ -1,78 +1,88 @@
 {# _haproxy_nav.html
-   Shared navigation for the HAProxy administration section. #}
+   Shared navigation for the HAProxy administration section.
 
-<a class="btn" href="{{ url_for('routes.haproxy_sites_page') }}">
-  HTTP sites
-</a>
+   Eighteen buttons in one wrapping row took three lines of the header on a
+   wide screen and pushed the page itself below the fold. They are grouped
+   here by the job someone is doing, which turns nineteen targets into seven
+   and fits one line.
 
-<a class="btn" href="{{ url_for('routes.haproxy_tcp_page') }}">
-  TCP proxies
-</a>
+   Built on <details>, so it opens and closes with no script at all;
+   nav.js only adds the conveniences a script is needed for -- closing the
+   others when one opens, Escape, and clicking away.
 
-<a class="btn" href="{{ url_for('routes.haproxy_udp_page') }}">
-  UDP forwarding
-</a>
+   The group holding the current page is marked, so the header still answers
+   "where am I" the way a row of buttons did. #}
 
-<a class="btn" href="{{ url_for('routes.haproxy_config_page') }}">
-  HAProxy configuration
-</a>
+{% set nav_groups = [
+  {
+    "label": "Routing",
+    "items": [
+      ("routes.haproxy_sites_page",    "HTTP sites"),
+      ("routes.haproxy_tcp_page",      "TCP proxies"),
+      ("routes.haproxy_udp_page",      "UDP forwarding"),
+      ("routes.haproxy_backends_page", "Backends"),
+    ],
+  },
+  {
+    "label": "Configuration",
+    "items": [
+      ("routes.haproxy_config_page",  "HAProxy configuration"),
+      ("routes.config_history_page",  "Configuration history"),
+      ("routes.mail_settings_page",   "Mail settings"),
+    ],
+  },
+  {
+    "label": "Names and certificates",
+    "items": [
+      ("routes.haproxy_certs_page", "Certificates"),
+      ("routes.dns_providers_page", "DNS providers"),
+      ("routes.haproxy_geoip_page", "GeoIP database"),
+    ],
+  },
+  {
+    "label": "Protection",
+    "items": [
+      ("routes.adaptive_protection_page", "Adaptive protection"),
+      ("routes.request_log_page",         "Request log"),
+    ],
+  },
+  {
+    "label": "Observation",
+    "items": [
+      ("routes.monitoring_page",     "Monitoring"),
+      ("routes.alerts_page",         "Alerts"),
+      ("routes.audit_page",          "Change log"),
+      ("routes.system_health_page",  "Status"),
+    ],
+  },
+  {
+    "label": "Maintenance",
+    "items": [
+      ("system_updates.page", "Software updates"),
+      ("system_backups.page", "Backup & restore"),
+    ],
+  },
+] %}
 
-<a class="btn" href="{{ url_for('routes.config_history_page') }}">
-  Configuration history
-</a>
+<nav class="nav-groups" aria-label="Administration sections">
+  {% for group in nav_groups %}
+  {% set here = group["items"] | selectattr("0", "equalto", request.endpoint) | list | length > 0 %}
+  <details class="nav-group{% if here %} nav-group-current{% endif %}">
+    <summary class="btn nav-group-summary">
+      {{ group["label"] }}
+      <span class="nav-group-caret" aria-hidden="true">▾</span>
+    </summary>
+    <div class="nav-group-items">
+      {% for endpoint, label in group["items"] %}
+      <a class="nav-group-item{% if endpoint == request.endpoint %} nav-group-item-current{% endif %}"
+         href="{{ url_for(endpoint) }}"
+         {% if endpoint == request.endpoint %}aria-current="page"{% endif %}>
+        {{ label }}
+      </a>
+      {% endfor %}
+    </div>
+  </details>
+  {% endfor %}
 
-<a class="btn" href="{{ url_for('routes.haproxy_geoip_page') }}">
-  GeoIP database
-</a>
-
-<a class="btn" href="{{ url_for('routes.haproxy_certs_page') }}">
-  Certificates
-</a>
-
-<a class="btn" href="{{ url_for('routes.dns_providers_page') }}">
-  DNS providers
-</a>
-
-<a class="btn" href="{{ url_for('routes.mail_settings_page') }}">
-  Mail settings
-</a>
-
-<a class="btn" href="{{ url_for('routes.haproxy_backends_page') }}">
-  Backends
-</a>
-
-<a class="btn" href="{{ url_for('routes.monitoring_page') }}">
-  Monitoring
-</a>
-
-<a class="btn" href="{{ url_for('routes.adaptive_protection_page') }}">
-  Adaptive protection
-</a>
-
-<a class="btn" href="{{ url_for('routes.request_log_page') }}">
-  Request log
-</a>
-
-<a class="btn" href="{{ url_for('routes.alerts_page') }}">
-  Alerts
-</a>
-
-<a class="btn" href="{{ url_for('routes.audit_page') }}">
-  Change log
-</a>
-
-<a class="btn" href="{{ url_for('routes.system_health_page') }}">
-  Status
-</a>
-
-<a class="btn" href="{{ url_for('system_updates.page') }}">
-  Software updates
-</a>
-
-<a class="btn" href="{{ url_for('system_backups.page') }}">
-  Backup & restore
-</a>
-
-<a class="btn" href="{{ url_for('routes.index') }}">
-  Home
-</a>
+  <a class="btn" href="{{ url_for('routes.index') }}">Home</a>
+</nav>
