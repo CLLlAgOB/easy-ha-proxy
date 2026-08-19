@@ -527,20 +527,6 @@
                             Controls option <code>option prefer-last-server</code> in backend.
                         </div>
 
-                        {% set raw_enable_splice = site.enable_splice_backend if site.enable_splice_backend is defined
-                        else None %}
-                        <label class="form-label" for="enable_splice_backend"
-                            style="margin-top: 10px;">enable_splice_backend</label>
-                        <select id="enable_splice_backend" name="enable_splice_backend" class="form-input">
-                            <option value="">Default (from site_defaults)</option>
-                            <option value="true" {% if raw_enable_splice is sameas true %}selected{% endif %}>Enabled
-                            </option>
-                            <option value="false" {% if raw_enable_splice is sameas false %}selected{% endif %}>
-                                Disabled</option>
-                        </select>
-                        <div class="table-meta">
-                            Enables/disables «splice» for backend (is used in template HAProxy, if configured).
-                        </div>
                         </div>
                     </div>
 
@@ -1021,11 +1007,6 @@
                     </div>
                 </div>
 
-                <div id="row-waf">
-                    <label class="form-label" for="waf" style="margin-top: 10px;">waf</label>
-                    <input id="waf" name="waf" type="text" class="form-input" value="{{ site.waf or '' }}"
-                        placeholder="{{ eff.waf or site_defaults.waf or 'none' }}">
-                </div>
 
             </div>
 

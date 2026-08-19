@@ -577,11 +577,6 @@ if (effTcpPassForCheck === true) {
         }
       }
 
-      var wafEl = document.getElementById("waf");
-      if (wafEl) {
-        var wv = wafEl.value.trim();
-        if (wv) site.waf = wv;
-      }
 
       // Load balancing / sticky / sessions
       var balanceEl = document.getElementById("balance");
@@ -645,10 +640,6 @@ if (effTcpPassForCheck === true) {
         site.prefer_last_server = pls;
       }
 
-      var spliceVal = tristateSelectValue("enable_splice_backend");
-      if (spliceVal !== undefined) {
-        site.enable_splice_backend = spliceVal;
-      }
 
       // Only these addresses may reach the site. Sent as a list; an empty
       // textarea removes the key and the site is public again.
@@ -780,7 +771,6 @@ delete site.health_status;
 
 // HTTP-only extras
 delete site.hsts;
-delete site.waf;
 
 // Sticky/cookie/HTTP timeouts — not актуальны for TCP passthrough
 delete site.sticky;
@@ -790,7 +780,6 @@ delete site.http_reuse;
 delete site.session_timeout;
 delete site.http_keepalive_timeout;
 delete site.prefer_last_server;
-delete site.enable_splice_backend;
 
 // Geo/ACL (in текущей реализации у тебя это HTTP-only)
 delete site.geo;
@@ -1381,13 +1370,12 @@ delete site.geo_countries;
   var blockHttpRight = document.getElementById("block-http-right");
 
   var rowHsts = document.getElementById("row-hsts");
-  var rowWaf = document.getElementById("row-waf");
 
   // In TCP passthrough:
   // - скрываем backend_host (Host header not применим)
   // - оставляем alt_names and balance, but скрываем cert + sticky/cookie/HTTP-only таймауты
   // - скрываем HTTP-only правую колонку
-  // - скрываем hsts/waf
+  // - скрываем hsts
   if (isTcpMode) {
     setBlockVisible(blockBackendHost, false);
     setInputsDisabled(blockBackendHost, true);
@@ -1407,8 +1395,6 @@ delete site.geo_countries;
     setBlockVisible(rowHsts, false);
     setInputsDisabled(rowHsts, true);
 
-    setBlockVisible(rowWaf, false);
-    setInputsDisabled(rowWaf, true);
   } else {
     setBlockVisible(blockBackendHost, true);
     setInputsDisabled(blockBackendHost, false);
@@ -1428,8 +1414,6 @@ delete site.geo_countries;
     setBlockVisible(rowHsts, true);
     setInputsDisabled(rowHsts, false);
 
-    setBlockVisible(rowWaf, true);
-    setInputsDisabled(rowWaf, false);
   }
 
   // Health-check зависит and от tcp_passthrough тоже

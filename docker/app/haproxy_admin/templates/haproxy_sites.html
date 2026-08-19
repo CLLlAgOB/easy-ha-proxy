@@ -345,7 +345,7 @@
             {% set eff_cookie_attrs = eff.cookie_attrs if eff.cookie_attrs is defined else def_cookie_attrs %}
             {{ diff_flag(ns, 'cookie_attrs', eff_cookie_attrs, def_cookie_attrs) }}
 
-            {# --- http_reuse / prefer_last_server / splice --- #}
+            {# --- http_reuse / prefer_last_server --- #}
             {% set def_http_reuse = site_defaults.http_reuse if site_defaults.http_reuse is defined else none %}
             {% set eff_http_reuse = eff.http_reuse if eff.http_reuse is defined else def_http_reuse %}
             {{ diff_flag(ns, 'http_reuse', eff_http_reuse, def_http_reuse) }}
@@ -355,10 +355,6 @@
             {% set eff_prefer_last = eff.prefer_last_server if eff.prefer_last_server is defined else def_prefer_last %}
             {{ diff_flag(ns, 'prefer_last_server', eff_prefer_last, def_prefer_last) }}
 
-            {% set def_splice = site_defaults.enable_splice_backend if site_defaults.enable_splice_backend is defined
-            else none %}
-            {% set eff_splice = eff.enable_splice_backend if eff.enable_splice_backend is defined else def_splice %}
-            {{ diff_flag(ns, 'enable_splice_backend', eff_splice, def_splice) }}
 
             {# --- timeouts --- #}
             {% set def_session_timeout = site_defaults.session_timeout if site_defaults.session_timeout is defined else
@@ -392,9 +388,6 @@
             {% set eff_hsts = eff.hsts | default(def_hsts) %}
             {{ diff_flag(ns, 'HSTS', eff_hsts, def_hsts) }}
 
-            {% set def_waf = site_defaults.waf | default('none') %}
-            {% set eff_waf = eff.waf | default(def_waf) %}
-            {{ diff_flag(ns, 'WAF', eff_waf, def_waf) }}
 
             {% set def_compress = site_defaults.compress | default(false) %}
             {% set eff_compress = eff.compress | default(def_compress) %}

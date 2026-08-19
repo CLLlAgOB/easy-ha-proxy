@@ -66,9 +66,7 @@ site_defaults:
   enable_geoip: true
 
   # — WAF / SPOE —
-  waf: "none"                               # имя spoe-engine или none
   # Усорение
-  enable_splice_global: false
 ######## 5. Список сайтов (ПЕРЕОПРЕДЕЛЯЕМ в group_vars/host_vars) #############
 sites: []
 # пример структуры:

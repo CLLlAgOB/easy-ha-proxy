@@ -89,7 +89,7 @@ from .services_haproxy_tcp import (
 # Certificate material is small; anything larger is not a certificate, and the
 # daemon on the other side has its own limit besides.
 MAX_CERT_UPLOAD_BYTES = 4 * 1024 * 1024
-FORM_TEXT_FIELDS = ("backend_host", "health_uri", "hsts", "waf")
+FORM_TEXT_FIELDS = ("backend_host", "health_uri", "hsts")
 FORM_NUMBER_FIELDS = ("max_req_rate", "health_status")
 FORM_TRISTATE_FIELDS = (
     "redirect_to_https",

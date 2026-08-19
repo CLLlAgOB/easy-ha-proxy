@@ -706,7 +706,6 @@ def build_site_defaults(*, geoip_enabled: bool) -> dict[str, Any]:
         "rate_ban": True,
         "rate_errors": 20,
         "enable_geoip": True,
-        "waf": "none",
         "tcp_check": False,
         "health_uri": "/",
         "health_status": 200,
@@ -721,7 +720,6 @@ def build_site_defaults(*, geoip_enabled: bool) -> dict[str, Any]:
         "other_err_limit": 12,
         "other_err_exclude_enabled": True,
         "other_err_exclude_exact": [{"path": "/", "methods": ["GET"]}],
-        "enable_splice_global": False,
     }
 
 

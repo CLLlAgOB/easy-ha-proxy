@@ -56,22 +56,12 @@ STRUCTURE = {
     "csrf_token",
 }
 
-# Settings the interface offers that nothing acts on. Each is a promise the
-# product has not kept, kept here so it stays visible and countable.
-#
-#   waf                   -- a text field, and a "WAF profile" choice with
-#                            none/strict/balanced on the variables page. The
-#                            default calls it "the name of a spoe-engine",
-#                            and there is no SPOE configuration anywhere in
-#                            the repository. Setting it does nothing, which
-#                            is worse than offering nothing: an operator can
-#                            believe the site has a web application firewall.
-#   enable_splice_backend -- a tri-state on the site, with
-#                            enable_splice_global beside it in the defaults.
-#                            Neither reaches haproxy.cfg: option
-#                            splice-request and splice-response appear
-#                            nowhere.
-NOT_IMPLEMENTED = {"waf", "enable_splice_backend"}
+# Nothing is offered without a consumer any more. waf and
+# enable_splice_backend were the two that were, and both were withdrawn
+# rather than half-built: waf named a spoe-engine with no SPOE anywhere in
+# the repository, and neither splice setting reached haproxy.cfg. An empty
+# set here is the state to keep.
+NOT_IMPLEMENTED: set[str] = set()
 
 
 def offered_settings() -> set[str]:
@@ -111,22 +101,47 @@ class ConsumerTests(unittest.TestCase):
         self.assertIn("ex.path_beg", TEMPLATE.read_text(encoding="utf-8"))
 
 
-class SpliceTests(unittest.TestCase):
-    """Named separately because the claim is specific and checkable."""
+class WithdrawnTests(unittest.TestCase):
+    """The two that were facades are gone, not merely undocumented."""
 
-    def test_no_splice_option_is_ever_rendered(self):
-        template = TEMPLATE.read_text(encoding="utf-8")
-        self.assertNotIn("splice-request", template)
-        self.assertNotIn("splice-response", template)
-
-    def test_the_global_default_is_equally_inert(self):
-        defaults = (
-            ROOT / "ansible" / "roles" / "haproxy" / "defaults" / "main.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("enable_splice_global", defaults)
-        self.assertNotIn(
-            "enable_splice_global", TEMPLATE.read_text(encoding="utf-8")
+    def pages(self) -> str:
+        directory = ROOT / "docker" / "app" / "haproxy_admin" / "templates"
+        return "\n".join(
+            path.read_text(encoding="utf-8") for path in directory.glob("*.html")
         )
+
+    def scripts(self) -> str:
+        directory = ROOT / "docker" / "app" / "haproxy_admin" / "static" / "js"
+        return "\n".join(
+            path.read_text(encoding="utf-8") for path in directory.glob("*.js")
+        )
+
+    def test_the_pages_no_longer_offer_them(self):
+        pages = self.pages()
+        for name in ('name="waf"', 'name="enable_splice_backend"'):
+            with self.subTest(name=name):
+                self.assertNotIn(name, pages)
+
+    def test_the_scripts_no_longer_collect_them(self):
+        scripts = self.scripts()
+        self.assertNotIn("site.waf", scripts)
+        self.assertNotIn("enable_splice_backend", scripts)
+
+    def test_the_defaults_no_longer_declare_them(self):
+        for name in ("waf:", "enable_splice_global:"):
+            for path in (
+                ROOT / "ansible" / "roles" / "haproxy" / "defaults" / "main.yml",
+                ROOT / "ansible" / "vars.yml",
+            ):
+                with self.subTest(name=name, file=path.name):
+                    self.assertNotIn(name, path.read_text(encoding="utf-8"))
+
+    def test_a_stored_value_does_not_break_anything(self):
+        # An existing websites.yml may still carry them; they are simply
+        # ignored, which is why nothing had to migrate.
+        template = TEMPLATE.read_text(encoding="utf-8")
+        self.assertNotIn("splice", template)
+        self.assertNotIn("s.waf", template)
 
 
 class WafTests(unittest.TestCase):
