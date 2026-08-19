@@ -38,6 +38,9 @@
     "Names and certificates": "Имена и сертификаты",
     "Protection": "Защита",
     "Observation": "Наблюдение",
-    "Administration sections": "Разделы администрирования"
+    "Administration sections": "Разделы администрирования",
+    "Access": "Доступ",
+    "Dashboard": "Дашборд",
+    "Authelia access rules": "Правила доступа Authelia"
   }
 }

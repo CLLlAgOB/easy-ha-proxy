@@ -1383,6 +1383,10 @@ input[type="submit"].btn {
   -webkit-appearance: none;
   /* для Chrome/Safari */
 
+  /* A link styled as a button still carried the browser's underline, so a
+     row mixing <a class="btn"> and <button class="btn"> looked like two
+     different kinds of control. */
+  text-decoration: none;
   height: 38px;
   /* общая высота кнопок */
   line-height: 1;
@@ -3225,30 +3229,71 @@ tr.job-row-selected > td:first-child {
   border-radius: 6px;
 }
 
-/* ── Grouped header navigation ─────────────────────────────────────────
+/* ── Header navigation ─────────────────────────────────────────────────
    Eighteen buttons wrapped onto three rows and pushed the page below the
-   fold. Six menus and one link fit a single line, and the group holding the
-   current page is marked so the header still answers "where am I".
+   fold. Seven menus and a link fit one line.
 
-   Built on <details>, which means it works with no script: these rules only
-   have to place the panel and stop it stretching the header. */
+   They are deliberately quieter than .btn. A header of solid accent-coloured
+   pills reads as seven competing calls to action, when navigation is the
+   furniture of the page and the accent belongs to the thing you are looking
+   at. So: a surface that lifts on hover, and the accent spent only on the
+   section you are in.
+
+   Built on <details>, so these rules only place the panel and keep it from
+   stretching the header. */
 
 .nav-groups {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
 }
 
 .nav-group {
   position: relative;
 }
 
-/* The summary carries .btn, so it inherits every button style; only the
-   marker and the cursor need saying. */
+.nav-group-summary,
+.nav-home {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  /* Every other underlined link in this header came from the browser
+     default; a navigation control is not prose. */
+  text-decoration: none;
+  transition: background var(--transition-speed) ease,
+              border-color var(--transition-speed) ease,
+              color var(--transition-speed) ease;
+}
+
+.nav-group-summary:hover,
+.nav-home:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.nav-group-summary:focus-visible,
+.nav-home:focus-visible,
+.nav-group-item:focus-visible {
+  outline: 2px solid var(--accent-secondary);
+  outline-offset: 2px;
+}
+
 .nav-group-summary {
   list-style: none;
-  user-select: none;
 }
 
 .nav-group-summary::-webkit-details-marker,
@@ -3258,29 +3303,44 @@ tr.job-row-selected > td:first-child {
 }
 
 .nav-group-caret {
-  font-size: 10px;
-  line-height: 1;
-  opacity: .75;
-  transition: transform var(--transition-speed) ease;
+  flex: 0 0 auto;
+  opacity: .55;
+  transition: transform var(--transition-speed) ease,
+              opacity var(--transition-speed) ease;
+}
+
+.nav-group-summary:hover .nav-group-caret {
+  opacity: .9;
+}
+
+.nav-group[open] > .nav-group-summary {
+  background: var(--surface-2);
+  border-color: var(--border);
 }
 
 .nav-group[open] > .nav-group-summary .nav-group-caret {
   transform: rotate(180deg);
+  opacity: 1;
 }
 
-/* The group containing the current page keeps a visible edge whether it is
-   open or not. */
-.nav-group-current > .nav-group-summary {
-  background: var(--accent-secondary);
-  color: #0f0f15;
+/* Where you are. A tinted face and a solid underline rather than a filled
+   pill: it has to be unmistakable next to six neighbours without shouting
+   louder than the page content. */
+.nav-group-current > .nav-group-summary,
+.nav-home-current {
+  background: rgba(123, 104, 238, .16);
+  border-color: rgba(123, 104, 238, .55);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 0 var(--accent-primary);
 }
 
 .nav-group-items {
   position: absolute;
   z-index: 40;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   left: 0;
-  min-width: 230px;
+  min-width: 236px;
   display: flex;
   flex-direction: column;
   padding: 6px;
@@ -3288,13 +3348,13 @@ tr.job-row-selected > td:first-child {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg-secondary);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, .35);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .45);
 }
 
-/* Near the right edge a left-aligned panel would leave the viewport, and a
+/* Near the right edge a left-aligned panel leaves the viewport, and a
    horizontal scrollbar on the whole page is worse than a panel that opens
    the other way. */
-.nav-group:last-of-type .nav-group-items {
+.nav-group:nth-last-of-type(-n+2) .nav-group-items {
   left: auto;
   right: 0;
 }
@@ -3303,16 +3363,17 @@ tr.job-row-selected > td:first-child {
   display: block;
   padding: 9px 12px;
   border-radius: 8px;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   text-decoration: none;
   font-size: 14px;
   white-space: nowrap;
-  transition: background var(--transition-speed) ease;
+  transition: background var(--transition-speed) ease,
+              color var(--transition-speed) ease;
 }
 
-.nav-group-item:hover,
-.nav-group-item:focus-visible {
+.nav-group-item:hover {
   background: var(--surface-2);
+  color: var(--text-primary);
 }
 
 .nav-group-item-current {
@@ -3320,11 +3381,12 @@ tr.job-row-selected > td:first-child {
   font-weight: 600;
 }
 
-/* On a narrow screen there is no room beside anything, so the panel becomes
-   part of the flow instead of floating over content it would cover. */
+/* On a narrow screen there is no room beside anything, so the panel joins
+   the flow instead of covering the content underneath it. */
 @media (max-width: 720px) {
   .nav-groups {
     width: 100%;
+    gap: 4px;
   }
 
   .nav-group {
@@ -3339,7 +3401,11 @@ tr.job-row-selected > td:first-child {
   .nav-group-items {
     position: static;
     min-width: 0;
-    margin-top: 6px;
+    margin-top: 4px;
     box-shadow: none;
+  }
+
+  .nav-home {
+    width: 100%;
   }
 }

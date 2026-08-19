@@ -456,8 +456,10 @@ class DeploymentRegressionTests(unittest.TestCase):
         routes = (
             ROOT / "docker/app/haproxy_admin/routes.py"
         ).read_text(encoding="utf-8")
-        index = (
-            ROOT / "docker/app/haproxy_admin/templates/index.html"
+        # The link lives in the shared header navigation now, not on the
+        # dashboard; the guard moved with it and is what this checks.
+        nav = (
+            ROOT / "docker/app/haproxy_admin/templates/_haproxy_nav.html"
         ).read_text(encoding="utf-8")
         disabled_page = (
             ROOT / "docker/app/haproxy_admin/templates/debug_disabled.html"
@@ -469,7 +471,8 @@ class DeploymentRegressionTests(unittest.TestCase):
 
         self.assertIn("debug_routes_enabled=_debug_routes_enabled()", routes)
         self.assertIn('render_template("debug_disabled.html")', routes)
-        self.assertIn("{% if debug_routes_enabled %}", index)
+        self.assertIn("debug_routes_enabled | default(false)", nav)
+        self.assertIn("url_for('routes.debug')", nav)
         self.assertIn("haproxy_admin_debug_routes: true", disabled_page)
         self.assertIn("HAPROXY_ADMIN_DEBUG_ROUTES=", environment)
 

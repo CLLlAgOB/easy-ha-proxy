@@ -21,7 +21,10 @@ BASE = APP / "templates" / "base.html"
 SCRIPT = APP / "static" / "js" / "nav.js"
 STYLES = APP / "static" / "css" / "styles.css"
 
-# Every destination the flat row of buttons offered, before grouping.
+# Every destination the header offers. The first four rows were the flat
+# button row on the HAProxy pages; the rest were reachable only from the
+# dashboard or only from the Authelia pages, which is why one nav now
+# carries them all.
 EXPECTED_ENDPOINTS = {
     "routes.haproxy_sites_page",
     "routes.haproxy_tcp_page",
@@ -41,6 +44,13 @@ EXPECTED_ENDPOINTS = {
     "routes.system_health_page",
     "system_updates.page",
     "system_backups.page",
+    "routes.haproxy_stats_page",
+    "authelia_acl.edit_rules",
+    "routes.authelia_users",
+    "routes.authelia_bans",
+    "authelia_settings.edit_settings",
+    # Only rendered when debug routes are switched on.
+    "routes.debug",
     "routes.index",
 }
 
@@ -68,16 +78,30 @@ class DestinationTests(unittest.TestCase):
         duplicates = {e for e in endpoints if endpoints.count(e) > 1}
         self.assertEqual(duplicates, set())
 
-    def test_home_stays_a_button_rather_than_hiding_in_a_menu(self):
+    def test_the_dashboard_stays_a_link_rather_than_hiding_in_a_menu(self):
+        # It is where people go when they are lost; burying it in a menu is
+        # the opposite of that.
         self.assertNotIn("routes.index", grouped_endpoints())
         self.assertIn("url_for('routes.index')", nav_source())
+
+    def test_authelia_is_reachable_from_every_page(self):
+        # It used to be one button on the dashboard, so arriving on any
+        # HAProxy page meant going Home before you could reach it.
+        self.assertIn("authelia_acl.edit_rules", grouped_endpoints())
+
+    def test_one_nav_serves_the_whole_application(self):
+        pages = ROOT / "docker" / "app" / "haproxy_admin" / "templates"
+        for name in ("index.html", "_authelia_nav.html"):
+            with self.subTest(page=name):
+                markup = (pages / name).read_text(encoding="utf-8")
+                self.assertIn("_haproxy_nav.html", markup)
 
     def test_the_row_is_short_enough_to_be_worth_it(self):
         # Six menus plus Home. More than about eight and the header wraps
         # again, which is the problem this replaced.
         source = nav_source()
         groups = source.count('"label":')
-        self.assertLessEqual(groups + 1, 8, "the header will wrap again")
+        self.assertLessEqual(groups + 1, 9, "the header will wrap again")
         self.assertGreater(groups, 1, "grouping that groups nothing")
 
 
@@ -123,10 +147,22 @@ class BehaviourTests(unittest.TestCase):
             with self.subTest(rule=rule):
                 self.assertIn(rule, self.styles)
 
-    def test_the_last_menu_opens_inward(self):
-        # Otherwise the rightmost panel leaves the viewport and the whole
-        # page gains a horizontal scrollbar.
-        self.assertIn(".nav-group:last-of-type .nav-group-items", self.styles)
+    def test_the_menus_nearest_the_edge_open_inward(self):
+        # Otherwise a right-hand panel leaves the viewport and the whole page
+        # gains a horizontal scrollbar.
+        self.assertIn(".nav-group:nth-last-of-type(-n+2) .nav-group-items", self.styles)
+
+    def test_navigation_is_quieter_than_an_action_button(self):
+        # Seven solid accent pills read as seven competing calls to action.
+        # The summary deliberately does not carry .btn.
+        self.assertNotIn('class="btn nav-group-summary"', self.source)
+        self.assertIn(".nav-group-summary", self.styles)
+
+    def test_a_link_shaped_like_a_button_is_not_underlined(self):
+        # Mixing <a class="btn"> and <button class="btn"> in one row showed
+        # the browser default underline on half of them.
+        block = self.styles.split("a.btn,")[1][:400]
+        self.assertIn("text-decoration: none", block)
 
     def test_a_narrow_screen_gets_a_stacked_menu(self):
         self.assertIn("@media (max-width: 720px)", self.styles)

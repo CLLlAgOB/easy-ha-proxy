@@ -13,24 +13,10 @@
 <button class="btn" id="auto-btn">Auto-refresh: off</button>
 
 {% if is_superadmin %}
-<a class="btn" href="{{ url_for('routes.haproxy_stats_page') }}">
-  HAProxy statistics
-</a>
-{% endif %}
-
-{% if debug_routes_enabled %}
-  <a class="btn" href="{{ url_for('routes.debug') }}">
-    Diagnostics
-  </a>
-{% endif %}
-
-{% if is_superadmin %}
-<a class="btn" href="{{ url_for('authelia_acl.edit_rules') }}">
-  Authelia
-</a>
-<a class="btn" href="{{ url_for('routes.haproxy_sites_page') }}">
-  Haproxy config
-</a>
+{# The same navigation every other page carries. Authelia, the HAProxy
+   section and the statistics page used to be three separate buttons here
+   and nowhere else, so the dashboard was the only way into any of them. #}
+{% include "_haproxy_nav.html" %}
 {% endif %}
 <!-- Центрируемая группа in шапке (вариант B) -->
 <div class="controls-spacer"></div>
