@@ -9,6 +9,14 @@
    page there used to be no way to reach Authelia at all except by going Home
    first, and the dashboard offered a different set of buttons again.
 
+   Two of the group names are chosen rather than obvious. Authelia is named
+   for the product, not for an idea like "Access": every page in it is an
+   Authelia page, and someone hunting for Authelia should not have to guess
+   which abstract noun it was filed under -- so the menu carries the name and
+   the items inside drop the prefix. And the GeoIP database sits under
+   Protection, not beside the certificates: a country list is not a naming
+   concern, it exists so that requests from somewhere can be refused.
+
    Built on <details>, so it opens and closes with no script; nav.js only
    adds what a script is needed for -- closing the others, Escape, clicking
    away. The group holding the current page is marked, so the header still
@@ -33,20 +41,19 @@
     ],
   },
   {
-    "label": "Names and certificates",
+    "label": "Certificates",
     "items": [
       ("routes.haproxy_certs_page", "Certificates"),
       ("routes.dns_providers_page", "DNS providers"),
-      ("routes.haproxy_geoip_page", "GeoIP database"),
     ],
   },
   {
-    "label": "Access",
+    "label": "Authelia",
     "items": [
-      ("authelia_acl.edit_rules",         "Authelia access rules"),
-      ("routes.authelia_users",           "Authelia users"),
-      ("routes.authelia_bans",            "Authelia bans"),
-      ("authelia_settings.edit_settings", "Authelia settings"),
+      ("authelia_acl.edit_rules",         "Access rules"),
+      ("routes.authelia_users",           "Users"),
+      ("routes.authelia_bans",            "Bans"),
+      ("authelia_settings.edit_settings", "Settings"),
     ],
   },
   {
@@ -54,6 +61,7 @@
     "items": [
       ("routes.adaptive_protection_page", "Adaptive protection"),
       ("routes.request_log_page",         "Request log"),
+      ("routes.haproxy_geoip_page",       "GeoIP database"),
     ],
   },
   {

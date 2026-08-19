@@ -84,6 +84,22 @@ class DestinationTests(unittest.TestCase):
         self.assertNotIn("routes.index", grouped_endpoints())
         self.assertIn("url_for('routes.index')", nav_source())
 
+    def test_the_geoip_database_sits_with_the_protection_it_serves(self):
+        # A country list is not a naming concern; it exists so requests from
+        # somewhere can be refused.
+        source = nav_source()
+        protection = source.split('"label": "Protection"')[1].split("},")[0]
+        self.assertIn("routes.haproxy_geoip_page", protection)
+
+    def test_the_authelia_items_do_not_repeat_the_menu_name(self):
+        source = nav_source()
+        block = source.split('"label": "Authelia"')[1].split("},")[0]
+        labels = re.findall(r'"([A-Z][^"]*)"\)', block)
+        self.assertTrue(labels)
+        for label in labels:
+            with self.subTest(label=label):
+                self.assertNotIn("Authelia", label)
+
     def test_authelia_is_reachable_from_every_page(self):
         # It used to be one button on the dashboard, so arriving on any
         # HAProxy page meant going Home before you could reach it.
@@ -186,7 +202,13 @@ class TranslationTests(unittest.TestCase):
             )
         labels = re.findall(r'"label": "([^"]+)"', nav_source())
         self.assertTrue(labels)
-        missing = [label for label in labels if label not in messages]
+        # A product keeps its name in every language; translating "Authelia"
+        # would leave nobody able to find Authelia.
+        product_names = {"Authelia"}
+        missing = [
+            label for label in labels
+            if label not in messages and label not in product_names
+        ]
         self.assertEqual(missing, [], "group labels with no Russian")
 
 

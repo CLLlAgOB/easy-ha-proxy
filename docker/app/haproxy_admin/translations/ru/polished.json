@@ -35,12 +35,10 @@
     "TCP proxy parameters": "Параметры TCP-прокси",
     "If the server list is not defined, a single": "Если список серверов не задан, используется одна пара",
     "Routing": "Маршруты",
-    "Names and certificates": "Имена и сертификаты",
     "Protection": "Защита",
     "Observation": "Наблюдение",
     "Administration sections": "Разделы администрирования",
-    "Access": "Доступ",
     "Dashboard": "Дашборд",
-    "Authelia access rules": "Правила доступа Authelia"
+    "Bans": "Баны"
   }
 }
