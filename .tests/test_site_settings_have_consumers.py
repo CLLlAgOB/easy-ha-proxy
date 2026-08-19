@@ -128,13 +128,25 @@ class WithdrawnTests(unittest.TestCase):
         self.assertNotIn("enable_splice_backend", scripts)
 
     def test_the_defaults_no_longer_declare_them(self):
-        for name in ("waf:", "enable_splice_global:"):
-            for path in (
-                ROOT / "ansible" / "roles" / "haproxy" / "defaults" / "main.yml",
-                ROOT / "ansible" / "vars.yml",
-            ):
+        # Only what a clone actually contains. ansible/vars.yml is generated
+        # per installation and is gitignored, so it exists on a developer's
+        # machine and never on a CI runner -- reading it unconditionally
+        # passes locally and fails everywhere else.
+        candidates = [
+            ROOT / "ansible" / "roles" / "haproxy" / "defaults" / "main.yml",
+            ROOT / "ansible" / "vars.yml",
+            ROOT / "installer" / "easy_ha_proxy.py",
+        ]
+        checked = 0
+        for path in candidates:
+            if not path.is_file():
+                continue
+            checked += 1
+            text = path.read_text(encoding="utf-8")
+            for name in ("waf:", "enable_splice_global:", '"waf"'):
                 with self.subTest(name=name, file=path.name):
-                    self.assertNotIn(name, path.read_text(encoding="utf-8"))
+                    self.assertNotIn(name, text)
+        self.assertGreater(checked, 0, "nothing was actually examined")
 
     def test_a_stored_value_does_not_break_anything(self):
         # An existing websites.yml may still carry them; they are simply
