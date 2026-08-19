@@ -41,6 +41,10 @@
     </div>
 
     <div class="controls">
+      {# Anything a page wants to the left of the language switcher. The
+         dashboard puts its site counters here; every other page leaves it
+         empty, so the header keeps one shape across the application. #}
+      {% block header_lead %}{% endblock %}
       {% if g.is_superadmin %}
       <a id="global-config-state"
          class="global-config-state"

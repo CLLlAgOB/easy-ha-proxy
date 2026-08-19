@@ -2,34 +2,38 @@
 {% block title %}HAProxy – Home{% endblock %}
 {% block header_title %}Home{% endblock %}
 
+{% block header_lead %}
+{# The site counters and the compact toggle read the list below, so they sit
+   at the head of the controls rather than trailing off the right edge. #}
+<div class="header-controls">
+  <div id="sites-meta" class="connection-badge"></div>
+  <button id="toggle-compact" class="btn-icon" type="button" title="Compact">≡</button>
+</div>
+{% endblock %}
+
 {% block header_buttons %}
-<button class="btn btn-refresh" id="refresh-btn" data-dashboard-action="manualRefresh">
-  <span class="spinner"></span>
-  <span class="icon">⟳</span>
-  <span class="check">✔</span>
-  Refresh
-</button>
-
-<button class="btn" id="auto-btn">Auto-refresh: off</button>
-
 {% if is_superadmin %}
 {# The same navigation every other page carries. Authelia, the HAProxy
    section and the statistics page used to be three separate buttons here
    and nowhere else, so the dashboard was the only way into any of them. #}
 {% include "_haproxy_nav.html" %}
 {% endif %}
-<!-- Центрируемая группа in шапке (вариант B) -->
-<div class="controls-spacer"></div>
-<div class="card-header">
-  <div class="header-controls">
-    <div id="sites-meta" class="connection-badge"></div>
-    <button id="toggle-compact" class="btn-icon" type="button" title="Compact">≡</button>
-  </div>
-</div>
-<div class="controls-spacer"></div>
 {% endblock %}
 
 {% block content %}
+{# Refreshing and auto-refreshing act on this page, not on the application,
+   so they belong to the page. In the header they made the dashboard the one
+   place whose header needed two rows. #}
+<div class="page-toolbar">
+  <button class="btn btn-refresh" id="refresh-btn" data-dashboard-action="manualRefresh">
+    <span class="spinner"></span>
+    <span class="icon">⟳</span>
+    <span class="check">✔</span>
+    Refresh
+  </button>
+  <button class="btn" id="auto-btn">Auto-refresh: off</button>
+</div>
+
 <div class="card" id="sites-panel" style="margin-bottom:20px">
   <ul id="sites-list" class="site-list">
     <li class="muted">Loading…</li>

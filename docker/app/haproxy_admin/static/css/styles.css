@@ -148,19 +148,6 @@ h1 {
   flex-wrap: wrap
 }
 
-/* Центрирование блока с меткой/кнопкой внутри .controls (вариант B) */
-header .controls .card-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: auto;
-  margin-right: auto;
-  /* стараемся центрировать среди других элементов */
-  gap: 10px;
-  /* Was a second block for this same selector 760 lines further down. */
-  margin-bottom: 0;
-}
-
 header .controls .header-controls {
   display: inline-flex;
   align-items: center;
@@ -192,14 +179,9 @@ header .controls .btn-icon:hover {
   background: var(--surface-2)
 }
 
-/* Опционально: идеальное центрирование, если добавишь .controls-spacer по бокам от блока */
 header .controls {
   display: flex;
   align-items: center
-}
-
-header .controls .controls-spacer {
-  flex: 1 1 auto
 }
 
 /* Тема */
@@ -3319,4 +3301,15 @@ tr.job-row-selected > td:first-child {
   .nav-separator {
     display: none;
   }
+}
+
+/* A page's own actions, above its first card. They used to live in the
+   header, which made the dashboard the one page whose header needed two
+   rows; the header is for navigating between pages, not for acting on one. */
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
 }
