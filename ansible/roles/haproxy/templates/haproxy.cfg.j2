@@ -399,10 +399,41 @@ frontend fe_https
 {% endfor %}
 {% endif %}
 
+{# ---- Per-site error-accounting exclusions (err_exclude) ----
+   The site edit page has offered these for a long time and the tracking rule
+   below has always consulted the variable, but nothing ever set it: a rule
+   could be written, saved and displayed while changing nothing at all. A
+   mail client fetching a dozen inline images that are not there produced 71
+   errors in ten seconds and was banned for a week with an exclusion for that
+   very path sitting in its site configuration.
+
+   Three shapes, matching what the page offers: path (exact), path_beg
+   (prefix), path_reg (regular expression). #}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
     http-request set-var(txn.site_{{ id }}_excl) bool(false)
+{% for ex in s.err_exclude | default([]) %}
+{% set rule = loop.index %}
+{% if ex.path is defined and ex.path %}
+{% set matcher = 'path' %}{% set value = ex.path %}
+{% elif ex.path_beg is defined and ex.path_beg %}
+{% set matcher = 'path_beg' %}{% set value = ex.path_beg %}
+{% elif ex.path_reg is defined and ex.path_reg %}
+{% set matcher = 'path_reg' %}{% set value = ex.path_reg %}
+{% else %}
+{% set matcher = '' %}{% set value = '' %}
+{% endif %}
+{% if matcher %}
+    acl site_{{ id }}_ex{{ rule }}_path {{ matcher }} -i {{ value }}
+{% if (ex.methods | default([])) | length > 0 %}
+    acl site_{{ id }}_ex{{ rule }}_meth method {{ ex.methods | join(' ') }}
+    http-request set-var(txn.site_{{ id }}_excl) bool(true) if host_{{ id }} site_{{ id }}_ex{{ rule }}_path site_{{ id }}_ex{{ rule }}_meth
+{% else %}
+    http-request set-var(txn.site_{{ id }}_excl) bool(true) if host_{{ id }} site_{{ id }}_ex{{ rule }}_path
+{% endif %}
+{% endif %}
+{% endfor %}
 {% endfor %}
 
     # ---- GEO (опционально) ----
