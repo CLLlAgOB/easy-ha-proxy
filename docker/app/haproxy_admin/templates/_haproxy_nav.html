@@ -17,6 +17,13 @@
    Protection, not beside the certificates: a country list is not a naming
    concern, it exists so that requests from somewhere can be refused.
 
+   The menu triggers and the dashboard link carry the same class. They were
+   two rules that had to be kept identical, and they were not: on a live
+   gateway the dashboard link came out visibly different from its
+   neighbours. What differs between them now is what should -- a menu has a
+   caret, the dashboard has a rule before it, because it is a destination
+   rather than a menu.
+
    Built on <details>, so it opens and closes with no script; nav.js only
    adds what a script is needed for -- closing the others, Escape, clicking
    away. The group holding the current page is marked, so the header still
@@ -86,10 +93,10 @@
 <nav class="nav-groups" aria-label="Administration sections">
   {% for group in nav_groups %}
   {% set here = group["items"] | selectattr("0", "equalto", request.endpoint) | list | length > 0 %}
-  <details class="nav-group{% if here %} nav-group-current{% endif %}">
-    <summary class="nav-group-summary">
+  <details class="nav-group">
+    <summary class="nav-item nav-item-menu{% if here %} nav-item-current{% endif %}">
       <span>{{ group["label"] }}</span>
-      <svg class="nav-group-caret" width="10" height="10" viewBox="0 0 10 10"
+      <svg class="nav-caret" width="10" height="10" viewBox="0 0 10 10"
            aria-hidden="true" focusable="false">
         <path d="M1 3.5L5 7.5L9 3.5" fill="none" stroke="currentColor"
               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -113,7 +120,8 @@
   </details>
   {% endfor %}
 
-  <a class="nav-home{% if request.endpoint == 'routes.index' %} nav-home-current{% endif %}"
+  <span class="nav-separator" aria-hidden="true"></span>
+  <a class="nav-item{% if request.endpoint == 'routes.index' %} nav-item-current{% endif %}"
      href="{{ url_for('routes.index') }}"
      {% if request.endpoint == 'routes.index' %}aria-current="page"{% endif %}>
     Dashboard

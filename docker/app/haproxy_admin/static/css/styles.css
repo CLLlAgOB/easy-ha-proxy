@@ -157,6 +157,8 @@ header .controls .card-header {
   margin-right: auto;
   /* стараемся центрировать среди других элементов */
   gap: 10px;
+  /* Was a second block for this same selector 760 lines further down. */
+  margin-bottom: 0;
 }
 
 header .controls .header-controls {
@@ -433,15 +435,6 @@ a.ip-cell:hover {
 .status-normal {
   background: rgba(0, 217, 126, .15);
   color: var(--success)
-}
-
-.progress-bar {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--border);
-  overflow: hidden;
-  flex: 1;
-  max-width: 120px
 }
 
 .progress-fill {
@@ -844,27 +837,6 @@ footer {
   }
 }
 
-.update-indicator {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #ccc;
-  margin-left: 15px;
-  transition: background-color .3s
-}
-
-.update-indicator.green {
-  background-color: var(--success)
-}
-
-.update-indicator.red {
-  background-color: var(--error)
-}
-
-.update-indicator.pulse {
-  animation: pulse 1.5s infinite
-}
-
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
   .flex-container {
@@ -909,10 +881,6 @@ footer {
 }
 
 /* убираем нижний отступ у card-header, когда он используется в <header> */
-header .controls .card-header {
-  margin-bottom: 0;
-}
-
 /* ===== Forms (восстановлено) ===== */
 .form-label {
   display: block;
@@ -1063,10 +1031,6 @@ header .controls .card-header {
   white-space: nowrap;
 }
 
-.user-group-pill--primary {
-  background: rgba(var(--accent-secondary-rgb), .14);
-}
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 13px;
@@ -1107,52 +1071,8 @@ header .controls .card-header {
 }
 
 /* ===== Code blocks для конфигов ===== */
-.code-block {
-  background: var(--bg-tertiary);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  padding: 12px 14px;
-  max-height: 420px;
-  overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    "Liberation Mono", "Courier New", monospace;
-  font-size: 13px;
-  white-space: pre;
-}
-
-.code-block-small {
-  max-height: 220px;
-}
 
 /* ===== Формы загрузки YAML ===== */
-.yaml-upload-forms {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-}
-
-.yaml-upload-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--surface-1);
-  border: 1px dashed var(--border);
-}
-
-.yaml-upload-form .form-input[type="file"] {
-  padding: 4px 6px;
-  height: auto;
-  background: transparent;
-  cursor: pointer;
-}
-
-.yaml-upload-form .btn {
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-}
 
 .file-input-hidden {
   display: none;
@@ -1209,7 +1129,6 @@ header .controls .card-header {
 .site-table col:nth-child(5) {
   width: 12%;
 }
-
 
 .site-table th,
 .site-table td {
@@ -1397,24 +1316,6 @@ input[type="submit"].btn {
 }
 
 /* Подсказка "Текущий файл: скачать" в блоках загрузки YAML */
-.yaml-upload-form .table-meta.yaml-current-file {
-  margin-top: 6px;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(var(--accent-secondary-rgb), .20);
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.yaml-upload-form .table-meta.yaml-current-file a {
-  color: var(--accent-secondary);
-  font-weight: 600;
-  text-decoration: underline;
-}
 
 /* ===== Guided HAProxy vars.yml editor and transactional apply ===== */
 .config-error-card {
@@ -1430,7 +1331,8 @@ input[type="submit"].btn {
 
 .config-overview-header,
 .vars-editor-header,
-.config-apply-header {
+.config-overview-header,
+.vars-editor-header {
   gap: 16px;
   align-items: flex-start;
 }
@@ -2246,7 +2148,8 @@ input[type="submit"].btn {
 
   .config-overview-header,
   .vars-editor-header,
-  .config-apply-header {
+.config-overview-header,
+.vars-editor-header {
     align-items: stretch;
   }
 
@@ -3233,14 +3136,16 @@ tr.job-row-selected > td:first-child {
    Eighteen buttons wrapped onto three rows and pushed the page below the
    fold. Seven menus and a link fit one line.
 
-   They are deliberately quieter than .btn. A header of solid accent-coloured
-   pills reads as seven competing calls to action, when navigation is the
-   furniture of the page and the accent belongs to the thing you are looking
-   at. So: a surface that lifts on hover, and the accent spent only on the
-   section you are in.
+   Menu triggers and the dashboard link share one class rather than two
+   rules that have to be kept in step: they looked different in production
+   precisely because keeping two selectors identical is something nobody
+   does reliably. What differs between them is what should differ -- a menu
+   has a caret, the dashboard has a separator before it because it is a
+   destination rather than a menu.
 
-   Built on <details>, so these rules only place the panel and keep it from
-   stretching the header. */
+   Quieter than .btn on purpose. A header of solid accent pills reads as
+   seven competing calls to action, when navigation is furniture and the
+   accent belongs to the thing you are looking at. */
 
 .nav-groups {
   display: flex;
@@ -3249,12 +3154,7 @@ tr.job-row-selected > td:first-child {
   gap: 6px;
 }
 
-.nav-group {
-  position: relative;
-}
-
-.nav-group-summary,
-.nav-home {
+.nav-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3271,68 +3171,79 @@ tr.job-row-selected > td:first-child {
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
-  /* Every other underlined link in this header came from the browser
-     default; a navigation control is not prose. */
+  /* A navigation control is not prose; without this the links carried the
+     browser's underline and the <summary> elements did not. */
   text-decoration: none;
   transition: background var(--transition-speed) ease,
               border-color var(--transition-speed) ease,
               color var(--transition-speed) ease;
 }
 
-.nav-group-summary:hover,
-.nav-home:hover {
+.nav-item:hover {
   background: var(--surface-2);
   border-color: var(--border);
 }
 
-.nav-group-summary:focus-visible,
-.nav-home:focus-visible,
+.nav-item:focus-visible,
 .nav-group-item:focus-visible {
   outline: 2px solid var(--accent-secondary);
   outline-offset: 2px;
 }
 
-.nav-group-summary {
+/* <summary> shows a disclosure triangle of its own, which the caret
+   replaces. */
+.nav-item-menu {
   list-style: none;
 }
 
-.nav-group-summary::-webkit-details-marker,
-.nav-group-summary::marker {
+.nav-item-menu::-webkit-details-marker,
+.nav-item-menu::marker {
   display: none;
   content: "";
 }
 
-.nav-group-caret {
+.nav-caret {
   flex: 0 0 auto;
   opacity: .55;
   transition: transform var(--transition-speed) ease,
               opacity var(--transition-speed) ease;
 }
 
-.nav-group-summary:hover .nav-group-caret {
+.nav-item:hover .nav-caret {
   opacity: .9;
 }
 
-.nav-group[open] > .nav-group-summary {
+.nav-group[open] > .nav-item {
   background: var(--surface-2);
   border-color: var(--border);
 }
 
-.nav-group[open] > .nav-group-summary .nav-group-caret {
+.nav-group[open] > .nav-item .nav-caret {
   transform: rotate(180deg);
   opacity: 1;
 }
 
-/* Where you are. A tinted face and a solid underline rather than a filled
-   pill: it has to be unmistakable next to six neighbours without shouting
-   louder than the page content. */
-.nav-group-current > .nav-group-summary,
-.nav-home-current {
-  background: rgba(123, 104, 238, .16);
-  border-color: rgba(123, 104, 238, .55);
-  color: var(--text-primary);
+/* Where you are: a tinted face and a solid underline rather than a filled
+   pill, so it is unmistakable next to seven neighbours without shouting
+   over the page itself. */
+.nav-item-current {
+  background: rgba(var(--accent-primary-rgb), .16);
+  border-color: rgba(var(--accent-primary-rgb), .55);
   font-weight: 600;
   box-shadow: inset 0 -2px 0 0 var(--accent-primary);
+}
+
+/* The dashboard is a destination among menus, so it gets a rule to stand
+   after rather than a different shape. */
+.nav-separator {
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.nav-group {
+  position: relative;
 }
 
 .nav-group-items {
@@ -3389,12 +3300,12 @@ tr.job-row-selected > td:first-child {
     gap: 4px;
   }
 
-  .nav-group {
+  .nav-group,
+  .nav-item {
     width: 100%;
   }
 
-  .nav-group-summary {
-    width: 100%;
+  .nav-item-menu {
     justify-content: space-between;
   }
 
@@ -3405,7 +3316,7 @@ tr.job-row-selected > td:first-child {
     box-shadow: none;
   }
 
-  .nav-home {
-    width: 100%;
+  .nav-separator {
+    display: none;
   }
 }

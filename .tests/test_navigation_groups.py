@@ -151,9 +151,25 @@ class BehaviourTests(unittest.TestCase):
     def test_the_current_page_is_marked(self):
         # The row of buttons told you nothing about where you were either,
         # but a menu that hides its contents has to.
-        self.assertIn("nav-group-current", self.source)
+        self.assertIn("nav-item-current", self.source)
         self.assertIn('aria-current="page"', self.source)
-        self.assertIn(".nav-group-current", self.styles)
+        self.assertIn(".nav-item-current", self.styles)
+
+    def test_the_menus_and_the_dashboard_share_one_class(self):
+        # They were two rules obliged to stay identical and did not: the
+        # dashboard link came out visibly different from its neighbours on a
+        # live gateway. One class cannot drift from itself.
+        source = self.source
+        self.assertEqual(source.count('class="nav-item nav-item-menu'), 1)
+        self.assertIn('<a class="nav-item{%', source)
+        # And exactly one rule defines the shared look.
+        self.assertEqual(self.styles.count("\n.nav-item {"), 1)
+
+    def test_the_dashboard_is_set_apart_deliberately(self):
+        # It is a destination among menus; a rule before it says so without
+        # making it a different shape.
+        self.assertIn('class="nav-separator"', self.source)
+        self.assertIn(".nav-separator", self.styles)
 
     def test_the_section_is_named_for_a_screen_reader(self):
         self.assertIn('aria-label="Administration sections"', self.source)
@@ -171,8 +187,8 @@ class BehaviourTests(unittest.TestCase):
     def test_navigation_is_quieter_than_an_action_button(self):
         # Seven solid accent pills read as seven competing calls to action.
         # The summary deliberately does not carry .btn.
-        self.assertNotIn('class="btn nav-group-summary"', self.source)
-        self.assertIn(".nav-group-summary", self.styles)
+        self.assertNotIn('class="btn nav-item', self.source)
+        self.assertIn(".nav-item {", self.styles)
 
     def test_a_link_shaped_like_a_button_is_not_underlined(self):
         # Mixing <a class="btn"> and <button class="btn"> in one row showed
