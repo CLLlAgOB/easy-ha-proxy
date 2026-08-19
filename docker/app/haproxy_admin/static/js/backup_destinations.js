@@ -69,6 +69,7 @@
     byId("dest-port").value = String(destination.port || 22);
     byId("dest-user").value = destination.user || "";
     byId("dest-path").value = destination.path || "";
+    byId("dest-verify").value = destination.verify || "auto";
     byId("dest-endpoint").value = destination.endpoint || "";
     byId("dest-region").value = destination.region || "";
     byId("dest-bucket").value = destination.bucket || "";
@@ -166,6 +167,7 @@
       const secret = byId("dest-secret-key").value;
       if (secret) body.secret_key = secret;
     } else {
+      body.verify = byId("dest-verify").value;
       body.host = byId("dest-host").value.trim();
       body.port = Number(byId("dest-port").value || 22);
       body.user = byId("dest-user").value.trim();

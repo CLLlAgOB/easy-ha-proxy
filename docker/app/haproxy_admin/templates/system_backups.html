@@ -258,7 +258,13 @@
             <input id="dest-user" class="form-input" type="text"
                    placeholder="gateway">
           </label>
-          <label>Remote directory
+          <label>Checking the copy
+          <select id="dest-verify" class="form-input">
+            <option value="auto">Read it back if the far end cannot hash</option>
+            <option value="transfer">Trust the transfer</option>
+          </select>
+        </label>
+        <label>Remote directory
             <input id="dest-path" class="form-input" type="text"
                    placeholder="/srv/backups/gateway">
           </label>

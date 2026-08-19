@@ -77,6 +77,10 @@
     "A destination says where a copy goes. This says when.": "Назначение говорит, куда уходит копия. Здесь задаётся когда.",
     "Next run": "Следующий запуск",
     "choose at least one destination before running it": "выберите хотя бы одно назначение, прежде чем запускать",
-    "the schedule is off": "расписание выключено"
+    "the schedule is off": "расписание выключено",
+    "Checking the copy": "Проверка копии",
+    "Read it back if the far end cannot hash": "Скачать обратно, если та сторона не умеет считать хеш",
+    "Trust the transfer": "Доверять передаче",
+    "verify must be auto or transfer": "verify должен быть auto или transfer"
   }
 }

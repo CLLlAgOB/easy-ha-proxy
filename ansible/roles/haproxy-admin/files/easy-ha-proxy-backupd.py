@@ -213,7 +213,7 @@ REQUEST_FIELDS = {
             "action", "name", "type", "host", "port", "user", "path",
             "private_key", "host_key", "keep_daily", "keep_weekly",
             "keep_monthly", "endpoint", "region", "bucket", "prefix",
-            "access_key", "secret_key", "allow_insecure",
+            "access_key", "secret_key", "allow_insecure", "verify",
         }
     ),
     "destination_delete": frozenset({"action", "name"}),
@@ -2358,6 +2358,7 @@ def public_destination(record: dict[str, Any]) -> dict[str, Any]:
         "path": record.get("path", ""),
         "has_key": bool(record.get("key_installed")),
         "host_key_pinned": bool(record.get("host_key_pinned")),
+        "verify": verify_mode(record.get("verify")),
         "endpoint": record.get("endpoint", ""),
         "region": record.get("region", ""),
         "bucket": record.get("bucket", ""),
@@ -2453,6 +2454,7 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
         "keep_daily": keep_count(request.get("keep_daily"), default=7, cap=365),
         "keep_weekly": keep_count(request.get("keep_weekly"), default=4, cap=260),
         "keep_monthly": keep_count(request.get("keep_monthly"), default=6, cap=120),
+        "verify": verify_mode(request.get("verify"), default=existing.get("verify")),
         "updated_at": utc_now(),
     }
     atomic_json(path_target, record, mode=0o600)
@@ -2510,6 +2512,7 @@ def save_s3_destination(
         "keep_daily": keep_count(request.get("keep_daily"), default=7, cap=365),
         "keep_weekly": keep_count(request.get("keep_weekly"), default=4, cap=260),
         "keep_monthly": keep_count(request.get("keep_monthly"), default=6, cap=120),
+        "verify": verify_mode(request.get("verify"), default=existing.get("verify")),
         "updated_at": utc_now(),
     }
     atomic_json(path_target, record, mode=0o600)
@@ -2580,17 +2583,47 @@ def remote_quote(value: str) -> str:
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
+# How hard the gateway works to prove an off-host copy arrived intact.
+#   auto     -- ask the far end to hash it; fall back to reading it back.
+#   transfer -- trust that sftp accepted every byte, and do not read it back.
+VERIFY_MODES = ("auto", "transfer")
+
+
+def verify_mode(value: Any, *, default: Any = None) -> str:
+    text = str(value or "").strip().lower()
+    if text in VERIFY_MODES:
+        return text
+    if value is not None and text:
+        raise BackupdError(
+            "verify must be auto or transfer", code="invalid"
+        )
+    fallback = str(default or "").strip().lower()
+    return fallback if fallback in VERIFY_MODES else "auto"
+
+
 
 def verify_remote_copy(
     record: dict[str, Any], remote_file: str, expected: str, size: int
 ) -> tuple[bool, str, str]:
     """Prove the far end holds the same bytes. Returns (ok, method, detail).
 
-    Two ways, in order of cost. Asking the far end to hash is exact and cheap
-    but needs a shell there; re-downloading is exact and always possible but
-    pays for the transfer twice, so it is skipped for very large archives.
-    Nothing is deleted anywhere unless one of them succeeded.
+    Three ways, in descending order of confidence.
+
+    Asking the far end to hash is exact and costs nothing to send. A
+    destination restricted to SFTP cannot do it, so re-reading the copy is
+    the fallback: also exact, but it pays for the whole transfer a second
+    time and needs room on this disk to land in, which on a small gateway
+    with a large archive is the thing that fails.
+
+    `verify: transfer` is for that case. sftp reports whether every byte it
+    sent was accepted, and the checksum file is uploaded beside the archive,
+    so a restore can still prove the contents later -- it just is not proved
+    here and now. It is weaker, and it is chosen deliberately.
     """
+    mode = str(record.get("verify") or "auto").strip().lower()
+    if mode == "transfer":
+        return True, "transfer", ""
+
     probe = run_ssh(record, ["sha256sum", "--", remote_file])
     if probe.returncode == 0:
         answer = (probe.stdout or b"").decode("utf-8", "replace").split()

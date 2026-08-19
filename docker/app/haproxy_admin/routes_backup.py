@@ -410,6 +410,7 @@ def save_destination_view():
             "host", "user", "path", "port", "private_key", "host_key",
             "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
             "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
+            "verify",
         },
     )
     command = {"action": "destination_save", "name": _destination_name(payload["name"])}
@@ -417,6 +418,7 @@ def save_destination_view():
         "type", "host", "user", "path", "port", "private_key", "host_key",
         "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
         "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
+        "verify",
     ):
         if key in payload:
             command[key] = payload[key]
