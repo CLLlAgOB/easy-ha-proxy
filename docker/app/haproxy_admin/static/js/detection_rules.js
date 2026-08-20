@@ -49,8 +49,21 @@
       : `${each} ${uiText("points")}`;
   }
 
+  // A signature is data, not prose. The translator falls back to replacing
+  // any catalogue word it finds inside a string it does not recognise whole,
+  // and "backup", "database" and "custom" are all in the catalogue: without
+  // this, backup.sql is shown as бэкап.sql and database.sql as БД.sql. The
+  // containers are marked in the template too; this is here so that a
+  // signature stays intact even if that attribute is ever lost, because a
+  // rule the operator cannot read is a rule they cannot act on.
+  function keepVerbatim(element) {
+    element.setAttribute("data-i18n-skip", "");
+    element.setAttribute("translate", "no");
+    return element;
+  }
+
   function token(text, disabled, onClick, title) {
-    const chip = document.createElement("span");
+    const chip = keepVerbatim(document.createElement("span"));
     chip.className = "dr-token" + (disabled ? " off" : "");
     const label = document.createElement("span");
     label.textContent = text;
@@ -67,7 +80,7 @@
     return chip;
   }
 
-  function ruleCard(name, note, extraClass) {
+  function ruleCard(name, note, extraClass, verbatimName) {
     const card = document.createElement("div");
     card.className = "dr-rule" + (extraClass ? ` ${extraClass}` : "");
     const head = document.createElement("div");
@@ -75,6 +88,9 @@
     const title = document.createElement("span");
     title.className = "dr-rule-name";
     title.textContent = name;
+    // A category name is the daemon's, except on the one card whose heading
+    // is our own words.
+    if (verbatimName !== false) keepVerbatim(title);
     head.appendChild(title);
     if (note) {
       const sub = document.createElement("span");
@@ -129,7 +145,8 @@
       const { card, tokens } = ruleCard(
         uiText("Switched off"),
         uiText("not matched, and kept off across updates"),
-        ""
+        "",
+        false
       );
       disabled.slice().sort().forEach((name) => {
         tokens.appendChild(token(name, true, enable, uiText("Switch back on")));
@@ -195,7 +212,7 @@
       names.unshift(signatures.custom_category);
     }
     names.forEach((name) => {
-      const option = document.createElement("option");
+      const option = keepVerbatim(document.createElement("option"));
       option.value = name;
       const decisive = (signatures.categories || []).some(
         (c) => c.name === name && c.decisive

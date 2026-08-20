@@ -152,7 +152,8 @@
     </label>
     <label>
       <span class="form-label">Category</span>
-      <select class="form-input" id="dr-category"></select>
+      <select class="form-input" id="dr-category"
+              data-i18n-skip translate="no"></select>
     </label>
     <button class="btn" type="button" id="dr-add">Add</button>
   </div>
@@ -163,7 +164,7 @@
     acme-console also catches /x/acme-console/login.
   </p>
 
-  <div class="dr-rules" id="dr-mine"></div>
+  <div class="dr-rules" id="dr-mine" data-i18n-skip translate="no"></div>
 
   <p class="dr-result" id="dr-result" data-i18n-skip translate="no"></p>
 </div>
@@ -186,9 +187,14 @@
     across updates, and you can switch it back on here.
   </p>
 
-  <div class="dr-rules" id="dr-shipped"></div>
+  {# Everything below is written by the script, which has already put its own
+     prose through the translator. Leaving it translatable a second time
+     rewrites the signatures themselves: "backup" and "database" are ordinary
+     words in the catalogue, so backup.sql came out as бэкап.sql and
+     database.sql as БД.sql -- a rule the operator cannot act on. #}
+  <div class="dr-rules" id="dr-shipped" data-i18n-skip translate="no"></div>
 
-  <p class="mon-sub" id="dr-query-note"></p>
+  <p class="mon-sub" id="dr-query-note" data-i18n-skip translate="no"></p>
 
   <p class="mon-sub">
     The shipped list is a file on the gateway, replaceable without rebuilding

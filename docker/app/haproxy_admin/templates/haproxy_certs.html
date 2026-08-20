@@ -156,7 +156,9 @@
         <input id="material-file" type="file" class="file-input-hidden"
           accept=".pem,.crt,.cer,.der,.p12,.pfx,.key">
         <button type="button" class="btn btn-icon" id="material-choose">Choose file</button>
-        <span class="file-name" id="material-name">No file selected</span>
+        {# The chosen file name is the operating system's, not ours. Left translatable, the substitution pass rewrites any catalogue word inside it -- site-backup.pem is shown as site-бэкап.pem. The fallback below is translated by the script instead. #}
+        <span class="file-name" id="material-name"
+              data-i18n-skip translate="no">No file selected</span>
       </div>
 
       <label class="form-label" for="material-password" style="margin-top:10px;">
@@ -545,7 +547,8 @@
           Choose file
         </button>
 
-        <span class="file-name" id="backup_file_name">
+        <span class="file-name" id="backup_file_name"
+              data-i18n-skip translate="no">
           No file selected
         </span>
       </div>

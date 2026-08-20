@@ -1207,7 +1207,8 @@ delete site.geo_countries;
 
       certFileInput.addEventListener("change", function () {
         if (!certFileInput.files || certFileInput.files.length === 0) {
-          certFileNameSpan.textContent = "No file selected";
+          // The span is exempt: a file name must not be translated.
+          certFileNameSpan.textContent = window.t("No file selected");
         } else {
           certFileNameSpan.textContent =
             certFileInput.files[0].name || "File selected";

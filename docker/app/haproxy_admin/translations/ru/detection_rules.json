@@ -19,7 +19,7 @@
     "points each": "очков каждое",
     "Query strings are checked by what the value looks like, never by the parameter name": "Query-строки проверяются по виду значения, а не по имени параметра",
     "points — one request is enough": "очков — хватает одного запроса",
-    "points — takes N different categories to ban": "очков — для бана нужно N разных категорий",
+    "points — takes N different categories to ban": "очков — для бана нужно разных категорий: N",
     "points": "очков",
     "signatures": "сигнатур",
     "bans on one request": "банит с одного запроса",

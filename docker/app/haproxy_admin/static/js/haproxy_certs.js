@@ -52,7 +52,7 @@ document.addEventListener("DOMContentLoaded", function () {
       backupFileInput.addEventListener("change", function () {
         var file = backupFileInput.files && backupFileInput.files[0];
         var name = file ? file.name : "";
-        backupFileName.textContent = name || "No file selected";
+        backupFileName.textContent = name || window.t("No file selected");
         backupRestoreBtn.disabled = !name;
       });
     }
@@ -144,8 +144,10 @@ document.addEventListener("DOMContentLoaded", function () {
       });
       materialFile.addEventListener("change", function () {
         var file = materialFile.files && materialFile.files[0];
+        // The span is exempt from translation because a file name is the
+        // operating system's, so the placeholder is translated here.
         document.getElementById("material-name").textContent =
-          file ? file.name : "No file selected";
+          file ? file.name : window.t("No file selected");
         importBtn.hidden = true;
         materialReport.textContent = "";
       });
