@@ -729,12 +729,28 @@ class DetectionTests(EngineTestCase):
         return [event["event_type"] for event in self.events()]
 
     def test_a_known_scanner_path_is_recorded_with_its_category(self):
+        # .env is decisive: no client legitimately asks for one, so a single
+        # hit is reported as such rather than as a probable finding.
         self.append(self.line("203.0.113.9", "/.env", 404))
         self.engine.ingest_log(1000)
         events = self.events()
-        self.assertEqual(events[0]["event_type"], guardd.EVENT_SCANNER_PATH)
+        self.assertEqual(events[0]["event_type"], guardd.EVENT_SCANNER_DECISIVE)
         self.assertEqual(events[0]["category"], "secrets")
         self.assertEqual(events[0]["detail"], "/.env")
+
+    def test_a_path_a_site_might_serve_stays_a_probable_finding(self):
+        self.append(self.line("203.0.113.9", "/wp-login.php", 404))
+        self.engine.ingest_log(1000)
+        events = self.events()
+        self.assertEqual(events[0]["event_type"], guardd.EVENT_SCANNER_PATH)
+        self.assertEqual(events[0]["category"], "wordpress")
+
+    def test_a_scanner_path_the_application_served_is_not_a_finding(self):
+        # A site that really runs WordPress answers this with a login page,
+        # and every one of its users would otherwise be filed as scanning.
+        self.append(self.line("203.0.113.9", "/wp-login.php", 200))
+        self.engine.ingest_log(1000)
+        self.assertNotIn(guardd.EVENT_SCANNER_PATH, self.types())
 
     def test_the_same_category_is_not_re_recorded_inside_its_cooldown(self):
         self.append(
@@ -742,7 +758,7 @@ class DetectionTests(EngineTestCase):
             self.line("203.0.113.9", "/.svn/entries", 404),
         )
         self.engine.ingest_log(1000)
-        self.assertEqual(self.types().count(guardd.EVENT_SCANNER_PATH), 1)
+        self.assertEqual(self.types().count(guardd.EVENT_SCANNER_DECISIVE), 1)
 
     def test_the_slow_scanner_from_the_design_discussion_is_caught(self):
         # Six probes spread over 40 minutes: every rate window in HAProxy sees

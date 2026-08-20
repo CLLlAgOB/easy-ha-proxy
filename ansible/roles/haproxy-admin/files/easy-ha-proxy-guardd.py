@@ -168,6 +168,33 @@ SCANNER_PATHS: Dict[str, str] = {
     "/.ssh/id_rsa": "secrets",
 }
 
+# Categories no client has any business asking for. There is no browser, no
+# framework and no crawler that fetches an .env file, a git object store or a
+# database dump: a single request is not a hint, it is the whole answer. The
+# rest are only probable, because a site may genuinely run WordPress, publish
+# a server-status page or serve something under /vendor -- there, one hit
+# means little and it takes a spread across categories to mean anything.
+#
+# The three tiers this file has always described in its comments were never
+# actually built: every category weighed the same, so asking for /.env scored
+# what asking for /wp-admin scored.
+DECISIVE_CATEGORIES: frozenset = frozenset({"secrets", "vcs", "backup"})
+
+
+def category_is_decisive(category: str) -> bool:
+    return category in DECISIVE_CATEGORIES
+
+
+def is_served(status: int) -> bool:
+    """The application answered with content, so this path is not a probe.
+
+    A site that really runs WordPress answers /wp-login.php with a login
+    page, and every one of its users would otherwise be filed as scanning
+    for WordPress.
+    """
+
+    return 200 <= status < 400
+
 # A 404 on one of these is a broken page, not reconnaissance. Without this the
 # single largest false-positive source is a front end asking for assets that
 # were renamed by a deploy.
@@ -179,6 +206,7 @@ ASSET_SUFFIXES: Tuple[str, ...] = (
 )
 
 EVENT_SCANNER_PATH = "SCANNER_PATH"
+EVENT_SCANNER_DECISIVE = "SCANNER_PATH_DECISIVE"
 EVENT_SCANNER_MULTI = "SCANNER_MULTI_CATEGORY"
 EVENT_LOW_AND_SLOW = "LOW_AND_SLOW_SCANNER"
 EVENT_NOT_FOUND_ENUM = "NOT_FOUND_ENUMERATION"
@@ -193,6 +221,9 @@ EVENT_BAN_LIFTED = "BAN_LIFTED"
 
 DEFAULT_WEIGHTS: Dict[str, int] = {
     EVENT_SCANNER_PATH: 25,
+    # One request for a file no client ever wants is enough on
+    # its own; that is what makes it decisive.
+    EVENT_SCANNER_DECISIVE: 60,
     EVENT_SCANNER_MULTI: 20,
     EVENT_LOW_AND_SLOW: 30,
     EVENT_NOT_FOUND_ENUM: 15,
@@ -2298,18 +2329,29 @@ class GuardEngine:
             activity.hosts.add(request.host)
 
         category = classify_path(request.path)
+        if category and is_served(request.status):
+            # The application answered with content, so this is a path the
+            # site actually has. A real WordPress installation would
+            # otherwise file every one of its own users as scanning for
+            # WordPress.
+            category = ""
         if category:
             activity.scanner_hits += 1
             activity.note_category(category, now)
+            event = (
+                EVENT_SCANNER_DECISIVE
+                if category_is_decisive(category)
+                else EVENT_SCANNER_PATH
+            )
             self._emit(
                 ip,
-                EVENT_SCANNER_PATH,
+                event,
                 now,
                 source="haproxy-log",
                 category=category,
                 detail=request.path,
                 handled=handled,
-                fingerprint=f"{ip}|{EVENT_SCANNER_PATH}|{category}",
+                fingerprint=f"{ip}|{event}|{category}",
             )
             self._check_multi_category(ip, activity, now)
             self._check_low_and_slow(ip, activity, now)
