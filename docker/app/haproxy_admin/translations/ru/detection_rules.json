@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Detection rules": "Правила обнаружения",
+    "The adaptive protection engine is not answering, so the rules cannot be shown. HAProxy traffic is not affected.": "Движок адаптивной защиты не отвечает, поэтому правила показать нельзя. На трафик HAProxy это не влияет.",
+    "Your rules": "Ваши правила",
+    "Rules added here are kept separately from the list that ships with the software, and are applied on top of it. That matters both ways: a deploy replaces the shipped list and cannot take yours with it, and a shipped signature you switch off stays off when the list is next updated. A signature that caused a false ban must not come back with a release.": "Правила, добавленные здесь, хранятся отдельно от списка, который поставляется с программой, и накладываются поверх него. Это важно в обе стороны: раскатка заменяет поставляемый список и ваши правила унести с собой не может, а выключенная вами сигнатура остаётся выключенной и после обновления списка. Сигнатура, из-за которой забанили живого пользователя, не должна вернуться с релизом.",
+    "Signature": "Сигнатура",
+    "Category": "Категория",
+    "A signature that begins with a slash matches the whole path. Anything else matches one path segment wherever it appears, so a signature of acme-console also catches /x/acme-console/login.": "Сигнатура, начинающаяся со слэша, сверяется со всем путём. Всё остальное сверяется с одним сегментом пути, где бы он ни стоял: сигнатура acme-console поймает и /x/acme-console/login.",
+    "Shipped rules": "Поставляемые правила",
+    "What the engine looks for in a request. A decisive category is one no client has any business asking for, so a single hit is enough on its own. The rest are only probable: a site may genuinely run WordPress or serve something under /vendor, so one hit there is not enough by itself.": "Что движок ищет в запросе. Решающая категория — это то, что легальному клиенту не нужно никогда, поэтому одного попадания достаточно. Остальные лишь вероятные: сайт действительно может работать на WordPress или отдавать что-то из /vendor, так что одного попадания там не хватит.",
+    "Switch off any signature that is matching your own traffic. It stays off across updates, and you can switch it back on here.": "Выключите любую сигнатуру, которая ловит ваш собственный трафик. Она останется выключенной и после обновлений, а включить обратно можно здесь же.",
+    "The shipped list is a file on the gateway, replaceable without rebuilding anything. A broken or missing one keeps the built-in rules rather than switching detection off.": "Поставляемый список — это файл на шлюзе, его можно заменить, ничего не пересобирая. Битый или отсутствующий оставляет встроенные правила, а не выключает обнаружение.",
+    "Signature list": "Список сигнатур",
+    "points each": "очков каждое",
+    "Query strings are checked by what the value looks like, never by the parameter name": "Query-строки проверяются по виду значения, а не по имени параметра",
+    "points — one request is enough": "очков — хватает одного запроса",
+    "points — takes N different categories to ban": "очков — для бана нужно N разных категорий",
+    "points": "очков",
+    "signatures": "сигнатур",
+    "bans on one request": "банит с одного запроса",
+    "You have not changed any rules yet": "Вы пока не меняли ни одного правила",
+    "Switched off": "Выключено",
+    "not matched, and kept off across updates": "не сверяется и остаётся выключенным после обновлений",
+    "Switch off": "Выключить",
+    "Switch back on": "Включить обратно",
+    "Switched back on": "Включено обратно",
+    "Remove": "Убрать",
+    "Removed": "Убрано",
+    "Added": "Добавлено",
+    "Type a signature first": "Сначала введите сигнатуру"
+  }
+}

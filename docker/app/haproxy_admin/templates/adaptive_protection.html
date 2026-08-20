@@ -238,51 +238,6 @@
   text-align: center;
 }
 
-/* The rules themselves. Grouped by category, because the thing an operator
-   needs to see is which of them end an argument on their own. */
-.ap-rules { margin-top: 12px; }
-
-.ap-rule {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 13px;
-  margin-bottom: 8px;
-}
-
-.ap-rule.decisive {
-  border-color: rgba(204,75,75,.45);
-  background: rgba(204,75,75,.06);
-}
-
-.ap-rule-head {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 9px;
-}
-
-.ap-rule-name { font-weight: 600; }
-
-.ap-rule-tokens {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 6px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  margin-top: 7px;
-}
-
-/* A signature must break between tokens, never inside one: wrapping
-   /latest/meta-data/... mid-path turns the list into noise. */
-.ap-rule-tokens code {
-  background: var(--bg-secondary, rgba(120,120,140,.12));
-  border-radius: 5px;
-  padding: 1px 6px;
-  white-space: nowrap;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 </style>
 
 <div class="ap-banner" id="ap-mode">
@@ -378,33 +333,9 @@
     A likely false positive is an address the engine scored that later
     completed authentication. Review those before enabling enforcement.
   </p>
-</div>
-
-<div class="card" style="margin-top:25px;">
-  <div class="card-header">
-    <h2>Detection rules</h2>
-    <span class="mon-sub" id="ap-sig-version" data-i18n-skip translate="no"></span>
-  </div>
 
   <p class="mon-sub">
-    What the engine looks for in a request. A decisive category is one no
-    client has any business asking for — a single hit reaches the ban line
-    on its own. The rest are probable: a site may genuinely run WordPress or
-    serve something under /vendor, so those need company before they mean
-    anything.
-  </p>
-
-  <div class="ap-rules" id="ap-rules" data-i18n-skip translate="no"></div>
-
-  <p class="mon-sub" id="ap-query-note"></p>
-
-  <p class="mon-sub">
-    The list is a file on the gateway, replaceable without rebuilding
-    anything. A broken or missing one keeps the built-in rules rather than
-    switching detection off.
-  </p>
-  <p class="mon-sub" data-i18n-skip translate="no">
-    <code>/usr/local/sbin/scanner-signatures.json</code>
+    <a href="{{ url_for('routes.detection_rules_page') }}">See what each finding means, and what it is worth</a>
   </p>
 </div>
 

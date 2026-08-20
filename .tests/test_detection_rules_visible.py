@@ -23,8 +23,8 @@ FILES = ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
 GUARDD = FILES / "easy-ha-proxy-guardd.py"
 SIGNATURES = FILES / "scanner-signatures.json"
 APP = ROOT / "docker" / "app" / "haproxy_admin"
-PAGE = APP / "templates" / "adaptive_protection.html"
-SCRIPT = APP / "static" / "js" / "adaptive_protection.js"
+PAGE = APP / "templates" / "detection_rules.html"
+SCRIPT = APP / "static" / "js" / "detection_rules.js"
 
 
 def load():
@@ -108,31 +108,54 @@ class ThePageShowsThem(unittest.TestCase):
         self.page = PAGE.read_text(encoding="utf-8")
         self.script = SCRIPT.read_text(encoding="utf-8")
 
-    def test_the_card_exists(self):
-        self.assertIn('id="ap-rules"', self.page)
+    def test_the_page_exists(self):
+        self.assertIn('id="dr-shipped"', self.page)
         self.assertIn("Detection rules", self.page)
 
     def test_the_version_has_somewhere_to_go(self):
-        self.assertIn('id="ap-sig-version"', self.page)
+        self.assertIn('id="dr-version"', self.page)
 
-    def test_the_payload_is_actually_rendered(self):
-        self.assertIn("renderSignatures(payload.signatures)", self.script)
+    def test_the_rules_page_is_reachable_from_the_navigation(self):
+        nav = (APP / "templates" / "_haproxy_nav.html").read_text(
+            encoding="utf-8")
+        self.assertIn("routes.detection_rules_page", nav)
+
+    def test_the_page_that_reports_a_ban_points_at_the_rules(self):
+        adaptive = (APP / "templates" / "adaptive_protection.html").read_text(
+            encoding="utf-8")
+        self.assertIn("routes.detection_rules_page", adaptive)
 
     def test_the_rules_are_written_as_text_not_markup(self):
         # A signature is attacker-influenced only in the sense that a
         # downloaded list could carry anything; textContent keeps it inert.
-        block = self.script.split("function renderSignatures")[1].split(
-            "function renderSummary")[0]
-        self.assertIn("textContent", block)
-        self.assertNotIn("innerHTML", block)
+        self.assertIn("textContent", self.script)
+        self.assertNotIn("innerHTML", self.script)
 
     def test_the_file_path_is_not_offered_for_translation(self):
         # The DOM translator walks text nodes one at a time, so a path
-        # inside a sentence breaks the lookup for the whole sentence.
-        marker = "/usr/local/sbin/scanner-signatures.json"
-        self.assertIn(marker, self.page)
-        paragraph = self.page.split(marker)[0].rsplit("<p", 1)[-1]
+        # inside a sentence breaks the lookup for the whole sentence. The
+        # path stands alone, in a paragraph the translator is told to skip.
+        paragraph = self.page.split('id="dr-source"')[0].rsplit("<p", 1)[-1]
         self.assertIn("data-i18n-skip", paragraph)
+
+    def test_no_sentence_hides_a_word_inside_markup(self):
+        # Every prose paragraph must be one text node, or half of it goes
+        # untranslated. An anchor or code element has to be the whole
+        # paragraph, not a word in the middle of one.
+        import re as _re
+
+        for match in _re.finditer(
+            r'<p class="mon-sub"(?![^>]*data-i18n-skip)[^>]*>(.*?)</p>',
+            self.page, _re.S,
+        ):
+            body = match.group(1).strip()
+            if "<" not in body:
+                continue
+            with self.subTest(body=body[:60]):
+                self.assertTrue(
+                    _re.fullmatch(r"<(a|code)[^>]*>[^<]*</(a|code)>", body),
+                    "markup inside a sentence breaks the translator",
+                )
 
 
 class TheProseIsTranslated(unittest.TestCase):
@@ -140,15 +163,17 @@ class TheProseIsTranslated(unittest.TestCase):
         import json
         import re
 
-        fragment = (APP / "translations" / "ru" / "adaptive_protection.json")
+        fragment = (APP / "translations" / "ru" / "detection_rules.json")
         messages = json.loads(fragment.read_text(encoding="utf-8"))["messages"]
         for english in (
             "Detection rules",
             "Signature list",
-            "The rule list has not been read yet",
-            "points — bans on its own",
-            "points — needs company",
+            "You have not changed any rules yet",
+            "points — one request is enough",
+            "points — takes N different categories to ban",
             "points each",
+            "Switch off",
+            "Switch back on",
             "Query strings are checked by what the value looks like, never by "
             "the parameter name",
         ):

@@ -73,6 +73,42 @@ def guardd_ip(address: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     return _get_json("/api/v1/guard/ip", params=query)
 
 
+def guardd_signatures() -> Dict[str, Any]:
+    """The detection rules as the running daemon has them loaded."""
+
+    return _get_json("/api/v1/guard/signatures")
+
+
+def guardd_set_signatures(overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Store the operator's own rules and apply them without a restart.
+
+    Mutating, so it carries the shared token like the mode switch does.
+    """
+
+    url = (
+        "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="")
+        + "/api/v1/guard/signatures"
+    )
+    try:
+        response = _session().post(
+            url,
+            json=overrides,
+            timeout=30,
+            headers={"X-Guardd-Token": GUARDD_TOKEN} if GUARDD_TOKEN else {},
+        )
+        if response.status_code == 400:
+            # The operator mistyped a rule. That is an answer, not an outage.
+            raise ValueError(
+                (response.json() or {}).get("error") or "rejected"
+            )
+        response.raise_for_status()
+        return response.json()
+    except (GuarddUnavailable, ValueError):
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+
+
 def guardd_set_mode(mode: str) -> Dict[str, Any]:
     """Switch between observing and enforcing.
 

@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from .cache import get_country_code
 from .guardd_client import (
+    guardd_signatures,
+    guardd_set_signatures,
     guardd_requests,
     guardd_requests_status,
     guardd_set_request_log,
@@ -213,6 +215,26 @@ def _withhold_advice_from_attackers(contributions: List[Dict[str, Any]]) -> None
 
 def health() -> Dict[str, Any]:
     return guardd_health()
+
+
+def detection_rules() -> Dict[str, Any]:
+    return guardd_signatures()
+
+
+def set_detection_rules(payload: Any) -> Dict[str, Any]:
+    """Pass the operator's rules to the daemon, which is what validates them.
+
+    Deliberately not re-validated here. The daemon owns the rules and has to
+    refuse a bad one anyway, whoever sends it; a second copy of the same
+    checks in the web layer would be one more thing to drift.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    return guardd_set_signatures({
+        "added": payload.get("added") or {},
+        "disabled": payload.get("disabled") or [],
+    })
 
 
 def set_mode(value: Any) -> Dict[str, Any]:

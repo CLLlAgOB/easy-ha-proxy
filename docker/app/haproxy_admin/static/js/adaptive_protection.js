@@ -1,5 +1,5 @@
-/* Adaptive protection: mode, detection rules, shadow review, weight simulator
- * and per-address evidence.
+/* Adaptive protection: mode, shadow review, weight simulator and
+ * per-address evidence. The rules themselves are their own page.
  *
  * The only thing here that changes anything is the mode switch, and it asks
  * before it does. Everything else reads.
@@ -257,81 +257,6 @@
     });
   }
 
-  // A score of 60 and the word "banned" told the operator nothing about what
-  // the address had actually done. These are the rules that produced it.
-  function renderSignatures(signatures) {
-    const host = byId("ap-rules");
-    if (!host) return;
-    const categories = (signatures && signatures.categories) || [];
-    host.textContent = "";
-
-    const version = byId("ap-sig-version");
-    if (version) {
-      version.textContent = signatures && signatures.version
-        ? `${uiText("Signature list")} ${signatures.version}`
-        : "";
-    }
-
-    if (!categories.length) {
-      host.textContent = uiText("The rule list has not been read yet");
-      return;
-    }
-
-    // Decisive first: those are the ones that end an argument alone.
-    const ordered = categories.slice().sort((a, b) => {
-      if (a.decisive !== b.decisive) return a.decisive ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    ordered.forEach((category) => {
-      const tokens = (category.paths || []).concat(category.segments || []);
-      const item = document.createElement("div");
-      item.className = "ap-rule" + (category.decisive ? " decisive" : "");
-
-      const head = document.createElement("div");
-      head.className = "ap-rule-head";
-      const name = document.createElement("span");
-      name.className = "ap-rule-name";
-      name.textContent = category.name;
-      head.appendChild(name);
-
-      const points = document.createElement("span");
-      points.className = "mon-sub";
-      const weight = category.decisive
-        ? signatures.decisive_weight
-        : signatures.probable_weight;
-      points.textContent = category.decisive
-        ? `${weight} ${uiText("points — bans on its own")}`
-        : `${weight} ${uiText("points — needs company")}`;
-      head.appendChild(points);
-
-      item.appendChild(head);
-
-      const list = document.createElement("div");
-      list.className = "ap-rule-tokens";
-      tokens.forEach((token) => {
-        const code = document.createElement("code");
-        code.textContent = token;
-        list.appendChild(code);
-      });
-      item.appendChild(list);
-      host.appendChild(item);
-    });
-
-    const note = byId("ap-query-note");
-    if (note) {
-      const rules = (signatures && signatures.query_rules) || [];
-      // One literal, not a concatenation: the catalogue check greps the
-      // source for translatable literals, and splitting one across a + hides
-      // half the key from it.
-      const lead = uiText("Query strings are checked by what the value looks like, never by the parameter name");
-      note.textContent = rules.length
-        ? `${lead}: ${rules.join(", ")} — `
-          + `${signatures.query_weight} ${uiText("points each")}`
-        : "";
-    }
-  }
-
   function renderSummary(summary) {
     if (!summary) return;
     setText("ap-scored", formatCount(summary.scored));
@@ -545,7 +470,6 @@
       lastSummary = payload.summary || {};
       renderMode(payload);
       renderPolicy(payload.policy);
-      renderSignatures(payload.signatures);
       renderSummary(payload.summary);
       renderTable(payload.addresses);
       setText("ap-updated", payload.ts ? formatTime(payload.ts) : "");

@@ -1,7 +1,8 @@
 # routes_security.py
 #
-# Раздел Adaptive protection. Только чтение: демон в этом релизе не принимает
-# изменяющих команд и ничего не банит.
+# Раздел Adaptive protection и страница правил обнаружения. Меняют состояние
+# только два маршрута: переключение режима и правила оператора; оба требуют
+# superadmin и CSRF, как любая другая форма в приложении.
 
 from __future__ import annotations
 
@@ -22,6 +23,85 @@ def adaptive_protection_page():
     return render_template(
         "adaptive_protection.html", event_types=security.EVENT_TYPES
     )
+
+
+@bp.get("/security/detection-rules")
+def detection_rules_page():
+    """The rules, on their own page.
+
+    They were a card on the shadow-review page, which put a list of eighty
+    signatures between the operator and the numbers they came to read.
+    """
+
+    return render_template("detection_rules.html")
+
+
+@bp.get("/api/security/detection-rules")
+def api_detection_rules():
+    try:
+        return jsonify(security.detection_rules())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules")
+def api_set_detection_rules():
+    """Store the operator's own rules.
+
+    Changing what the engine bans by is exactly as consequential as changing
+    the mode, so it is guarded the same way.
+    """
+
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+
+    try:
+        before = security.detection_rules()
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+    try:
+        result = security.set_detection_rules(payload)
+    except ValueError as exc:
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+
+    # A rule added or suppressed here changes who gets banned, so the record
+    # carries both sides rather than a count.
+    record_request(
+        "adaptive.rules",
+        object_type="detection_rules",
+        before={"added": before.get("added"), "disabled": before.get("disabled")},
+        after={"added": result.get("added"), "disabled": result.get("disabled")},
+        detail=(
+            f"{len(result.get('added') or {})} added, "
+            f"{len(result.get('disabled') or [])} suppressed"
+        ),
+    )
+    LOG.warning(
+        "Detection rules changed by %s", getattr(g, "remote_user", "unknown")
+    )
+    return jsonify(result)
 
 
 @bp.get("/api/security/adaptive/shadow")

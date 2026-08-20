@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+
+{% block title %}Detection rules{% endblock %}
+{% block header_title %}Detection rules{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+/* The rules, grouped by category, because the thing an operator needs to see
+   first is which of them end an argument on their own. */
+.dr-banner {
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(204, 75, 75, .5);
+  background: rgba(204, 75, 75, .08);
+  font-size: 14px;
+}
+
+.dr-banner[hidden] { display: none; }
+
+.dr-rules { margin-top: 12px; }
+
+.dr-rule {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 13px;
+  margin-bottom: 8px;
+}
+
+.dr-rule.decisive {
+  border-color: rgba(204,75,75,.45);
+  background: rgba(204,75,75,.06);
+}
+
+.dr-rule.mine {
+  border-color: rgba(46,158,91,.45);
+  background: rgba(46,158,91,.06);
+}
+
+.dr-rule-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.dr-rule-name { font-weight: 600; }
+
+.dr-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 6px;
+  margin-top: 8px;
+}
+
+/* A signature must break between tokens, never inside one: wrapping
+   /latest/meta-data/... mid-path turns the list into noise. */
+.dr-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 4px 2px 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.dr-token span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dr-token.off {
+  opacity: .6;
+  border-color: var(--border);
+  background: transparent;
+}
+
+/* The signature is struck through, never the button that puts it back. */
+.dr-token.off > span { text-decoration: line-through; }
+
+.dr-token button {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.dr-token button:hover { background: rgba(204,75,75,.16); color: #cc4b4b; }
+.dr-token.off button:hover { background: rgba(46,158,91,.16); color: #2e9e5b; }
+
+.dr-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-top: 10px;
+}
+
+.dr-add label { display: flex; flex-direction: column; gap: 5px; }
+.dr-add .form-input { min-width: 260px; }
+.dr-add select.form-input { min-width: 190px; }
+
+.dr-result { margin-top: 10px; font-size: 13px; }
+.dr-result.error { color: #cc4b4b; }
+
+.dr-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 16px 0;
+}
+</style>
+
+<div class="dr-banner" id="dr-unavailable" hidden>
+  The adaptive protection engine is not answering, so the rules cannot be
+  shown. HAProxy traffic is not affected.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Your rules</h2>
+    <span class="mon-sub" id="dr-version" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Rules added here are kept separately from the list that ships with the
+    software, and are applied on top of it. That matters both ways: a deploy
+    replaces the shipped list and cannot take yours with it, and a shipped
+    signature you switch off stays off when the list is next updated. A
+    signature that caused a false ban must not come back with a release.
+  </p>
+
+  <div class="dr-add">
+    <label>
+      <span class="form-label">Signature</span>
+      <input type="text" class="form-input" id="dr-token"
+             placeholder="/admin-backup.zip or acme-console"
+             autocomplete="off" spellcheck="false">
+    </label>
+    <label>
+      <span class="form-label">Category</span>
+      <select class="form-input" id="dr-category"></select>
+    </label>
+    <button class="btn" type="button" id="dr-add">Add</button>
+  </div>
+
+  <p class="mon-sub">
+    A signature that begins with a slash matches the whole path. Anything else
+    matches one path segment wherever it appears, so a signature of
+    acme-console also catches /x/acme-console/login.
+  </p>
+
+  <div class="dr-rules" id="dr-mine"></div>
+
+  <p class="dr-result" id="dr-result" data-i18n-skip translate="no"></p>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Shipped rules</h2>
+    <span class="mon-sub" id="dr-counts" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    What the engine looks for in a request. A decisive category is one no
+    client has any business asking for, so a single hit is enough on its own.
+    The rest are only probable: a site may genuinely run WordPress or serve
+    something under /vendor, so one hit there is not enough by itself.
+  </p>
+
+  <p class="mon-sub">
+    Switch off any signature that is matching your own traffic. It stays off
+    across updates, and you can switch it back on here.
+  </p>
+
+  <div class="dr-rules" id="dr-shipped"></div>
+
+  <p class="mon-sub" id="dr-query-note"></p>
+
+  <p class="mon-sub">
+    The shipped list is a file on the gateway, replaceable without rebuilding
+    anything. A broken or missing one keeps the built-in rules rather than
+    switching detection off.
+  </p>
+  <p class="mon-sub" data-i18n-skip translate="no">
+    <code id="dr-source"></code>
+  </p>
+</div>
+
+<script src="{{ url_for('static', filename='js/detection_rules.js') }}"></script>
+
+{% endblock %}

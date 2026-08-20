@@ -244,6 +244,14 @@ SIGNATURE_PATH = os.environ.get(
     "GUARDD_SIGNATURES", "/usr/local/sbin/scanner-signatures.json"
 )
 SIGNATURE_VERSION = "built-in"
+# Where the list in force actually came from. Reloading has to go back to
+# the same place: re-reading the default path would quietly swap the list
+# under a daemon started with GUARDD_SIGNATURES pointing somewhere else.
+SIGNATURE_SOURCE = ""
+# The shipped list as read from the file, before the operator's rules go
+# on top. Kept apart so the two can be merged and published in one step.
+_SHIPPED_SEGMENTS: Dict[str, str] = dict(SCANNER_SEGMENTS)
+_SHIPPED_PATHS: Dict[str, str] = dict(SCANNER_PATHS)
 # A path has few segments, but a hostile one can be made to have many; the
 # scan stops well before the cost matters.
 MAX_MATCHED_SEGMENTS = 12
@@ -257,7 +265,8 @@ def load_signatures(path: str = "") -> bool:
     yesterday's list.
     """
 
-    global SIGNATURE_VERSION, DECISIVE_CATEGORIES
+    global SIGNATURE_VERSION, DECISIVE_CATEGORIES, SIGNATURE_SOURCE
+    global _SHIPPED_SEGMENTS, _SHIPPED_PATHS
 
     source = path or SIGNATURE_PATH
     try:
@@ -297,12 +306,12 @@ def load_signatures(path: str = "") -> bool:
 
     QUERY_RULES.clear()
     QUERY_RULES.update(rules)
-    SCANNER_SEGMENTS.clear()
-    SCANNER_SEGMENTS.update(segments)
-    SCANNER_PATHS.clear()
-    SCANNER_PATHS.update(paths)
+    _SHIPPED_SEGMENTS = segments
+    _SHIPPED_PATHS = paths
     DECISIVE_CATEGORIES = frozenset(decisive)
+    publish_signatures()
     SIGNATURE_VERSION = str(data.get("version") or "unversioned")
+    SIGNATURE_SOURCE = source
     LOG.info(
         "Loaded scanner signatures %s: %d segments, %d paths, %d decisive, "
         "%d query rules",
@@ -313,6 +322,134 @@ def load_signatures(path: str = "") -> bool:
         len(QUERY_RULES),
     )
     return True
+
+
+# The operator's own rules. The shipped list is a file Ansible writes on
+# every deploy, so a signature typed into it would survive exactly until the
+# next one; these live in guardd's state table instead, next to the
+# enforcement mode and the request-log switch, for the same reason.
+#
+# Suppression is by token rather than by deletion, so a shipped signature the
+# operator has turned off stays off when the shipped list is updated. That is
+# the whole point: the entry that caused a false positive here must not come
+# back with the next release.
+SIGNATURE_OVERRIDES_KEY = "signature_overrides"
+CUSTOM_CATEGORY = "custom"
+MAX_CUSTOM_RULES = 200
+MAX_TOKEN_LENGTH = 120
+
+# What may be typed into a signature. A token is matched against a path
+# segment or a whole path, never interpreted, so this only has to keep out
+# the characters that would make one impossible to match or to read back.
+_TOKEN_OK = re.compile(r"^[A-Za-z0-9._~/@:+-]{1,%d}$" % MAX_TOKEN_LENGTH)
+
+_overrides: Dict[str, Any] = {"added": {}, "disabled": []}
+
+
+def validate_token(token: str) -> str:
+    """A signature an operator typed, or a ValueError explaining why not."""
+
+    text = (token or "").strip()
+    if not text:
+        raise ValueError("empty signature")
+    if len(text) > MAX_TOKEN_LENGTH:
+        raise ValueError(f"longer than {MAX_TOKEN_LENGTH} characters")
+    if not _TOKEN_OK.match(text):
+        raise ValueError(
+            "a signature may hold letters, digits and . _ ~ / @ : + - only"
+        )
+    if text.startswith("/") and text.strip("/") == "":
+        # "/" would classify every request ever made.
+        raise ValueError("a signature of / would match everything")
+    return text
+
+
+def validate_overrides(data: Any) -> Dict[str, Any]:
+    """Check an override document before anything is allowed to store it."""
+
+    if not isinstance(data, dict):
+        raise ValueError("expected an object")
+    added_raw = data.get("added") or {}
+    disabled_raw = data.get("disabled") or []
+    if not isinstance(added_raw, dict) or not isinstance(disabled_raw, list):
+        raise ValueError("expected added to be an object and disabled a list")
+    if len(added_raw) > MAX_CUSTOM_RULES or len(disabled_raw) > MAX_CUSTOM_RULES:
+        raise ValueError(f"at most {MAX_CUSTOM_RULES} rules")
+
+    added: Dict[str, str] = {}
+    for token, category in added_raw.items():
+        name = str(category or CUSTOM_CATEGORY).strip() or CUSTOM_CATEGORY
+        if not re.match(r"^[a-z0-9-]{1,32}$", name):
+            raise ValueError(f"{name} is not a usable category name")
+        added[validate_token(str(token))] = name
+
+    disabled = sorted({validate_token(str(token)) for token in disabled_raw})
+    return {"added": added, "disabled": disabled}
+
+
+def publish_signatures() -> None:
+    """Merge the shipped list with the operator's rules and swap them in.
+
+    One rebinding rather than a clear and a refill: the log reader looks
+    these up on another thread, and it must see either the whole old set or
+    the whole new one -- never a half-empty table, and never a moment where
+    a suppressed signature is live again.
+    """
+
+    global SCANNER_SEGMENTS, SCANNER_PATHS
+
+    segments = dict(_SHIPPED_SEGMENTS)
+    paths = dict(_SHIPPED_PATHS)
+    for token in _overrides.get("disabled") or []:
+        paths.pop(token, None)
+        segments.pop(token, None)
+    for token, category in (_overrides.get("added") or {}).items():
+        if token.startswith("/"):
+            paths[token] = category
+        else:
+            segments[token] = category
+    SCANNER_SEGMENTS = segments
+    SCANNER_PATHS = paths
+
+
+def apply_overrides(overrides: Optional[Dict[str, Any]] = None) -> None:
+    """Adopt a set of operator rules and republish."""
+
+    global _overrides
+
+    if overrides is not None:
+        _overrides = overrides
+    publish_signatures()
+
+
+def load_overrides(database: "SecurityDatabase") -> Dict[str, Any]:
+    """Read them back at startup. A corrupt document is ignored, not fatal."""
+
+    raw = database.get_state(SIGNATURE_OVERRIDES_KEY, "")
+    if not raw:
+        return {"added": {}, "disabled": []}
+    try:
+        return validate_overrides(json.loads(raw))
+    except Exception as exc:  # noqa: BLE001 - never stop the daemon for this
+        LOG.warning("stored signature overrides are unusable (%s); ignoring", exc)
+        return {"added": {}, "disabled": []}
+
+
+def store_overrides(database: "SecurityDatabase", data: Any) -> Dict[str, Any]:
+    """Validate, persist and apply in one step, so the three cannot diverge."""
+
+    checked = validate_overrides(data)
+    database.set_state(SIGNATURE_OVERRIDES_KEY, json.dumps(checked))
+    # Reload the shipped list first: a signature that was disabled and is now
+    # enabled again has to come back, and only the file has it.
+    load_signatures(SIGNATURE_SOURCE)
+    apply_overrides(checked)
+    LOG.info(
+        "signature overrides updated: %d added, %d suppressed",
+        len(checked["added"]),
+        len(checked["disabled"]),
+    )
+    return checked
 
 
 def signature_summary() -> Dict[str, Any]:
@@ -333,7 +470,7 @@ def signature_summary() -> Dict[str, Any]:
 
     return {
         "version": SIGNATURE_VERSION,
-        "source": SIGNATURE_PATH,
+        "source": SIGNATURE_SOURCE or SIGNATURE_PATH,
         "would_ban_score": WOULD_BAN_SCORE,
         "decisive_weight": DEFAULT_WEIGHTS.get(EVENT_SCANNER_DECISIVE, 0),
         "probable_weight": DEFAULT_WEIGHTS.get(EVENT_SCANNER_PATH, 0),
@@ -351,6 +488,11 @@ def signature_summary() -> Dict[str, Any]:
         # show, but they are regular expressions against a query string and
         # the page is not the place to teach anyone to read one.
         "query_rules": sorted(QUERY_RULES),
+        # What the operator changed, so the page can offer to change it back.
+        "added": dict(_overrides.get("added") or {}),
+        "disabled": list(_overrides.get("disabled") or []),
+        "custom_category": CUSTOM_CATEGORY,
+        "max_rules": MAX_CUSTOM_RULES,
     }
 
 
@@ -3158,6 +3300,10 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return
 
+        if path == "/api/v1/guard/signatures":
+            self._send_json(200, {"ok": True, **signature_summary()})
+            return
+
         if path == "/api/v1/guard/shadow":
             query = parse_qs(urlparse(self.path).query or "")
             try:
@@ -3227,6 +3373,32 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             self._send_json(200, {"ok": True, **result})
+            return
+
+        if path == "/api/v1/guard/signatures":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+                # Larger than the mode payload: this one carries a rule list.
+                if length <= 0 or length > 65536:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            try:
+                store_overrides(engine.database, payload)
+            except ValueError as exc:
+                # A rejected rule is the operator's typo, not a fault.
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("cannot store the signature overrides")
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, **signature_summary()})
             return
 
         if path != "/api/v1/guard/mode":
@@ -3356,6 +3528,9 @@ def main() -> None:
     # The database first: it holds the operator's switch, and that switch
     # decides whether there is anything to do at all.
     database = SecurityDatabase(DATABASE_PATH)
+    # The operator's own rules go on top of the shipped list, which was read
+    # above. Order matters: the file first, then what was changed about it.
+    apply_overrides(load_overrides(database))
     want_requests = _request_log_wanted(database, config)
     if config.mode == MODE_OFF and not want_requests:
         LOG.info("Adaptive protection is off in %s; idling", CONFIG_PATH)

@@ -38,6 +38,7 @@ EXPECTED_ENDPOINTS = {
     "routes.haproxy_backends_page",
     "routes.monitoring_page",
     "routes.adaptive_protection_page",
+    "routes.detection_rules_page",
     "routes.request_log_page",
     "routes.alerts_page",
     "routes.audit_page",

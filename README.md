@@ -874,16 +874,21 @@ host. The rules match shapes with no legitimate reading -- a fetch-and-run, a
 traversal chain, shell chaining, command substitution, an absolute path to an
 interpreter -- and carry the same weight as a decisive path.
 
-#### Where the rules are
+### Detection rules
 
-The **Detection rules** card on the Adaptive protection page lists them as the
-running daemon has them loaded: every category with its matched paths and
-segments, which of them are decisive, what each is worth in points, and the
-names of the query rules. The score bands above it say where the ban line
-falls, so a score of 60 on the reputation table can be traced back to the rule
-that produced it.
+**Detection rules** in the HAProxy navigation lists them as the running daemon
+has them loaded: every category with its matched paths and segments, which of
+them are decisive, what each is worth in points, and the names of the query
+rules. Read with the score bands on the Adaptive protection page, a score of
+60 on the reputation table can be traced back to the rule that produced it.
 
-The card also shows the **version of the signature list in use**, which is
+Each category says what one hit costs and what that buys. A decisive one is
+worth the whole ban line, so a single request is enough. A probable one is
+capped below it, and the page says how many different categories it therefore
+takes -- three, at the shipped weights -- rather than leaving the operator to
+work it out.
+
+The page also shows the **version of the signature list in use**, which is
 worth a glance: the list is a file on the gateway rather than something
 compiled into the daemon, and a file that fails to load leaves the daemon on
 its built-in rules quietly. A gateway running the built-in list says so there.
@@ -896,6 +901,33 @@ with what is actually being probed, and that changes faster than releases. A
 broken or empty file is refused and the previous rules stay in force;
 protection that fails closed on a bad download would be worse than protection
 running yesterday's list.
+
+#### Adding and suppressing rules
+
+The same page takes rules of your own. A signature beginning with `/` is
+matched against the whole path; anything else is matched against one path
+segment wherever it appears, so `acme-console` catches
+`/x/acme-console/login` as well. Filing it under a decisive category makes one
+request enough, which is the right choice for a path nothing on your gateway
+would ever legitimately serve.
+
+Any shipped signature can be switched off, and switched back on, from the same
+list.
+
+These do **not** go into the file above, and that is deliberate in both
+directions. The file is a template Ansible owns and rewrites on every deploy,
+so a rule typed into it would survive exactly until the next one. Worse, a
+shipped signature deleted from it because it banned a real user would come
+straight back with the next release, silently, and ban them again. So the
+operator's rules live in guardd's own state -- the same place the enforcement
+mode and the request-log switch live, for the same reason -- and are laid over
+the shipped list every time it loads. Suppression is recorded by name rather
+than by deletion, which is what makes it survive an update.
+
+A change takes effect immediately; nothing needs restarting. The shipped list
+and the operator's rules are merged and swapped in as one, because the log
+reader looks them up on another thread and must never see a moment in which a
+suppressed signature is live again.
 
 Contributions fade with age rather than being decremented on a timer, so the
 score is a pure function of the stored events. Retuning any weight re-scores
