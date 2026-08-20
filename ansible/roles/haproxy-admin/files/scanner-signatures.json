@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-20",
+  "version": "2026-08-20b",
   "source": "curated, plus paths mined from 713945 requests across two live gateways",
   "notes": [
     "A category is decisive when no client has any legitimate reason to ask:",
@@ -15,7 +15,6 @@
     "Nothing can reach one by accident, so a request for one is decisive by",
     "construction. Add your own; they cost nothing and never false-positive."
   ],
-
   "decisive": [
     "secrets",
     "vcs",
@@ -23,9 +22,10 @@
     "rce-probe",
     "container-api",
     "shell",
-    "trap"
+    "trap",
+    "cloud-credentials",
+    "known-exploit"
   ],
-
   "segments": {
     ".env": "secrets",
     ".env.local": "secrets",
@@ -75,7 +75,6 @@
     "web.config": "config",
     "docker-compose.yml": "config"
   },
-
   "paths": {
     "/.env": "secrets",
     "/.git/config": "vcs",
@@ -90,8 +89,36 @@
     "/hello.world": "rce-probe",
     "/test.hello": "rce-probe",
     "/debug/default/view": "app-framework",
-    "/telescope/requests": "app-framework"
+    "/telescope/requests": "app-framework",
+    "/aws/metadata/iam/security-credentials": "cloud-credentials",
+    "/latest/meta-data/iam/security-credentials": "cloud-credentials",
+    "/ecs/task-credentials": "cloud-credentials",
+    "/computeMetadata/v1/instance/service-accounts": "cloud-credentials",
+    "/k8s/secrets.yaml": "cloud-credentials",
+    "/kubernetes.yml": "cloud-credentials",
+    "/proc/1/environ": "secrets",
+    "/@fs/proc/1/environ": "secrets",
+    "/debug/pprof/cmdline": "server-info",
+    "/remote/fgt_lang": "known-exploit",
+    "/geoserver/web": "known-exploit",
+    "/developmentserver/metadatauploader": "known-exploit",
+    "/boaform/admin/formLogin": "known-exploit",
+    "/SDK/webLanguage": "known-exploit",
+    "/onvif/device_service": "known-exploit",
+    "/setup.cgi": "known-exploit",
+    "/device.rsp": "known-exploit",
+    "/restapps/applications.php": "known-exploit",
+    "/this_is_a_new_hello_world.php": "rce-probe",
+    "/mcp": "ai-endpoint",
+    "/sse": "ai-endpoint",
+    "/api/mcp": "ai-endpoint"
   },
-
-  "traps": []
+  "traps": [],
+  "queries": {
+    "fetch-and-run": "(wget\\s|curl\\s|tftp\\s|\\bchmod\\s+\\+?x|\\bbusybox\\b)",
+    "traversal": "(\\.\\./\\.\\./|%2e%2e[/%])",
+    "shell-chaining": "(;\\s*(sh|bash|cat|ls|id|uname|rm)\\b|\\|\\s*(sh|bash)\\b)",
+    "substitution": "(\\$\\(|`[a-z/]{2,})",
+    "absolute-binary": "/(bin|usr/bin|sbin)/(sh|bash|nc|perl|python)"
+  }
 }

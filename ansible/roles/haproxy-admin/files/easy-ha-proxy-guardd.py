@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn, UnixStreamServer
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
 LOG = logging.getLogger("easy-ha-proxy-guardd")
 
@@ -180,6 +180,62 @@ SCANNER_PATHS: Dict[str, str] = {
 # what asking for /wp-admin scored.
 DECISIVE_CATEGORIES: frozenset = frozenset({"secrets", "vcs", "backup"})
 
+# Nothing above looks at the query string, and one gateway carried 11,413
+# requests whose attack lived entirely there. The obvious rule -- treat
+# ?cmd= as an attack -- would have been a disaster: 73 of the 74 addresses
+# sending ?cmd= on that gateway were 1C Enterprise clients, whose web
+# protocol puts cmd= in every single request. The parameter name carries no
+# information at all.
+#
+# So these match the VALUE, and only shapes with no legitimate reading. On
+# 837,733 real requests they fired on 17 addresses, none of them a client of
+# anything, every one answered 404/451/423, and not one was caught by the
+# path signatures: /setup.cgi, /device.rsp, /remote/fgt_lang. The three that
+# found nothing in that sample are kept because they are well-known
+# injection shapes and were proven not to misfire on 412 query-sending
+# addresses -- absence of a hit is still evidence about false positives.
+DEFAULT_QUERY_RULES: Dict[str, str] = {
+    "fetch-and-run": r"(wget\s|curl\s|tftp\s|\bchmod\s+\+?x|\bbusybox\b)",
+    "traversal": r"(\.\./\.\./|%2e%2e[/%])",
+    "shell-chaining": r"(;\s*(sh|bash|cat|ls|id|uname|rm)\b|\|\s*(sh|bash)\b)",
+    "substitution": r"(\$\(|`[a-z/]{2,})",
+    "absolute-binary": r"/(bin|usr/bin|sbin)/(sh|bash|nc|perl|python)",
+}
+QUERY_RULES: Dict[str, "re.Pattern"] = {
+    name: re.compile(pattern, re.I)
+    for name, pattern in DEFAULT_QUERY_RULES.items()
+}
+# The query is decoded twice before matching, because %252e%252e is the
+# same attack wearing one more coat. Past that, decoding invents requests
+# nobody made.
+QUERY_DECODE_PASSES = 2
+MAX_QUERY_LENGTH = 2048
+
+
+def classify_query(uri: str) -> str:
+    """Name the injection shape in a request target's query, or "".
+
+    The name is all that ever leaves this function. The value stays here:
+    the access log genuinely contains ?token=..., which is why
+    normalize_path throws the query away, and a rule that recorded what it
+    matched would put the thing back into the security database by the
+    back door.
+    """
+
+    if not uri or "?" not in uri:
+        return ""
+    query = uri.split("?", 1)[1][:MAX_QUERY_LENGTH]
+    if not query:
+        return ""
+    for _ in range(QUERY_DECODE_PASSES):
+        with contextlib.suppress(Exception):
+            query = unquote_plus(query)
+    for name, pattern in QUERY_RULES.items():
+        if pattern.search(query):
+            return name
+    return ""
+
+
 # The tables above are the fallback. The signature file ships beside this
 # daemon and can be replaced without rebuilding anything, the way the GeoIP
 # database already is: the useful part of this list is the part that keeps up
@@ -223,6 +279,24 @@ def load_signatures(path: str = "") -> bool:
     for trap in data.get("traps") or []:
         paths[str(trap)] = "trap"
 
+    # A bad regex in a downloaded file must not take the daemon with it, so
+    # every rule is compiled before any of them is adopted.
+    rules = dict(QUERY_RULES)
+    if isinstance(data.get("queries"), dict):
+        compiled = {}
+        for name, pattern in data["queries"].items():
+            try:
+                compiled[str(name)] = re.compile(str(pattern), re.I)
+            except re.error as exc:
+                LOG.warning("query rule %s is not a valid regex (%s); "
+                            "keeping the built-in rules", name, exc)
+                compiled = {}
+                break
+        if compiled:
+            rules = compiled
+
+    QUERY_RULES.clear()
+    QUERY_RULES.update(rules)
     SCANNER_SEGMENTS.clear()
     SCANNER_SEGMENTS.update(segments)
     SCANNER_PATHS.clear()
@@ -230,11 +304,13 @@ def load_signatures(path: str = "") -> bool:
     DECISIVE_CATEGORIES = frozenset(decisive)
     SIGNATURE_VERSION = str(data.get("version") or "unversioned")
     LOG.info(
-        "Loaded scanner signatures %s: %d segments, %d paths, %d decisive",
+        "Loaded scanner signatures %s: %d segments, %d paths, %d decisive, "
+        "%d query rules",
         SIGNATURE_VERSION,
         len(segments),
         len(paths),
         len(decisive),
+        len(QUERY_RULES),
     )
     return True
 
@@ -249,9 +325,16 @@ def is_served(status: int) -> bool:
     A site that really runs WordPress answers /wp-login.php with a login
     page, and every one of its users would otherwise be filed as scanning
     for WordPress.
+
+    2xx only. A redirect is not the application serving the file: plenty of
+    sites bounce every unknown path to a login page or a home page, and on
+    one gateway 1004 of 1211 scanner-shaped paths that looked "served" were
+    301s. Counting those as legitimate would have excused every scanner on
+    the host -- the opposite failure from the one this exists to prevent,
+    and a quieter one.
     """
 
-    return 200 <= status < 400
+    return 200 <= status < 300
 
 # A 404 on one of these is a broken page, not reconnaissance. Without this the
 # single largest false-positive source is a front end asking for assets that
@@ -265,6 +348,7 @@ ASSET_SUFFIXES: Tuple[str, ...] = (
 
 EVENT_SCANNER_PATH = "SCANNER_PATH"
 EVENT_SCANNER_DECISIVE = "SCANNER_PATH_DECISIVE"
+EVENT_QUERY_INJECTION = "QUERY_INJECTION"
 EVENT_SCANNER_MULTI = "SCANNER_MULTI_CATEGORY"
 EVENT_LOW_AND_SLOW = "LOW_AND_SLOW_SCANNER"
 EVENT_NOT_FOUND_ENUM = "NOT_FOUND_ENUMERATION"
@@ -282,6 +366,11 @@ DEFAULT_WEIGHTS: Dict[str, int] = {
     # One request for a file no client ever wants is enough on
     # its own; that is what makes it decisive.
     EVENT_SCANNER_DECISIVE: 60,
+    # Same tier, same reason. Nothing legitimate puts a fetch-and-run or a
+    # traversal chain in a query string: on 837,733 real requests these
+    # fired on 17 addresses, every one answered 4xx, and none of them was a
+    # client of anything.
+    EVENT_QUERY_INJECTION: 60,
     EVENT_SCANNER_MULTI: 20,
     EVENT_LOW_AND_SLOW: 30,
     EVENT_NOT_FOUND_ENUM: 15,
@@ -439,6 +528,11 @@ class ParsedRequest:
     path: str
     host: str
     bad_request: bool = False
+    # The NAME of the injection rule the query matched, never the query. The
+    # value is dropped for the same reason normalize_path drops it: the
+    # access log really does contain ?token=..., and a security database is
+    # the last place that belongs.
+    query_flag: str = ""
     # Filled in only when the request log is on. They cost a little more
     # parsing per line, so they stay optional rather than always paid for.
     ts: int = 0
@@ -627,6 +721,7 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         method=tail.group("method"),
         path=normalize_path(uri),
         host=extract_host(uri) if not host else host[:MAX_HOST_LENGTH],
+        query_flag=classify_query(uri),
         ts=stamp,
         request_id=request_id,
         bytes_out=bytes_out,
@@ -2403,12 +2498,44 @@ class GuardEngine:
         if request.host and len(activity.hosts) < 16:
             activity.hosts.add(request.host)
 
+        if request.query_flag:
+            # Deliberately not gated on is_served. A path the site answers
+            # is evidence the path is real; an injection the site answered
+            # 200 is evidence it may have worked, which is the opposite of
+            # a reason to let the client alone.
+            activity.scanner_hits += 1
+            activity.note_category(request.query_flag, now)
+            self._emit(
+                ip,
+                EVENT_QUERY_INJECTION,
+                now,
+                source="haproxy-log",
+                category=request.query_flag,
+                # The path, never the query. The rule name above already
+                # says what was in it.
+                detail=request.path,
+                handled=handled,
+                fingerprint=f"{ip}|{EVENT_QUERY_INJECTION}|{request.query_flag}",
+            )
+            self._check_multi_category(ip, activity, now)
+
         category = classify_path(request.path)
-        if category and is_served(request.status):
+        if (
+            category
+            and is_served(request.status)
+            and not category_is_decisive(category)
+        ):
             # The application answered with content, so this is a path the
             # site actually has. A real WordPress installation would
             # otherwise file every one of its own users as scanning for
             # WordPress.
+            #
+            # A decisive category is never excused this way. No site serves
+            # its own .env, git store or database dump on purpose, so a 200
+            # there means one of two things: a catch-all page that answers
+            # everything alike -- one gateway returned the same 1477 bytes
+            # for /.env, /backup.sql and /phpinfo.php -- or a real leak.
+            # Neither is a reason to trust the client asking.
             category = ""
         if category:
             activity.scanner_hits += 1

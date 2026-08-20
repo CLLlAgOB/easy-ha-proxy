@@ -85,7 +85,7 @@ class TierTests(unittest.TestCase):
 
 class ServedPathTests(unittest.TestCase):
     def test_a_served_response_is_the_application_answering(self):
-        for status in (200, 201, 204, 301, 302, 304):
+        for status in (200, 201, 204, 206):
             with self.subTest(status=status):
                 self.assertTrue(guardd.is_served(status))
 
@@ -94,13 +94,32 @@ class ServedPathTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertFalse(guardd.is_served(status))
 
+    def test_a_redirect_is_not_the_application_serving_the_file(self):
+        # Plenty of sites bounce every unknown path to a login or home page.
+        # On one gateway 1004 of 1211 scanner paths that looked served were
+        # 301s; exempting those would excuse every scanner on the host.
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                self.assertFalse(guardd.is_served(status))
+
     def test_the_rule_is_applied_before_a_finding_is_emitted(self):
         source = GUARDD.read_text(encoding="utf-8")
-        block = source.split("category = classify_path(request.path)")[1][:400]
+        block = source.split("category = classify_path(request.path)")[1][:1200]
         self.assertIn("is_served(request.status)", block)
         # It must clear the category, not merely skip the weight, or the
         # request would still count towards the multi-category finding.
         self.assertIn('category = ""', block)
+
+    def test_a_decisive_category_is_never_excused_by_a_served_response(self):
+        # No site serves its own .env, git store or database dump on
+        # purpose. A 200 there is either a catch-all page that answers
+        # everything alike -- one gateway returned the same 1477 bytes for
+        # /.env, /backup.sql and /phpinfo.php -- or a genuine leak. Neither
+        # is a reason to stop scoring the client that asked.
+        source = GUARDD.read_text(encoding="utf-8")
+        block = source.split("category = classify_path(request.path)")[1][:1200]
+        guard = block.split('category = ""')[0]
+        self.assertIn("not category_is_decisive(category)", guard)
 
     def test_the_emitted_event_follows_the_tier(self):
         source = GUARDD.read_text(encoding="utf-8")
