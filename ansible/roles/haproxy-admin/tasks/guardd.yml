@@ -11,6 +11,18 @@
     mode: "0755"
   register: guardd_script
 
+# Beside the daemon rather than inside it, so the list can be replaced
+# without rebuilding anything -- the useful part of it is the part that keeps
+# up with what is actually being probed.
+- name: "easy-ha-proxy-guardd | Install the scanner signatures"
+  ansible.builtin.copy:
+    src: scanner-signatures.json
+    dest: /usr/local/sbin/scanner-signatures.json
+    owner: root
+    group: root
+    mode: "0644"
+  register: guardd_signatures
+
 - name: "easy-ha-proxy-guardd | Render config"
   ansible.builtin.template:
     src: guardd.json.j2
@@ -55,6 +67,7 @@
     guardd_script.changed
     or guardd_unit.changed
     or guardd_cfg.changed
+    or guardd_signatures.changed
     or (hapadm_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-guardd | Ensure service started"

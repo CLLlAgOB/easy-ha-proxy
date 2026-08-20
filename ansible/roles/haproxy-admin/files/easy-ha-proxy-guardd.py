@@ -180,6 +180,64 @@ SCANNER_PATHS: Dict[str, str] = {
 # what asking for /wp-admin scored.
 DECISIVE_CATEGORIES: frozenset = frozenset({"secrets", "vcs", "backup"})
 
+# The tables above are the fallback. The signature file ships beside this
+# daemon and can be replaced without rebuilding anything, the way the GeoIP
+# database already is: the useful part of this list is the part that keeps up
+# with what is actually being probed, and that changes faster than releases.
+SIGNATURE_PATH = os.environ.get(
+    "GUARDD_SIGNATURES", "/usr/local/sbin/scanner-signatures.json"
+)
+SIGNATURE_VERSION = "built-in"
+# A path has few segments, but a hostile one can be made to have many; the
+# scan stops well before the cost matters.
+MAX_MATCHED_SEGMENTS = 12
+
+
+def load_signatures(path: str = "") -> bool:
+    """Replace the tables from the signature file. False keeps the built-ins.
+
+    A broken or missing file must never stop the daemon: protection that
+    fails closed on a bad download is worse than protection that keeps
+    yesterday's list.
+    """
+
+    global SIGNATURE_VERSION, DECISIVE_CATEGORIES
+
+    source = path or SIGNATURE_PATH
+    try:
+        with open(source, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        segments = {str(k): str(v) for k, v in dict(data["segments"]).items()}
+        paths = {str(k): str(v) for k, v in dict(data["paths"]).items()}
+        decisive = {str(name) for name in data["decisive"]}
+    except Exception as exc:  # noqa: BLE001 - any breakage keeps the built-ins
+        LOG.warning("cannot read %s (%s); using the built-in signatures", source, exc)
+        return False
+
+    if not segments or not paths:
+        LOG.warning("%s carries no signatures; using the built-in ones", source)
+        return False
+
+    # A trap is a path this installation does not serve and never links to,
+    # so nothing can reach one by accident.
+    for trap in data.get("traps") or []:
+        paths[str(trap)] = "trap"
+
+    SCANNER_SEGMENTS.clear()
+    SCANNER_SEGMENTS.update(segments)
+    SCANNER_PATHS.clear()
+    SCANNER_PATHS.update(paths)
+    DECISIVE_CATEGORIES = frozenset(decisive)
+    SIGNATURE_VERSION = str(data.get("version") or "unversioned")
+    LOG.info(
+        "Loaded scanner signatures %s: %d segments, %d paths, %d decisive",
+        SIGNATURE_VERSION,
+        len(segments),
+        len(paths),
+        len(decisive),
+    )
+    return True
+
 
 def category_is_decisive(category: str) -> bool:
     return category in DECISIVE_CATEGORIES
@@ -461,8 +519,12 @@ def is_asset(path: str) -> bool:
 def classify_path(path: str) -> str:
     """Return the scanner category for a normalised path, or "".
 
-    Matching is by first path segment so the lookup stays O(1) per request:
-    the cost of this runs on every logged line.
+    Every segment is checked, not only the first. The most common attack in
+    the mined traffic -- CVE-2017-9841, the phpunit eval-stdin.php remote
+    execution -- arrives as /laravel/vendor/phpunit/... and /lib/phpunit/...
+    far more often than as /vendor/phpunit/..., and first-segment matching
+    saw none of those. A path has few segments and the scan is bounded, so
+    the cost of running this on every logged line is unchanged in practice.
     """
 
     if not path or path == "/":
@@ -470,13 +532,26 @@ def classify_path(path: str) -> str:
     exact = SCANNER_PATHS.get(path)
     if exact:
         return exact
-    segment = path.split("/", 2)[1] if len(path) > 1 else ""
-    if not segment:
+    if is_asset(path):
+        # A stylesheet under /vendor/ that a deploy renamed is not a probe,
+        # and matching every segment would otherwise make it one.
         return ""
-    category = SCANNER_SEGMENTS.get(segment)
-    if category:
-        return category
-    return SCANNER_SEGMENTS.get(segment.lower(), "")
+    # The most confident match wins, not the leftmost. /vendor/phpunit/...
+    # and /lib/phpunit/... are the same attack, and taking whichever segment
+    # came first gave one of them "dependency" and the other "rce-probe".
+    probable = ""
+    for segment in path.split("/", MAX_MATCHED_SEGMENTS + 1)[1:]:
+        if not segment:
+            continue
+        category = SCANNER_SEGMENTS.get(segment) or SCANNER_SEGMENTS.get(
+            segment.lower()
+        )
+        if not category:
+            continue
+        if category_is_decisive(category):
+            return category
+        probable = probable or category
+    return probable
 
 
 def extract_host(value: str) -> str:
@@ -3092,6 +3167,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # Before anything reads a log line: a signature file that turns out to be
+    # unreadable leaves the built-in tables in place and says so.
+    load_signatures()
 
     try:
         config = load_config(CONFIG_PATH)
