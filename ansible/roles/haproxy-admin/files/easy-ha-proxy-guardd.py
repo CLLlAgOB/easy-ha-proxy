@@ -1455,9 +1455,28 @@ class IpActivity:
     # 404 paths that were not assets.
     categories: "OrderedDict[str, int]" = field(default_factory=OrderedDict)
     scanner_hits: int = 0
+    # How many of those the gateway had already refused. A finding derived
+    # from nothing but refused requests must not score when every request it
+    # was derived from scored nothing.
+    scanner_hits_denied: int = 0
     missing_paths: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
     invalid_host_hits: int = 0
     invalid_host_since: int = 0
+
+    @property
+    def scanning_was_all_refused(self) -> bool:
+        """Every scanner hit from this address was refused on identity.
+
+        The address reaches nothing, so a ban changes nothing -- the same
+        reason a single finding scores zero. Mixed traffic does not count:
+        one request that got through is enough for the derived findings to
+        be worth their points.
+        """
+
+        return (
+            self.scanner_hits > 0
+            and self.scanner_hits_denied >= self.scanner_hits
+        )
 
     def note_path(self, path: str, ts: int, limit: int) -> bool:
         """Remember a path by hash. True when it had not been seen before."""
@@ -2685,6 +2704,8 @@ class GuardEngine:
             # 200 is evidence it may have worked, which is the opposite of
             # a reason to let the client alone.
             activity.scanner_hits += 1
+            if handled:
+                activity.scanner_hits_denied += 1
             activity.note_category(request.query_flag, now)
             self._emit(
                 ip,
@@ -2720,6 +2741,8 @@ class GuardEngine:
             category = ""
         if category:
             activity.scanner_hits += 1
+            if handled:
+                activity.scanner_hits_denied += 1
             activity.note_category(category, now)
             event = (
                 EVENT_SCANNER_DECISIVE
@@ -2801,6 +2824,7 @@ class GuardEngine:
             now,
             source="haproxy-log",
             detail=f"categories={len(categories)}",
+            handled=activity.scanning_was_all_refused,
         )
 
     def _check_low_and_slow(
@@ -2821,6 +2845,7 @@ class GuardEngine:
             now,
             source="haproxy-log",
             detail=f"hits={activity.scanner_hits} categories={len(categories)}",
+            handled=activity.scanning_was_all_refused,
         )
 
     def _check_not_found_enumeration(
