@@ -315,6 +315,45 @@ def load_signatures(path: str = "") -> bool:
     return True
 
 
+def signature_summary() -> Dict[str, Any]:
+    """The rules as they are loaded, for the page that has to explain a ban.
+
+    Grouped by category rather than listed flat: forty-seven segments in one
+    column is a data dump, and the thing an operator needs to see is which
+    categories end an argument on their own.
+    """
+
+    grouped: Dict[str, Dict[str, List[str]]] = {}
+    for segment, category in SCANNER_SEGMENTS.items():
+        grouped.setdefault(category, {"segments": [], "paths": []})
+        grouped[category]["segments"].append(segment)
+    for path, category in SCANNER_PATHS.items():
+        grouped.setdefault(category, {"segments": [], "paths": []})
+        grouped[category]["paths"].append(path)
+
+    return {
+        "version": SIGNATURE_VERSION,
+        "source": SIGNATURE_PATH,
+        "would_ban_score": WOULD_BAN_SCORE,
+        "decisive_weight": DEFAULT_WEIGHTS.get(EVENT_SCANNER_DECISIVE, 0),
+        "probable_weight": DEFAULT_WEIGHTS.get(EVENT_SCANNER_PATH, 0),
+        "query_weight": DEFAULT_WEIGHTS.get(EVENT_QUERY_INJECTION, 0),
+        "categories": [
+            {
+                "name": category,
+                "decisive": category_is_decisive(category),
+                "segments": sorted(entries["segments"]),
+                "paths": sorted(entries["paths"]),
+            }
+            for category, entries in sorted(grouped.items())
+        ],
+        # The names only. The patterns themselves would be a fair thing to
+        # show, but they are regular expressions against a query string and
+        # the page is not the place to teach anyone to read one.
+        "query_rules": sorted(QUERY_RULES),
+    }
+
+
 def category_is_decisive(category: str) -> bool:
     return category in DECISIVE_CATEGORIES
 
@@ -2919,6 +2958,12 @@ class GuardEngine:
                 ],
                 "would_ban_score": WOULD_BAN_SCORE,
             },
+            # The page could show a score of 60 and the word "banned" and
+            # never say what the address had actually done to earn it. The
+            # rules live in a replaceable file now, so the version matters
+            # too: without it nobody can tell which list a gateway is
+            # running.
+            "signatures": signature_summary(),
             "summary": {
                 "scored": len(rows),
                 "would_ban": sum(1 for row in rows if row["would_ban"]),

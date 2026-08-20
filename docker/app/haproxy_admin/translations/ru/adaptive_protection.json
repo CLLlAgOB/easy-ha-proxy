@@ -71,6 +71,15 @@
     "raise": "поднять",
     "requests": "запросов",
     "What a score means. The engine bans an address once it reaches the marked band; below it the score only ranks how much attention the address deserves.": "Что означает счёт. Движок банит адрес, когда счёт достигает отмеченной полосы; ниже неё счёт лишь показывает, насколько адрес заслуживает внимания.",
-    "bans from here": "отсюда банит"
+    "bans from here": "отсюда банит",
+    "Detection rules": "Правила обнаружения",
+    "The list is a file on the gateway, replaceable without rebuilding anything. A broken or missing one keeps the built-in rules rather than switching detection off.": "Список — это файл на шлюзе, его можно заменить, ничего не пересобирая. Битый или отсутствующий оставляет встроенные правила, а не выключает обнаружение.",
+    "Signature list": "Список сигнатур",
+    "The rule list has not been read yet": "Список правил ещё не прочитан",
+    "points each": "очков каждое",
+    "Query strings are checked by what the value looks like, never by the parameter name": "Query-строки проверяются по виду значения, а не по имени параметра",
+    "points — bans on its own": "очков — банит сама по себе",
+    "points — needs company": "очков — нужна компания",
+    "What the engine looks for in a request. A decisive category is one no client has any business asking for — a single hit reaches the ban line on its own. The rest are probable: a site may genuinely run WordPress or serve something under /vendor, so those need company before they mean anything.": "Что движок ищет в запросе. Решающая категория — это то, что легальному клиенту не нужно никогда: одного попадания хватает, чтобы дойти до линии бана. Остальные лишь вероятные: сайт действительно может работать на WordPress или отдавать что-то из /vendor, поэтому им нужна компания, чтобы что-то значить."
   }
 }

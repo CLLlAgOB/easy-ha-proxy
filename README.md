@@ -516,7 +516,10 @@ the gateway runs out of disk.
 What is never stored: the query string, which the engine drops before anything
 reaches the store, and any header, cookie or body, which the access log does
 not contain in the first place. There is no list of sensitive parameters to
-keep up to date because there are no parameters.
+keep up to date because there are no parameters. The security engine does
+match the query against its injection rules, but that happens in memory on the
+way past; what it records is the name of the rule, never the value that
+matched it.
 
 The store rides on the same read of the same file the security engine already
 does, so it costs no extra I/O -- but it is independent of it: requests from
@@ -771,7 +774,7 @@ maintenance responders, and the stick tables -- are not offered at all, because
 draining the one serving the page you are clicking in would lock you out.
 Changing a state requires the superadmin role.
 
-### Adaptive protection (monitor only)
+### Adaptive protection
 
 `easy-ha-proxy-guardd.service` watches for behaviour the existing rate limits
 cannot see. HAProxy's stick tables measure intensity over short windows, so a
@@ -818,22 +821,81 @@ IPv4 only: `tbl_ban` is an IPv4 stick table and the firewall ruleset is `inet`,
 so addresses that cannot be acted upon are recorded as such instead of
 accumulating a score nothing can use.
 
-Only significant events are stored, never the traffic itself. Query strings are
-removed while the line is parsed -- an access log genuinely contains things
-like `?token=...` -- and paths are normalised and length-capped before they
-reach the database. The per-address working set is bounded in both directions:
-a capped number of addresses, and a capped path history each.
+Only significant events are stored, never the traffic itself. Paths are
+normalised and length-capped before they reach the database, and the
+per-address working set is bounded in both directions: a capped number of
+addresses, and a capped path history each.
 
-Findings come in three strengths. A request for a path only a scanner wants --
-`/.env`, `/.git/config`, `/phpmyadmin` -- is high confidence and carries a
-category. Weaker signals are enumeration of distinct missing paths, repeated
-requests with no valid host, and the short-window rate and error counters
-HAProxy already keeps. A missing stylesheet or image is not a signal at all.
-Scores combine these with each category capped, because fifty different
-WordPress URLs are one finding -- "looked for WordPress" -- rather than fifty,
-and the interesting case is an address that tried several unrelated
-technologies. `LOW_AND_SLOW_SCANNER` is deliberately rate-blind: the slower a
-scan is, the less the existing limits can see it.
+The query string is the one part of a request that is read but never kept. An
+access log genuinely contains things like `?token=...`, so the value is
+matched in memory and discarded; what reaches the database is the name of the
+rule it matched and nothing else.
+
+#### What counts as a finding
+
+Findings come in two strengths, and the difference decides whether one request
+is enough.
+
+A **decisive** category is one no client has any business asking for. There is
+no browser, no framework and no crawler that fetches an `.env` file, a git
+object store or a database dump, so a single request is not a hint -- it is the
+whole answer, and it reaches the ban line on its own. `secrets`, `vcs`,
+`backup`, `rce-probe`, `shell`, `container-api`, `cloud-credentials` and
+`known-exploit` are decisive.
+
+A **probable** category is one a site might genuinely have. WordPress,
+`/vendor`, `/server-status`, `phpMyAdmin` -- one hit there means little, and it
+takes a spread across unrelated categories to mean anything. Each category is
+capped, because fifty different WordPress URLs are one finding -- "looked for
+WordPress" -- rather than fifty.
+
+Two rules stop the engine reading a site's own traffic as an attack on itself.
+A path the application actually **served** is not a probe: a real WordPress
+installation answers `/wp-login.php`, and without this every one of its users
+would be filed as scanning for WordPress. Only a 2xx counts as served -- a
+redirect is not the application serving the file, and a site that bounces every
+unknown path to a login page would otherwise excuse every scanner on it. The
+exemption never applies to a decisive category: nobody serves their own `.env`
+on purpose, so a 200 there is either a catch-all page or a real leak, and
+neither is a reason to trust the client asking.
+
+Weaker signals are enumeration of distinct missing paths, repeated requests
+with no valid host, and the short-window rate and error counters HAProxy
+already keeps. A missing stylesheet or image is not a signal at all.
+`LOW_AND_SLOW_SCANNER` is deliberately rate-blind: the slower a scan is, the
+less the existing limits can see it.
+
+Query strings are checked separately, and by what the **value** looks like
+rather than by the parameter it arrived under. That distinction is not
+cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`
+were 1C:Enterprise clients, whose web protocol puts `cmd=` in every single
+request. A rule on the parameter name would have banned every 1C user on the
+host. The rules match shapes with no legitimate reading -- a fetch-and-run, a
+traversal chain, shell chaining, command substitution, an absolute path to an
+interpreter -- and carry the same weight as a decisive path.
+
+#### Where the rules are
+
+The **Detection rules** card on the Adaptive protection page lists them as the
+running daemon has them loaded: every category with its matched paths and
+segments, which of them are decisive, what each is worth in points, and the
+names of the query rules. The score bands above it say where the ban line
+falls, so a score of 60 on the reputation table can be traced back to the rule
+that produced it.
+
+The card also shows the **version of the signature list in use**, which is
+worth a glance: the list is a file on the gateway rather than something
+compiled into the daemon, and a file that fails to load leaves the daemon on
+its built-in rules quietly. A gateway running the built-in list says so there.
+
+    /usr/local/sbin/scanner-signatures.json
+
+Replacing it needs no rebuild -- the same arrangement the GeoIP database
+already uses -- because the useful part of the list is the part that keeps up
+with what is actually being probed, and that changes faster than releases. A
+broken or empty file is refused and the previous rules stay in force;
+protection that fails closed on a bad download would be worse than protection
+running yesterday's list.
 
 Contributions fade with age rather than being decremented on a timer, so the
 score is a pure function of the stored events. Retuning any weight re-scores
@@ -866,8 +928,10 @@ catching before anything is blocked.
 
 Selecting an address shows every finding that contributed to its score, when it
 happened, how many points it was worth and why: `counted`, `category cap
-reached`, or `already refused by the gateway`. Nothing on the page can ban
-anything; there is no control for it, because the engine cannot.
+reached`, or `already refused by the gateway`. Read together with the
+**Detection rules** card, a verdict on that page can be followed all the way
+back: the finding names a category, the card says what that category matches
+and what it is worth, and the bands say where the ban line falls.
 
 A weight simulator re-scores the stored history against different weights,
 caps and decay without saving anything, so a proposed change can be judged
