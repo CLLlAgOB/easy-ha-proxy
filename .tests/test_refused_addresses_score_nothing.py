@@ -21,6 +21,16 @@ a live gateway, off a timeline where every other line read "already refused".
 Mixed traffic is the case that stops this being a one-line change: an
 address refused on one site and served on another is reaching something, and
 its derived findings are worth their points.
+
+And then the premise itself turned out to be wrong. "It reaches nothing, so
+a ban changes nothing" holds only for a gateway with one site on it. The
+refusals are per host -- one rule for each gated site, plus geography over a
+named set of domains -- and the Authelia host cannot be gated at all,
+because the login page has to be reachable. On the same live gateway, of 173
+addresses refused that day, 17 were answered on something else; one was
+being handed a 200 for /b374k-2.6.php, a webshell name, while its page read
+score 0, state NORMAL, recommended action "nothing". A refusal is a shield
+only while the address has never been past the gateway on anything.
 """
 
 from __future__ import annotations
@@ -60,6 +70,44 @@ class WhatCountsAsRefused(unittest.TestCase):
         # rejected one bad request and carried on serving that address
         # everything else it asked for.
         self.assertNotIn(400, guardd.ParsedRequest.IDENTITY_REFUSALS)
+
+
+class WhenARefusalStillCounts(unittest.TestCase):
+    """The rule, on its own, before any of the plumbing around it."""
+
+    def request(self, status: int, backend: str) -> "guardd.ParsedRequest":
+        return guardd.ParsedRequest(
+            client_ip="203.0.113.1", status=status, frontend="fe_https~",
+            backend=backend, method="GET", path="/.env", host="x",
+        )
+
+    def test_an_address_walled_off_everywhere_is_left_alone(self):
+        activity = guardd.IpActivity()
+        self.assertTrue(guardd.refusal_is_a_shield(
+            self.request(451, "fe_https/<NOSRV>"), activity))
+
+    def test_once_it_has_been_past_the_gateway_the_refusal_stops_shielding(self):
+        activity = guardd.IpActivity()
+        activity.reached_backend = True
+        self.assertFalse(guardd.refusal_is_a_shield(
+            self.request(451, "fe_https/<NOSRV>"), activity))
+
+    def test_a_request_that_was_not_refused_is_never_shielded(self):
+        for status, backend in ((404, "be_shop/srv1"), (200, "be_shop/srv1"),
+                                (500, "be_shop/srv1")):
+            with self.subTest(status=status):
+                self.assertFalse(guardd.refusal_is_a_shield(
+                    self.request(status, backend), guardd.IpActivity()))
+
+    def test_reaching_the_login_page_counts_as_reaching_something(self):
+        # The case from the gateway: refused on the gated hosts, answered
+        # 200 by Authelia on any path it asked for.
+        activity = guardd.IpActivity()
+        self.assertTrue(guardd.refusal_is_a_shield(
+            self.request(451, "fe_https/<NOSRV>"), activity))
+        activity.reached_backend = True
+        self.assertFalse(guardd.refusal_is_a_shield(
+            self.request(451, "fe_https/<NOSRV>"), activity))
 
 
 class TheDerivedFindingsFollowTheEvidence(unittest.TestCase):
@@ -143,9 +191,12 @@ class DrivenThroughTheEngine(unittest.TestCase):
         self.engine.cursor.read(4096)
 
     def line(self, ip, path, status):
+        # A refusal never reaches a server, so it logs <NOSRV>; anything else
+        # names the backend that answered. The engine reads that difference.
+        backend = "fe_https/<NOSRV>" if status in (403, 451) else "be_shop/srv1"
         return (
             "2026-08-11T07:00:00.000000+00:00 host haproxy[1]: "
-            f"{ip}:1234 [11/Aug/2026:07:00:00.000] fe_https~ be_shop/srv1 "
+            f"{ip}:1234 [11/Aug/2026:07:00:00.000] fe_https~ {backend} "
             f"0/0/0/1/1 {status} 100 ---- 1/1/0/0/0 0/0 GET {path} HTTP/1.1"
         )
 
@@ -198,6 +249,32 @@ class DrivenThroughTheEngine(unittest.TestCase):
         seen = self.run_scan("203.0.113.11", self.ONE_GOT_THROUGH)
         self.assertIn(guardd.EVENT_SCANNER_MULTI, seen)
         self.assertEqual(seen[guardd.EVENT_SCANNER_MULTI], 0)
+
+    def test_the_address_from_the_gateway(self):
+        """Refused on the gated hosts, answered by Authelia on another.
+
+        This is 119.59.124.134 as it actually behaved: a 200 from the login
+        host for a webshell path, then hours of refusals for /.aws/credentials
+        on the gated ones. It read score 0, state NORMAL, action "nothing".
+        """
+        seen = self.run_scan("203.0.113.20", [
+            ("/b374k-2.6.php", 200),          # answered by the login host
+            ("/.aws/credentials", 451),
+            ("/.git/config", 451),
+            ("/.env", 451),
+        ])
+        self.assertEqual(
+            seen[guardd.EVENT_SCANNER_DECISIVE], 0,
+            "an address that is being answered somewhere still scores zero",
+        )
+
+    def test_an_address_answered_nowhere_is_still_left_alone(self):
+        # The case the shield exists for, and the one that must not change:
+        # geography refuses it everywhere, so a ban would add nothing.
+        seen = self.run_scan("203.0.113.21", [
+            ("/.aws/credentials", 451), ("/.git/config", 451), ("/.env", 451),
+        ])
+        self.assertEqual(seen[guardd.EVENT_SCANNER_DECISIVE], 1)
 
     def test_a_finding_is_judged_on_what_had_happened_when_it_fired(self):
         """Not on everything the address ever did.

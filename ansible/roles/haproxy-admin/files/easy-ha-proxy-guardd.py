@@ -500,6 +500,33 @@ def category_is_decisive(category: str) -> bool:
     return category in DECISIVE_CATEGORIES
 
 
+def refusal_is_a_shield(request: ParsedRequest, activity: "IpActivity") -> bool:
+    """Does the gateway's refusal make scoring this request pointless?
+
+    Only while the address has never been past the gateway on anything.
+
+    "It reaches nothing, so a ban changes nothing" was the original
+    reasoning, and on a gateway serving more than one site it is false. The
+    refusals are per host -- one rule for each gated site, plus geography
+    over a named set of domains -- so an address turned away from one host
+    is free to keep walking the others, and the Authelia host cannot be
+    gated at all, because the login page has to be reachable to log in.
+
+    Measured on a live gateway: of 173 addresses refused that day, 17 were
+    answered on something else. One of them was collecting a 200 for
+    /b374k-2.6.php, which is a webshell name. Every one of them sat at score
+    0, state NORMAL, recommended action "nothing", and went on probing every
+    hour for days.
+
+    A ban is also not the same instrument as a 451. It is applied by
+    tcp-request connection reject, across every host and every port, before
+    the TLS handshake -- strictly more coverage, and far cheaper, than the
+    per-site rule that refused the request.
+    """
+
+    return request.denied_by_gateway and not activity.reached_backend
+
+
 def is_served(status: int) -> bool:
     """The application answered with content, so this path is not a probe.
 
@@ -1449,6 +1476,9 @@ class IpActivity:
     not_found: int = 0
     gateway_denied: int = 0
     bad_requests: int = 0
+    # Whether any request from this address ever reached a real server. A
+    # refusal is only a shield while the answer is no: see reached_a_backend.
+    reached_backend: bool = False
     paths: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
     hosts: Set[str] = field(default_factory=set)
     # Detection state, all bounded: category -> last seen, and the distinct
@@ -2684,11 +2714,16 @@ class GuardEngine:
             self._note_invalid_host(ip, activity, now, request)
             return
 
-        handled = request.denied_by_gateway
+        if not request.backend.endswith("/<NOSRV>"):
+            # A real server answered, so this address is not walled off.
+            activity.reached_backend = True
+
+        handled = refusal_is_a_shield(request, activity)
         if request.status == 404:
             activity.not_found += 1
-        elif handled:
-            # A 451 means GeoIP already refused this before any counter saw it.
+        elif request.denied_by_gateway:
+            # The counter records what the gateway did, not what the engine
+            # decided to do about it.
             activity.gateway_denied += 1
         elif request.status >= 400:
             activity.errors += 1
@@ -2877,7 +2912,7 @@ class GuardEngine:
             now,
             source="haproxy-log",
             detail=f"hits={activity.invalid_host_hits}",
-            handled=request.denied_by_gateway,
+            handled=refusal_is_a_shield(request, activity),
         )
 
     # -- reputation -------------------------------------------------------

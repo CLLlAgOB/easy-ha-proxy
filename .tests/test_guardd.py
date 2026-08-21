@@ -460,9 +460,15 @@ class EngineTestCase(unittest.TestCase):
 
 class EngineIngestTests(EngineTestCase):
     def line(self, ip, path, status=200, proto="HTTP/1.1"):
+        # HAProxy refuses a 403 or 451 with http-request deny, so no server
+        # is ever chosen and the line carries <NOSRV>. Every 451 on the
+        # production gateway logs exactly that. The engine reads the
+        # difference: a refusal only shields an address that has never been
+        # past the gateway on anything.
+        backend = "fe_https/<NOSRV>" if status in (403, 451) else "be_shop/srv1"
         return (
             f"2026-08-11T07:00:00.000000+00:00 host haproxy[1]: "
-            f"{ip}:1234 [11/Aug/2026:07:00:00.000] fe_https~ be_shop/srv1 "
+            f"{ip}:1234 [11/Aug/2026:07:00:00.000] fe_https~ {backend} "
             f"0/0/0/1/1 {status} 100 ---- 1/1/0/0/0 0/0 GET {path} {proto}"
         )
 
@@ -719,9 +725,15 @@ class ScoringTests(unittest.TestCase):
 
 class DetectionTests(EngineTestCase):
     def line(self, ip, path, status=200):
+        # HAProxy refuses a 403 or 451 with http-request deny, so no server
+        # is ever chosen and the line carries <NOSRV>. Every 451 on the
+        # production gateway logs exactly that. The engine reads the
+        # difference: a refusal only shields an address that has never been
+        # past the gateway on anything.
+        backend = "fe_https/<NOSRV>" if status in (403, 451) else "be_shop/srv1"
         return (
             f"2026-08-11T07:00:00.000000+00:00 host haproxy[1]: "
-            f"{ip}:1234 [11/Aug/2026:07:00:00.000] fe_https~ be_shop/srv1 "
+            f"{ip}:1234 [11/Aug/2026:07:00:00.000] fe_https~ {backend} "
             f"0/0/0/1/1 {status} 100 ---- 1/1/0/0/0 0/0 GET {path} HTTP/1.1"
         )
 
@@ -810,10 +822,27 @@ class DetectionTests(EngineTestCase):
         self.assertNotIn(guardd.EVENT_NOT_FOUND_ENUM, self.types())
 
     def test_a_geo_denied_scan_is_recorded_as_already_handled(self):
+        # Nothing this address asked for was answered, so a ban would add
+        # nothing to the refusal it already gets.
         self.append(self.line("203.0.113.9", "/.env", 451))
         self.engine.ingest_log(1000)
         self.assertEqual(self.events()[0]["handled"], 1)
         self.assertEqual(self.engine.reputation("203.0.113.9", 1000)["score"], 0)
+
+    def test_a_denied_scan_still_counts_once_the_address_gets_answered(self):
+        # The refusals are per host. An address turned away from a gated
+        # site and answered on another is not walled off, and the ban --
+        # applied at connection level across every host and port -- is
+        # strictly more coverage than the rule that refused it.
+        self.append(self.line("203.0.113.8", "/", 200))
+        self.append(self.line("203.0.113.8", "/.env", 451))
+        self.engine.ingest_log(1000)
+        finding = [e for e in self.events()
+                   if e["event_type"] == guardd.EVENT_SCANNER_DECISIVE][0]
+        self.assertEqual(finding["handled"], 0)
+        self.assertGreater(
+            self.engine.reputation("203.0.113.8", 1000)["score"], 0
+        )
 
     def test_invalid_host_activity_needs_repetition(self):
         for index in range(4):
