@@ -866,7 +866,7 @@ class AlertEngine:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_prune = 0
-        # A cloud instance is named something like epdvmcr928c02uk7q8je,
+        # A cloud instance is named something like vm4a7c19be2f08d3,
         # which tells the reader of an alert nothing at all. An operator can
         # give the gateway a name they recognise; the machine name is only
         # the fallback.

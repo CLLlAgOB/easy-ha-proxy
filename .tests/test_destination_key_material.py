@@ -3,7 +3,7 @@
 An operator pinned a host key, saved an SFTP destination, pressed Test and
 got:
 
-    Load key "/etc/easy-ha-proxy/backup-destinations/oreol.key":
+    Load key "/etc/easy-ha-proxy/backup-destinations/offsite.key":
     error in libcrypto
 
 The key was not corrupt. It was 398 bytes, header and footer intact, line

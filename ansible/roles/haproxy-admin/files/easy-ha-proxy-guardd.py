@@ -550,6 +550,7 @@ def is_served(status: int) -> bool:
 ASSET_SUFFIXES: Tuple[str, ...] = (
     ".css", ".js", ".mjs", ".map", ".json", ".xml", ".txt",
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".bmp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
     ".mp4", ".webm", ".mp3", ".wav", ".pdf",
 )

@@ -49,9 +49,9 @@ class TheOneClassOfFalsePositiveThatMatters(unittest.TestCase):
 
     def test_the_1c_web_client_is_not_an_attacker(self):
         for uri in (
-            "/114-b9e59390-2b55-11f0-bbf0-00155d35f506-474/e1cib/?cmd=sysver",
+            "/001-aaaaaaaa-0000-0000-0000-000000000000-001/e1cib/?cmd=sysver",
             "/e1csys?cmd=runApp&clientID=7",
-            "/097-c3a64edd/e1cib/logForm?cmd=open",
+            "/002-bbbbbbbb/e1cib/logForm?cmd=open",
         ):
             with self.subTest(uri=uri):
                 self.assertEqual(guardd.classify_query(uri), "")

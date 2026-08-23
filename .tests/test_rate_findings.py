@@ -35,9 +35,9 @@ GUARDD = load_guardd()
 # Copied from a production gateway, so the parser is tested against the shapes
 # the template really produces rather than ones invented to suit it.
 REAL_CONFIG = """
-    acl too_many_errs_e_oreol_2010_ru src_http_err_rate(tbl_err_e_oreol_2010_ru) gt 50
-    acl too_fast_e_oreol_2010_ru src_http_req_rate(tbl_rate_e_oreol_2010_ru) gt 400
-    acl too_fast_dsm_oreol_2010_ru src_http_req_rate(tbl_rate_dsm_oreol_2010_ru) gt 1200
+    acl too_many_errs_mail_example_com src_http_err_rate(tbl_err_mail_example_com) gt 50
+    acl too_fast_mail_example_com src_http_req_rate(tbl_rate_mail_example_com) gt 400
+    acl too_fast_nas_example_com src_http_req_rate(tbl_rate_nas_example_com) gt 1200
     acl too_many_errs_other src_http_err_rate(tbl_err_other) gt 20
     acl nosni_too_often sc0_conn_rate(tbl_nosni_tcp) gt 5
     acl something_else hdr(host) -i example.test
@@ -58,9 +58,9 @@ class ThresholdParsingTests(unittest.TestCase):
         self.assertEqual(
             found,
             {
-                "tbl_err_e_oreol_2010_ru": 50,
-                "tbl_rate_e_oreol_2010_ru": 400,
-                "tbl_rate_dsm_oreol_2010_ru": 1200,
+                "tbl_err_mail_example_com": 50,
+                "tbl_rate_mail_example_com": 400,
+                "tbl_rate_nas_example_com": 1200,
                 "tbl_err_other": 20,
                 "tbl_nosni_tcp": 5,
             },

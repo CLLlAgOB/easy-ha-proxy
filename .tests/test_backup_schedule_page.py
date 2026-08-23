@@ -147,7 +147,7 @@ class PageTests(unittest.TestCase):
 
     def test_machine_output_is_not_run_through_the_translator(self):
         # The same trap that turned a daemon's file path into
-        # "бэкап-destinations/oreol.ключ".
+        # "бэкап-destinations/offsite.ключ".
         for element in ("schedule-status", "schedule-last-run", "schedule-last-result"):
             with self.subTest(element=element):
                 block = self.markup.split(f'id="{element}"')[1][:160]

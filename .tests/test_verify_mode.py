@@ -72,7 +72,7 @@ class ModeParsingTests(unittest.TestCase):
 
 class BehaviourTests(unittest.TestCase):
     def verify(self, mode, ssh_returncode=0, ssh_stdout=SFTP_ONLY):
-        record = {"name": "oreol", "host": "h", "port": 22, "user": "u"}
+        record = {"name": "site", "host": "h", "port": 22, "user": "u"}
         if mode is not None:
             record["verify"] = mode
         ssh = subprocess.CompletedProcess([], ssh_returncode, stdout=ssh_stdout, stderr=b"")

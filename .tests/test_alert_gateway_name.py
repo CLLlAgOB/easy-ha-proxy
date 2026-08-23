@@ -2,7 +2,7 @@
 
 Every alert this gateway sent carried its machine name in the subject line:
 
-    [epdvmcr928c02uk7q8je] WORSE critical: Site is down (e.oreol-2010.ru)
+    [vm4a7c19be2f08d3] WORSE critical: Site is down (mail.example.com)
 
 That is what a cloud provider generated, not anything the operator ever
 chose, and it identifies nothing to the person reading the mail at midnight.

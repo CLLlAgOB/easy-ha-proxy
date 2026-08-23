@@ -371,7 +371,24 @@ frontend fe_https
     acl valid_host hdr(host) -i {{ all_hosts | unique | join(' ') }}
 
     # ---- Исключения из учёта ошибок (txn-флаги) ----
+    # A miss on a static asset is a broken page, never an attack. The
+    # adaptive engine has always known that -- is_asset() is its single
+    # largest false-positive guard -- but this counter did not, and it is
+    # the one that bans. A link preview fetching /logo.png, /logo.svg,
+    # /images/logo.png, /assets/logo.svg, /static/logo.png, /favicon.ico
+    # and /apple-touch-icon.png found none of them, collected 30 404s and
+    # was banned for a week on example.com.
+    #
+    # Narrower than the engine's list on purpose: .json, .xml and .txt stay
+    # counted, because /config.json and /.env.txt are plausible targets and
+    # this exclusion is by path alone -- the status is not known yet when
+    # tracking is decided.
+    # Two declarations of one name, which HAProxy reads as either.
+    acl err_asset_path path_end -i .css .js .mjs .map .ico .svg .png .gif
+    acl err_asset_path path_end -i .jpg .jpeg .webp .avif .bmp
+    acl err_asset_path path_end -i .woff .woff2 .ttf .otf .eot
     http-request set-var(txn.other_excl) bool(false)
+    http-request set-var(txn.other_excl) bool(true) if err_asset_path
 
     # ---- Исключения из учёта OTHER-ошибок (tbl_err_other) для запросов БЕЗ SNI ----
     # Управляется через site_defaults:
@@ -413,6 +430,7 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
     http-request set-var(txn.site_{{ id }}_excl) bool(false)
+    http-request set-var(txn.site_{{ id }}_excl) bool(true) if err_asset_path
 {% for ex in s.err_exclude | default([]) %}
 {% set rule = loop.index %}
 {% if ex.path is defined and ex.path %}

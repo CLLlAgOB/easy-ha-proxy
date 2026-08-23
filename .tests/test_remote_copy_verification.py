@@ -46,7 +46,7 @@ backupd = load()
 
 DIGEST = "a" * 64
 OTHER = "b" * 64
-RECORD = {"name": "oreol", "host": "post.example.test", "port": 2222, "user": "u"}
+RECORD = {"name": "site", "host": "post.example.test", "port": 2222, "user": "u"}
 SFTP_ONLY = b"This service allows sftp connections only.\n"
 
 

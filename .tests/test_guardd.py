@@ -62,12 +62,12 @@ LIVE_LINES = {
     ),
     "server_up": (
         "2026-08-11T06:03:01.160002+00:00 haproxy-easy haproxy[976]: "
-        "[WARNING]  (976) : Server be_oreol2_easy_ha_proxy_test/srv1 is UP, "
+        "[WARNING]  (976) : Server be_site2_easy_ha_proxy_test/srv1 is UP, "
         "reason: Layer7 check passed, code: 200, check duration: 800ms."
     ),
     "no_server": (
         "2026-08-11T06:02:53.606589+00:00 haproxy-easy haproxy[976]: "
-        "backend be_oreol2_easy_ha_proxy_test has no server available!"
+        "backend be_site2_easy_ha_proxy_test has no server available!"
     ),
 }
 
