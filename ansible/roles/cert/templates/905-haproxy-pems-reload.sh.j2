@@ -135,7 +135,36 @@ else
   fi
 fi
 
-# Перезагрузка HAProxy
-if systemctl list-unit-files | grep -q "^${HAPROXY_SERVICE}.service"; then
-  systemctl reload "$HAPROXY_SERVICE" || systemctl restart "$HAPROXY_SERVICE"
+# Перезагрузка HAProxy.
+#
+# The check here used to be
+#
+#   if systemctl list-unit-files | grep -q "^${HAPROXY_SERVICE}.service"
+#
+# and this script runs under `set -euo pipefail`. grep -q exits the moment
+# it matches, systemctl takes SIGPIPE while it is still writing the other
+# four hundred unit names, pipefail makes the pipeline's status 141, and the
+# condition is therefore false. Measured on a live gateway: twenty times out
+# of twenty. So the reload never ran. Certificates renewed on schedule, the
+# PEMs below were rebuilt correctly, and HAProxy went on presenting the
+# previous ones until something unrelated happened to reload it -- eight
+# hours later, in the incident that turned this up. Left alone it would
+# eventually have served an expired certificate.
+#
+# systemctl cat needs no pipe and fails cleanly when the unit is absent.
+if systemctl cat "${HAPROXY_SERVICE}.service" >/dev/null 2>&1; then
+  if systemctl reload "$HAPROXY_SERVICE"; then
+    echo "Reloaded ${HAPROXY_SERVICE}"
+  elif systemctl restart "$HAPROXY_SERVICE"; then
+    echo "Restarted ${HAPROXY_SERVICE} (reload was refused)"
+  else
+    # Loudly. A rebuilt certificate that is not being served is exactly the
+    # failure this hook exists to prevent, and the last one was silent:
+    # certbot reported "all renewals succeeded" and the notification mail
+    # went out as usual.
+    echo "ERROR: certificates rebuilt but ${HAPROXY_SERVICE} would not reload" >&2
+    exit 1
+  fi
+else
+  echo "No ${HAPROXY_SERVICE}.service on this host; nothing to reload"
 fi
