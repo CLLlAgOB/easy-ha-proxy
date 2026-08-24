@@ -248,7 +248,7 @@
         <div class="form-grid">
           <label>Host
             <input id="dest-host" class="form-input" type="text"
-                   placeholder="backup.example.com">
+                   placeholder="backup.example.com" data-i18n-skip translate="no">
           </label>
           <label>Port
             <input id="dest-port" class="form-input" type="number" value="22"
@@ -271,11 +271,12 @@
         </div>
         <label>Private key
           <textarea id="dest-key" class="form-input mono" rows="4"
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    data-i18n-skip translate="no"></textarea>
         </label>
         <label>Host key
           <textarea id="dest-host-key" class="form-input mono" rows="2"
-                    placeholder="backup.example.com ssh-ed25519 AAAA..."></textarea>
+                    placeholder="backup.example.com ssh-ed25519 AAAA..." data-i18n-skip translate="no"></textarea>
         </label>
         <p class="muted">
           Take it from <code translate="no" data-i18n-skip>ssh-keyscan backup.example.com</code>

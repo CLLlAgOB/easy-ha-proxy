@@ -489,7 +489,7 @@
         </select>
 
         <label class="form-label" for="domain" style="margin-top: 10px;">Domain *</label>
-        <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" />
+        <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" data-i18n-skip translate="no">
 
         <div id="add-site-backend-fields">
           <label class="form-label" for="backend_ip" style="margin-top: 10px;">backend_ip *</label>
@@ -498,7 +498,7 @@
 
           <label class="form-label" for="backend_port" style="margin-top: 10px;">backend_port *</label>
           <input id="backend_port" name="backend_port" type="number" min="1" max="65535" class="form-input"
-            placeholder="{{ site_defaults.backend_port|default(80) }}" />
+            placeholder="{{ site_defaults.backend_port|default(80) }}" data-i18n-skip translate="no">
         </div>
       </div>
     </div>

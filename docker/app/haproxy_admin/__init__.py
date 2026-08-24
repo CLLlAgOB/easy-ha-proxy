@@ -48,6 +48,7 @@ from . import routes_security
 from . import routes_runtime
 from . import routes_audit
 from . import routes_config_history
+from . import routes_cert_delivery
 from . import routes_dns_providers
 from . import routes_alerts
 from . import routes_prometheus

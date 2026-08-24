@@ -1,22 +1,10 @@
-# The hook has to be a DEPLOY hook, not a post hook. certbot sets
-# RENEWED_LINEAGE and RENEWED_DOMAINS only for deploy hooks; in
-# renewal-hooks/post they are simply absent, so the script below would fall
-# out at its first test and the RDG server would never receive a new
-# certificate. It was written into post/ at some point and the only reason
-# deliveries kept working on an existing gateway is that an older copy
-# survived in deploy/ from before the move, unmanaged.
-- name: Ensure deploy-hooks directory exists
+- name: Ensure post-hooks directory exists
   ansible.builtin.file:
-    path: /etc/letsencrypt/renewal-hooks/deploy
+    path: /etc/letsencrypt/renewal-hooks/post
     state: directory
     owner: root
     group: root
     mode: '0755'
-
-- name: Remove the RDG hook from post-hooks, where it can never fire
-  ansible.builtin.file:
-    path: /etc/letsencrypt/renewal-hooks/post/900-post-deploy-rdg.sh
-    state: absent
 
 - name: Ensure /root/.ssh exists
   ansible.builtin.file:
@@ -55,12 +43,10 @@
   no_log: true
   diff: false
 
-# Единый deploy-hook: делает PFX → заливает на RDG.
-# Имя совпадает с тем, что уже стоит на существующих шлюзах, поэтому файл
-# заменяется, а не дублируется.
-- name: DEPLOY-hook — RDG certificate delivery
+# Единый post-hook: делает PFX → заливает на RDG → reload haproxy
+- name: POST-hook — RDG deploy + HAProxy reload
   copy:
-    dest: /etc/letsencrypt/renewal-hooks/deploy/900-deploy-rdg.sh
+    dest: /etc/letsencrypt/renewal-hooks/post/900-post-deploy-rdg.sh
     mode: "0755"
     owner: root
     group: root
@@ -71,15 +57,9 @@
 
       # Certbot даёт переменные окружения:
       #  RENEWED_LINEAGE (путь live/...), RENEWED_DOMAINS (через пробел)
-      #
-      # Сопоставление без конвейера: под `set -o pipefail` условие вида
-      # `writer | grep -q` ложно всякий раз, когда grep успевает выйти
-      # раньше, чем writer допишет. Здесь writer -- echo, и это безопасно,
-      # но правило дешевле держать без исключений.
-      case " ${RENEWED_DOMAINS:-} " in
-        *" ${RDG_DOMAIN} "*) ;;
-        *) exit 0 ;;
-      esac
+      if ! echo " ${RENEWED_DOMAINS:-} " | grep -q " ${RDG_DOMAIN} "; then
+        exit 0
+      fi
 
       LIVE_DIR="${RENEWED_LINEAGE}"
       if [ ! -f "${LIVE_DIR}/fullchain.pem" ] || [ ! -f "${LIVE_DIR}/privkey.pem" ]; then
@@ -113,7 +93,4 @@
         -o StrictHostKeyChecking=no \
         "${SSH_USER}@${RDG_HOST}"
 
-      # Никакой перезагрузки здесь. Следом отрабатывает
-      # 905-haproxy-pems-reload.sh: он пересобирает все PEM и перезагружает
-      # один раз. Перезагрузка отсюда лишь подняла бы воркер с прежним
-      # сертификатом.
+      systemctl reload haproxy 2>/dev/null || true

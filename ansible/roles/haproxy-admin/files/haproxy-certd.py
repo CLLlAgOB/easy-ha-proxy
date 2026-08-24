@@ -1277,6 +1277,327 @@ def handle_dns_provider_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any
     return 200, {"ok": True, **removed}
 
 
+# ───────────────── certificate delivery targets ─────────────────
+#
+# Machines other than this gateway that hold the same certificate: a Remote
+# Desktop Gateway wanting a PKCS#12, a web server wanting the PEM pair. The
+# records live in a directory and the work is done by
+# easy-ha-proxy-cert-deliver, which certbot's 906 hook also calls; certd only
+# edits the records and can run one on demand so the operator can see it work
+# before a renewal depends on it.
+#
+# Same storage shape as an off-host backup destination, and for the same
+# reasons: one JSON per target, the private key and the pinned host key
+# beside it, the whole directory root-only.
+
+DELIVERY_DIR = Path(
+    os.environ.get("CERT_DESTINATIONS_DIR", "/etc/easy-ha-proxy/cert-destinations")
+)
+DELIVERY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DELIVERY_FORMATS = ("pfx", "pem-pair", "pem-combined")
+DELIVERY_TRANSPORTS = ("sftp", "scp")
+DELIVERY_WORKER = "/usr/local/sbin/easy-ha-proxy-cert-deliver"
+MAX_DELIVERY_TARGETS = 50
+
+
+def _delivery_paths(name: str) -> Tuple[Path, Path, Path]:
+    return (
+        DELIVERY_DIR / f"{name}.json",
+        DELIVERY_DIR / f"{name}.key",
+        DELIVERY_DIR / f"{name}.known_hosts",
+    )
+
+
+def _delivery_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not DELIVERY_NAME_RE.fullmatch(text):
+        raise ValueError(
+            "name must be 1-40 characters of a-z, 0-9 and -, "
+            "starting with a letter or digit"
+        )
+    return text
+
+
+def _delivery_public(record: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """What the page is allowed to see. No key material, ever."""
+
+    _, key, known = _delivery_paths(name)
+    return {
+        "name": name,
+        "enabled": bool(record.get("enabled", True)),
+        "domains": list(record.get("domains") or []),
+        "transport": record.get("transport", "sftp"),
+        "host": record.get("host", ""),
+        "port": record.get("port", 22),
+        "user": record.get("user", ""),
+        "remote_path": record.get("remote_path", ""),
+        "format": record.get("format", "pfx"),
+        "post_command": record.get("post_command", ""),
+        # Whether a password is set, never what it is.
+        "pfx_password_set": bool(record.get("pfx_password")),
+        "key_present": key.is_file(),
+        "host_key_present": known.is_file(),
+        "last_result": record.get("last_result", {}),
+    }
+
+
+def list_cert_deliveries() -> Dict[str, Any]:
+    items = []
+    if DELIVERY_DIR.is_dir():
+        for path in sorted(DELIVERY_DIR.glob("*.json")):
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    record = json.load(handle)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("cannot read %s (%s)", path, exc)
+                continue
+            items.append(_delivery_public(record, path.stem))
+    return {
+        "ok": True,
+        "targets": items,
+        "formats": list(DELIVERY_FORMATS),
+        "transports": list(DELIVERY_TRANSPORTS),
+        "legacy_hooks": _unmanaged_delivery_hooks(),
+    }
+
+
+def _unmanaged_delivery_hooks() -> List[str]:
+    """Hand-written hooks that also deliver certificates.
+
+    A gateway upgraded from before this page has one, and it keeps working.
+    Saying so is better than leaving the operator to wonder why a target
+    they never configured is receiving files -- or, worse, deleting the
+    hook that is doing the actual work.
+    """
+
+    found: List[str] = []
+    hooks = Path("/etc/letsencrypt/renewal-hooks/deploy")
+    if not hooks.is_dir():
+        return found
+    for path in sorted(hooks.glob("*.sh")):
+        if path.name in ("905-haproxy-pems-reload.sh",
+                         "906-deliver-certificates.sh",
+                         "910-mail-notify.sh"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "sftp" in text or "scp " in text or "pkcs12" in text:
+            found.append(path.name)
+    return found
+
+
+def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _delivery_name(payload.get("name"))
+    record_path, key_file, known_file = _delivery_paths(name)
+
+    DELIVERY_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DELIVERY_DIR, 0o700)
+
+    existing: Dict[str, Any] = {}
+    if record_path.is_file():
+        with record_path.open("r", encoding="utf-8") as handle:
+            existing = json.load(handle)
+    elif len(list(DELIVERY_DIR.glob("*.json"))) >= MAX_DELIVERY_TARGETS:
+        raise ValueError(f"at most {MAX_DELIVERY_TARGETS} delivery targets")
+
+    domains = [
+        _normalize_dns_name(str(d)) for d in (payload.get("domains") or [])
+        if str(d).strip()
+    ]
+    if not domains:
+        raise ValueError("choose at least one certificate to deliver")
+
+    transport = str(payload.get("transport") or "sftp").strip().lower()
+    if transport not in DELIVERY_TRANSPORTS:
+        raise ValueError("transport must be sftp or scp")
+
+    fmt = str(payload.get("format") or "pfx").strip().lower()
+    if fmt not in DELIVERY_FORMATS:
+        raise ValueError("format must be pfx, pem-pair or pem-combined")
+
+    host = str(payload.get("host") or "").strip()
+    user = str(payload.get("user") or "").strip()
+    remote_path = str(payload.get("remote_path") or "").strip()
+    if not host or not user or not remote_path:
+        raise ValueError("host, user and remote path are all required")
+
+    try:
+        port = int(payload.get("port") or 22)
+    except (TypeError, ValueError):
+        raise ValueError("port must be a number") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+
+    record = {
+        "enabled": bool(payload.get("enabled", True)),
+        "domains": domains,
+        "transport": transport,
+        "host": host,
+        "port": port,
+        "user": user,
+        "remote_path": remote_path,
+        "format": fmt,
+        "post_command": str(payload.get("post_command") or "").strip(),
+        # Left as it was unless a new one is sent, so editing a target does
+        # not silently clear its password.
+        "pfx_password": (
+            str(payload.get("pfx_password"))
+            if payload.get("pfx_password") is not None
+            else existing.get("pfx_password", "")
+        ),
+        "last_result": existing.get("last_result", {}),
+    }
+
+    material = payload.get("private_key")
+    if material:
+        _write_delivery_secret(key_file, str(material).strip() + chr(10))
+    host_key = payload.get("host_key")
+    if host_key:
+        _write_delivery_secret(known_file, str(host_key).strip() + chr(10))
+
+    tmp = record_path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    tmp.replace(record_path)
+    return _delivery_public(record, name)
+
+
+def _write_delivery_secret(path: Path, text: str) -> None:
+    """Mode set before the content lands, not after."""
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(handle, text.encode("utf-8"))
+    finally:
+        os.close(handle)
+    os.replace(tmp, path)
+
+
+def delete_cert_delivery(name: Any) -> Dict[str, Any]:
+    checked = _delivery_name(name)
+    for path in _delivery_paths(checked):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    return {"name": checked, "deleted": True}
+
+
+def test_cert_delivery(name: Any) -> Dict[str, Any]:
+    """Deliver right now, so a target can be proven before a renewal needs it."""
+
+    checked = _delivery_name(name)
+    record_path, _, _ = _delivery_paths(checked)
+    if not record_path.is_file():
+        raise ValueError(f"no delivery target named {checked}")
+    with record_path.open("r", encoding="utf-8") as handle:
+        record = json.load(handle)
+
+    domains = list(record.get("domains") or [])
+    if not domains:
+        raise ValueError("this target has no certificate chosen")
+
+    lineage = _resolve_lineage(domains[0])
+    if lineage is None:
+        raise ValueError(
+            f"there is no issued certificate for {domains[0]} to send yet"
+        )
+
+    result = subprocess.run(
+        [
+            DELIVERY_WORKER,
+            "--lineage", str(lineage),
+            "--domains", " ".join(domains),
+        ],
+        capture_output=True, timeout=180, check=False,
+    )
+    output = (result.stdout + result.stderr).decode("utf-8", "replace").strip()
+    outcome = {
+        "ok": result.returncode == 0,
+        "output": output[-4000:],
+        "lineage": lineage.name,
+    }
+    record["last_result"] = {
+        "ok": outcome["ok"],
+        "at": int(time.time()),
+        "detail": output[-400:],
+    }
+    tmp = record_path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    tmp.replace(record_path)
+    return outcome
+
+
+def _resolve_lineage(domain: str) -> Optional[Path]:
+    """Find the live directory holding a domain's certificate.
+
+    During a renewal certbot hands the hook RENEWED_LINEAGE and there is
+    nothing to work out. Sending on demand has to find it, and the directory
+    is not simply the domain: this installation issues separate ECDSA and RSA
+    lineages, so a site is example.com-ecdsa and example.com-rsa, and certbot
+    itself appends -0001 when a name is reused.
+
+    Tried in order, then a scan of every lineage for one whose certificate
+    actually covers the name. Where a domain has both key types this picks
+    one rather than sending twice to the same remote path, where the second
+    would only overwrite the first. A real renewal still fires the hook once
+    per lineage, as certbot decides; that is unchanged.
+    """
+
+    live = _get_le_live_dir()
+    if not live.is_dir():
+        return None
+
+    for candidate in (domain, f"{domain}-ecdsa", f"{domain}-rsa"):
+        path = live / candidate
+        if (path / "fullchain.pem").is_file():
+            return path
+
+    for path in sorted(live.iterdir()):
+        chain = path / "fullchain.pem"
+        if not chain.is_file():
+            continue
+        cert = _load_first_cert_from_pem(chain)
+        if cert is not None and _cert_matches_domain(cert, domain):
+            return path
+    return None
+
+
+def handle_deliveries_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    return 200, list_cert_deliveries()
+
+
+def handle_delivery_save(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        saved = save_cert_delivery(body)
+    except ValueError as exc:
+        # Never echo the payload: it carries a private key.
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, "target": saved}
+
+
+def handle_delivery_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        removed = delete_cert_delivery(body.get("name"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **removed}
+
+
+def handle_delivery_test(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        outcome = test_cert_delivery(body.get("name"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, outcome
+
+
 def handle_certs_status(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     domains = body.get("domains") or []
     if not isinstance(domains, list) or len(domains) > 500:
@@ -3279,6 +3600,14 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_dns_provider_save(body)
             elif path == "/api/v1/certs/dns-providers/delete":
                 status, resp = handle_dns_provider_delete(body)
+            elif path == "/api/v1/certs/deliveries":
+                status, resp = handle_deliveries_list(body)
+            elif path == "/api/v1/certs/deliveries/save":
+                status, resp = handle_delivery_save(body)
+            elif path == "/api/v1/certs/deliveries/delete":
+                status, resp = handle_delivery_delete(body)
+            elif path == "/api/v1/certs/deliveries/test":
+                status, resp = handle_delivery_test(body)
             else:
                 status, resp = 404, {"ok": False, "error": "unknown path"}
         except Exception as exc:  # noqa: BLE001

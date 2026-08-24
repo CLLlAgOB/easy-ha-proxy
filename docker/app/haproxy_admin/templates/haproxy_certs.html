@@ -43,7 +43,7 @@
     <div class="form-group">
       <label class="form-label" for="acme-email-input">Account email</label>
       <input class="form-input" id="acme-email-input" name="acme_email" type="email"
-             maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+             maxlength="254" autocomplete="off" placeholder="admin@example.com" required data-i18n-skip translate="no">
       <p class="vars-field-help">
         Applies to future certificate registrations and renewals after the next certificate operation or stack update.
       </p>
@@ -89,12 +89,12 @@
       <input type="hidden" name="action" value="issue_internal_cert">
       <label class="form-label" for="internal_domain">Primary domain</label>
       <input class="form-input" id="internal_domain" name="domain" type="text"
-        placeholder="app.example.com" required>
+        placeholder="app.example.com" required data-i18n-skip translate="no">
       <label class="form-label" for="internal_alt_names" style="margin-top:8px;">
         Alternative domains (comma or space separated)
       </label>
       <input class="form-input" id="internal_alt_names" name="alt_names" type="text"
-        placeholder="www.example.com api.example.com">
+        placeholder="www.example.com api.example.com" data-i18n-skip translate="no">
       <div style="margin-top:8px;">
         <button class="btn" type="submit">Issue internal certificate</button>
       </div>

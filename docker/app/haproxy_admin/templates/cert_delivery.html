@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+
+{% block title %}Certificate delivery{% endblock %}
+{% block header_title %}Certificate delivery{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.cd-banner {
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(204, 75, 75, .5);
+  background: rgba(204, 75, 75, .08);
+  font-size: 14px;
+}
+
+.cd-banner[hidden] { display: none; }
+
+/* The actions column holds three buttons; without this they wrap under
+   each other on a narrow screen and the row grows to three lines. */
+#cd-body td:last-child { white-space: nowrap; }
+
+.cd-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 14px;
+}
+</style>
+
+<div class="cd-banner" id="cd-unavailable" hidden>
+  The certificate daemon is not answering, so delivery targets cannot be
+  shown. Certificates and HAProxy are not affected.
+</div>
+
+<div class="card" id="cd-legacy-card" hidden>
+  <div class="card-header">
+    <h2>A hook is already delivering certificates</h2>
+  </div>
+  <p class="mon-sub">
+    These scripts were written by hand before this page existed, and they
+    still run. They are left alone deliberately: whatever they do is working.
+    If you configure a target here for the same certificate, it will be sent
+    twice — harmless, but you probably want to remove the old script once you
+    are satisfied the new target works.
+  </p>
+  <p class="mon-sub" id="cd-legacy-list" data-i18n-skip translate="no"></p>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Targets</h2>
+    <span class="mon-sub" id="cd-count" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Machines other than this gateway that need the same certificate: a Remote
+    Desktop Gateway that wants a PKCS#12 file, a web server that wants the PEM
+    pair, an appliance that wants both concatenated. Each target names the
+    certificates it wants, and is sent them a few seconds after they renew.
+  </p>
+
+  <p class="mon-sub">
+    Delivery runs after HAProxy has already reloaded, so a machine that is
+    switched off cannot leave this gateway on an old certificate. One target
+    failing does not stop the others.
+  </p>
+
+  <div class="table-wrap">
+    <table class="backup-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Certificates</th>
+          <th>Where</th>
+          <th>Format</th>
+          <th>Last run</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="cd-body" data-i18n-skip translate="no">
+        <tr><td colspan="6" class="muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Add or edit a target</h2>
+    <span class="mon-sub" id="cd-editing" data-i18n-skip translate="no"></span>
+  </div>
+
+  <form id="cd-form" autocomplete="off">
+    <div class="form-grid">
+      <label>Name
+        <input id="cd-name" class="form-input" type="text" required
+               placeholder="rdg" pattern="[a-z0-9][a-z0-9-]*"
+               data-i18n-skip translate="no">
+      </label>
+      <label>Transport
+        <select id="cd-transport" class="form-input">
+          {% for t in transports %}
+          <option value="{{ t }}" data-i18n-skip translate="no">{{ t|upper }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Format
+        <select id="cd-format" class="form-input">
+          <option value="pfx">PKCS#12 (.pfx) — one file</option>
+          <option value="pem-pair">PEM pair — fullchain and key</option>
+          <option value="pem-combined">PEM combined — one file</option>
+        </select>
+      </label>
+      <label>Host
+        <input id="cd-host" class="form-input" type="text"
+               placeholder="rdg.example.com" data-i18n-skip translate="no">
+      </label>
+      <label>Port
+        <input id="cd-port" class="form-input" type="number" value="22"
+               min="1" max="65535">
+      </label>
+      <label>User
+        <input id="cd-user" class="form-input" type="text"
+               placeholder="certbot" data-i18n-skip translate="no">
+      </label>
+    </div>
+
+    <label>Certificates to send
+      <select id="cd-domains" class="form-input" multiple size="6"
+              data-i18n-skip translate="no"></select>
+    </label>
+    <p class="mon-sub">
+      Hold Ctrl to choose more than one. A target fires when any certificate
+      it names is renewed.
+    </p>
+
+    <label id="cd-path-label">Remote path
+      <input id="cd-path" class="form-input" type="text"
+             placeholder="rdg_cert.pfx" data-i18n-skip translate="no">
+    </label>
+    <p class="mon-sub" id="cd-path-help">
+      Where the file lands on the far side. A relative path is resolved
+      wherever the account starts, which for a chrooted SFTP account is its
+      own directory.
+    </p>
+
+    <label id="cd-password-label">PKCS#12 password
+      <input id="cd-password" class="form-input" type="password"
+             placeholder="leave empty for no password" maxlength="1024">
+    </label>
+    <p class="mon-sub" id="cd-password-help">
+      Leave blank to keep whatever is saved. Type a single space to clear it.
+    </p>
+
+    <label>Private key
+      <textarea id="cd-key" class="form-input mono" rows="4"
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                data-i18n-skip translate="no"></textarea>
+    </label>
+    <label>Host key
+      <textarea id="cd-host-key" class="form-input mono" rows="2"
+                placeholder="rdg.example.com ssh-ed25519 AAAA..."
+                data-i18n-skip translate="no"></textarea>
+    </label>
+    <p class="mon-sub">
+      The host key is pinned, exactly as it is for an off-host backup. Without
+      it the certificate and the key that opens a session go to whoever
+      answers on that address.
+    </p>
+    <p class="mon-sub" data-i18n-skip translate="no">
+      <code>ssh-keyscan -p 22 rdg.example.com</code>
+    </p>
+
+    <label>Command to run afterwards (optional)
+      <input id="cd-post" class="form-input mono" type="text"
+             placeholder="systemctl reload nginx" data-i18n-skip translate="no">
+    </label>
+    <p class="mon-sub">
+      Run over SSH once the file has landed, for a service that has to be told
+      to pick it up. If it fails the delivery still counts as done, because
+      the file did arrive.
+    </p>
+
+    <label class="backup-option">
+      <input id="cd-enabled" type="checkbox" checked>
+      Deliver to this target
+    </label>
+
+    <div class="cd-actions">
+      <button class="btn" type="submit" id="cd-save">Save target</button>
+      <button class="btn" type="button" id="cd-clear">Clear the form</button>
+      <span class="mon-sub" id="cd-result" data-i18n-skip translate="no"></span>
+    </div>
+  </form>
+</div>
+
+<script src="{{ url_for('static', filename='js/cert_delivery.js') }}"></script>
+
+{% endblock %}

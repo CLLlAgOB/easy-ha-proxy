@@ -51,3 +51,22 @@
   ansible.builtin.systemd:
     name: haproxy-certd.service
     state: started
+
+# The worker certbot's 906 hook runs, and that certd calls when the operator
+# asks to send a certificate now. It lives with the other helpers rather than
+# in the cert role, whose files/ directory is not tracked.
+- name: Install the certificate delivery worker
+  ansible.builtin.copy:
+    src: easy-ha-proxy-cert-deliver.py
+    dest: /usr/local/sbin/easy-ha-proxy-cert-deliver
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure certificate delivery targets directory exists
+  ansible.builtin.file:
+    path: /etc/easy-ha-proxy/cert-destinations
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"

@@ -3313,3 +3313,33 @@ tr.job-row-selected > td:first-child {
   gap: 10px;
   margin-bottom: 18px;
 }
+
+/* Three classes several pages already use and nothing ever defined.
+   .mon-sub exists in monitoring.html but only inside .mon-card and
+   .mon-chart, so every other page writing <p class="mon-sub"> was getting
+   ordinary body text -- the explanatory paragraphs on the adaptive
+   protection, detection rules and backup pages among them. The scoped rules
+   in monitoring.html are more specific and still win. */
+.mon-sub {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text-secondary);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 18px;
+  margin-bottom: 14px;
+}
+
+.form-grid > label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}

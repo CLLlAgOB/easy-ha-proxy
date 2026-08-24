@@ -120,14 +120,14 @@
                 </label>
                 <input id="field-backend-ip" name="backend_ip" type="text" class="form-input"
                     value="{{ site.backend_ip or '' }}"
-                    placeholder="{{ eff.backend_ip or site_defaults.backend_ip or '' }}">
+                    placeholder="{{ eff.backend_ip or site_defaults.backend_ip or '' }}" data-i18n-skip translate="no">
 
                 <label class="form-label" for="field-backend-port" style="margin-top: 10px;">
                     backend_port
                 </label>
                 <input id="field-backend-port" name="backend_port" type="number" min="1" max="65535" class="form-input"
                     value="{{ site.backend_port or '' }}"
-                    placeholder="{{ eff.backend_port or site_defaults.backend_port or 80 }}">
+                    placeholder="{{ eff.backend_port or site_defaults.backend_port or 80 }}" data-i18n-skip translate="no">
 
                 <div class="table-meta">
                     May be left empty if a backend server list is defined below.
@@ -139,7 +139,7 @@
                         backend_host (Host-header by default)
                     </label>
                     <input id="field-backend-host" name="backend_host" type="text" class="form-input"
-                        value="{{ site.backend_host or '' }}" placeholder="{{ eff.backend_host or eff.domain }}">
+                        value="{{ site.backend_host or '' }}" placeholder="{{ eff.backend_host or eff.domain }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         If omitted, the request <code>Host</code> is used ({{ eff.domain }}).
                     </div>
@@ -177,12 +177,12 @@
                         <tr class="backend-row">
                             <td>
                                 <input type="text" class="form-input backend-name" placeholder="srv{{ loop.index }}"
-                                    value="{{ srv.name or ('srv' ~ loop.index) }}">
+                                    value="{{ srv.name or ('srv' ~ loop.index) }}" data-i18n-skip translate="no">
                             </td>
                             <td>
                                 <input type="text" class="form-input backend-host"
                                     placeholder="{{ site.backend_ip or eff.backend_ip or '' }}"
-                                    value="{{ srv.host or '' }}">
+                                    value="{{ srv.host or '' }}" data-i18n-skip translate="no">
                             </td>
                             <td>
                                 <input type="number" min="1" max="65535" class="form-input backend-port"
@@ -214,7 +214,7 @@
                             <td>
                                 <input type="text" class="form-input backend-host"
                                     placeholder="{{ site.backend_ip or eff.backend_ip or '' }}"
-                                    value="{{ site.backend_ip or eff.backend_ip or '' }}">
+                                    value="{{ site.backend_ip or eff.backend_ip or '' }}" data-i18n-skip translate="no">
                             </td>
                             <td>
                                 <input type="number" min="1" max="65535" class="form-input backend-port"
@@ -365,7 +365,7 @@
                                 </label>
                                 {% set cert_alt_list = site.cert_alt_names or [] %}
                                 <textarea id="field-cert-alt-names" name="cert_alt_names" class="form-input mono" rows="3"
-                                    placeholder="*.example.com">{{ cert_alt_list | join("\n") }}</textarea>
+                                    placeholder="*.example.com" data-i18n-skip translate="no">{{ cert_alt_list | join("\n") }}</textarea>
                                 <div class="table-meta">
                                     One name per line. These are added to the certificate only and are never routed,
                                     which is where a wildcard belongs: new subdomains can then be added to alt names
@@ -439,7 +439,7 @@
 
 <label class="form-label" for="balance" style="margin-top: 10px;">balance</label>
                         <input id="balance" name="balance" type="text" class="form-input"
-                            value="{{ site.balance or '' }}" placeholder="{{ eff.balance or site_defaults.balance }}">
+                            value="{{ site.balance or '' }}" placeholder="{{ eff.balance or site_defaults.balance }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Backend load-balancing algorithm (for example, <code>roundrobin</code>,
                             <code>leastconn</code>, <code>source</code>).
@@ -464,7 +464,7 @@
                         <label class="form-label" for="cookie_name" style="margin-top: 10px;">cookie_name</label>
                         <input id="cookie_name" name="cookie_name" type="text" class="form-input"
                             value="{{ site.cookie_name or '' }}"
-                            placeholder="{{ eff.cookie_name or site_defaults.cookie_name }}">
+                            placeholder="{{ eff.cookie_name or site_defaults.cookie_name }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Cookie name when using <code>sticky="cookie"</code>.
                             Empty — value from <code>site_defaults</code>.
@@ -473,7 +473,7 @@
                         <label class="form-label" for="cookie_attrs" style="margin-top: 10px;">cookie_attrs</label>
                         <input id="cookie_attrs" name="cookie_attrs" type="text" class="form-input"
                             value="{{ site.cookie_attrs or '' }}"
-                            placeholder="{{ eff.cookie_attrs or site_defaults.cookie_attrs }}">
+                            placeholder="{{ eff.cookie_attrs or site_defaults.cookie_attrs }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Cookie attributes (for example, <code>insert nocache</code>).
                             Empty — use <code>site_defaults</code>.
@@ -498,7 +498,7 @@
                             style="margin-top: 10px;">session_timeout</label>
                         <input id="session_timeout" name="session_timeout" type="text" class="form-input"
                             value="{{ site.session_timeout or '' }}"
-                            placeholder="{{ eff.session_timeout or site_defaults.session_timeout }}">
+                            placeholder="{{ eff.session_timeout or site_defaults.session_timeout }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Backend session timeout (for example, <code>15m</code>, <code>1h</code>).
                             Empty — use the value from <code>site_defaults</code>.
@@ -508,7 +508,7 @@
                             style="margin-top: 10px;">http_keepalive_timeout</label>
                         <input id="http_keepalive_timeout" name="http_keepalive_timeout" type="text" class="form-input"
                             value="{{ site.http_keepalive_timeout or '' }}"
-                            placeholder="{{ eff.http_keepalive_timeout or site_defaults.http_keepalive_timeout }}">
+                            placeholder="{{ eff.http_keepalive_timeout or site_defaults.http_keepalive_timeout }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             HTTP keep-alive timeout. Empty — use <code>site_defaults</code>.
                         </div>
@@ -727,7 +727,7 @@
                     <label class="form-label" for="max_req_rate" style="margin-top: 10px;">max_req_rate</label>
                     <input id="max_req_rate" name="max_req_rate" type="number" min="0" class="form-input"
                         value="{{ site.max_req_rate or '' }}"
-                        placeholder="{{ eff.max_req_rate or site_defaults.max_req_rate or 200 }}">
+                        placeholder="{{ eff.max_req_rate or site_defaults.max_req_rate or 200 }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Maximum request rate per IP for this site.
                         If value &gt; 0, then when exceeding limit:
@@ -743,7 +743,7 @@
                     <label class="form-label" for="err_limit" style="margin-top: 10px;">err_limit</label>
                     <input id="err_limit" name="err_limit" type="number" min="0" class="form-input"
                         value="{{ site.err_limit or '' }}"
-                        placeholder="{{ eff.err_limit or site_defaults.err_limit or 8 }}">
+                        placeholder="{{ eff.err_limit or site_defaults.err_limit or 8 }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Error-rate threshold for this site.
                         Used in ACL form:
@@ -757,7 +757,7 @@
                     <label class="form-label" for="err_window" style="margin-top: 10px;">err_window</label>
                     <input id="err_window" name="err_window" type="text" class="form-input"
                         value="{{ site.err_window or '' }}"
-                        placeholder="{{ eff.err_window or site_defaults.err_window or '20s' }}">
+                        placeholder="{{ eff.err_window or site_defaults.err_window or '20s' }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Time window used to count errors and storage entries stick-table.
                         Examples: <code>10s</code>, <code>20s</code>, <code>1m</code>.
@@ -769,7 +769,7 @@
                     <label class="form-label" for="err_size" style="margin-top: 10px;">err_size</label>
                     <input id="err_size" name="err_size" type="text" class="form-input"
                         value="{{ site.err_size or '' }}"
-                        placeholder="{{ eff.err_size or site_defaults.err_size or '50k' }}">
+                        placeholder="{{ eff.err_size or site_defaults.err_size or '50k' }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Error stick-table size for this site (number IP-entries),
                         for example <code>50k</code>, <code>100k</code>, <code>200k</code>.
@@ -987,14 +987,14 @@
                     <label class="form-label" for="health_uri">health_uri</label>
                     <input id="health_uri" name="health_uri" type="text" class="form-input"
                         value="{{ site.health_uri or '' }}"
-                        placeholder="{{ eff.health_uri or site_defaults.health_uri or '/' }}">
+                        placeholder="{{ eff.health_uri or site_defaults.health_uri or '/' }}" data-i18n-skip translate="no">
                 </div>
 
                 <div id="row-health-status">
                     <label class="form-label" for="health_status" style="margin-top: 10px;">health_status</label>
                     <input id="health_status" name="health_status" type="number" min="100" max="599" class="form-input"
                         value="{{ site.health_status or '' }}"
-                        placeholder="{{ eff.health_status or site_defaults.health_status or 200 }}">
+                        placeholder="{{ eff.health_status or site_defaults.health_status or 200 }}" data-i18n-skip translate="no">
                 </div>
 
                 <div id="row-hsts">
@@ -1002,7 +1002,7 @@
                     <input id="hsts" name="hsts" type="text" class="form-input"
                         value="{% if site.hsts is defined and site.hsts is not none %}{% if site.hsts is sameas true %}true{% elif site.hsts is sameas false %}false{% else %}{{ site.hsts }}{% endif %}{% endif %}"
                         placeholder="{% if eff.hsts is defined and eff.hsts is not none %}{{ eff.hsts }}{% elif site_defaults.hsts is defined and site_defaults.hsts is not none %}{{ site_defaults.hsts }}{% else %}15552000{% endif %}"
-                        pattern="(?:true|false|[0-9]+|[0-9]+d)">
+                        pattern="(?:true|false|[0-9]+|[0-9]+d)" data-i18n-skip translate="no">
                     <div class="table-meta">
                         true/false, seconds, or a duration such as <code>365d</code>.
                     </div>

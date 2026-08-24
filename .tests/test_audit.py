@@ -281,6 +281,9 @@ class InstrumentationTests(unittest.TestCase):
         "routes_geoip.py": ("geoip.update", "geoip.countries", "geoip.schedule"),
         "routes_health.py": ("service.control",),
         "routes_security.py": ("adaptive.mode", "request_log.enabled"),
+        "routes_cert_delivery.py": (
+            "cert_delivery.save", "cert_delivery.delete", "cert_delivery.test",
+        ),
         "routes_authelia_settings.py": (
             "authelia_mail.update", "authelia_mail.test",
             "authelia_settings.update",

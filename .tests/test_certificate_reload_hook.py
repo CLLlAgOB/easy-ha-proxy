@@ -17,13 +17,15 @@ unit names, pipefail turns the pipeline's status into 141, and the condition
 is false. On the gateway it failed twenty times out of twenty. The reload
 had simply never been running.
 
-The second fault came out of the same read. The hook that delivers the
-certificate to the remote server had been moved into renewal-hooks/post,
-and certbot sets RENEWED_LINEAGE and RENEWED_DOMAINS only for deploy hooks.
-In post/ both are empty, so the script exits at its first test. Deliveries
-kept working on the existing gateway only because a copy from before the
-move survived in deploy/, no longer managed by the role -- a fresh install
-would have delivered nothing.
+A second fault came out of the same read and is deliberately NOT fixed here.
+The role's own certificate-delivery hook is written into renewal-hooks/post,
+where certbot sets neither RENEWED_LINEAGE nor RENEWED_DOMAINS, so it exits
+at its first test and never fires. Deployed gateways deliver certificates
+from an older hand-written copy in deploy/ that the role does not manage --
+different remote path, different host-key policy, different PFX password.
+Renaming the role's file onto that name would have overwritten a working
+script with one that behaves differently, so the role is left alone and the
+delivery is being rebuilt as something configurable from the interface.
 """
 
 from __future__ import annotations
@@ -84,40 +86,6 @@ class TheReloadRuns(unittest.TestCase):
         )
 
 
-class TheRemoteDeliveryHookCanActuallyFire(unittest.TestCase):
-    def setUp(self):
-        self.source = RDG.read_text(encoding="utf-8")
-
-    def test_it_is_installed_as_a_deploy_hook(self):
-        self.assertIn("renewal-hooks/deploy/900-deploy-rdg.sh", self.source)
-
-    def test_it_is_not_installed_as_a_post_hook(self):
-        # certbot gives post hooks neither RENEWED_LINEAGE nor
-        # RENEWED_DOMAINS, and the script needs both.
-        self.assertNotIn(
-            "dest: /etc/letsencrypt/renewal-hooks/post/", self.source
-        )
-
-    def test_the_variables_it_reads_are_the_deploy_hook_ones(self):
-        for name in ("RENEWED_DOMAINS", "RENEWED_LINEAGE"):
-            with self.subTest(name=name):
-                self.assertIn(name, self.source)
-
-    def test_a_copy_left_in_post_is_removed(self):
-        # An installation that already ran the previous version has a file
-        # there that will never fire; leaving it is one more thing to
-        # mislead whoever reads the directory next.
-        block = self.source.split(
-            "renewal-hooks/post/900-post-deploy-rdg.sh")[1][:120]
-        self.assertIn("state: absent", block)
-
-    def test_it_does_not_reload_haproxy_itself(self):
-        # 905 runs immediately after and reloads once. Reloading here first
-        # would start a worker still holding the previous certificate.
-        delivery = self.source.split("900-deploy-rdg.sh")[1]
-        self.assertNotIn("systemctl reload haproxy", delivery)
-
-
 class NoOtherHookRepeatsTheMistake(unittest.TestCase):
     """The pattern is easy to write and fails only under load."""
 
@@ -137,8 +105,20 @@ class NoOtherHookRepeatsTheMistake(unittest.TestCase):
                 # `if <writer> | grep -q ...` is the shape that bites: grep
                 # leaves early, the writer dies of SIGPIPE, pipefail reports
                 # it, and the branch silently does not run.
-                if re.search(r"^(if|elif|while)\s+.*\|\s*grep\s+-q", stripped):
-                    offenders.append(f"{path.name}:{number}")
+                #
+                # echo and printf are exempt, and not as a convenience: they
+                # write one short string that fits the pipe buffer and are
+                # finished before grep is scheduled, so there is no signal to
+                # take. What is dangerous is a writer with a lot to say --
+                # systemctl, journalctl, find, ss -- which is still going
+                # when the reader leaves.
+                if not re.search(r"^(if|elif|while)\s+.*\|\s*grep\s+-q",
+                                 stripped):
+                    continue
+                writer = re.sub(r"^(if|elif|while)\s+!?\s*", "", stripped)
+                if re.match(r"(echo|printf)[ 	]", writer):
+                    continue
+                offenders.append(f"{path.name}:{number}")
         self.assertEqual(offenders, [])
 
 

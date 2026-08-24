@@ -113,6 +113,47 @@ def dns_provider_delete(name: str) -> Dict[str, Any]:
     return _dns_request("dns-providers/delete", {"name": name})
 
 
+def _delivery_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Запрос к certd по разделу доставки сертификатов.
+
+    Тот же контракт, что и у DNS-провайдеров: секреты уходят к демону и
+    никогда не возвращаются -- он их не отдаёт.
+    """
+
+    url = f"{CERTD_API_BASE}/certs/{path}"
+    try:
+        # A test delivery talks to another machine over the network, so it
+        # gets longer than an edit does.
+        timeout = 200.0 if path.endswith("test") else 70.0
+        resp = _post(url, json=payload, timeout=timeout)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning("haproxy-certd unreachable (%s): %s", url, exc)
+        raise CertdUnavailable(str(exc)) from exc
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise CertdUnavailable("certd returned a non-JSON response") from exc
+    if not isinstance(data, dict):
+        raise CertdUnavailable("certd returned an unexpected payload")
+    return data
+
+
+def cert_deliveries_list() -> Dict[str, Any]:
+    return _delivery_request("deliveries", {})
+
+
+def cert_delivery_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _delivery_request("deliveries/save", payload)
+
+
+def cert_delivery_delete(name: str) -> Dict[str, Any]:
+    return _delivery_request("deliveries/delete", {"name": name})
+
+
+def cert_delivery_test(name: str) -> Dict[str, Any]:
+    return _delivery_request("deliveries/test", {"name": name})
+
+
 def get_certs_status_for_domains(domains: List[str]) -> Dict[str, Dict[str, Any]]:
     """Запрашивает статусы сертификатов для списка доменов.
 
