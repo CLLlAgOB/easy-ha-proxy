@@ -627,6 +627,11 @@ _SCHEMA_STATEMENTS: Tuple[str, ...] = (
 _MIGRATIONS: Dict[int, Tuple[str, ...]] = {}
 
 
+# Where the operator's names for the uplinks are kept. HAProxy knows a
+# server as srv1; which cable that is, only a person knows.
+CHANNEL_LABELS_KEY = "channel_labels"
+
+
 def _metric_table_sql(name: str) -> str:
     columns = ",\n        ".join(
         f"{column} INTEGER NOT NULL DEFAULT 0" for column in METRIC_COLUMNS
@@ -1088,6 +1093,40 @@ class MetricsDatabase:
         return {
             column: int(row[index] or 0)
             for index, column in enumerate(SUMMARY_COLUMNS)
+        }
+
+    def server_totals(self, *, since: int, until: int) -> Dict[str, Any]:
+        """Traffic per backend server over a range.
+
+        Deliberately not scoped to one site: an uplink carries every site
+        that points at it, and the whole question is how much went through
+        each one.
+        """
+
+        table, _ = choose_resolution(max(1, until - since))
+        columns = ("bytes_in", "bytes_out", "sessions")
+        projection = ", ".join(_aggregate_sql(column) for column in columns)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT o.proxy, o.server, {projection} "
+                f"FROM {table} m JOIN objects o ON o.id = m.object_id "
+                "WHERE o.kind = 'server' "
+                "AND m.bucket_ts >= ? AND m.bucket_ts < ? "
+                "GROUP BY o.proxy, o.server ORDER BY o.proxy, o.server",
+                [since, until],
+            ).fetchall()
+        return {
+            "servers": [
+                {
+                    "proxy": str(row["proxy"]),
+                    "server": str(row["server"]),
+                    **{
+                        column: int(row[index + 2] or 0)
+                        for index, column in enumerate(columns)
+                    },
+                }
+                for row in rows
+            ]
         }
 
     def latest_gauges(self, *, site: str, until: int) -> Dict[str, int]:
@@ -2049,6 +2088,48 @@ class MetricsHandler(BaseHTTPRequestHandler):
         # query: the parameter selects from what exists, it does not describe it.
         return requested if requested in known else ""
 
+    def do_POST(self) -> None:  # noqa: N802
+        """The one thing this daemon is told rather than asked.
+
+        An uplink's name is the operator's, not something that can be
+        derived: HAProxy knows a server as srv1, and which cable that is
+        only a person knows. Kept in the collector's own state table, beside
+        the rollup watermark, because it belongs to the same database as the
+        numbers it labels.
+        """
+
+        database: Database = self.server.database  # type: ignore[attr-defined]
+        if urlparse(self.path).path != "/api/v1/metrics/channel-labels":
+            self._send_json(404, {"ok": False, "error": "unknown path"})
+            return
+        try:
+            length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+            if length <= 0 or length > 65536:
+                raise ValueError("invalid Content-Length")
+            payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+            labels = payload.get("labels")
+            if not isinstance(labels, dict):
+                raise ValueError("labels must be an object")
+            if len(labels) > 64:
+                raise ValueError("at most 64 labels")
+            cleaned = {}
+            for host, label in labels.items():
+                key = str(host).strip()
+                text = str(label or "").strip()[:60]
+                if not key or len(key) > 255:
+                    raise ValueError("a host name is missing or too long")
+                if text:
+                    cleaned[key] = text
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        try:
+            database.set_state(CHANNEL_LABELS_KEY, json.dumps(cleaned))
+        except Exception as exc:  # pylint: disable=broad-except
+            self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "labels": cleaned})
+
     def do_GET(self) -> None:  # noqa: N802
         collector: Collector = self.server.collector  # type: ignore[attr-defined]
         database: MetricsDatabase = self.server.database  # type: ignore[attr-defined]
@@ -2087,6 +2168,25 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             payload.update({"ok": True, "range": range_key, "until": until})
+            self._send_json(200, payload)
+            return
+
+        if path == "/api/v1/metrics/servers":
+            query = self._query()
+            range_key, range_seconds = resolve_range(query.get("range", [""])[0])
+            until = _utc_now()
+            try:
+                payload = database.server_totals(
+                    since=until - range_seconds, until=until
+                )
+                payload["labels"] = json.loads(
+                    database.get_state(CHANNEL_LABELS_KEY, "{}") or "{}"
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            payload.update({"ok": True, "range": range_key,
+                            "since": until - range_seconds, "until": until})
             self._send_json(200, payload)
             return
 

@@ -281,6 +281,7 @@ class InstrumentationTests(unittest.TestCase):
         "routes_geoip.py": ("geoip.update", "geoip.countries", "geoip.schedule"),
         "routes_health.py": ("service.control",),
         "routes_security.py": ("adaptive.mode", "request_log.enabled"),
+        "routes_monitoring.py": ("monitoring.channel_labels",),
         "routes_cert_delivery.py": (
             "cert_delivery.save", "cert_delivery.delete", "cert_delivery.test",
         ),
@@ -323,7 +324,7 @@ class InstrumentationTests(unittest.TestCase):
     def test_no_mutating_route_module_is_left_out(self):
         # A new routes_*.py with a POST handler has to be added above, or the
         # audit page silently stops telling the truth about the gateway.
-        skip = {"routes_audit.py", "routes_monitoring.py"}
+        skip = {"routes_audit.py"}
         for path in sorted(APP_DIR.glob("routes*.py")):
             if path.name in skip or path.name in self.EXPECTED:
                 continue

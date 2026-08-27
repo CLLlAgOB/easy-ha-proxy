@@ -119,6 +119,79 @@
 
 .mon-chart .mon-sub { font-size: 12px; color: var(--text-secondary); }
 
+/* One row per uplink: name, where it goes, how much went through it. */
+.mon-channel {
+  display: grid;
+  /* minmax(0, …) rather than a pixel floor: a bare 1fr refuses to shrink
+     below its content, which pushed the traffic column off the card. */
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) max-content;
+  gap: 10px 16px;
+  align-items: center;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+}
+
+.mon-channel.reserve {
+  border-style: dashed;
+  opacity: .82;
+}
+
+.mon-channel .mon-channel-name {
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mon-channel .mon-channel-where {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mon-channel .mon-channel-traffic { text-align: right; white-space: nowrap; }
+
+.mon-channel .mon-channel-share {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* The share bar sits under the row and spans it. */
+.mon-channel .mon-channel-bar {
+  grid-column: 1 / -1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.mon-channel .mon-channel-bar i {
+  display: block;
+  height: 100%;
+  background: rgba(var(--accent-primary-rgb), .75);
+}
+
+.mon-channel .mon-channel-rename {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.mon-channel .mon-channel-rename:hover {
+  background: rgba(var(--accent-primary-rgb), .15);
+}
+
 .mon-plot { width: 100%; height: 190px; display: block; margin-top: 10px; }
 .mon-plot .mon-axis { stroke: var(--border); stroke-width: 1; }
 .mon-plot .mon-gridline { stroke: var(--border); stroke-width: 1; opacity: .45; }
@@ -334,6 +407,24 @@
       <div class="mon-legend" id="mon-legend-connections"></div>
     </div>
   </div>
+</div>
+
+<div class="card" style="margin-top:25px;" id="mon-channels-card" hidden>
+  <div class="card-header">
+    <h2>Uplinks</h2>
+    <span class="mon-sub" id="mon-channels-note" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Worked out from the backends: every server on the same address is the same
+    link, so a gateway reaching its sites through a main connection and a
+    reserve shows up as two. Traffic is counted per link as well as in total,
+    which is what says how much actually went out through each.
+  </p>
+
+  <div id="mon-channels"></div>
+
+  <div class="mon-sub" id="mon-channels-result" data-i18n-skip translate="no"></div>
 </div>
 
 <div class="card" style="margin-top:25px;">

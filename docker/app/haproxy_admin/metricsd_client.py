@@ -76,6 +76,38 @@ def metricsd_summary(range_key: str, site: str = "") -> Dict[str, Any]:
     return _get_json("/api/v1/metrics/summary", params=params, timeout=15)
 
 
+def metricsd_servers(range_key: str) -> Dict[str, Any]:
+    """Traffic per backend server, for grouping into uplinks.
+
+    Never scoped to one site: a link carries every site pointed at it.
+    """
+
+    return _get_json("/api/v1/metrics/servers", params={"range": range_key})
+
+
+def metricsd_channel_labels_save(labels: Dict[str, str]) -> Dict[str, Any]:
+    """The operator's names for the links. The one call here that writes."""
+
+    url = ("http+unix://" + quote(METRICSD_SOCKET_PATH, safe="")
+           + "/api/v1/metrics/channel-labels")
+    try:
+        response = _session().post(
+            url, json={"labels": labels}, timeout=DEFAULT_TIMEOUT
+        )
+        # A rejected label is the operator's typo, and the daemon says which.
+        if response.status_code == 400:
+            raise ValueError((response.json() or {}).get("error") or "rejected")
+        response.raise_for_status()
+        data = response.json()
+    except (MetricsdUnavailable, ValueError):
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        raise MetricsdUnavailable(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise MetricsdUnavailable("metricsd returned an unexpected payload")
+    return data
+
+
 def metricsd_states(range_key: str, site: str = "") -> Dict[str, Any]:
     params: Dict[str, Any] = {"range": range_key}
     if site:

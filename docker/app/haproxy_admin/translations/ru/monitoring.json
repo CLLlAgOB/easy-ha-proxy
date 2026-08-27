@@ -51,6 +51,14 @@
     "Resolution": "Разрешение",
     "stable": "стабильно",
     "growing": "растёт",
-    "shrinking": "уменьшается"
+    "shrinking": "уменьшается",
+    "Uplinks": "Каналы",
+    "Worked out from the backends: every server on the same address is the same link, so a gateway reaching its sites through a main connection and a reserve shows up as two. Traffic is counted per link as well as in total, which is what says how much actually went out through each.": "Определяются по бэкендам: все серверы на одном адресе — это один канал, поэтому шлюз, который ходит к сайтам через основное подключение и резерв, показывается двумя строками. Трафик считается и по каждому каналу, и суммарно — это и отвечает на вопрос, сколько реально ушло через каждый.",
+    "reserve": "резерв",
+    "in use": "в работе",
+    "rename": "переименовать",
+    "backends": "бэкендов",
+    "Name for this uplink": "Название канала",
+    "Could not save the name": "Не удалось сохранить название"
   }
 }

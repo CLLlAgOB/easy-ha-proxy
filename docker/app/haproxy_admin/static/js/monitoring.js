@@ -553,6 +553,159 @@
     }
   }
 
+  /* ---------- uplinks ---------- */
+
+  // Worked out from the backends rather than configured: every server on the
+  // same address is the same link. A gateway with a main connection and a
+  // reserve comes out as two rows without anything having to be set up.
+
+  let channelState = [];
+
+  function csrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute("content") || "" : "";
+  }
+
+  function channelLabel(channel) {
+    return channel.label || channel.default_label || channel.host;
+  }
+
+  function renderChannels(payload) {
+    const card = document.getElementById("mon-channels-card");
+    const host = document.getElementById("mon-channels");
+    if (!card || !host) return;
+
+    const channels = (payload && payload.channels) || [];
+    channelState = channels;
+    // One link is not a comparison, and zero is not worth a card.
+    card.hidden = channels.length < 2;
+    if (card.hidden) return;
+
+    const note = document.getElementById("mon-channels-note");
+    if (note) {
+      note.textContent = `${channels.length} · ${formatBytes(payload.bytes_total)}`;
+    }
+
+    host.textContent = "";
+    channels.forEach((channel) => {
+      const row = document.createElement("div");
+      row.className = "mon-channel" + (channel.backup ? " reserve" : "");
+
+      const name = document.createElement("div");
+      name.className = "mon-channel-name";
+      const label = document.createElement("span");
+      label.setAttribute("data-i18n-skip", "");
+      label.setAttribute("translate", "no");
+      label.textContent = channelLabel(channel);
+      name.appendChild(label);
+
+      const kind = document.createElement("span");
+      kind.className = "mon-sub";
+      kind.textContent = channel.backup
+        ? uiText("reserve")
+        : uiText("in use");
+      name.appendChild(kind);
+
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.className = "mon-channel-rename";
+      rename.textContent = uiText("rename");
+      rename.addEventListener("click", () => renameChannel(channel));
+      name.appendChild(rename);
+      row.appendChild(name);
+
+      const where = document.createElement("div");
+      where.className = "mon-channel-where";
+      where.setAttribute("data-i18n-skip", "");
+      where.setAttribute("translate", "no");
+      where.textContent = channel.host;
+      row.appendChild(where);
+
+      const traffic = document.createElement("div");
+      traffic.className = "mon-channel-traffic";
+      const total = document.createElement("b");
+      total.setAttribute("data-i18n-skip", "");
+      total.setAttribute("translate", "no");
+      total.textContent = formatBytes(channel.bytes_total);
+      traffic.appendChild(total);
+      const share = document.createElement("span");
+      share.className = "mon-channel-share";
+      // The backend count is the honest reason a link is busy, so it is
+      // next to the number rather than left to be guessed.
+      // "backends: 8" rather than "8 backends": Russian declines the noun
+      // after 2-4 differently from after 5+, and the count moves.
+      share.textContent =
+        `${channel.share}% · ` + uiText("backends") + `: ${channel.backend_count}`;
+      traffic.appendChild(share);
+      row.appendChild(traffic);
+
+      const bar = document.createElement("div");
+      bar.className = "mon-channel-bar";
+      const fill = document.createElement("i");
+      fill.style.width = `${Math.max(0, Math.min(100, channel.share))}%`;
+      bar.appendChild(fill);
+      row.appendChild(bar);
+
+      host.appendChild(row);
+    });
+  }
+
+  function sayChannels(message, isError) {
+    const host = document.getElementById("mon-channels-result");
+    if (!host) return;
+    host.textContent = message || "";
+    host.style.color = isError ? "#cc4b4b" : "";
+  }
+
+  async function renameChannel(channel) {
+    const current = channel.label || "";
+    const next = window.prompt(
+      `${uiText("Name for this uplink")} (${channel.host})`,
+      current
+    );
+    if (next === null) return;
+
+    const labels = {};
+    channelState.forEach((item) => {
+      if (item.label) labels[item.host] = item.label;
+    });
+    const trimmed = next.trim();
+    if (trimmed) {
+      labels[channel.host] = trimmed;
+    } else {
+      // Cleared: back to whatever HAProxy calls the servers on it.
+      delete labels[channel.host];
+    }
+
+    try {
+      const response = await fetch("/api/monitoring/channels/labels", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken()
+        },
+        body: JSON.stringify({ labels })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        sayChannels(data.error || uiText("Could not save the name"), true);
+        return;
+      }
+      sayChannels("");
+      await loadChannels();
+    } catch (error) {
+      sayChannels(String(error), true);
+    }
+  }
+
+  async function loadChannels() {
+    const payload = await getJson("/api/monitoring/channels", {
+      range: currentRange
+    }).catch(() => null);
+    if (payload) renderChannels(payload);
+  }
+
   async function loadAll() {
     if (inFlight) return;
     inFlight = true;
@@ -567,6 +720,9 @@
 
       const timeline = await getJson("/api/monitoring/states", params).catch(() => null);
       renderTimeline(timeline);
+
+      // Not scoped by site: a link carries every site pointed at it.
+      await loadChannels();
 
       const seconds = rangeSeconds(currentRange);
       const results = await Promise.all(
