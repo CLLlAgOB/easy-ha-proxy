@@ -26,6 +26,38 @@
   color: var(--text-secondary);
 }
 
+.mon-hidden-toggle {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 2px;
+  border-radius: 6px;
+}
+
+.mon-hidden-toggle:hover { color: var(--text-primary); }
+
+.mon-window {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin: 12px 0 4px;
+}
+
+.mon-window[hidden] { display: none; }
+
+.mon-window label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.mon-window .form-input { width: auto; }
+
 .mon-ranges {
   display: inline-flex;
   flex-wrap: wrap;
@@ -326,6 +358,23 @@
         <button type="button" class="mon-range" data-range="{{ value }}"
                 aria-pressed="{{ 'true' if value == default_range else 'false' }}">{{ value }}</button>
       {% endfor %}
+      <button type="button" class="mon-range" id="mon-range-custom"
+              aria-pressed="false">Period…</button>
+    </div>
+
+    {# A preset answers "how are things". It cannot answer "what happened
+       during the incident on Tuesday morning", which is the question an
+       operator actually arrives with. #}
+    <div class="mon-window" id="mon-window" hidden>
+      <label>Period start
+        <input type="datetime-local" id="mon-window-from" class="form-input">
+      </label>
+      <label>Period end
+        <input type="datetime-local" id="mon-window-to" class="form-input">
+      </label>
+      <button type="button" class="btn btn-small" id="mon-window-apply">Show</button>
+      <button type="button" class="btn btn-small" id="mon-window-clear">Back to presets</button>
+      <span class="mon-sub" id="mon-window-note" data-i18n-skip translate="no"></span>
     </div>
 
     <label for="mon-site">
@@ -423,6 +472,13 @@
   </p>
 
   <div id="mon-channels"></div>
+
+  <div id="mon-channels-hidden-wrap" hidden>
+    <button type="button" class="mon-hidden-toggle" id="mon-channels-toggle">
+      Show hidden
+    </button>
+    <div id="mon-channels-hidden" hidden></div>
+  </div>
 
   <div class="mon-sub" id="mon-channels-result" data-i18n-skip translate="no"></div>
 </div>

@@ -59,6 +59,17 @@
     "rename": "переименовать",
     "backends": "бэкендов",
     "Name for this uplink": "Название канала",
-    "Could not save the name": "Не удалось сохранить название"
+    "Could not save the name": "Не удалось сохранить название",
+    "Period…": "Период…",
+    "Back to presets": "Вернуться к пресетам",
+    "Choose a start earlier than the end": "Начало должно быть раньше конца",
+    "hide": "скрыть",
+    "show": "показать",
+    "Show hidden": "Показать скрытые",
+    "Hide the list": "Свернуть список",
+    "Period start": "Начало периода",
+    "Period end": "Конец периода",
+    "The collector on this gateway is an older version and ignores a chosen period; it answered with its own preset. Update the daemons component.": "Сборщик на этом шлюзе старой версии и не понимает произвольный период — он ответил своим пресетом. Обновите компонент демонов.",
+    "The collector on this gateway is an older version and cannot hide channels yet. Update the daemons component.": "Сборщик на этом шлюзе старой версии и пока не умеет скрывать каналы. Обновите компонент демонов."
   }
 }

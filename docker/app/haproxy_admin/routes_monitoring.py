@@ -35,6 +35,14 @@ def api_monitoring_sites():
         return jsonify(monitoring.unavailable_payload(exc)), 503
 
 
+def _window():
+    """The exact period asked for, or {} to use the preset."""
+
+    return monitoring.normalize_window(
+        request.args.get("since"), request.args.get("until")
+    )
+
+
 @bp.get("/api/monitoring/channels")
 def api_monitoring_channels():
     """The links this gateway reaches its backends through.
@@ -45,7 +53,7 @@ def api_monitoring_channels():
 
     range_key = monitoring.normalize_range(request.args.get("range"))
     try:
-        return jsonify(monitoring.channels(range_key))
+        return jsonify(monitoring.channels(range_key, _window()))
     except MetricsdUnavailable as exc:
         return jsonify(monitoring.unavailable_payload(exc)), 503
 
@@ -62,7 +70,9 @@ def api_monitoring_channel_labels():
         )
         return jsonify({"ok": False, "error": "superadmin required"}), 403
     try:
-        result = monitoring.save_channel_labels(payload.get("labels"))
+        result = monitoring.save_channel_labels(
+            payload.get("labels"), payload.get("hidden")
+        )
     except ValueError as exc:
         record_request(
             "monitoring.channel_labels",
@@ -88,7 +98,7 @@ def api_monitoring_summary():
     try:
         sites = monitoring.list_sites()
         site = monitoring.normalize_site(request.args.get("site"), sites)
-        return jsonify(monitoring.summary(range_key, site))
+        return jsonify(monitoring.summary(range_key, site, _window()))
     except MetricsdUnavailable as exc:
         return jsonify(monitoring.unavailable_payload(exc)), 503
 
@@ -111,7 +121,7 @@ def api_monitoring_series():
     try:
         sites = monitoring.list_sites()
         site = monitoring.normalize_site(request.args.get("site"), sites)
-        return jsonify(monitoring.series(chart, range_key, site))
+        return jsonify(monitoring.series(chart, range_key, site, _window()))
     except MetricsdUnavailable as exc:
         return jsonify(monitoring.unavailable_payload(exc)), 503
 
@@ -122,7 +132,7 @@ def api_monitoring_states():
     try:
         sites = monitoring.list_sites()
         site = monitoring.normalize_site(request.args.get("site"), sites)
-        return jsonify(monitoring.states(range_key, site))
+        return jsonify(monitoring.states(range_key, site, _window()))
     except MetricsdUnavailable as exc:
         return jsonify(monitoring.unavailable_payload(exc)), 503
 

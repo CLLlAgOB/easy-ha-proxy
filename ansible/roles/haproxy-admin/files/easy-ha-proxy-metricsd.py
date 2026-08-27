@@ -240,6 +240,35 @@ def resolve_range(value: Any) -> Tuple[str, int]:
     return key, min(RANGES[key], MAX_RANGE_SECONDS)
 
 
+def resolve_window(query: Dict[str, List[str]]) -> Tuple[str, int, int]:
+    """The period to report on: an explicit one if given, else a preset.
+
+    The presets answer "how are things", which is most of the time. They
+    cannot answer "what happened during the incident on Tuesday morning",
+    and until now nothing could -- every window ended at this instant. An
+    explicit since/until pair does, and is bounded the same way a preset is,
+    so a mistyped year cannot ask for a scan of the whole table.
+    """
+
+    def number(name: str) -> Optional[int]:
+        raw = (query.get(name) or [""])[0]
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    since = number("since")
+    until = number("until")
+    if since is not None and until is not None and until > since:
+        span = min(until - since, MAX_RANGE_SECONDS)
+        return "custom", until - span, until
+
+    key, seconds = resolve_range((query.get("range") or [""])[0])
+    now = _utc_now()
+    return key, now - seconds, now
+
+
 def choose_resolution(range_seconds: int) -> Tuple[str, int]:
     """Pick the stored table and the step to group by.
 
@@ -630,6 +659,10 @@ _MIGRATIONS: Dict[int, Tuple[str, ...]] = {}
 # Where the operator's names for the uplinks are kept. HAProxy knows a
 # server as srv1; which cable that is, only a person knows.
 CHANNEL_LABELS_KEY = "channel_labels"
+# Addresses the operator has put away. Not every backend host is an
+# uplink -- a single application server is just a server -- and a list
+# that cannot be tidied is one nobody reads.
+CHANNEL_HIDDEN_KEY = "channel_hidden"
 
 
 def _metric_table_sql(name: str) -> str:
@@ -2120,15 +2153,33 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     raise ValueError("a host name is missing or too long")
                 if text:
                     cleaned[key] = text
+
+            # Absent means "leave it as it is": the page sends both together,
+            # but an older one sending only labels must not empty the list.
+            hidden_raw = payload.get("hidden")
+            if hidden_raw is None:
+                hidden = json.loads(
+                    database.get_state(CHANNEL_HIDDEN_KEY, "[]") or "[]"
+                )
+            elif isinstance(hidden_raw, list):
+                if len(hidden_raw) > 64:
+                    raise ValueError("at most 64 hidden channels")
+                hidden = sorted({
+                    str(host).strip() for host in hidden_raw
+                    if str(host).strip() and len(str(host).strip()) <= 255
+                })
+            else:
+                raise ValueError("hidden must be a list")
         except ValueError as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
         try:
             database.set_state(CHANNEL_LABELS_KEY, json.dumps(cleaned))
+            database.set_state(CHANNEL_HIDDEN_KEY, json.dumps(hidden))
         except Exception as exc:  # pylint: disable=broad-except
             self._send_json(500, {"ok": False, "error": str(exc)})
             return
-        self._send_json(200, {"ok": True, "labels": cleaned})
+        self._send_json(200, {"ok": True, "labels": cleaned, "hidden": hidden})
 
     def do_GET(self) -> None:  # noqa: N802
         collector: Collector = self.server.collector  # type: ignore[attr-defined]
@@ -2155,13 +2206,12 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            range_key, range_seconds = resolve_range(query.get("range", [""])[0])
-            until = _utc_now()
+            range_key, since, until = resolve_window(query)
             try:
                 payload = database.series(
                     chart=chart,
                     site=self._site(query),
-                    since=until - range_seconds,
+                    since=since,
                     until=until,
                 )
             except Exception as exc:  # pylint: disable=broad-except
@@ -2173,31 +2223,32 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/metrics/servers":
             query = self._query()
-            range_key, range_seconds = resolve_range(query.get("range", [""])[0])
-            until = _utc_now()
+            range_key, since, until = resolve_window(query)
             try:
                 payload = database.server_totals(
-                    since=until - range_seconds, until=until
+                    since=since, until=until
                 )
                 payload["labels"] = json.loads(
                     database.get_state(CHANNEL_LABELS_KEY, "{}") or "{}"
+                )
+                payload["hidden"] = json.loads(
+                    database.get_state(CHANNEL_HIDDEN_KEY, "[]") or "[]"
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             payload.update({"ok": True, "range": range_key,
-                            "since": until - range_seconds, "until": until})
+                            "since": since, "until": until})
             self._send_json(200, payload)
             return
 
         if path == "/api/v1/metrics/states":
             query = self._query()
-            range_key, range_seconds = resolve_range(query.get("range", [""])[0])
-            until = _utc_now()
+            range_key, since, until = resolve_window(query)
             try:
                 payload = database.state_timeline(
                     site=self._site(query),
-                    since=until - range_seconds,
+                    since=since,
                     until=until,
                 )
             except Exception as exc:  # pylint: disable=broad-except
@@ -2207,7 +2258,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "range": range_key,
-                    "since": until - range_seconds,
+                    "since": since,
                     "until": until,
                 }
             )
@@ -2216,18 +2267,23 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/metrics/summary":
             query = self._query()
-            range_key, range_seconds = resolve_range(query.get("range", [""])[0])
+            range_key, since, until = resolve_window(query)
             site = self._site(query)
-            until = _utc_now()
+            # The window decides the end, not the clock: an explicit period
+            # that silently snapped back to "now" would report the wrong
+            # thing while looking right.
+            range_seconds = max(1, until - since)
             try:
                 totals = database.totals(
-                    site=site, since=until - range_seconds, until=until
+                    site=site, since=since, until=until
                 )
                 payload = {
                     "ok": True,
                     "ts": until,
                     "range": range_key,
                     "range_seconds": range_seconds,
+                    "since": since,
+                    "until": until,
                     "site": site,
                     "totals": totals,
                     "requests_per_second": round(

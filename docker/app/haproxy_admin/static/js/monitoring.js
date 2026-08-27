@@ -560,6 +560,31 @@
   // reserve comes out as two rows without anything having to be set up.
 
   let channelState = [];
+  let hiddenState = [];
+  // An explicit period, when a preset cannot say what happened on Tuesday.
+  // Empty means "use the preset", which is the normal case.
+  let customWindow = null;
+
+  function windowParams() {
+    return customWindow
+      ? { since: customWindow.since, until: customWindow.until }
+      : {};
+  }
+
+  // A collector older than this page ignores since/until and answers with
+  // its preset instead. The charts then plot a day's points inside a
+  // two-hour window, every one falls outside it, and the page says "no data
+  // for this period" -- which is true of what it was given and completely
+  // misleading about why. The daemon names the window it actually used, so
+  // the disagreement is visible; say it rather than draw the empty result.
+  function noteWindowSkew(payload) {
+    if (!customWindow || !payload) return false;
+    if (payload.range === "custom") return false;
+    setWindowNote(
+      uiText("The collector on this gateway is an older version and ignores a chosen period; it answered with its own preset. Update the daemons component.")
+    );
+    return true;
+  }
 
   function csrfToken() {
     const meta = document.querySelector('meta[name="csrf-token"]');
@@ -576,15 +601,19 @@
     if (!card || !host) return;
 
     const channels = (payload && payload.channels) || [];
-    channelState = channels;
-    // One link is not a comparison, and zero is not worth a card.
-    card.hidden = channels.length < 2;
+    hiddenState = (payload && payload.hidden) || [];
+    channelState = channels.concat(hiddenState);
+    // One link is not a comparison, and zero is not worth a card -- unless
+    // something is only hidden, in which case there has to be a way back.
+    card.hidden = channels.length < 2 && hiddenState.length === 0;
     if (card.hidden) return;
 
     const note = document.getElementById("mon-channels-note");
     if (note) {
       note.textContent = `${channels.length} · ${formatBytes(payload.bytes_total)}`;
     }
+
+    renderHiddenDrawer();
 
     host.textContent = "";
     channels.forEach((channel) => {
@@ -612,6 +641,16 @@
       rename.textContent = uiText("rename");
       rename.addEventListener("click", () => renameChannel(channel));
       name.appendChild(rename);
+
+      // Not every backend host is an uplink -- a single application server
+      // is just a server -- and a list that cannot be tidied is one nobody
+      // reads.
+      const hide = document.createElement("button");
+      hide.type = "button";
+      hide.className = "mon-channel-rename";
+      hide.textContent = channel.hidden ? uiText("show") : uiText("hide");
+      hide.addEventListener("click", () => setHidden(channel, !channel.hidden));
+      name.appendChild(hide);
       row.appendChild(name);
 
       const where = document.createElement("div");
@@ -650,6 +689,67 @@
     });
   }
 
+  function renderHiddenDrawer() {
+    const wrap = document.getElementById("mon-channels-hidden-wrap");
+    const box = document.getElementById("mon-channels-hidden");
+    const toggle = document.getElementById("mon-channels-toggle");
+    if (!wrap || !box || !toggle) return;
+
+    wrap.hidden = hiddenState.length === 0;
+    toggle.textContent = box.hidden
+      ? `${uiText("Show hidden")} (${hiddenState.length})`
+      : uiText("Hide the list");
+    if (box.hidden) return;
+
+    box.textContent = "";
+    hiddenState.forEach((channel) => {
+      const row = document.createElement("div");
+      row.className = "mon-channel";
+      row.style.opacity = ".6";
+
+      const name = document.createElement("div");
+      name.className = "mon-channel-name";
+      const label = document.createElement("span");
+      label.setAttribute("data-i18n-skip", "");
+      label.setAttribute("translate", "no");
+      label.textContent = channelLabel(channel);
+      name.appendChild(label);
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "mon-channel-rename";
+      back.textContent = uiText("show");
+      back.addEventListener("click", () => setHidden(channel, false));
+      name.appendChild(back);
+      row.appendChild(name);
+
+      const where = document.createElement("div");
+      where.className = "mon-channel-where";
+      where.setAttribute("data-i18n-skip", "");
+      where.setAttribute("translate", "no");
+      where.textContent = channel.host;
+      row.appendChild(where);
+
+      const traffic = document.createElement("div");
+      traffic.className = "mon-channel-traffic";
+      traffic.setAttribute("data-i18n-skip", "");
+      traffic.setAttribute("translate", "no");
+      traffic.textContent = formatBytes(channel.bytes_total);
+      row.appendChild(traffic);
+
+      box.appendChild(row);
+    });
+  }
+
+  async function setHidden(channel, hidden) {
+    const hosts = new Set(hiddenState.map((item) => item.host));
+    if (hidden) {
+      hosts.add(channel.host);
+    } else {
+      hosts.delete(channel.host);
+    }
+    await saveChannels(Array.from(hosts));
+  }
+
   function sayChannels(message, isError) {
     const host = document.getElementById("mon-channels-result");
     if (!host) return;
@@ -665,17 +765,27 @@
     );
     if (next === null) return;
 
+    const trimmed = next.trim();
+    await saveChannels(null, { host: channel.host, label: trimmed });
+  }
+
+  // Names and visibility go together in one request, because the daemon
+  // stores them together and a partial write would drop the other half.
+  async function saveChannels(hidden, rename) {
     const labels = {};
     channelState.forEach((item) => {
       if (item.label) labels[item.host] = item.label;
     });
-    const trimmed = next.trim();
-    if (trimmed) {
-      labels[channel.host] = trimmed;
-    } else {
-      // Cleared: back to whatever HAProxy calls the servers on it.
-      delete labels[channel.host];
+    if (rename) {
+      if (rename.label) {
+        labels[rename.host] = rename.label;
+      } else {
+        // Cleared: back to whatever HAProxy calls the servers on it.
+        delete labels[rename.host];
+      }
     }
+    const body = { labels };
+    if (hidden !== null && hidden !== undefined) body.hidden = hidden;
 
     try {
       const response = await fetch("/api/monitoring/channels/labels", {
@@ -685,11 +795,21 @@
           "Content-Type": "application/json",
           "X-CSRFToken": csrfToken()
         },
-        body: JSON.stringify({ labels })
+        body: JSON.stringify(body)
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.ok === false) {
         sayChannels(data.error || uiText("Could not save the name"), true);
+        return;
+      }
+      // Same skew, quieter symptom: an older collector accepts the request,
+      // drops the hidden list and answers ok, so the button appears to do
+      // nothing at all.
+      if (body.hidden !== undefined && data.hidden === undefined) {
+        sayChannels(
+          uiText("The collector on this gateway is an older version and cannot hide channels yet. Update the daemons component."),
+          true
+        );
         return;
       }
       sayChannels("");
@@ -700,21 +820,27 @@
   }
 
   async function loadChannels() {
-    const payload = await getJson("/api/monitoring/channels", {
-      range: currentRange
-    }).catch(() => null);
+    const payload = await getJson(
+      "/api/monitoring/channels",
+      Object.assign({ range: currentRange }, windowParams())
+    ).catch(() => null);
     if (payload) renderChannels(payload);
   }
 
   async function loadAll() {
     if (inFlight) return;
     inFlight = true;
-    const params = { range: currentRange };
+    const params = Object.assign({ range: currentRange }, windowParams());
     if (currentSite) params.site = currentSite;
 
     try {
       const summary = await getJson("/api/monitoring/summary", params);
       showUnavailable(false);
+      if (noteWindowSkew(summary)) {
+        // Show what it did return rather than an empty frame, now that the
+        // note says which period it belongs to.
+        customWindow = null;
+      }
       renderSummary(summary);
       renderStorage(summary.storage);
 
@@ -770,6 +896,96 @@
     }, REFRESH_INTERVAL_MS);
   }
 
+  function setWindowNote(text) {
+    const note = byId("mon-window-note");
+    if (note) note.textContent = text || "";
+  }
+
+  function localInputToEpoch(value) {
+    // datetime-local has no zone; the browser's own is what the operator
+    // means when they type a time.
+    if (!value) return 0;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  function bindWindowControls() {
+    const panel = byId("mon-window");
+    const open = byId("mon-range-custom");
+    if (open && panel) {
+      open.addEventListener("click", () => {
+        panel.hidden = !panel.hidden;
+        if (panel.hidden) return;
+        // Seed with the preset currently shown, so the fields start
+        // somewhere sensible rather than empty.
+        const until = Math.floor(Date.now() / 1000);
+        const since = until - rangeSeconds(currentRange);
+        const from = byId("mon-window-from");
+        const to = byId("mon-window-to");
+        if (from && !from.value) from.value = toLocalInput(since);
+        if (to && !to.value) to.value = toLocalInput(until);
+      });
+    }
+
+    const apply = byId("mon-window-apply");
+    if (apply) {
+      apply.addEventListener("click", () => {
+        const since = localInputToEpoch((byId("mon-window-from") || {}).value);
+        const until = localInputToEpoch((byId("mon-window-to") || {}).value);
+        if (!since || !until || until <= since) {
+          setWindowNote(uiText("Choose a start earlier than the end"));
+          return;
+        }
+        customWindow = { since: since, until: until };
+        const ranges = byId("mon-ranges");
+        if (ranges) {
+          ranges.querySelectorAll("button").forEach((item) => {
+            item.setAttribute(
+              "aria-pressed", item.id === "mon-range-custom" ? "true" : "false"
+            );
+          });
+        }
+        setWindowNote("");
+        loadAll();
+      });
+    }
+
+    const clear = byId("mon-window-clear");
+    if (clear) {
+      clear.addEventListener("click", () => {
+        customWindow = null;
+        setWindowNote("");
+        if (panel) panel.hidden = true;
+        const ranges = byId("mon-ranges");
+        if (ranges) {
+          ranges.querySelectorAll("button").forEach((item) => {
+            item.setAttribute(
+              "aria-pressed",
+              item.dataset.range === currentRange ? "true" : "false"
+            );
+          });
+        }
+        loadAll();
+      });
+    }
+
+    const toggle = byId("mon-channels-toggle");
+    if (toggle) {
+      toggle.addEventListener("click", () => {
+        const box = byId("mon-channels-hidden");
+        if (box) box.hidden = !box.hidden;
+        renderHiddenDrawer();
+      });
+    }
+  }
+
+  function toLocalInput(epochSeconds) {
+    const date = new Date(epochSeconds * 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-` +
+      `${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
   function bindControls() {
     const ranges = byId("mon-ranges");
     if (ranges) {
@@ -777,14 +993,20 @@
         const button = event.target.closest("button[data-range]");
         if (!button) return;
         currentRange = button.dataset.range;
-        ranges.querySelectorAll("button[data-range]").forEach((item) => {
+        // Choosing a preset leaves the explicit period, or the page would
+        // show one thing and highlight another.
+        customWindow = null;
+        setWindowNote("");
+        ranges.querySelectorAll("button").forEach((item) => {
           item.setAttribute("aria-pressed", item === button ? "true" : "false");
         });
         loadAll();
       });
       const active = ranges.querySelector('button[aria-pressed="true"]');
-      if (active) currentRange = active.dataset.range;
+      if (active && active.dataset.range) currentRange = active.dataset.range;
     }
+
+    bindWindowControls();
 
     const site = byId("mon-site");
     if (site) {

@@ -83,8 +83,31 @@ def normalize_site(value: Any, sites: List[Dict[str, str]]) -> str:
     return candidate if candidate in known else ""
 
 
-def summary(range_key: str, site: str) -> Dict[str, Any]:
-    payload = metricsd_summary(range_key, site)
+# An explicit period, when the presets cannot say what happened on Tuesday
+# morning. Bounded here as well as in the daemon so a mistyped year is
+# refused before it becomes a query.
+MAX_WINDOW_SECONDS = 366 * 86400
+MIN_WINDOW_SECONDS = 60
+
+
+def normalize_window(since: Any, until: Any) -> Dict[str, int]:
+    """A since/until pair, or {} to fall back to the preset."""
+
+    try:
+        start = int(str(since).strip())
+        end = int(str(until).strip())
+    except (TypeError, ValueError):
+        return {}
+    if start <= 0 or end <= 0 or end - start < MIN_WINDOW_SECONDS:
+        return {}
+    if end - start > MAX_WINDOW_SECONDS:
+        start = end - MAX_WINDOW_SECONDS
+    return {"since": start, "until": end}
+
+
+def summary(range_key: str, site: str,
+            window: Dict[str, int] | None = None) -> Dict[str, Any]:
+    payload = metricsd_summary(range_key, site, window)
     health = payload.get("health") or {}
     for group in ("backends", "servers"):
         for entry in health.get(group) or []:
@@ -93,14 +116,46 @@ def summary(range_key: str, site: str) -> Dict[str, Any]:
     return payload
 
 
-def series(chart: str, range_key: str, site: str) -> Dict[str, Any]:
-    return metricsd_series(chart, range_key, site)
+def series(chart: str, range_key: str, site: str,
+           window: Dict[str, int] | None = None) -> Dict[str, Any]:
+    return metricsd_series(chart, range_key, site, window)
 
 
-def states(range_key: str, site: str) -> Dict[str, Any]:
-    payload = metricsd_states(range_key, site)
-    for entry in payload.get("objects") or []:
+def states(range_key: str, site: str,
+           window: Dict[str, int] | None = None) -> Dict[str, Any]:
+    payload = metricsd_states(range_key, site, window)
+    objects = payload.get("objects") or []
+
+    # A backend with one server produced two rows saying the same thing --
+    # "authelia.backend / Backend" directly above "authelia /
+    # authelia.backend". The backend row is the one that means anything, and
+    # the server row only earns its place when there is more than one to
+    # tell apart.
+    servers_per_proxy: Dict[str, int] = {}
+    has_backend_row: set = set()
+    for entry in objects:
+        proxy = str(entry.get("proxy") or "")
+        if entry.get("server"):
+            servers_per_proxy[proxy] = servers_per_proxy.get(proxy, 0) + 1
+        else:
+            has_backend_row.add(proxy)
+
+    def keep(entry: Dict[str, Any]) -> bool:
+        if not entry.get("server"):
+            return True
+        proxy = str(entry.get("proxy") or "")
+        # Only ever collapse into a row that exists. Without this the sole
+        # row of a backend that has no backend row of its own disappears
+        # and the object stops being visible at all.
+        if proxy not in has_backend_row:
+            return True
+        return servers_per_proxy.get(proxy, 0) > 1
+
+    kept = [entry for entry in objects if keep(entry)]
+    for entry in kept:
         entry["label"] = display_name(str(entry.get("proxy") or ""))
+    payload["objects"] = kept
+    payload["collapsed"] = len(objects) - len(kept)
     return payload
 
 
@@ -176,7 +231,8 @@ def backend_servers(path: str | None = None) -> List[Dict[str, Any]]:
     return found
 
 
-def channels(range_key: str) -> Dict[str, Any]:
+def channels(range_key: str,
+             window: Dict[str, int] | None = None) -> Dict[str, Any]:
     """The links this gateway reaches its backends through, with their traffic.
 
     Loopback is left out: those backends are this machine's own services --
@@ -185,8 +241,9 @@ def channels(range_key: str) -> Dict[str, Any]:
     """
 
     servers = backend_servers()
-    payload = metricsd_servers(range_key)
+    payload = metricsd_servers(range_key, window)
     labels = payload.get("labels") or {}
+    hidden = set(payload.get("hidden") or [])
 
     # (proxy, server) is what the collector keys on, so that is the join.
     measured = {
@@ -222,6 +279,7 @@ def channels(range_key: str) -> Dict[str, Any]:
 
     items = []
     for channel in grouped.values():
+        channel["hidden"] = channel["host"] in hidden
         names = channel.pop("names")
         # The name HAProxy was given is the best default label there is: an
         # operator who called it "main" and "bkp" has already named the links.
@@ -233,27 +291,34 @@ def channels(range_key: str) -> Dict[str, Any]:
         items.append(channel)
 
     # Live links first, then by how much went through them.
-    items.sort(key=lambda c: (c["backup"], -c["bytes_total"], c["host"]))
-    total = sum(c["bytes_total"] for c in items)
+    items.sort(key=lambda c: (c["hidden"], c["backup"], -c["bytes_total"],
+                              c["host"]))
+    # Shares are of what is shown. A hidden host is one the operator has said
+    # is not an uplink, and counting it would make the percentages answer a
+    # question nobody asked.
+    total = sum(c["bytes_total"] for c in items if not c["hidden"])
     for channel in items:
         channel["share"] = round(
             100.0 * channel["bytes_total"] / total, 1
-        ) if total else 0.0
+        ) if total and not channel["hidden"] else 0.0
 
     return {
         "ok": True,
         "range": payload.get("range", range_key),
         "since": payload.get("since", 0),
         "until": payload.get("until", 0),
-        "channels": items,
+        "channels": [c for c in items if not c["hidden"]],
+        "hidden": [c for c in items if c["hidden"]],
         "bytes_total": total,
     }
 
 
-def save_channel_labels(labels: Any) -> Dict[str, Any]:
+def save_channel_labels(labels: Any, hidden: Any = None) -> Dict[str, Any]:
     if not isinstance(labels, dict):
         raise ValueError("labels must be an object")
-    return metricsd_channel_labels_save(labels)
+    if hidden is not None and not isinstance(hidden, list):
+        raise ValueError("hidden must be a list")
+    return metricsd_channel_labels_save(labels, hidden)
 
 
 def unavailable_payload(exc: MetricsdUnavailable) -> Dict[str, Any]:

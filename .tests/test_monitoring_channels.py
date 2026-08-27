@@ -206,12 +206,190 @@ backend be_site_four
         self.assertEqual(result["channels"][0]["share"], 0.0)
 
 
+class PuttingALinkAway(unittest.TestCase):
+    """Not every backend host is an uplink, and the list has to be tidyable."""
+
+    def setUp(self):
+        self.path = write_config(CONFIG + """
+backend be_one_off
+    server app1 203.0.113.99:8080 check
+""")
+        self.addCleanup(lambda: Path(self.path).unlink(missing_ok=True))
+        self.payload = {
+            "range": "24h", "since": 1, "until": 2, "labels": {}, "hidden": [],
+            "servers": [
+                {"proxy": "be_site_one", "server": "main",
+                 "bytes_in": 400, "bytes_out": 600, "sessions": 4},
+                {"proxy": "be_one_off", "server": "app1",
+                 "bytes_in": 100, "bytes_out": 100, "sessions": 1},
+            ],
+        }
+
+    def channels(self, hidden=()):
+        payload = dict(self.payload, hidden=list(hidden))
+        with mock.patch.object(monitoring, "HAPROXY_CFG", self.path),                 mock.patch.object(monitoring, "metricsd_servers",
+                                  return_value=payload):
+            return monitoring.channels("24h")
+
+    def test_a_hidden_host_leaves_the_list(self):
+        shown = [c["host"] for c in self.channels(["203.0.113.99"])["channels"]]
+        self.assertNotIn("203.0.113.99", shown)
+
+    def test_it_is_still_reachable_so_it_can_come_back(self):
+        away = self.channels(["203.0.113.99"])["hidden"]
+        self.assertEqual([c["host"] for c in away], ["203.0.113.99"])
+
+    def test_its_traffic_leaves_the_total_and_the_shares(self):
+        # Otherwise the percentages answer a question nobody asked: shares
+        # of a set that includes something the operator said is not a link.
+        before = self.channels()
+        after = self.channels(["203.0.113.99"])
+        self.assertEqual(before["bytes_total"], 1200)
+        self.assertEqual(after["bytes_total"], 1000)
+        self.assertAlmostEqual(
+            sum(c["share"] for c in after["channels"]), 100.0, places=1
+        )
+
+    def test_a_hidden_link_carries_no_share(self):
+        away = self.channels(["203.0.113.99"])["hidden"][0]
+        self.assertEqual(away["share"], 0.0)
+
+
+class TheChosenPeriod(unittest.TestCase):
+    """A preset cannot answer what happened on Tuesday morning."""
+
+    def test_a_valid_pair_is_taken(self):
+        window = monitoring.normalize_window("1000000", "1003600")
+        self.assertEqual(window, {"since": 1000000, "until": 1003600})
+
+    def test_nonsense_falls_back_to_the_preset(self):
+        for since, until in (("", ""), ("x", "y"), (None, None),
+                             ("1000", "500"), ("-5", "100"), ("0", "0")):
+            with self.subTest(since=since, until=until):
+                self.assertEqual(monitoring.normalize_window(since, until), {})
+
+    def test_a_window_too_short_to_mean_anything_is_refused(self):
+        self.assertEqual(monitoring.normalize_window("1000000", "1000030"), {})
+
+    def test_a_mistyped_year_is_clamped_rather_than_scanned(self):
+        window = monitoring.normalize_window("0", "2000000000")
+        self.assertEqual(window, {})
+        window = monitoring.normalize_window("1", "2000000000")
+        self.assertEqual(
+            window["until"] - window["since"], monitoring.MAX_WINDOW_SECONDS
+        )
+
+    def test_the_daemon_prefers_the_pair_over_the_preset(self):
+        source = (
+            ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
+            / "easy-ha-proxy-metricsd.py"
+        ).read_text(encoding="utf-8")
+        block = source.split("def resolve_window")[1].split(chr(10) + "def ")[0]
+        self.assertIn('return "custom"', block)
+        self.assertIn("MAX_RANGE_SECONDS", block)
+        # And the summary must not snap the end back to now, which would
+        # report the wrong period while looking right.
+        summary = source.split('if path == "/api/v1/metrics/summary"')[1][:900]
+        self.assertNotIn("until = _utc_now()", summary)
+
+
+class OneBackendOneRow(unittest.TestCase):
+    """A backend with a single server said the same thing twice."""
+
+    def payload(self, objects):
+        return {"objects": objects, "since": 0, "until": 1}
+
+    def states(self, objects):
+        with mock.patch.object(monitoring, "metricsd_states",
+                               return_value=self.payload(objects)),                 mock.patch.object(monitoring, "display_name",
+                                  side_effect=lambda p: p):
+            return monitoring.states("24h", "")
+
+    def test_the_lone_server_row_goes_and_the_backend_row_stays(self):
+        result = self.states([
+            {"proxy": "be_authelia", "server": ""},
+            {"proxy": "be_authelia", "server": "authelia"},
+        ])
+        self.assertEqual(len(result["objects"]), 1)
+        self.assertEqual(result["objects"][0]["server"], "")
+        self.assertEqual(result["collapsed"], 1)
+
+    def test_several_servers_are_all_worth_showing(self):
+        # Which member is down is exactly what an operator needs here.
+        result = self.states([
+            {"proxy": "be_site", "server": ""},
+            {"proxy": "be_site", "server": "main"},
+            {"proxy": "be_site", "server": "bkp"},
+        ])
+        self.assertEqual(len(result["objects"]), 3)
+        self.assertEqual(result["collapsed"], 0)
+
+    def test_a_server_with_no_backend_row_is_kept(self):
+        # Never drop the only row an object has.
+        result = self.states([{"proxy": "be_orphan", "server": "srv1"}])
+        self.assertEqual(len(result["objects"]), 1)
+
+
+class AnOlderCollectorSaysSo(unittest.TestCase):
+    """Version skew has to announce itself, not look like missing data.
+
+    A collector older than the page ignores since/until and answers with its
+    own preset. The charts then plot a day of points inside a two-hour
+    window, every one falls outside, and the page reports "no data for this
+    period" -- true of what it was handed, and entirely misleading about
+    why. Measured on a live gateway: asked for two hours, got range "24h"
+    and 1439 points spanning the whole day. The hide button had the quieter
+    version of the same fault: the request was accepted, the list dropped,
+    and ok returned, so the button appeared to do nothing.
+    """
+
+    def setUp(self):
+        self.script = (
+            ROOT / "docker" / "app" / "haproxy_admin" / "static" / "js"
+            / "monitoring.js"
+        ).read_text(encoding="utf-8")
+
+    def test_the_answer_is_checked_against_what_was_asked(self):
+        block = self.script.split("function noteWindowSkew")[1][:600]
+        self.assertIn('payload.range === "custom"', block)
+
+    def test_it_only_complains_when_a_period_was_actually_chosen(self):
+        block = self.script.split("function noteWindowSkew")[1][:600]
+        self.assertIn("if (!customWindow", block)
+
+    def test_the_hide_request_checks_the_answer_carried_the_list_back(self):
+        block = self.script.split("async function saveChannels")[1][:2000]
+        self.assertIn("data.hidden === undefined", block)
+
+    def test_the_daemon_names_the_window_it_used(self):
+        # The whole check rests on this: without a label in the answer the
+        # page cannot tell a honoured window from an ignored one.
+        source = (
+            ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
+            / "easy-ha-proxy-metricsd.py"
+        ).read_text(encoding="utf-8")
+        block = source.split("def resolve_window")[1].split(chr(10) + "def ")[0]
+        self.assertIn('return "custom"', block)
+
+
 class SavingTheNames(unittest.TestCase):
     def test_it_refuses_anything_that_is_not_a_mapping(self):
         for payload in ([], "x", 7, None):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
                     monitoring.save_channel_labels(payload)
+
+    def test_hidden_must_be_a_list_when_given(self):
+        with self.assertRaises(ValueError):
+            monitoring.save_channel_labels({}, "not-a-list")
+
+    def test_omitting_hidden_leaves_it_alone(self):
+        # The daemon reads absent as "leave it", so a rename must not empty
+        # the list of what was put away.
+        with mock.patch.object(monitoring, "metricsd_channel_labels_save",
+                               return_value={"ok": True}) as saved:
+            monitoring.save_channel_labels({"h": "x"})
+        self.assertIsNone(saved.call_args[0][1])
 
 
 class TheDaemonSideIsWired(unittest.TestCase):
