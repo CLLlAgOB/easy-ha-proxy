@@ -421,5 +421,93 @@ class TheDaemonSideIsWired(unittest.TestCase):
         self.assertIn("too long", block)
 
 
+
+
+class TheWindowSurvivesTheWholeCallPath(unittest.TestCase):
+    """Every read has to carry the period all the way to the socket.
+
+    This exists because it did not. `metricsd_states` and `metricsd_series`
+    never took the argument the service layer had started passing, and every
+    chart on the page answered 500 with
+
+        TypeError: metricsd_series() takes from 2 to 3 positional arguments
+        but 4 were given
+
+    while the summary cards above them, whose signature had been widened,
+    kept showing numbers. The page reported "no data for this period" for
+    all five charts, which is what the browser is left to say when the
+    request fails.
+
+    The suite did not catch it because it mocked the client functions, and a
+    mock accepts any signature at all. So these call the real service
+    functions and intercept the transport instead -- the one seam below
+    which nothing of ours runs. A signature that stops matching raises here,
+    the way it did in production.
+    """
+
+    def setUp(self):
+        self.seen = []
+
+        def record(path, params=None, timeout=None):
+            self.seen.append((path, dict(params or {})))
+            return {"ok": True, "objects": [], "points": [], "series": {},
+                    "totals": {}, "health": {}, "servers": [], "labels": {},
+                    "hidden": []}
+
+        # Patch the module object, not a dotted string. Under discovery the
+        # string form cannot be resolved -- by the time this runs, another
+        # test module has imported the package without binding this
+        # submodule as an attribute, and mock's lookup raises
+        # AttributeError. Importing it here binds it and hands back the very
+        # module whose globals the real client function consults.
+        from haproxy_admin import metricsd_client
+
+        patcher = mock.patch.object(
+            metricsd_client, "_get_json", side_effect=record
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    WINDOW = {"since": 1787846270, "until": 1787853470}
+
+    def params_for(self, fragment):
+        for path, params in self.seen:
+            if fragment in path:
+                return params
+        self.fail(f"nothing asked for {fragment}: {self.seen}")
+
+    def test_the_charts_carry_it(self):
+        monitoring.series("requests", "24h", "", self.WINDOW)
+        params = self.params_for("/series")
+        self.assertEqual(params.get("since"), self.WINDOW["since"])
+        self.assertEqual(params.get("until"), self.WINDOW["until"])
+        self.assertEqual(params.get("chart"), "requests")
+
+    def test_the_timeline_carries_it(self):
+        monitoring.states("24h", "", self.WINDOW)
+        params = self.params_for("/states")
+        self.assertEqual(params.get("since"), self.WINDOW["since"])
+        self.assertEqual(params.get("until"), self.WINDOW["until"])
+
+    def test_the_cards_carry_it(self):
+        monitoring.summary("24h", "", self.WINDOW)
+        params = self.params_for("/summary")
+        self.assertEqual(params.get("since"), self.WINDOW["since"])
+        self.assertEqual(params.get("until"), self.WINDOW["until"])
+
+    def test_a_preset_sends_no_period_at_all(self):
+        # The absence matters: sending a stale since/until alongside a preset
+        # would pin every refresh to the moment the page was opened.
+        monitoring.series("requests", "24h", "", {})
+        params = self.params_for("/series")
+        self.assertNotIn("since", params)
+        self.assertNotIn("until", params)
+        self.assertEqual(params.get("range"), "24h")
+
+    def test_a_site_still_scopes_the_chart(self):
+        monitoring.series("requests", "24h", "example.com", self.WINDOW)
+        self.assertEqual(self.params_for("/series").get("site"), "example.com")
+
+
 if __name__ == "__main__":
     unittest.main()

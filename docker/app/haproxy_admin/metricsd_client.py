@@ -138,15 +138,17 @@ def metricsd_channel_labels_save(
     return data
 
 
-def metricsd_states(range_key: str, site: str = "") -> Dict[str, Any]:
-    params: Dict[str, Any] = {"range": range_key}
-    if site:
-        params["site"] = site
-    return _get_json("/api/v1/metrics/states", params=params, timeout=15)
+def metricsd_states(range_key: str, site: str = "",
+                    window: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    return _get_json(
+        "/api/v1/metrics/states",
+        params=_window_params(range_key, site, window),
+        timeout=15,
+    )
 
 
-def metricsd_series(chart: str, range_key: str, site: str = "") -> Dict[str, Any]:
-    params: Dict[str, Any] = {"chart": chart, "range": range_key}
-    if site:
-        params["site"] = site
+def metricsd_series(chart: str, range_key: str, site: str = "",
+                    window: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    params = _window_params(range_key, site, window)
+    params["chart"] = chart
     return _get_json("/api/v1/metrics/series", params=params, timeout=15)
