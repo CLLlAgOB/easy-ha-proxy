@@ -406,6 +406,11 @@
       <div class="mon-classes" id="mon-classes" data-i18n-skip translate="no"></div>
       <div class="mon-sub" id="mon-error-ratio"></div>
     </div>
+    <div class="mon-card" id="mon-card-cpu" hidden>
+      <div class="mon-label">Processor</div>
+      <div class="mon-value" id="mon-cpu" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-cpu-detail" data-i18n-skip translate="no"></div>
+    </div>
     <div class="mon-card">
       <div class="mon-label">Backend health</div>
       <div class="mon-value" id="mon-health" data-i18n-skip translate="no">—</div>
@@ -454,6 +459,13 @@
       <div class="mon-sub">Concurrent connections</div>
       <svg class="mon-plot" id="mon-plot-connections" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-connections"></div>
+    </div>
+
+    <div class="mon-chart">
+      <h3>Processor</h3>
+      <div class="mon-sub">Percent of the machine</div>
+      <svg class="mon-plot" id="mon-plot-cpu" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-cpu"></div>
     </div>
   </div>
 </div>

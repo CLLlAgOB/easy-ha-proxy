@@ -186,20 +186,37 @@ class CollectorTestCase(unittest.TestCase):
         with mock.patch.object(metricsd, "_utc_now", return_value=now):
             return self.collector.flush(force=True)
 
-    def rows(self, table="metric_1m"):
+    def rows(self, table="metric_1m", kind=None):
+        """Stored rows for the proxy objects.
+
+        Every poll also records the machine's own load as a synthetic 'host'
+        object. That is a different question from the ones these tests ask,
+        and counting it here would have every traffic assertion off by one,
+        so it is excluded unless asked for by name.
+        """
+
         connection = sqlite3.connect(str(self.database.path))
         connection.row_factory = sqlite3.Row
         try:
+            if kind is None:
+                predicate, parameters = "o.kind != ?", [metricsd.HOST_KIND]
+            else:
+                predicate, parameters = "o.kind = ?", [kind]
             return [
                 dict(row)
                 for row in connection.execute(
                     f"SELECT o.kind, o.proxy, o.server, m.* FROM {table} m "
                     "JOIN objects o ON o.id = m.object_id "
-                    "ORDER BY m.bucket_ts, o.proxy, o.server"
+                    f"WHERE {predicate} "
+                    "ORDER BY m.bucket_ts, o.proxy, o.server",
+                    parameters,
                 )
             ]
         finally:
             connection.close()
+
+    def host_rows(self, table="metric_1m"):
+        return self.rows(table=table, kind=metricsd.HOST_KIND)
 
 
 class DeltaTests(CollectorTestCase):
@@ -1091,6 +1108,13 @@ class ReadApiTests(CollectorTestCase):
                 self.database.rollup_hours(bucket_ts + metricsd.HOUR_SECONDS)
         return object_id
 
+    def seed_host(self, buckets, **columns):
+        """The machine's own row, so the cpu chart has something to return."""
+
+        values = {"cpu_avg": 250, "cpu_max": 400, "haproxy_busy_avg": 100}
+        values.update(columns)
+        return self.seed(metricsd.HOST_KIND, "", "", buckets, **values)
+
     def test_range_and_resolution_are_chosen_from_an_allow_list(self):
         self.assertEqual(metricsd.resolve_range("24h"), ("24h", 86400))
         self.assertEqual(metricsd.resolve_range("bogus"), ("24h", 86400))
@@ -1140,6 +1164,11 @@ class ReadApiTests(CollectorTestCase):
             response_ms_avg=8, response_ms_max=9,
             conn_cur_avg=10, conn_cur_max=11,
         )
+        # The machine's own row, on the same bucket: the cpu chart reads a
+        # different object entirely, and without it this loop would pass
+        # every chart and quietly skip the only one that is scoped
+        # differently.
+        self.seed_host([600])
         for chart, columns in metricsd.CHART_SERIES.items():
             payload = self.database.series(
                 chart=chart, site="", since=0, until=1200
@@ -1462,6 +1491,259 @@ class StorageAlertTests(unittest.TestCase):
         guard.alerts = None
         guard.writes_paused = False
         guard._report_to_alerts(mock.Mock(state="CRITICAL", reason=""))
+
+
+class TheMachinesOwnLoad(unittest.TestCase):
+    """CPU, which no `show stat` row reports.
+
+    Stored as a synthetic object of kind 'host' so it inherits the existing
+    bucketing, rollup and retention rather than growing a second system
+    beside them. The whole design rests on nothing else selecting that kind,
+    which the leak tests below pin down.
+    """
+
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.database = metricsd.MetricsDatabase(
+            str(Path(self._temporary.name) / "metrics.db")
+        )
+        self.addCleanup(self.database.close)
+        self.config = metricsd.load_config("/nonexistent/metricsd.json")
+        self.collector = metricsd.Collector(self.config, self.database)
+
+    def read(self, *lines):
+        """Drive _read_host_cpu off a fabricated /proc/stat."""
+
+        data = "\n".join(lines)
+        with mock.patch("builtins.open", mock.mock_open(read_data=data)):
+            return self.collector._read_host_cpu()
+
+    def test_the_first_reading_is_nothing_not_zero(self):
+        # CPU is a rate. With nothing to subtract from, the honest answer is
+        # "no reading yet"; a zero would draw a floor that never happened.
+        self.assertIsNone(self.read("cpu 100 0 100 800 0 0 0 0"))
+
+    def test_the_second_reading_is_the_share_that_was_busy(self):
+        self.read("cpu 100 0 100 800 0 0 0 0")
+        # 100 more busy jiffies, 100 more idle: half the interval was work.
+        self.assertEqual(self.read("cpu 150 0 150 900 0 0 0 0"), 500)
+
+    def test_iowait_counts_as_idle(self):
+        # The processor was free; the disk was not. Calling that busy blames
+        # the wrong component for a slow gateway.
+        self.read("cpu 100 0 100 800 100 0 0 0")
+        self.assertEqual(self.read("cpu 100 0 100 800 200 0 0 0"), 0)
+
+    def test_a_counter_that_went_backwards_reports_nothing(self):
+        self.read("cpu 500 0 500 5000 0 0 0 0")
+        self.assertIsNone(self.read("cpu 10 0 10 100 0 0 0 0"))
+
+    def test_an_unreadable_proc_costs_only_the_cpu_reading(self):
+        with mock.patch("builtins.open", side_effect=OSError("nope")):
+            self.assertIsNone(self.collector._read_host_cpu())
+
+    def test_a_garbled_line_reports_nothing(self):
+        self.assertIsNone(self.read("cpu bogus values here now ok fine"))
+
+    def test_it_never_exceeds_the_whole_machine(self):
+        self.read("cpu 0 0 0 0 0 0 0 0")
+        self.assertLessEqual(self.read("cpu 900 0 100 0 0 0 0 0"), 1000)
+
+    # -- HAProxy's own idle ------------------------------------------------
+
+    def test_haproxy_busy_is_the_complement_of_idle(self):
+        with mock.patch.object(
+            metricsd, "runtime_command",
+            return_value="Name: HAProxy\nIdle_pct: 93\n",
+        ):
+            self.assertEqual(self.collector._read_haproxy_busy(), 70)
+
+    def test_a_missing_idle_line_reports_nothing(self):
+        with mock.patch.object(
+            metricsd, "runtime_command", return_value="Name: HAProxy\n"
+        ):
+            self.assertIsNone(self.collector._read_haproxy_busy())
+
+    def test_a_failed_runtime_call_costs_only_this_reading(self):
+        # It shares a poll with the traffic metrics and must never take them
+        # down with it.
+        with mock.patch.object(
+            metricsd, "runtime_command", side_effect=OSError("socket gone")
+        ):
+            self.assertIsNone(self.collector._read_haproxy_busy())
+
+    # -- it must not leak into anything else -------------------------------
+
+    def host_row(self, cpu=250, busy=100, bucket=3600):
+        object_id = self.database.object_id(metricsd.HOST_KIND, "", "", bucket)
+        row = {column: 0 for column in metricsd.METRIC_COLUMNS}
+        row.update(samples=1, cpu_avg=cpu, cpu_max=cpu, haproxy_busy_avg=busy)
+        self.database.write_buckets(bucket, {object_id: row})
+
+    def traffic_row(self, bucket=3600, requests=500):
+        object_id = self.database.object_id("frontend", "fe_https", "", bucket)
+        row = {column: 0 for column in metricsd.METRIC_COLUMNS}
+        row.update(samples=1, requests=requests)
+        self.database.write_buckets(bucket, {object_id: row})
+
+    def test_the_host_row_is_not_counted_as_traffic(self):
+        self.host_row()
+        self.traffic_row(requests=500)
+        totals = self.database.totals(site="", since=0, until=7200)
+        self.assertEqual(totals["requests"], 500)
+
+    def test_the_host_is_not_offered_as_a_site(self):
+        self.host_row()
+        self.assertEqual([entry["proxy"] for entry in self.database.sites()], [])
+
+    def test_the_host_is_not_an_uplink(self):
+        self.host_row()
+        payload = self.database.server_totals(since=0, until=7200)
+        self.assertEqual(payload["servers"], [])
+
+    def test_the_chart_reads_percent_not_tenths(self):
+        self.host_row(cpu=250)
+        payload = self.database.series(chart="cpu", site="", since=0, until=7200)
+        self.assertEqual(payload["series"]["cpu_avg"], [25.0])
+
+    def test_choosing_a_site_does_not_filter_the_machine(self):
+        # One machine's CPU is not divisible among the sites it serves, so a
+        # site selection must leave the reading alone rather than empty it.
+        self.host_row(cpu=250)
+        payload = self.database.series(
+            chart="cpu", site="be_something_else", since=0, until=7200
+        )
+        self.assertEqual(payload["series"]["cpu_avg"], [25.0])
+
+    def test_the_summary_says_when_it_has_never_seen_the_machine(self):
+        # A database written before the collector could read it has no rows
+        # at all; a confident 0% would be a lie about an idle gateway.
+        self.traffic_row()
+        self.assertEqual(
+            self.database.host_load(since=0, until=7200), {"observed": False}
+        )
+
+    def test_the_summary_reports_percent_once_it_has(self):
+        self.host_row(cpu=250, busy=100)
+        load = self.database.host_load(since=0, until=7200)
+        self.assertTrue(load["observed"])
+        self.assertEqual(load["cpu_avg"], 25.0)
+        self.assertEqual(load["haproxy_busy_avg"], 10.0)
+
+
+class EveryStoredColumnSurvivesTheRollup(unittest.TestCase):
+    """The minute rows are deleted after a week; the hourly ones are the
+    history. A column collected and charted but missing from the rollup
+    lists would look perfect for seven days and then lose everything older
+    -- silently, and only for that one metric. The lists are derived from
+    the aggregation table for exactly that reason; this holds them to it.
+    """
+
+    def test_nothing_is_left_behind(self):
+        covered = (
+            set(metricsd._ROLLUP_SUM)
+            | set(metricsd._ROLLUP_MAX)
+            | set(metricsd._ROLLUP_WAVG)
+        )
+        forgotten = [
+            column
+            for column in metricsd.METRIC_COLUMNS
+            if column != "samples" and column not in covered
+        ]
+        self.assertEqual(forgotten, [])
+
+    def test_every_column_knows_how_it_aggregates(self):
+        missing = [
+            column
+            for column in metricsd.METRIC_COLUMNS
+            if column != "samples" and column not in metricsd._AGGREGATIONS
+        ]
+        self.assertEqual(missing, [])
+
+    def test_the_load_actually_reaches_the_hourly_table(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = metricsd.MetricsDatabase(
+            str(Path(temporary.name) / "metrics.db")
+        )
+        self.addCleanup(database.close)
+
+        object_id = database.object_id(metricsd.HOST_KIND, "", "", 3600)
+        for bucket in (3600, 3660):
+            row = {column: 0 for column in metricsd.METRIC_COLUMNS}
+            row.update(samples=1, cpu_avg=400, cpu_max=600)
+            database.write_buckets(bucket, {object_id: row})
+
+        database.rollup_hours(7200)
+        connection = sqlite3.connect(str(database.path))
+        try:
+            row = connection.execute(
+                "SELECT cpu_avg, cpu_max FROM metric_1h"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, (400, 600))
+
+
+class ANewColumnIsAddedToAnExistingDatabase(unittest.TestCase):
+    """Upgrading must not cost the operator their history."""
+
+    def test_a_table_missing_the_column_gets_it_without_losing_rows(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = str(Path(temporary.name) / "metrics.db")
+
+        database = metricsd.MetricsDatabase(path)
+        object_id = database.object_id("backend", "be_site", "", 0)
+        row = {column: 0 for column in metricsd.METRIC_COLUMNS}
+        row.update(samples=6, requests=99)
+        database.write_buckets(3600, {object_id: row})
+        database.close()
+
+        # Put the table back the way a build without CPU columns left it.
+        connection = sqlite3.connect(path)
+        try:
+            for column in (
+                "cpu_avg", "cpu_max", "haproxy_busy_avg", "haproxy_busy_max",
+            ):
+                connection.execute(
+                    f"ALTER TABLE metric_1m DROP COLUMN {column}"
+                )
+            connection.commit()
+        except sqlite3.OperationalError:
+            connection.close()
+            self.skipTest("this sqlite cannot drop columns")
+        else:
+            connection.close()
+
+        reopened = metricsd.MetricsDatabase(path)
+        self.addCleanup(reopened.close)
+        connection = sqlite3.connect(path)
+        try:
+            names = {
+                str(entry[1])
+                for entry in connection.execute("PRAGMA table_info(metric_1m)")
+            }
+            kept = connection.execute("SELECT requests FROM metric_1m").fetchone()
+        finally:
+            connection.close()
+        self.assertIn("cpu_avg", names)
+        self.assertEqual(kept[0], 99)
+
+    def test_reopening_a_current_database_adds_nothing(self):
+        # The ensure runs on every open, so it has to be a no-op the second
+        # time rather than an error about a duplicate column.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = str(Path(temporary.name) / "metrics.db")
+        first = metricsd.MetricsDatabase(path)
+        first.close()
+        second = metricsd.MetricsDatabase(path)
+        self.addCleanup(second.close)
+        self.assertEqual(
+            second.stats()["schema_version"], metricsd.SCHEMA_VERSION
+        )
 
 
 if __name__ == "__main__":

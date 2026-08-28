@@ -64,6 +64,16 @@
         { key: "conn_cur_avg", label: "Average", color: "#4a86c8" },
         { key: "conn_cur_max", label: "Peak", color: "#c8a13a" }
       ]
+    },
+    {
+      // Never a rate: these arrive as percentages and dividing them by the
+      // bucket step would turn 40% into 0.7 of nothing.
+      name: "cpu",
+      series: [
+        { key: "cpu_avg", label: "Average", color: "#4a86c8", percent: true },
+        { key: "cpu_max", label: "Peak", color: "#c8a13a", percent: true },
+        { key: "haproxy_busy_avg", label: "HAProxy", color: "#8a63d2", percent: true }
+      ]
     }
   ];
 
@@ -125,6 +135,7 @@
   }
 
   function axisLabel(spec, value) {
+    if (spec.percent) return `${decimalFormat.format(value)}%`;
     if (spec.bytes) return formatBytes(value);
     if (value >= 1000) return formatCount(Math.round(value));
     return decimalFormat.format(value);
@@ -285,7 +296,11 @@
       const reading = document.createElement("b");
       reading.setAttribute("data-i18n-skip", "");
       reading.setAttribute("translate", "no");
-      reading.textContent = spec.bytes ? `${formatBytes(value)}/s` : formatRate(value);
+      reading.textContent = spec.percent
+        ? `${decimalFormat.format(value)}%`
+        : spec.bytes
+          ? `${formatBytes(value)}/s`
+          : formatRate(value);
       item.appendChild(reading);
       legend.appendChild(item);
     });
@@ -491,6 +506,21 @@
       "mon-health-servers",
       `${uiText("Servers up")}: ${formatCount(health.servers_up)} / ${formatCount(health.servers_total)}`
     );
+
+    // Hidden rather than shown as 0% when there is nothing to show: a
+    // database written before the collector learned to read the machine has
+    // no rows at all for it, and a confident zero would be a lie.
+    const load = data.load || {};
+    const cpuCard = byId("mon-card-cpu");
+    if (cpuCard) cpuCard.hidden = !load.observed;
+    if (load.observed) {
+      setText("mon-cpu", `${decimalFormat.format(load.cpu_avg)}%`);
+      setText(
+        "mon-cpu-detail",
+        `${uiText("Peak")}: ${decimalFormat.format(load.cpu_max)}%`
+        + ` · HAProxy: ${decimalFormat.format(load.haproxy_busy_avg)}%`
+      );
+    }
 
     const collector = data.collector || {};
     showPaused(Boolean(collector.writes_paused));

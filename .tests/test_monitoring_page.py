@@ -148,7 +148,10 @@ class PageAssetTests(unittest.TestCase):
         charts = re.findall(r'name:\s*"([a-z]+)"', self.javascript)
         self.assertEqual(
             sorted(charts),
-            sorted(["requests", "traffic", "responses", "latency", "connections"]),
+            sorted([
+                "requests", "traffic", "responses", "latency", "connections",
+                "cpu",
+            ]),
         )
         for chart in charts:
             self.assertIn(f'id="mon-plot-{chart}"', self.template)

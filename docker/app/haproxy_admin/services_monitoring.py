@@ -37,6 +37,7 @@ CHARTS: Tuple[str, ...] = (
     "responses",
     "latency",
     "connections",
+    "cpu",
 )
 
 

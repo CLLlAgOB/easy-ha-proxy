@@ -194,6 +194,10 @@ _AGGREGATIONS: Dict[str, str] = {
     "total_ms_avg": "wavg",
     "connect_ms_avg": "wavg",
     "queue_ms_avg": "wavg",
+    "cpu_avg": "wavg",
+    "cpu_max": "max",
+    "haproxy_busy_avg": "wavg",
+    "haproxy_busy_max": "max",
 }
 
 CHART_SERIES: Dict[str, Tuple[str, ...]] = {
@@ -202,7 +206,24 @@ CHART_SERIES: Dict[str, Tuple[str, ...]] = {
     "responses": ("resp_2xx", "resp_3xx", "resp_4xx", "resp_5xx"),
     "latency": ("response_ms_avg", "response_ms_max"),
     "connections": ("conn_cur_avg", "conn_cur_max"),
+    # The machine, not the traffic. Two different questions live here: the
+    # host can sit at 12% while HAProxy's own event loop is saturated and
+    # every request is queueing behind it, and on a two-core gateway that
+    # difference is the whole diagnosis.
+    "cpu": ("cpu_avg", "cpu_max", "haproxy_busy_avg"),
 }
+
+# Charts about the machine rather than about a proxy object. They select the
+# synthetic 'host' row and ignore any site: one machine's CPU is not
+# divisible among the sites it serves.
+HOST_CHARTS = frozenset({"cpu"})
+HOST_KIND = "host"
+
+# CPU is stored as tenths of a percent. Whole percent would round a gateway
+# that idles at 0.4% down to a flat zero line, which reads as "broken"
+# rather than "quiet"; the read API divides it back out, so what leaves the
+# daemon is an ordinary percentage.
+CPU_SCALE = 10
 
 SUMMARY_COLUMNS: Tuple[str, ...] = (
     "requests",
@@ -332,22 +353,28 @@ METRIC_COLUMNS: Tuple[str, ...] = (
     "response_ms_avg",
     "response_ms_max",
     "total_ms_avg",
+    "cpu_avg",
+    "cpu_max",
+    "haproxy_busy_avg",
+    "haproxy_busy_max",
 )
 # Columns summed when rolling minutes up into hours; the rest are averaged
 # (weighted by sample count) or maxed, see _ROLLUP_MAX.
-_ROLLUP_SUM = (
-    "requests",
-    "sessions",
-    "bytes_in",
-    "bytes_out",
-    "resp_2xx",
-    "resp_3xx",
-    "resp_4xx",
-    "resp_5xx",
-    "resp_other",
-    "check_failures",
+# Derived from _AGGREGATIONS rather than written out again. Kept as three
+# separate lists, a column added to the schema but forgotten here would still
+# be collected and still be charted -- and then quietly vanish the moment the
+# minute rows aged out and only the hourly rollup was left. Deriving them
+# makes that impossible to get wrong; a test asserts every stored column is
+# accounted for.
+_ROLLUP_SUM = tuple(
+    column for column in METRIC_COLUMNS if _AGGREGATIONS.get(column) == "sum"
 )
-_ROLLUP_MAX = ("conn_cur_max", "queue_max", "response_ms_max")
+_ROLLUP_MAX = tuple(
+    column for column in METRIC_COLUMNS if _AGGREGATIONS.get(column) == "max"
+)
+_ROLLUP_WAVG = tuple(
+    column for column in METRIC_COLUMNS if _AGGREGATIONS.get(column) == "wavg"
+)
 
 DEFAULT_EXCLUDE_EXACT = (
     "be_admin",
@@ -725,6 +752,10 @@ class Bucket:
             "response_ms_avg": average("response_ms"),
             "response_ms_max": self.gauge_maxima.get("response_ms", 0),
             "total_ms_avg": average("total_ms"),
+            "cpu_avg": average("cpu"),
+            "cpu_max": self.gauge_maxima.get("cpu", 0),
+            "haproxy_busy_avg": average("haproxy_busy"),
+            "haproxy_busy_max": self.gauge_maxima.get("haproxy_busy", 0),
         }
 
 
@@ -763,6 +794,7 @@ class MetricsDatabase:
                 cursor.execute(statement)
             cursor.execute(_metric_table_sql("metric_1m"))
             cursor.execute(_metric_table_sql("metric_1h"))
+            self._add_missing_metric_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_metric_1m_object "
                 "ON metric_1m (object_id, bucket_ts)"
@@ -801,6 +833,36 @@ class MetricsDatabase:
                 LOG.info("Migrated metrics database to schema v%d", current)
             cursor.execute("UPDATE schema_version SET version = ?", (current,))
             cursor.close()
+
+    @staticmethod
+    def _add_missing_metric_columns(cursor: sqlite3.Cursor) -> None:
+        """Bring both metric tables up to the current column list.
+
+        Deliberately not a numbered migration. A new metric column is purely
+        additive -- every stored row keeps its values and the new one defaults
+        to zero -- so bumping the schema version would buy nothing and cost
+        the ability to roll the daemon back: the version guard makes an older
+        build refuse the file outright, and refusing to start is a far worse
+        failure than ignoring a column it does not know about.
+
+        Run on every open rather than once, so it is self-healing: a database
+        that somehow missed a column gets it on the next start, and adding a
+        column in future needs no migration entry at all.
+        """
+
+        for table in ("metric_1m", "metric_1h"):
+            existing = {
+                str(row["name"])
+                for row in cursor.execute(f"PRAGMA table_info({table})")
+            }
+            for column in METRIC_COLUMNS:
+                if column in existing:
+                    continue
+                cursor.execute(
+                    f"ALTER TABLE {table} "
+                    f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+                LOG.info("Added metrics column %s.%s", table, column)
 
     def close(self) -> None:
         with self._lock:
@@ -936,14 +998,7 @@ class MetricsDatabase:
         # Counters add up; sample-weighted averages keep a partial minute from
         # counting as much as a complete one; peaks stay peaks.
         sums = ", ".join(f"SUM({column})" for column in _ROLLUP_SUM)
-        averaged = (
-            "conn_cur_avg",
-            "queue_avg",
-            "queue_ms_avg",
-            "connect_ms_avg",
-            "response_ms_avg",
-            "total_ms_avg",
-        )
+        averaged = _ROLLUP_WAVG
         projection = [
             f"bucket_ts - (bucket_ts % {HOUR_SECONDS}) AS hour_ts",
             "object_id",
@@ -1082,7 +1137,13 @@ class MetricsDatabase:
     ) -> Dict[str, Any]:
         columns = CHART_SERIES[chart]
         table, step = choose_resolution(max(1, until - since))
-        predicate, parameters = self._scope(site)
+        if chart in HOST_CHARTS:
+            # The machine's own row, and never scoped by site: picking a site
+            # must not appear to filter a number that has nothing to do with
+            # it. The kind is a module constant, not anything a caller sent.
+            predicate, parameters = "o.kind = 'host'", []
+        else:
+            predicate, parameters = self._scope(site)
         projection = ", ".join(_aggregate_sql(column) for column in columns)
         query = (
             f"SELECT (m.bucket_ts / {step}) * {step} AS slot, {projection} "
@@ -1096,10 +1157,19 @@ class MetricsDatabase:
             ).fetchall()
 
         points = [int(row["slot"]) for row in rows]
-        values = {
-            column: [int(row[index + 1]) for row in rows]
-            for index, column in enumerate(columns)
-        }
+        if chart in HOST_CHARTS:
+            # Back to a plain percentage, one decimal, at the edge -- the
+            # tenths are a storage detail and nothing outside this file
+            # should have to know about them.
+            values = {
+                column: [round(row[index + 1] / CPU_SCALE, 1) for row in rows]
+                for index, column in enumerate(columns)
+            }
+        else:
+            values = {
+                column: [int(row[index + 1]) for row in rows]
+                for index, column in enumerate(columns)
+            }
         return {
             "chart": chart,
             "resolution_seconds": step,
@@ -1107,6 +1177,35 @@ class MetricsDatabase:
             "points": points[:MAX_CHART_POINTS],
             "series": {
                 name: value[:MAX_CHART_POINTS] for name, value in values.items()
+            },
+        }
+
+    def host_load(self, *, since: int, until: int) -> Dict[str, float]:
+        """Average and peak load over the window, as percentages.
+
+        Zero rows is not zero load -- it means this gateway has not collected
+        any yet, which is the normal state for the first minute after an
+        upgrade and for every database written before v3. The caller is told
+        which of the two it is rather than being handed a confident 0%.
+        """
+
+        table, _ = choose_resolution(max(1, until - since))
+        columns = ("cpu_avg", "cpu_max", "haproxy_busy_avg", "haproxy_busy_max")
+        projection = ", ".join(_aggregate_sql(column) for column in columns)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS observed, {projection} FROM {table} m "
+                "JOIN objects o ON o.id = m.object_id "
+                "WHERE o.kind = 'host' AND m.bucket_ts >= ? AND m.bucket_ts < ?",
+                [since, until],
+            ).fetchone()
+        if row is None or not int(row["observed"]):
+            return {"observed": False}
+        return {
+            "observed": True,
+            **{
+                column: round(row[index + 1] / CPU_SCALE, 1)
+                for index, column in enumerate(columns)
             },
         }
 
@@ -1805,6 +1904,9 @@ class Collector:
         self._buckets: Dict[int, Bucket] = {}
         self._bucket_ts: Optional[int] = None
         self._last_states: Dict[int, str] = {}
+        # Previous (total, idle) jiffies. CPU is a rate, so the first poll
+        # after a start has nothing to compare against and reports nothing.
+        self._cpu_previous: Optional[Tuple[int, int]] = None
 
         self.last_poll_ts: Optional[int] = None
         self.last_flush_ts: Optional[int] = None
@@ -1896,11 +1998,100 @@ class Collector:
                 self._observe(kind, proxy, server, row, now)
                 observed += 1
 
+            self._observe_host(now)
+
         self.polls_total += 1
         self.last_poll_ts = now
         self.consecutive_failures = 0
         self.last_error = None
         return observed
+
+    def _observe_host(self, now: int) -> None:
+        """The machine's own load, which no `show stat` row reports.
+
+        Stored as an object like every other one, so it inherits the same
+        bucketing, rollup and retention for free. Nothing in the read API
+        selects kind 'host' except the chart that wants it, so it cannot leak
+        into a traffic total.
+        """
+
+        cpu = self._read_host_cpu()
+        busy = self._read_haproxy_busy()
+        if cpu is None and busy is None:
+            return
+
+        key = (HOST_KIND, "", "")
+        object_id = self._object_ids.get(key)
+        if object_id is None:
+            object_id = self.database.object_id(HOST_KIND, "", "", now)
+            self._object_ids[key] = object_id
+
+        bucket = self._buckets.get(object_id)
+        if bucket is None:
+            bucket = Bucket()
+            self._buckets[object_id] = bucket
+        bucket.samples += 1
+        if cpu is not None:
+            bucket.add_gauge("cpu", cpu)
+        if busy is not None:
+            bucket.add_gauge("haproxy_busy", busy)
+
+    def _read_host_cpu(self) -> Optional[int]:
+        """Host CPU since the previous poll, in tenths of a percent.
+
+        None rather than zero whenever the answer would be a guess: the first
+        poll after a start, a counter that went backwards, an unreadable
+        /proc. Load is supplementary here, and failing to read it must never
+        cost the traffic sample that shares this poll.
+        """
+
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as handle:
+                fields = handle.readline().split()
+        except OSError as exc:
+            LOG.debug("cannot read /proc/stat: %s", exc)
+            return None
+        if len(fields) < 9 or fields[0] != "cpu":
+            return None
+        try:
+            values = [int(value) for value in fields[1:9]]
+        except ValueError:
+            return None
+
+        # iowait counts as idle: the processor was available, the disk was
+        # not, and calling that "busy" would blame the wrong component.
+        idle = values[3] + values[4]
+        total = sum(values)
+        previous = self._cpu_previous
+        self._cpu_previous = (total, idle)
+        if previous is None:
+            return None
+        total_delta = total - previous[0]
+        idle_delta = idle - previous[1]
+        if total_delta <= 0:
+            return None
+        busy = max(0, total_delta - idle_delta)
+        return min(100 * CPU_SCALE, round(100 * CPU_SCALE * busy / total_delta))
+
+    def _read_haproxy_busy(self) -> Optional[int]:
+        """How much of its own time HAProxy spent working, in tenths.
+
+        The host figure cannot answer this. A gateway can idle at 10% while
+        HAProxy's event loop is saturated and every request waits behind it,
+        because the other cores have nothing to do with proxying.
+        """
+
+        try:
+            payload = runtime_command(self.config.haproxy_socket, "show info")
+        except Exception as exc:  # pylint: disable=broad-except
+            LOG.debug("show info failed: %s", exc)
+            return None
+        for line in payload.splitlines():
+            name, separator, value = line.partition(":")
+            if separator and name.strip() == "Idle_pct":
+                idle = max(0, min(100, _to_int(value)))
+                return (100 - idle) * CPU_SCALE
+        return None
 
     def _observe(
         self,
@@ -2290,6 +2481,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
                         totals["requests"] / range_seconds, 3
                     ),
                     "connections": database.latest_gauges(site=site, until=until),
+                    # Deliberately not scoped by site: one machine's load is
+                    # not divisible among the sites it serves.
+                    "load": database.host_load(since=since, until=until),
                     "health": database.backend_health(),
                     "collector": collector.health(),
                     "storage": collector.storage.report(until),

@@ -70,6 +70,8 @@
     "Period start": "Начало периода",
     "Period end": "Конец периода",
     "The collector on this gateway is an older version and ignores a chosen period; it answered with its own preset. Update the daemons component.": "Сборщик на этом шлюзе старой версии и не понимает произвольный период — он ответил своим пресетом. Обновите компонент демонов.",
-    "The collector on this gateway is an older version and cannot hide channels yet. Update the daemons component.": "Сборщик на этом шлюзе старой версии и пока не умеет скрывать каналы. Обновите компонент демонов."
+    "The collector on this gateway is an older version and cannot hide channels yet. Update the daemons component.": "Сборщик на этом шлюзе старой версии и пока не умеет скрывать каналы. Обновите компонент демонов.",
+    "Processor": "Процессор",
+    "Percent of the machine": "Процентов от машины"
   }
 }
