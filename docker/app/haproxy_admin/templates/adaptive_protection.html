@@ -69,6 +69,55 @@
 
 .ap-mode:disabled { opacity: .5; cursor: progress; }
 
+.ap-ladder-box {
+  margin: 14px 0 4px;
+  padding: 14px 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.ap-ladder-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.ap-ladder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ap-ladder span {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.ap-ladder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ap-ladder-row label { min-width: 90px; font-size: 13px; }
+.ap-ladder-row input { width: 90px; }
+
+.ap-ladder-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
 .ap-guardrails {
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -268,6 +317,29 @@
 
   <p class="mon-sub" id="ap-mode-effect"></p>
 
+  <div class="ap-ladder-box" id="ap-ladder-box">
+    <div class="ap-ladder-head">
+      <strong>How long a ban lasts</strong>
+      <button type="button" class="btn-small" id="ap-ladder-edit">Change the ladder</button>
+    </div>
+    <p class="mon-sub">
+      Each repeat finding within the strike window moves the address one step
+      down this list. The first step is the one a mistake lands on, so it is
+      kept short on purpose; the steps after it assume the address came back
+      and did it again.
+    </p>
+    <div class="ap-ladder" id="ap-ladder"></div>
+    <div class="ap-ladder-edit" id="ap-ladder-editor" hidden>
+      <div id="ap-ladder-rows"></div>
+      <div class="ap-ladder-actions">
+        <button type="button" class="btn-small" id="ap-ladder-add">Add a step</button>
+        <button type="button" class="btn-small primary" id="ap-ladder-save">Save</button>
+        <button type="button" class="btn-small" id="ap-ladder-cancel">Cancel</button>
+        <span class="mon-sub" id="ap-ladder-result" data-i18n-skip translate="no"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="ap-guardrails">
     These are never banned, whatever the score: addresses that have
     authenticated before, the global whitelist, the admin allow-list, the GeoIP
@@ -293,7 +365,7 @@
 
 <div class="card">
   <div class="card-header">
-    <h2>Shadow review</h2>
+    <h2 id="ap-review-title">Shadow review</h2>
     <span class="mon-sub" id="ap-updated" data-i18n-skip translate="no"></span>
   </div>
 
@@ -303,7 +375,7 @@
       <div class="ap-value" id="ap-scored" data-i18n-skip translate="no">—</div>
     </div>
     <div class="ap-card danger">
-      <div class="ap-label">Would be banned</div>
+      <div class="ap-label" id="ap-wouldban-label">Would be banned</div>
       <div class="ap-value" id="ap-wouldban" data-i18n-skip translate="no">—</div>
     </div>
     <div class="ap-card warn">

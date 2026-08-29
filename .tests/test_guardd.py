@@ -581,10 +581,14 @@ class MonitorGuaranteeTests(EngineTestCase):
         ).read_text(encoding="utf-8")
         # Every mutating runtime command has to live inside Enforcer, which is
         # gated on the mode; nothing else may construct one.
+        # Comments are skipped: a comment cannot issue a command, and a
+        # guarantee that fires on the prose explaining the mechanism is one
+        # that gets edited away rather than obeyed.
         mutating = [
             line.strip()
             for line in source.splitlines()
-            if "set table" in line or "clear table" in line
+            if ("set table" in line or "clear table" in line)
+            and not line.strip().startswith("#")
         ]
         self.assertTrue(mutating)
         enforcer_body = source.split("class Enforcer")[1].split("\nclass ")[0]
@@ -1071,6 +1075,13 @@ class EnforcementTestCase(EngineTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        # These tests are about how escalation behaves, not about which
+        # numbers happen to ship. Pinning the ladder here keeps their
+        # timings meaningful when the shipped default changes -- which it
+        # did, and which silently broke five of them until this was added.
+        # What the default *is* has its own test.
+        self.engine.ban_durations = (300, 1800, 6 * 3600, 24 * 3600)
+
     def make_hostile(self, ip, now=1000):
         """Give an address enough findings to cross the ban threshold."""
 
@@ -1138,6 +1149,7 @@ class EnforcementTests(EnforcementTestCase):
         self.assertEqual(self.table, {})
 
     def test_bans_get_progressively_longer(self):
+        # Against the ladder pinned in setUp, not the shipped one.
         self.assertEqual(self.engine.ban_duration("203.0.113.9", 1000), 300)
         for index, expected in enumerate((1800, 6 * 3600, 24 * 3600, 24 * 3600)):
             self.database.record_events(
@@ -1359,6 +1371,157 @@ class BanAlertTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("except Exception:  # pragma: no cover", source)
         self.assertIn("AlertClient = None", source)
+
+
+class TheBanLadderIsTheOperatorsToSet(EnforcementTestCase):
+    """How long a ban lasts stopped being a constant in the source.
+
+    Five minutes is not a deterrent against a scanner that will still be
+    there in an hour, and there was nowhere to change it. It is stored in
+    guardd's own state rather than in guardd.json, because that file is a
+    template Ansible owns and rewrites -- a choice made in the interface
+    would not survive the next run.
+    """
+
+    def test_the_shipped_default_is_short_first_then_long(self):
+        # The shape matters more than the numbers: the first step is the one
+        # a single reading reaches, so it is the one a false positive lands
+        # on, and it stays cheap. Coming back and doing it again is a much
+        # harder thing to do by accident, so the steps after it are not.
+        first, *rest = guardd.BAN_DURATIONS
+        self.assertLessEqual(first, 86400, "a mistake must stay cheap")
+        self.assertGreaterEqual(
+            rest[0], 7 * 86400, "a repeat offender should get at least a week"
+        )
+
+    def test_the_default_never_goes_backwards(self):
+        steps = list(guardd.BAN_DURATIONS)
+        self.assertEqual(steps, sorted(steps))
+
+    def test_a_stored_ladder_is_used_instead_of_the_default(self):
+        self.engine.set_ban_durations([600, 7 * 86400])
+        self.assertEqual(self.engine.ban_duration("203.0.113.9", 1000), 600)
+
+    def test_it_survives_a_restart(self):
+        self.engine.set_ban_durations([900, 30 * 86400])
+        revived = guardd.GuardEngine(self.config, self.database)
+        self.assertEqual(revived.ban_durations, (900, 30 * 86400))
+
+    def test_a_corrupt_stored_ladder_falls_back_rather_than_stopping(self):
+        # Never a reason to refuse to start: a daemon that will not come up
+        # protects nobody.
+        self.database.set_state(guardd.BAN_DURATIONS_KEY, "{not json")
+        revived = guardd.GuardEngine(self.config, self.database)
+        self.assertEqual(revived.ban_durations, guardd.BAN_DURATIONS)
+
+    def test_bans_already_placed_keep_the_term_they_were_given(self):
+        # Changing the rule must not re-sentence anybody: the expiry was
+        # written as an absolute time when the ban was applied.
+        self.make_hostile("203.0.113.9")
+        self.engine.set_mode(guardd.MODE_ENFORCE, 1000)
+        self.engine.apply_enforcement(1001)
+        scheduled = self.database.scheduled_bans()["203.0.113.9"]
+
+        self.engine.set_ban_durations([90 * 86400])
+        self.assertEqual(
+            self.database.scheduled_bans()["203.0.113.9"], scheduled
+        )
+
+    # -- what the daemon refuses -------------------------------------------
+
+    def test_an_empty_ladder_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([])
+
+    def test_a_step_shorter_than_the_one_before_is_refused(self):
+        # Never what anyone meant, and it would quietly reward persistence.
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([7 * 86400, 3600])
+
+    def test_an_absurd_step_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([10 * 365 * 86400])
+
+    def test_a_step_of_seconds_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([5])
+
+    def test_text_is_refused_rather_than_coerced(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations(["3600"])
+
+    def test_a_true_is_not_a_number_of_seconds(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([True])
+
+    def test_too_many_steps_are_refused(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([3600] * 20)
+
+    def test_a_refused_ladder_changes_nothing(self):
+        before = self.engine.ban_durations
+        with self.assertRaises(ValueError):
+            self.engine.set_ban_durations([7 * 86400, 60])
+        self.assertEqual(self.engine.ban_durations, before)
+
+
+class ABanOutlivesTheStickTable(EnforcementTestCase):
+    """The schedule here decides when a ban ends -- nothing else.
+
+    tbl_ban expires its own entries after 168h. Once a ladder step can be
+    thirty or ninety days, a ban would lapse inside HAProxy while the
+    schedule still called it banned, and the address would quietly be let
+    back in with nothing logged. The same gap opens when HAProxy restarts or
+    the table is cleared by hand.
+    """
+
+    def test_a_ban_that_vanished_from_the_table_is_put_back(self):
+        self.make_hostile("203.0.113.9")
+        self.engine.set_mode(guardd.MODE_ENFORCE, 1000)
+        self.engine.apply_enforcement(1001)
+        self.assertIn("203.0.113.9", self.table)
+
+        # However it went: expiry, a restart, a careless clear.
+        self.table.clear()
+        self.engine.apply_enforcement(1100)
+        self.assertIn("203.0.113.9", self.table)
+
+    def test_it_is_put_back_with_our_own_reason_code(self):
+        self.make_hostile("203.0.113.9")
+        self.engine.set_mode(guardd.MODE_ENFORCE, 1000)
+        self.engine.apply_enforcement(1001)
+        self.table.clear()
+        self.engine.apply_enforcement(1100)
+        self.assertEqual(
+            self.table["203.0.113.9"]["gpt0"], str(guardd.ADAPTIVE_BAN_CODE)
+        )
+
+    def test_an_expired_ban_is_not_put_back(self):
+        # The whole point is the schedule, so a ban past its time must stay
+        # gone rather than be restored forever.
+        self.make_hostile("203.0.113.9")
+        self.engine.set_mode(guardd.MODE_ENFORCE, 1000)
+        self.engine.apply_enforcement(1001)
+        self.engine.apply_enforcement(1001 + 301)
+        self.assertEqual(self.table, {})
+        self.engine.apply_enforcement(1001 + 400)
+        self.assertEqual(self.table, {})
+
+    def test_nothing_is_put_back_while_only_observing(self):
+        self.make_hostile("203.0.113.9")
+        self.engine.set_mode(guardd.MODE_ENFORCE, 1000)
+        self.engine.apply_enforcement(1001)
+        self.engine.set_mode(guardd.MODE_MONITOR, 1002)
+        self.table.clear()
+        self.engine.apply_enforcement(1100)
+        self.assertEqual(self.table, {})
+        self.assertNotIn(
+            True,
+            [
+                command.startswith("set table")
+                for command in self.commands[-3:]
+            ],
+        )
 
 
 if __name__ == "__main__":

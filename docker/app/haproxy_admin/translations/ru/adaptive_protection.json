@@ -72,6 +72,14 @@
     "requests": "запросов",
     "What a score means. The engine bans an address once it reaches the marked band; below it the score only ranks how much attention the address deserves.": "Что означает счёт. Движок банит адрес, когда счёт достигает отмеченной полосы; ниже неё счёт лишь показывает, насколько адрес заслуживает внимания.",
     "bans from here": "отсюда банит",
-    "See what each finding means, and what it is worth": "Посмотреть, что означает каждая находка и сколько она стоит"
+    "See what each finding means, and what it is worth": "Посмотреть, что означает каждая находка и сколько она стоит",
+    "Enforcement review": "Боевой режим",
+    "Banned": "Забанены",
+    "How long a ban lasts": "Насколько долго действует бан",
+    "Each repeat finding within the strike window moves the address one step down this list. The first step is the one a mistake lands on, so it is kept short on purpose; the steps after it assume the address came back and did it again.": "Каждое повторное срабатывание в пределах окна сдвигает адрес на шаг вниз по этому списку. На первый шаг попадает ошибка, поэтому он намеренно короткий; следующие исходят из того, что адрес вернулся и сделал это снова.",
+    "Add a step": "Добавить шаг",
+    "Strike": "Срабатывание",
+    "Each step must be at least as long as the one before": "Каждый шаг должен быть не короче предыдущего",
+    "Change the ladder": "Изменить лестницу"
   }
 }

@@ -109,6 +109,34 @@ def guardd_set_signatures(overrides: Dict[str, Any]) -> Dict[str, Any]:
         raise GuarddUnavailable(str(exc)) from exc
 
 
+def guardd_set_ban_durations(durations: Any) -> Dict[str, Any]:
+    """Replace the escalating ban ladder.
+
+    Mutating, so it carries the shared token like the mode switch does.
+    """
+
+    url = (
+        "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="")
+        + "/api/v1/guard/ban-durations"
+    )
+    try:
+        response = _session().post(
+            url,
+            json={"durations": durations},
+            timeout=15,
+            headers={"X-Guardd-Token": GUARDD_TOKEN} if GUARDD_TOKEN else {},
+        )
+        if response.status_code == 400:
+            # A rejected ladder is the operator's typo, not an outage.
+            raise ValueError((response.json() or {}).get("error") or "rejected")
+        response.raise_for_status()
+        return response.json()
+    except (GuarddUnavailable, ValueError):
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+
+
 def guardd_set_mode(mode: str) -> Dict[str, Any]:
     """Switch between observing and enforcing.
 

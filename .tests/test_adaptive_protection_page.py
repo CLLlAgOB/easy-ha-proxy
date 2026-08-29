@@ -144,9 +144,17 @@ class PageAssetTests(unittest.TestCase):
     def test_the_page_has_no_direct_ban_control(self):
         # Banning is a consequence of the mode plus the score, never a button
         # aimed at one address.
+        # Matched as whole paths. As a bare prefix this also caught
+        # /adaptive/durations, which bans nobody -- and a guarantee that
+        # fires on innocent names is one that gets edited away.
         for forbidden in ("/api/security/adaptive/ban", "/api/security/adaptive/unban"):
-            self.assertNotIn(forbidden, self.template, forbidden)
-            self.assertNotIn(forbidden, self.javascript, forbidden)
+            pattern = re.escape(forbidden) + r"(?![-\w])"
+            self.assertIsNone(
+                re.search(pattern, self.template), forbidden
+            )
+            self.assertIsNone(
+                re.search(pattern, self.javascript), forbidden
+            )
 
     def test_the_simulator_covers_every_event_type(self):
         for event_type in security.EVENT_TYPES:

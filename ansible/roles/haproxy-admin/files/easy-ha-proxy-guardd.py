@@ -88,7 +88,70 @@ CONTROL_TOKEN = os.environ.get("GUARDD_TOKEN", "").strip()
 # Progressive ban durations by strike. Stick-table entries carry the table's
 # expiry rather than a per-key one, so the schedule is kept here and enforced
 # by lifting the entry when its time is up.
-BAN_DURATIONS: Tuple[int, ...] = (5 * 60, 30 * 60, 6 * 3600, 24 * 3600)
+# How long a ban lasts, by how many times the address has been caught inside
+# the strike window. The first step is deliberately short: it is the one an
+# address reaches on a single reading, so it is the one a false positive
+# lands on, and an hour costs a wrongly-judged visitor very little. Every
+# step after it assumes the address came back and did it again, which is a
+# much harder thing to do by accident.
+#
+# The operator can replace this list; it is only where a gateway starts.
+BAN_DURATIONS: Tuple[int, ...] = (3600, 7 * 86400, 30 * 86400, 90 * 86400)
+
+BAN_DURATIONS_KEY = "ban_durations"
+MIN_BAN_SECONDS = 60
+MAX_BAN_SECONDS = 365 * 86400
+MAX_BAN_STEPS = 6
+
+
+def validate_ban_durations(data: Any) -> Tuple[int, ...]:
+    """Check an operator-supplied ladder before it can ban anyone.
+
+    Rejected rather than repaired, because every repair here would be a
+    guess about what someone meant to type in a setting that decides how
+    long real visitors stay locked out.
+    """
+
+    if not isinstance(data, list) or not data:
+        raise ValueError("ban durations must be a non-empty list")
+    if len(data) > MAX_BAN_STEPS:
+        raise ValueError(f"at most {MAX_BAN_STEPS} steps")
+
+    steps: List[int] = []
+    for entry in data:
+        if isinstance(entry, bool) or not isinstance(entry, int):
+            raise ValueError("each step must be a whole number of seconds")
+        if entry < MIN_BAN_SECONDS or entry > MAX_BAN_SECONDS:
+            raise ValueError(
+                f"each step must be between {MIN_BAN_SECONDS} seconds "
+                f"and {MAX_BAN_SECONDS // 86400} days"
+            )
+        steps.append(entry)
+
+    # A later strike earning a shorter ban is never what anyone meant, and it
+    # would quietly reward persistence.
+    for earlier, later in zip(steps, steps[1:]):
+        if later < earlier:
+            raise ValueError("each step must be at least as long as the one before")
+    return tuple(steps)
+
+
+def load_ban_durations(database: "SecurityDatabase") -> Tuple[int, ...]:
+    """Read the stored ladder, falling back to the shipped one.
+
+    Kept in guardd's own state rather than in guardd.json for the same reason
+    the mode is: that file is a template Ansible owns and rewrites, so a
+    choice made in the web interface would not survive the next run.
+    """
+
+    raw = database.get_state(BAN_DURATIONS_KEY, "")
+    if not raw:
+        return BAN_DURATIONS
+    try:
+        return validate_ban_durations(json.loads(raw))
+    except Exception as exc:  # noqa: BLE001 - never stop the daemon for this
+        LOG.warning("stored ban durations are unusable (%s); using defaults", exc)
+        return BAN_DURATIONS
 STRIKE_WINDOW_SECONDS = 7 * 86400
 
 RUNTIME_TIMEOUT_SECONDS = 5
@@ -2468,6 +2531,7 @@ class GuardEngine:
         self.enforcer = Enforcer(
             config, override if override in SUPPORTED_MODES else config.mode
         )
+        self.ban_durations = load_ban_durations(database)
         self.policy = ScoringPolicy()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         cursor_state: Dict[str, Any] = {}
@@ -3007,8 +3071,24 @@ class GuardEngine:
 
     def ban_duration(self, ip: str, now: int) -> int:
         strikes = self.database.strike_count(ip, now - STRIKE_WINDOW_SECONDS)
-        index = min(strikes, len(BAN_DURATIONS) - 1)
-        return BAN_DURATIONS[index]
+        ladder = self.ban_durations
+        index = min(strikes, len(ladder) - 1)
+        return ladder[index]
+
+    def set_ban_durations(self, data: Any) -> Tuple[int, ...]:
+        """Replace the ladder. Bans already placed keep the term they were
+        given -- their expiry was written as an absolute time when the ban was
+        applied, so changing the rule does not re-sentence anybody.
+        """
+
+        checked = validate_ban_durations(data)
+        self.database.set_state(BAN_DURATIONS_KEY, json.dumps(list(checked)))
+        self.ban_durations = checked
+        LOG.warning(
+            "Adaptive ban durations changed to %s",
+            ", ".join(str(step) for step in checked),
+        )
+        return checked
 
     def apply_enforcement(self, now: Optional[int] = None) -> Dict[str, Any]:
         """Ban what qualifies, lift what has served its time.
@@ -3049,6 +3129,20 @@ class GuardEngine:
                 if self.enforcer.lift(ip):
                     lifted.append(ip)
             return {"applied": applied, "lifted": lifted, "enforcing": False}
+
+        # A ban longer than the stick table's own expiry would lapse inside
+        # HAProxy while the schedule here still called it banned, and the
+        # address would be quietly let back in. The same gap opens whenever
+        # HAProxy is restarted or the table is cleared by hand. Re-asserting
+        # the entries the schedule still wants closes all three: `set table`
+        # rewrites the entry and restarts its expiry, so the schedule is the
+        # only thing that decides when a ban ends.
+        present = set(self.enforcer.adaptive_bans())
+        for ip, until in scheduled.items():
+            if until <= now or ip in present:
+                continue
+            if self.enforcer.ban(ip):
+                LOG.info("Re-asserted the ban on %s, gone from the table", ip)
 
         for row in self.reputation_table(now, limit=200):
             ip = row["ip"]
@@ -3144,7 +3238,7 @@ class GuardEngine:
             "mode_overridden": self.enforcer.mode != self.config.mode,
             "supported_modes": list(SUPPORTED_MODES),
             "enforcement_possible": self.enforcer.allowed,
-            "ban_durations_seconds": list(BAN_DURATIONS),
+            "ban_durations_seconds": list(self.ban_durations),
             "policy": {
                 "weights": dict(policy.weights),
                 "category_cap": policy.category_cap,
@@ -3460,6 +3554,37 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             self._send_json(200, {"ok": True, **signature_summary()})
+            return
+
+        if path == "/api/v1/guard/ban-durations":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int(
+                    (self.headers.get("Content-Length") or "0").strip() or "0"
+                )
+                if length <= 0 or length > 4096:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(
+                    self.rfile.read(length).decode("utf-8", "replace")
+                )
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            try:
+                steps = engine.set_ban_durations(payload.get("durations"))
+            except ValueError as exc:
+                # A rejected ladder is the operator's typo, not a fault.
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("cannot store the ban durations")
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(
+                200, {"ok": True, "ban_durations_seconds": list(steps)}
+            )
             return
 
         if path != "/api/v1/guard/mode":

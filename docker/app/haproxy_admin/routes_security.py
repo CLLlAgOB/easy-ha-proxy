@@ -131,6 +131,55 @@ def api_adaptive_health():
         return jsonify(security.unavailable_payload(exc)), 503
 
 
+@bp.post("/api/security/adaptive/durations")
+def api_adaptive_ban_durations():
+    """Set how long an adaptive ban lasts, by strike.
+
+    Mutating and it decides how long real visitors stay locked out, so it is
+    superadmin-only, CSRF protected and recorded, exactly like the mode.
+    """
+
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get("durations")
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.ban_durations",
+            object_type="adaptive_protection",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_ban_durations(requested)
+    except ValueError as exc:
+        record_request(
+            "adaptive.ban_durations",
+            object_type="adaptive_protection",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request(
+            "adaptive.ban_durations",
+            object_type="adaptive_protection",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "adaptive.ban_durations",
+        object_type="adaptive_protection",
+        after={"durations": result.get("ban_durations_seconds")},
+    )
+    LOG.warning(
+        "Adaptive ban durations set to %s by %s",
+        result.get("ban_durations_seconds"),
+        getattr(g, "remote_user", "unknown"),
+    )
+    return jsonify(result)
+
+
 @bp.post("/api/security/adaptive/mode")
 def api_adaptive_mode():
     """Switch between observing and enforcing.

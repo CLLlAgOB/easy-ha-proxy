@@ -20,6 +20,9 @@
   let selectedAddress = "";
   let currentMode = "";
   let pendingMode = "";
+  // The ban ladder as the daemon last reported it, and the copy being edited.
+  let ladder = [];
+  let draft = [];
   let lastSummary = {};
 
   function csrfToken() {
@@ -123,7 +126,9 @@
       banner.classList.toggle("error", currentMode === "enforce");
     }
 
-    const durations = payload.ban_durations_seconds || [];
+    ladder = payload.ban_durations_seconds || ladder;
+    renderLadder();
+    const durations = ladder;
     setText(
       "ap-mode-effect",
       currentMode === "enforce"
@@ -136,8 +141,162 @@
 
   function formatDuration(seconds) {
     const total = Number(seconds) || 0;
-    if (total >= 3600) return `${Math.round(total / 3600)}h`;
-    return `${Math.round(total / 60)}m`;
+    // Days matter now that a step can be months long: "2160h" is a number
+    // nobody reads as ninety days.
+    if (total >= 86400) return `${Math.round(total / 86400)} ${unitLabel("days")}`;
+    if (total >= 3600) return `${Math.round(total / 3600)} ${unitLabel("hr")}`;
+    return `${Math.round(total / 60)} ${unitLabel("min")}`;
+  }
+
+  /* ---------- how long a ban lasts ---------- */
+
+  // The abbreviations the rest of the application already uses, rather than
+  // single letters of my own. A one-letter catalogue key would be a trap:
+  // the DOM translator substitutes catalogue words inside strings it did
+  // not match whole, so "d" would sit waiting for the first page that
+  // prints a lone "d" in some other sense. Abbreviations also sidestep
+  // Russian numeral agreement, which is why these are not "7 days".
+  const UNITS = [
+    { key: "min", seconds: 60 },
+    { key: "hr", seconds: 3600 },
+    { key: "days", seconds: 86400 }
+  ];
+
+  function unitLabel(key) {
+    return uiText(key);
+  }
+
+  function splitDuration(seconds) {
+    // Show it in the largest unit that divides exactly, so a stored 604800
+    // comes back as "7 d" rather than "10080 m".
+    const total = Number(seconds) || 0;
+    for (const unit of [...UNITS].reverse()) {
+      if (total >= unit.seconds && total % unit.seconds === 0) {
+        return { value: total / unit.seconds, unit: unit.key };
+      }
+    }
+    return { value: Math.max(1, Math.round(total / 60)), unit: "min" };
+  }
+
+  function renderLadder() {
+    const host = byId("ap-ladder");
+    if (!host) return;
+    host.textContent = "";
+    ladder.forEach((seconds, index) => {
+      const chip = document.createElement("span");
+      chip.setAttribute("data-i18n-skip", "");
+      chip.setAttribute("translate", "no");
+      chip.textContent =
+        `${index + 1}. ${formatDuration(seconds)}`;
+      host.appendChild(chip);
+    });
+  }
+
+  function renderLadderRows() {
+    const host = byId("ap-ladder-rows");
+    if (!host) return;
+    host.textContent = "";
+    draft.forEach((seconds, index) => {
+      const parts = splitDuration(seconds);
+      const row = document.createElement("div");
+      row.className = "ap-ladder-row";
+
+      const label = document.createElement("label");
+      label.setAttribute("data-i18n-skip", "");
+      label.setAttribute("translate", "no");
+      label.textContent = `${uiText("Strike")} ${index + 1}`;
+      row.appendChild(label);
+
+      const number = document.createElement("input");
+      number.type = "number";
+      number.min = "1";
+      number.value = String(parts.value);
+      row.appendChild(number);
+
+      const unit = document.createElement("select");
+      unit.setAttribute("data-i18n-skip", "");
+      unit.setAttribute("translate", "no");
+      UNITS.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.key;
+        option.textContent = unitLabel(entry.key);
+        if (entry.key === parts.unit) option.selected = true;
+        unit.appendChild(option);
+      });
+      row.appendChild(unit);
+
+      function update() {
+        const chosen = UNITS.find((entry) => entry.key === unit.value) || UNITS[0];
+        draft[index] = Math.max(1, Number(number.value) || 1) * chosen.seconds;
+      }
+      number.addEventListener("input", update);
+      unit.addEventListener("change", update);
+
+      if (draft.length > 1) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn-small";
+        remove.textContent = uiText("Remove");
+        remove.addEventListener("click", () => {
+          draft.splice(index, 1);
+          renderLadderRows();
+        });
+        row.appendChild(remove);
+      }
+
+      host.appendChild(row);
+    });
+
+    const add = byId("ap-ladder-add");
+    if (add) add.disabled = draft.length >= 6;
+  }
+
+  function openLadderEditor(open) {
+    const editor = byId("ap-ladder-editor");
+    if (!editor) return;
+    editor.hidden = !open;
+    if (open) {
+      draft = ladder.slice();
+      setText("ap-ladder-result", "");
+      renderLadderRows();
+    }
+  }
+
+  async function saveLadder() {
+    setText("ap-ladder-result", "");
+    // Checked here so an obvious mistake is named before it becomes a
+    // request; the daemon checks again and its answer is the one that holds.
+    for (let i = 1; i < draft.length; i += 1) {
+      if (draft[i] < draft[i - 1]) {
+        setText(
+          "ap-ladder-result",
+          uiText("Each step must be at least as long as the one before")
+        );
+        return;
+      }
+    }
+    try {
+      const response = await fetch("/api/security/adaptive/durations", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken()
+        },
+        body: JSON.stringify({ durations: draft })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        setText("ap-ladder-result", payload.error || `HTTP ${response.status}`);
+        return;
+      }
+      ladder = payload.ban_durations_seconds || draft.slice();
+      renderLadder();
+      openLadderEditor(false);
+      await load();
+    } catch (error) {
+      setText("ap-ladder-result", String(error));
+    }
   }
 
   function askToSwitch(mode) {
@@ -259,6 +418,20 @@
 
   function renderSummary(summary) {
     if (!summary) return;
+    // The heading and this label were written when monitor was the only
+    // mode there was. Left alone they claim nothing has happened while the
+    // engine is banning addresses -- which is precisely the moment the
+    // operator most needs the page to be telling the truth.
+    const enforcing = currentMode === "enforce";
+    setText(
+      "ap-review-title",
+      enforcing ? uiText("Enforcement review") : uiText("Shadow review")
+    );
+    setText(
+      "ap-wouldban-label",
+      enforcing ? uiText("Banned") : uiText("Would be banned")
+    );
+
     setText("ap-scored", formatCount(summary.scored));
     setText("ap-wouldban", formatCount(summary.would_ban));
     setText("ap-falsepos", formatCount(summary.likely_false_positive));
@@ -481,6 +654,22 @@
   }
 
   function bind() {
+    const edit = byId("ap-ladder-edit");
+    if (edit) edit.addEventListener("click", () => openLadderEditor(true));
+    const cancel = byId("ap-ladder-cancel");
+    if (cancel) cancel.addEventListener("click", () => openLadderEditor(false));
+    const save = byId("ap-ladder-save");
+    if (save) save.addEventListener("click", saveLadder);
+    const add = byId("ap-ladder-add");
+    if (add) {
+      add.addEventListener("click", () => {
+        // A new step starts at the last one, which is the only value that
+        // cannot break the "never shorter than the step before" rule.
+        draft.push(draft.length ? draft[draft.length - 1] : 3600);
+        renderLadderRows();
+      });
+    }
+
     const modes = byId("ap-mode-switch");
     if (modes) {
       modes.addEventListener("click", (event) => {

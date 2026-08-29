@@ -22,6 +22,7 @@ from .guardd_client import (
     GuarddUnavailable,
     guardd_health,
     guardd_ip,
+    guardd_set_ban_durations,
     guardd_set_mode,
     guardd_shadow,
 )
@@ -242,6 +243,41 @@ def set_mode(value: Any) -> Dict[str, Any]:
     if mode not in MODES:
         raise ValueError("mode must be one of " + ", ".join(MODES))
     return guardd_set_mode(mode)
+
+
+# Bounds are checked here as well as in the daemon. The daemon's are the ones
+# that hold; these exist so a typo comes back as a sentence the operator can
+# read rather than as a rejected request from a socket they never see.
+MAX_BAN_STEPS = 6
+MIN_BAN_SECONDS = 60
+MAX_BAN_SECONDS = 365 * 86400
+
+
+def set_ban_durations(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("ban durations must be a non-empty list")
+    if len(value) > MAX_BAN_STEPS:
+        raise ValueError(f"at most {MAX_BAN_STEPS} steps")
+    steps = []
+    for entry in value:
+        if isinstance(entry, bool):
+            raise ValueError("each step must be a whole number of seconds")
+        try:
+            seconds = int(entry)
+        except (TypeError, ValueError):
+            raise ValueError("each step must be a whole number of seconds")
+        if seconds < MIN_BAN_SECONDS or seconds > MAX_BAN_SECONDS:
+            raise ValueError(
+                f"each step must be between {MIN_BAN_SECONDS} seconds and "
+                f"{MAX_BAN_SECONDS // 86400} days"
+            )
+        steps.append(seconds)
+    for earlier, later in zip(steps, steps[1:]):
+        if later < earlier:
+            raise ValueError(
+                "each step must be at least as long as the one before"
+            )
+    return guardd_set_ban_durations(steps)
 
 
 def unavailable_payload(exc: GuarddUnavailable) -> Dict[str, Any]:
