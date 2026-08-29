@@ -11,11 +11,12 @@ const Dashboard = (() => {
   const BAN_REASON_LABELS = {
     10: 'Too many 4xx errors for the site (ERR_LIMIT_SITE)',
     20: 'Too many 4xx errors for other requests without SNI (ERR_LIMIT_OTHER)',
-    30: 'Site request rate limit exceeded (RATE_LIMIT_SITE)'
-    // сюда же потом можно добавить, for example:
-    // 40: 'Блокировка by GeoIP',
-    // 50: 'Ручной ban админом',
-    // and etc., if будешь расширять логику.
+    30: 'Site request rate limit exceeded (RATE_LIMIT_SITE)',
+    // 40 is the adaptive engine's own, and it is the one an operator is most
+    // likely to question -- a ban placed by scoring rather than by a rule
+    // they can point at in the configuration. Without a label here it showed
+    // as a bare "40", which explains nothing and looks like a fault.
+    40: 'Adaptive protection: scored as hostile (ADAPTIVE_BAN)'
   };
 
 

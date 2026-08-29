@@ -1524,5 +1524,60 @@ class ABanOutlivesTheStickTable(EnforcementTestCase):
         )
 
 
+class TheBanListCanNameAnAdaptiveBan(unittest.TestCase):
+    """The ban list explains every reason code it can be shown.
+
+    An adaptive ban lands in the same table as the ones HAProxy places under
+    its own rules, and is told apart only by its reason code. The dashboard
+    had labels for the three HAProxy codes and none for this one, so it fell
+    through to printing the bare number -- which explains nothing and reads
+    like a fault, on precisely the ban an operator is most likely to
+    question, because no rule in the configuration points at it.
+
+    It went unnoticed because a ban lasted five minutes and was gone before
+    anybody opened the list. It stops being invisible the moment a ban lasts
+    a week.
+    """
+
+    def setUp(self):
+        self.script = (
+            ROOT / "docker/app/haproxy_admin/static/js/dashboard.js"
+        ).read_text(encoding="utf-8")
+
+    def test_the_adaptive_code_has_a_label(self):
+        table = self.script.split("BAN_REASON_LABELS = {")[1].split("};")[0]
+        self.assertIn(f"{guardd.ADAPTIVE_BAN_CODE}:", table)
+
+    def test_the_label_says_which_engine_placed_it(self):
+        table = self.script.split("BAN_REASON_LABELS = {")[1].split("};")[0]
+        line = [
+            row for row in table.splitlines()
+            if row.strip().startswith(f"{guardd.ADAPTIVE_BAN_CODE}:")
+        ]
+        self.assertTrue(line, "no entry for the adaptive code")
+        self.assertIn("ADAPTIVE_BAN", line[0])
+
+    def test_the_haproxy_codes_are_still_there(self):
+        # The adaptive code must be an addition, not a replacement: these are
+        # the reasons for most of what is in the list on a real gateway.
+        table = self.script.split("BAN_REASON_LABELS = {")[1].split("};")[0]
+        for code in (10, 20, 30):
+            self.assertIn(f"{code}:", table)
+
+    def test_the_label_is_translated(self):
+        table = self.script.split("BAN_REASON_LABELS = {")[1].split("};")[0]
+        line = [
+            row for row in table.splitlines()
+            if row.strip().startswith(f"{guardd.ADAPTIVE_BAN_CODE}:")
+        ][0]
+        english = line.split("'")[1]
+        catalogue = json.loads(
+            (
+                ROOT / "docker/app/haproxy_admin/translations/ru.json"
+            ).read_text(encoding="utf-8")
+        )["messages"]
+        self.assertIn(english, catalogue)
+
+
 if __name__ == "__main__":
     unittest.main()

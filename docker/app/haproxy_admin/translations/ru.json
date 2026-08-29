@@ -1741,6 +1741,7 @@
     "the software-update service socket is not configured": "Сокет службы обновления не настроен",
     "the software-update service is unavailable": "Служба обновления недоступна",
     "HAProxy configuration state is unavailable; source and host-service updates are blocked": "Состояние конфигурации HAProxy недоступно; обновление исходников и служб хоста заблокировано",
-    "Resolve pending HAProxy configuration changes before updating source or host services": "Перед обновлением исходников или служб хоста примените либо отмените ожидающие изменения конфигурации HAProxy"
+    "Resolve pending HAProxy configuration changes before updating source or host services": "Перед обновлением исходников или служб хоста примените либо отмените ожидающие изменения конфигурации HAProxy",
+    "Adaptive protection: scored as hostile (ADAPTIVE_BAN)": "Адаптивная защита: набран враждебный балл (ADAPTIVE_BAN)"
   }
 }
