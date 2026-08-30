@@ -80,6 +80,11 @@
     "Add a step": "Добавить шаг",
     "Strike": "Срабатывание",
     "Each step must be at least as long as the one before": "Каждый шаг должен быть не короче предыдущего",
-    "Change the ladder": "Изменить лестницу"
+    "Change the ladder": "Изменить лестницу",
+    "Banned right now": "Забанены сейчас",
+    "How long each one has left, on this engine's own schedule. The ban list on the HAProxy page shows the stick table's expiry instead, which is the table's own lifetime and says days about a ban that lifts within the hour.": "Сколько каждому осталось по графику самого движка. Список банов на странице HAProxy показывает срок жизни stick-таблицы — это её собственное время, и оно скажет «дни» про бан, который снимется в течение часа.",
+    "Lifts in": "Снимется через",
+    "What it did": "За что",
+    "Check this one": "Проверьте"
   }
 }

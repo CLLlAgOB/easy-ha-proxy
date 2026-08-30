@@ -3310,6 +3310,50 @@ class GuardEngine:
         result = self.apply_enforcement(now)
         return {"mode": mode, "previous": previous, **result}
 
+    def current_bans(self, now: Optional[int] = None) -> List[Dict[str, Any]]:
+        """The addresses being held right now, and until when.
+
+        Built from the schedule rather than from the reputation table,
+        because the reputation table only covers addresses seen inside the
+        scoring window. An address that was banned and then went quiet --
+        which is the whole point of banning it -- drops out of that window
+        and would silently vanish from a list of who is banned.
+
+        The stick table cannot answer this either. Its entries carry the
+        table's own expiry, not this daemon's schedule, so it will say six
+        days about a ban that lifts in an hour.
+        """
+
+        now = now or _utc_now()
+        scheduled = self.database.scheduled_bans()
+        rows: List[Dict[str, Any]] = []
+        for ip, until in scheduled.items():
+            remaining = int(until) - now
+            if remaining <= 0:
+                # Served, and due to be lifted on the next cycle.
+                continue
+            last_ban = self.database.last_ban_ts(ip)
+            # Why it was banned, in the same terms the rest of the page uses.
+            # A list of addresses with no reason beside them is a list nobody
+            # can act on, and "is this one a mistake?" is the first question
+            # anybody asks of it.
+            standing = self.reputation(ip, now, scheduled=scheduled)
+            rows.append({
+                "ip": ip,
+                "until": int(until),
+                "seconds_left": remaining,
+                "banned_at": last_ban,
+                "strikes": self.strike_level(ip, now),
+                "score": standing.get("score", 0),
+                "state": standing.get("state", ""),
+                "categories": sorted(standing.get("categories") or {}),
+                "likely_false_positive": bool(
+                    standing.get("likely_false_positive")
+                ),
+            })
+        rows.sort(key=lambda row: row["seconds_left"])
+        return rows
+
     def shadow_review(
         self,
         now: Optional[int] = None,
@@ -3353,6 +3397,10 @@ class GuardEngine:
             # too: without it nobody can tell which list a gateway is
             # running.
             "signatures": signature_summary(),
+            # Who is actually being held, which the page could not say: the
+            # ban list elsewhere shows the stick table's expiry, which is the
+            # table's own and not the schedule's.
+            "bans": self.current_bans(now),
             "summary": {
                 "scored": len(rows),
                 "would_ban": sum(1 for row in rows if row["would_ban"]),

@@ -363,6 +363,33 @@
   HAProxy traffic is not affected.
 </div>
 
+<div class="card" id="ap-bans-card" hidden>
+  <div class="card-header">
+    <h2>Banned right now</h2>
+    <span class="mon-sub" id="ap-bans-note" data-i18n-skip translate="no"></span>
+  </div>
+  <div style="padding: 12px 16px;">
+    <p class="mon-sub" style="margin-top:0;">
+      How long each one has left, on this engine's own schedule. The ban list
+      on the HAProxy page shows the stick table's expiry instead, which is the
+      table's own lifetime and says days about a ban that lifts within the
+      hour.
+    </p>
+    <table class="table mono" style="width:100%;">
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th>Lifts in</th>
+          <th>Strike</th>
+          <th>Score</th>
+          <th>What it did</th>
+        </tr>
+      </thead>
+      <tbody id="ap-bans"></tbody>
+    </table>
+  </div>
+</div>
+
 <div class="card">
   <div class="card-header">
     <h2 id="ap-review-title">Shadow review</h2>

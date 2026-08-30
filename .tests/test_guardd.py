@@ -1761,5 +1761,95 @@ class BanRecordsOutliveOrdinaryFindings(EnforcementTestCase):
         self.assertEqual(self.database.ban_timestamps("203.0.113.9"), [])
 
 
+class TheListOfWhoIsBannedRightNow(EnforcementTestCase):
+    """The page could say a lot about scores and nothing about who is held.
+
+    The ban list elsewhere reads the stick table, and a stick table entry
+    carries the table's own expiry rather than this daemon's schedule -- so
+    with a one-day ladder it reports "6 days" about a ban that lifts within
+    the hour, which is the report that prompted this. The schedule is the
+    only thing that knows.
+    """
+
+    LADDER = (86400, 7 * 86400, 30 * 86400, 90 * 86400)
+
+    def setUp(self):
+        super().setUp()
+        self.engine.ban_durations = self.LADDER
+
+    def ban_now(self, ip="203.0.113.9", at=1_000_000):
+        self.make_hostile(ip, now=at)
+        self.engine.set_mode(guardd.MODE_ENFORCE, at)
+        self.engine.apply_enforcement(at + 1)
+        return at + 1
+
+    def test_it_lists_what_is_held(self):
+        now = self.ban_now()
+        bans = self.engine.current_bans(now)
+        self.assertEqual([row["ip"] for row in bans], ["203.0.113.9"])
+
+    def test_it_reports_the_schedule_not_the_table(self):
+        # A day, because that is the first rung -- not the table's week.
+        now = self.ban_now()
+        left = self.engine.current_bans(now)[0]["seconds_left"]
+        self.assertGreater(left, 86400 - 120)
+        self.assertLessEqual(left, 86400)
+
+    def test_it_counts_down(self):
+        now = self.ban_now()
+        later = self.engine.current_bans(now + 3600)[0]["seconds_left"]
+        self.assertAlmostEqual(later, 86400 - 3600, delta=120)
+
+    def test_a_served_ban_drops_off_the_list(self):
+        now = self.ban_now()
+        self.assertEqual(self.engine.current_bans(now + 86400 + 60), [])
+
+    def test_nothing_held_is_an_empty_list(self):
+        self.assertEqual(self.engine.current_bans(1_000_000), [])
+
+    def test_it_says_why(self):
+        # A list of addresses with no reason beside them is one nobody can
+        # act on, and "is this one a mistake?" is the first question asked.
+        now = self.ban_now()
+        row = self.engine.current_bans(now)[0]
+        self.assertGreaterEqual(row["score"], guardd.WOULD_BAN_SCORE)
+        self.assertTrue(row["categories"])
+
+    def test_it_says_which_rung(self):
+        now = self.ban_now()
+        self.assertEqual(self.engine.current_bans(now)[0]["strikes"], 1)
+
+    def test_the_soonest_to_lift_comes_first(self):
+        first = self.ban_now("203.0.113.9", at=1_000_000)
+        self.make_hostile("203.0.113.10", now=first + 7200)
+        self.engine.apply_enforcement(first + 7201)
+        bans = self.engine.current_bans(first + 7202)
+        self.assertEqual(
+            [row["ip"] for row in bans], ["203.0.113.9", "203.0.113.10"]
+        )
+
+    def test_an_address_that_went_quiet_is_still_listed(self):
+        # The whole reason this is built from the schedule. A banned address
+        # stops being seen, falls out of the scoring window, and would
+        # disappear from a list built from the reputation table -- while
+        # still being banned.
+        # Needs a ban longer than the scoring window to be expressible at
+        # all: with both set to a day there is no moment that is inside the
+        # ban and outside the window.
+        self.engine.ban_durations = (7 * 86400,)
+        now = self.ban_now()
+        much_later = now + int(self.engine.policy.window_seconds) + 3600
+        self.assertEqual(
+            [row["ip"] for row in self.engine.current_bans(much_later)],
+            ["203.0.113.9"],
+        )
+
+    def test_the_page_is_given_the_list(self):
+        now = self.ban_now()
+        review = self.engine.shadow_review(now)
+        self.assertIn("bans", review)
+        self.assertEqual([row["ip"] for row in review["bans"]], ["203.0.113.9"])
+
+
 if __name__ == "__main__":
     unittest.main()

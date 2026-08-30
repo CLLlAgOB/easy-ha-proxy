@@ -416,6 +416,75 @@
     });
   }
 
+  function formatLeft(seconds) {
+    const total = Math.max(0, Number(seconds) || 0);
+    if (total >= 86400) {
+      const days = Math.floor(total / 86400);
+      const hours = Math.round((total % 86400) / 3600);
+      return `${days}${unitLabel("days")} ${hours}${unitLabel("hr")}`;
+    }
+    if (total >= 3600) {
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.round((total % 3600) / 60);
+      return `${hours}${unitLabel("hr")} ${minutes}${unitLabel("min")}`;
+    }
+    return `${Math.max(1, Math.round(total / 60))}${unitLabel("min")}`;
+  }
+
+  function renderBans(bans) {
+    const card = byId("ap-bans-card");
+    const host = byId("ap-bans");
+    if (!card || !host) return;
+    const rows = bans || [];
+    card.hidden = rows.length === 0;
+    setText("ap-bans-note", rows.length ? String(rows.length) : "");
+    if (!rows.length) return;
+
+    host.textContent = "";
+    rows.forEach((ban) => {
+      const tr = document.createElement("tr");
+
+      const address = document.createElement("td");
+      address.setAttribute("data-i18n-skip", "");
+      address.setAttribute("translate", "no");
+      address.textContent = ban.ip;
+      if (ban.likely_false_positive) {
+        const flag = document.createElement("span");
+        flag.className = "badge warn";
+        flag.style.marginLeft = "6px";
+        flag.textContent = uiText("Check this one");
+        address.appendChild(flag);
+      }
+      tr.appendChild(address);
+
+      const left = document.createElement("td");
+      left.setAttribute("data-i18n-skip", "");
+      left.setAttribute("translate", "no");
+      left.textContent = formatLeft(ban.seconds_left);
+      tr.appendChild(left);
+
+      const strike = document.createElement("td");
+      strike.setAttribute("data-i18n-skip", "");
+      strike.setAttribute("translate", "no");
+      strike.textContent = String(ban.strikes || 1);
+      tr.appendChild(strike);
+
+      const score = document.createElement("td");
+      score.setAttribute("data-i18n-skip", "");
+      score.setAttribute("translate", "no");
+      score.textContent = String(ban.score == null ? "" : ban.score);
+      tr.appendChild(score);
+
+      const why = document.createElement("td");
+      why.setAttribute("data-i18n-skip", "");
+      why.setAttribute("translate", "no");
+      why.textContent = (ban.categories || []).join(", ") || "—";
+      tr.appendChild(why);
+
+      host.appendChild(tr);
+    });
+  }
+
   function renderSummary(summary) {
     if (!summary) return;
     // The heading and this label were written when monitor was the only
@@ -644,6 +713,7 @@
       renderMode(payload);
       renderPolicy(payload.policy);
       renderSummary(payload.summary);
+      renderBans(payload.bans);
       renderTable(payload.addresses);
       setText("ap-updated", payload.ts ? formatTime(payload.ts) : "");
       if (selectedAddress) await loadDetail(selectedAddress);
