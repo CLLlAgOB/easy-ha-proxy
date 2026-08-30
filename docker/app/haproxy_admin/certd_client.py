@@ -600,6 +600,21 @@ def store_standby_certificate(domain: str, slot: str, pem: str) -> Dict[str, Any
     }
 
 
+def adopt_deployed_as_standby(domain: str, slot: str) -> Dict[str, Any]:
+    """Take a deployed certificate out of service and keep it as a standby."""
+
+    url = f"{CERTD_API_BASE}/certs/standby/adopt"
+    payload = {"domain": (domain or "").strip(), "slot": (slot or "").strip()}
+    try:
+        response = _post(url, json=payload, timeout=60.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {
+        "ok": False, "error": "unexpected response from haproxy-certd"
+    }
+
+
 def store_standby_for_covered_names(slot: str, pem: str) -> Dict[str, Any]:
     """Keep one certificate as the standby for every name it covers."""
 

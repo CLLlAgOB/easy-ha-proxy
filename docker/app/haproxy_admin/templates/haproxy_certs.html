@@ -14,7 +14,8 @@
   <div class="card-header">
     <h2>Error</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;"
+       data-i18n-skip translate="no">
     {{ error }}
   </div>
 </div>
@@ -25,7 +26,8 @@
   <div class="card-header">
     <h2>Operation completed</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;"
+       data-i18n-skip translate="no">
     {{ message }}
   </div>
 </div>
@@ -480,6 +482,15 @@
                 Hand back to Let's Encrypt
               </button>
             </form>
+            {% elif entry.can_be_put_away %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ entry.domain }}?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="adopt_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="imported">
+              <button type="submit" class="btn-small">Keep as a standby</button>
+            </form>
             {% elif not entry.has_usable_standby %}
               <span class="mon-sub">No standby</span>
             {% endif %}
@@ -551,21 +562,24 @@
                placeholder="other-ca" maxlength="64">
       </div>
       <div class="form-row">
-        <label for="standby-cert">Certificate, with its chain</label>
+        <label for="standby-cert">Certificate file</label>
         <input id="standby-cert" name="standby_cert" type="file" required
-               accept=".pem,.crt,.cer">
+               accept=".pem,.crt,.cer,.key,.txt">
       </div>
       <div class="form-row">
-        <label for="standby-key">Private key</label>
-        <input id="standby-key" name="standby_key" type="file" required
-               accept=".pem,.key">
+        <label for="standby-key">Key file, if it is separate</label>
+        <input id="standby-key" name="standby_key" type="file"
+               accept=".pem,.key,.txt">
       </div>
       <div class="table-meta">
-        Checked before it is accepted: the key has to match the certificate
-        and the certificate has to cover the name. A standby discovered to be
-        broken at the moment it is needed is worse than none. A wildcard filed
-        against every name it covers is stored once per name, so each can be
-        put into service on its own.
+        One file holding the key and the chain together is the usual shape
+        and is all that is needed; the second field is only for material that
+        came as two files. Order does not matter and a file given twice is
+        not counted twice. Checked before it is accepted: the key has to
+        match the certificate and the certificate has to cover the name — a
+        standby discovered to be broken at the moment it is needed is worse
+        than none. A wildcard filed against every name it covers is stored
+        once per name, so each can be put into service on its own.
       </div>
       <button type="submit" class="btn primary" style="margin-top:10px;">
         Keep it

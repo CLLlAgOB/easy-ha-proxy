@@ -21,6 +21,7 @@ import ipaddress
 import re
 import zipfile
 from datetime import datetime
+from .i18n import translate
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
 from .services_haproxy_config import (
@@ -1221,6 +1222,7 @@ def haproxy_certs_page():
         delete_standby_certificate,
         release_to_letsencrypt,
         store_standby_for_covered_names,
+        adopt_deployed_as_standby,
     )
 
     message = None
@@ -1246,6 +1248,7 @@ def haproxy_certs_page():
         "activate_standby": ("certificate.standby_activate", "certificate"),
         "delete_standby": ("certificate.standby_delete", "certificate"),
         "release_standby": ("certificate.standby_release", "certificate"),
+        "adopt_standby": ("certificate.standby_adopt", "certificate"),
     }
 
     if request.method == "POST":
@@ -1349,19 +1352,18 @@ def haproxy_certs_page():
             key_file = request.files.get("standby_key")
             if not cert_file or not cert_file.filename:
                 error = "Select the certificate file"
-            elif not key_file or not key_file.filename:
-                error = "Select the private key file"
             else:
-                # Joined here rather than asking for one pasted blob: a CA
-                # hands over two files, and making the operator concatenate
-                # them by hand is a step that goes wrong quietly.
-                blob = "\n".join(
-                    part.strip()
-                    for part in (
-                        cert_file.read().decode("utf-8", "replace"),
-                        key_file.read().decode("utf-8", "replace"),
-                    )
-                ) + "\n"
+                # One file or two, in either order. The daemon takes the PEM
+                # blocks apart, drops duplicates and works out which is
+                # which. A certificate authority hands its material over in
+                # whatever shape it likes, and the commonest shape is a
+                # single file with the key and the chain together -- which,
+                # against two required fields, got uploaded into both and was
+                # then refused for containing two private keys.
+                pieces = [cert_file.read().decode("utf-8", "replace")]
+                if key_file and key_file.filename:
+                    pieces.append(key_file.read().decode("utf-8", "replace"))
+                blob = "\n".join(piece.strip() for piece in pieces) + "\n"
                 if domain == "*":
                     # One wildcard covers a dozen hostnames; filing it a
                     # dozen times by hand is the sort of chore that gets
@@ -1395,6 +1397,23 @@ def haproxy_certs_page():
                     res.get("reload_error")
                     or res.get("error")
                     or "Failed to put the standby certificate into service"
+                )
+
+        elif action == "adopt_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip() or "imported"
+            audit_target = f"{domain}/{slot}"
+            res = adopt_deployed_as_standby(domain, slot)
+            if res.get("ok"):
+                message = (
+                    f"{domain} taken out of service and kept as the standby "
+                    f"'{slot}' for " + ", ".join(res.get("domains") or [])
+                )
+            else:
+                error = (
+                    res.get("reload_error")
+                    or res.get("error")
+                    or "Failed to take the certificate out of service"
                 )
 
         elif action == "release_standby":
@@ -1483,6 +1502,16 @@ def haproxy_certs_page():
                 summary=f"action: {action}",
                 detail=str(error or "")[:500],
             )
+
+    # Translated here, not in the browser. These sentences come from the
+    # daemon in English; the DOM translator matches what it can and
+    # substitutes catalogue words into the rest, which turns an explanation
+    # into half-English soup. Server-side it is all or nothing, and anything
+    # unknown stays plain English rather than becoming nonsense.
+    if error:
+        error = translate(str(error))
+    if message:
+        message = translate(str(message))
 
     standby = list_standby_certificates()
     data = list_all_certs()

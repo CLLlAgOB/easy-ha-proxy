@@ -23,7 +23,6 @@
     "Keep it": "Положить",
     "No certificates are deployed yet.": "Ни одного сертификата пока не развёрнуто.",
     "Select the certificate file": "Выберите файл сертификата",
-    "Select the private key file": "Выберите файл закрытого ключа",
     "Failed to keep the standby certificate": "Не удалось сохранить запасной сертификат",
     "Failed to put the standby certificate into service": "Не удалось ввести запасной сертификат в строй",
     "Failed to remove the standby certificate": "Не удалось удалить запасной сертификат",
@@ -33,6 +32,14 @@
     "Failed to hand the name back to Let's Encrypt": "Не удалось вернуть имя на Let's Encrypt",
     "Failed to import the certificate": "Не удалось импортировать сертификат",
     "Every name this certificate covers": "Все имена, которые он покрывает",
-    "Checked before it is accepted: the key has to match the certificate and the certificate has to cover the name. A standby discovered to be broken at the moment it is needed is worse than none. A wildcard filed against every name it covers is stored once per name, so each can be put into service on its own.": "Проверяется до того, как будет принят: ключ должен подходить к сертификату, а сертификат — покрывать имя. Запасной, о поломке которого узнаёшь ровно тогда, когда он понадобился, хуже, чем никакого. Wildcard, положенный на все покрываемые имена, сохраняется отдельно под каждое, чтобы каждое можно было ввести в строй само по себе."
+    "Checked before it is accepted: the key has to match the certificate and the certificate has to cover the name. A standby discovered to be broken at the moment it is needed is worse than none. A wildcard filed against every name it covers is stored once per name, so each can be put into service on its own.": "Проверяется до того, как будет принят: ключ должен подходить к сертификату, а сертификат — покрывать имя. Запасной, о поломке которого узнаёшь ровно тогда, когда он понадобился, хуже, чем никакого. Wildcard, положенный на все покрываемые имена, сохраняется отдельно под каждое, чтобы каждое можно было ввести в строй само по себе.",
+    "no certificate was found in what was uploaded": "в загруженном не нашлось ни одного сертификата",
+    "no private key was found; the certificate on its own cannot be used to serve a site": "не нашлось закрытого ключа: один сертификат без него сайт обслуживать не может",
+    "no certificate was supplied": "сертификат не был передан",
+    "the certificate is implausibly large": "файл неправдоподобно большой",
+    "Key file, if it is separate": "Файл ключа, если он отдельный",
+    "Keep as a standby": "Перевести в запасные",
+    "Failed to take the certificate out of service": "Не удалось вывести сертификат из строя",
+    "One file holding the key and the chain together is the usual shape and is all that is needed; the second field is only for material that came as two files. Order does not matter and a file given twice is not counted twice. Checked before it is accepted: the key has to match the certificate and the certificate has to cover the name — a standby discovered to be broken at the moment it is needed is worse than none. A wildcard filed against every name it covers is stored once per name, so each can be put into service on its own.": "Один файл, где ключ и цепочка лежат вместе, — обычный вид, и его достаточно; второе поле нужно только если материал пришёл двумя файлами. Порядок не важен, и один и тот же файл дважды не считается дважды. Проверяется до приёма: ключ должен подходить к сертификату, а сертификат — покрывать имя; запасной, о поломке которого узнаёшь ровно тогда, когда он понадобился, хуже, чем никакого. Wildcard, положенный на все покрываемые имена, сохраняется отдельно под каждое, чтобы каждое можно было ввести в строй само по себе."
   }
 }

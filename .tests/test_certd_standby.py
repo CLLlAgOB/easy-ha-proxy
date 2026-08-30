@@ -932,5 +932,268 @@ class AWildcardCoversExactlyOneLabel(unittest.TestCase):
         self.assertTrue(self.check("A.Example.COM", "*.example.com"))
 
 
+class TakingADeployedCertificateOutOfService(StandbyFixture):
+    """The obvious thing to want after putting one in the wrong place.
+
+    A certificate imported into the live directory is already on the gateway
+    with its key. Telling the operator to go and find the original files and
+    upload them a second time is a poor answer, so it can be moved where it
+    belongs in one step.
+
+    Only when nothing depends on it. Every ordinary name it answers for has
+    to still be answered by another deployed file once it is gone, or taking
+    it away would take that name down with it.
+    """
+
+    def wildcard(self, base="example.com", issuer="Another CA"):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = datetime.now(timezone.utc)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, base)])
+        issuer_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer)])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject).issuer_name(issuer_name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.DNSName(base), x509.DNSName(f"*.{base}")]
+                ),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        return (
+            cert.public_bytes(serialization.Encoding.PEM)
+            + key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+
+    def gateway(self):
+        """The live one: per-host certificates, a dual-key apex, and the
+        wildcard that was imported into the middle of them."""
+
+        for stem, name in (
+            ("a.example.com", "a.example.com"),
+            ("rdg.example.com", "rdg.example.com"),
+            ("example.com-ecdsa", "example.com"),
+            ("example.com-rsa", "example.com"),
+        ):
+            self.deploy_active(stem, self.make_pem(name, "LE"))
+        self.deploy_active("example.com", self.wildcard())
+
+    def test_it_leaves_the_live_directory(self):
+        self.gateway()
+        CERTD.adopt_deployed_as_standby("example.com", "imported")
+        self.assertFalse((CERTD.HAPROXY_CERTS_DIR / "example.com.pem").exists())
+
+    def test_it_becomes_the_standby_for_every_name_it_covers(self):
+        self.gateway()
+        result = CERTD.adopt_deployed_as_standby("example.com", "imported")
+        self.assertEqual(
+            sorted(result["domains"]),
+            ["a.example.com", "example.com-ecdsa", "example.com-rsa",
+             "rdg.example.com"],
+        )
+        for stem in result["domains"]:
+            self.assertTrue(
+                (CERTD.CERTS_AVAILABLE_DIR / stem / "imported.pem").is_file(), stem
+            )
+
+    def test_haproxy_is_reloaded_so_it_stops_serving_it(self):
+        # Removing the file changes nothing until HAProxy re-reads.
+        self.gateway()
+        before = len(self.reloads)
+        CERTD.adopt_deployed_as_standby("example.com", "imported")
+        self.assertGreater(len(self.reloads), before)
+
+    def test_the_names_it_was_serving_are_still_served(self):
+        self.gateway()
+        CERTD.adopt_deployed_as_standby("example.com", "imported")
+        for stem in ("a.example.com", "rdg.example.com",
+                     "example.com-ecdsa", "example.com-rsa"):
+            self.assertTrue((CERTD.HAPROXY_CERTS_DIR / f"{stem}.pem").is_file(), stem)
+
+    def test_it_does_not_file_itself_under_a_name_it_is_leaving(self):
+        # Its own stem is about to stop existing; a standby filed there
+        # would stand by for nothing.
+        self.gateway()
+        CERTD.adopt_deployed_as_standby("example.com", "imported")
+        self.assertFalse(
+            (CERTD.CERTS_AVAILABLE_DIR / "example.com" / "imported.pem").exists()
+        )
+
+    # -- when it must refuse ----------------------------------------------
+
+    def test_the_only_certificate_for_a_name_is_not_taken_away(self):
+        # This is the whole safety of it. Removing it would take the site
+        # down, which is a strange way to arrange a backup.
+        self.deploy_active("alone.example.com",
+                           self.make_pem("alone.example.com", "Some CA"))
+        with self.assertRaises(ValueError):
+            CERTD.adopt_deployed_as_standby("alone.example.com", "imported")
+
+    def test_the_refusal_names_what_would_be_left_bare(self):
+        self.deploy_active("alone.example.com",
+                           self.make_pem("alone.example.com", "Some CA"))
+        with self.assertRaises(ValueError) as caught:
+            CERTD.adopt_deployed_as_standby("alone.example.com", "imported")
+        self.assertIn("alone.example.com", str(caught.exception))
+
+    def test_nothing_is_removed_when_it_refuses(self):
+        self.deploy_active("alone.example.com",
+                           self.make_pem("alone.example.com", "Some CA"))
+        with self.assertRaises(ValueError):
+            CERTD.adopt_deployed_as_standby("alone.example.com", "imported")
+        self.assertTrue((CERTD.HAPROXY_CERTS_DIR / "alone.example.com.pem").is_file())
+
+    def test_a_certificate_without_its_key_is_refused(self):
+        # It would be half a standby, discovered at the worst moment.
+        self.gateway()
+        pem = self.wildcard()
+        only_cert = pem.split("-----BEGIN RSA PRIVATE KEY-----")[0]
+        (CERTD.HAPROXY_CERTS_DIR / "keyless.example.com.pem").write_text(
+            only_cert, encoding="ascii"
+        )
+        with self.assertRaises(ValueError):
+            CERTD.adopt_deployed_as_standby("keyless.example.com", "imported")
+
+    def test_a_name_that_is_not_deployed_is_refused(self):
+        self.gateway()
+        with self.assertRaises(ValueError):
+            CERTD.adopt_deployed_as_standby("nothing.example.com", "imported")
+
+    def test_the_listing_says_which_ones_could_be_put_away(self):
+        # The page offers the action only where it would work; a certificate
+        # that is the only thing serving its name must not sprout a button
+        # that always refuses.
+        self.gateway()
+        listing = CERTD.list_standby_certificates()
+        flags = {d["domain"]: d["can_be_put_away"] for d in listing["domains"]}
+        self.assertTrue(flags["example.com"], "the wildcard duplicates the rest")
+        self.assertFalse(flags["a.example.com"], "nothing else serves that name")
+
+    def test_a_lone_certificate_is_not_offered(self):
+        self.deploy_active("alone.example.com",
+                           self.make_pem("alone.example.com", "Some CA"))
+        listing = CERTD.list_standby_certificates()
+        flags = {d["domain"]: d["can_be_put_away"] for d in listing["domains"]}
+        self.assertFalse(flags["alone.example.com"])
+
+    def test_a_wildcard_entry_does_not_block_it(self):
+        # *.example.com answers for hostnames that have no file of their own,
+        # and those had no certificate before this one arrived either.
+        self.gateway()
+        result = CERTD.adopt_deployed_as_standby("example.com", "imported")
+        self.assertTrue(result["ok"])
+
+
+class MaterialArrivesInWhateverShapeTheAuthorityChose(StandbyFixture):
+    """A certificate authority does not ask how you would like it.
+
+    The form used to demand exactly two files. The commonest shape is one
+    file with the key and the whole chain in it, so that one file went into
+    both fields, arrived as two copies, and was refused with "PEM must
+    contain exactly one unencrypted private key" -- being told that a file
+    with one key in it has two keys, which is not a useful thing to be told.
+    """
+
+    def parts(self, name="site.example.com"):
+        pem = self.make_pem(name, "Another CA")
+        head, _, tail = pem.partition("-----BEGIN RSA PRIVATE KEY-----")
+        return head, "-----BEGIN RSA PRIVATE KEY-----" + tail
+
+    def test_one_file_with_the_key_first(self):
+        # Exactly the shape the operator had.
+        cert, key = self.parts()
+        combined = key + "\n" + cert
+        CERTD.store_standby_certificate("site.example.com", "other", combined)
+        stored = CERTD.CERTS_AVAILABLE_DIR / "site.example.com" / "other.pem"
+        self.assertTrue(stored.is_file())
+
+    def test_one_file_with_the_certificate_first(self):
+        cert, key = self.parts()
+        CERTD.store_standby_certificate("site.example.com", "other", cert + key)
+        self.assertTrue(
+            (CERTD.CERTS_AVAILABLE_DIR / "site.example.com" / "other.pem").is_file()
+        )
+
+    def test_the_same_file_given_twice_is_not_two_keys(self):
+        # What two required fields and one combined file produce.
+        cert, key = self.parts()
+        combined = key + "\n" + cert
+        CERTD.store_standby_certificate(
+            "site.example.com", "other", combined + "\n" + combined
+        )
+        self.assertTrue(
+            (CERTD.CERTS_AVAILABLE_DIR / "site.example.com" / "other.pem").is_file()
+        )
+
+    def test_two_genuinely_different_keys_are_still_refused(self):
+        # Dropping duplicates must not become dropping mistakes.
+        _cert_a, key_a = self.parts()
+        cert_b, key_b = self.parts()
+        with self.assertRaises(ValueError) as caught:
+            CERTD.normalise_uploaded_pem((cert_b + key_a + key_b).encode())
+        self.assertIn("private keys", str(caught.exception))
+
+    def test_a_certificate_with_no_key_says_which_half_is_missing(self):
+        cert, _key = self.parts()
+        with self.assertRaises(ValueError) as caught:
+            CERTD.normalise_uploaded_pem(cert.encode())
+        self.assertIn("private key", str(caught.exception))
+
+    def test_a_key_with_no_certificate_says_so_too(self):
+        _cert, key = self.parts()
+        with self.assertRaises(ValueError) as caught:
+            CERTD.normalise_uploaded_pem(key.encode())
+        self.assertIn("certificate", str(caught.exception))
+
+    def test_the_whole_chain_is_kept(self):
+        # Three certificates came in the operator's file; dropping the
+        # intermediates would break the chain for every client that needs it.
+        cert, key = self.parts()
+        second, _ = self.parts("other.example.com")
+        third, _ = self.parts("third.example.com")
+        result = CERTD.normalise_uploaded_pem((key + cert + second + third).encode())
+        self.assertEqual(result.count(b"BEGIN CERTIFICATE"), 3)
+        # BEGIN only: the marker appears in the END line as well.
+        self.assertEqual(result.count(b"-----BEGIN RSA PRIVATE KEY-----"), 1)
+
+    def test_the_leaf_stays_first(self):
+        # HAProxy takes the first certificate as the one it is serving.
+        cert, key = self.parts()
+        intermediate, _ = self.parts("issuer.example.com")
+        result = CERTD.normalise_uploaded_pem((key + cert + intermediate).encode())
+        first = CERTD._load_pem_certificates(result)[0]
+        self.assertEqual(CERTD._certificate_label(first), "site.example.com")
+
+    def test_two_separate_files_still_work(self):
+        cert, key = self.parts()
+        result = CERTD.normalise_uploaded_pem(cert.encode(), key.encode())
+        self.assertIn(b"BEGIN CERTIFICATE", result)
+        self.assertIn(b"PRIVATE KEY", result)
+
+    def test_the_pieces_may_arrive_in_either_order(self):
+        cert, key = self.parts()
+        result = CERTD.normalise_uploaded_pem(key.encode(), cert.encode())
+        self.assertIn(b"BEGIN CERTIFICATE", result)
+
+    def test_an_empty_second_file_is_ignored(self):
+        cert, key = self.parts()
+        result = CERTD.normalise_uploaded_pem((cert + key).encode(), b"")
+        self.assertIn(b"BEGIN CERTIFICATE", result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml  # type: ignore
 from cryptography import x509  # type: ignore
@@ -2244,6 +2244,63 @@ def _get_certs_available_dir() -> Path:
     return CERTS_AVAILABLE_DIR
 
 
+_PEM_LABELS = (
+    b"PRIVATE KEY", b"RSA PRIVATE KEY", b"EC PRIVATE KEY", b"CERTIFICATE",
+)
+
+
+def normalise_uploaded_pem(*parts: bytes) -> bytes:
+    """Make one usable PEM out of whatever the operator actually had.
+
+    A certificate authority hands over its material in whatever shape it
+    likes: one file with the key first and the chain after it, one file the
+    other way round, or a certificate and a key separately. The form used to
+    insist on exactly two files, which meant the commonest case -- a single
+    combined file -- was uploaded into both fields, arrived here as two
+    copies, and was refused for containing two private keys. Being told that
+    a file with one key in it has two keys is not a useful thing to be told.
+
+    So: take every PEM block from everything given, drop exact duplicates,
+    and put the certificates before the key. Order does not matter to
+    HAProxy, but one shape is easier to reason about than four.
+    """
+
+    seen: set = set()
+    certificates: List[bytes] = []
+    keys: List[bytes] = []
+    for part in parts:
+        if not part:
+            continue
+        for label in _PEM_LABELS:
+            for block in _extract_pem_blocks(part, label):
+                normalised = block.strip()
+                fingerprint = b"".join(normalised.split())
+                if fingerprint in seen:
+                    # The same file given twice, which is exactly what
+                    # happens when one combined file meets two fields.
+                    continue
+                seen.add(fingerprint)
+                if label == b"CERTIFICATE":
+                    certificates.append(normalised)
+                else:
+                    keys.append(normalised)
+
+    if not certificates:
+        raise ValueError("no certificate was found in what was uploaded")
+    if not keys:
+        raise ValueError(
+            "no private key was found; the certificate on its own cannot be "
+            "used to serve a site"
+        )
+    if len(keys) > 1:
+        raise ValueError(
+            f"{len(keys)} different private keys were found; upload the one "
+            "that belongs to this certificate"
+        )
+    separator = b"\n"
+    return separator.join(certificates + keys) + separator
+
+
 def _standby_slot(value: Any) -> str:
     """A slot name safe to use as a path component."""
 
@@ -2428,7 +2485,22 @@ def list_standby_certificates() -> Dict[str, Any]:
             active = {"error": str(exc)[:200], "usable": False}
         standbys = _standby_entries(domain)
         pinned = read_pin(domain)
+        # Whether this one could be put away without leaving a name bare.
+        # Offering the button on a certificate that is the only thing serving
+        # its name would be offering an action that always refuses.
+        claimed = _names_claimed_by(path)
+        served_elsewhere = {
+            name.lower()
+            for other in certs_dir.glob("*.pem")
+            if other.name != path.name
+            for name in _names_claimed_by(other)
+        }
+        can_be_put_away = bool(claimed) and all(
+            name.startswith("*.") or name.lower() in served_elsewhere
+            for name in claimed
+        )
         domains.append({
+            "can_be_put_away": can_be_put_away,
             "domain": domain,
             "active": active,
             "standbys": standbys,
@@ -2460,12 +2532,13 @@ def store_standby_certificate(
         raise ValueError(
             f"{LETSENCRYPT_SLOT!r} is reserved for the renewing certificate"
         )
-    data = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
-    if not data.strip():
+    raw = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
+    if not raw.strip():
         raise ValueError("no certificate was supplied")
-    if len(data) > 1024 * 1024:
+    if len(raw) > 1024 * 1024:
         raise ValueError("the certificate is implausibly large")
 
+    data = normalise_uploaded_pem(raw)
     _validate_server_pem(data, _stem_domain(checked_domain))
     described = _describe_pem(data)
 
@@ -2505,7 +2578,9 @@ def _sibling_stem(stem: str) -> str:
     return ""
 
 
-def store_standby_for_covered_names(slot: Any, pem: Any) -> Dict[str, Any]:
+def store_standby_for_covered_names(
+    slot: Any, pem: Any, exclude: Optional[Sequence[str]] = None
+) -> Dict[str, Any]:
     """Keep one certificate as the standby for every name it covers.
 
     A wildcard is bought precisely so it covers a dozen hostnames; filing it
@@ -2516,16 +2591,20 @@ def store_standby_for_covered_names(slot: Any, pem: Any) -> Dict[str, Any]:
     """
 
     checked_slot = _standby_slot(slot)
-    data = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
-    if not data.strip():
+    raw = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
+    if not raw.strip():
         raise ValueError("no certificate was supplied")
+    data = normalise_uploaded_pem(raw)
     certificates = _load_pem_certificates(data)
     if not certificates:
         raise ValueError("PEM does not contain an X.509 certificate")
 
+    left_out = {str(name) for name in (exclude or ())}
     covered: List[str] = []
     skipped: List[str] = []
     for stem in _deployed_stems():
+        if stem in left_out:
+            continue
         if _cert_matches_domain(certificates[0], _stem_domain(stem)):
             covered.append(stem)
         else:
@@ -2551,6 +2630,73 @@ def store_standby_for_covered_names(slot: Any, pem: Any) -> Dict[str, Any]:
         "domains": covered,
         "not_covered": skipped,
         "stored": stored,
+    }
+
+
+def _names_claimed_by(path: Path) -> List[str]:
+    try:
+        return _get_cert_dns_names(_load_pem_certificates(path.read_bytes())[0])
+    except Exception:  # pylint: disable=broad-except
+        return []
+
+
+def adopt_deployed_as_standby(domain: Any, slot: Any) -> Dict[str, Any]:
+    """Move a certificate out of service and keep it as a standby.
+
+    The obvious thing to want after putting one in the wrong place: it is
+    already on the gateway, with its key, and asking the operator to go and
+    find the original files again to upload them a second time is a poor
+    answer.
+
+    It is only safe when nothing depends on it. Every ordinary name the
+    certificate answers for has to still be answered by some other deployed
+    file once this one is gone, or removing it would take that name down --
+    so that is checked first and the whole thing is refused by name if it
+    does not hold. Wildcard entries are not checked: a wildcard answers for
+    hostnames that have no file of their own, and those had no certificate
+    before this one arrived either.
+    """
+
+    stem = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    certs_dir = _get_haproxy_certs_dir()
+    source = _ensure_within(certs_dir, certs_dir / f"{_safe_slug(stem)}.pem")
+    if not source.is_file():
+        raise ValueError(f"no certificate is deployed as {stem}")
+
+    data = source.read_bytes()
+    # Without its key it is not a standby, it is half of one.
+    _validate_server_pem(data)
+
+    others = [p for p in certs_dir.glob("*.pem") if p.resolve() != source.resolve()]
+    still_served = {name.lower() for path in others for name in _names_claimed_by(path)}
+    orphaned = [
+        name for name in _names_claimed_by(source)
+        if not name.startswith("*.") and name.lower() not in still_served
+    ]
+    if orphaned:
+        raise ValueError(
+            "this certificate is the only one serving "
+            + ", ".join(sorted(orphaned))
+            + "; putting it away would leave "
+            + ("that name" if len(orphaned) == 1 else "those names")
+            + " without one"
+        )
+
+    stored = store_standby_for_covered_names(checked_slot, data, exclude=[stem])
+    source.unlink()
+    rc, _stdout, stderr = _reload_haproxy()
+    LOG.warning(
+        "Took %s out of service and kept it as standby %s for %s",
+        stem, checked_slot, ", ".join(stored["domains"]),
+    )
+    return {
+        "ok": rc in (None, 0),
+        "removed": stem,
+        "slot": checked_slot,
+        "domains": stored["domains"],
+        "reload_rc": rc,
+        "reload_error": "" if rc in (None, 0) else stderr.strip()[:400],
     }
 
 
@@ -3011,6 +3157,18 @@ def handle_standby_store_all(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]
         return 400, {"ok": False, "error": str(exc)}
     except Exception as exc:  # pylint: disable=broad-except
         LOG.exception("cannot store the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_adopt(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, adopt_deployed_as_standby(
+            body.get("domain"), body.get("slot")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot take the certificate out of service")
         return 500, {"ok": False, "error": str(exc)}
 
 
@@ -4264,6 +4422,8 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_standby_list(body)
             elif path == "/api/v1/certs/standby/store":
                 status, resp = handle_standby_store(body)
+            elif path == "/api/v1/certs/standby/adopt":
+                status, resp = handle_standby_adopt(body)
             elif path == "/api/v1/certs/standby/store-all":
                 status, resp = handle_standby_store_all(body)
             elif path == "/api/v1/certs/standby/activate":
