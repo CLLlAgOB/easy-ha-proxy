@@ -2,6 +2,7 @@
 set -euo pipefail
 
 CERTS_DIR="{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+CERTS_AVAILABLE="{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}"
 HAPROXY_SERVICE="haproxy"
 HAPROXY_GROUP="haproxy"      # группа, под которой работает haproxy
 LIVE_DIR="/etc/letsencrypt/live"
@@ -12,9 +13,30 @@ FORCE_ALL="${HAPROXY_PEMS_FORCE_ALL:-1}"   # если =1 — всегда пер
 
 mkdir -p "$CERTS_DIR"
 
+# A name the operator has put on a standby certificate is held there until
+# they hand it back. Checked in this one function because it is the only
+# thing in this script that writes into CERTS_DIR, so there is no second path
+# that forgot -- the same reason the daemon enforces it inside its own single
+# installer.
+#
+# Without this, switching to a standby would last exactly until the next
+# successful renewal, and the operator would learn it had been undone from a
+# browser rather than from us.
+is_pinned() {
+  local stem="$1"
+  [[ -s "$CERTS_AVAILABLE/$stem/.pinned" ]]
+}
+
 build_pem() {
   local lineage="$1"   # имя lineage (domain.local, domain.local-ecdsa ...)
   local dest="$2"      # /etc/haproxy/certs/domain.local-ecdsa.pem
+
+  local stem
+  stem="$(basename "$dest" .pem)"
+  if is_pinned "$stem"; then
+    echo "Held: $stem is on a standby certificate ($(cat "$CERTS_AVAILABLE/$stem/.pinned")); not replacing it"
+    return 0
+  fi
 
   local tmp="${dest}.tmp.$$"
   local fc="$LIVE_DIR/$lineage/fullchain.pem"

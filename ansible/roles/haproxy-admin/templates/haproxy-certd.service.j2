@@ -15,6 +15,9 @@ Environment="HAPROXY_CERTD_DRY_RUN={{ haproxy_certd_dry_run | default('0') }}"
 Environment="HAPROXY_CERTD_SOCKET={{ certd_socket_path }}"
 Environment="HAPROXY_CERTD_SOCKET_GROUP={{ app_group }}"
 Environment="HAPROXY_CERTS_DIR={{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+# Standby certificates, kept out of the directory above on purpose: one file
+# there that is not a certificate is a fatal HAProxy configuration error.
+Environment="HAPROXY_CERTS_AVAILABLE_DIR={{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}"
 Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
 Environment="HAPROXY_CA_ROOT_DIR={{ haproxy_ca_root_dir | default('/etc/haproxy/certificate-authorities') }}"
 Environment="HAPROXY_MTLS_DIR={{ haproxy_mtls_dir | default('/etc/haproxy/mtls') }}"

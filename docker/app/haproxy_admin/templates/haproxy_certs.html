@@ -401,6 +401,178 @@
 {# ─────────────────── Let's Encrypt certificates ─────────────────── #}
 <div class="card" style="margin-top: 20px;">
   <div class="card-header">
+    <h2>Standby certificates</h2>
+    <div class="table-meta">
+      A second certificate for a name, from another authority, kept ready in
+      case this one cannot be renewed.
+    </div>
+  </div>
+
+  <div style="padding: 12px 16px;">
+    <p class="mon-sub" style="margin-top:0;">
+      HAProxy resolves a name to exactly one certificate and never looks at
+      the dates: given an expired one and a good one in the same directory it
+      serves the expired one, and the site is down while the replacement sits
+      unused. So a standby is kept out of that directory and put into service
+      deliberately, from here. Nothing switches on its own — the certificate
+      that takes over is usually signed by an authority most visitors do not
+      carry, and that trade is yours to make, not a timer's.
+    </p>
+    <p class="mon-sub">
+      While a name is on a standby it is held there. Renewal, a configuration
+      apply and the orphan sweep all leave it alone, so the switch is not
+      undone behind your back. Hand it back when Let's Encrypt is working
+      again.
+    </p>
+
+    {% if standby_error %}
+    <div class="table-meta" style="color: var(--error);">{{ standby_error }}</div>
+    {% endif %}
+
+    {% if standby_domains %}
+    <table class="table mono" style="table-layout: fixed; width: 100%;">
+      <colgroup>
+        <col style="width:26%;">
+        <col style="width:22%;">
+        <col style="width:16%;">
+        <col style="width:16%;">
+        <col style="width:20%;">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Issued by</th>
+          <th>Until</th>
+          <th>Role</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in standby_domains %}
+        <tr>
+          <td data-i18n-skip translate="no"><b>{{ entry.domain }}</b></td>
+          <td data-i18n-skip translate="no">
+            {{ entry.active.issuer or entry.active.error or "—" }}
+          </td>
+          <td data-i18n-skip translate="no">
+            {{ entry.active.not_after or "—" }}
+            {% if entry.active.days_left is defined and entry.active.days_left <= 14 %}
+              <span class="badge danger" data-i18n-skip translate="no">
+                {{ entry.active.days_left }}
+              </span>
+            {% endif %}
+          </td>
+          <td>
+            {% if entry.pinned %}
+              <span class="badge warn">Held</span>
+            {% else %}
+              In service
+            {% endif %}
+          </td>
+          <td style="text-align:right;">
+            {% if entry.pinned %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ entry.domain }} → Let's Encrypt?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="release_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <button type="submit" class="btn-small primary">
+                Hand back to Let's Encrypt
+              </button>
+            </form>
+            {% elif not entry.has_usable_standby %}
+              <span class="mon-sub">No standby</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% for spare in entry.standbys %}
+        <tr style="opacity:.85;">
+          <td style="padding-left:24px;" data-i18n-skip translate="no">
+            ↳ {{ spare.slot }}
+          </td>
+          <td data-i18n-skip translate="no">
+            {{ spare.issuer or spare.error or "—" }}
+          </td>
+          <td data-i18n-skip translate="no">{{ spare.not_after or "—" }}</td>
+          <td>
+            {% if entry.pinned == spare.slot %}
+              <span class="badge warn">In service</span>
+            {% elif spare.usable %}Standby{% else %}Unusable{% endif %}
+          </td>
+          <td style="text-align:right; white-space:nowrap;">
+            {% if spare.usable and entry.pinned != spare.slot %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ entry.domain }} → {{ spare.slot }}?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="activate_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="{{ spare.slot }}">
+              <button type="submit" class="btn-small primary">Put into service</button>
+            </form>
+            {% endif %}
+            {% if entry.pinned != spare.slot %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ spare.slot }}?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="delete_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="{{ spare.slot }}">
+              <button type="submit" class="btn-small">Remove</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="table-meta">No certificates are deployed yet.</div>
+    {% endif %}
+
+    <h3 style="margin-top:20px;">Keep a standby</h3>
+    <form method="post" enctype="multipart/form-data" style="max-width:640px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="store_standby">
+      <div class="form-row">
+        <label for="standby-domain">Name it is for</label>
+        <select id="standby-domain" name="standby_domain" required>
+          {% for entry in standby_domains %}
+          <option value="{{ entry.domain }}" data-i18n-skip translate="no">
+            {{ entry.domain }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="standby-slot">Call it</label>
+        <input id="standby-slot" name="standby_slot" required
+               placeholder="other-ca" maxlength="64">
+      </div>
+      <div class="form-row">
+        <label for="standby-cert">Certificate, with its chain</label>
+        <input id="standby-cert" name="standby_cert" type="file" required
+               accept=".pem,.crt,.cer">
+      </div>
+      <div class="form-row">
+        <label for="standby-key">Private key</label>
+        <input id="standby-key" name="standby_key" type="file" required
+               accept=".pem,.key">
+      </div>
+      <div class="table-meta">
+        Checked before it is accepted: the key has to match the certificate
+        and the certificate has to cover the name. A standby discovered to be
+        broken at the moment it is needed is worse than none.
+      </div>
+      <button type="submit" class="btn primary" style="margin-top:10px;">
+        Keep it
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="card" style="margin-top: 20px;">
+  <div class="card-header">
     <h2>Let's Encrypt certificates ({{ le_certs|length }})</h2>
     <div class="table-meta">
       Source: <code>/etc/letsencrypt/live/*/fullchain.pem</code>.<br>

@@ -567,6 +567,81 @@ def issue_internal_cert_for_domain(
     return data if isinstance(data, dict) else {"ok": False, "error": "unexpected response from haproxy-certd"}
 
 
+def list_standby_certificates() -> Dict[str, Any]:
+    """Every deployed certificate with whatever spare is held for it."""
+
+    url = f"{CERTD_API_BASE}/certs/standby"
+    try:
+        response = _post(url, json={}, timeout=30.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {
+        "ok": False, "error": "unexpected response from haproxy-certd"
+    }
+
+
+def store_standby_certificate(domain: str, slot: str, pem: str) -> Dict[str, Any]:
+    """Keep a certificate as a spare. The daemon refuses an unusable one."""
+
+    url = f"{CERTD_API_BASE}/certs/standby/store"
+    payload = {
+        "domain": (domain or "").strip(),
+        "slot": (slot or "").strip(),
+        "pem": pem or "",
+    }
+    try:
+        response = _post(url, json=payload, timeout=60.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {
+        "ok": False, "error": "unexpected response from haproxy-certd"
+    }
+
+
+def activate_standby_certificate(domain: str, slot: str) -> Dict[str, Any]:
+    """Put a spare into service. Always someone's decision, never a timer's."""
+
+    url = f"{CERTD_API_BASE}/certs/standby/activate"
+    payload = {"domain": (domain or "").strip(), "slot": (slot or "").strip()}
+    try:
+        response = _post(url, json=payload, timeout=60.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {
+        "ok": False, "error": "unexpected response from haproxy-certd"
+    }
+
+
+def release_to_letsencrypt(domain: str) -> Dict[str, Any]:
+    """Hand a name back to the renewing certificate and lift the hold."""
+
+    url = f"{CERTD_API_BASE}/certs/standby/release"
+    try:
+        response = _post(url, json={"domain": (domain or "").strip()}, timeout=60.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {
+        "ok": False, "error": "unexpected response from haproxy-certd"
+    }
+
+
+def delete_standby_certificate(domain: str, slot: str) -> Dict[str, Any]:
+    url = f"{CERTD_API_BASE}/certs/standby/delete"
+    payload = {"domain": (domain or "").strip(), "slot": (slot or "").strip()}
+    try:
+        response = _post(url, json=payload, timeout=30.0)
+        data = response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
+    return data if isinstance(data, dict) else {
+        "ok": False, "error": "unexpected response from haproxy-certd"
+    }
+
+
 def ensure_internal_ca() -> Dict[str, Any]:
     """Create the local root CA once, without returning its private key."""
     url = f"{CERTD_API_BASE}/certs/ca/internal/ensure"

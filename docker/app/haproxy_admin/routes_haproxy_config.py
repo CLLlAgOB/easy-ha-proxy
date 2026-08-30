@@ -1215,6 +1215,11 @@ def haproxy_certs_page():
         set_client_auth_cas,
         set_revoked_client_certificates,
         upload_external_ca,
+        list_standby_certificates,
+        store_standby_certificate,
+        activate_standby_certificate,
+        delete_standby_certificate,
+        release_to_letsencrypt,
     )
 
     message = None
@@ -1234,6 +1239,12 @@ def haproxy_certs_page():
         "delete_external_ca": ("ca.delete", "external_ca"),
         "set_client_auth_cas": ("ca.client_auth", "client_auth"),
         "set_revoked_client_certs": ("ca.revoke_client", "client_certificate"),
+        "store_standby": ("certificate.standby_store", "certificate"),
+        # Which certificate a site presents is exactly the kind of change
+        # that has to be answerable for afterwards.
+        "activate_standby": ("certificate.standby_activate", "certificate"),
+        "delete_standby": ("certificate.standby_delete", "certificate"),
+        "release_standby": ("certificate.standby_release", "certificate"),
     }
 
     if request.method == "POST":
@@ -1329,6 +1340,81 @@ def haproxy_certs_page():
                 else:
                     error = res.get("error") or "Failed to import the certificate authority"
 
+        elif action == "store_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip()
+            audit_target = f"{domain}/{slot}"
+            cert_file = request.files.get("standby_cert")
+            key_file = request.files.get("standby_key")
+            if not cert_file or not cert_file.filename:
+                error = "Select the certificate file"
+            elif not key_file or not key_file.filename:
+                error = "Select the private key file"
+            else:
+                # Joined here rather than asking for one pasted blob: a CA
+                # hands over two files, and making the operator concatenate
+                # them by hand is a step that goes wrong quietly.
+                blob = "\n".join(
+                    part.strip()
+                    for part in (
+                        cert_file.read().decode("utf-8", "replace"),
+                        key_file.read().decode("utf-8", "replace"),
+                    )
+                ) + "\n"
+                res = store_standby_certificate(domain, slot, blob)
+                if res.get("ok"):
+                    message = (
+                        f"Standby certificate kept for {domain}: "
+                        f"{res.get('standby', {}).get('issuer', '')}"
+                    )
+                else:
+                    error = res.get("error") or "Failed to keep the standby certificate"
+
+        elif action == "activate_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip()
+            audit_target = f"{domain}/{slot}"
+            res = activate_standby_certificate(domain, slot)
+            if res.get("ok"):
+                message = (
+                    f"{domain} is now served by the standby certificate "
+                    f"from {res.get('issuer', '')}"
+                )
+            else:
+                error = (
+                    res.get("reload_error")
+                    or res.get("error")
+                    or "Failed to put the standby certificate into service"
+                )
+
+        elif action == "release_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            audit_target = domain
+            res = release_to_letsencrypt(domain)
+            if res.get("ok"):
+                message = (
+                    f"{domain} is back on Let's Encrypt"
+                    if res.get("restored")
+                    else res.get("message")
+                    or f"{domain} released; no Let's Encrypt certificate on disk yet"
+                )
+            else:
+                error = (
+                    res.get("reload_error")
+                    or res.get("error")
+                    or "Failed to hand the name back to Let's Encrypt"
+                )
+
+        elif action == "delete_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip()
+            audit_target = f"{domain}/{slot}"
+            res = delete_standby_certificate(domain, slot)
+            if res.get("ok"):
+                message = f"Standby certificate removed for {domain}"
+            else:
+                error = res.get("error") or "Failed to remove the standby certificate"
+
         elif action == "delete_external_ca":
             audit_target = str(request.form.get("ca_id") or "").strip()
             res = delete_external_ca(audit_target)
@@ -1388,6 +1474,7 @@ def haproxy_certs_page():
                 detail=str(error or "")[:500],
             )
 
+    standby = list_standby_certificates()
     data = list_all_certs()
     haproxy_certs = data.get("haproxy") or []
     le_certs = data.get("letsencrypt") or []
@@ -1404,6 +1491,8 @@ def haproxy_certs_page():
         internal_ca=authorities.get("internal"),
         external_cas=authorities.get("external") or [],
         revoked_client_certs=authorities.get("revoked_client_certificates") or [],
+        standby_domains=standby.get("domains") or [],
+        standby_error=("" if standby.get("ok") else str(standby.get("error") or "")),
         message=message,
         error=error,
     )

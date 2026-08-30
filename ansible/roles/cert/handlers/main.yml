@@ -44,6 +44,16 @@
       exit 0
     fi
 
+    # A name the operator put on a standby certificate is held there until
+    # they hand it back. Without this, a config apply would undo the switch
+    # silently -- and this handler runs on far more than renewals.
+    stem="$(basename "{{ dest }}" .pem)"
+    pin="{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}/$stem/.pinned"
+    if [ -s "$pin" ]; then
+      echo "Held: $stem is on a standby certificate ($(cat "$pin")); not replacing it" >&2
+      exit 0
+    fi
+
     tmp="{{ dest }}.tmp.$$"
     cat "$full" "$key" > "$tmp"
     chown root:root "$tmp"
@@ -72,6 +82,16 @@
 
     if [ ! -r "$full" ] || [ ! -r "$key" ]; then
       echo "Skip {{ lineage }}: certificate files not ready" >&2
+      exit 0
+    fi
+
+    # A name the operator put on a standby certificate is held there until
+    # they hand it back. Without this, a config apply would undo the switch
+    # silently -- and this handler runs on far more than renewals.
+    stem="$(basename "{{ dest }}" .pem)"
+    pin="{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}/$stem/.pinned"
+    if [ -s "$pin" ]; then
+      echo "Held: $stem is on a standby certificate ($(cat "$pin")); not replacing it" >&2
       exit 0
     fi
 

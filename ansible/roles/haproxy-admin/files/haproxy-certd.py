@@ -967,10 +967,28 @@ def _reload_haproxy() -> Tuple[Optional[int], str, str]:
         return -1, "", f"systemctl reload haproxy failed: {exc}"
 
 
+class PinnedCertificate(ValueError):
+    """Raised when something would overwrite a name held on a standby."""
+
+
 def _activate_server_pem(
-    destination: Path, data: bytes
+    destination: Path, data: bytes, *, override_pin: bool = False
 ) -> Tuple[bool, Optional[int], str, str]:
-    """Install a PEM atomically and roll it back when HAProxy rejects it."""
+    """Install a PEM atomically and roll it back when HAProxy rejects it.
+
+    Every path in this daemon that puts a certificate in front of HAProxy
+    comes through here, which is why the hold is enforced here rather than at
+    each of them. A name held on a standby is held against issuing, importing,
+    uploading and renewing alike; there is no fifth caller that forgot.
+    """
+
+    if not override_pin:
+        held = read_pin(destination.stem)
+        if held:
+            raise PinnedCertificate(
+                f"{destination.stem} is being served by the standby "
+                f"{held!r}; hand it back to Let's Encrypt first"
+            )
     destination.parent.mkdir(parents=True, exist_ok=True)
     previous = destination.read_bytes() if destination.exists() else None
     with tempfile.NamedTemporaryFile(
@@ -2110,6 +2128,426 @@ def _mtls_dir(create: bool = False) -> Path:
     return directory
 
 
+# Standby certificates live outside the directory HAProxy reads, and that
+# separation is the entire point of it.
+#
+# HAProxy resolves a name to exactly one certificate per key type. Measured on
+# 2.8: with two files claiming the same name it loads the first in alphabetical
+# order, says nothing at all -- the configuration checks clean -- and serves
+# that one. It never looks at the dates. Given an expired certificate and a
+# perfectly good one side by side it serves the expired one and the site is
+# down for everybody while the replacement sits unused in the same directory.
+#
+# So a spare cannot be left where HAProxy can see it. It waits here, and
+# something has to deliberately put it in play.
+CERTS_AVAILABLE_DIR = Path(
+    os.environ.get("HAPROXY_CERTS_AVAILABLE_DIR", "/etc/haproxy/certs-available")
+).resolve()
+
+# Reserved for the certificate the ACME client renews on its own.
+LETSENCRYPT_SLOT = "letsencrypt"
+
+
+def _certs_available_root() -> Path:
+    """Where standbys live. Reading must never create anything.
+
+    Every certificate this daemon installs now passes the hold check on its
+    way in, so if reading the hold created a directory then installing a
+    certificate would depend on being able to create one -- and would start
+    failing on any host where that was not possible, for a feature that host
+    may not even use.
+    """
+
+    return CERTS_AVAILABLE_DIR
+
+
+def _get_certs_available_dir() -> Path:
+    """The same directory, made ready. Only for paths that are about to write."""
+
+    CERTS_AVAILABLE_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    return CERTS_AVAILABLE_DIR
+
+
+def _standby_slot(value: Any) -> str:
+    """A slot name safe to use as a path component."""
+
+    slug = _safe_slug(str(value or "").strip())
+    if not slug:
+        raise ValueError("the standby name must contain letters or digits")
+    if len(slug) > 64:
+        raise ValueError("the standby name is too long")
+    return slug
+
+
+def _standby_path(domain: str, slot: str) -> Path:
+    """The file for one standby, checked to stay inside its own directory."""
+
+    root = _certs_available_root()
+    holder = _ensure_within(root, root / _safe_slug(domain))
+    return _ensure_within(holder, holder / f"{slot}.pem")
+
+
+# The marker that says a name is being held on a standby. It lives here and
+# never in the crt directory: measured on HAProxy 2.8, one file there that is
+# not a certificate is a fatal configuration error and the gateway will not
+# start at all ("unable to load certificate ... no start line"). Only a
+# leading dot is skipped, which is why this daemon's own temporary files are
+# named .cert-* -- that prefix is load-bearing, not style.
+PIN_FILE = ".pinned"
+
+
+def _pin_path(stem: str) -> Path:
+    root = _certs_available_root()
+    holder = _ensure_within(root, root / _safe_slug(stem))
+    return _ensure_within(holder, holder / PIN_FILE)
+
+
+def _stem_domain(stem: str) -> str:
+    """The name a file is really for.
+
+    Dual-key sites are deployed as <domain>-ecdsa.pem and <domain>-rsa.pem,
+    so the file stem is not a hostname and no certificate on earth covers it.
+    Everything that addresses a file uses the stem; everything that checks
+    what a certificate is good for uses this.
+    """
+
+    for suffix in ("-ecdsa", "-rsa"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+def _standby_key(value: Any) -> str:
+    """The stem of a deployed certificate file, checked and normalised.
+
+    Not a hostname, deliberately. Dual-key sites deploy as <domain>-ecdsa.pem
+    and <domain>-rsa.pem, and the stem is what every writer of that directory
+    keys on, so it is what a hold and a standby are filed under. The hostname
+    hiding inside it still has to be a real one.
+    """
+
+    raw = str(value or "").strip().lower()
+    if not raw:
+        raise ValueError("a certificate name is required")
+    if len(raw) > 200:
+        raise ValueError("that certificate name is too long")
+    _normalize_dns_name(_stem_domain(raw))
+    if _safe_slug(raw) != raw:
+        raise ValueError("that certificate name cannot be used as a file name")
+    return raw
+
+
+def read_pin(stem: str) -> str:
+    """Which standby a name is held on, or "" when it is not held."""
+
+    try:
+        path = _pin_path(stem)
+    except ValueError:
+        return ""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()[:64]
+    except OSError:
+        return ""
+
+
+def is_pinned(stem: str) -> bool:
+    return bool(read_pin(stem))
+
+
+def _write_pin(stem: str, slot: str) -> None:
+    path = _pin_path(stem)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(f"{slot}\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def _clear_pin(stem: str) -> None:
+    with contextlib.suppress(ValueError, OSError):
+        _pin_path(stem).unlink(missing_ok=True)
+
+
+def _describe_pem(data: bytes) -> Dict[str, Any]:
+    """What a certificate is, in the terms the page needs to show it."""
+
+    certificates = _load_pem_certificates(data)
+    if not certificates:
+        raise ValueError("PEM does not contain an X.509 certificate")
+    leaf = certificates[0]
+    not_after = _cert_not_after(leaf)
+    not_before = _cert_not_before(leaf)
+    now = datetime.now(timezone.utc)
+    key = leaf.public_key()
+    if isinstance(key, rsa.RSAPublicKey):
+        key_type = f"RSA {key.key_size}"
+    elif isinstance(key, ec.EllipticCurvePublicKey):
+        key_type = f"EC {key.curve.name}"
+    else:
+        key_type = type(key).__name__
+    return {
+        "subject": _certificate_label(leaf),
+        # Who signed it is the whole reason for keeping a second one: a
+        # standby from a different authority is only useful if the operator
+        # can see at a glance that it *is* from a different authority.
+        "issuer": _issuer_label(leaf),
+        "names": _get_cert_dns_names(leaf),
+        "not_before": not_before.strftime("%Y-%m-%d"),
+        "not_after": not_after.strftime("%Y-%m-%d"),
+        "days_left": (not_after - now).days,
+        "usable": not_before <= now < not_after,
+        "key_type": key_type,
+        "chain_length": len(certificates),
+    }
+
+
+def _issuer_label(cert: x509.Certificate) -> str:
+    attrs = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if attrs:
+        return str(attrs[0].value)
+    attrs = cert.issuer.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+    if attrs:
+        return str(attrs[0].value)
+    return cert.issuer.rfc4514_string()
+
+
+def _standby_entries(domain: str) -> List[Dict[str, Any]]:
+    """Every standby stored for one name, newest expiry first."""
+
+    root = _certs_available_root()
+    holder = root / _safe_slug(domain)
+    if not holder.is_dir():
+        return []
+    entries: List[Dict[str, Any]] = []
+    for path in sorted(holder.glob("*.pem")):
+        try:
+            described = _describe_pem(path.read_bytes())
+        except Exception as exc:  # pylint: disable=broad-except
+            # A file that cannot be read is reported, not hidden: a standby
+            # nobody can see is broken is worse than no standby at all.
+            entries.append({
+                "slot": path.stem,
+                "error": str(exc)[:200],
+                "usable": False,
+            })
+            continue
+        described["slot"] = path.stem
+        entries.append(described)
+    entries.sort(key=lambda item: (not item.get("usable"), item.get("slot", "")))
+    return entries
+
+
+def list_standby_certificates() -> Dict[str, Any]:
+    """Every deployed certificate, with whatever spares are held for it."""
+
+    certs_dir = _get_haproxy_certs_dir()
+    domains: List[Dict[str, Any]] = []
+    for path in sorted(certs_dir.glob("*.pem")):
+        domain = path.stem
+        try:
+            active = _describe_pem(path.read_bytes())
+        except Exception as exc:  # pylint: disable=broad-except
+            active = {"error": str(exc)[:200], "usable": False}
+        standbys = _standby_entries(domain)
+        pinned = read_pin(domain)
+        domains.append({
+            "domain": domain,
+            "active": active,
+            "standbys": standbys,
+            "pinned": pinned,
+            "renewal_paused": bool(pinned),
+            # What the operator actually wants to know when the warning
+            # arrives: is there something ready to put in.
+            "has_usable_standby": any(
+                entry.get("usable") for entry in standbys
+            ),
+        })
+    return {"ok": True, "domains": domains}
+
+
+def store_standby_certificate(
+    domain: Any, slot: Any, pem: Any
+) -> Dict[str, Any]:
+    """Keep a certificate as a spare for one name.
+
+    Refused rather than repaired if the key does not match the certificate or
+    the certificate does not cover the name: a standby that cannot be put in
+    is worse than none, because it will be discovered at the moment it is
+    needed.
+    """
+
+    checked_domain = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    if checked_slot == LETSENCRYPT_SLOT:
+        raise ValueError(
+            f"{LETSENCRYPT_SLOT!r} is reserved for the renewing certificate"
+        )
+    data = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
+    if not data.strip():
+        raise ValueError("no certificate was supplied")
+    if len(data) > 1024 * 1024:
+        raise ValueError("the certificate is implausibly large")
+
+    _validate_server_pem(data, _stem_domain(checked_domain))
+    described = _describe_pem(data)
+
+    path = _standby_path(checked_domain, checked_slot)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(handle, data)
+    finally:
+        os.close(handle)
+    _set_cert_permissions(tmp)
+    os.replace(tmp, path)
+    LOG.info("Stored standby certificate %s for %s", checked_slot, checked_domain)
+    described["slot"] = checked_slot
+    return {"ok": True, "domain": checked_domain, "standby": described}
+
+
+def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
+    """Put a standby into service for one name.
+
+    Deliberately a decision somebody makes, never one this daemon makes for
+    them: a spare is usually signed by an authority most clients do not
+    trust, so swapping to it unasked would trade one broken page for another
+    without anybody deciding that was the better trade.
+    """
+
+    checked_domain = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    path = _standby_path(checked_domain, checked_slot)
+    if not path.is_file():
+        raise ValueError(f"no standby named {checked_slot!r} for this name")
+
+    data = path.read_bytes()
+    _validate_server_pem(data, _stem_domain(checked_domain))
+    described = _describe_pem(data)
+    if not described["usable"]:
+        raise ValueError(
+            "that standby is not valid today "
+            f"({described['not_before']} to {described['not_after']})"
+        )
+
+    certs_dir = _get_haproxy_certs_dir()
+    destination = _ensure_within(
+        certs_dir, certs_dir / f"{_safe_slug(checked_domain)}.pem"
+    )
+    ok, rc, _stdout, stderr = _activate_server_pem(
+        destination, data, override_pin=True
+    )
+    if ok:
+        # Held from here on. Everything else that writes this directory --
+        # the renewal hook, the Ansible handlers, the orphan sweep, this
+        # daemon's own issue paths -- checks the pin and leaves it alone,
+        # because a switch that the next renewal silently undoes is not a
+        # switch, and the operator would find out from a browser.
+        _write_pin(checked_domain, checked_slot)
+    LOG.warning(
+        "Standby certificate %s put into service for %s (issuer %s)",
+        checked_slot, checked_domain, described["issuer"],
+    )
+    return {
+        "ok": ok,
+        "domain": checked_domain,
+        "slot": checked_slot,
+        "issuer": described["issuer"],
+        "not_after": described["not_after"],
+        "reload_rc": rc,
+        "reload_error": "" if ok else stderr.strip()[:400],
+    }
+
+
+def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
+    """Hand a name back to the renewing certificate.
+
+    Clears the hold and reinstalls from the live lineage straight away, so
+    the name is not left on a standby that nothing is going to renew while
+    waiting for the next renewal to come round.
+    """
+
+    stem = _standby_key(domain)
+    if not read_pin(stem):
+        raise ValueError("that name is not being held on a standby")
+
+    live = _get_le_live_dir() / stem
+    fullchain = live / "fullchain.pem"
+    privkey = live / "privkey.pem"
+    _clear_pin(stem)
+
+    if not (fullchain.is_file() and privkey.is_file()):
+        # The hold is lifted either way: leaving it on would keep renewal
+        # locked out for a name whose certificate has to be issued again.
+        LOG.warning(
+            "Released %s, but no live lineage to restore; the next issue "
+            "will install it", stem,
+        )
+        return {
+            "ok": True, "domain": stem, "restored": False,
+            "message": "released; no Let's Encrypt certificate is on disk yet",
+        }
+
+    data = fullchain.read_bytes() + privkey.read_bytes()
+    certs_dir = _get_haproxy_certs_dir()
+    destination = _ensure_within(
+        certs_dir, certs_dir / f"{_safe_slug(stem)}.pem"
+    )
+    ok, rc, _stdout, stderr = _activate_server_pem(
+        destination, data, override_pin=True
+    )
+    LOG.warning("Released %s back to the renewing certificate", stem)
+    return {
+        "ok": ok,
+        "domain": stem,
+        "restored": ok,
+        "reload_rc": rc,
+        "reload_error": "" if ok else stderr.strip()[:400],
+    }
+
+
+def delete_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
+    checked_domain = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    if read_pin(checked_domain) == checked_slot:
+        raise ValueError(
+            "that standby is in service; hand the name back to Let's Encrypt "
+            "before removing it"
+        )
+    path = _standby_path(checked_domain, checked_slot)
+    path.unlink(missing_ok=True)
+    holder = path.parent
+    if holder.is_dir() and not any(holder.iterdir()):
+        holder.rmdir()
+    LOG.info("Deleted standby certificate %s for %s", checked_slot, checked_domain)
+    return {"ok": True, "domain": checked_domain, "slot": checked_slot}
+
+
+def _standby_hint(domain: str) -> str:
+    """Whether a spare is ready, appended to the expiry warning.
+
+    A warning that only says the certificate is dying leaves the operator to
+    go and find out whether anything can be done about it. If a usable spare
+    is already held, the warning is the right place to say so.
+    """
+
+    try:
+        usable = [
+            entry for entry in _standby_entries(domain) if entry.get("usable")
+        ]
+    except Exception:  # pylint: disable=broad-except
+        return ""
+    if not usable:
+        return ""
+    best = max(usable, key=lambda entry: entry.get("days_left", 0))
+    return (
+        f". A standby is ready: {best['slot']} from {best['issuer']}, "
+        f"valid until {best['not_after']}"
+    )
+
+
 def _write_public_file(path: Path, data: bytes) -> None:
     """Replace a world-readable file in one step, never half-written."""
     tmp = path.with_name(path.name + ".tmp")
@@ -2364,6 +2802,60 @@ def handle_internal_ca_ensure(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         "certificate_authority": item,
         "message": "Internal certificate authority created." if created else "Internal certificate authority already exists.",
     }
+
+
+def handle_standby_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, list_standby_certificates()
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot list standby certificates")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_store(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, store_standby_certificate(
+            body.get("domain"), body.get("slot"), body.get("pem")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot store the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_activate(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, activate_standby_certificate(
+            body.get("domain"), body.get("slot")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot put the standby certificate into service")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_release(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, release_to_letsencrypt(body.get("domain"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot release the name back to Let's Encrypt")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, delete_standby_certificate(
+            body.get("domain"), body.get("slot")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot delete the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
 
 
 def handle_internal_cert_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -3578,6 +4070,16 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_delete_haproxy(body)
             elif path == "/api/v1/certs/delete-le":
                 status, resp = handle_delete_le(body)
+            elif path == "/api/v1/certs/standby":
+                status, resp = handle_standby_list(body)
+            elif path == "/api/v1/certs/standby/store":
+                status, resp = handle_standby_store(body)
+            elif path == "/api/v1/certs/standby/activate":
+                status, resp = handle_standby_activate(body)
+            elif path == "/api/v1/certs/standby/release":
+                status, resp = handle_standby_release(body)
+            elif path == "/api/v1/certs/standby/delete":
+                status, resp = handle_standby_delete(body)
             elif path == "/api/v1/certs/ca/internal/ensure":
                 status, resp = handle_internal_ca_ensure(body)
             elif path == "/api/v1/certs/ca/internal/issue":
@@ -3685,7 +4187,10 @@ class CertificateExpiryWatch(threading.Thread):
                     if days >= 0
                     else f"The certificate for {domain} expired {-days} days ago"
                 ),
-                detail=f"Not after: {info['not_after']}",
+                detail=(
+                    f"Not after: {info['not_after']}"
+                    + _standby_hint(domain)
+                ),
             )
             reported += 1
         return reported

@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Standby certificates": "Запасные сертификаты",
+    "A second certificate for a name, from another authority, kept ready in case this one cannot be renewed.": "Второй сертификат для имени, от другого удостоверяющего центра, лежащий наготове на случай, если этот не удастся продлить.",
+    "HAProxy resolves a name to exactly one certificate and never looks at the dates: given an expired one and a good one in the same directory it serves the expired one, and the site is down while the replacement sits unused. So a standby is kept out of that directory and put into service deliberately, from here. Nothing switches on its own — the certificate that takes over is usually signed by an authority most visitors do not carry, and that trade is yours to make, not a timer's.": "HAProxy сопоставляет имени ровно один сертификат и никогда не смотрит на даты: если рядом лежат просроченный и исправный, он отдаст просроченный, и сайт ляжет, пока замена лежит неиспользованной. Поэтому запасной хранится вне того каталога и вводится в строй вручную, отсюда. Само ничего не переключается — тот сертификат, что встанет на замену, обычно подписан центром, которого у большинства посетителей нет, и этот размен ваш, а не таймера.",
+    "A successful renewal puts the original certificate back. That is normally what you want: you switched because renewal was failing.": "Успешное продление вернёт исходный сертификат обратно. Обычно это и нужно: вы переключались как раз потому, что продление ломалось.",
+    "Issued by": "Кем выдан",
+    "Until": "До",
+    "Role": "Роль",
+    "In service": "В строю",
+    "Standby": "Запасной",
+    "Unusable": "Непригоден",
+    "No standby": "Запасного нет",
+    "Put into service": "Ввести в строй",
+    "Keep a standby": "Положить запасной",
+    "Name it is for": "Для какого имени",
+    "Call it": "Назвать",
+    "Certificate, with its chain": "Сертификат вместе с цепочкой",
+    "Checked before it is accepted: the key has to match the certificate and the certificate has to cover the name. A standby discovered to be broken at the moment it is needed is worse than none.": "Проверяется до того, как будет принят: ключ должен подходить к сертификату, а сертификат — покрывать имя. Запасной, о поломке которого узнаёшь ровно в тот момент, когда он понадобился, хуже, чем никакого.",
+    "Keep it": "Положить",
+    "No certificates are deployed yet.": "Ни одного сертификата пока не развёрнуто.",
+    "Select the certificate file": "Выберите файл сертификата",
+    "Select the private key file": "Выберите файл закрытого ключа",
+    "Failed to keep the standby certificate": "Не удалось сохранить запасной сертификат",
+    "Failed to put the standby certificate into service": "Не удалось ввести запасной сертификат в строй",
+    "Failed to remove the standby certificate": "Не удалось удалить запасной сертификат",
+    "While a name is on a standby it is held there. Renewal, a configuration apply and the orphan sweep all leave it alone, so the switch is not undone behind your back. Hand it back when Let's Encrypt is working again.": "Пока имя стоит на запасном, оно закреплено. Продление, применение конфигурации и уборка осиротевших файлов его не трогают, так что переключение не отменится у вас за спиной. Верните обратно, когда Let's Encrypt снова заработает.",
+    "Held": "Закреплено",
+    "Hand back to Let's Encrypt": "Вернуть на Let's Encrypt",
+    "Failed to hand the name back to Let's Encrypt": "Не удалось вернуть имя на Let's Encrypt"
+  }
+}

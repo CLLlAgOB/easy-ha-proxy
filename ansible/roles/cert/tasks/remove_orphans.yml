@@ -102,6 +102,38 @@
         | list
       }}
 
+# 3b-bis) Имена, удерживаемые на запасном сертификате
+#
+# Такой PEM выглядит осиротевшим ровно тогда, когда он нужнее всего: линейки
+# Let's Encrypt для него может уже не быть — например, её удалили как раз
+# потому, что домен переведён на другой удостоверяющий центр. Снести его
+# означало бы положить сайт, и именно в тот момент, когда оператор считает,
+# что всё под контролем.
+- name: "Find names held on a standby certificate"
+  tags: [never, remove_site]
+  find:
+    paths: "{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}"
+    patterns: ".pinned"
+    hidden: true
+    recurse: true
+    file_type: file
+  register: _pinned_files
+  failed_when: false
+  changed_when: false
+
+- name: "Build the list of held PEM names"
+  tags: [never, remove_site]
+  set_fact:
+    pinned_pems: >-
+      {{
+        (_pinned_files.files | default([]))
+        | map(attribute='path')
+        | map('dirname')
+        | map('basename')
+        | map('regex_replace', '$', '.pem')
+        | list
+      }}
+
 # 3c) Итоговый список *.pem к удалению (и защита от коллизий с активными линейками)
 - name: "Build the final orphaned PEM removal list"
   tags: [never, remove_site]
@@ -111,6 +143,7 @@
         (orphan_pems_exact + orphan_pems_by_root)
         | unique
         | difference(current_lineages | map('regex_replace', '$', '.pem') | list)
+        | difference(pinned_pems | default([]))
         | sort
       }}
 
@@ -123,6 +156,7 @@
       - "Найденные линеки    : {{ current_lineages | sort }}"
       - "Линеки к удалению   : {{ orphan_lineages }}"
       - "*.pem   к удалению  : {{ orphan_pems }}"
+      - "удерживаются        : {{ pinned_pems | default([]) }}"
       - "cleanup_dry_run={{ cleanup_dry_run | default(false) | bool }}"
 
 # 5) Удаляем ТОЛЬКО если не dry-run
