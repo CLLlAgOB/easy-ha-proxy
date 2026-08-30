@@ -152,7 +152,18 @@ def load_ban_durations(database: "SecurityDatabase") -> Tuple[int, ...]:
     except Exception as exc:  # noqa: BLE001 - never stop the daemon for this
         LOG.warning("stored ban durations are unusable (%s); using defaults", exc)
         return BAN_DURATIONS
-STRIKE_WINDOW_SECONDS = 7 * 86400
+# How long the record of a ban survives, as a multiple of that ban's own
+# length. It has to be more than 1: a locked-out address cannot commit its
+# next offence until it is let back in, so a window merely equal to the ban
+# would forget the strike at the exact moment the address became able to
+# earn the next one. The multiplier grows with the step, so a second offence
+# is judged over twice its ban, a third over three times, and so on.
+#
+# This replaced a flat seven-day window, which worked only while bans were
+# minutes long. Once a ban could last a week the record aged out while the
+# address was still serving it: every release started again from step one
+# and the later rungs could never be reached at all.
+STRIKE_RETENTION_BASE_MULTIPLIER = 1
 
 RUNTIME_TIMEOUT_SECONDS = 5
 RUNTIME_MAX_BYTES = 8 * 1024 * 1024
@@ -2001,6 +2012,21 @@ class SecurityDatabase:
             ).fetchone()
         return int(row["value"] or 0) if row else 0
 
+    def ban_timestamps(self, ip: str, limit: int = 100) -> List[int]:
+        """When this address was banned, oldest first.
+
+        Capped: an address with more links than the ladder has rungs is
+        already at the top of it, so older ones cannot change the answer.
+        """
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts FROM security_events "
+                "WHERE ip = ? AND event_type = ? ORDER BY ts DESC LIMIT ?",
+                (ip, EVENT_BAN_APPLIED, int(limit)),
+            ).fetchall()
+        return sorted(int(row["ts"]) for row in rows)
+
     def strike_count(self, ip: str, since: int) -> int:
         """How many times this address has been banned recently."""
 
@@ -2059,13 +2085,33 @@ class SecurityDatabase:
             )
         return True
 
-    def apply_retention(self, *, events_before: int) -> Dict[str, int]:
+    def apply_retention(
+        self, *, events_before: int, bans_before: Optional[int] = None
+    ) -> Dict[str, int]:
+        """Sweep old rows.
+
+        Ban records are kept longer than everything else, and deliberately:
+        they are what the escalating ladder is counted from. Sweeping them on
+        the ordinary schedule would have quietly capped the ladder at
+        whatever fits inside the retention period -- the top rungs would have
+        existed in the settings and been unreachable in practice.
+        """
+
+        if bans_before is None:
+            bans_before = events_before
         with self._lock, self._conn:
             cursor = self._conn.cursor()
             cursor.execute(
-                "DELETE FROM security_events WHERE ts < ?", (events_before,)
+                "DELETE FROM security_events WHERE ts < ? "
+                "AND event_type NOT IN (?, ?)",
+                (events_before, EVENT_BAN_APPLIED, EVENT_BAN_LIFTED),
             )
             events = cursor.rowcount or 0
+            cursor.execute(
+                "DELETE FROM security_events WHERE ts < ? AND event_type IN (?, ?)",
+                (bans_before, EVENT_BAN_APPLIED, EVENT_BAN_LIFTED),
+            )
+            events += cursor.rowcount or 0
             cursor.execute(
                 "DELETE FROM event_cooldowns WHERE last_ts < ?", (events_before,)
             )
@@ -3069,10 +3115,56 @@ class GuardEngine:
             blockers.append("IPv4-only ban path")
         return blockers
 
-    def ban_duration(self, ip: str, now: int) -> int:
-        strikes = self.database.strike_count(ip, now - STRIKE_WINDOW_SECONDS)
+    def strike_retention(self, level: int) -> int:
+        """How long a strike earned at this level stays on the record."""
+
         ladder = self.ban_durations
-        index = min(strikes, len(ladder) - 1)
+        index = min(max(level - 1, 0), len(ladder) - 1)
+        return ladder[index] * (level + STRIKE_RETENTION_BASE_MULTIPLIER)
+
+    def longest_strike_retention(self) -> int:
+        """The most any strike could be worth keeping, for the sweeper."""
+
+        return max(
+            self.strike_retention(level)
+            for level in range(1, len(self.ban_durations) + 1)
+        )
+
+    def strike_level(self, ip: str, now: int) -> int:
+        """How many bans this address has earned that still count.
+
+        Derived from the ban record rather than stored alongside it, so the
+        two cannot drift apart. Each link carries its own window, measured
+        from the ban that created it, so a long ban keeps its own evidence
+        alive instead of outliving it.
+
+        Any fresh activity restarts the countdown from the beginning: an
+        address that is still probing has served nothing out, whatever the
+        clock says about its last ban.
+        """
+
+        stamps = self.database.ban_timestamps(ip)
+        if not stamps:
+            return 0
+
+        level = 0
+        previous = 0
+        for ts in stamps:
+            if level and ts - previous > self.strike_retention(level):
+                # Long enough went by with nothing: the chain lapsed and this
+                # ban starts a new one.
+                level = 0
+            level += 1
+            previous = ts
+
+        alive_from = max(previous, self.database.newest_finding_ts(ip))
+        if now - alive_from > self.strike_retention(level):
+            return 0
+        return level
+
+    def ban_duration(self, ip: str, now: int) -> int:
+        ladder = self.ban_durations
+        index = min(self.strike_level(ip, now), len(ladder) - 1)
         return ladder[index]
 
     def set_ban_durations(self, data: Any) -> Tuple[int, ...]:
@@ -3290,7 +3382,12 @@ class GuardEngine:
     def run_maintenance(self) -> Dict[str, Any]:
         now = _utc_now()
         cutoff = now - self.config.event_retention_days * 86400
-        deleted = self.database.apply_retention(events_before=cutoff)
+        # Ban records outlive ordinary findings by as long as the ladder can
+        # still be counting them.
+        ban_cutoff = min(cutoff, now - self.longest_strike_retention())
+        deleted = self.database.apply_retention(
+            events_before=cutoff, bans_before=ban_cutoff
+        )
         if any(deleted.values()):
             self.database.incremental_vacuum()
         pruned = self.memory.prune(now - 6 * 3600)

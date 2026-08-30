@@ -1149,7 +1149,11 @@ class EnforcementTests(EnforcementTestCase):
         self.assertEqual(self.table, {})
 
     def test_bans_get_progressively_longer(self):
-        # Against the ladder pinned in setUp, not the shipped one.
+        # Against the ladder pinned in setUp, not the shipped one. Each step
+        # is read just after the ban that earned it: a strike is kept for a
+        # multiple of its own ban now rather than for a flat week, so asking
+        # from a fixed point far in the future would be asking about an
+        # address that had already served its time and been forgiven.
         self.assertEqual(self.engine.ban_duration("203.0.113.9", 1000), 300)
         for index, expected in enumerate((1800, 6 * 3600, 24 * 3600, 24 * 3600)):
             self.database.record_events(
@@ -1163,7 +1167,9 @@ class EnforcementTests(EnforcementTestCase):
                 ]
             )
             self.assertEqual(
-                self.engine.ban_duration("203.0.113.9", 2000), expected, index
+                self.engine.ban_duration("203.0.113.9", 1001 + index),
+                expected,
+                index,
             )
 
     def test_a_ban_is_lifted_when_its_time_is_up(self):
@@ -1577,6 +1583,182 @@ class TheBanListCanNameAnAdaptiveBan(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )["messages"]
         self.assertIn(english, catalogue)
+
+
+class TheStrikeRecordOutlivesTheBanThatMadeIt(EnforcementTestCase):
+    """The ladder could not actually be climbed.
+
+    Strikes were counted in a flat seven-day window. That worked while a ban
+    lasted five minutes, and stopped working the moment one could last a
+    week: the record of the ban aged out while the address was still
+    serving it, so every release started again from step one and the rungs
+    above the second were unreachable in principle -- present in the
+    settings, impossible to arrive at.
+
+    Each strike now carries its own window, measured from the ban that
+    created it and scaled by the step it was on, so a long ban keeps its own
+    evidence alive. Any fresh activity restarts the countdown: an address
+    still probing has served nothing out.
+    """
+
+    LADDER = (3600, 7 * 86400, 30 * 86400, 90 * 86400)
+
+    def setUp(self):
+        super().setUp()
+        self.engine.ban_durations = self.LADDER
+
+    def ban_at(self, ip, ts):
+        self.database.record_events(
+            [{"ts": ts, "ip": ip, "event_type": guardd.EVENT_BAN_APPLIED,
+              "source": "guardd"}]
+        )
+
+    def probe_at(self, ip, ts):
+        self.database.record_events(
+            [{"ts": ts, "ip": ip, "event_type": guardd.EVENT_SCANNER_PATH,
+              "source": "guardd"}]
+        )
+
+    # -- the window the operator asked for ---------------------------------
+
+    def test_the_first_strike_is_kept_for_twice_its_ban(self):
+        self.assertEqual(self.engine.strike_retention(1), 3600 * 2)
+
+    def test_the_second_for_three_times(self):
+        self.assertEqual(self.engine.strike_retention(2), 7 * 86400 * 3)
+
+    def test_the_third_for_four_times(self):
+        self.assertEqual(self.engine.strike_retention(3), 30 * 86400 * 4)
+
+    def test_every_window_outlasts_its_own_ban(self):
+        # The whole point. A window equal to the ban would expire the record
+        # at the instant the address became able to earn the next step.
+        for level, duration in enumerate(self.LADDER, start=1):
+            self.assertGreater(
+                self.engine.strike_retention(level), duration, level
+            )
+
+    # -- the bug itself ----------------------------------------------------
+
+    def test_a_week_long_ban_does_not_erase_its_own_strike(self):
+        base = 1_000_000
+        self.ban_at("203.0.113.9", base)                 # step 1, one hour
+        self.ban_at("203.0.113.9", base + 7200)          # step 2, one week
+
+        # The week is served. Under the old flat window both strikes were
+        # exactly at its edge and the address came back a stranger.
+        after = base + 7200 + 7 * 86400 + 60
+        self.assertEqual(self.engine.strike_level("203.0.113.9", after), 2)
+        self.assertEqual(
+            self.engine.ban_duration("203.0.113.9", after), 30 * 86400
+        )
+
+    def test_the_ladder_can_be_climbed_to_the_top(self):
+        ip = "203.0.113.9"
+        ts = 1_000_000
+        reached = []
+        for _ in range(4):
+            duration = self.engine.ban_duration(ip, ts)
+            reached.append(duration)
+            self.ban_at(ip, ts)
+            ts += duration + 60  # released, and straight back to work
+        self.assertEqual(reached, list(self.LADDER))
+
+    def test_the_top_rung_is_not_exceeded(self):
+        ip = "203.0.113.9"
+        ts = 1_000_000
+        for _ in range(6):
+            duration = self.engine.ban_duration(ip, ts)
+            self.ban_at(ip, ts)
+            ts += duration + 60
+        self.assertEqual(self.engine.ban_duration(ip, ts), self.LADDER[-1])
+
+    # -- and it still forgives ---------------------------------------------
+
+    def test_an_address_that_stays_away_starts_again(self):
+        base = 1_000_000
+        self.ban_at("203.0.113.9", base)
+        # Nothing at all for longer than the first strike is kept.
+        quiet = base + 2 * 3600 + 60
+        self.assertEqual(self.engine.strike_level("203.0.113.9", quiet), 0)
+        self.assertEqual(self.engine.ban_duration("203.0.113.9", quiet), 3600)
+
+    def test_a_broken_chain_starts_the_count_again(self):
+        base = 1_000_000
+        self.ban_at("203.0.113.9", base)
+        # A year later, with nothing in between: unrelated behaviour, not a
+        # repeat offence.
+        self.ban_at("203.0.113.9", base + 365 * 86400)
+        self.assertEqual(
+            self.engine.strike_level("203.0.113.9", base + 365 * 86400 + 60), 1
+        )
+
+    def test_any_hit_restarts_the_countdown(self):
+        # "Любое попадание сбрасывает счётчик от начала": an address still
+        # probing has served nothing out, whatever its last ban says.
+        base = 1_000_000
+        self.ban_at("203.0.113.9", base)
+        self.probe_at("203.0.113.9", base + 2 * 3600 - 60)
+        # Past the ban's own window, but the probe carried the record.
+        later = base + 3 * 3600
+        self.assertEqual(self.engine.strike_level("203.0.113.9", later), 1)
+
+    def test_a_hit_does_not_invent_a_strike(self):
+        self.probe_at("203.0.113.9", 1_000_000)
+        self.assertEqual(self.engine.strike_level("203.0.113.9", 1_000_100), 0)
+
+    def test_an_address_never_banned_is_on_the_first_step(self):
+        self.assertEqual(
+            self.engine.ban_duration("203.0.113.9", 1_000_000), 3600
+        )
+
+
+class BanRecordsOutliveOrdinaryFindings(EnforcementTestCase):
+    """Retention was capping the ladder without saying so.
+
+    Every event was swept at thirty days. The ladder counts bans, so a rung
+    further out than the retention period could never be reached -- it would
+    sit in the settings looking configurable while the evidence for it was
+    deleted underneath.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.engine.ban_durations = (3600, 7 * 86400, 30 * 86400, 90 * 86400)
+
+    def test_the_sweeper_keeps_bans_as_long_as_the_ladder_needs(self):
+        # 90 days at the top rung, kept five times over.
+        self.assertEqual(
+            self.engine.longest_strike_retention(), 90 * 86400 * 5
+        )
+
+    def test_an_old_finding_goes_and_an_old_ban_stays(self):
+        old = 1_000_000
+        self.database.record_events([
+            {"ts": old, "ip": "203.0.113.9",
+             "event_type": guardd.EVENT_SCANNER_PATH, "source": "guardd"},
+            {"ts": old, "ip": "203.0.113.9",
+             "event_type": guardd.EVENT_BAN_APPLIED, "source": "guardd"},
+        ])
+        self.database.apply_retention(
+            events_before=old + 1, bans_before=old - 86400
+        )
+        self.assertEqual(
+            self.database.ban_timestamps("203.0.113.9"), [old]
+        )
+        self.assertEqual(self.database.newest_finding_ts("203.0.113.9"), 0)
+
+    def test_a_ban_past_even_that_is_swept(self):
+        # Kept longer, not kept forever.
+        old = 1_000_000
+        self.database.record_events([
+            {"ts": old, "ip": "203.0.113.9",
+             "event_type": guardd.EVENT_BAN_APPLIED, "source": "guardd"},
+        ])
+        self.database.apply_retention(
+            events_before=old + 1, bans_before=old + 1
+        )
+        self.assertEqual(self.database.ban_timestamps("203.0.113.9"), [])
 
 
 if __name__ == "__main__":
