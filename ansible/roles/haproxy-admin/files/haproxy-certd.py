@@ -801,7 +801,14 @@ def _hostname_matches_pattern(host: str, pattern: str) -> bool:
 
     if pattern.startswith("*."):
         suffix = pattern[1:]  # ".domain.local"
-        if host.endswith(suffix) and host.count(".") > suffix.count("."):
+        # A wildcard covers exactly one label, so the host must have the same
+        # number of dots as the suffix -- a.domain.local against
+        # .domain.local. This read `>` and was wrong in both directions at
+        # once: it refused a.domain.local, the only thing the wildcard is
+        # for, and accepted a.b.domain.local, which it does not cover.
+        # endswith already rules out the bare domain, so nothing else needs
+        # the comparison.
+        if host.endswith(suffix) and host.count(".") == suffix.count("."):
             return True
 
     return False
@@ -2477,6 +2484,76 @@ def store_standby_certificate(
     return {"ok": True, "domain": checked_domain, "standby": described}
 
 
+def _deployed_stems() -> List[str]:
+    """Every name HAProxy currently has a certificate file for."""
+
+    return sorted(path.stem for path in _get_haproxy_certs_dir().glob("*.pem"))
+
+
+def _sibling_stem(stem: str) -> str:
+    """The other half of a dual-key pair, or "" when there is not one.
+
+    <domain>-ecdsa.pem and <domain>-rsa.pem are one site in two files. A
+    standby put into only one of them would leave the other still claiming
+    the same name -- which is the shadowing this whole feature exists to
+    avoid, recreated by the act of avoiding it.
+    """
+
+    for suffix, other in (("-ecdsa", "-rsa"), ("-rsa", "-ecdsa")):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)] + other
+    return ""
+
+
+def store_standby_for_covered_names(slot: Any, pem: Any) -> Dict[str, Any]:
+    """Keep one certificate as the standby for every name it covers.
+
+    A wildcard is bought precisely so it covers a dozen hostnames; filing it
+    a dozen times by hand is the sort of chore that gets done nine times.
+    Which names it lands on is decided by the certificate itself, checked
+    against what is actually deployed, so it cannot be filed against a name
+    it could not serve.
+    """
+
+    checked_slot = _standby_slot(slot)
+    data = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
+    if not data.strip():
+        raise ValueError("no certificate was supplied")
+    certificates = _load_pem_certificates(data)
+    if not certificates:
+        raise ValueError("PEM does not contain an X.509 certificate")
+
+    covered: List[str] = []
+    skipped: List[str] = []
+    for stem in _deployed_stems():
+        if _cert_matches_domain(certificates[0], _stem_domain(stem)):
+            covered.append(stem)
+        else:
+            skipped.append(stem)
+
+    if not covered:
+        raise ValueError(
+            "this certificate does not cover any name deployed on this gateway"
+        )
+
+    stored: List[Dict[str, Any]] = []
+    for stem in covered:
+        result = store_standby_certificate(stem, checked_slot, data)
+        stored.append({"domain": stem, **result.get("standby", {})})
+
+    LOG.info(
+        "Stored standby %s for %d name(s): %s",
+        checked_slot, len(covered), ", ".join(covered),
+    )
+    return {
+        "ok": True,
+        "slot": checked_slot,
+        "domains": covered,
+        "not_covered": skipped,
+        "stored": stored,
+    }
+
+
 def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
     """Put a standby into service for one name.
 
@@ -2508,6 +2585,25 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
     ok, rc, _stdout, stderr = _activate_server_pem(
         destination, data, override_pin=True, allow_shadow=True
     )
+
+    # A dual-key site is two files for one name. Moving only one of them
+    # would leave the other still claiming that name with the old
+    # certificate -- the shadowing this feature exists to prevent, recreated
+    # by the act of preventing it. The sibling comes along when it holds the
+    # same standby.
+    also: List[str] = []
+    sibling = _sibling_stem(checked_domain)
+    if ok and sibling and _standby_path(sibling, checked_slot).is_file():
+        sibling_destination = _ensure_within(
+            certs_dir, certs_dir / f"{_safe_slug(sibling)}.pem"
+        )
+        sibling_ok, _rc2, _out2, _err2 = _activate_server_pem(
+            sibling_destination, data, override_pin=True, allow_shadow=True
+        )
+        if sibling_ok:
+            _write_pin(sibling, checked_slot)
+            also.append(sibling)
+
     if ok:
         # Held from here on. Everything else that writes this directory --
         # the renewal hook, the Ansible handlers, the orphan sweep, this
@@ -2523,8 +2619,42 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
         "ok": ok,
         "domain": checked_domain,
         "slot": checked_slot,
+        "also_switched": also,
         "issuer": described["issuer"],
         "not_after": described["not_after"],
+        "reload_rc": rc,
+        "reload_error": "" if ok else stderr.strip()[:400],
+    }
+
+
+def _release_one(stem: str) -> Dict[str, Any]:
+    """Lift the hold on one file and restore its lineage if there is one."""
+
+    live = _get_le_live_dir() / stem
+    fullchain = live / "fullchain.pem"
+    privkey = live / "privkey.pem"
+    _clear_pin(stem)
+    if not (fullchain.is_file() and privkey.is_file()):
+        LOG.warning(
+            "Released %s, but no live lineage to restore; the next issue "
+            "will install it", stem,
+        )
+        return {"ok": True, "domain": stem, "restored": False}
+    certs_dir = _get_haproxy_certs_dir()
+    destination = _ensure_within(
+        certs_dir, certs_dir / f"{_safe_slug(stem)}.pem"
+    )
+    ok, rc, _stdout, stderr = _activate_server_pem(
+        destination,
+        fullchain.read_bytes() + privkey.read_bytes(),
+        override_pin=True,
+        allow_shadow=True,
+    )
+    LOG.warning("Released %s back to the renewing certificate", stem)
+    return {
+        "ok": ok,
+        "domain": stem,
+        "restored": ok,
         "reload_rc": rc,
         "reload_error": "" if ok else stderr.strip()[:400],
     }
@@ -2542,39 +2672,18 @@ def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
     if not read_pin(stem):
         raise ValueError("that name is not being held on a standby")
 
-    live = _get_le_live_dir() / stem
-    fullchain = live / "fullchain.pem"
-    privkey = live / "privkey.pem"
-    _clear_pin(stem)
+    also: List[str] = []
+    sibling = _sibling_stem(stem)
+    if sibling and read_pin(sibling):
+        # Both halves went over together; both come back together.
+        _release_one(sibling)
+        also.append(sibling)
 
-    if not (fullchain.is_file() and privkey.is_file()):
-        # The hold is lifted either way: leaving it on would keep renewal
-        # locked out for a name whose certificate has to be issued again.
-        LOG.warning(
-            "Released %s, but no live lineage to restore; the next issue "
-            "will install it", stem,
-        )
-        return {
-            "ok": True, "domain": stem, "restored": False,
-            "message": "released; no Let's Encrypt certificate is on disk yet",
-        }
-
-    data = fullchain.read_bytes() + privkey.read_bytes()
-    certs_dir = _get_haproxy_certs_dir()
-    destination = _ensure_within(
-        certs_dir, certs_dir / f"{_safe_slug(stem)}.pem"
-    )
-    ok, rc, _stdout, stderr = _activate_server_pem(
-        destination, data, override_pin=True, allow_shadow=True
-    )
-    LOG.warning("Released %s back to the renewing certificate", stem)
-    return {
-        "ok": ok,
-        "domain": stem,
-        "restored": ok,
-        "reload_rc": rc,
-        "reload_error": "" if ok else stderr.strip()[:400],
-    }
+    result = _release_one(stem)
+    result["also_released"] = also
+    if not result["restored"]:
+        result["message"] = "released; no Let's Encrypt certificate is on disk yet"
+    return result
 
 
 def delete_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
@@ -2885,6 +2994,18 @@ def handle_standby_store(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     try:
         return 200, store_standby_certificate(
             body.get("domain"), body.get("slot"), body.get("pem")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot store the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_store_all(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, store_standby_for_covered_names(
+            body.get("slot"), body.get("pem")
         )
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
@@ -4143,6 +4264,8 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_standby_list(body)
             elif path == "/api/v1/certs/standby/store":
                 status, resp = handle_standby_store(body)
+            elif path == "/api/v1/certs/standby/store-all":
+                status, resp = handle_standby_store_all(body)
             elif path == "/api/v1/certs/standby/activate":
                 status, resp = handle_standby_activate(body)
             elif path == "/api/v1/certs/standby/release":

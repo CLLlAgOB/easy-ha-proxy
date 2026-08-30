@@ -537,6 +537,7 @@
       <div class="form-row">
         <label for="standby-domain">Name it is for</label>
         <select id="standby-domain" name="standby_domain" required>
+          <option value="*">Every name this certificate covers</option>
           {% for entry in standby_domains %}
           <option value="{{ entry.domain }}" data-i18n-skip translate="no">
             {{ entry.domain }}
@@ -562,7 +563,9 @@
       <div class="table-meta">
         Checked before it is accepted: the key has to match the certificate
         and the certificate has to cover the name. A standby discovered to be
-        broken at the moment it is needed is worse than none.
+        broken at the moment it is needed is worse than none. A wildcard filed
+        against every name it covers is stored once per name, so each can be
+        put into service on its own.
       </div>
       <button type="submit" class="btn primary" style="margin-top:10px;">
         Keep it

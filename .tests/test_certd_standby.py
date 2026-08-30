@@ -474,14 +474,27 @@ class DualKeySitesAreFiledByFileName(StandbyFixture):
         with self.assertRaises(ValueError):
             CERTD.store_standby_certificate("example.com-ecdsa", "other", pem)
 
-    def test_the_two_key_types_are_held_separately(self):
+    def test_the_two_key_types_are_stored_separately(self):
+        # Stored apart, one directory each. Whether they *switch* together is
+        # a different question, answered in ADualKeySiteMovesAsOne: they do,
+        # because leaving one behind rebuilds the shadowing.
         for stem in ("example.com-ecdsa", "example.com-rsa"):
             self.deploy_active(stem, self.make_pem("example.com", "Original CA"))
             CERTD.store_standby_certificate(
                 stem, "other", self.make_pem("example.com", "Another CA")
             )
-        CERTD.activate_standby_certificate("example.com-ecdsa", "other")
-        self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "other")
+        for stem in ("example.com-ecdsa", "example.com-rsa"):
+            self.assertTrue(
+                (CERTD.CERTS_AVAILABLE_DIR / stem / "other.pem").is_file(), stem
+            )
+
+    def test_a_name_with_no_sibling_holds_only_itself(self):
+        self.deploy_active("site.example.com", self.make_pem("site.example.com", "LE"))
+        CERTD.store_standby_certificate(
+            "site.example.com", "other", self.make_pem("site.example.com", "Another CA")
+        )
+        CERTD.activate_standby_certificate("site.example.com", "other")
+        self.assertEqual(CERTD.read_pin("site.example.com"), "other")
         self.assertEqual(CERTD.read_pin("example.com-rsa"), "")
 
 
@@ -720,6 +733,203 @@ class TwoCertificatesForOneNameAreRefused(StandbyFixture):
         self.assertFalse(
             (CERTD.HAPROXY_CERTS_DIR / "site.example.com-other.pem").exists()
         )
+
+
+class OneWildcardCoversEveryNameItCovers(StandbyFixture):
+    """Filing a wildcard by hand, once per hostname, is a chore done nine
+    times out of twelve.
+
+    The gateway that prompted this has twelve deployed certificates and a
+    wildcard that covers all of them. Which names it lands on is decided by
+    the certificate, checked against what is actually deployed, so it cannot
+    be filed against a name it could not serve.
+    """
+
+    def wildcard(self, base="example.com", issuer="Another CA"):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = datetime.now(timezone.utc)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, base)])
+        issuer_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer)])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer_name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.DNSName(base), x509.DNSName(f"*.{base}")]
+                ),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        return (
+            cert.public_bytes(serialization.Encoding.PEM)
+            + key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+
+    def gateway(self):
+        """The shape of the real one: subdomains plus a dual-key apex."""
+
+        for stem, name in (
+            ("a.example.com", "a.example.com"),
+            ("rdg.example.com", "rdg.example.com"),
+            ("example.com-ecdsa", "example.com"),
+            ("example.com-rsa", "example.com"),
+            ("other.test", "other.test"),
+        ):
+            self.deploy_active(stem, self.make_pem(name, "LE"))
+
+    def test_it_lands_on_every_name_it_covers(self):
+        self.gateway()
+        result = CERTD.store_standby_for_covered_names("other-ca", self.wildcard())
+        self.assertEqual(
+            sorted(result["domains"]),
+            ["a.example.com", "example.com-ecdsa", "example.com-rsa",
+             "rdg.example.com"],
+        )
+
+    def test_it_leaves_alone_a_name_it_does_not_cover(self):
+        self.gateway()
+        result = CERTD.store_standby_for_covered_names("other-ca", self.wildcard())
+        self.assertIn("other.test", result["not_covered"])
+        self.assertFalse(
+            (CERTD.CERTS_AVAILABLE_DIR / "other.test" / "other-ca.pem").exists()
+        )
+
+    def test_the_apex_is_matched_through_its_key_suffixed_file_names(self):
+        # The file stem is example.com-ecdsa, which no certificate covers
+        # literally; the hostname inside it is what is checked.
+        self.gateway()
+        CERTD.store_standby_for_covered_names("other-ca", self.wildcard())
+        for stem in ("example.com-ecdsa", "example.com-rsa"):
+            self.assertTrue(
+                (CERTD.CERTS_AVAILABLE_DIR / stem / "other-ca.pem").is_file(), stem
+            )
+
+    def test_each_one_can_be_put_into_service_on_its_own(self):
+        self.gateway()
+        CERTD.store_standby_for_covered_names("other-ca", self.wildcard())
+        result = CERTD.activate_standby_certificate("rdg.example.com", "other-ca")
+        self.assertTrue(result["ok"])
+        self.assertEqual(CERTD.read_pin("rdg.example.com"), "other-ca")
+        self.assertEqual(CERTD.read_pin("a.example.com"), "")
+
+    def test_a_certificate_covering_nothing_deployed_is_refused(self):
+        self.gateway()
+        with self.assertRaises(ValueError):
+            CERTD.store_standby_for_covered_names(
+                "other-ca", self.wildcard("nowhere.invalid")
+            )
+
+    def test_nothing_at_all_is_refused(self):
+        self.gateway()
+        with self.assertRaises(ValueError):
+            CERTD.store_standby_for_covered_names("other-ca", "")
+
+
+class ADualKeySiteMovesAsOne(StandbyFixture):
+    """Two files, one name. Moving one and not the other rebuilds the trap.
+
+    <domain>-ecdsa.pem and <domain>-rsa.pem both claim the same hostname. Put
+    a standby into only one of them and the other goes on claiming that name
+    with the old certificate -- which is the shadowing this whole feature
+    exists to prevent, recreated by the act of preventing it, and decided as
+    always by whichever file name sorts first.
+    """
+
+    def setup_pair(self):
+        for stem in ("example.com-ecdsa", "example.com-rsa"):
+            self.deploy_active(stem, self.make_pem("example.com", "LE"))
+            CERTD.store_standby_certificate(
+                stem, "other-ca", self.make_pem("example.com", "Another CA")
+            )
+
+    def test_the_sibling_comes_along(self):
+        self.setup_pair()
+        result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["also_switched"], ["example.com-rsa"])
+        self.assertEqual(CERTD.read_pin("example.com-rsa"), "other-ca")
+
+    def test_both_files_are_actually_replaced(self):
+        self.setup_pair()
+        CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        for stem in ("example.com-ecdsa", "example.com-rsa"):
+            deployed = (CERTD.HAPROXY_CERTS_DIR / f"{stem}.pem").read_bytes()
+            self.assertEqual(CERTD._describe_pem(deployed)["issuer"], "Another CA")
+
+    def test_the_sibling_is_left_alone_when_it_holds_no_such_standby(self):
+        # Only what the operator actually filed moves.
+        self.deploy_active("example.com-ecdsa", self.make_pem("example.com", "LE"))
+        self.deploy_active("example.com-rsa", self.make_pem("example.com", "LE"))
+        CERTD.store_standby_certificate(
+            "example.com-ecdsa", "other-ca", self.make_pem("example.com", "Another CA")
+        )
+        result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        self.assertEqual(result["also_switched"], [])
+        self.assertEqual(CERTD.read_pin("example.com-rsa"), "")
+
+    def test_both_come_back_together(self):
+        self.setup_pair()
+        CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        result = CERTD.release_to_letsencrypt("example.com-ecdsa")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["also_released"], ["example.com-rsa"])
+        self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "")
+        self.assertEqual(CERTD.read_pin("example.com-rsa"), "")
+
+    def test_an_ordinary_name_has_no_sibling(self):
+        self.assertEqual(CERTD._sibling_stem("site.example.com"), "")
+        self.assertEqual(CERTD._sibling_stem("example.com-ecdsa"), "example.com-rsa")
+        self.assertEqual(CERTD._sibling_stem("example.com-rsa"), "example.com-ecdsa")
+
+
+class AWildcardCoversExactlyOneLabel(unittest.TestCase):
+    """The matcher was wrong in both directions at once.
+
+    `host.count(".") > suffix.count(".")` refused a.domain.local -- the only
+    thing a *.domain.local certificate exists to cover -- and accepted
+    a.b.domain.local, which it does not cover. Since endswith already rules
+    out the bare domain, the comparison had nothing left to do but be wrong.
+
+    It blocked the feature that found it: filing a wildcard against the names
+    it covers matched none of the subdomains. It also means uploading a
+    wildcard for a subdomain was refused as not covering that subdomain.
+    """
+
+    def check(self, host, pattern):
+        return CERTD._hostname_matches_pattern(host, pattern)
+
+    def test_one_label_matches(self):
+        self.assertTrue(self.check("a.example.com", "*.example.com"))
+
+    def test_two_labels_do_not(self):
+        self.assertFalse(self.check("a.b.example.com", "*.example.com"))
+
+    def test_the_bare_domain_does_not(self):
+        self.assertFalse(self.check("example.com", "*.example.com"))
+
+    def test_an_exact_name_still_matches_itself(self):
+        self.assertTrue(self.check("example.com", "example.com"))
+
+    def test_a_subdomain_does_not_match_the_bare_domain(self):
+        self.assertFalse(self.check("a.example.com", "example.com"))
+
+    def test_it_is_case_insensitive(self):
+        self.assertTrue(self.check("A.Example.COM", "*.example.com"))
 
 
 if __name__ == "__main__":

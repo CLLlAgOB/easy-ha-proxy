@@ -1220,6 +1220,7 @@ def haproxy_certs_page():
         activate_standby_certificate,
         delete_standby_certificate,
         release_to_letsencrypt,
+        store_standby_for_covered_names,
     )
 
     message = None
@@ -1361,11 +1362,20 @@ def haproxy_certs_page():
                         key_file.read().decode("utf-8", "replace"),
                     )
                 ) + "\n"
-                res = store_standby_certificate(domain, slot, blob)
+                if domain == "*":
+                    # One wildcard covers a dozen hostnames; filing it a
+                    # dozen times by hand is the sort of chore that gets
+                    # done nine times.
+                    res = store_standby_for_covered_names(slot, blob)
+                    covered = res.get("domains") or []
+                    audit_target = f"*/{slot}"
+                else:
+                    res = store_standby_certificate(domain, slot, blob)
+                    covered = [domain] if res.get("ok") else []
                 if res.get("ok"):
                     message = (
-                        f"Standby certificate kept for {domain}: "
-                        f"{res.get('standby', {}).get('issuer', '')}"
+                        "Standby certificate kept for "
+                        + ", ".join(covered)
                     )
                 else:
                     error = res.get("error") or "Failed to keep the standby certificate"

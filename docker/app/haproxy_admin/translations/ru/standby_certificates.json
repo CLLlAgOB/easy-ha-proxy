@@ -20,7 +20,6 @@
     "Name it is for": "Для какого имени",
     "Call it": "Назвать",
     "Certificate, with its chain": "Сертификат вместе с цепочкой",
-    "Checked before it is accepted: the key has to match the certificate and the certificate has to cover the name. A standby discovered to be broken at the moment it is needed is worse than none.": "Проверяется до того, как будет принят: ключ должен подходить к сертификату, а сертификат — покрывать имя. Запасной, о поломке которого узнаёшь ровно в тот момент, когда он понадобился, хуже, чем никакого.",
     "Keep it": "Положить",
     "No certificates are deployed yet.": "Ни одного сертификата пока не развёрнуто.",
     "Select the certificate file": "Выберите файл сертификата",
@@ -32,6 +31,8 @@
     "Held": "Закреплено",
     "Hand back to Let's Encrypt": "Вернуть на Let's Encrypt",
     "Failed to hand the name back to Let's Encrypt": "Не удалось вернуть имя на Let's Encrypt",
-    "Failed to import the certificate": "Не удалось импортировать сертификат"
+    "Failed to import the certificate": "Не удалось импортировать сертификат",
+    "Every name this certificate covers": "Все имена, которые он покрывает",
+    "Checked before it is accepted: the key has to match the certificate and the certificate has to cover the name. A standby discovered to be broken at the moment it is needed is worse than none. A wildcard filed against every name it covers is stored once per name, so each can be put into service on its own.": "Проверяется до того, как будет принят: ключ должен подходить к сертификату, а сертификат — покрывать имя. Запасной, о поломке которого узнаёшь ровно тогда, когда он понадобился, хуже, чем никакого. Wildcard, положенный на все покрываемые имена, сохраняется отдельно под каждое, чтобы каждое можно было ввести в строй само по себе."
   }
 }
