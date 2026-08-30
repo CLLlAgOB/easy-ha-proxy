@@ -559,5 +559,168 @@ class EveryWriterOfTheCertificateDirectoryChecksTheHold(unittest.TestCase):
         self.assertNotIn("mkdir", body)
 
 
+class TwoCertificatesForOneNameAreRefused(StandbyFixture):
+    """What happened on a live gateway, and must not happen again.
+
+    A wildcard for domain and *.domain was imported into the certificate
+    directory alongside the existing per-host certificates. HAProxy said
+    nothing, the configuration checked clean, and the result was decided by
+    how the file names happened to sort: the apex kept Let's Encrypt purely
+    by luck, while every hostname without a certificate of its own quietly
+    started presenting the new one instead.
+
+    That is not a spare and not a replacement. It is a coin toss whose loser
+    is invisible, which is exactly why the standby directory exists.
+    """
+
+    def install(self, stem, pem, **kwargs):
+        return CERTD._activate_server_pem(
+            CERTD.HAPROXY_CERTS_DIR / f"{stem}.pem", pem.encode(), **kwargs
+        )
+
+    def wildcard_pem(self, base, issuer, days=365):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = datetime.now(timezone.utc)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, base)])
+        issuer_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer)])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer_name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=days))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.DNSName(base), x509.DNSName(f"*.{base}")]
+                ),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        return (
+            cert.public_bytes(serialization.Encoding.PEM)
+            + key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+
+    def test_a_second_certificate_for_a_name_is_refused(self):
+        self.install("site.example.com", self.make_pem("site.example.com", "CA One"))
+        with self.assertRaises(CERTD.ShadowedCertificate):
+            self.install(
+                "site.example.com-other", self.make_pem("site.example.com", "CA Two")
+            )
+
+    def test_the_refusal_names_the_file_it_would_fight(self):
+        self.install("site.example.com", self.make_pem("site.example.com", "CA One"))
+        with self.assertRaises(CERTD.ShadowedCertificate) as caught:
+            self.install(
+                "site.example.com-other", self.make_pem("site.example.com", "CA Two")
+            )
+        self.assertIn("site.example.com.pem", str(caught.exception))
+
+    def test_the_refusal_points_at_the_standby_directory(self):
+        # An error that only says no leaves the operator to do the wrong
+        # thing again, more forcefully.
+        self.install("site.example.com", self.make_pem("site.example.com", "CA One"))
+        with self.assertRaises(CERTD.ShadowedCertificate) as caught:
+            self.install(
+                "site.example.com-other", self.make_pem("site.example.com", "CA Two")
+            )
+        self.assertIn("standby", str(caught.exception).lower())
+
+    def test_a_wildcard_over_existing_hosts_is_refused(self):
+        # The live case exactly: per-host certificates already deployed, then
+        # a wildcard dropped in beside them.
+        self.install("example.com", self.make_pem("example.com", "LE"))
+        with self.assertRaises(CERTD.ShadowedCertificate):
+            self.install("wildcard", self.wildcard_pem("example.com", "Another CA"))
+
+    def test_replacing_the_same_file_is_not_a_conflict(self):
+        # A renewal writes the same destination; that is the normal path and
+        # must stay open.
+        self.install("site.example.com", self.make_pem("site.example.com", "CA One"))
+        ok, _rc, _out, _err = self.install(
+            "site.example.com", self.make_pem("site.example.com", "CA One renewed")
+        )
+        self.assertTrue(ok)
+
+    def test_the_dual_key_pattern_is_not_a_conflict(self):
+        # <domain>-ecdsa and <domain>-rsa claim the same name on purpose:
+        # the client picks by what it supports. Refusing that would break
+        # every dual-key site on the gateway.
+        rsa_pem = self.make_pem("example.com", "LE")
+        self.install("example.com-rsa", rsa_pem)
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        now = datetime.now(timezone.utc)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=90))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("example.com")]),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        ecdsa_pem = (
+            cert.public_bytes(serialization.Encoding.PEM)
+            + key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+
+        ok, _rc, _out, _err = self.install("example.com-ecdsa", ecdsa_pem)
+        self.assertTrue(ok)
+
+    def test_an_unrelated_name_is_not_a_conflict(self):
+        self.install("site.example.com", self.make_pem("site.example.com", "CA One"))
+        ok, _rc, _out, _err = self.install(
+            "other.example.com", self.make_pem("other.example.com", "CA Two")
+        )
+        self.assertTrue(ok)
+
+    def test_putting_a_standby_in_is_still_allowed(self):
+        # The whole point of a standby is to take a name another file holds.
+        # It goes through the same installer and must not be refused by this.
+        self.deploy_active("site.example.com", self.make_pem("site.example.com", "LE"))
+        CERTD.store_standby_certificate(
+            "site.example.com", "other", self.make_pem("site.example.com", "Another CA")
+        )
+        result = CERTD.activate_standby_certificate("site.example.com", "other")
+        self.assertTrue(result["ok"])
+
+    def test_nothing_is_written_when_it_is_refused(self):
+        self.install("site.example.com", self.make_pem("site.example.com", "CA One"))
+        with self.assertRaises(CERTD.ShadowedCertificate):
+            self.install(
+                "site.example.com-other", self.make_pem("site.example.com", "CA Two")
+            )
+        self.assertFalse(
+            (CERTD.HAPROXY_CERTS_DIR / "site.example.com-other.pem").exists()
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

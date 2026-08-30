@@ -31,6 +31,7 @@
     "While a name is on a standby it is held there. Renewal, a configuration apply and the orphan sweep all leave it alone, so the switch is not undone behind your back. Hand it back when Let's Encrypt is working again.": "Пока имя стоит на запасном, оно закреплено. Продление, применение конфигурации и уборка осиротевших файлов его не трогают, так что переключение не отменится у вас за спиной. Верните обратно, когда Let's Encrypt снова заработает.",
     "Held": "Закреплено",
     "Hand back to Let's Encrypt": "Вернуть на Let's Encrypt",
-    "Failed to hand the name back to Let's Encrypt": "Не удалось вернуть имя на Let's Encrypt"
+    "Failed to hand the name back to Let's Encrypt": "Не удалось вернуть имя на Let's Encrypt",
+    "Failed to import the certificate": "Не удалось импортировать сертификат"
   }
 }

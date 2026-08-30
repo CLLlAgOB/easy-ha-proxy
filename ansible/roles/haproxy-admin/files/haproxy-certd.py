@@ -971,8 +971,67 @@ class PinnedCertificate(ValueError):
     """Raised when something would overwrite a name held on a standby."""
 
 
+class ShadowedCertificate(ValueError):
+    """Raised when installing would put two certificates on one name."""
+
+
+def _key_family(cert: x509.Certificate) -> str:
+    key = cert.public_key()
+    if isinstance(key, rsa.RSAPublicKey):
+        return "rsa"
+    if isinstance(key, ec.EllipticCurvePublicKey):
+        return "ecdsa"
+    return type(key).__name__.lower()
+
+
+def _shadow_conflicts(destination: Path, data: bytes) -> List[str]:
+    """Names this certificate would end up fighting another file over.
+
+    HAProxy resolves a name to one certificate per key type, picks by
+    filename order, warns about nothing and never looks at the dates. Two
+    files claiming a name is therefore not a spare and not a replacement --
+    it is a coin toss decided by collation, and the loser is invisible.
+
+    Measured on a live gateway after exactly this happened: a wildcard
+    imported alongside the existing per-host certificates took over every
+    hostname that had no certificate of its own, while the apex kept the old
+    one purely because of how the names sorted. Nothing said a word.
+
+    Different key types for one name are the legitimate dual-key pattern and
+    are not a conflict; the same key type is.
+    """
+
+    try:
+        incoming = _load_pem_certificates(data)[0]
+    except Exception:  # pylint: disable=broad-except
+        return []
+    family = _key_family(incoming)
+    names = {name.lower() for name in _get_cert_dns_names(incoming)}
+    if not names:
+        return []
+
+    conflicts: List[str] = []
+    for other in sorted(destination.parent.glob("*.pem")):
+        if other.resolve() == destination.resolve():
+            continue
+        try:
+            existing = _load_pem_certificates(other.read_bytes())[0]
+        except Exception:  # pylint: disable=broad-except
+            continue
+        if _key_family(existing) != family:
+            continue
+        shared = names & {n.lower() for n in _get_cert_dns_names(existing)}
+        for name in sorted(shared):
+            conflicts.append(f"{name} (already in {other.name})")
+    return conflicts
+
+
 def _activate_server_pem(
-    destination: Path, data: bytes, *, override_pin: bool = False
+    destination: Path,
+    data: bytes,
+    *,
+    override_pin: bool = False,
+    allow_shadow: bool = False,
 ) -> Tuple[bool, Optional[int], str, str]:
     """Install a PEM atomically and roll it back when HAProxy rejects it.
 
@@ -982,6 +1041,16 @@ def _activate_server_pem(
     uploading and renewing alike; there is no fifth caller that forgot.
     """
 
+    if not allow_shadow:
+        conflicts = _shadow_conflicts(destination, data)
+        if conflicts:
+            raise ShadowedCertificate(
+                "another certificate already covers "
+                + "; ".join(conflicts[:5])
+                + ". HAProxy would pick one of them by file name and ignore "
+                "the other. Keep this one as a standby instead, and put it "
+                "into service when you want it."
+            )
     if not override_pin:
         held = read_pin(destination.stem)
         if held:
@@ -2437,7 +2506,7 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
         certs_dir, certs_dir / f"{_safe_slug(checked_domain)}.pem"
     )
     ok, rc, _stdout, stderr = _activate_server_pem(
-        destination, data, override_pin=True
+        destination, data, override_pin=True, allow_shadow=True
     )
     if ok:
         # Held from here on. Everything else that writes this directory --
@@ -2496,7 +2565,7 @@ def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
         certs_dir, certs_dir / f"{_safe_slug(stem)}.pem"
     )
     ok, rc, _stdout, stderr = _activate_server_pem(
-        destination, data, override_pin=True
+        destination, data, override_pin=True, allow_shadow=True
     )
     LOG.warning("Released %s back to the renewing certificate", stem)
     return {
