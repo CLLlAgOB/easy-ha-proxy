@@ -2001,6 +2001,17 @@ class SecurityDatabase:
             ).fetchone()
         return int(row["value"] or 0) if row else 0
 
+    def last_ban_detail(self, ip: str) -> str:
+        """What was written down when this address was last banned."""
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT detail FROM security_events "
+                "WHERE ip = ? AND event_type = ? ORDER BY ts DESC LIMIT 1",
+                (ip, EVENT_BAN_APPLIED),
+            ).fetchone()
+        return str(row["detail"] or "") if row else ""
+
     def newest_finding_ts(self, ip: str) -> int:
         """Timestamp of the most recent event that carries weight."""
 
@@ -3310,6 +3321,29 @@ class GuardEngine:
         result = self.apply_enforcement(now)
         return {"mode": mode, "previous": previous, **result}
 
+    @staticmethod
+    def _parse_ban_detail(detail: str) -> Dict[str, Any]:
+        """Read back the reason recorded when the ban was applied.
+
+        The format is this daemon's own -- "score=90 seconds=86400 [vcs,
+        secrets]" -- so parsing it is reading our own handwriting rather than
+        guessing at someone else's. Anything unrecognised yields nothing
+        rather than a wrong number.
+        """
+
+        parsed: Dict[str, Any] = {"score": None, "categories": []}
+        if not detail:
+            return parsed
+        match = re.search(r"score=(\d+)", detail)
+        if match:
+            parsed["score"] = int(match.group(1))
+        match = re.search(r"\[([^\]]*)\]", detail)
+        if match:
+            parsed["categories"] = [
+                part.strip() for part in match.group(1).split(",") if part.strip()
+            ]
+        return parsed
+
     def current_bans(self, now: Optional[int] = None) -> List[Dict[str, Any]]:
         """The addresses being held right now, and until when.
 
@@ -3333,10 +3367,13 @@ class GuardEngine:
                 # Served, and due to be lifted on the next cycle.
                 continue
             last_ban = self.database.last_ban_ts(ip)
-            # Why it was banned, in the same terms the rest of the page uses.
-            # A list of addresses with no reason beside them is a list nobody
-            # can act on, and "is this one a mistake?" is the first question
-            # anybody asks of it.
+            # Why it was banned, taken from what was written down at the
+            # time. Recomputing it here reports what the address is doing
+            # *now*, and a banned address is doing nothing: its findings
+            # decay and fall out of the scoring window while it is locked
+            # out, so within hours every ban read "score 0, no categories".
+            # True, useless, and the opposite of the question being asked.
+            recorded = self._parse_ban_detail(self.database.last_ban_detail(ip))
             standing = self.reputation(ip, now, scheduled=scheduled)
             rows.append({
                 "ip": ip,
@@ -3344,9 +3381,15 @@ class GuardEngine:
                 "seconds_left": remaining,
                 "banned_at": last_ban,
                 "strikes": self.strike_level(ip, now),
-                "score": standing.get("score", 0),
+                "score": (
+                    recorded["score"] if recorded["score"] is not None
+                    else standing.get("score", 0)
+                ),
                 "state": standing.get("state", ""),
-                "categories": sorted(standing.get("categories") or {}),
+                "categories": (
+                    recorded["categories"]
+                    or sorted(standing.get("categories") or {})
+                ),
                 "likely_false_positive": bool(
                     standing.get("likely_false_positive")
                 ),

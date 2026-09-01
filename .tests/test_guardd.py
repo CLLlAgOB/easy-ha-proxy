@@ -1851,5 +1851,105 @@ class TheListOfWhoIsBannedRightNow(EnforcementTestCase):
         self.assertEqual([row["ip"] for row in review["bans"]], ["203.0.113.9"])
 
 
+class TheBanListSaysWhatItWasBannedFor(EnforcementTestCase):
+    """The list showed "0" and no categories for almost every entry.
+
+    Not a display fault: the score was being recomputed at the moment of
+    looking. A banned address is doing nothing by construction -- it is
+    blocked at the connection, so it produces no new findings -- and the old
+    ones decay and fall out of the twenty-four hour window while it sits
+    there. Within hours every ban honestly reported "score 0, no reason",
+    which is the correct answer to a question nobody was asking.
+
+    The reason is written down when the ban is applied. That is the one to
+    show, and it is the one the operator means by "what did it do".
+    """
+
+    LADDER = (86400, 7 * 86400, 30 * 86400, 90 * 86400)
+
+    def setUp(self):
+        super().setUp()
+        self.engine.ban_durations = self.LADDER
+
+    def ban(self, ip="203.0.113.9", at=1_000_000):
+        self.make_hostile(ip, now=at)
+        self.engine.set_mode(guardd.MODE_ENFORCE, at)
+        self.engine.apply_enforcement(at + 1)
+        return at + 1
+
+    def test_the_reason_survives_the_findings_decaying(self):
+        now = self.ban()
+        # Most of a day later: nothing new, everything old has decayed.
+        much_later = now + 20 * 3600
+        row = self.engine.current_bans(much_later)[0]
+        self.assertGreaterEqual(row["score"], guardd.WOULD_BAN_SCORE)
+        self.assertTrue(row["categories"])
+
+    def test_recomputing_would_have_given_nothing(self):
+        # The comparison that makes the point: the same address, scored
+        # live, has nothing left to say for itself.
+        now = self.ban()
+        much_later = now + 20 * 3600
+        live = self.engine.reputation("203.0.113.9", much_later)
+        self.assertEqual(live["score"], 0)
+        self.assertEqual(
+            self.engine.current_bans(much_later)[0]["score"],
+            self.engine._parse_ban_detail(
+                self.database.last_ban_detail("203.0.113.9")
+            )["score"],
+        )
+
+    def test_the_categories_are_the_ones_from_that_moment(self):
+        now = self.ban()
+        recorded = self.engine._parse_ban_detail(
+            self.database.last_ban_detail("203.0.113.9")
+        )
+        row = self.engine.current_bans(now + 20 * 3600)[0]
+        self.assertEqual(row["categories"], recorded["categories"])
+
+    def test_without_a_record_it_falls_back_to_the_live_standing(self):
+        # A ban placed by an older build has no detail to read. Showing the
+        # live number is worse, but it beats showing nothing at all.
+        now = self.ban()
+        self.database._conn.execute(
+            "UPDATE security_events SET detail = '' WHERE event_type = ?",
+            (guardd.EVENT_BAN_APPLIED,),
+        )
+        self.database._conn.commit()
+        row = self.engine.current_bans(now)[0]
+        self.assertEqual(row["score"], self.engine.reputation("203.0.113.9", now)["score"])
+
+    # -- reading our own handwriting ---------------------------------------
+
+    def test_it_reads_the_recorded_format(self):
+        parsed = self.engine._parse_ban_detail(
+            "score=100 seconds=86400 [ERROR_RATE_EXCEEDED, secrets, vcs]"
+        )
+        self.assertEqual(parsed["score"], 100)
+        self.assertEqual(
+            parsed["categories"], ["ERROR_RATE_EXCEEDED", "secrets", "vcs"]
+        )
+
+    def test_an_empty_category_list_is_not_a_category(self):
+        parsed = self.engine._parse_ban_detail("score=60 seconds=86400 []")
+        self.assertEqual(parsed["score"], 60)
+        self.assertEqual(parsed["categories"], [])
+
+    def test_nothing_recorded_yields_nothing_rather_than_a_guess(self):
+        for detail in ("", "nonsense", "score=", "[]"):
+            parsed = self.engine._parse_ban_detail(detail)
+            self.assertIsNone(parsed["score"], detail)
+
+    def test_the_format_it_reads_is_the_format_it_writes(self):
+        # These two live far apart in the file and would drift silently:
+        # the reason would keep being written and quietly stop being read.
+        self.ban()
+        detail = self.database.last_ban_detail("203.0.113.9")
+        self.assertTrue(detail)
+        parsed = self.engine._parse_ban_detail(detail)
+        self.assertIsNotNone(parsed["score"])
+        self.assertTrue(parsed["categories"])
+
+
 if __name__ == "__main__":
     unittest.main()
