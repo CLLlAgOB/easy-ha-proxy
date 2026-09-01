@@ -56,24 +56,51 @@ services:
     # Exercise the same authenticated request boundary as HAProxy without
     # exposing a separate unauthenticated readiness endpoint. Python is
     # already part of the application image, so no extra utility is needed.
+    #
+    # The request is written onto a socket by hand rather than handed to
+    # urllib, which sounds like showing off and is not. Measured on a live
+    # gateway as container CPU per run: urllib 329 ms, this 111 ms. Nearly
+    # all of the difference is importing urllib.request, which drags in
+    # http.client, email and ssl in order to send eleven lines of plain
+    # HTTP. A bare interpreter start is 17 ms, so what is left here is
+    # mostly gunicorn answering, and no client can make that part cheaper.
+    #
+    # At ten second intervals the old form cost about 2800 core-seconds a
+    # day, which was very nearly the entire CPU consumption of this
+    # container: 4154 core-seconds over the 36 hours that were measured.
+    #
+    # What is checked has not changed: same endpoint, same three headers,
+    # same 200, same {"ok": true}. A wrong secret, a wrong identity and a
+    # dead port were each confirmed to still fail it.
     healthcheck:
       test:
         - CMD
         - python
         - -c
-        - >-
-          import json, os, urllib.request;
-          request = urllib.request.Request(
-          "http://127.0.0.1:5000/api/control-plane-health",
-          headers={"X-Easy-HA-Proxy-Secret": os.environ["HAPROXY_ADMIN_PROXY_SECRET"],
-          "Remote-User": "easy-ha-proxy-healthcheck",
-          "Remote-Groups": "healthcheck"});
-          response = urllib.request.urlopen(request, timeout=3);
-          payload = json.load(response);
-          assert response.status == 200 and payload.get("ok") is True
-      interval: 10s
+        - |-
+          import os, socket
+          request = (
+              "GET /api/control-plane-health HTTP/1.0\r\n"
+              "Host: 127.0.0.1\r\n"
+              "X-Easy-HA-Proxy-Secret: "
+              + os.environ["HAPROXY_ADMIN_PROXY_SECRET"] + "\r\n"
+              "Remote-User: easy-ha-proxy-healthcheck\r\n"
+              "Remote-Groups: healthcheck\r\n"
+              "Connection: close\r\n"
+              "\r\n"
+          )
+          connection = socket.create_connection(("127.0.0.1", 5000), timeout=3)
+          connection.sendall(request.encode())
+          answer = b"".join(iter(lambda: connection.recv(4096), b""))
+          assert answer.split(b"\r\n", 1)[0].split()[1] == b"200"
+          assert b'"ok": true' in answer
+      # Thirty seconds rather than ten. What remains per run is gunicorn
+      # serving the request, and only asking less often reduces that. The
+      # window before a wedged container is called unhealthy is unchanged:
+      # it was 12 x 10s, it is 4 x 30s, two minutes either way.
+      interval: 30s
       timeout: 5s
-      retries: 12
+      retries: 4
       start_period: 10s
 
     networks:
