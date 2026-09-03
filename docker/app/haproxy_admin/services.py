@@ -737,6 +737,23 @@ def get_whitelists() -> dict:
 def unban_ip(ip: str):
     if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip):
         return "Invalid IP", 400
+
+    # The adaptive engine keeps its own schedule and treats it as the
+    # authority on when a ban ends. Clearing only the stick table left that
+    # schedule intact, so the engine noticed the entry had gone and put it
+    # back on its next pass -- an unban that undid itself ten seconds later,
+    # which is indistinguishable from a broken button.
+    #
+    # Told first, so there is no window in which the engine could re-assert
+    # between the two steps. Best effort: an engine that is not running must
+    # not stop an operator lifting a ban HAProxy placed under its own rules.
+    try:
+        from .guardd_client import guardd_forget_ban
+
+        guardd_forget_ban(ip)
+    except Exception:  # pylint: disable=broad-except
+        logger.info("adaptive engine not reachable while unbanning %s", ip, exc_info=True)
+
     haproxy_runtime_command(
         f"set table tbl_ban key {ip} data.gpc0 0", SOCKET, timeout=2
     )

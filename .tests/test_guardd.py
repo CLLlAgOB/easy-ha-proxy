@@ -1951,5 +1951,150 @@ class TheBanListSaysWhatItWasBannedFor(EnforcementTestCase):
         self.assertTrue(parsed["categories"])
 
 
+class SigningInIsNotReconnaissance(unittest.TestCase):
+    """A visitor with a hardware key was banned for logging in.
+
+    Completing a second factor fetches
+    /api/secondfactor/webauthn/credentials. The segment rule
+    "credentials" -> secrets matched the last word of that path, secrets is
+    a decisive category, and one request from a legitimate user was worth an
+    immediate ban.
+
+    The rule itself is sound and stays. Over thirty days on the gateway that
+    reported this, every other decisive match was genuine -- /.env across
+    ninety-one addresses, /.git/config across a hundred and two, and
+    /.aws/credentials across eight, which is precisely what the segment
+    exists to catch. Weakening it to spare one endpoint would have been the
+    wrong trade. The sign-in paths are spared instead.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        guardd.load_signatures(
+            str(ROOT / "ansible/roles/haproxy-admin/files/scanner-signatures.json")
+        )
+
+    def test_the_path_that_caused_this_is_not_a_probe(self):
+        self.assertEqual(
+            guardd.classify_path("/api/secondfactor/webauthn/credentials"), ""
+        )
+
+    def test_the_rest_of_the_sign_in_surface_is_spared(self):
+        for path in (
+            "/api/firstfactor",
+            "/api/secondfactor/totp",
+            "/api/secondfactor/duo",
+            "/api/user/info",
+            "/api/state",
+            "/api/verify",
+            "/api/logout",
+            "/api/reset-password/identity/start",
+            "/api/checks/safe-redirection",
+        ):
+            self.assertEqual(guardd.classify_path(path), "", path)
+
+    def test_it_is_not_a_blanket_exemption_for_api(self):
+        # Probes for /api/.env are real and frequent on this gateway, and a
+        # prefix rule wide enough to spare them would be worse than the bug.
+        self.assertEqual(guardd.classify_path("/api/.env"), "secrets")
+        self.assertEqual(guardd.classify_path("/api/mcp"), "ai-endpoint")
+
+    def test_the_credentials_segment_still_catches_what_it_is_for(self):
+        self.assertEqual(guardd.classify_path("/.aws/credentials"), "secrets")
+        self.assertEqual(guardd.classify_path("/vendor/.aws/credentials"), "secrets")
+
+    def test_the_ordinary_probes_are_untouched(self):
+        for path, category in (
+            ("/.env", "secrets"),
+            ("/.git/config", "vcs"),
+            ("/wp-login.php", "wordpress"),
+            ("/actuator/env", "app-framework"),
+        ):
+            self.assertEqual(guardd.classify_path(path), category, path)
+
+
+class AnUnbanHasToReachTheSchedule(EnforcementTestCase):
+    """Unbanning by hand undid itself ten seconds later.
+
+    Clearing the stick table is only half of it. This daemon keeps its own
+    schedule and treats it as the authority on when a ban ends, so the next
+    cycle saw the entry missing and put it straight back -- with a
+    re-assert line in the journal as the only sign that anything had
+    happened. From the outside the unban button simply did not work.
+    """
+
+    def ban(self, ip="203.0.113.9", at=1_000_000):
+        self.make_hostile(ip, now=at)
+        self.engine.set_mode(guardd.MODE_ENFORCE, at)
+        self.engine.apply_enforcement(at + 1)
+        return at + 1
+
+    def test_clearing_the_table_alone_is_undone(self):
+        # The behaviour that caused the report, kept as a test so the
+        # re-assert cannot be blamed for it later: it is doing its job.
+        now = self.ban()
+        self.table.clear()
+        self.engine.apply_enforcement(now + 10)
+        self.assertIn("203.0.113.9", self.table)
+
+    def test_telling_the_engine_makes_it_stick(self):
+        now = self.ban()
+        self.engine.forget_ban("203.0.113.9", now + 5)
+        self.engine.apply_enforcement(now + 10)
+        self.assertNotIn("203.0.113.9", self.table)
+
+    def test_the_schedule_is_dropped_not_merely_the_entry(self):
+        now = self.ban()
+        self.engine.forget_ban("203.0.113.9", now + 5)
+        self.assertNotIn("203.0.113.9", self.database.scheduled_bans())
+
+    def test_it_lifts_the_table_entry_too(self):
+        # So the call is complete on its own rather than depending on what
+        # the caller happens to do next.
+        now = self.ban()
+        self.assertIn("203.0.113.9", self.table)
+        self.engine.forget_ban("203.0.113.9", now + 5)
+        self.assertNotIn("203.0.113.9", self.table)
+
+    def test_it_says_whether_anything_was_held(self):
+        now = self.ban()
+        result = self.engine.forget_ban("203.0.113.9", now + 5)
+        self.assertTrue(result["was_scheduled"])
+        again = self.engine.forget_ban("203.0.113.9", now + 6)
+        self.assertFalse(again["was_scheduled"])
+
+    def test_forgetting_an_address_that_was_never_banned_is_harmless(self):
+        result = self.engine.forget_ban("198.51.100.7", 1_000_000)
+        self.assertTrue(result["ok"])
+
+    def test_an_empty_address_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.engine.forget_ban("", 1_000_000)
+
+    def test_the_lift_is_recorded(self):
+        # An address let back in by hand should be answerable for later.
+        now = self.ban()
+        self.engine.forget_ban("203.0.113.9", now + 5)
+        types = [
+            row["event_type"]
+            for row in self.database.events_for("203.0.113.9", 0)
+        ] if hasattr(self.database, "events_for") else []
+        if types:
+            self.assertIn(guardd.EVENT_BAN_LIFTED, types)
+
+    def test_the_unban_button_tells_the_engine(self):
+        # The web layer has to make the call; without it the daemon never
+        # hears about the operator's decision.
+        services = (
+            ROOT / "docker/app/haproxy_admin/services.py"
+        ).read_text(encoding="utf-8")
+        body = services.split("def unban_ip(")[1].split("\ndef ")[0]
+        self.assertIn("guardd_forget_ban", body)
+        # Before the table is cleared, so nothing can re-assert in between.
+        self.assertLess(
+            body.index("guardd_forget_ban"), body.index("data.gpc0 0")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

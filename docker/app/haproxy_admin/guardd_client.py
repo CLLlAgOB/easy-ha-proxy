@@ -137,6 +137,29 @@ def guardd_set_ban_durations(durations: Any) -> Dict[str, Any]:
         raise GuarddUnavailable(str(exc)) from exc
 
 
+def guardd_forget_ban(ip: str) -> Dict[str, Any]:
+    """Tell the engine to drop its hold on an address the operator unbanned.
+
+    Mutating, so it carries the shared token like the mode switch does.
+    """
+
+    url = (
+        "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="")
+        + "/api/v1/guard/ban/forget"
+    )
+    try:
+        response = _session().post(
+            url,
+            json={"ip": (ip or "").strip()},
+            timeout=15,
+            headers={"X-Guardd-Token": GUARDD_TOKEN} if GUARDD_TOKEN else {},
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+
+
 def guardd_set_mode(mode: str) -> Dict[str, Any]:
     """Switch between observing and enforcing.
 

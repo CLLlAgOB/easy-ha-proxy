@@ -893,6 +893,42 @@ def is_asset(path: str) -> bool:
     return lowered.endswith(ASSET_SUFFIXES)
 
 
+# The gateway's own sign-in surface. These are paths this product serves in
+# order to authenticate somebody, so a request to one is the product working,
+# never reconnaissance against it.
+#
+# This exists because of a real ban. A visitor completing a second factor
+# with a hardware key fetches /api/secondfactor/webauthn/credentials; the
+# segment rule "credentials" -> secrets matched the last word, secrets is a
+# decisive category, and one request from a legitimate user was worth an
+# instant ban. Every other decisive match on this gateway over thirty days
+# was genuine -- /.env across ninety-one addresses, /.git/config across a
+# hundred and two -- so the rule stays and the sign-in paths are spared
+# instead. Weakening "credentials" would have cost the eight addresses
+# caught fetching /.aws/credentials to save one endpoint.
+AUTHENTICATION_PATHS: Tuple[str, ...] = (
+    "/api/firstfactor",
+    "/api/secondfactor/",
+    "/api/user/info",
+    "/api/state",
+    "/api/verify",
+    "/api/logout",
+    "/api/reset-password/",
+    "/api/checks/",
+)
+
+
+def is_authentication_endpoint(path: str) -> bool:
+    """Whether this is one of the sign-in paths the gateway serves itself.
+
+    Matched by prefix and deliberately not as a blanket /api/: probes for
+    /api/.env are real and frequent, and must go on being caught.
+    """
+
+    lowered = path.lower()
+    return lowered.startswith(AUTHENTICATION_PATHS)
+
+
 def classify_path(path: str) -> str:
     """Return the scanner category for a normalised path, or "".
 
@@ -912,6 +948,11 @@ def classify_path(path: str) -> str:
     if is_asset(path):
         # A stylesheet under /vendor/ that a deploy renamed is not a probe,
         # and matching every segment would otherwise make it one.
+        return ""
+    if is_authentication_endpoint(path):
+        # Signing in is not reconnaissance. Checked after the exact table so
+        # a genuinely hostile path could still be listed there explicitly,
+        # and before the segments, which is where the damage was done.
         return ""
     # The most confident match wins, not the leftmost. /vendor/phpunit/...
     # and /lib/phpunit/... are the same attack, and taking whichever segment
@@ -3307,6 +3348,49 @@ class GuardEngine:
                 ),
             )
 
+    def forget_ban(self, ip: str, now: Optional[int] = None) -> Dict[str, Any]:
+        """Drop this daemon's hold on an address, because a person said so.
+
+        Clearing the stick table alone is not enough, and used to look like a
+        bug in the unban button: the schedule here still wanted the address
+        banned, so the next cycle noticed the entry was missing and put it
+        straight back. Ten seconds after the operator unbanned somebody they
+        were banned again, with a re-assert line in the journal as the only
+        clue that anything had happened.
+
+        The schedule is the authority on when a ban ends, so an unban has to
+        reach it. Lifting the table entry here as well makes the call
+        complete on its own rather than depending on what the caller does
+        next.
+        """
+
+        now = now or _utc_now()
+        checked = str(ip or "").strip()
+        if not checked:
+            raise ValueError("an address is required")
+
+        held = int(self.database.scheduled_bans().get(checked, 0))
+        self.database.clear_ban(checked)
+        lifted = self.enforcer.lift(checked)
+        if held or lifted:
+            self._emit(
+                checked,
+                EVENT_BAN_LIFTED,
+                now,
+                source="operator",
+                detail="cleared by hand",
+                fingerprint=f"{checked}|{EVENT_BAN_LIFTED}|{now}",
+            )
+            LOG.warning(
+                "Ban on %s cleared by hand; the schedule is dropped", checked
+            )
+        return {
+            "ok": True,
+            "ip": checked,
+            "was_scheduled": bool(held),
+            "lifted": lifted,
+        }
+
     def set_mode(self, mode: str, now: Optional[int] = None) -> Dict[str, Any]:
         """Switch between observing and enforcing, and reconcile immediately."""
 
@@ -3773,6 +3857,30 @@ class GuardHandler(BaseHTTPRequestHandler):
             self._send_json(
                 200, {"ok": True, "ban_durations_seconds": list(steps)}
             )
+            return
+
+        if path == "/api/v1/guard/ban/forget":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int(
+                    (self.headers.get("Content-Length") or "0").strip() or "0"
+                )
+                if length <= 0 or length > 1024:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(
+                    self.rfile.read(length).decode("utf-8", "replace")
+                )
+                result = engine.forget_ban(str(payload.get("ip", "")))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("cannot clear the ban")
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, result)
             return
 
         if path != "/api/v1/guard/mode":
