@@ -99,6 +99,18 @@ CONTROL_TOKEN = os.environ.get("GUARDD_TOKEN", "").strip()
 BAN_DURATIONS: Tuple[int, ...] = (3600, 7 * 86400, 30 * 86400, 90 * 86400)
 
 BAN_DURATIONS_KEY = "ban_durations"
+# When the ladder was last replaced. Strikes earned before it are not counted
+# against the new one: a strike is a position on a scale of punishment, and
+# changing the scale changes what the old ones were worth.
+#
+# Found on a live gateway. An address collected two strikes five minutes
+# apart while the first two rungs were five and thirty minutes -- one
+# continuous scan, and cheap. The rungs then became a day and a week, those
+# two strikes came along, and its next offence started at the third rung: a
+# thirty day ban, then ninety. Nobody chose ninety days for it, and by the
+# ladder's own arithmetic reaching that rung should take thirty-eight days of
+# actually serving the ones below.
+BAN_DURATIONS_CHANGED_KEY = "ban_durations_changed_at"
 MIN_BAN_SECONDS = 60
 MAX_BAN_SECONDS = 365 * 86400
 MAX_BAN_STEPS = 6
@@ -2630,6 +2642,9 @@ class GuardEngine:
             config, override if override in SUPPORTED_MODES else config.mode
         )
         self.ban_durations = load_ban_durations(database)
+        self.ban_durations_changed_at = _safe_int(
+            database.get_state(BAN_DURATIONS_CHANGED_KEY, "0")
+        )
         self.policy = ScoringPolicy()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         cursor_state: Dict[str, Any] = {}
@@ -3195,7 +3210,12 @@ class GuardEngine:
         clock says about its last ban.
         """
 
-        stamps = self.database.ban_timestamps(ip)
+        stamps = [
+            ts for ts in self.database.ban_timestamps(ip)
+            # Earned under a different scale of punishment, so worth nothing
+            # against this one.
+            if ts >= self.ban_durations_changed_at
+        ]
         if not stamps:
             return 0
 
@@ -3226,8 +3246,11 @@ class GuardEngine:
         """
 
         checked = validate_ban_durations(data)
+        now = _utc_now()
         self.database.set_state(BAN_DURATIONS_KEY, json.dumps(list(checked)))
+        self.database.set_state(BAN_DURATIONS_CHANGED_KEY, str(now))
         self.ban_durations = checked
+        self.ban_durations_changed_at = now
         LOG.warning(
             "Adaptive ban durations changed to %s",
             ", ".join(str(step) for step in checked),
@@ -3248,9 +3271,11 @@ class GuardEngine:
         scheduled = self.database.scheduled_bans()
         enforcing = self.enforcer.allowed
         for ip, until in scheduled.items():
-            # Turning enforcement off undoes what it did; leaving addresses
-            # banned by a feature that is no longer on would be a trap.
-            if enforcing and until > now:
+            served = int(until) <= now
+            # Turning enforcement off stops blocking immediately: leaving
+            # addresses rejected by a feature that is no longer on would be a
+            # trap.
+            if enforcing and not served:
                 continue
             if self.enforcer.lift(ip):
                 lifted.append(ip)
@@ -3262,7 +3287,15 @@ class GuardEngine:
                     detail="expired" if enforcing else "enforcement disabled",
                     fingerprint=f"{ip}|{EVENT_BAN_LIFTED}|{until}",
                 )
-            self.database.clear_ban(ip)
+            # Forgotten only once the time was actually served. Switching the
+            # mode off used to clear the schedule as well, so a pause was an
+            # amnesty: on one gateway a thirty-seven minute visit to monitor
+            # released ten addresses for good, and one of them came back the
+            # next day and was escalated a rung for an offence it could only
+            # commit because it had been let out. Enforcing again resumes
+            # what was left; an operator who means to forgive can unban.
+            if served:
+                self.database.clear_ban(ip)
 
         if not enforcing:
             # A ban this daemon placed can outlive it: the stick table keeps the

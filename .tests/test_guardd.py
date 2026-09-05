@@ -2096,5 +2096,196 @@ class AnUnbanHasToReachTheSchedule(EnforcementTestCase):
         )
 
 
+class ChangingTheLadderStartsTheCountingAgain(EnforcementTestCase):
+    """Strikes are a position on a scale of punishment, not a tally.
+
+    Found on a live gateway. An address collected two strikes five minutes
+    apart while the first two rungs were five and thirty minutes -- one
+    continuous scan, and cheap at the time. The rungs then became a day and
+    a week; those two strikes came along unchanged, and the address's next
+    offence started at the third rung. Thirty days, then ninety. Nobody
+    chose ninety days for it, and by the new ladder's own arithmetic getting
+    there should take thirty-eight days of serving the rungs below.
+
+    So a strike earned under one ladder is not spent against another.
+    """
+
+    OLD = (300, 1800, 6 * 3600, 24 * 3600)
+    NEW = (86400, 7 * 86400, 30 * 86400, 90 * 86400)
+
+    def ban_at(self, ts, ip="203.0.113.9"):
+        self.database.record_events(
+            [{"ts": ts, "ip": ip, "event_type": guardd.EVENT_BAN_APPLIED,
+              "source": "guardd"}]
+        )
+
+    def test_the_reported_case(self):
+        # The four bans exactly as they happened, and the ladder change
+        # between the second and the third.
+        base = 1_000_000
+        self.engine.ban_durations = self.OLD
+        self.ban_at(base)                       # 300s rung
+        self.ban_at(base + 300)                 # 1800s rung, five minutes on
+
+        self.engine.set_ban_durations(list(self.NEW))
+        with mock.patch.object(guardd, "_utc_now", return_value=base + 3600):
+            self.engine.set_ban_durations(list(self.NEW))
+
+        # Its next offence, two days later, is its first under this ladder.
+        later = base + 3 * 86400
+        self.assertEqual(self.engine.strike_level("203.0.113.9", later), 0)
+        self.assertEqual(self.engine.ban_duration("203.0.113.9", later), 86400)
+
+    def test_the_second_offence_after_the_change_is_the_second_rung(self):
+        base = 1_000_000
+        self.engine.ban_durations = self.OLD
+        self.ban_at(base)
+        self.ban_at(base + 300)
+        with mock.patch.object(guardd, "_utc_now", return_value=base + 3600):
+            self.engine.set_ban_durations(list(self.NEW))
+
+        self.ban_at(base + 3 * 86400)
+        later = base + 5 * 86400
+        self.assertEqual(self.engine.strike_level("203.0.113.9", later), 1)
+        self.assertEqual(
+            self.engine.ban_duration("203.0.113.9", later), 7 * 86400
+        )
+
+    def test_strikes_earned_under_the_current_ladder_still_count(self):
+        # The rule forgives history, not repetition.
+        base = 1_000_000
+        with mock.patch.object(guardd, "_utc_now", return_value=base):
+            self.engine.set_ban_durations(list(self.NEW))
+        self.ban_at(base + 100)
+        self.ban_at(base + 2 * 86400)
+        later = base + 3 * 86400
+        self.assertEqual(self.engine.strike_level("203.0.113.9", later), 2)
+
+    def test_a_ladder_never_changed_counts_everything(self):
+        # A gateway that has never touched the setting must behave as before.
+        base = 1_000_000
+        self.engine.ban_durations = self.NEW
+        self.engine.ban_durations_changed_at = 0
+        self.ban_at(base)
+        self.ban_at(base + 2 * 86400)
+        self.assertEqual(
+            self.engine.strike_level("203.0.113.9", base + 3 * 86400), 2
+        )
+
+    def test_the_moment_of_the_change_is_remembered_across_a_restart(self):
+        base = 1_000_000
+        with mock.patch.object(guardd, "_utc_now", return_value=base):
+            self.engine.set_ban_durations(list(self.NEW))
+        revived = guardd.GuardEngine(self.config, self.database)
+        self.assertEqual(revived.ban_durations_changed_at, base)
+
+    def test_climbing_to_the_top_still_takes_serving_the_rungs(self):
+        # What the operator expected of the ladder in the first place: each
+        # rung is reached by coming back after the one below was served.
+        base = 1_000_000
+        with mock.patch.object(guardd, "_utc_now", return_value=base):
+            self.engine.set_ban_durations(list(self.NEW))
+        ts = base + 60
+        reached = []
+        for _ in range(4):
+            duration = self.engine.ban_duration("203.0.113.9", ts)
+            reached.append(duration)
+            self.ban_at(ts)
+            ts += duration + 60
+        self.assertEqual(reached, list(self.NEW))
+        # And that took the sum of the rungs below the last one.
+        self.assertGreaterEqual(ts - base, 86400 + 7 * 86400 + 30 * 86400)
+
+
+class PausingEnforcementIsNotAnAmnesty(EnforcementTestCase):
+    """Switching to monitor and back used to forgive everybody.
+
+    Found from a real question: an address that should have been serving a
+    thirty day ban was seen hitting the gateway again. It had not broken
+    through anything. The mode had been switched to monitor for
+    thirty-seven minutes, which lifted every adaptive ban and cleared the
+    schedule with it, so switching back to enforce started from nothing.
+    Ten addresses were released for good by that pause, and one of them
+    came back the next day and was escalated a rung -- punished harder for
+    an offence it could only commit because it had been let out.
+
+    Stopping enforcement still stops blocking at once, which is the point of
+    the switch. It no longer erases the sentence.
+    """
+
+    LADDER = (86400, 7 * 86400, 30 * 86400, 90 * 86400)
+
+    def setUp(self):
+        super().setUp()
+        self.engine.ban_durations = self.LADDER
+
+    def ban(self, ip="203.0.113.9", at=1_000_000):
+        self.make_hostile(ip, now=at)
+        self.engine.set_mode(guardd.MODE_ENFORCE, at)
+        self.engine.apply_enforcement(at + 1)
+        return at + 1
+
+    def test_pausing_stops_blocking_at_once(self):
+        # Unchanged, and the reason the switch exists.
+        now = self.ban()
+        self.assertIn("203.0.113.9", self.table)
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        self.assertNotIn("203.0.113.9", self.table)
+
+    def test_the_sentence_survives_the_pause(self):
+        now = self.ban()
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        self.assertIn("203.0.113.9", self.database.scheduled_bans())
+
+    def test_enforcing_again_resumes_what_was_left(self):
+        now = self.ban()
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        self.engine.set_mode(guardd.MODE_ENFORCE, now + 120)
+        self.assertIn("203.0.113.9", self.table)
+
+    def test_the_term_is_not_extended_by_the_pause(self):
+        # It resumes; it does not restart. The expiry was written as an
+        # absolute time when the ban was applied.
+        now = self.ban()
+        before = self.database.scheduled_bans()["203.0.113.9"]
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        self.engine.set_mode(guardd.MODE_ENFORCE, now + 120)
+        self.assertEqual(self.database.scheduled_bans()["203.0.113.9"], before)
+
+    def test_a_ban_that_expired_during_the_pause_stays_gone(self):
+        now = self.ban()
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        # A day and a bit later the first rung is served.
+        self.engine.set_mode(guardd.MODE_ENFORCE, now + 86400 + 600)
+        self.assertNotIn("203.0.113.9", self.database.scheduled_bans())
+        self.assertNotIn("203.0.113.9", self.table)
+
+    def test_a_served_ban_is_still_forgotten_while_enforcing(self):
+        # The ordinary path has to keep working: nothing accumulates.
+        now = self.ban()
+        self.engine.apply_enforcement(now + 86400 + 60)
+        self.assertNotIn("203.0.113.9", self.database.scheduled_bans())
+
+    def test_an_operator_can_still_forgive_on_purpose(self):
+        # The pause is no longer the way to do it; the unban is.
+        now = self.ban()
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        self.engine.forget_ban("203.0.113.9", now + 90)
+        self.engine.set_mode(guardd.MODE_ENFORCE, now + 120)
+        self.assertNotIn("203.0.113.9", self.table)
+        self.assertNotIn("203.0.113.9", self.database.scheduled_bans())
+
+    def test_the_pause_does_not_earn_a_strike(self):
+        # Being released and re-caught is a repeat offence; being released
+        # by us is not, and must not move the address up the ladder.
+        now = self.ban()
+        level_before = self.engine.strike_level("203.0.113.9", now + 30)
+        self.engine.set_mode(guardd.MODE_MONITOR, now + 60)
+        self.engine.set_mode(guardd.MODE_ENFORCE, now + 120)
+        self.assertEqual(
+            self.engine.strike_level("203.0.113.9", now + 150), level_before
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
