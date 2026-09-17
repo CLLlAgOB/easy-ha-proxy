@@ -59,6 +59,17 @@ def _get_json(
         raise GuarddUnavailable(str(exc)) from exc
 
 
+def guardd_ban_schedule() -> Dict[str, Any]:
+    """When the engine intends each adaptive ban to end.
+
+    Short timeout on purpose: the dashboard's ban list asks on every refresh,
+    and an engine that is down must cost that list nothing more than falling
+    back to the stick table's own expiry.
+    """
+
+    return _get_json("/api/v1/guard/bans/schedule", timeout=2)
+
+
 def guardd_health() -> Dict[str, Any]:
     return _get_json("/api/v1/guard/health")
 

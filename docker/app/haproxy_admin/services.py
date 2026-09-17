@@ -280,6 +280,55 @@ def get_ip_auth_table() -> dict:
     }
 
 
+ADAPTIVE_BAN_CODE = "40"
+
+
+def _apply_adaptive_expiry(ban: dict | None) -> None:
+    """Show an adaptive ban's real end, not the stick table's.
+
+    A tbl_ban entry carries the table's own expiry -- expire 168h -- and for
+    the bans HAProxy places under its own rules (codes 10, 20, 30) that is
+    exactly when they end, so those rows are left alone. An adaptive ban
+    (code 40) ends when the engine's schedule says, which on a one-day ladder
+    is hours away while the table says six days. That mismatch was the whole
+    complaint, so for those rows the schedule's number is shown instead.
+
+    Only while enforcement is on, and only for addresses the engine actually
+    holds; anything else keeps the table's time as before. The engine being
+    down, slow or absent changes nothing but that: this list must not fail or
+    stall because an optional daemon did.
+    """
+
+    if not ban or not ban.get("rows"):
+        return
+    rows = ban["rows"]
+    if not any(len(row) >= 4 and str(row[2]) == ADAPTIVE_BAN_CODE for row in rows):
+        # No adaptive bans shown, so nothing to ask about.
+        return
+    try:
+        from .guardd_client import guardd_ban_schedule
+
+        schedule = guardd_ban_schedule()
+    except Exception:  # pylint: disable=broad-except
+        logger.debug("adaptive ban schedule unavailable", exc_info=True)
+        return
+    if not schedule.get("enforcing"):
+        return
+
+    held = schedule.get("bans") or {}
+    now = int(schedule.get("now") or 0)
+    from_schedule = []
+    for row in rows:
+        if len(row) < 4 or str(row[2]) != ADAPTIVE_BAN_CODE:
+            continue
+        until = held.get(row[0])
+        if not until or not now:
+            continue
+        row[3] = str(max(0, int(until) - now))
+        from_schedule.append(row[0])
+    ban.setdefault("meta", {})["expiry_from_schedule"] = from_schedule
+
+
 def get_tables():
     """
     Кэшированное чтение tbl_ban + агрегация всех tbl_err_*.
@@ -290,6 +339,7 @@ def get_tables():
     try:
         ban_raw = haproxy_runtime_command("show table tbl_ban", SOCKET, timeout=2)
         ban = parse_table_output(ban_raw)
+        _apply_adaptive_expiry(ban)
 
         err_names = _list_err_tables()
         err_multi = []

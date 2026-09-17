@@ -58,7 +58,10 @@ const Dashboard = (() => {
         rows: data.rows.slice().sort((a, b) => {
           const av = Number(a?.[ttlIdx]) || 0;
           const bv = Number(b?.[ttlIdx]) || 0;
-          return bv - av; // свежие баны сверху
+          // Longest time left first. This used to mean "newest first", when
+          // every row carried the table's own countdown; adaptive bans now
+          // show the engine's schedule instead, so the two are not the same.
+          return bv - av;
         })
       });
     }
@@ -102,7 +105,19 @@ const Dashboard = (() => {
 
         // 4) Колонка TTL/Expires — форматируем in человекочитаемый вид
         else if (ttlIdx >= 0 && i === ttlIdx) {
-          v = `<span>${formatDuration(cell)}</span>`;
+          // Say where the number comes from. For an adaptive ban it is the
+          // engine's schedule; for everything else it is the stick table's
+          // own lifetime -- which, for an adaptive ban, reads as days about a
+          // ban that lifts within the hour.
+          let source = '';
+          if (containerId === 'ban') {
+            const scheduled = (data.meta && data.meta.expiry_from_schedule) || [];
+            source = scheduled.includes(String(r[0]))
+              ? 'By the adaptive protection schedule'
+              : 'Stick table lifetime';
+          }
+          const title = source ? ` title="${escapeHtml(source)}"` : '';
+          v = `<span${title}>${formatDuration(cell)}</span>`;
         }
 
         // 5) Причина ban (if добавишь колонку "Причина" / "Reason")

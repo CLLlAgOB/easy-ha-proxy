@@ -3694,6 +3694,27 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return
 
+        if path == "/api/v1/guard/bans/schedule":
+            # When each held address is let go, and nothing else. The ban
+            # list on the dashboard polls every few seconds, so this is one
+            # indexed query rather than the shadow review, which scores up to
+            # two hundred addresses to answer a different question.
+            try:
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "now": _utc_now(),
+                        "mode": engine.enforcer.mode,
+                        "enforcing": engine.enforcer.allowed,
+                        "code": ADAPTIVE_BAN_CODE,
+                        "bans": database.scheduled_bans(),
+                    },
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
         if path == "/api/v1/guard/reputation":
             try:
                 rows = engine.reputation_table()
