@@ -153,6 +153,35 @@ class AutheliaTimeSynchronizationTests(unittest.TestCase):
         for sensitive in ("authorization", "password", "secret", "token"):
             self.assertIn(sensitive, self.start_tasks)
 
+    def test_the_probes_answer_under_check_mode(self) -> None:
+        # `easy-ha-proxy plan` runs the playbook with --check, which skips a
+        # command task unless it opts out. Skipped, every probe returned
+        # nothing: the clock read as unsynchronized, the timesyncd unit as
+        # absent, and plan stopped with "systemd-timesyncd is not available"
+        # on a host whose clock was synchronized by systemd-timesyncd.
+        tasks = yaml.safe_load(self.tasks)
+
+        def walk(items):
+            for item in items or []:
+                yield item
+                for key in ("block", "rescue", "always"):
+                    yield from walk(item.get(key))
+
+        probes = {
+            task["register"]: task
+            for task in walk(tasks)
+            if task.get("register")
+            in {
+                "authelia_initial_time_sync",
+                "authelia_timesyncd_unit",
+                "authelia_final_time_sync",
+            }
+        }
+        self.assertEqual(len(probes), 3)
+        for name, task in probes.items():
+            self.assertIs(task.get("check_mode"), False, name)
+            self.assertIs(task.get("changed_when"), False, name)
+
 
 if __name__ == "__main__":
     unittest.main()

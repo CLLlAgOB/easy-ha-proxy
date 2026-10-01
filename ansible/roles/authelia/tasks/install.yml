@@ -19,6 +19,8 @@
       register: authelia_initial_time_sync
       changed_when: false
       failed_when: false
+      # Read-only; check mode would skip it and leave nothing to test.
+      check_mode: false
 
     - name: Synchronize the host clock when it has drifted
       when: authelia_initial_time_sync.stdout | default('') | trim != 'yes'
@@ -34,6 +36,8 @@
           register: authelia_timesyncd_unit
           changed_when: false
           failed_when: false
+          # Read-only; check mode would skip it and leave nothing to test.
+          check_mode: false
 
         - name: Require a time synchronization provider
           ansible.builtin.assert:
@@ -97,6 +101,8 @@
       register: authelia_final_time_sync
       changed_when: false
       failed_when: false
+      # Read-only; check mode would skip it and leave nothing to test.
+      check_mode: false
 
     - name: Stop before deploying Authelia with an inaccurate clock
       ansible.builtin.assert:
