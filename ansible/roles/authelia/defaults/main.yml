@@ -97,6 +97,15 @@ authelia_redis_image: "redis:7.4.9-alpine"
 # Docker network for Authelia and related services.
 authelia_docker_network: "hadmin_net"
 
+# ----------------- DATABASE COPIES -----------------
+
+# Before the stack is recreated on a different Authelia image, the database
+# is copied here: a new version migrates the schema on first start and the
+# old one refuses it, so this copy is the only way back. Root-only; the
+# newest copies are kept.
+authelia_db_backup_dir: "/var/backups/easy-ha-proxy/authelia-db"
+authelia_db_backup_keep: 5
+
 # ----------------- AUTHELIA LOGS -----------------
 
 # Authelia log level (trace|debug|info|warn|error).

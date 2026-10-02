@@ -36,6 +36,10 @@
               container and queue were preserved or recovered. Verify Docker,
               let any queued mail drain, and retry the update.
 
+    - name: Copy the Authelia database if the image is about to change
+      ansible.builtin.include_tasks: db_backup.yml
+      when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+
     - name: Reconcile the Authelia stack with migration recovery
       when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
       block:
