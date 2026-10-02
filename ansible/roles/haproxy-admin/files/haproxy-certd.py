@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import base64
 import cgi
+import contextlib
 import io
 import json
 import logging
 import os
+import re
+import secrets
 import shutil
 import socketserver
 import ssl
@@ -40,7 +43,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml  # type: ignore
 from cryptography import x509  # type: ignore
@@ -72,6 +75,54 @@ CERTBOT_BIN = Path(os.environ.get("CERTBOT_BIN", "/snap/bin/certbot"))
 CERTBOT_HTTP_PORT = 8000
 CERTBOT_HTTP_ADDR = "0.0.0.0"
 
+# --- DNS-01 -----------------------------------------------------------------
+#
+# Certbot здесь ставится snap'ом, поэтому и плагины — тоже snap'ы, версия в
+# версию с самим certbot: `snap install certbot-dns-<provider>`,
+# `snap set certbot trust-plugin-with-root=ok`,
+# `snap connect certbot:plugin certbot-dns-<provider>`. Пакетов apt тут нет.
+#
+# Провайдер и имена его ключей — фиксированный набор. Из браузера приходит
+# только имя профиля и значения; ни имя плагина, ни аргументы certbot из
+# запроса не берутся никогда.
+DNS_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "cloudflare": {
+        "plugin": "dns-cloudflare",
+        "snap": "certbot-dns-cloudflare",
+        "keys": ("dns_cloudflare_api_token",),
+    },
+    "digitalocean": {
+        "plugin": "dns-digitalocean",
+        "snap": "certbot-dns-digitalocean",
+        "keys": ("dns_digitalocean_token",),
+    },
+    "route53": {
+        "plugin": "dns-route53",
+        "snap": "certbot-dns-route53",
+        "keys": ("aws_access_key_id", "aws_secret_access_key"),
+    },
+    "rfc2136": {
+        "plugin": "dns-rfc2136",
+        "snap": "certbot-dns-rfc2136",
+        "keys": (
+            "dns_rfc2136_server",
+            "dns_rfc2136_port",
+            "dns_rfc2136_name",
+            "dns_rfc2136_secret",
+            "dns_rfc2136_algorithm",
+        ),
+    },
+}
+
+DNS_CREDENTIALS_DIR = Path(
+    os.environ.get("HAPROXY_DNS_CREDENTIALS_DIR", "/etc/easy-ha-proxy/dns-providers")
+)
+DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DNS_VALUE_MAX = 4096
+DNS_PROPAGATION_MIN = 10
+DNS_PROPAGATION_MAX = 1800
+DNS_PROPAGATION_DEFAULT = 60
+
 # Скрипт, который пересобирает PEM для HAProxy и делает reload
 HAPROXY_PEMS_SCRIPT = Path(
     os.environ.get(
@@ -87,6 +138,55 @@ DEFAULT_CA_ROOT_DIR = Path("/etc/haproxy/certificate-authorities")
 
 # Предупреждать, если до конца срока действия меньше N дней
 CERT_WARN_DAYS = 30
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose:
+# certificates are issued the same way without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="certd")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine something failed. Never disturbs issuance."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
+
+
+def report_alert_level(
+    rule: str,
+    subject: str,
+    *,
+    active: bool,
+    severity: str = "",
+    summary: str = "",
+    detail: str = "",
+) -> None:
+    """Report a level condition. Never disturbs the daemon."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(
+            rule,
+            subject,
+            active=active,
+            severity=severity,
+            summary=summary,
+            detail=detail,
+        )
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 
 # Dry-run: не трогаем файлы, certbot запускаем с --dry-run
 CERTD_DRY_RUN = os.environ.get("HAPROXY_CERTD_DRY_RUN", "0") == "1"
@@ -115,6 +215,23 @@ MAX_COMPRESSION_RATIO = int(
     os.environ.get("HAPROXY_CERTD_MAX_COMPRESSION_RATIO", "100")
 )
 CA_LOCK = threading.Lock()
+
+# ── client authentication material ────────────────────────────────────────
+#
+# The CA root is 0700 root: HAProxy cannot read it, and neither can the web
+# container. Everything the frontend needs for client certificates is derived
+# into this directory instead, which holds only public certificates and the
+# names taken out of them.
+MTLS_DIR = Path(os.environ.get("HAPROXY_MTLS_DIR", "/etc/haproxy/mtls"))
+MTLS_TRUST_FILE = "client-auth.json"
+MTLS_BUNDLE_NAME = "clients-ca.pem"
+MTLS_REVOKED_NAME = "revoked.list"
+# A pattern file loads fine with nothing but a comment in it; an empty one
+# earns a warning on every start. Both files exist from the first boot so the
+# configuration can reference them before anyone has imported anything.
+MTLS_EMPTY_MARKER = "# managed by easy-ha-proxy; edit through the web interface\n"
+MTLS_MAX_REVOKED = 2000
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ───────────────────── утилиты работы с YAML ─────────────────────
@@ -184,10 +301,25 @@ def _prepare_ca_subdir(name: str, create: bool = False) -> Path:
     return directory
 
 
-def _normalize_dns_name(value: str) -> str:
+def _normalize_dns_name(value: str, *, allow_wildcard: bool = False) -> str:
     name = (value or "").strip().rstrip(".").lower()
     if not name or len(name) > 253 or any(ch in name for ch in "/\\\x00\r\n"):
         raise ValueError("invalid DNS name")
+
+    if name.startswith("*."):
+        # A wildcard is only ever the leftmost label, and only where the caller
+        # said one is acceptable — everything else still refuses the character.
+        if not allow_wildcard:
+            raise ValueError("a wildcard name is not allowed here")
+        remainder = name[2:]
+        if "*" in remainder:
+            raise ValueError("only one wildcard label is allowed")
+        base = _normalize_dns_name(remainder)
+        if len(base.split(".")) < 2:
+            raise ValueError("a wildcard needs at least two labels beneath it")
+        return "*." + base
+    if "*" in name:
+        raise ValueError("a wildcard is only allowed as the leftmost label")
     try:
         ascii_name = name.encode("idna").decode("ascii")
     except UnicodeError as exc:
@@ -266,6 +398,187 @@ def _get_certbot_settings() -> Tuple[str, str, int, str]:
 # ───────────────────── Certbot execution ─────────────────────
 
 
+def _dns_profile_path(name: str) -> Path:
+    """Путь к файлу учётных данных профиля.
+
+    Имя сверяется с шаблоном, а не склеивается с путём как есть: этот файл
+    отдаётся certbot от root.
+    """
+
+    if not DNS_PROFILE_RE.match(str(name or "")):
+        raise ValueError("invalid DNS provider profile name")
+    return DNS_CREDENTIALS_DIR / f"{name}.ini"
+
+
+def _installed_dns_plugins() -> set[str]:
+    """Какие DNS-плагины certbot реально видит прямо сейчас."""
+
+    try:
+        proc = subprocess.run(
+            [str(CERTBOT_BIN), "plugins", "--non-interactive"],
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception:  # noqa: BLE001
+        return set()
+    found: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        entry = line.strip()
+        if entry.startswith("* "):
+            found.add(entry[2:].strip())
+    return found
+
+
+def list_dns_providers() -> Dict[str, Any]:
+    """Профили и доступность плагинов. Секреты не возвращаются никогда."""
+
+    available = _installed_dns_plugins()
+    profiles: List[Dict[str, Any]] = []
+    if DNS_CREDENTIALS_DIR.is_dir():
+        for path in sorted(DNS_CREDENTIALS_DIR.glob("*.ini")):
+            name = path.stem
+            if not DNS_PROFILE_RE.match(name):
+                continue
+            provider = ""
+            try:
+                for line in path.read_text("utf-8").splitlines():
+                    if line.startswith("# provider:"):
+                        provider = line.split(":", 1)[1].strip()
+                        break
+            except OSError:
+                continue
+            profiles.append(
+                {
+                    "name": name,
+                    "provider": provider,
+                    "plugin_available": (
+                        DNS_PROVIDERS.get(provider, {}).get("plugin") in available
+                    ),
+                    "updated_ts": int(path.stat().st_mtime),
+                }
+            )
+    return {
+        "profiles": profiles,
+        "providers": {
+            name: {
+                "plugin": spec["plugin"],
+                "snap": spec["snap"],
+                "keys": list(spec["keys"]),
+                "available": spec["plugin"] in available,
+            }
+            for name, spec in DNS_PROVIDERS.items()
+        },
+    }
+
+
+def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Записать учётные данные профиля с правами 0600."""
+
+    name = str(payload.get("name") or "").strip().lower()
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider not in DNS_PROVIDERS:
+        raise ValueError("unsupported DNS provider")
+    path = _dns_profile_path(name)
+
+    spec = DNS_PROVIDERS[provider]
+    supplied = payload.get("credentials")
+    if not isinstance(supplied, dict):
+        raise ValueError("credentials must be an object")
+    if set(supplied) - set(spec["keys"]):
+        raise ValueError("credentials contain an unsupported field")
+
+    lines = [f"# provider: {provider}"]
+    for key in spec["keys"]:
+        raw = supplied.get(key)
+        if raw is None or str(raw) == "":
+            continue
+        value = str(raw)
+        if len(value) > DNS_VALUE_MAX:
+            raise ValueError(f"{key} exceeds the size limit")
+        # A newline would let one value introduce another directive into the
+        # credentials file certbot reads as root.
+        if any(character in value for character in "\r\n\x00"):
+            raise ValueError(f"{key} contains a line break")
+        lines.append(f"{key} = {value}")
+    if len(lines) == 1:
+        raise ValueError("no credentials were supplied")
+
+    DNS_CREDENTIALS_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(DNS_CREDENTIALS_DIR, 0o700)
+    temporary = DNS_CREDENTIALS_DIR / f".{name}.{secrets.token_hex(8)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    LOG.info("Saved DNS provider profile %s (%s)", name, provider)
+    return {"name": name, "provider": provider}
+
+
+def delete_dns_provider(name: str) -> Dict[str, Any]:
+    path = _dns_profile_path(str(name or "").strip().lower())
+    existed = path.exists()
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    return {"name": path.stem, "deleted": existed}
+
+
+def _dns_provider_of(name: str) -> str:
+    path = _dns_profile_path(name)
+    try:
+        text = path.read_text("utf-8")
+    except FileNotFoundError as exc:
+        raise ValueError(f"no DNS provider profile named {path.stem}") from exc
+    except OSError as exc:
+        # A profile that cannot be read is a configuration problem to report,
+        # not an unhandled error to surface as a failed request.
+        raise ValueError("the DNS provider profile cannot be read") from exc
+    for line in text.splitlines():
+        if line.startswith("# provider:"):
+            provider = line.split(":", 1)[1].strip()
+            if provider in DNS_PROVIDERS:
+                return provider
+            break
+    raise ValueError("the DNS provider profile is unusable")
+
+
+def _dns_challenge_flags(profile: str, propagation: Any = None) -> List[str]:
+    """Аргументы certbot для DNS-01. Всё берётся из таблицы, не из запроса."""
+
+    provider = _dns_provider_of(profile)
+    spec = DNS_PROVIDERS[provider]
+    plugin = spec["plugin"]
+    if plugin not in _installed_dns_plugins():
+        raise ValueError(
+            f"the {plugin} certbot plugin is not installed; "
+            f"install and connect the {spec['snap']} snap first"
+        )
+    try:
+        seconds = int(propagation) if propagation is not None else DNS_PROPAGATION_DEFAULT
+    except (TypeError, ValueError):
+        seconds = DNS_PROPAGATION_DEFAULT
+    seconds = max(DNS_PROPAGATION_MIN, min(seconds, DNS_PROPAGATION_MAX))
+
+    flags = [f"--{plugin}", "--preferred-challenges", "dns-01"]
+    if provider != "route53":
+        # route53 reads the environment or the instance role; the others take
+        # a credentials file.
+        flags.extend([f"--{plugin}-credentials", str(_dns_profile_path(profile))])
+    flags.extend([f"--{plugin}-propagation-seconds", str(seconds)])
+    return flags
+
+
 def _run_certbot_for_lineage(
     lineage: str,
     domain: str,
@@ -275,12 +588,38 @@ def _run_certbot_for_lineage(
     rsa_key_size: int,
     ecdsa_curve: str,
     account_id: Optional[str] = None,
+    dns_profile: str = "",
+    dns_propagation: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Issue or renew one Certbot lineage."""
+    """Issue or renew one Certbot lineage.
+
+    With a DNS profile the challenge is DNS-01, which is the only way to get a
+    wildcard certificate; without one it stays the existing standalone HTTP-01
+    path.
+    """
     names = [domain] + [n for n in (alt_names or []) if n]
     san_flags: List[str] = []
     for n in names:
         san_flags.extend(["-d", n])
+
+    wildcard = any(str(n).startswith("*.") for n in names)
+    if wildcard and not dns_profile:
+        raise ValueError(
+            "a wildcard certificate requires DNS-01; select a DNS provider profile"
+        )
+
+    if dns_profile:
+        challenge_flags = _dns_challenge_flags(dns_profile, dns_propagation)
+    else:
+        challenge_flags = [
+            "--standalone",
+            "--http-01-port",
+            str(CERTBOT_HTTP_PORT),
+            "--http-01-address",
+            CERTBOT_HTTP_ADDR,
+            "--preferred-challenges",
+            "http-01",
+        ]
 
     cmd: List[str] = [
         str(CERTBOT_BIN),
@@ -289,13 +628,7 @@ def _run_certbot_for_lineage(
         "--agree-tos",
         "--email",
         email,
-        "--standalone",
-        "--http-01-port",
-        str(CERTBOT_HTTP_PORT),
-        "--http-01-address",
-        CERTBOT_HTTP_ADDR,
-        "--preferred-challenges",
-        "http-01",
+        *challenge_flags,
         "--key-type",
         key_type,
         "--cert-name",
@@ -468,7 +801,14 @@ def _hostname_matches_pattern(host: str, pattern: str) -> bool:
 
     if pattern.startswith("*."):
         suffix = pattern[1:]  # ".domain.local"
-        if host.endswith(suffix) and host.count(".") > suffix.count("."):
+        # A wildcard covers exactly one label, so the host must have the same
+        # number of dots as the suffix -- a.domain.local against
+        # .domain.local. This read `>` and was wrong in both directions at
+        # once: it refused a.domain.local, the only thing the wildcard is
+        # for, and accepted a.b.domain.local, which it does not cover.
+        # endswith already rules out the bare domain, so nothing else needs
+        # the comparison.
+        if host.endswith(suffix) and host.count(".") == suffix.count("."):
             return True
 
     return False
@@ -634,10 +974,97 @@ def _reload_haproxy() -> Tuple[Optional[int], str, str]:
         return -1, "", f"systemctl reload haproxy failed: {exc}"
 
 
+class PinnedCertificate(ValueError):
+    """Raised when something would overwrite a name held on a standby."""
+
+
+class ShadowedCertificate(ValueError):
+    """Raised when installing would put two certificates on one name."""
+
+
+def _key_family(cert: x509.Certificate) -> str:
+    key = cert.public_key()
+    if isinstance(key, rsa.RSAPublicKey):
+        return "rsa"
+    if isinstance(key, ec.EllipticCurvePublicKey):
+        return "ecdsa"
+    return type(key).__name__.lower()
+
+
+def _shadow_conflicts(destination: Path, data: bytes) -> List[str]:
+    """Names this certificate would end up fighting another file over.
+
+    HAProxy resolves a name to one certificate per key type, picks by
+    filename order, warns about nothing and never looks at the dates. Two
+    files claiming a name is therefore not a spare and not a replacement --
+    it is a coin toss decided by collation, and the loser is invisible.
+
+    Measured on a live gateway after exactly this happened: a wildcard
+    imported alongside the existing per-host certificates took over every
+    hostname that had no certificate of its own, while the apex kept the old
+    one purely because of how the names sorted. Nothing said a word.
+
+    Different key types for one name are the legitimate dual-key pattern and
+    are not a conflict; the same key type is.
+    """
+
+    try:
+        incoming = _load_pem_certificates(data)[0]
+    except Exception:  # pylint: disable=broad-except
+        return []
+    family = _key_family(incoming)
+    names = {name.lower() for name in _get_cert_dns_names(incoming)}
+    if not names:
+        return []
+
+    conflicts: List[str] = []
+    for other in sorted(destination.parent.glob("*.pem")):
+        if other.resolve() == destination.resolve():
+            continue
+        try:
+            existing = _load_pem_certificates(other.read_bytes())[0]
+        except Exception:  # pylint: disable=broad-except
+            continue
+        if _key_family(existing) != family:
+            continue
+        shared = names & {n.lower() for n in _get_cert_dns_names(existing)}
+        for name in sorted(shared):
+            conflicts.append(f"{name} (already in {other.name})")
+    return conflicts
+
+
 def _activate_server_pem(
-    destination: Path, data: bytes
+    destination: Path,
+    data: bytes,
+    *,
+    override_pin: bool = False,
+    allow_shadow: bool = False,
 ) -> Tuple[bool, Optional[int], str, str]:
-    """Install a PEM atomically and roll it back when HAProxy rejects it."""
+    """Install a PEM atomically and roll it back when HAProxy rejects it.
+
+    Every path in this daemon that puts a certificate in front of HAProxy
+    comes through here, which is why the hold is enforced here rather than at
+    each of them. A name held on a standby is held against issuing, importing,
+    uploading and renewing alike; there is no fifth caller that forgot.
+    """
+
+    if not allow_shadow:
+        conflicts = _shadow_conflicts(destination, data)
+        if conflicts:
+            raise ShadowedCertificate(
+                "another certificate already covers "
+                + "; ".join(conflicts[:5])
+                + ". HAProxy would pick one of them by file name and ignore "
+                "the other. Keep this one as a standby instead, and put it "
+                "into service when you want it."
+            )
+    if not override_pin:
+        held = read_pin(destination.stem)
+        if held:
+            raise PinnedCertificate(
+                f"{destination.stem} is being served by the standby "
+                f"{held!r}; hand it back to Let's Encrypt first"
+            )
     destination.parent.mkdir(parents=True, exist_ok=True)
     previous = destination.read_bytes() if destination.exists() else None
     with tempfile.NamedTemporaryFile(
@@ -920,6 +1347,351 @@ def _build_cert_item_for_list(path: Path) -> Optional[Dict[str, Any]]:
 # ───────────────────── реализация эндпоинтов ─────────────────────
 
 
+def handle_dns_providers_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    payload = list_dns_providers()
+    payload["ok"] = True
+    return 200, payload
+
+
+def handle_dns_provider_save(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        saved = save_dns_provider(body)
+    except ValueError as exc:
+        # Never echo the payload back: it carries the credentials that were
+        # just rejected.
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **saved}
+
+
+def handle_dns_provider_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        removed = delete_dns_provider(body.get("name"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **removed}
+
+
+# ───────────────── certificate delivery targets ─────────────────
+#
+# Machines other than this gateway that hold the same certificate: a Remote
+# Desktop Gateway wanting a PKCS#12, a web server wanting the PEM pair. The
+# records live in a directory and the work is done by
+# easy-ha-proxy-cert-deliver, which certbot's 906 hook also calls; certd only
+# edits the records and can run one on demand so the operator can see it work
+# before a renewal depends on it.
+#
+# Same storage shape as an off-host backup destination, and for the same
+# reasons: one JSON per target, the private key and the pinned host key
+# beside it, the whole directory root-only.
+
+DELIVERY_DIR = Path(
+    os.environ.get("CERT_DESTINATIONS_DIR", "/etc/easy-ha-proxy/cert-destinations")
+)
+DELIVERY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DELIVERY_FORMATS = ("pfx", "pem-pair", "pem-combined")
+DELIVERY_TRANSPORTS = ("sftp", "scp")
+DELIVERY_WORKER = "/usr/local/sbin/easy-ha-proxy-cert-deliver"
+MAX_DELIVERY_TARGETS = 50
+
+
+def _delivery_paths(name: str) -> Tuple[Path, Path, Path]:
+    return (
+        DELIVERY_DIR / f"{name}.json",
+        DELIVERY_DIR / f"{name}.key",
+        DELIVERY_DIR / f"{name}.known_hosts",
+    )
+
+
+def _delivery_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not DELIVERY_NAME_RE.fullmatch(text):
+        raise ValueError(
+            "name must be 1-40 characters of a-z, 0-9 and -, "
+            "starting with a letter or digit"
+        )
+    return text
+
+
+def _delivery_public(record: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """What the page is allowed to see. No key material, ever."""
+
+    _, key, known = _delivery_paths(name)
+    return {
+        "name": name,
+        "enabled": bool(record.get("enabled", True)),
+        "domains": list(record.get("domains") or []),
+        "transport": record.get("transport", "sftp"),
+        "host": record.get("host", ""),
+        "port": record.get("port", 22),
+        "user": record.get("user", ""),
+        "remote_path": record.get("remote_path", ""),
+        "format": record.get("format", "pfx"),
+        "post_command": record.get("post_command", ""),
+        # Whether a password is set, never what it is.
+        "pfx_password_set": bool(record.get("pfx_password")),
+        "key_present": key.is_file(),
+        "host_key_present": known.is_file(),
+        "last_result": record.get("last_result", {}),
+    }
+
+
+def list_cert_deliveries() -> Dict[str, Any]:
+    items = []
+    if DELIVERY_DIR.is_dir():
+        for path in sorted(DELIVERY_DIR.glob("*.json")):
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    record = json.load(handle)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("cannot read %s (%s)", path, exc)
+                continue
+            items.append(_delivery_public(record, path.stem))
+    return {
+        "ok": True,
+        "targets": items,
+        "formats": list(DELIVERY_FORMATS),
+        "transports": list(DELIVERY_TRANSPORTS),
+        "legacy_hooks": _unmanaged_delivery_hooks(),
+    }
+
+
+def _unmanaged_delivery_hooks() -> List[str]:
+    """Hand-written hooks that also deliver certificates.
+
+    A gateway upgraded from before this page has one, and it keeps working.
+    Saying so is better than leaving the operator to wonder why a target
+    they never configured is receiving files -- or, worse, deleting the
+    hook that is doing the actual work.
+    """
+
+    found: List[str] = []
+    hooks = Path("/etc/letsencrypt/renewal-hooks/deploy")
+    if not hooks.is_dir():
+        return found
+    for path in sorted(hooks.glob("*.sh")):
+        if path.name in ("905-haproxy-pems-reload.sh",
+                         "906-deliver-certificates.sh",
+                         "910-mail-notify.sh"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "sftp" in text or "scp " in text or "pkcs12" in text:
+            found.append(path.name)
+    return found
+
+
+def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _delivery_name(payload.get("name"))
+    record_path, key_file, known_file = _delivery_paths(name)
+
+    DELIVERY_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DELIVERY_DIR, 0o700)
+
+    existing: Dict[str, Any] = {}
+    if record_path.is_file():
+        with record_path.open("r", encoding="utf-8") as handle:
+            existing = json.load(handle)
+    elif len(list(DELIVERY_DIR.glob("*.json"))) >= MAX_DELIVERY_TARGETS:
+        raise ValueError(f"at most {MAX_DELIVERY_TARGETS} delivery targets")
+
+    domains = [
+        _normalize_dns_name(str(d)) for d in (payload.get("domains") or [])
+        if str(d).strip()
+    ]
+    if not domains:
+        raise ValueError("choose at least one certificate to deliver")
+
+    transport = str(payload.get("transport") or "sftp").strip().lower()
+    if transport not in DELIVERY_TRANSPORTS:
+        raise ValueError("transport must be sftp or scp")
+
+    fmt = str(payload.get("format") or "pfx").strip().lower()
+    if fmt not in DELIVERY_FORMATS:
+        raise ValueError("format must be pfx, pem-pair or pem-combined")
+
+    host = str(payload.get("host") or "").strip()
+    user = str(payload.get("user") or "").strip()
+    remote_path = str(payload.get("remote_path") or "").strip()
+    if not host or not user or not remote_path:
+        raise ValueError("host, user and remote path are all required")
+
+    try:
+        port = int(payload.get("port") or 22)
+    except (TypeError, ValueError):
+        raise ValueError("port must be a number") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+
+    record = {
+        "enabled": bool(payload.get("enabled", True)),
+        "domains": domains,
+        "transport": transport,
+        "host": host,
+        "port": port,
+        "user": user,
+        "remote_path": remote_path,
+        "format": fmt,
+        "post_command": str(payload.get("post_command") or "").strip(),
+        # Left as it was unless a new one is sent, so editing a target does
+        # not silently clear its password.
+        "pfx_password": (
+            str(payload.get("pfx_password"))
+            if payload.get("pfx_password") is not None
+            else existing.get("pfx_password", "")
+        ),
+        "last_result": existing.get("last_result", {}),
+    }
+
+    material = payload.get("private_key")
+    if material:
+        _write_delivery_secret(key_file, str(material).strip() + chr(10))
+    host_key = payload.get("host_key")
+    if host_key:
+        _write_delivery_secret(known_file, str(host_key).strip() + chr(10))
+
+    tmp = record_path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    tmp.replace(record_path)
+    return _delivery_public(record, name)
+
+
+def _write_delivery_secret(path: Path, text: str) -> None:
+    """Mode set before the content lands, not after."""
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(handle, text.encode("utf-8"))
+    finally:
+        os.close(handle)
+    os.replace(tmp, path)
+
+
+def delete_cert_delivery(name: Any) -> Dict[str, Any]:
+    checked = _delivery_name(name)
+    for path in _delivery_paths(checked):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    return {"name": checked, "deleted": True}
+
+
+def test_cert_delivery(name: Any) -> Dict[str, Any]:
+    """Deliver right now, so a target can be proven before a renewal needs it."""
+
+    checked = _delivery_name(name)
+    record_path, _, _ = _delivery_paths(checked)
+    if not record_path.is_file():
+        raise ValueError(f"no delivery target named {checked}")
+    with record_path.open("r", encoding="utf-8") as handle:
+        record = json.load(handle)
+
+    domains = list(record.get("domains") or [])
+    if not domains:
+        raise ValueError("this target has no certificate chosen")
+
+    lineage = _resolve_lineage(domains[0])
+    if lineage is None:
+        raise ValueError(
+            f"there is no issued certificate for {domains[0]} to send yet"
+        )
+
+    result = subprocess.run(
+        [
+            DELIVERY_WORKER,
+            "--lineage", str(lineage),
+            "--domains", " ".join(domains),
+        ],
+        capture_output=True, timeout=180, check=False,
+    )
+    output = (result.stdout + result.stderr).decode("utf-8", "replace").strip()
+    outcome = {
+        "ok": result.returncode == 0,
+        "output": output[-4000:],
+        "lineage": lineage.name,
+    }
+    record["last_result"] = {
+        "ok": outcome["ok"],
+        "at": int(time.time()),
+        "detail": output[-400:],
+    }
+    tmp = record_path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    tmp.replace(record_path)
+    return outcome
+
+
+def _resolve_lineage(domain: str) -> Optional[Path]:
+    """Find the live directory holding a domain's certificate.
+
+    During a renewal certbot hands the hook RENEWED_LINEAGE and there is
+    nothing to work out. Sending on demand has to find it, and the directory
+    is not simply the domain: this installation issues separate ECDSA and RSA
+    lineages, so a site is example.com-ecdsa and example.com-rsa, and certbot
+    itself appends -0001 when a name is reused.
+
+    Tried in order, then a scan of every lineage for one whose certificate
+    actually covers the name. Where a domain has both key types this picks
+    one rather than sending twice to the same remote path, where the second
+    would only overwrite the first. A real renewal still fires the hook once
+    per lineage, as certbot decides; that is unchanged.
+    """
+
+    live = _get_le_live_dir()
+    if not live.is_dir():
+        return None
+
+    for candidate in (domain, f"{domain}-ecdsa", f"{domain}-rsa"):
+        path = live / candidate
+        if (path / "fullchain.pem").is_file():
+            return path
+
+    for path in sorted(live.iterdir()):
+        chain = path / "fullchain.pem"
+        if not chain.is_file():
+            continue
+        cert = _load_first_cert_from_pem(chain)
+        if cert is not None and _cert_matches_domain(cert, domain):
+            return path
+    return None
+
+
+def handle_deliveries_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    return 200, list_cert_deliveries()
+
+
+def handle_delivery_save(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        saved = save_cert_delivery(body)
+    except ValueError as exc:
+        # Never echo the payload: it carries a private key.
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, "target": saved}
+
+
+def handle_delivery_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        removed = delete_cert_delivery(body.get("name"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **removed}
+
+
+def handle_delivery_test(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        outcome = test_cert_delivery(body.get("name"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, outcome
+
+
 def handle_certs_status(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     domains = body.get("domains") or []
     if not isinstance(domains, list) or len(domains) > 500:
@@ -940,22 +1712,49 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     domain = (body.get("domain") or "").strip()
     alt_names = body.get("alt_names") or []
     key_types = body.get("key_types") or []
+    dns_profile = str(body.get("dns_profile") or "").strip().lower()
+    dns_propagation = body.get("dns_propagation")
+    # Wildcards are only accepted alongside a DNS profile, because only DNS-01
+    # can validate them.
+    allow_wildcard = bool(dns_profile)
 
     if not domain:
         return 200, {"ok": False, "error": "domain is required"}
     try:
-        domain = _normalize_dns_name(domain)
+        domain = _normalize_dns_name(domain, allow_wildcard=allow_wildcard)
     except ValueError as exc:
         return 400, {"ok": False, "error": f"invalid domain: {exc}"}
 
     if not isinstance(alt_names, list):
         alt_names = []
     try:
-        alt_names = [_normalize_dns_name(str(x)) for x in alt_names if x]
+        alt_names = [
+            _normalize_dns_name(str(x), allow_wildcard=allow_wildcard)
+            for x in alt_names
+            if x
+        ]
     except ValueError as exc:
         return 400, {"ok": False, "error": f"invalid alternative domain: {exc}"}
     if len(alt_names) > 100:
         return 400, {"ok": False, "error": "too many alternative domains"}
+
+    wildcard_names = [n for n in [domain, *alt_names] if n.startswith("*.")]
+    if wildcard_names and not dns_profile:
+        return 400, {
+            "ok": False,
+            "error": (
+                "a wildcard certificate requires DNS-01; select a DNS provider "
+                "profile for this site"
+            ),
+        }
+    if dns_profile:
+        # Resolve the profile and the plugin before issuing anything: a bad
+        # profile should be a clear message, not a failed ACME attempt part way
+        # through a loop over key types.
+        try:
+            _dns_challenge_flags(dns_profile, dns_propagation)
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
 
     reserved_suffixes = (".test", ".example", ".invalid", ".localhost", ".local")
     reserved_names = [
@@ -1005,11 +1804,16 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     any_ok = False
 
+    # The lineage becomes a directory name under /etc/letsencrypt/live and a
+    # PEM file name in the HAProxy certificate directory, so a wildcard drops
+    # its leftmost label — the same name Certbot would pick on its own.
+    lineage_base = domain[2:] if domain.startswith("*.") else domain
+
     for kt in key_types:
         if len(key_types) == 1:
-            lineage = domain
+            lineage = lineage_base
         else:
-            lineage = f"{domain}-{kt}"
+            lineage = f"{lineage_base}-{kt}"
 
         res = _run_certbot_for_lineage(
             lineage=lineage,
@@ -1020,6 +1824,8 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
             rsa_key_size=rsa_key_size,
             ecdsa_curve=ecdsa_curve,
             account_id=account_id,
+            dns_profile=dns_profile,
+            dns_propagation=dns_propagation,
         )
         results.append(res)
         if res["rc"] == 0:
@@ -1070,6 +1876,14 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     }
     if error:
         response["error"] = error
+        # The browser sees this immediately, but issuance also runs before an
+        # apply, where nobody is watching the certificate page.
+        report_alert(
+            "certificate.renewal_failed",
+            domain,
+            f"Certificate issuance failed for {domain}",
+            error[:1000],
+        )
     return 200, response
 
 
@@ -1317,13 +2131,26 @@ def _ca_item(ca_id: str, kind: str, certificates: List[x509.Certificate]) -> Dic
 
 
 def _list_certificate_authorities() -> Dict[str, Any]:
+    expiry_watch = CertificateExpiryWatch()
+    expiry_watch.start()
+
     ca_root = _prepare_ca_root()
+    client_auth_ids = set(_load_client_auth_ids())
+
+    def _decorate(item: Dict[str, Any], certs: List[x509.Certificate]) -> Dict[str, Any]:
+        # The names a site would match against. Shown so an operator can see
+        # what "trusted for client authentication" actually turns into, and
+        # so the site editor can refuse a CA that has nothing to match on.
+        item["client_auth"] = item["id"] in client_auth_ids
+        item["subject_cns"] = _subject_cns(certs)
+        return item
+
     internal: Optional[Dict[str, Any]] = None
     _, internal_cert_path = _internal_ca_paths()
     if internal_cert_path.is_file():
         certs = _load_pem_certificates(internal_cert_path.read_bytes())
         if certs:
-            internal = _ca_item("internal", "internal", certs)
+            internal = _decorate(_ca_item("internal", "internal", certs), certs)
 
     external: List[Dict[str, Any]] = []
     external_dir = _prepare_ca_subdir("external")
@@ -1331,12 +2158,963 @@ def _list_certificate_authorities() -> Dict[str, Any]:
         for path in sorted(external_dir.glob("*.pem")):
             try:
                 certs = _validate_ca_bundle(path.read_bytes())
-                item = _ca_item(path.stem, "external", certs)
+                item = _decorate(_ca_item(path.stem, "external", certs), certs)
                 item["path"] = str(path)
                 external.append(item)
             except (OSError, ValueError) as exc:
                 LOG.warning("Skipping invalid CA bundle %s: %s", path, exc)
-    return {"internal": internal, "external": external}
+    return {
+        "internal": internal,
+        "external": external,
+        "client_auth_ids": sorted(client_auth_ids),
+        "revoked_client_certificates": _load_revoked_fingerprints(),
+    }
+
+
+# ───────────────────── client certificate authentication ─────────────────────
+#
+# Importing a CA does not make it a client-auth CA. A CA becomes one only when
+# it is explicitly marked here, because the CA that signs this gateway's own
+# server certificates has no business deciding who may connect to it.
+#
+# What gets written, and why the frontend needs exactly this:
+#
+#   clients-ca.pem       one bundle, because a bind takes one ca-file. It is
+#                        also what the server advertises in CertificateRequest,
+#                        so only these CA names reach a browser -- a visitor
+#                        holding nothing from them is never prompted.
+#   issuers-<id>.list    the subject CNs of one CA. The bundle is shared by the
+#                        whole bind, so "verified" is not the same as "verified
+#                        for this site"; the site matches the issuer against
+#                        its own CA's names.
+#   revoked.list         SHA-256 fingerprints, hex, lower case -- the exact
+#                        form ssl_c_der,sha2(256),hex,lower produces.
+
+
+def _mtls_dir(create: bool = False) -> Path:
+    directory = MTLS_DIR
+    if directory.is_symlink():
+        raise ValueError("the client authentication directory must not be a symlink")
+    if create:
+        directory.mkdir(parents=True, mode=0o755, exist_ok=True)
+    if directory.exists():
+        if not directory.is_dir():
+            raise ValueError("the client authentication path is not a directory")
+        os.chmod(directory, 0o755)
+    return directory
+
+
+# Standby certificates live outside the directory HAProxy reads, and that
+# separation is the entire point of it.
+#
+# HAProxy resolves a name to exactly one certificate per key type. Measured on
+# 2.8: with two files claiming the same name it loads the first in alphabetical
+# order, says nothing at all -- the configuration checks clean -- and serves
+# that one. It never looks at the dates. Given an expired certificate and a
+# perfectly good one side by side it serves the expired one and the site is
+# down for everybody while the replacement sits unused in the same directory.
+#
+# So a spare cannot be left where HAProxy can see it. It waits here, and
+# something has to deliberately put it in play.
+CERTS_AVAILABLE_DIR = Path(
+    os.environ.get("HAPROXY_CERTS_AVAILABLE_DIR", "/etc/haproxy/certs-available")
+).resolve()
+
+# Reserved for the certificate the ACME client renews on its own.
+LETSENCRYPT_SLOT = "letsencrypt"
+
+
+def _certs_available_root() -> Path:
+    """Where standbys live. Reading must never create anything.
+
+    Every certificate this daemon installs now passes the hold check on its
+    way in, so if reading the hold created a directory then installing a
+    certificate would depend on being able to create one -- and would start
+    failing on any host where that was not possible, for a feature that host
+    may not even use.
+    """
+
+    return CERTS_AVAILABLE_DIR
+
+
+def _get_certs_available_dir() -> Path:
+    """The same directory, made ready. Only for paths that are about to write."""
+
+    CERTS_AVAILABLE_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    return CERTS_AVAILABLE_DIR
+
+
+_PEM_LABELS = (
+    b"PRIVATE KEY", b"RSA PRIVATE KEY", b"EC PRIVATE KEY", b"CERTIFICATE",
+)
+
+
+def normalise_uploaded_pem(*parts: bytes) -> bytes:
+    """Make one usable PEM out of whatever the operator actually had.
+
+    A certificate authority hands over its material in whatever shape it
+    likes: one file with the key first and the chain after it, one file the
+    other way round, or a certificate and a key separately. The form used to
+    insist on exactly two files, which meant the commonest case -- a single
+    combined file -- was uploaded into both fields, arrived here as two
+    copies, and was refused for containing two private keys. Being told that
+    a file with one key in it has two keys is not a useful thing to be told.
+
+    So: take every PEM block from everything given, drop exact duplicates,
+    and put the certificates before the key. Order does not matter to
+    HAProxy, but one shape is easier to reason about than four.
+    """
+
+    seen: set = set()
+    certificates: List[bytes] = []
+    keys: List[bytes] = []
+    for part in parts:
+        if not part:
+            continue
+        for label in _PEM_LABELS:
+            for block in _extract_pem_blocks(part, label):
+                normalised = block.strip()
+                fingerprint = b"".join(normalised.split())
+                if fingerprint in seen:
+                    # The same file given twice, which is exactly what
+                    # happens when one combined file meets two fields.
+                    continue
+                seen.add(fingerprint)
+                if label == b"CERTIFICATE":
+                    certificates.append(normalised)
+                else:
+                    keys.append(normalised)
+
+    if not certificates:
+        raise ValueError("no certificate was found in what was uploaded")
+    if not keys:
+        raise ValueError(
+            "no private key was found; the certificate on its own cannot be "
+            "used to serve a site"
+        )
+    if len(keys) > 1:
+        raise ValueError(
+            f"{len(keys)} different private keys were found; upload the one "
+            "that belongs to this certificate"
+        )
+    separator = b"\n"
+    return separator.join(certificates + keys) + separator
+
+
+def _standby_slot(value: Any) -> str:
+    """A slot name safe to use as a path component."""
+
+    slug = _safe_slug(str(value or "").strip())
+    if not slug:
+        raise ValueError("the standby name must contain letters or digits")
+    if len(slug) > 64:
+        raise ValueError("the standby name is too long")
+    return slug
+
+
+def _standby_path(domain: str, slot: str) -> Path:
+    """The file for one standby, checked to stay inside its own directory."""
+
+    root = _certs_available_root()
+    holder = _ensure_within(root, root / _safe_slug(domain))
+    return _ensure_within(holder, holder / f"{slot}.pem")
+
+
+# The marker that says a name is being held on a standby. It lives here and
+# never in the crt directory: measured on HAProxy 2.8, one file there that is
+# not a certificate is a fatal configuration error and the gateway will not
+# start at all ("unable to load certificate ... no start line"). Only a
+# leading dot is skipped, which is why this daemon's own temporary files are
+# named .cert-* -- that prefix is load-bearing, not style.
+PIN_FILE = ".pinned"
+
+
+def _pin_path(stem: str) -> Path:
+    root = _certs_available_root()
+    holder = _ensure_within(root, root / _safe_slug(stem))
+    return _ensure_within(holder, holder / PIN_FILE)
+
+
+def _stem_domain(stem: str) -> str:
+    """The name a file is really for.
+
+    Dual-key sites are deployed as <domain>-ecdsa.pem and <domain>-rsa.pem,
+    so the file stem is not a hostname and no certificate on earth covers it.
+    Everything that addresses a file uses the stem; everything that checks
+    what a certificate is good for uses this.
+    """
+
+    for suffix in ("-ecdsa", "-rsa"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+def _standby_key(value: Any) -> str:
+    """The stem of a deployed certificate file, checked and normalised.
+
+    Not a hostname, deliberately. Dual-key sites deploy as <domain>-ecdsa.pem
+    and <domain>-rsa.pem, and the stem is what every writer of that directory
+    keys on, so it is what a hold and a standby are filed under. The hostname
+    hiding inside it still has to be a real one.
+    """
+
+    raw = str(value or "").strip().lower()
+    if not raw:
+        raise ValueError("a certificate name is required")
+    if len(raw) > 200:
+        raise ValueError("that certificate name is too long")
+    _normalize_dns_name(_stem_domain(raw))
+    if _safe_slug(raw) != raw:
+        raise ValueError("that certificate name cannot be used as a file name")
+    return raw
+
+
+def read_pin(stem: str) -> str:
+    """Which standby a name is held on, or "" when it is not held."""
+
+    try:
+        path = _pin_path(stem)
+    except ValueError:
+        return ""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()[:64]
+    except OSError:
+        return ""
+
+
+def is_pinned(stem: str) -> bool:
+    return bool(read_pin(stem))
+
+
+def _write_pin(stem: str, slot: str) -> None:
+    path = _pin_path(stem)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(f"{slot}\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def _clear_pin(stem: str) -> None:
+    with contextlib.suppress(ValueError, OSError):
+        _pin_path(stem).unlink(missing_ok=True)
+
+
+def _describe_pem(data: bytes) -> Dict[str, Any]:
+    """What a certificate is, in the terms the page needs to show it."""
+
+    certificates = _load_pem_certificates(data)
+    if not certificates:
+        raise ValueError("PEM does not contain an X.509 certificate")
+    leaf = certificates[0]
+    not_after = _cert_not_after(leaf)
+    not_before = _cert_not_before(leaf)
+    now = datetime.now(timezone.utc)
+    key = leaf.public_key()
+    if isinstance(key, rsa.RSAPublicKey):
+        key_type = f"RSA {key.key_size}"
+    elif isinstance(key, ec.EllipticCurvePublicKey):
+        key_type = f"EC {key.curve.name}"
+    else:
+        key_type = type(key).__name__
+    return {
+        "subject": _certificate_label(leaf),
+        # Who signed it is the whole reason for keeping a second one: a
+        # standby from a different authority is only useful if the operator
+        # can see at a glance that it *is* from a different authority.
+        "issuer": _issuer_label(leaf),
+        "names": _get_cert_dns_names(leaf),
+        "not_before": not_before.strftime("%Y-%m-%d"),
+        "not_after": not_after.strftime("%Y-%m-%d"),
+        "days_left": (not_after - now).days,
+        "usable": not_before <= now < not_after,
+        "key_type": key_type,
+        "chain_length": len(certificates),
+    }
+
+
+def _issuer_label(cert: x509.Certificate) -> str:
+    attrs = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if attrs:
+        return str(attrs[0].value)
+    attrs = cert.issuer.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+    if attrs:
+        return str(attrs[0].value)
+    return cert.issuer.rfc4514_string()
+
+
+def _standby_entries(domain: str) -> List[Dict[str, Any]]:
+    """Every standby stored for one name, newest expiry first."""
+
+    root = _certs_available_root()
+    holder = root / _safe_slug(domain)
+    if not holder.is_dir():
+        return []
+    entries: List[Dict[str, Any]] = []
+    for path in sorted(holder.glob("*.pem")):
+        try:
+            described = _describe_pem(path.read_bytes())
+        except Exception as exc:  # pylint: disable=broad-except
+            # A file that cannot be read is reported, not hidden: a standby
+            # nobody can see is broken is worse than no standby at all.
+            entries.append({
+                "slot": path.stem,
+                "error": str(exc)[:200],
+                "usable": False,
+            })
+            continue
+        described["slot"] = path.stem
+        entries.append(described)
+    entries.sort(key=lambda item: (not item.get("usable"), item.get("slot", "")))
+    return entries
+
+
+def list_standby_certificates() -> Dict[str, Any]:
+    """Every deployed certificate, with whatever spares are held for it."""
+
+    certs_dir = _get_haproxy_certs_dir()
+    domains: List[Dict[str, Any]] = []
+    for path in sorted(certs_dir.glob("*.pem")):
+        domain = path.stem
+        try:
+            active = _describe_pem(path.read_bytes())
+        except Exception as exc:  # pylint: disable=broad-except
+            active = {"error": str(exc)[:200], "usable": False}
+        standbys = _standby_entries(domain)
+        pinned = read_pin(domain)
+        # Whether this one could be put away without leaving a name bare.
+        # Offering the button on a certificate that is the only thing serving
+        # its name would be offering an action that always refuses.
+        claimed = _names_claimed_by(path)
+        served_elsewhere = {
+            name.lower()
+            for other in certs_dir.glob("*.pem")
+            if other.name != path.name
+            for name in _names_claimed_by(other)
+        }
+        can_be_put_away = bool(claimed) and all(
+            name.startswith("*.") or name.lower() in served_elsewhere
+            for name in claimed
+        )
+        domains.append({
+            "can_be_put_away": can_be_put_away,
+            "domain": domain,
+            "active": active,
+            "standbys": standbys,
+            "pinned": pinned,
+            "renewal_paused": bool(pinned),
+            # What the operator actually wants to know when the warning
+            # arrives: is there something ready to put in.
+            "has_usable_standby": any(
+                entry.get("usable") for entry in standbys
+            ),
+        })
+    return {"ok": True, "domains": domains}
+
+
+def store_standby_certificate(
+    domain: Any, slot: Any, pem: Any
+) -> Dict[str, Any]:
+    """Keep a certificate as a spare for one name.
+
+    Refused rather than repaired if the key does not match the certificate or
+    the certificate does not cover the name: a standby that cannot be put in
+    is worse than none, because it will be discovered at the moment it is
+    needed.
+    """
+
+    checked_domain = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    if checked_slot == LETSENCRYPT_SLOT:
+        raise ValueError(
+            f"{LETSENCRYPT_SLOT!r} is reserved for the renewing certificate"
+        )
+    raw = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
+    if not raw.strip():
+        raise ValueError("no certificate was supplied")
+    if len(raw) > 1024 * 1024:
+        raise ValueError("the certificate is implausibly large")
+
+    data = normalise_uploaded_pem(raw)
+    _validate_server_pem(data, _stem_domain(checked_domain))
+    described = _describe_pem(data)
+
+    path = _standby_path(checked_domain, checked_slot)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(handle, data)
+    finally:
+        os.close(handle)
+    _set_cert_permissions(tmp)
+    os.replace(tmp, path)
+    LOG.info("Stored standby certificate %s for %s", checked_slot, checked_domain)
+    described["slot"] = checked_slot
+    return {"ok": True, "domain": checked_domain, "standby": described}
+
+
+def _deployed_stems() -> List[str]:
+    """Every name HAProxy currently has a certificate file for."""
+
+    return sorted(path.stem for path in _get_haproxy_certs_dir().glob("*.pem"))
+
+
+def _sibling_stem(stem: str) -> str:
+    """The other half of a dual-key pair, or "" when there is not one.
+
+    <domain>-ecdsa.pem and <domain>-rsa.pem are one site in two files. A
+    standby put into only one of them would leave the other still claiming
+    the same name -- which is the shadowing this whole feature exists to
+    avoid, recreated by the act of avoiding it.
+    """
+
+    for suffix, other in (("-ecdsa", "-rsa"), ("-rsa", "-ecdsa")):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)] + other
+    return ""
+
+
+def store_standby_for_covered_names(
+    slot: Any, pem: Any, exclude: Optional[Sequence[str]] = None
+) -> Dict[str, Any]:
+    """Keep one certificate as the standby for every name it covers.
+
+    A wildcard is bought precisely so it covers a dozen hostnames; filing it
+    a dozen times by hand is the sort of chore that gets done nine times.
+    Which names it lands on is decided by the certificate itself, checked
+    against what is actually deployed, so it cannot be filed against a name
+    it could not serve.
+    """
+
+    checked_slot = _standby_slot(slot)
+    raw = pem.encode("utf-8") if isinstance(pem, str) else bytes(pem or b"")
+    if not raw.strip():
+        raise ValueError("no certificate was supplied")
+    data = normalise_uploaded_pem(raw)
+    certificates = _load_pem_certificates(data)
+    if not certificates:
+        raise ValueError("PEM does not contain an X.509 certificate")
+
+    left_out = {str(name) for name in (exclude or ())}
+    covered: List[str] = []
+    skipped: List[str] = []
+    for stem in _deployed_stems():
+        if stem in left_out:
+            continue
+        if _cert_matches_domain(certificates[0], _stem_domain(stem)):
+            covered.append(stem)
+        else:
+            skipped.append(stem)
+
+    if not covered:
+        raise ValueError(
+            "this certificate does not cover any name deployed on this gateway"
+        )
+
+    stored: List[Dict[str, Any]] = []
+    for stem in covered:
+        result = store_standby_certificate(stem, checked_slot, data)
+        stored.append({"domain": stem, **result.get("standby", {})})
+
+    LOG.info(
+        "Stored standby %s for %d name(s): %s",
+        checked_slot, len(covered), ", ".join(covered),
+    )
+    return {
+        "ok": True,
+        "slot": checked_slot,
+        "domains": covered,
+        "not_covered": skipped,
+        "stored": stored,
+    }
+
+
+def _names_claimed_by(path: Path) -> List[str]:
+    try:
+        return _get_cert_dns_names(_load_pem_certificates(path.read_bytes())[0])
+    except Exception:  # pylint: disable=broad-except
+        return []
+
+
+def adopt_deployed_as_standby(domain: Any, slot: Any) -> Dict[str, Any]:
+    """Move a certificate out of service and keep it as a standby.
+
+    The obvious thing to want after putting one in the wrong place: it is
+    already on the gateway, with its key, and asking the operator to go and
+    find the original files again to upload them a second time is a poor
+    answer.
+
+    It is only safe when nothing depends on it. Every ordinary name the
+    certificate answers for has to still be answered by some other deployed
+    file once this one is gone, or removing it would take that name down --
+    so that is checked first and the whole thing is refused by name if it
+    does not hold. Wildcard entries are not checked: a wildcard answers for
+    hostnames that have no file of their own, and those had no certificate
+    before this one arrived either.
+    """
+
+    stem = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    certs_dir = _get_haproxy_certs_dir()
+    source = _ensure_within(certs_dir, certs_dir / f"{_safe_slug(stem)}.pem")
+    if not source.is_file():
+        raise ValueError(f"no certificate is deployed as {stem}")
+
+    data = source.read_bytes()
+    # Without its key it is not a standby, it is half of one.
+    _validate_server_pem(data)
+
+    others = [p for p in certs_dir.glob("*.pem") if p.resolve() != source.resolve()]
+    still_served = {name.lower() for path in others for name in _names_claimed_by(path)}
+    orphaned = [
+        name for name in _names_claimed_by(source)
+        if not name.startswith("*.") and name.lower() not in still_served
+    ]
+    if orphaned:
+        raise ValueError(
+            "this certificate is the only one serving "
+            + ", ".join(sorted(orphaned))
+            + "; putting it away would leave "
+            + ("that name" if len(orphaned) == 1 else "those names")
+            + " without one"
+        )
+
+    stored = store_standby_for_covered_names(checked_slot, data, exclude=[stem])
+    source.unlink()
+    rc, _stdout, stderr = _reload_haproxy()
+    LOG.warning(
+        "Took %s out of service and kept it as standby %s for %s",
+        stem, checked_slot, ", ".join(stored["domains"]),
+    )
+    return {
+        "ok": rc in (None, 0),
+        "removed": stem,
+        "slot": checked_slot,
+        "domains": stored["domains"],
+        "reload_rc": rc,
+        "reload_error": "" if rc in (None, 0) else stderr.strip()[:400],
+    }
+
+
+def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
+    """Put a standby into service for one name.
+
+    Deliberately a decision somebody makes, never one this daemon makes for
+    them: a spare is usually signed by an authority most clients do not
+    trust, so swapping to it unasked would trade one broken page for another
+    without anybody deciding that was the better trade.
+    """
+
+    checked_domain = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    path = _standby_path(checked_domain, checked_slot)
+    if not path.is_file():
+        raise ValueError(f"no standby named {checked_slot!r} for this name")
+
+    data = path.read_bytes()
+    _validate_server_pem(data, _stem_domain(checked_domain))
+    described = _describe_pem(data)
+    if not described["usable"]:
+        raise ValueError(
+            "that standby is not valid today "
+            f"({described['not_before']} to {described['not_after']})"
+        )
+
+    certs_dir = _get_haproxy_certs_dir()
+    destination = _ensure_within(
+        certs_dir, certs_dir / f"{_safe_slug(checked_domain)}.pem"
+    )
+    ok, rc, _stdout, stderr = _activate_server_pem(
+        destination, data, override_pin=True, allow_shadow=True
+    )
+
+    # A dual-key site is two files for one name. Moving only one of them
+    # would leave the other still claiming that name with the old
+    # certificate -- the shadowing this feature exists to prevent, recreated
+    # by the act of preventing it. The sibling comes along when it holds the
+    # same standby.
+    also: List[str] = []
+    sibling = _sibling_stem(checked_domain)
+    if ok and sibling and _standby_path(sibling, checked_slot).is_file():
+        sibling_destination = _ensure_within(
+            certs_dir, certs_dir / f"{_safe_slug(sibling)}.pem"
+        )
+        sibling_ok, _rc2, _out2, _err2 = _activate_server_pem(
+            sibling_destination, data, override_pin=True, allow_shadow=True
+        )
+        if sibling_ok:
+            _write_pin(sibling, checked_slot)
+            also.append(sibling)
+
+    if ok:
+        # Held from here on. Everything else that writes this directory --
+        # the renewal hook, the Ansible handlers, the orphan sweep, this
+        # daemon's own issue paths -- checks the pin and leaves it alone,
+        # because a switch that the next renewal silently undoes is not a
+        # switch, and the operator would find out from a browser.
+        _write_pin(checked_domain, checked_slot)
+    LOG.warning(
+        "Standby certificate %s put into service for %s (issuer %s)",
+        checked_slot, checked_domain, described["issuer"],
+    )
+    return {
+        "ok": ok,
+        "domain": checked_domain,
+        "slot": checked_slot,
+        "also_switched": also,
+        "issuer": described["issuer"],
+        "not_after": described["not_after"],
+        "reload_rc": rc,
+        "reload_error": "" if ok else stderr.strip()[:400],
+    }
+
+
+def _release_one(stem: str) -> Dict[str, Any]:
+    """Lift the hold on one file and restore its lineage if there is one."""
+
+    live = _get_le_live_dir() / stem
+    fullchain = live / "fullchain.pem"
+    privkey = live / "privkey.pem"
+    _clear_pin(stem)
+    if not (fullchain.is_file() and privkey.is_file()):
+        LOG.warning(
+            "Released %s, but no live lineage to restore; the next issue "
+            "will install it", stem,
+        )
+        return {"ok": True, "domain": stem, "restored": False}
+    certs_dir = _get_haproxy_certs_dir()
+    destination = _ensure_within(
+        certs_dir, certs_dir / f"{_safe_slug(stem)}.pem"
+    )
+    ok, rc, _stdout, stderr = _activate_server_pem(
+        destination,
+        fullchain.read_bytes() + privkey.read_bytes(),
+        override_pin=True,
+        allow_shadow=True,
+    )
+    LOG.warning("Released %s back to the renewing certificate", stem)
+    return {
+        "ok": ok,
+        "domain": stem,
+        "restored": ok,
+        "reload_rc": rc,
+        "reload_error": "" if ok else stderr.strip()[:400],
+    }
+
+
+def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
+    """Hand a name back to the renewing certificate.
+
+    Clears the hold and reinstalls from the live lineage straight away, so
+    the name is not left on a standby that nothing is going to renew while
+    waiting for the next renewal to come round.
+    """
+
+    stem = _standby_key(domain)
+    if not read_pin(stem):
+        raise ValueError("that name is not being held on a standby")
+
+    also: List[str] = []
+    sibling = _sibling_stem(stem)
+    if sibling and read_pin(sibling):
+        # Both halves went over together; both come back together.
+        _release_one(sibling)
+        also.append(sibling)
+
+    result = _release_one(stem)
+    result["also_released"] = also
+    if not result["restored"]:
+        result["message"] = "released; no Let's Encrypt certificate is on disk yet"
+    return result
+
+
+def delete_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
+    checked_domain = _standby_key(domain)
+    checked_slot = _standby_slot(slot)
+    if read_pin(checked_domain) == checked_slot:
+        raise ValueError(
+            "that standby is in service; hand the name back to Let's Encrypt "
+            "before removing it"
+        )
+    path = _standby_path(checked_domain, checked_slot)
+    path.unlink(missing_ok=True)
+    holder = path.parent
+    if holder.is_dir() and not any(holder.iterdir()):
+        holder.rmdir()
+    LOG.info("Deleted standby certificate %s for %s", checked_slot, checked_domain)
+    return {"ok": True, "domain": checked_domain, "slot": checked_slot}
+
+
+def _standby_hint(domain: str) -> str:
+    """Whether a spare is ready, appended to the expiry warning.
+
+    A warning that only says the certificate is dying leaves the operator to
+    go and find out whether anything can be done about it. If a usable spare
+    is already held, the warning is the right place to say so.
+    """
+
+    try:
+        usable = [
+            entry for entry in _standby_entries(domain) if entry.get("usable")
+        ]
+    except Exception:  # pylint: disable=broad-except
+        return ""
+    if not usable:
+        return ""
+    best = max(usable, key=lambda entry: entry.get("days_left", 0))
+    return (
+        f". A standby is ready: {best['slot']} from {best['issuer']}, "
+        f"valid until {best['not_after']}"
+    )
+
+
+def _write_public_file(path: Path, data: bytes) -> None:
+    """Replace a world-readable file in one step, never half-written."""
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def _client_auth_trust_path() -> Path:
+    return _prepare_ca_root() / MTLS_TRUST_FILE
+
+
+def _load_client_auth_ids() -> List[str]:
+    path = _client_auth_trust_path()
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        LOG.warning("cannot read the client authentication list: %s", exc)
+        return []
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    if not isinstance(ids, list):
+        return []
+    return [str(value) for value in ids if isinstance(value, str)]
+
+
+def _ca_certificates(ca_id: str) -> List[x509.Certificate]:
+    """Load one CA bundle by identifier, internal or imported."""
+    if ca_id == "internal":
+        _, path = _internal_ca_paths()
+        if not path.is_file():
+            raise ValueError("the internal certificate authority does not exist")
+        return _load_pem_certificates(path.read_bytes())
+    safe = _safe_slug(ca_id).lower()
+    external_dir = _prepare_ca_subdir("external")
+    path = _ensure_within(external_dir, external_dir / f"{safe}.pem")
+    if not path.is_file():
+        raise ValueError(f"certificate authority {safe!r} was not found")
+    return _validate_ca_bundle(path.read_bytes())
+
+
+def _subject_cns(certificates: List[x509.Certificate]) -> List[str]:
+    """Every name that could appear as the issuer of a client certificate.
+
+    A bundle may hold a root and the intermediate that actually signs clients,
+    and only the direct issuer shows up in ssl_c_i_dn -- so all of them count.
+    """
+    names: List[str] = []
+    for cert in certificates:
+        for attribute in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME):
+            value = str(attribute.value).strip()
+            if value and value not in names:
+                names.append(value)
+    return names
+
+
+def _issuer_list_path(ca_id: str) -> Path:
+    return _mtls_dir() / f"issuers-{ca_id}.list"
+
+
+def _rebuild_client_auth_material(ids: List[str]) -> Dict[str, List[str]]:
+    """Derive everything HAProxy reads from the CAs marked for client auth."""
+    directory = _mtls_dir(create=True)
+
+    resolved: Dict[str, List[str]] = {}
+    bundle: List[bytes] = []
+    seen_cns: Dict[str, str] = {}
+    for ca_id in ids:
+        certificates = _ca_certificates(ca_id)
+        names = _subject_cns(certificates)
+        if not names:
+            raise ValueError(
+                f"certificate authority {ca_id!r} has no Common Name, so a "
+                "certificate it signed cannot be told apart from another "
+                "authority's"
+            )
+        for name in names:
+            owner = seen_cns.get(name.lower())
+            if owner and owner != ca_id:
+                raise ValueError(
+                    f"{ca_id!r} and {owner!r} both use the Common Name "
+                    f"{name!r}; a site could not tell their certificates apart"
+                )
+            seen_cns[name.lower()] = ca_id
+        resolved[ca_id] = names
+        bundle.extend(
+            cert.public_bytes(serialization.Encoding.PEM) for cert in certificates
+        )
+
+    for ca_id, names in resolved.items():
+        _write_public_file(
+            _issuer_list_path(ca_id),
+            ("".join(f"{name}\n" for name in names)).encode("utf-8"),
+        )
+    # A CA that is no longer trusted must stop being an answer for any site
+    # that still names it. Deleting the file would do that, but it would also
+    # make the live configuration reference something that no longer exists,
+    # so the next reload would fail and the change would not take effect at
+    # all. Emptying it has the same effect on access -- the ACL matches
+    # nothing, every request to that site is denied -- and leaves a
+    # configuration that still loads.
+    try:
+        live_config = HAPROXY_CFG.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        live_config = ""
+    for path in directory.glob("issuers-*.list"):
+        if path.stem[len("issuers-"):] in resolved:
+            continue
+        if path.name in live_config:
+            _write_public_file(path, MTLS_EMPTY_MARKER.encode("utf-8"))
+        else:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+    _write_public_file(
+        directory / MTLS_BUNDLE_NAME,
+        b"".join(bundle) if bundle else MTLS_EMPTY_MARKER.encode("utf-8"),
+    )
+    revoked_path = directory / MTLS_REVOKED_NAME
+    if not revoked_path.is_file():
+        _write_public_file(revoked_path, MTLS_EMPTY_MARKER.encode("utf-8"))
+    return resolved
+
+
+def _load_revoked_fingerprints() -> List[str]:
+    path = _mtls_dir() / MTLS_REVOKED_NAME
+    if not path.is_file():
+        return []
+    values: List[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        candidate = line.strip().lower()
+        if candidate and not candidate.startswith("#"):
+            values.append(candidate)
+    return values
+
+
+def handle_ca_client_auth(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """Replace the set of CAs trusted to authenticate clients."""
+    raw = body.get("ids")
+    if not isinstance(raw, list) or len(raw) > 64:
+        return 400, {"ok": False, "error": "ids must be a list of CA identifiers"}
+    ids: List[str] = []
+    for value in raw:
+        if not isinstance(value, str):
+            return 400, {"ok": False, "error": "ids must be a list of CA identifiers"}
+        candidate = value.strip().lower()
+        if not candidate:
+            continue
+        try:
+            candidate = "internal" if candidate == "internal" else _safe_slug(candidate).lower()
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        if candidate not in ids:
+            ids.append(candidate)
+
+    with CA_LOCK:
+        try:
+            resolved = _rebuild_client_auth_material(ids)
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            return 500, {"ok": False, "error": f"cannot write client authentication material: {exc}"}
+        path = _client_auth_trust_path()
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"version": 1, "ids": ids}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+
+    rc, _out, err = _reload_haproxy()
+    return 200, {
+        "ok": True,
+        "ids": ids,
+        "issuers": resolved,
+        "reload_rc": rc,
+        "reload_error": "" if rc == 0 else err.strip()[:400],
+        "message": (
+            f"Client authentication trusts {len(ids)} certificate authorities."
+            if ids
+            else "No certificate authority is trusted for client authentication."
+        ),
+    }
+
+
+def handle_ca_revoked(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """Replace the list of client certificates refused by fingerprint.
+
+    Refusing one certificate should not mean discarding the authority that
+    signed it, and a small gateway is unlikely to run a CRL distribution
+    point -- so revocation here is a list of fingerprints the frontend
+    matches directly.
+    """
+    raw = body.get("fingerprints")
+    if not isinstance(raw, list) or len(raw) > MTLS_MAX_REVOKED:
+        return 400, {
+            "ok": False,
+            "error": f"fingerprints must be a list of at most {MTLS_MAX_REVOKED} entries",
+        }
+    values: List[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            return 400, {"ok": False, "error": "each fingerprint must be a string"}
+        # Accept what the tools print: colons, spaces, upper case.
+        candidate = re.sub(r"[^0-9a-fA-F]", "", entry).lower()
+        if not candidate:
+            continue
+        if not SHA256_HEX_RE.fullmatch(candidate):
+            return 400, {
+                "ok": False,
+                "error": f"{entry.strip()!r} is not a SHA-256 fingerprint",
+            }
+        if candidate not in values:
+            values.append(candidate)
+
+    with CA_LOCK:
+        try:
+            directory = _mtls_dir(create=True)
+            _write_public_file(
+                directory / MTLS_REVOKED_NAME,
+                (MTLS_EMPTY_MARKER + "".join(f"{value}\n" for value in values)).encode(
+                    "utf-8"
+                ),
+            )
+        except (OSError, ValueError) as exc:
+            return 500, {"ok": False, "error": f"cannot write the revocation list: {exc}"}
+
+    # HAProxy reads a pattern file when it loads the configuration, so the new
+    # list is only in force after a reload. Revocation that takes effect at
+    # some unspecified later time is not revocation.
+    rc, _out, err = _reload_haproxy()
+    return 200, {
+        "ok": True,
+        "fingerprints": values,
+        "reload_rc": rc,
+        "reload_error": "" if rc == 0 else err.strip()[:400],
+        "message": f"{len(values)} client certificates are refused.",
+    }
 
 
 def handle_internal_ca_ensure(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -1348,6 +3126,84 @@ def handle_internal_ca_ensure(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         "certificate_authority": item,
         "message": "Internal certificate authority created." if created else "Internal certificate authority already exists.",
     }
+
+
+def handle_standby_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, list_standby_certificates()
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot list standby certificates")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_store(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, store_standby_certificate(
+            body.get("domain"), body.get("slot"), body.get("pem")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot store the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_store_all(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, store_standby_for_covered_names(
+            body.get("slot"), body.get("pem")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot store the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_adopt(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, adopt_deployed_as_standby(
+            body.get("domain"), body.get("slot")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot take the certificate out of service")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_activate(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, activate_standby_certificate(
+            body.get("domain"), body.get("slot")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot put the standby certificate into service")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_release(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, release_to_letsencrypt(body.get("domain"))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot release the name back to Let's Encrypt")
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def handle_standby_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, delete_standby_certificate(
+            body.get("domain"), body.get("slot")
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.exception("cannot delete the standby certificate")
+        return 500, {"ok": False, "error": str(exc)}
 
 
 def handle_internal_cert_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -1492,11 +3348,31 @@ def handle_internal_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
     return 200, {"ok": True, "message": "Internal certificate authority deleted."}
 
 
+def _uploaded_file(form: "cgi.FieldStorage", field: str) -> Any:
+    """Return the attached file for ``field``, or None.
+
+    A cgi.FieldStorage part that holds a file answers neither ``bool()`` nor
+    ``in`` -- both raise TypeError, because its ``list`` is None. So the
+    obvious way to ask whether the operator attached anything is the one way
+    that cannot be used, and asking it crashed the request handler instead of
+    returning an error.
+    """
+    try:
+        item = form[field]
+    except (KeyError, TypeError):
+        return None
+    if isinstance(item, list):
+        item = item[0] if item else None
+    if item is None or not getattr(item, "filename", ""):
+        return None
+    return item
+
+
 def handle_external_ca_upload_form(
     form: "cgi.FieldStorage",
 ) -> Tuple[int, Dict[str, Any]]:
-    file_item = form["ca_file"] if "ca_file" in form else None
-    if not file_item or not getattr(file_item, "filename", ""):
+    file_item = _uploaded_file(form, "ca_file")
+    if file_item is None:
         return 400, {"ok": False, "error": "ca_file is required"}
     raw = file_item.file.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
@@ -1558,7 +3434,395 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
     if not path.is_file():
         return 404, {"ok": False, "error": "certificate authority was not found"}
     path.unlink()
+    # Leaving a deleted authority in the client-auth list would keep its names
+    # in an issuers file that nothing can regenerate.
+    trusted = _load_client_auth_ids()
+    if ca_id in trusted:
+        remaining = [value for value in trusted if value != ca_id]
+        status, response = handle_ca_client_auth({"ids": remaining})
+        if not response.get("ok"):
+            return status, response
     return 200, {"ok": True, "message": f"External certificate authority deleted: {ca_id}"}
+
+
+# ───────────────────── one upload, sorted by what it turns out to be ─────
+#
+# An operator holding a file from their certificate authority should not have
+# to know whether it is PEM, DER or PKCS#12, nor which of the two forms on
+# this page it belongs in, before they can upload it. So there is one field:
+# read whatever arrives, work out what each piece is, and say so before
+# touching anything.
+#
+# The sorting rule is the certificate's own Basic Constraints. CA:TRUE is an
+# authority and goes to the trust store; anything else is an end-entity
+# certificate and, if its private key came along, becomes a server
+# certificate. Nothing is guessed from the file name or the extension.
+
+
+def _certificate_is_authority(cert: x509.Certificate) -> bool:
+    try:
+        return bool(
+            cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+        )
+    except x509.ExtensionNotFound:
+        return False
+
+
+def _is_self_signed(cert: x509.Certificate) -> bool:
+    return cert.subject == cert.issuer
+
+
+def _load_private_key_blocks(data: bytes, secret: Optional[bytes]) -> List[Any]:
+    blocks: List[bytes] = []
+    for label in (
+        b"PRIVATE KEY",
+        b"RSA PRIVATE KEY",
+        b"EC PRIVATE KEY",
+        b"ENCRYPTED PRIVATE KEY",
+    ):
+        blocks.extend(_extract_pem_blocks(data, label))
+    keys: List[Any] = []
+    for block in blocks:
+        for candidate in (secret, None):
+            try:
+                keys.append(
+                    serialization.load_pem_private_key(
+                        block, password=candidate, backend=default_backend()
+                    )
+                )
+                break
+            except (TypeError, ValueError):
+                continue
+        else:
+            raise ValueError(
+                "a private key in this file is encrypted; enter its password"
+            )
+    return keys
+
+
+def _decode_uploaded_material(
+    data: bytes, password: str = ""
+) -> Tuple[List[x509.Certificate], List[Any], str]:
+    """Return (certificates, private keys, detected format)."""
+    secret = password.encode("utf-8") if password else None
+
+    if b"-----BEGIN" in data:
+        certificates = _load_pem_certificates(data)
+        keys = _load_private_key_blocks(data, secret)
+        if not certificates and not keys:
+            raise ValueError("this PEM file holds no certificate and no private key")
+        return certificates, keys, "PEM"
+
+    # PKCS#12 before DER: a .p12 is also a binary blob, and trying to read it
+    # as a certificate produces a misleading "not a certificate" instead of
+    # "the password is wrong".
+    try:
+        from cryptography.hazmat.primitives.serialization import pkcs12
+
+        key, cert, extra = pkcs12.load_key_and_certificates(
+            data, secret, default_backend()
+        )
+    except ValueError as exc:
+        message = str(exc).lower()
+        if "mac" in message or "password" in message or "invalid" in message:
+            pkcs12_error: Optional[str] = (
+                "this looks like a PKCS#12 file and the password is missing or wrong"
+                if not password
+                else "the PKCS#12 password is wrong"
+            )
+        else:
+            pkcs12_error = None
+    except Exception:  # noqa: BLE001
+        pkcs12_error = None
+    else:
+        certificates = ([cert] if cert is not None else []) + list(extra or [])
+        keys = [key] if key is not None else []
+        if not certificates and not keys:
+            raise ValueError("this PKCS#12 file is empty")
+        return certificates, keys, "PKCS#12"
+
+    try:
+        return [x509.load_der_x509_certificate(data, default_backend())], [], "DER"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return [], [
+            serialization.load_der_private_key(
+                data, password=secret, backend=default_backend()
+            )
+        ], "DER"
+    except Exception:  # noqa: BLE001
+        pass
+
+    if pkcs12_error:
+        raise ValueError(pkcs12_error)
+    raise ValueError(
+        "unrecognised file: expected PEM, DER or PKCS#12 (.p12/.pfx)"
+    )
+
+
+def _chain_for_leaf(
+    leaf: x509.Certificate, authorities: List[x509.Certificate]
+) -> List[x509.Certificate]:
+    """Order the intermediates from the leaf upwards.
+
+    A self-signed root is left out: HAProxy sends the file as-is, and a client
+    that does not already trust the root will not start trusting it because
+    the server offered a copy.
+    """
+    chain: List[x509.Certificate] = []
+    remaining = [ca for ca in authorities if not _is_self_signed(ca)]
+    current = leaf
+    while True:
+        issuer = next(
+            (ca for ca in remaining if ca.subject == current.issuer), None
+        )
+        if issuer is None:
+            break
+        chain.append(issuer)
+        remaining.remove(issuer)
+        current = issuer
+    return chain
+
+
+def _describe_certificate(cert: x509.Certificate) -> Dict[str, Any]:
+    return {
+        "subject": _certificate_label(cert),
+        "issuer": (
+            cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            if cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+            else cert.issuer.rfc4514_string()
+        ),
+        "not_before": _cert_not_before(cert).strftime("%Y-%m-%d"),
+        "not_after": _cert_not_after(cert).strftime("%Y-%m-%d"),
+        "sha256": cert.fingerprint(hashes.SHA256()).hex(),
+        # Only for an end-entity certificate. _get_cert_dns_names falls back to
+        # the Common Name when there is no SAN, which for an authority means
+        # reporting "Corp Root CA" as though it were a host name.
+        "dns_names": (
+            [] if _certificate_is_authority(cert) else sorted(_get_cert_dns_names(cert))
+        ),
+        "self_signed": _is_self_signed(cert),
+    }
+
+
+def _sort_uploaded_material(
+    data: bytes, password: str, name: str, domain: str
+) -> Dict[str, Any]:
+    certificates, keys, detected = _decode_uploaded_material(data, password)
+
+    authorities = [c for c in certificates if _certificate_is_authority(c)]
+    leaves = [c for c in certificates if not _certificate_is_authority(c)]
+
+    paired: Optional[Tuple[x509.Certificate, Any]] = None
+    for leaf in leaves:
+        for key in keys:
+            if _public_key_bytes(leaf.public_key()) == _public_key_bytes(
+                key.public_key()
+            ):
+                paired = (leaf, key)
+                break
+        if paired:
+            break
+
+    problems: List[str] = []
+    actions: List[str] = []
+
+    ca_id = ""
+    if authorities:
+        root = next((c for c in authorities if _is_self_signed(c)), authorities[0])
+        ca_id = _safe_slug(name or _certificate_label(root)).lower()
+        if ca_id == "internal":
+            problems.append("the identifier 'internal' is reserved")
+            ca_id = ""
+        else:
+            actions.append(
+                f"import {len(authorities)} certificate authorities as {ca_id!r}"
+                if len(authorities) > 1
+                else f"import the certificate authority {ca_id!r}"
+            )
+
+    server: Optional[Dict[str, Any]] = None
+    target = ""
+    if paired:
+        leaf, _key = paired
+        names = sorted(_get_cert_dns_names(leaf))
+        target = domain or (names[0] if names else "")
+        if not target:
+            problems.append(
+                "the certificate carries no host name, so there is nothing to "
+                "install it under; choose a domain"
+            )
+        else:
+            chain = _chain_for_leaf(leaf, authorities)
+            server = {
+                **_describe_certificate(leaf),
+                "domain": target,
+                "chain_length": len(chain),
+            }
+            actions.append(f"install a server certificate for {target}")
+            if not chain and not _is_self_signed(leaf):
+                problems.append(
+                    "no intermediate certificate came with it, so clients that "
+                    "do not already hold the chain may reject this certificate"
+                )
+    elif leaves:
+        problems.append(
+            "a server certificate was found but not its private key, so it "
+            "cannot be installed; upload both together"
+        )
+    elif keys and not authorities:
+        problems.append("a private key was found but no certificate to go with it")
+
+    return {
+        "format": detected,
+        "authorities": [_describe_certificate(c) for c in authorities],
+        "server_certificate": server,
+        "ca_id": ca_id,
+        "domain": target,
+        "actions": actions,
+        "problems": problems,
+        "_authorities": authorities,
+        "_paired": paired,
+    }
+
+
+def _import_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in plan.items() if not key.startswith("_")
+    }
+
+
+def handle_certs_inspect_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+    """Say what a file is, and change nothing."""
+    file_item = _uploaded_file(form, "file")
+    if file_item is None:
+        return 400, {"ok": False, "error": "file is required"}
+    data = file_item.file.read(MAX_REQUEST_BYTES + 1)
+    if len(data) > MAX_REQUEST_BYTES:
+        return 413, {"ok": False, "error": "the upload is too large"}
+    try:
+        plan = _sort_uploaded_material(
+            data,
+            form.getfirst("password", "") or "",
+            (form.getfirst("name", "") or "").strip(),
+            (form.getfirst("domain", "") or "").strip(),
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    return 200, {"ok": True, **_import_summary(plan)}
+
+
+def handle_certs_import_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+    """Do what the inspection described."""
+    file_item = _uploaded_file(form, "file")
+    if file_item is None:
+        return 400, {"ok": False, "error": "file is required"}
+    data = file_item.file.read(MAX_REQUEST_BYTES + 1)
+    if len(data) > MAX_REQUEST_BYTES:
+        return 413, {"ok": False, "error": "the upload is too large"}
+    replace = (form.getfirst("replace", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+    try:
+        plan = _sort_uploaded_material(
+            data,
+            form.getfirst("password", "") or "",
+            (form.getfirst("name", "") or "").strip(),
+            (form.getfirst("domain", "") or "").strip(),
+        )
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+
+    if not plan["actions"]:
+        return 400, {
+            "ok": False,
+            "error": "; ".join(plan["problems"])
+            or "there is nothing in this file to install",
+        }
+
+    done: List[str] = []
+    authorities: List[x509.Certificate] = plan["_authorities"]
+    ca_path: Optional[Path] = None
+
+    if authorities and plan["ca_id"]:
+        canonical = b"".join(
+            cert.public_bytes(serialization.Encoding.PEM) for cert in authorities
+        )
+        external_dir = _prepare_ca_subdir("external", create=True)
+        try:
+            ca_path = _ensure_within(
+                external_dir, external_dir / f"{plan['ca_id']}.pem"
+            )
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        if ca_path.is_file() and ca_path.read_bytes() != canonical and not replace:
+            return 409, {
+                "ok": False,
+                "error": (
+                    f"a different certificate authority is already stored as "
+                    f"{plan['ca_id']!r}. Choose another name, or confirm the "
+                    "replacement."
+                ),
+                "needs_replace": True,
+                **_import_summary(plan),
+            }
+        _write_public_file(ca_path, canonical)
+        done.append(f"certificate authority {plan['ca_id']!r} imported")
+
+    if plan["_paired"]:
+        leaf, key = plan["_paired"]
+        chain = _chain_for_leaf(leaf, authorities)
+        pem = b"".join(
+            cert.public_bytes(serialization.Encoding.PEM) for cert in [leaf] + chain
+        ) + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        try:
+            certificates, _ = _validate_server_pem(pem, plan["domain"])
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc), "completed": done}
+
+        # Only when the same upload also carried the authority: verifying
+        # against an unrelated one already in the store would prove nothing.
+        if ca_path is not None:
+            verified, detail = _verify_external_chain(certificates, ca_path)
+            if not verified:
+                return 400, {
+                    "ok": False,
+                    "error": f"the chain does not verify against {plan['ca_id']!r}: {detail}",
+                    "completed": done,
+                }
+
+        hap_dir = _get_haproxy_certs_dir()
+        hap_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            destination = _ensure_within(
+                hap_dir, hap_dir / f"{_safe_slug(plan['domain'])}.pem"
+            )
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc), "completed": done}
+        ok, reload_rc, _out, reload_stderr = _activate_server_pem(destination, pem)
+        if not ok:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "HAProxy rejected the certificate and the previous one was "
+                    f"restored: {reload_stderr.strip()[:300]}"
+                ),
+                "completed": done,
+            }
+        done.append(f"server certificate installed for {plan['domain']}")
+
+    return 200, {
+        "ok": True,
+        "completed": done,
+        "message": "; ".join(done),
+        **_import_summary(plan),
+    }
 
 
 def handle_certs_backup(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -1810,9 +4074,8 @@ def handle_certs_upload_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, A
       - site_name (опц.)
       - domain    (опц.)
     """
-    file_item = form["cert_file"] if "cert_file" in form else None
-
-    if not file_item or not getattr(file_item, "filename", ""):
+    file_item = _uploaded_file(form, "cert_file")
+    if file_item is None:
         return 200, {"ok": False, "error": "cert_file is required"}
 
     site_name = (form.getfirst("site_name", "") or "").strip()
@@ -2074,7 +4337,12 @@ class CertdHandler(BaseHTTPRequestHandler):
         path = self.path
 
         # Certificate and CA imports use multipart/form-data.
-        if path in ("/api/v1/certs/upload", "/api/v1/certs/ca/upload"):
+        if path in (
+            "/api/v1/certs/upload",
+            "/api/v1/certs/ca/upload",
+            "/api/v1/certs/inspect",
+            "/api/v1/certs/import",
+        ):
             ctype, pdict = cgi.parse_header(
                 self.headers.get("Content-Type", ""))
             if ctype != "multipart/form-data":
@@ -2103,20 +4371,33 @@ class CertdHandler(BaseHTTPRequestHandler):
                     413, {"ok": False, "error": "upload is too large"}
                 )
 
-            form = cgi.FieldStorage(  # type: ignore[arg-type]
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                },
-                keep_blank_values=True,
-            )
+            # Everything below is wrapped, unlike the JSON branch further
+            # down, which always was. An exception escaping here does not
+            # reach the caller as an error: it unwinds out of the handler and
+            # the connection closes unanswered, so the browser is told only
+            # that the remote end hung up. An upload that fails must say why.
+            try:
+                form = cgi.FieldStorage(  # type: ignore[arg-type]
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        "REQUEST_METHOD": "POST",
+                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                    },
+                    keep_blank_values=True,
+                )
 
-            if path == "/api/v1/certs/ca/upload":
-                status, resp = handle_external_ca_upload_form(form)
-            else:
-                status, resp = handle_certs_upload_form(form)
+                if path == "/api/v1/certs/ca/upload":
+                    status, resp = handle_external_ca_upload_form(form)
+                elif path == "/api/v1/certs/inspect":
+                    status, resp = handle_certs_inspect_form(form)
+                elif path == "/api/v1/certs/import":
+                    status, resp = handle_certs_import_form(form)
+                else:
+                    status, resp = handle_certs_upload_form(form)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("certificate upload failed")
+                status, resp = 500, {"ok": False, "error": str(exc)}
             return self._send_json(status, resp)
 
         try:
@@ -2137,6 +4418,20 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_delete_haproxy(body)
             elif path == "/api/v1/certs/delete-le":
                 status, resp = handle_delete_le(body)
+            elif path == "/api/v1/certs/standby":
+                status, resp = handle_standby_list(body)
+            elif path == "/api/v1/certs/standby/store":
+                status, resp = handle_standby_store(body)
+            elif path == "/api/v1/certs/standby/adopt":
+                status, resp = handle_standby_adopt(body)
+            elif path == "/api/v1/certs/standby/store-all":
+                status, resp = handle_standby_store_all(body)
+            elif path == "/api/v1/certs/standby/activate":
+                status, resp = handle_standby_activate(body)
+            elif path == "/api/v1/certs/standby/release":
+                status, resp = handle_standby_release(body)
+            elif path == "/api/v1/certs/standby/delete":
+                status, resp = handle_standby_delete(body)
             elif path == "/api/v1/certs/ca/internal/ensure":
                 status, resp = handle_internal_ca_ensure(body)
             elif path == "/api/v1/certs/ca/internal/issue":
@@ -2149,6 +4444,24 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_ca_export(body)
             elif path == "/api/v1/certs/ca/delete-external":
                 status, resp = handle_external_ca_delete(body)
+            elif path == "/api/v1/certs/ca/client-auth":
+                status, resp = handle_ca_client_auth(body)
+            elif path == "/api/v1/certs/ca/revoked":
+                status, resp = handle_ca_revoked(body)
+            elif path == "/api/v1/certs/dns-providers":
+                status, resp = handle_dns_providers_list(body)
+            elif path == "/api/v1/certs/dns-providers/save":
+                status, resp = handle_dns_provider_save(body)
+            elif path == "/api/v1/certs/dns-providers/delete":
+                status, resp = handle_dns_provider_delete(body)
+            elif path == "/api/v1/certs/deliveries":
+                status, resp = handle_deliveries_list(body)
+            elif path == "/api/v1/certs/deliveries/save":
+                status, resp = handle_delivery_save(body)
+            elif path == "/api/v1/certs/deliveries/delete":
+                status, resp = handle_delivery_delete(body)
+            elif path == "/api/v1/certs/deliveries/test":
+                status, resp = handle_delivery_test(body)
             else:
                 status, resp = 404, {"ok": False, "error": "unknown path"}
         except Exception as exc:  # noqa: BLE001
@@ -2168,6 +4481,73 @@ class CertdHandler(BaseHTTPRequestHandler):
 # ───────────────────── main ─────────────────────
 
 
+# --- Certificate expiry watch ----------------------------------------------
+#
+# Nothing else polls expiry: the status call is driven by someone opening the
+# certificates page, so an alert built on it would only exist while a human is
+# already looking. This thread is the timer that makes "expires in six days"
+# something the gateway says on its own.
+CERT_WATCH_INTERVAL_SECONDS = int(
+    os.environ.get("CERTD_EXPIRY_WATCH_INTERVAL", str(6 * 3600))
+)
+
+
+class CertificateExpiryWatch(threading.Thread):
+    def __init__(self) -> None:
+        super().__init__(name="cert-expiry-watch", daemon=True)
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        if _ALERTS is None:
+            return
+        # A first pass right away, so a restart does not hide an expiry for
+        # another six hours.
+        while True:
+            try:
+                self.scan()
+            except Exception:  # pylint: disable=broad-except
+                LOG.exception("certificate expiry scan failed")
+            if self._stop.wait(CERT_WATCH_INTERVAL_SECONDS):
+                return
+
+    def scan(self) -> int:
+        """Report one observation per installed HAProxy certificate."""
+        directory = _get_haproxy_certs_dir()
+        reported = 0
+        try:
+            entries = sorted(directory.glob("*.pem"))
+        except OSError as exc:
+            LOG.warning("cannot list %s: %s", directory, exc)
+            return 0
+        for path in entries:
+            info = _load_cert_info(path)
+            if not info:
+                continue
+            days = int(info["days_left"])
+            domain = path.stem
+            expiring = days <= CERT_WARN_DAYS
+            report_alert_level(
+                "certificate.expiring",
+                domain,
+                active=expiring,
+                severity="critical" if days <= 7 else "warning",
+                summary=(
+                    f"The certificate for {domain} expires in {days} days"
+                    if days >= 0
+                    else f"The certificate for {domain} expired {-days} days ago"
+                ),
+                detail=(
+                    f"Not after: {info['not_after']}"
+                    + _standby_hint(domain)
+                ),
+            )
+            reported += 1
+        return reported
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -2185,6 +4565,25 @@ def main() -> None:
     if ca_root.exists():
         _prepare_ca_subdir("internal")
         _prepare_ca_subdir("external")
+
+    # The frontend may reference the bundle and the revocation list before
+    # anyone has imported a certificate authority, and HAProxy will not start
+    # if a file named in the configuration is missing.
+    # A CA can disappear between restarts (a restore from an older backup, a
+    # file removed by hand). One unresolvable entry must not cost the other
+    # authorities their material.
+    startup_ids: List[str] = []
+    for ca_id in _load_client_auth_ids():
+        try:
+            _ca_certificates(ca_id)
+        except (OSError, ValueError) as exc:
+            LOG.warning("dropping %r from client authentication: %s", ca_id, exc)
+            continue
+        startup_ids.append(ca_id)
+    try:
+        _rebuild_client_auth_material(startup_ids)
+    except (OSError, ValueError) as exc:
+        LOG.error("cannot prepare client authentication material: %s", exc)
 
     # удаляем старый сокет, если остался
     try:

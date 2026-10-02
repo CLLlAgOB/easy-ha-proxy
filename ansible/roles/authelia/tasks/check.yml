@@ -16,7 +16,7 @@
           docker run --rm
           {{ '--pull=never' if easy_ha_proxy_offline_restore | default(false) | bool else '' }}
           -v /opt/authelia:/config
-          authelia/authelia:{{ authelia_version | default('4.39.20') }}
+          authelia/authelia:{{ authelia_version | default('4.39.28') }}
           authelia config validate --config /config/configuration.yml
       register: authelia_config_validate
       changed_when: false

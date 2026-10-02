@@ -1437,10 +1437,28 @@ def _validated_incident_record(value: object) -> Dict[str, Any]:
     return record
 
 
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: a
+# gateway without the alert daemon falls back to sending its own mail.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+
 class SiteAlertEngine(threading.Thread):
     def __init__(self) -> None:
         super().__init__(name="site-alerts", daemon=True)
         self._stop = threading.Event()
+        # When the alert engine is reachable this class stops deciding: it
+        # reports what it sees and easy-ha-proxy-alertd owns the delay, the
+        # repetition, the escalation and the recovery. The local state machine
+        # and its own mail path remain as the fallback for a gateway where
+        # alertd is not installed, so an update can never lose site alerts.
+        self._alerts = None
+        if AlertClient is not None:
+            client = AlertClient(source="healthd")
+            self._alerts = client if client.configured else None
         # site name -> {"bad_since": float|None, "alerted_at": float|None,
         #               "alerted_state": str, "good_since": float|None}
         self._incidents: Dict[str, Dict[str, Any]] = self._load_incidents()
@@ -1782,12 +1800,42 @@ class SiteAlertEngine(threading.Thread):
             except Exception:  # noqa: BLE001 - the loop must survive anything
                 LOG.exception("site-alerts: evaluation cycle failed")
 
+    def _report(
+        self, site: Dict[str, Any], name: str, condition: Dict[str, Any]
+    ) -> bool:
+        """Hand the observation to the alert engine and decide nothing.
+
+        The per-site threshold and recipient travel with the observation
+        because they belong to the site, not to the rule.
+        """
+        mode = str(site.get("alert_mode") or "down")
+        triggers = {"down"} if mode == "down" else {"down", "degraded"}
+        state = condition["state"]
+        recipient = str(site.get("alert_email") or "")
+        detail = f"Backend servers up: {condition['up']}/{condition['total']}"
+        servers_block = _format_servers(condition.get("servers") or [])
+        if servers_block:
+            detail += "\n" + servers_block
+        self._alerts.observe(
+            "site.down",
+            name,
+            active=state in triggers,
+            severity="critical" if state == "down" else "warning",
+            summary=f"Site {name} is {state}",
+            detail=detail,
+            trigger_delay=int(_alert_after_seconds(site.get("alert_after"))),
+            recipient=recipient if _ALERT_EMAIL_RE.fullmatch(recipient) else "",
+        )
+        return False
+
     def _evaluate(
         self,
         site: Dict[str, Any],
         name: str,
         condition: Dict[str, Any],
     ) -> bool:
+        if self._alerts is not None:
+            return self._report(site, name, condition)
         mode = str(site.get("alert_mode") or "down")
         triggers = {"down"} if mode == "down" else {"down", "degraded"}
         threshold = _alert_after_seconds(site.get("alert_after"))

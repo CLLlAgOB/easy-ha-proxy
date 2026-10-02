@@ -26,6 +26,15 @@ CONTROL_PLANE_HEALTHCHECK_PATH = "/api/control-plane-health"
 CONTROL_PLANE_HEALTHCHECK_USER = "easy-ha-proxy-healthcheck"
 CONTROL_PLANE_HEALTHCHECK_GROUPS: FrozenSet[str] = frozenset({"healthcheck"})
 
+# A Prometheus scraper cannot complete an Authelia login, so HAProxy lets this
+# one path through for an allow-listed source and marks it with an identity of
+# its own. That identity is accepted here for exactly that GET and nothing
+# else, and the endpoint itself still demands a bearer token: being on the
+# allow-list is one gate, holding the token is the other.
+METRICS_SCRAPE_PATH = "/metrics"
+METRICS_SCRAPE_USER = "easy-ha-proxy-metrics"
+METRICS_SCRAPE_GROUPS: FrozenSet[str] = frozenset({"metrics"})
+
 
 def normalized_groups(value: str) -> FrozenSet[str]:
     groups: set[str] = set()
@@ -78,10 +87,25 @@ def enforce_proxy_and_role():
         g.is_superadmin = False
         return None
 
+    is_metrics_scrape = (
+        request.method == "GET"
+        and request.path == METRICS_SCRAPE_PATH
+        and username == METRICS_SCRAPE_USER
+        and groups == METRICS_SCRAPE_GROUPS
+    )
+    if is_metrics_scrape:
+        g.remote_user = username
+        g.remote_groups = groups
+        g.is_superadmin = False
+        return None
+
     if (
         username == CONTROL_PLANE_HEALTHCHECK_USER
         or groups.intersection(CONTROL_PLANE_HEALTHCHECK_GROUPS)
+        or username == METRICS_SCRAPE_USER
+        or groups.intersection(METRICS_SCRAPE_GROUPS)
     ):
+        # Either identity anywhere else is a forged header, not a mistake.
         return _json_error("authenticated administrator required", 403)
 
     if not username or not groups.intersection(ADMIN_GROUPS):

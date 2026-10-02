@@ -148,17 +148,6 @@ h1 {
   flex-wrap: wrap
 }
 
-/* Центрирование блока с меткой/кнопкой внутри .controls (вариант B) */
-header .controls .card-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: auto;
-  margin-right: auto;
-  /* стараемся центрировать среди других элементов */
-  gap: 10px;
-}
-
 header .controls .header-controls {
   display: inline-flex;
   align-items: center;
@@ -190,14 +179,9 @@ header .controls .btn-icon:hover {
   background: var(--surface-2)
 }
 
-/* Опционально: идеальное центрирование, если добавишь .controls-spacer по бокам от блока */
 header .controls {
   display: flex;
   align-items: center
-}
-
-header .controls .controls-spacer {
-  flex: 1 1 auto
 }
 
 /* Тема */
@@ -433,15 +417,6 @@ a.ip-cell:hover {
 .status-normal {
   background: rgba(0, 217, 126, .15);
   color: var(--success)
-}
-
-.progress-bar {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--border);
-  overflow: hidden;
-  flex: 1;
-  max-width: 120px
 }
 
 .progress-fill {
@@ -844,27 +819,6 @@ footer {
   }
 }
 
-.update-indicator {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #ccc;
-  margin-left: 15px;
-  transition: background-color .3s
-}
-
-.update-indicator.green {
-  background-color: var(--success)
-}
-
-.update-indicator.red {
-  background-color: var(--error)
-}
-
-.update-indicator.pulse {
-  animation: pulse 1.5s infinite
-}
-
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
   .flex-container {
@@ -909,10 +863,6 @@ footer {
 }
 
 /* убираем нижний отступ у card-header, когда он используется в <header> */
-header .controls .card-header {
-  margin-bottom: 0;
-}
-
 /* ===== Forms (восстановлено) ===== */
 .form-label {
   display: block;
@@ -1063,10 +1013,6 @@ header .controls .card-header {
   white-space: nowrap;
 }
 
-.user-group-pill--primary {
-  background: rgba(var(--accent-secondary-rgb), .14);
-}
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 13px;
@@ -1107,52 +1053,8 @@ header .controls .card-header {
 }
 
 /* ===== Code blocks для конфигов ===== */
-.code-block {
-  background: var(--bg-tertiary);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  padding: 12px 14px;
-  max-height: 420px;
-  overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    "Liberation Mono", "Courier New", monospace;
-  font-size: 13px;
-  white-space: pre;
-}
-
-.code-block-small {
-  max-height: 220px;
-}
 
 /* ===== Формы загрузки YAML ===== */
-.yaml-upload-forms {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-}
-
-.yaml-upload-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--surface-1);
-  border: 1px dashed var(--border);
-}
-
-.yaml-upload-form .form-input[type="file"] {
-  padding: 4px 6px;
-  height: auto;
-  background: transparent;
-  cursor: pointer;
-}
-
-.yaml-upload-form .btn {
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-}
 
 .file-input-hidden {
   display: none;
@@ -1209,7 +1111,6 @@ header .controls .card-header {
 .site-table col:nth-child(5) {
   width: 12%;
 }
-
 
 .site-table th,
 .site-table td {
@@ -1383,6 +1284,10 @@ input[type="submit"].btn {
   -webkit-appearance: none;
   /* для Chrome/Safari */
 
+  /* A link styled as a button still carried the browser's underline, so a
+     row mixing <a class="btn"> and <button class="btn"> looked like two
+     different kinds of control. */
+  text-decoration: none;
   height: 38px;
   /* общая высота кнопок */
   line-height: 1;
@@ -1393,24 +1298,6 @@ input[type="submit"].btn {
 }
 
 /* Подсказка "Текущий файл: скачать" в блоках загрузки YAML */
-.yaml-upload-form .table-meta.yaml-current-file {
-  margin-top: 6px;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(var(--accent-secondary-rgb), .20);
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.yaml-upload-form .table-meta.yaml-current-file a {
-  color: var(--accent-secondary);
-  font-weight: 600;
-  text-decoration: underline;
-}
 
 /* ===== Guided HAProxy vars.yml editor and transactional apply ===== */
 .config-error-card {
@@ -1426,7 +1313,8 @@ input[type="submit"].btn {
 
 .config-overview-header,
 .vars-editor-header,
-.config-apply-header {
+.config-overview-header,
+.vars-editor-header {
   gap: 16px;
   align-items: flex-start;
 }
@@ -2242,7 +2130,8 @@ input[type="submit"].btn {
 
   .config-overview-header,
   .vars-editor-header,
-  .config-apply-header {
+.config-overview-header,
+.vars-editor-header {
     align-items: stretch;
   }
 
@@ -3223,4 +3112,234 @@ tr.job-row-selected > td:first-child {
   white-space: pre-wrap;
   background: rgba(0, 0, 0, .16);
   border-radius: 6px;
+}
+
+/* ── Header navigation ─────────────────────────────────────────────────
+   Eighteen buttons wrapped onto three rows and pushed the page below the
+   fold. Seven menus and a link fit one line.
+
+   Menu triggers and the dashboard link share one class rather than two
+   rules that have to be kept in step: they looked different in production
+   precisely because keeping two selectors identical is something nobody
+   does reliably. What differs between them is what should differ -- a menu
+   has a caret, the dashboard has a separator before it because it is a
+   destination rather than a menu.
+
+   Quieter than .btn on purpose. A header of solid accent pills reads as
+   seven competing calls to action, when navigation is furniture and the
+   accent belongs to the thing you are looking at. */
+
+.nav-groups {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.nav-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  /* A navigation control is not prose; without this the links carried the
+     browser's underline and the <summary> elements did not. */
+  text-decoration: none;
+  transition: background var(--transition-speed) ease,
+              border-color var(--transition-speed) ease,
+              color var(--transition-speed) ease;
+}
+
+.nav-item:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.nav-item:focus-visible,
+.nav-group-item:focus-visible {
+  outline: 2px solid var(--accent-secondary);
+  outline-offset: 2px;
+}
+
+/* <summary> shows a disclosure triangle of its own, which the caret
+   replaces. */
+.nav-item-menu {
+  list-style: none;
+}
+
+.nav-item-menu::-webkit-details-marker,
+.nav-item-menu::marker {
+  display: none;
+  content: "";
+}
+
+.nav-caret {
+  flex: 0 0 auto;
+  opacity: .55;
+  transition: transform var(--transition-speed) ease,
+              opacity var(--transition-speed) ease;
+}
+
+.nav-item:hover .nav-caret {
+  opacity: .9;
+}
+
+.nav-group[open] > .nav-item {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.nav-group[open] > .nav-item .nav-caret {
+  transform: rotate(180deg);
+  opacity: 1;
+}
+
+/* Where you are: a tinted face and a solid underline rather than a filled
+   pill, so it is unmistakable next to seven neighbours without shouting
+   over the page itself. */
+.nav-item-current {
+  background: rgba(var(--accent-primary-rgb), .16);
+  border-color: rgba(var(--accent-primary-rgb), .55);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 0 var(--accent-primary);
+}
+
+/* The dashboard is a destination among menus, so it gets a rule to stand
+   after rather than a different shape. */
+.nav-separator {
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.nav-group {
+  position: relative;
+}
+
+.nav-group-items {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 236px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .45);
+}
+
+/* Near the right edge a left-aligned panel leaves the viewport, and a
+   horizontal scrollbar on the whole page is worse than a panel that opens
+   the other way. */
+.nav-group:nth-last-of-type(-n+2) .nav-group-items {
+  left: auto;
+  right: 0;
+}
+
+.nav-group-item {
+  display: block;
+  padding: 9px 12px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 14px;
+  white-space: nowrap;
+  transition: background var(--transition-speed) ease,
+              color var(--transition-speed) ease;
+}
+
+.nav-group-item:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.nav-group-item-current {
+  color: var(--accent-secondary);
+  font-weight: 600;
+}
+
+/* On a narrow screen there is no room beside anything, so the panel joins
+   the flow instead of covering the content underneath it. */
+@media (max-width: 720px) {
+  .nav-groups {
+    width: 100%;
+    gap: 4px;
+  }
+
+  .nav-group,
+  .nav-item {
+    width: 100%;
+  }
+
+  .nav-item-menu {
+    justify-content: space-between;
+  }
+
+  .nav-group-items {
+    position: static;
+    min-width: 0;
+    margin-top: 4px;
+    box-shadow: none;
+  }
+
+  .nav-separator {
+    display: none;
+  }
+}
+
+/* A page's own actions, above its first card. They used to live in the
+   header, which made the dashboard the one page whose header needed two
+   rows; the header is for navigating between pages, not for acting on one. */
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+/* Three classes several pages already use and nothing ever defined.
+   .mon-sub exists in monitoring.html but only inside .mon-card and
+   .mon-chart, so every other page writing <p class="mon-sub"> was getting
+   ordinary body text -- the explanatory paragraphs on the adaptive
+   protection, detection rules and backup pages among them. The scoped rules
+   in monitoring.html are more specific and still win. */
+.mon-sub {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text-secondary);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 18px;
+  margin-bottom: 14px;
+}
+
+.form-grid > label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text-secondary);
 }

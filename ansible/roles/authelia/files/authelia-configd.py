@@ -106,10 +106,6 @@ from urllib.parse import urlsplit
 import yaml
 
 LOG = logging.getLogger("authelia-configd")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 
 CONFIG_FILE = os.environ.get(
     "AUTHELIA_CONFIG_FILE",
@@ -3250,10 +3246,21 @@ def serve() -> None:
                 pass
 
 
-if __name__ == "__main__":
+def main() -> None:
+    # Настраиваем root-логгер только при запуске демона: делать это на импорте
+    # значит менять логирование любого процесса, который просто импортирует модуль.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
     try:
         serve()
     except Exception as exc:  # noqa: BLE001
         LOG.exception("fatal error in server: %s", exc)
         time.sleep(1)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

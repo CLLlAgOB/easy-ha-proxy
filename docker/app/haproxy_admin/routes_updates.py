@@ -6,6 +6,7 @@ import re
 
 from flask import Blueprint, abort, g, jsonify, render_template, request
 
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .services_haproxy_config import get_haproxy_configuration_state
 from .updated_client import UpdatedError, updated_request
 
@@ -62,11 +63,47 @@ def _daemon_response(result: dict, *, accepted: bool = False):
     return jsonify(result), status_code
 
 
+# One audit point for every action that changes the host. The update broker
+# payloads hold no secrets, but the summary still lists only what is useful.
+AUDITED_ACTIONS = {
+    "set_channels": (
+        "update.channels",
+        ("release_channel", "image_channel", "source_channel"),
+    ),
+    "start_apply": ("update.apply", ("plan_id", "components")),
+    "reboot": ("system.reboot", ("expected_boot_id",)),
+    "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
+}
+
+
 def _call_daemon(payload: dict, *, accepted: bool = False):
+    entry = AUDITED_ACTIONS.get(str(payload.get("action") or ""))
     try:
-        return _daemon_response(updated_request(payload), accepted=accepted)
+        result = updated_request(payload)
     except UpdatedError as exc:
+        if entry:
+            record_request(
+                entry[0],
+                object_type="system",
+                object_id="updates",
+                result=RESULT_FAILURE,
+                detail=str(exc)[:500],
+            )
         return jsonify({"ok": False, "error": str(exc)}), 503
+    if entry:
+        action, fields = entry
+        ok = bool(result.get("ok"))
+        record_request(
+            action,
+            object_type="system",
+            object_id=str(result.get("job_id") or "updates"),
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=", ".join(
+                f"{field}: {payload[field]}" for field in fields if field in payload
+            ),
+            detail="" if ok else str(result.get("error") or "")[:500],
+        )
+    return _daemon_response(result, accepted=accepted)
 
 
 def _json_payload(required: set[str], optional: set[str] | None = None) -> dict:

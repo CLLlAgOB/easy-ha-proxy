@@ -11,11 +11,13 @@ logs.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import errno
 import fcntl
 import grp
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -25,6 +27,7 @@ import re
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -142,6 +145,30 @@ STAGE_RECORD_PREFIX = "stage-"
 STAGE_RECORD_SUFFIX = ".json"
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: the
+# job still runs on a gateway without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="backupd")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine a job failed. Never disturbs the job itself."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 MANIFEST_MARKER = "EASY_HA_PROXY_BACKUP_MANIFEST_JSON="
 BACKUP_FILE_MARKER = "EASY_HA_PROXY_FULL_BACKUP_FILE="
 MANIFEST_KEYS = (
@@ -180,6 +207,26 @@ REQUEST_FIELDS = {
         }
     ),
     "delete": frozenset({"action", "kind", "id", "confirmation"}),
+    "destinations": frozenset({"action"}),
+    "destination_save": frozenset(
+        {
+            "action", "name", "type", "host", "port", "user", "path",
+            "private_key", "host_key", "keep_daily", "keep_weekly",
+            "keep_monthly", "endpoint", "region", "bucket", "prefix",
+            "access_key", "secret_key", "allow_insecure", "verify",
+        }
+    ),
+    "destination_delete": frozenset({"action", "name"}),
+    "destination_test": frozenset({"action", "name"}),
+    "upload": frozenset({"action", "backup_id", "destination"}),
+    "schedule": frozenset({"action"}),
+    "schedule_save": frozenset(
+        {
+            "action", "enabled", "destinations", "include_ssh", "quiesce",
+            "passphrase", "time",
+        }
+    ),
+    "run_scheduled": frozenset({"action", "on_demand"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -279,6 +326,26 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _set_owner(target, uid: int, gid: int, *, fd: bool = False) -> None:
+    """Give the file its intended ownership, where that is possible at all.
+
+    The daemon runs as root, so this always applies in a deployment. It does
+    not apply when the module is exercised by a test as an ordinary user, and
+    there it must not be fatal -- every caller has already created the file
+    with a restrictive mode, so failing to widen it to a group leaves the file
+    stricter than intended, never looser.
+    """
+    try:
+        if fd:
+            os.fchown(target, uid, gid)
+        else:
+            os.chown(target, uid, gid)
+    except PermissionError:
+        if os.geteuid() == 0:
+            raise
+        LOG.debug("not root: leaving ownership of %s as it is", target)
+
+
 def atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o640) -> None:
     encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode(
         "utf-8"
@@ -296,7 +363,7 @@ def atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o640) -> No
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.fchown(descriptor, 0, APP_GROUP_GID)
+            _set_owner(descriptor, 0, APP_GROUP_GID, fd=True)
             os.fchmod(descriptor, mode)
         finally:
             os.close(descriptor)
@@ -311,6 +378,13 @@ def atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o640) -> No
 
 
 def safe_json_file(path: Path, *, expected_uid: int = 0) -> dict[str, Any]:
+    # The point of the owner check is that nobody but the daemon's own account
+    # can have written this file. In a deployment that account is root, which
+    # is what expected_uid means. When the module is exercised by an ordinary
+    # user the same rule has to be read against that user, or the check refuses
+    # files it wrote itself a moment earlier.
+    if expected_uid == 0 and os.geteuid() != 0:
+        expected_uid = os.geteuid()
     info = path.lstat()
     if (
         not stat.S_ISREG(info.st_mode)
@@ -651,7 +725,7 @@ def copy_upload_to_job(upload_id: str, job_id: str) -> tuple[Path, str, int]:
             or copied != before.st_size
         ):
             raise BackupdError("upload changed while it was being copied")
-        os.fchown(destination_fd, 0, 0)
+        _set_owner(destination_fd, 0, 0, fd=True)
         os.fchmod(destination_fd, 0o600)
         os.fsync(destination_fd)
         actual_checksum = digest.hexdigest()
@@ -1243,6 +1317,18 @@ def finish_failed(
         error=message,
     )
     LOG.warning("Job %s failed: %s", job_id, message)
+    # A failed backup that nobody hears about is the same as no backup.
+    operation = ""
+    try:
+        operation = str(load_job(job_id, include_logs=False).get("operation") or "")
+    except Exception:  # pylint: disable=broad-except
+        pass
+    report_alert(
+        "restore.failed" if operation == "restore" else "backup.failed",
+        job_id,
+        f"The {operation or 'backup'} job failed",
+        message,
+    )
 
 
 def store_backup_artifact(
@@ -1295,7 +1381,7 @@ def store_backup_artifact(
     try:
         os.replace(candidate, destination)
         os.replace(checksum_source, checksum_destination)
-        os.chown(destination, 0, APP_GROUP_GID)
+        _set_owner(destination, 0, APP_GROUP_GID)
         os.chmod(destination, 0o640)
         descriptor = os.open(
             checksum_temporary,
@@ -1312,7 +1398,7 @@ def store_backup_artifact(
             while view:
                 written = os.write(descriptor, view)
                 view = view[written:]
-            os.fchown(descriptor, 0, APP_GROUP_GID)
+            _set_owner(descriptor, 0, APP_GROUP_GID, fd=True)
             os.fchmod(descriptor, 0o640)
             os.fsync(descriptor)
         finally:
@@ -2156,6 +2242,1132 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Off-host copies
+# ---------------------------------------------------------------------------
+#
+# The disaster-recovery archive is useless on the machine it protects. This
+# sends the already-encrypted archive somewhere else and nothing more: no
+# plaintext ever leaves, and the passphrase is not involved in the transfer at
+# all -- the file is encrypted long before it gets here.
+#
+# Only SFTP is implemented. It uses the OpenSSH client that is already on the
+# host, which means the host key handling, the ciphers and the key formats are
+# somebody else's well-tested problem rather than ours.
+
+DESTINATIONS_DIR = Path(
+    os.environ.get(
+        "BACKUPD_DESTINATIONS_DIR", "/etc/easy-ha-proxy/backup-destinations"
+    )
+)
+DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DESTINATION_TYPES = ("sftp", "s3")
+SFTP_TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_SFTP_TIMEOUT", "900"))
+SCHEDULED_BACKUP_TIMEOUT = int(
+    os.environ.get("BACKUPD_SCHEDULED_TIMEOUT", str(6 * 3600))
+)
+# Re-downloading to verify is exact but costs the transfer twice. Above this
+# the daemon asks the far end to hash instead, and says which it used.
+VERIFY_DOWNLOAD_MAX_BYTES = int(
+    os.environ.get("BACKUPD_VERIFY_DOWNLOAD_MAX", str(2 * 1024 * 1024 * 1024))
+)
+
+
+def keep_count(value: Any, *, default: int, cap: int) -> int:
+    """A retention count, where zero means zero rather than "unset"."""
+    if value is None or value == "":
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise BackupdError("a retention count must be a number", code="invalid") from None
+    return max(0, min(cap, number))
+
+
+def destination_path(name: Any) -> Path:
+    text = str(name or "").strip().lower()
+    if not DESTINATION_NAME_RE.fullmatch(text):
+        raise BackupdError(
+            "the destination name may use a-z, 0-9 and dashes", code="invalid"
+        )
+    return DESTINATIONS_DIR / (text + ".json")
+
+
+def destination_key_path(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".key")
+
+
+def destination_known_hosts(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".known_hosts")
+
+
+def normalize_private_key(material: str) -> bytes:
+    """Make a pasted key into a file OpenSSH will actually open.
+
+    Two things a textarea gets wrong and OpenSSH will not forgive.
+
+    The terminating newline: OpenSSH's own parser wants one after the
+    footer, and without it falls back to the PEM reader, which reports
+    `error in libcrypto` -- a message that describes a corrupt key and says
+    nothing about the byte that is missing. The browser sends a trimmed
+    field, so the newline is never there and no SFTP destination could ever
+    authenticate. One production key was rejected for exactly this while
+    being, in every other respect, perfectly valid.
+
+    And CRLF: a key copied out of a Windows terminal carries carriage
+    returns into the base64, which is the same failure wearing a different
+    hat.
+    """
+    text = material.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return (text + "\n").encode("utf-8")
+
+
+def write_private(path: Path, content: bytes) -> None:
+    """Replace a root-only file. private_file refuses to overwrite by design."""
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    private_file(path, content)
+
+
+def ensure_destinations_dir() -> None:
+    DESTINATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DESTINATIONS_DIR, 0o700)
+
+
+def load_destination(name: Any) -> dict[str, Any]:
+    path = destination_path(name)
+    try:
+        record = safe_json_file(path)
+    except BackupdError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise BackupdError(f"cannot read the destination: {exc}", code="invalid") from exc
+    if not record:
+        raise BackupdError("no such destination", code="not_found")
+    return record
+
+
+def public_destination(record: dict[str, Any]) -> dict[str, Any]:
+    """What the browser may see. Never the key, never a fingerprint secret."""
+    return {
+        "name": record.get("name", ""),
+        "type": record.get("type", ""),
+        "host": record.get("host", ""),
+        "port": record.get("port", 22),
+        "user": record.get("user", ""),
+        "path": record.get("path", ""),
+        "has_key": bool(record.get("key_installed")),
+        "host_key_pinned": bool(record.get("host_key_pinned")),
+        "verify": verify_mode(record.get("verify")),
+        "endpoint": record.get("endpoint", ""),
+        "region": record.get("region", ""),
+        "bucket": record.get("bucket", ""),
+        "prefix": record.get("prefix", ""),
+        "access_key": record.get("access_key", ""),
+        "has_secret": bool(record.get("secret_installed")),
+        "allow_insecure": bool(record.get("allow_insecure")),
+        "keep_daily": record.get("keep_daily", 7),
+        "keep_weekly": record.get("keep_weekly", 4),
+        "keep_monthly": record.get("keep_monthly", 6),
+        "updated_at": record.get("updated_at", ""),
+    }
+
+
+def list_destinations(_request: dict[str, Any]) -> dict[str, Any]:
+    ensure_destinations_dir()
+    items = []
+    for path in sorted(DESTINATIONS_DIR.glob("*.json")):
+        with contextlib.suppress(Exception):
+            items.append(public_destination(safe_json_file(path)))
+    return {"ok": True, "destinations": items, "types": list(DESTINATION_TYPES)}
+
+
+def save_destination(request: dict[str, Any]) -> dict[str, Any]:
+    ensure_destinations_dir()
+    name = str(request.get("name") or "").strip().lower()
+    path_target = destination_path(name)
+    kind = str(request.get("type") or "").strip().lower()
+    if kind not in DESTINATION_TYPES:
+        raise BackupdError("unsupported destination type", code="invalid")
+
+    existing_probe: dict[str, Any] = {}
+    with contextlib.suppress(BackupdError):
+        existing_probe = load_destination(name)
+
+    if kind == "s3":
+        return save_s3_destination(request, name, path_target, existing_probe)
+
+    host = str(request.get("host") or "").strip()
+    if not host or len(host) > 253 or any(ch.isspace() for ch in host):
+        raise BackupdError("a host is required", code="invalid")
+    user = str(request.get("user") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user):
+        raise BackupdError("the user name is not valid", code="invalid")
+    try:
+        port = int(request.get("port") or 22)
+    except (TypeError, ValueError):
+        raise BackupdError("the port must be a number", code="invalid") from None
+    if not 1 <= port <= 65535:
+        raise BackupdError("the port is out of range", code="invalid")
+    remote = str(request.get("path") or "").strip()
+    if not remote.startswith("/") or ".." in remote or len(remote) > 512:
+        raise BackupdError(
+            "the remote path must be absolute and free of '..'", code="invalid"
+        )
+
+    existing = existing_probe
+
+    key = str(request.get("private_key") or "")
+    if key:
+        if "PRIVATE KEY" not in key:
+            raise BackupdError("that does not look like a private key", code="invalid")
+        # The key never goes through the archive path and never leaves this
+        # directory; the browser cannot read it back.
+        write_private(destination_key_path(name), normalize_private_key(key))
+    elif not existing.get("key_installed"):
+        raise BackupdError("a private key is required", code="invalid")
+
+    host_key = str(request.get("host_key") or "").strip()
+    if host_key:
+        write_private(
+            destination_known_hosts(name), (host_key + "\n").encode("utf-8")
+        )
+    elif not existing.get("host_key_pinned"):
+        raise BackupdError(
+            "the host key is required: pin the one you expect rather than"
+            " accepting whatever answers",
+            code="invalid",
+        )
+
+    record = {
+        "name": name,
+        "type": kind,
+        "host": host,
+        "port": port,
+        "user": user,
+        "path": remote.rstrip("/") or "/",
+        "key_installed": True,
+        "host_key_pinned": True,
+        # "or" would read a deliberate zero as "not supplied" and quietly
+        # restore the default, so an operator asking to keep no weeklies would
+        # silently keep four of them.
+        "keep_daily": keep_count(request.get("keep_daily"), default=7, cap=365),
+        "keep_weekly": keep_count(request.get("keep_weekly"), default=4, cap=260),
+        "keep_monthly": keep_count(request.get("keep_monthly"), default=6, cap=120),
+        "verify": verify_mode(request.get("verify"), default=existing.get("verify")),
+        "updated_at": utc_now(),
+    }
+    atomic_json(path_target, record, mode=0o600)
+    return {"ok": True, "destination": public_destination(record)}
+
+
+def save_s3_destination(
+    request: dict[str, Any],
+    name: str,
+    path_target: Path,
+    existing: dict[str, Any],
+) -> dict[str, Any]:
+    import urllib.parse
+
+    endpoint = str(request.get("endpoint") or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in ("https", "http") or not parsed.netloc:
+        raise BackupdError(
+            "the endpoint must be a full https:// URL", code="invalid"
+        )
+    allow_insecure = bool(request.get("allow_insecure"))
+    if parsed.scheme == "http" and not allow_insecure:
+        raise BackupdError(
+            "the endpoint is plain http; tick 'allow insecure' only for a"
+            " storage service on a trusted network",
+            code="invalid",
+        )
+
+    bucket = str(request.get("bucket") or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,62}", bucket):
+        raise BackupdError("the bucket name is not valid", code="invalid")
+    prefix = str(request.get("prefix") or "").strip().strip("/")
+    if ".." in prefix or len(prefix) > 256:
+        raise BackupdError("the prefix is not valid", code="invalid")
+    access_key = str(request.get("access_key") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9/+=_-]{3,128}", access_key):
+        raise BackupdError("the access key is not valid", code="invalid")
+
+    secret = str(request.get("secret_key") or "")
+    if secret:
+        write_private(destination_secret_path(name), secret.encode("utf-8"))
+    elif not existing.get("secret_installed"):
+        raise BackupdError("a secret key is required", code="invalid")
+
+    record = {
+        "name": name,
+        "type": "s3",
+        "endpoint": endpoint,
+        "region": str(request.get("region") or "us-east-1").strip()[:64],
+        "bucket": bucket,
+        "prefix": prefix,
+        "access_key": access_key,
+        "secret_installed": True,
+        "allow_insecure": allow_insecure,
+        "keep_daily": keep_count(request.get("keep_daily"), default=7, cap=365),
+        "keep_weekly": keep_count(request.get("keep_weekly"), default=4, cap=260),
+        "keep_monthly": keep_count(request.get("keep_monthly"), default=6, cap=120),
+        "verify": verify_mode(request.get("verify"), default=existing.get("verify")),
+        "updated_at": utc_now(),
+    }
+    atomic_json(path_target, record, mode=0o600)
+    return {"ok": True, "destination": public_destination(record)}
+
+
+def delete_destination(request: dict[str, Any]) -> dict[str, Any]:
+    name = str(request.get("name") or "").strip().lower()
+    path_target = destination_path(name)
+    removed = False
+    for candidate in (
+        path_target,
+        destination_key_path(name),
+        destination_known_hosts(name),
+        destination_secret_path(name),
+    ):
+        with contextlib.suppress(FileNotFoundError):
+            candidate.unlink()
+            removed = True
+    return {"ok": True, "deleted": removed}
+
+
+def sftp_base_command(record: dict[str, Any], binary: str) -> list[str]:
+    """Options shared by every call to the OpenSSH client.
+
+    The host key is pinned to what the operator saved. Accepting whatever
+    answers would make an off-host copy a way to hand the archive to whoever
+    can answer on that address -- encrypted, but still theirs to keep and
+    attack offline.
+    """
+    name = record["name"]
+    return [
+        binary,
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={destination_known_hosts(name)}",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "ConnectTimeout=20",
+        "-i", str(destination_key_path(name)),
+        "-P" if binary.endswith("sftp") else "-p", str(record.get("port") or 22),
+    ]
+
+
+def run_sftp(record: dict[str, Any], batch: str) -> subprocess.CompletedProcess:
+    command = sftp_base_command(record, "/usr/bin/sftp")
+    command += ["-b", "-", f"{record['user']}@{record['host']}"]
+    return subprocess.run(
+        command,
+        input=batch.encode("utf-8"),
+        capture_output=True,
+        timeout=SFTP_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
+def run_ssh(record: dict[str, Any], remote_command: list[str]) -> subprocess.CompletedProcess:
+    command = sftp_base_command(record, "/usr/bin/ssh")
+    command += [f"{record['user']}@{record['host']}", "--"] + remote_command
+    return subprocess.run(
+        command, capture_output=True, timeout=SFTP_TIMEOUT_SECONDS, check=False
+    )
+
+
+def remote_quote(value: str) -> str:
+    """Quote a path for the sftp batch language, which splits on whitespace."""
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+# How hard the gateway works to prove an off-host copy arrived intact.
+#   auto     -- ask the far end to hash it; fall back to reading it back.
+#   transfer -- trust that sftp accepted every byte, and do not read it back.
+VERIFY_MODES = ("auto", "transfer")
+
+
+def verify_mode(value: Any, *, default: Any = None) -> str:
+    text = str(value or "").strip().lower()
+    if text in VERIFY_MODES:
+        return text
+    if value is not None and text:
+        raise BackupdError(
+            "verify must be auto or transfer", code="invalid"
+        )
+    fallback = str(default or "").strip().lower()
+    return fallback if fallback in VERIFY_MODES else "auto"
+
+
+
+def verify_remote_copy(
+    record: dict[str, Any], remote_file: str, expected: str, size: int
+) -> tuple[bool, str, str]:
+    """Prove the far end holds the same bytes. Returns (ok, method, detail).
+
+    Three ways, in descending order of confidence.
+
+    Asking the far end to hash is exact and costs nothing to send. A
+    destination restricted to SFTP cannot do it, so re-reading the copy is
+    the fallback: also exact, but it pays for the whole transfer a second
+    time and needs room on this disk to land in, which on a small gateway
+    with a large archive is the thing that fails.
+
+    `verify: transfer` is for that case. sftp reports whether every byte it
+    sent was accepted, and the checksum file is uploaded beside the archive,
+    so a restore can still prove the contents later -- it just is not proved
+    here and now. It is weaker, and it is chosen deliberately.
+    """
+    mode = str(record.get("verify") or "auto").strip().lower()
+    if mode == "transfer":
+        return True, "transfer", ""
+
+    probe = run_ssh(record, ["sha256sum", "--", remote_file])
+    if probe.returncode == 0:
+        answer = (probe.stdout or b"").decode("utf-8", "replace").split()
+        # A server restricted to SFTP answers every command with a banner and
+        # exits 0 -- "This service allows sftp connections only." -- so a zero
+        # exit is not evidence that anything was hashed. Taking the first word
+        # of that as a digest reported a mismatch for a copy that was fine,
+        # and, because an unproven copy is never pruned, would have let the
+        # far end fill up while insisting the backup had failed.
+        if answer and _SHA256_RE.fullmatch(answer[0]):
+            if answer[0] == expected:
+                return True, "remote-hash", ""
+            return False, "remote-hash", "the far end reports different content"
+
+    if size > VERIFY_DOWNLOAD_MAX_BYTES:
+        return (
+            False,
+            "none",
+            "the far end cannot hash and the archive is too large to re-read",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="backupd-verify-") as work:
+        local = Path(work) / "verify.bin"
+        result = run_sftp(
+            record, f"get {remote_quote(remote_file)} {remote_quote(str(local))}\n"
+        )
+        if result.returncode != 0 or not local.exists():
+            return False, "download", "the copy could not be read back"
+        if sha256_file(local) != expected:
+            return False, "download", "the copy read back does not match"
+    return True, "download", ""
+
+
+def remote_listing(record: dict[str, Any]) -> list[str]:
+    """Archive names already on the far end, newest last."""
+    result = run_sftp(record, f"ls -1 {remote_quote(record['path'])}\n")
+    if result.returncode != 0:
+        return []
+    names = []
+    for row in (result.stdout or b"").decode("utf-8", "replace").splitlines():
+        candidate = row.strip().rsplit("/", 1)[-1]
+        if candidate.startswith("easy-ha-proxy-") and candidate.endswith(".tar.gz.enc"):
+            names.append(candidate)
+    return sorted(names)
+
+
+def retention_victims(names: list[str], record: dict[str, Any]) -> list[str]:
+    """Which remote archives fall outside the keep policy.
+
+    Grouped by the date in the file name, which is how the archives are named
+    anyway. One per day is kept as a daily, then one per ISO week, then one
+    per month; anything else goes.
+    """
+    by_day: dict[str, str] = {}
+    for name in sorted(names):
+        match = re.search(r"(\d{4})(\d{2})(\d{2})", name)
+        if match is None:
+            continue
+        # The last archive of a day represents that day.
+        by_day["-".join(match.groups())] = name
+
+    days = sorted(by_day, reverse=True)
+    keep: set[str] = set()
+    for day in days[: max(0, int(record.get("keep_daily") or 0))]:
+        keep.add(by_day[day])
+
+    seen_weeks: set[str] = set()
+    for day in days:
+        year, month, number = (int(part) for part in day.split("-"))
+        week = dt.date(year, month, number).isocalendar()
+        token = f"{week[0]}-{week[1]}"
+        if token in seen_weeks:
+            continue
+        seen_weeks.add(token)
+        if len(seen_weeks) <= int(record.get("keep_weekly") or 0):
+            keep.add(by_day[day])
+
+    seen_months: set[str] = set()
+    for day in days:
+        token = day[:7]
+        if token in seen_months:
+            continue
+        seen_months.add(token)
+        if len(seen_months) <= int(record.get("keep_monthly") or 0):
+            keep.add(by_day[day])
+
+    return [name for name in names if name not in keep]
+
+
+# ---------------------------------------------------------------------------
+# S3-compatible destinations
+# ---------------------------------------------------------------------------
+#
+# Signed with SigV4 against the standard library rather than by adding an SDK
+# to the gateway. That is a deliberate trade: a hundred lines of HMAC here, or
+# boto3 and its dependency tree on a two-core box that already runs HAProxy.
+#
+# The integrity proof falls out of the protocol. A signed PUT carries the
+# payload's SHA-256 in x-amz-content-sha256, and the service refuses the
+# request if the body does not hash to it -- so a 200 already means the far
+# end holds exactly these bytes, with no second transfer to check.
+
+S3_ALGORITHM = "AWS4-HMAC-SHA256"
+S3_TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_S3_TIMEOUT", "900"))
+S3_SERVICE = "s3"
+_S3_UNRESERVED = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+
+
+def destination_secret_path(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".secret")
+
+
+def s3_quote(value: str, *, keep_slash: bool = True) -> str:
+    """Percent-encode the way SigV4 requires, which is not urllib's default."""
+    allowed = _S3_UNRESERVED + ("/" if keep_slash else "")
+    out = []
+    for byte in str(value).encode("utf-8"):
+        char = chr(byte)
+        out.append(char if char in allowed else f"%{byte:02X}")
+    return "".join(out)
+
+
+def s3_signing_key(secret: str, stamp: str, region: str) -> bytes:
+    key = ("AWS4" + secret).encode("utf-8")
+    for part in (stamp, region, S3_SERVICE, "aws4_request"):
+        key = hmac.new(key, part.encode("utf-8"), hashlib.sha256).digest()
+    return key
+
+
+def s3_authorization(
+    *,
+    method: str,
+    canonical_uri: str,
+    canonical_query: str,
+    headers: dict[str, str],
+    payload_sha: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+    amz_date: str,
+) -> str:
+    """Build the Authorization header for one request.
+
+    Header names are lower-cased and sorted, values collapsed -- SigV4 signs a
+    canonical form, so anything that differs between what is signed and what
+    is sent is a 403 that looks like bad credentials.
+    """
+    canonical_headers = "".join(
+        f"{name}:{' '.join(str(value).split())}\n"
+        for name, value in sorted(headers.items())
+    )
+    signed_headers = ";".join(sorted(headers))
+    canonical_request = "\n".join(
+        [
+            method,
+            canonical_uri,
+            canonical_query,
+            canonical_headers,
+            signed_headers,
+            payload_sha,
+        ]
+    )
+    stamp = amz_date[:8]
+    scope = f"{stamp}/{region}/{S3_SERVICE}/aws4_request"
+    to_sign = "\n".join(
+        [
+            S3_ALGORITHM,
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ]
+    )
+    signature = hmac.new(
+        s3_signing_key(secret_key, stamp, region),
+        to_sign.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return (
+        f"{S3_ALGORITHM} Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+
+
+def s3_request(
+    record: dict[str, Any],
+    method: str,
+    key: str = "",
+    *,
+    query: dict[str, str] | None = None,
+    body: Any = None,
+    body_sha: str = "",
+    length: int = 0,
+) -> tuple[int, dict[str, str], bytes]:
+    """One signed request. Returns (status, headers, body)."""
+    import http.client
+    import urllib.parse
+
+    endpoint = urllib.parse.urlparse(record["endpoint"])
+    if endpoint.scheme not in ("https", "http"):
+        raise BackupdError("the endpoint must be http or https", code="invalid")
+    if endpoint.scheme == "http" and not record.get("allow_insecure"):
+        raise BackupdError(
+            "the endpoint is plain http; enable 'allow insecure' only for a"
+            " storage service on a trusted network",
+            code="invalid",
+        )
+
+    secret = destination_secret_path(record["name"]).read_text(encoding="utf-8").strip()
+    # A bucket-level call addresses the bucket and carries the prefix in the
+    # query; putting the prefix in the path too turns a listing into a request
+    # for an object that does not exist.
+    prefix = str(record.get("prefix") or "").strip("/")
+    segments = [
+        segment
+        for segment in (record.get("bucket") or "", prefix if key else "", key)
+        if segment
+    ]
+    canonical_uri = "/" + s3_quote("/".join(segments))
+
+    items = sorted((query or {}).items())
+    canonical_query = "&".join(
+        f"{s3_quote(name, keep_slash=False)}={s3_quote(value, keep_slash=False)}"
+        for name, value in items
+    )
+
+    amz_date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    payload_sha = body_sha or hashlib.sha256(b"").hexdigest()
+    host = endpoint.netloc
+    headers = {
+        "host": host,
+        "x-amz-content-sha256": payload_sha,
+        "x-amz-date": amz_date,
+    }
+    authorization = s3_authorization(
+        method=method,
+        canonical_uri=canonical_uri,
+        canonical_query=canonical_query,
+        headers=headers,
+        payload_sha=payload_sha,
+        access_key=record["access_key"],
+        secret_key=secret,
+        region=record.get("region") or "us-east-1",
+        amz_date=amz_date,
+    )
+    secret = ""
+
+    send_headers = dict(headers)
+    send_headers["Authorization"] = authorization
+    if length:
+        send_headers["Content-Length"] = str(length)
+
+    target = canonical_uri + (f"?{canonical_query}" if canonical_query else "")
+    if endpoint.scheme == "https":
+        connection = http.client.HTTPSConnection(
+            host, timeout=S3_TIMEOUT_SECONDS, context=ssl.create_default_context()
+        )
+    else:
+        connection = http.client.HTTPConnection(host, timeout=S3_TIMEOUT_SECONDS)
+    try:
+        connection.request(method, target, body=body, headers=send_headers)
+        response = connection.getresponse()
+        payload = response.read(1024 * 1024)
+        return response.status, dict(response.getheaders()), payload
+    finally:
+        connection.close()
+
+
+def s3_listing(record: dict[str, Any]) -> list[str]:
+    """Archive names already in the bucket."""
+    prefix = str(record.get("prefix") or "").strip("/")
+    query = {"list-type": "2"}
+    if prefix:
+        query["prefix"] = prefix + "/"
+    status, _headers, body = s3_request(record, "GET", query=query)
+    if status != 200:
+        return []
+    text = body.decode("utf-8", "replace")
+    names = []
+    for match in re.finditer(r"<Key>([^<]+)</Key>", text):
+        candidate = match.group(1).rsplit("/", 1)[-1]
+        if candidate.startswith("easy-ha-proxy-") and candidate.endswith(".tar.gz.enc"):
+            names.append(candidate)
+    return sorted(names)
+
+
+def s3_upload(
+    record: dict[str, Any], archive: Path, checksum: Path, expected: str
+) -> dict[str, Any]:
+    """PUT the archive, then the checksum beside it.
+
+    No .part dance here: an S3 PUT is atomic, an object appears whole or not
+    at all, so there is nothing half-written for a later prune to mistake for
+    a finished backup.
+    """
+    size = archive.stat().st_size
+    with archive.open("rb") as stream:
+        status, _headers, body = s3_request(
+            record, "PUT", archive.name, body=stream, body_sha=expected, length=size
+        )
+    if status not in (200, 201):
+        detail = body.decode("utf-8", "replace").strip()[:400]
+        raise BackupdError(f"the upload failed ({status}): {detail}", code="upstream")
+
+    if checksum.is_file():
+        payload = checksum.read_bytes()
+        s3_request(
+            record,
+            "PUT",
+            checksum.name,
+            body=payload,
+            body_sha=hashlib.sha256(payload).hexdigest(),
+            length=len(payload),
+        )
+    # The service verified the body against the hash carried in the signature,
+    # so a success here is the integrity proof; re-reading would prove nothing
+    # more and cost the transfer twice.
+    return {"bytes": size, "verified": True, "verified_by": "signed-put"}
+
+
+def s3_prune(record: dict[str, Any], victims: list[str]) -> list[str]:
+    removed = []
+    for name in victims:
+        for key in (name, name + ".sha256"):
+            status, _headers, _body = s3_request(record, "DELETE", key)
+            if status in (200, 204) and key == name:
+                removed.append(name)
+    return removed
+
+
+def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
+    """Copy one finished archive to one destination, then prune the far end."""
+    backup_id = identifier(request.get("backup_id"), "backup id")
+    record = load_destination(request.get("destination"))
+
+    archive = backup_archive_path(backup_id)
+    checksum = backup_checksum_path(backup_id)
+    if not archive.is_file():
+        raise BackupdError("no such backup", code="not_found")
+    expected = read_checksum_file(checksum, checksum.stat()) if checksum.is_file() else ""
+    if not expected:
+        expected = sha256_file(archive)
+    size = archive.stat().st_size
+
+    if record.get("type") == "s3":
+        outcome = s3_upload(record, archive, checksum, expected)
+        response = {
+            "ok": True,
+            "backup_id": backup_id,
+            "destination": record["name"],
+            "pruned": [],
+            **outcome,
+        }
+        victims = retention_victims(s3_listing(record), record)
+        if victims:
+            response["pruned"] = s3_prune(record, victims)
+        return response
+
+    remote_dir = record["path"]
+    remote_file = f"{remote_dir}/{archive.name}"
+    # Upload beside the final name and rename, so an interrupted transfer
+    # cannot look like a complete backup to whoever prunes next.
+    staging = remote_file + ".part"
+    batch = (
+        f"-mkdir {remote_quote(remote_dir)}\n"
+        f"put {remote_quote(str(archive))} {remote_quote(staging)}\n"
+        f"-rm {remote_quote(remote_file)}\n"
+        f"rename {remote_quote(staging)} {remote_quote(remote_file)}\n"
+    )
+    if checksum.is_file():
+        batch += (
+            f"put {remote_quote(str(checksum))} "
+            f"{remote_quote(remote_dir + '/' + checksum.name)}\n"
+        )
+    result = run_sftp(record, batch)
+    if result.returncode != 0:
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:500]
+        report_alert(
+            "backup.failed",
+            f"{backup_id}@{record['name']}",
+            "The off-host copy of the backup failed",
+            detail,
+        )
+        raise BackupdError(f"the upload failed: {detail}", code="upstream")
+
+    verified, method, detail = verify_remote_copy(
+        record, remote_file, expected, size
+    )
+    response = {
+        "ok": True,
+        "backup_id": backup_id,
+        "destination": record["name"],
+        "bytes": size,
+        "verified": verified,
+        "verified_by": method,
+        "pruned": [],
+    }
+    if not verified:
+        # The new copy is not proven, so nothing old is removed: a broken
+        # upload must never be the reason the last good copy disappears.
+        response["ok"] = False
+        response["error"] = detail or "the copy could not be verified"
+        report_alert(
+            "backup.failed",
+            f"{backup_id}@{record['name']}",
+            "The off-host copy could not be verified",
+            response["error"],
+        )
+        return response
+
+    victims = retention_victims(remote_listing(record), record)
+    if victims:
+        prune = "".join(
+            f"-rm {remote_quote(remote_dir + '/' + name)}\n"
+            f"-rm {remote_quote(remote_dir + '/' + name + '.sha256')}\n"
+            for name in victims
+        )
+        run_sftp(record, prune)
+        response["pruned"] = victims
+    return response
+
+
+def test_destination(request: dict[str, Any]) -> dict[str, Any]:
+    """Prove the credentials and the path work before a real backup needs them."""
+    record = load_destination(request.get("name"))
+    if record.get("type") == "s3":
+        # A listing proves the credentials, the region and the bucket in one
+        # call, without leaving anything behind to clean up.
+        try:
+            status, _headers, body = s3_request(
+                record, "GET", query={"list-type": "2", "max-keys": "1"}
+            )
+        except BackupdError as exc:
+            return {"ok": False, "error": str(exc)}
+        if status != 200:
+            return {
+                "ok": False,
+                "error": f"the storage service answered {status}: "
+                + body.decode("utf-8", "replace").strip()[:300],
+            }
+        return {"ok": True, "destination": record["name"]}
+
+    marker = f"{record['path']}/.easy-ha-proxy-write-test"
+    with tempfile.TemporaryDirectory(prefix="backupd-test-") as work:
+        probe = Path(work) / "probe"
+        probe.write_text(utc_now() + "\n", encoding="utf-8")
+        result = run_sftp(
+            record,
+            f"-mkdir {remote_quote(record['path'])}\n"
+            f"put {remote_quote(str(probe))} {remote_quote(marker)}\n"
+            f"rm {remote_quote(marker)}\n",
+        )
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "error": (result.stderr or b"").decode("utf-8", "replace").strip()[:500],
+        }
+    return {"ok": True, "destination": record["name"]}
+
+
+# ---------------------------------------------------------------------------
+# The scheduled copy
+# ---------------------------------------------------------------------------
+#
+# An unattended backup has to encrypt with something, and the only place that
+# something can live is this host. That is a real weakening and it is stated
+# plainly rather than hidden: the stored passphrase protects the archive
+# wherever it is *sent*, not against someone who already owns the gateway.
+# Without a stored passphrase the schedule refuses to run rather than making a
+# weaker archive on its own initiative.
+
+SCHEDULE_PATH = Path(
+    os.environ.get("BACKUPD_SCHEDULE", "/etc/easy-ha-proxy/backup-schedule.json")
+)
+SCHEDULE_PASSPHRASE_PATH = Path(
+    os.environ.get(
+        "BACKUPD_SCHEDULE_PASSPHRASE", "/etc/easy-ha-proxy/backup-schedule.key"
+    )
+)
+
+# The hour is systemd's business, not this file's: the timer is what actually
+# wakes the job, so changing the time means rewriting the timer and reloading
+# it. A drop-in keeps the packaged unit intact -- and clears OnCalendar before
+# setting it, because systemd treats the setting as a list and would otherwise
+# fire at both the old time and the new one.
+BACKUP_TIMER_UNIT = "easy-ha-proxy-backup.timer"
+TIMER_DROPIN_DIR = Path(
+    os.environ.get(
+        "BACKUPD_TIMER_DROPIN",
+        "/etc/systemd/system/easy-ha-proxy-backup.timer.d",
+    )
+)
+TIMER_DROPIN_PATH = TIMER_DROPIN_DIR / "schedule.conf"
+DEFAULT_SCHEDULE_TIME = "03:20"
+_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+
+
+def schedule_time(value: Any, *, default: str = DEFAULT_SCHEDULE_TIME) -> str:
+    """A 24-hour HH:MM, or the default. Never anything systemd could choke on."""
+    text = str(value or "").strip()
+    if not text:
+        return default
+    if not _TIME_RE.fullmatch(text):
+        raise BackupdError(
+            "the time must be given as HH:MM on a 24-hour clock", code="invalid"
+        )
+    return text
+
+
+def write_timer_time(value: str) -> None:
+    """Point the timer at a new hour and make systemd notice."""
+    TIMER_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(TIMER_DROPIN_DIR, 0o755)
+    body = "\n".join(
+        (
+            "# Written by easy-ha-proxy-backupd from the Backups page.",
+            "# The empty OnCalendar clears the packaged one; without it",
+            "# systemd would keep both and run the backup twice.",
+            "[Timer]",
+            "OnCalendar=",
+            f"OnCalendar=*-*-* {value}:00",
+            "",
+        )
+    )
+    temporary = TIMER_DROPIN_PATH.with_suffix(".conf.tmp")
+    temporary.write_text(body, encoding="utf-8")
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, TIMER_DROPIN_PATH)
+    for command in (
+        [SYSTEMCTL_PATH, "daemon-reload"],
+        # Restart rather than reload: a timer recomputes its next elapse only
+        # when restarted, so without this the change would take effect a day
+        # late.
+        [SYSTEMCTL_PATH, "restart", BACKUP_TIMER_UNIT],
+    ):
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise BackupdError(
+                "the schedule was saved but the timer could not be updated: "
+                + result.stderr.decode("utf-8", "replace").strip()[:200],
+                code="invalid",
+            )
+
+
+def timer_next_run() -> str:
+    """What systemd says the next firing will be, or nothing if it is inert."""
+    try:
+        properties = systemctl_properties(
+            BACKUP_TIMER_UNIT, ["NextElapseUSecRealtime", "ActiveState"]
+        )
+    except Exception:  # noqa: BLE001 - reporting must not break the page
+        return ""
+    if properties.get("ActiveState") != "active":
+        return ""
+    return properties.get("NextElapseUSecRealtime", "") or ""
+
+
+def load_schedule() -> dict[str, Any]:
+    try:
+        record = safe_json_file(SCHEDULE_PATH)
+    except Exception:  # noqa: BLE001 - a broken file must not stop the daemon
+        record = {}
+    return {
+        "enabled": bool(record.get("enabled")),
+        "destinations": [
+            str(item)
+            for item in (record.get("destinations") or [])
+            if isinstance(item, str)
+        ],
+        "include_ssh": bool(record.get("include_ssh")),
+        "quiesce": record.get("quiesce", True) is not False,
+        "passphrase_stored": SCHEDULE_PASSPHRASE_PATH.is_file(),
+        "last_run": record.get("last_run", ""),
+        "last_result": record.get("last_result", ""),
+        # The stored time is what the operator asked for; next_run is what
+        # systemd will actually do about it, which is the honest answer when
+        # the timer is stopped or the drop-in never landed.
+        "time": schedule_time(record.get("time"), default=DEFAULT_SCHEDULE_TIME),
+        "next_run": timer_next_run(),
+    }
+
+
+def schedule_status(_request: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "schedule": load_schedule()}
+
+
+def save_schedule(request: dict[str, Any]) -> dict[str, Any]:
+    current = load_schedule()
+    names = request.get("destinations")
+    if names is None:
+        names = current["destinations"]
+    if not isinstance(names, list):
+        raise BackupdError("destinations must be a list", code="invalid")
+    chosen = []
+    for item in names:
+        name = str(item or "").strip().lower()
+        # Refuse a name that does not resolve, so the schedule cannot be armed
+        # pointing at nothing.
+        load_destination(name)
+        chosen.append(name)
+
+    passphrase = request.get("passphrase")
+    if isinstance(passphrase, str) and passphrase:
+        write_private(
+            SCHEDULE_PASSPHRASE_PATH, require_passphrase(passphrase).encode("utf-8")
+        )
+    elif passphrase == "":
+        with contextlib.suppress(FileNotFoundError):
+            SCHEDULE_PASSPHRASE_PATH.unlink()
+
+    enabled = request.get("enabled")
+    enabled = current["enabled"] if enabled is None else bool(enabled)
+    if enabled and not SCHEDULE_PASSPHRASE_PATH.is_file():
+        raise BackupdError(
+            "a stored passphrase is required before the schedule can run",
+            code="invalid",
+        )
+    if enabled and not chosen:
+        raise BackupdError(
+            "choose at least one destination before enabling the schedule",
+            code="invalid",
+        )
+
+    wanted_time = schedule_time(
+        request.get("time"), default=current.get("time", DEFAULT_SCHEDULE_TIME)
+    )
+
+    record = {
+        "enabled": enabled,
+        "destinations": chosen,
+        "include_ssh": bool(request.get("include_ssh", current["include_ssh"])),
+        "quiesce": request.get("quiesce", current["quiesce"]) is not False,
+        "last_run": current["last_run"],
+        "last_result": current["last_result"],
+        "time": wanted_time,
+    }
+    atomic_json(SCHEDULE_PATH, record, mode=0o600)
+    # Only when the hour actually moved. Saving a destination or a passphrase
+    # is a far more common act than changing the time, and each rewrite costs
+    # a daemon-reload and restarts the timer -- which also discards the
+    # randomised delay it had already picked.
+    if wanted_time != current.get("time", DEFAULT_SCHEDULE_TIME):
+        write_timer_time(wanted_time)
+    return {"ok": True, "schedule": load_schedule()}
+
+
+def record_schedule_outcome(result: str) -> None:
+    try:
+        record = safe_json_file(SCHEDULE_PATH)
+    except Exception:  # noqa: BLE001
+        record = {}
+    record["last_run"] = utc_now()
+    record["last_result"] = result[:500]
+    with contextlib.suppress(Exception):
+        atomic_json(SCHEDULE_PATH, record, mode=0o600)
+
+
+def run_scheduled_backup(request: dict[str, Any]) -> dict[str, Any]:
+    """Make a backup and send it away. Invoked by the timer or by a person.
+
+    Runs inline rather than as a background job: the timer wants an exit code,
+    and the maintenance lock the backup takes is what keeps it from racing a
+    restore or an update.
+    """
+    schedule = load_schedule()
+    # The timer asks whether the schedule is on; a person pressing the button
+    # has already answered that by pressing it. Everything else the run needs
+    # -- a stored passphrase, somewhere to send it -- is still required.
+    on_demand = bool(request.get("on_demand"))
+    if not schedule["enabled"] and not on_demand:
+        return {"ok": True, "skipped": "the schedule is off"}
+    if on_demand and not schedule["destinations"]:
+        raise BackupdError(
+            "choose at least one destination before running it", code="invalid"
+        )
+    if not schedule["passphrase_stored"]:
+        record_schedule_outcome("no stored passphrase")
+        raise BackupdError("no stored passphrase", code="invalid")
+
+    passphrase = SCHEDULE_PASSPHRASE_PATH.read_text(encoding="utf-8").strip()
+    started = start_backup(
+        {
+            "action": "start_backup",
+            "passphrase": passphrase,
+            "include_ssh": schedule["include_ssh"],
+            "quiesce": schedule["quiesce"],
+        }
+    )
+    passphrase = ""
+    job_id = started["job_id"]
+
+    deadline = time.monotonic() + SCHEDULED_BACKUP_TIMEOUT
+    state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        time.sleep(5)
+        with contextlib.suppress(BackupdError):
+            state = load_job(job_id, include_logs=False)
+        if state.get("status") in TERMINAL_STATUSES:
+            break
+    if state.get("status") != "completed":
+        record_schedule_outcome(f"the backup did not complete: {state.get('status')}")
+        report_alert(
+            "backup.failed",
+            job_id,
+            "The scheduled backup did not complete",
+            str(state.get("error") or "")[:500],
+        )
+        return {"ok": False, "job_id": job_id, "error": "the backup did not complete"}
+
+    backup_id = ((state.get("output") or {}).get("backup_id")) or ""
+    uploads = []
+    failures = []
+    for name in schedule["destinations"]:
+        try:
+            outcome = upload_backup(
+                {"action": "upload", "backup_id": backup_id, "destination": name}
+            )
+        except BackupdError as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        uploads.append(outcome)
+        if not outcome.get("ok"):
+            failures.append(f"{name}: {outcome.get('error')}")
+
+    record_schedule_outcome(
+        "; ".join(failures) if failures else f"copied to {len(uploads)} destination(s)"
+    )
+    return {
+        "ok": not failures,
+        "job_id": job_id,
+        "backup_id": backup_id,
+        "uploads": uploads,
+        "errors": failures,
+    }
+
+
 def dispatch(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise BackupdError("request must be a JSON object")
@@ -2175,6 +3387,22 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_inspect(request)
     if action == "start_restore":
         return start_restore(request)
+    if action == "destinations":
+        return list_destinations(request)
+    if action == "destination_save":
+        return save_destination(request)
+    if action == "destination_delete":
+        return delete_destination(request)
+    if action == "destination_test":
+        return test_destination(request)
+    if action == "upload":
+        return upload_backup(request)
+    if action == "schedule":
+        return schedule_status(request)
+    if action == "schedule_save":
+        return save_schedule(request)
+    if action == "run_scheduled":
+        return run_scheduled_backup(request)
     return delete_item(request)
 
 

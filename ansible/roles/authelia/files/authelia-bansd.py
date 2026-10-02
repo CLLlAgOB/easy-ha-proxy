@@ -40,10 +40,6 @@ MAX_REQUEST_BYTES = env_int("AUTHELIA_BANS_MAX_REQUEST_BYTES", 65536, 1024, 1048
 MAX_WORKERS = env_int("AUTHELIA_BANS_MAX_WORKERS", 4, 1, 16)
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9._@-]+$")
 
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 log = logging.getLogger("authelia-bansd")
 
 
@@ -218,5 +214,15 @@ def serve() -> None:
             conn.close()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    # Configure the root logger only when the daemon actually runs: doing it at
+    # import time reconfigures logging for any process that merely imports us.
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
     serve()
+
+
+if __name__ == "__main__":
+    main()

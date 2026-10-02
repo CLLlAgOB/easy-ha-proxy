@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block title %}Configuration history{% endblock %}
+{% block header_title %}Configuration history{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.ch-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) 1fr;
+  gap: 22px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .ch-layout { grid-template-columns: 1fr; }
+}
+
+.ch-version {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ch-version:hover { border-color: rgba(var(--accent-primary-rgb), .45); }
+
+.ch-version[aria-selected="true"] {
+  background: rgba(var(--accent-primary-rgb), .14);
+  border-color: rgba(var(--accent-primary-rgb), .6);
+}
+
+.ch-version b { display: block; font-size: 13px; }
+
+.ch-version small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+.ch-change {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.ch-change:last-child { border-bottom: none; }
+
+.ch-kind {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  margin-right: 8px;
+  background: rgba(var(--accent-primary-rgb), .12);
+  color: var(--text-secondary);
+}
+
+.ch-added { color: #2e9e5b; font-weight: 600; }
+.ch-removed { color: #cc4b4b; font-weight: 600; }
+.ch-modified { color: #c8a13a; font-weight: 600; }
+
+.ch-fields {
+  margin: 6px 0 0 18px;
+  font-family: 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ch-fields div { padding: 1px 0; }
+
+.ch-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 30px 0;
+  text-align: center;
+}
+
+.ch-restore {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ch-restore[hidden], .ch-confirm[hidden] { display: none; }
+
+.ch-confirm {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(204, 75, 75, .5);
+  background: rgba(204, 75, 75, .08);
+  font-size: 14px;
+}
+
+.ch-compare {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.ch-compare select {
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+</style>
+
+<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
+     background: rgba(var(--accent-primary-rgb), .07);">
+  A version is kept every time a configuration change is confirmed. What is compared is the managed model — sites, TCP proxies and variables — not the generated HAProxy file, so the list shows what you changed rather than every line it produced.
+</div>
+
+<div class="ch-layout">
+  <div class="card">
+    <div class="card-header">
+      <h2>Versions</h2>
+      <span class="mon-sub" id="ch-count" data-i18n-skip translate="no"></span>
+    </div>
+    <div id="ch-list" data-i18n-skip translate="no"></div>
+    <div class="ch-empty" id="ch-list-empty">No versions have been recorded yet</div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Changes</h2>
+    </div>
+
+    <div class="ch-compare">
+      <span>Compare</span>
+      <select id="ch-left" data-i18n-skip translate="no"></select>
+      <span>with</span>
+      <select id="ch-right" data-i18n-skip translate="no"></select>
+    </div>
+
+    <div id="ch-diff"></div>
+    <div class="ch-empty" id="ch-diff-empty">Select a version to see what changed</div>
+
+    <div class="ch-restore" id="ch-restore" hidden>
+      <p>
+        Restoring puts these files back and applies them through the normal guarded path: the configuration is validated, your own administrative access is checked, and the change still has to be confirmed before its deadline or it rolls itself back.
+      </p>
+      <div class="ap-sim-actions">
+        <button class="btn" type="button" id="ch-restore-start">Restore this version</button>
+        <span class="mon-sub" id="ch-restore-result" data-i18n-skip translate="no"></span>
+      </div>
+    </div>
+
+    <div class="ch-confirm" id="ch-confirm" hidden>
+      <p id="ch-confirm-text"></p>
+      <div class="ap-sim-actions">
+        <button class="btn" type="button" id="ch-confirm-yes">Confirm restore</button>
+        <button class="btn" type="button" id="ch-confirm-no">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/config_history.js') }}"></script>
+{% endblock %}

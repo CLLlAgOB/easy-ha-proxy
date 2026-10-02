@@ -11,11 +11,12 @@ const Dashboard = (() => {
   const BAN_REASON_LABELS = {
     10: 'Too many 4xx errors for the site (ERR_LIMIT_SITE)',
     20: 'Too many 4xx errors for other requests without SNI (ERR_LIMIT_OTHER)',
-    30: 'Site request rate limit exceeded (RATE_LIMIT_SITE)'
-    // сюда же потом можно добавить, for example:
-    // 40: 'Блокировка by GeoIP',
-    // 50: 'Ручной ban админом',
-    // and etc., if будешь расширять логику.
+    30: 'Site request rate limit exceeded (RATE_LIMIT_SITE)',
+    // 40 is the adaptive engine's own, and it is the one an operator is most
+    // likely to question -- a ban placed by scoring rather than by a rule
+    // they can point at in the configuration. Without a label here it showed
+    // as a bare "40", which explains nothing and looks like a fault.
+    40: 'Adaptive protection: scored as hostile (ADAPTIVE_BAN)'
   };
 
 
@@ -57,7 +58,10 @@ const Dashboard = (() => {
         rows: data.rows.slice().sort((a, b) => {
           const av = Number(a?.[ttlIdx]) || 0;
           const bv = Number(b?.[ttlIdx]) || 0;
-          return bv - av; // свежие баны сверху
+          // Longest time left first. This used to mean "newest first", when
+          // every row carried the table's own countdown; adaptive bans now
+          // show the engine's schedule instead, so the two are not the same.
+          return bv - av;
         })
       });
     }
@@ -101,7 +105,19 @@ const Dashboard = (() => {
 
         // 4) Колонка TTL/Expires — форматируем in человекочитаемый вид
         else if (ttlIdx >= 0 && i === ttlIdx) {
-          v = `<span>${formatDuration(cell)}</span>`;
+          // Say where the number comes from. For an adaptive ban it is the
+          // engine's schedule; for everything else it is the stick table's
+          // own lifetime -- which, for an adaptive ban, reads as days about a
+          // ban that lifts within the hour.
+          let source = '';
+          if (containerId === 'ban') {
+            const scheduled = (data.meta && data.meta.expiry_from_schedule) || [];
+            source = scheduled.includes(String(r[0]))
+              ? 'By the adaptive protection schedule'
+              : 'Stick table lifetime';
+          }
+          const title = source ? ` title="${escapeHtml(source)}"` : '';
+          v = `<span${title}>${formatDuration(cell)}</span>`;
         }
 
         // 5) Причина ban (if добавишь колонку "Причина" / "Reason")

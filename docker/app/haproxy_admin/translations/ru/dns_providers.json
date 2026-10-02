@@ -1,0 +1,20 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "DNS providers": "DNS-провайдеры",
+    "DNS-01 proves control of a domain through a DNS record instead of an HTTP request, which is the only way to obtain a wildcard certificate and the only option when port 80 is unreachable. A saved credential is written root-only and is never sent back to this page: to change one, enter it again.": "DNS-01 подтверждает владение доменом через DNS-запись, а не HTTP-запрос: это единственный способ получить wildcard-сертификат и единственный вариант, когда порт 80 недоступен. Сохранённые учётные данные пишутся с доступом только для root и обратно на эту страницу не возвращаются — чтобы изменить, введите заново.",
+    "Profiles": "Профили",
+    "No DNS provider profiles yet": "Профилей DNS-провайдеров пока нет",
+    "Add or replace a profile": "Добавить или заменить профиль",
+    "Profile name": "Имя профиля",
+    "Save profile": "Сохранить профиль",
+    "unchanged": "без изменений",
+    "plugin ready": "плагин готов",
+    "plugin missing": "плагина нет",
+    "The certbot plugin for this provider is not installed.": "Плагин certbot для этого провайдера не установлен.",
+    "Add it to dns_plugins_enabled and apply, or install": "Добавьте его в dns_plugins_enabled и примените конфигурацию, либо установите"
+  }
+}

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>updates reconnect harness</title></head>
+<body>
+  <div id="updates-app" data-status-url="/status" data-check-url="/check"
+       data-apply-url="/apply" data-channels-url="/channels"
+       data-reboot-url="/reboot" data-reboot-cancel-url="/reboot-cancel"></div>
+  <select id="updates-release-channel"><option value="stable">stable</option></select>
+  <button id="updates-check"></button><button id="updates-apply"></button>
+  <button id="updates-save-channels"></button><button id="updates-select-all"></button>
+  <button id="updates-select-none"></button><button id="updates-reboot-now"></button>
+  <button id="updates-reboot-cancel"></button><button id="updates-reboot-modal-cancel"></button>
+  <button id="updates-reboot-modal-close"></button>
+  <input id="updates-impact-confirm" type="checkbox"><input id="updates-confirmation">
+  <input id="updates-reboot-confirm">
+  <details id="updates-log-details"><pre id="updates-job-log"></pre></details>
+  <table><tbody id="updates-components-body"></tbody><tbody id="updates-jobs-body"></tbody></table>
+  <div id="updates-channels-status"></div><div id="updates-service-status"></div>
+  <div id="updates-apply-status"></div><div id="updates-release-note"></div>
+  <div id="updates-local-source-note"></div><div id="updates-components-wrap"></div>
+  <div id="updates-no-updates"></div><div id="updates-confirm-panel"></div>
+  <div id="updates-plan-summary"></div><div id="updates-plan-warning"></div>
+  <details id="updates-unknown-details"></details><div id="updates-unknown-summary"></div>
+  <ul id="updates-unknown-list"></ul><details id="updates-skipped-details"></details>
+  <div id="updates-skipped-summary"></div><ul id="updates-skipped-list"></ul>
+  <div id="updates-checked-at"></div><div id="updates-self-restart-note"></div>
+  <div id="updates-os-note"></div><div id="updates-active-progress"></div>
+  <div id="updates-progress"><div id="updates-progress-track"><div id="updates-progress-fill"></div></div></div>
+  <div id="updates-progress-label"></div><div id="updates-progress-elapsed"></div>
+  <div id="updates-log-mode"></div><div id="updates-reboot-card"></div>
+  <div id="updates-reboot-idle"></div><div id="updates-reboot-pending"></div>
+  <div id="updates-reboot-status"></div><div id="updates-reboot-modal"></div>
+  <div id="updates-reboot-modal-title"></div><div id="updates-reboot-modal-text"></div>
+  <div id="updates-reboot-modal-timer"></div>
+  <script>
+    window.t = (value) => String(value);
+    window.escapeHtml = (value) => String(value);
+    const jobId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const bootId = "11111111-1111-1111-1111-111111111111";
+    let postCount = 0;
+    let accepted = false;
+    const response = (payload) => Promise.resolve(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: {"Content-Type": "application/json"}
+    }));
+    window.fetch = (url, options) => {
+      if (String(url) === "/check" && options && options.method === "POST") {
+        postCount += 1;
+        accepted = true;
+        return Promise.reject(new TypeError("NetworkError when attempting to fetch resource."));
+      }
+      const job = {
+        id: jobId,
+        operation: "check",
+        status: "running",
+        created_at: new Date().toISOString(),
+        components: []
+      };
+      return response({
+        ok: true,
+        boot_id: bootId,
+        deployment: {release_channel: "stable"},
+        jobs: accepted ? [job] : [],
+        active_job: accepted ? job : null,
+        reboot_required: false,
+        reboot_scheduled: false
+      });
+    };
+  </script>
+  <script src="../docker/app/haproxy_admin/static/js/system_updates.js"></script>
+  <script>
+    window.setTimeout(() => document.getElementById("updates-check").click(), 50);
+    window.setTimeout(() => {
+      const result = {
+        postCount,
+        status: document.getElementById("updates-service-status").textContent,
+        activeJob: sessionStorage.getItem("easy_ha_proxy_update_job"),
+        pendingStart: sessionStorage.getItem("easy_ha_proxy_update_pending_start"),
+        rawNetworkErrorVisible: document.getElementById("updates-service-status").textContent.includes("NetworkError")
+      };
+      document.body.textContent = JSON.stringify(result);
+      document.title = postCount === 1 && result.activeJob === jobId &&
+        result.pendingStart === null && !result.rawNetworkErrorVisible ? "PASS" : "FAIL";
+    }, 2600);
+  </script>
+</body>
+</html>

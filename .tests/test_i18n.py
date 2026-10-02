@@ -15,8 +15,8 @@ from unittest import mock
 from jinja2 import Environment, FileSystemLoader
 
 
-APP_DIR = Path(__file__).resolve().parent / "haproxy_admin"
-PROJECT_ROOT = APP_DIR.parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = PROJECT_ROOT / "docker" / "app" / "haproxy_admin"
 CATALOG_DIR = APP_DIR / "translations"
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 

@@ -12,6 +12,7 @@ import uuid
 
 from flask import Blueprint, abort, jsonify, render_template, request, send_file
 
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .backupd_client import BackupdError, backupd_request
 
 
@@ -60,14 +61,66 @@ def _daemon_response(result: dict, *, accepted: bool = False):
     return jsonify(result), status_code
 
 
+# Every job that changes the host goes through _call_daemon, so one audit
+# point covers them all. The payload also carries the archive passphrase, so
+# the summary is built from an allow-list and never from the payload itself.
+AUDITED_ACTIONS = {
+    "start_backup": ("backup.start", ("include_ssh", "quiesce")),
+    "start_restore": ("restore.start", ("upload_id", "scope", "restore_ssh")),
+    "delete": ("backup.delete", ("kind", "id")),
+    "destination_save": ("backup_destination.save", ("name", "type", "host", "user")),
+    "destination_delete": ("backup_destination.delete", ("name",)),
+    "destination_test": ("backup_destination.test", ("name",)),
+    "upload": ("backup.upload", ("backup_id", "destination")),
+    # The passphrase travels in this payload, which is why the summary
+    # is built from named fields and never from the payload itself.
+    "schedule_save": ("backup_schedule.save", ("enabled", "destinations")),
+    "run_scheduled": ("backup_schedule.run", ()),
+}
+
+DESTINATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _destination_name(value) -> str:
+    text = str(value or "").strip().lower()
+    if not DESTINATION_NAME_RE.fullmatch(text):
+        abort(400, description="the destination name may use a-z, 0-9 and dashes")
+    return text
+
+
 def _call_daemon(payload: dict, *, accepted: bool = False, timeout: float = 10.0):
+    entry = AUDITED_ACTIONS.get(str(payload.get("action") or ""))
     try:
-        return _daemon_response(
-            backupd_request(payload, timeout=timeout),
-            accepted=accepted,
-        )
+        result = backupd_request(payload, timeout=timeout)
     except BackupdError as exc:
+        if entry:
+            record_request(
+                entry[0],
+                object_type="backup",
+                object_id=str(payload.get("id") or payload.get("upload_id") or ""),
+                result=RESULT_FAILURE,
+                detail=str(exc)[:500],
+            )
         return jsonify({"ok": False, "error": str(exc)}), 503
+    if entry:
+        action, fields = entry
+        ok = bool(result.get("ok"))
+        record_request(
+            action,
+            object_type="backup",
+            object_id=str(
+                result.get("job_id")
+                or payload.get("id")
+                or payload.get("upload_id")
+                or ""
+            ),
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=", ".join(
+                f"{field}: {payload[field]}" for field in fields if field in payload
+            ),
+            detail="" if ok else str(result.get("error") or "")[:500],
+        )
+    return _daemon_response(result, accepted=accepted)
 
 
 def _json_payload(required: set[str], optional: set[str] | None = None):
@@ -336,4 +389,140 @@ def download_backup(backup_id: str):
         download_name=filename,
         conditional=True,
         max_age=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Off-host destinations
+# ---------------------------------------------------------------------------
+
+
+@bp_system_backups.get("/api/destinations")
+def list_destinations_view():
+    return _call_daemon({"action": "destinations"})
+
+
+@bp_system_backups.post("/api/destinations")
+def save_destination_view():
+    payload = _json_payload(
+        {"name", "type"},
+        {
+            "host", "user", "path", "port", "private_key", "host_key",
+            "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
+            "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
+            "verify",
+        },
+    )
+    command = {"action": "destination_save", "name": _destination_name(payload["name"])}
+    for key in (
+        "type", "host", "user", "path", "port", "private_key", "host_key",
+        "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
+        "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
+        "verify",
+    ):
+        if key in payload:
+            command[key] = payload[key]
+    return _call_daemon(command)
+
+
+@bp_system_backups.post("/api/destinations/delete")
+def delete_destination_view():
+    payload = _json_payload({"name"})
+    return _call_daemon(
+        {"action": "destination_delete", "name": _destination_name(payload["name"])}
+    )
+
+
+@bp_system_backups.post("/api/destinations/test")
+def test_destination_view():
+    payload = _json_payload({"name"})
+    # The far end may be slow to answer; the daemon has its own timeout.
+    return _call_daemon(
+        {"action": "destination_test", "name": _destination_name(payload["name"])},
+        timeout=90.0,
+    )
+
+
+@bp_system_backups.post("/api/destinations/upload")
+def upload_backup_view():
+    payload = _json_payload({"backup_id", "destination"})
+    return _call_daemon(
+        {
+            "action": "upload",
+            "backup_id": _identifier(payload["backup_id"], "backup id"),
+            "destination": _destination_name(payload["destination"]),
+        },
+        accepted=False,
+        timeout=1800.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The nightly schedule
+#
+# The daemon has carried this since the destinations were built, and the
+# systemd timer has been firing daily all along -- but nothing here exposed
+# it, so an operator could say where a copy should go and never say when.
+# Every firing found the schedule off and exited without doing anything.
+# ---------------------------------------------------------------------------
+
+
+@bp_system_backups.get("/api/schedule")
+def schedule_view():
+    return _call_daemon({"action": "schedule"})
+
+
+@bp_system_backups.post("/api/schedule")
+def save_schedule_view():
+    payload = _json_payload(
+        set(),
+        {"enabled", "destinations", "include_ssh", "quiesce", "passphrase", "time"},
+    )
+    command = {"action": "schedule_save"}
+
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            abort(400, description="enabled must be boolean")
+        command["enabled"] = payload["enabled"]
+
+    for key in ("include_ssh", "quiesce"):
+        if key in payload:
+            if not isinstance(payload[key], bool):
+                abort(400, description=f"{key} must be boolean")
+            command[key] = payload[key]
+
+    if "time" in payload:
+        # Shape only; the daemon owns the range and the systemd syntax.
+        wanted = str(payload["time"] or "").strip()
+        if not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", wanted):
+            abort(400, description="the time must be given as HH:MM on a 24-hour clock")
+        command["time"] = wanted
+
+    if "destinations" in payload:
+        names = payload["destinations"]
+        if not isinstance(names, list):
+            abort(400, description="destinations must be a list")
+        command["destinations"] = [_destination_name(name) for name in names]
+
+    if "passphrase" in payload:
+        supplied = payload["passphrase"]
+        # An empty string is how the page asks for the stored passphrase to be
+        # forgotten, so it must reach the daemon rather than be validated as
+        # if it were a new one.
+        if supplied == "":
+            command["passphrase"] = ""
+        else:
+            command["passphrase"] = _passphrase(supplied)
+
+    return _call_daemon(command)
+
+
+@bp_system_backups.post("/api/schedule/run")
+def run_schedule_view():
+    # The same job the timer runs, started by hand -- on_demand so that
+    # pressing the button works before the schedule itself is switched on,
+    # which is exactly when someone wants to see it work. It can take as long
+    # as a full backup and an upload, so it gets the upload timeout.
+    return _call_daemon(
+        {"action": "run_scheduled", "on_demand": True}, timeout=1800.0
     )

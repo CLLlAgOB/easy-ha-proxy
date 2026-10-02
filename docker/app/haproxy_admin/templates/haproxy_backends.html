@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Backends{% endblock %}
+{% block header_title %}Backends{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.rt-notice {
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(200, 161, 58, .5);
+  background: rgba(200, 161, 58, .08);
+  font-size: 14px;
+}
+
+.rt-notice.error {
+  border-color: rgba(204, 75, 75, .5);
+  background: rgba(204, 75, 75, .08);
+}
+
+.rt-notice[hidden] { display: none; }
+
+.rt-backend { margin-bottom: 22px; }
+.rt-backend:last-child { margin-bottom: 0; }
+
+.rt-backend h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 2px;
+}
+
+.rt-backend .rt-id {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+.rt-server {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(150px, 1fr) auto auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.rt-server:last-child { border-bottom: none; }
+
+.rt-name { font-weight: 600; }
+.rt-name small {
+  display: block;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+.rt-state {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rt-ready { background: rgba(46,158,91,.15); color: #2e9e5b; }
+.rt-drain { background: rgba(200,161,58,.18); color: #c8a13a; }
+.rt-maint { background: rgba(204,75,75,.15); color: #cc4b4b; }
+.rt-down { background: rgba(204,75,75,.25); color: #cc4b4b; }
+
+.rt-sessions { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+
+.rt-weight {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.rt-weight input {
+  width: 70px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.rt-actions { display: inline-flex; gap: 6px; }
+
+.rt-actions button {
+  padding: 5px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: rgba(var(--accent-primary-rgb), .05);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.rt-actions button:hover:not(:disabled) {
+  border-color: rgba(var(--accent-primary-rgb), .5);
+}
+
+.rt-actions button[aria-pressed="true"] {
+  background: rgba(var(--accent-primary-rgb), .2);
+  border-color: rgba(var(--accent-primary-rgb), .55);
+  font-weight: 600;
+}
+
+.rt-actions button:disabled { opacity: .5; cursor: not-allowed; }
+
+.rt-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 40px 0;
+  text-align: center;
+}
+</style>
+
+<div class="rt-notice">
+  These controls change the running HAProxy immediately. The state is saved and restored across reloads and restarts, so a server left in maintenance stays in maintenance until you put it back — including after a reboot.
+</div>
+
+<div class="rt-notice error" id="rt-error" hidden></div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Servers</h2>
+    <span class="mon-sub" id="rt-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  {# The /haproxy prefix is already superadmin-only, so this flag is belt and
+     braces: it keeps the controls inert if the page ever moves elsewhere. #}
+  <div id="rt-list" data-superadmin="{{ '1' if is_superadmin else '0' }}"></div>
+  <div class="rt-empty" id="rt-empty">No backends are currently defined</div>
+</div>
+
+<script src="{{ url_for('static', filename='js/haproxy_backends.js') }}"></script>
+{% endblock %}

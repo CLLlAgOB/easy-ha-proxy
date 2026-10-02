@@ -131,12 +131,19 @@ def translate(message: str, language: str | None = None, **values: Any) -> str:
     normalized = " ".join(message.split())
     translated = messages.get(message, messages.get(normalized, message))
     if translated == message:
+        # Phrases only. A catalogue fragment such as "Let's Encrypt cannot
+        # issue certificates for reserved/private domains: " carries its own
+        # context and substitutes cleanly into a message with a name inside
+        # it. A single word does not: this is the path every error, message
+        # and warning from the daemons takes to the page, and replacing "for",
+        # "all" and "check" one at a time left "the update candidate changed
+        # for all; check again" with three Russian words in an English
+        # sentence. A sentence the catalogue does not know stays in English,
+        # which can at least be read.
         for pattern, source, target in _replacement_rules(selected):
-            translated = (
-                pattern.sub(lambda _match: target, translated)
-                if pattern is not None
-                else translated.replace(source, target)
-            )
+            if pattern is not None:
+                continue
+            translated = translated.replace(source, target)
     if not values:
         return translated
     try:

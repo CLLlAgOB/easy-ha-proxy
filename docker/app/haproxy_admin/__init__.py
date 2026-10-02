@@ -13,7 +13,9 @@ import stat
 
 from flask import Flask, abort, g, jsonify, redirect, request, url_for
 from flask_wtf.csrf import CSRFError, CSRFProtect
+from werkzeug.exceptions import HTTPException
 
+from .api_errors import caller_parses_json, error_reason
 from .cache import init_cache
 from .i18n import (
     DEFAULT_LANGUAGE,
@@ -41,6 +43,15 @@ from . import routes_haproxy_tcp
 from . import routes_haproxy_udp
 from . import routes_health
 from . import routes_geoip
+from . import routes_monitoring
+from . import routes_security
+from . import routes_runtime
+from . import routes_audit
+from . import routes_config_history
+from . import routes_cert_delivery
+from . import routes_dns_providers
+from . import routes_alerts
+from . import routes_prometheus
 
 from .routes_authelia_settings import bp_authelia_settings
 from .authelia_acl import bp_authelia_acl
@@ -271,14 +282,29 @@ def create_app() -> Flask:
         )
         return response
 
+    def _caller_parses_json() -> bool:
+        return caller_parses_json(request.path, request.is_json)
+
     @app.errorhandler(CSRFError)
     def handle_csrf_error(exc: CSRFError):
         message = translate("CSRF validation failed")
-        if request.path.startswith(
-            ("/api/", "/system/backups/api/", "/system/updates/api/")
-        ) or request.is_json:
+        if _caller_parses_json():
             return jsonify({"ok": False, "error": message}), 400
         return f"{message}: {exc.description}", 400
+
+    @app.errorhandler(HTTPException)
+    def handle_api_error(exc: HTTPException):
+        """Answer an API caller in the language it parses.
+
+        Without this, every `abort(400, description=...)` in the API
+        blueprints reaches the browser as an HTML page, the client's
+        `response.json()` fails, and a precise complaint about one field is
+        shown as a generic failure the operator cannot act on.
+        """
+        if not _caller_parses_json():
+            return exc
+        reason = translate(error_reason(exc.description, exc.name))
+        return jsonify({"ok": False, "error": reason}), exc.code
 
     # Open the local MMDB reader. Each Gunicorn worker reopens it after an
     # atomic on-disk database update.

@@ -172,7 +172,6 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
                 help_text="Default: 15552000 seconds (180 days). Set to 0 to disable HSTS.",
             ),
             _field("site_defaults.compress", "Enable response compression", "boolean"),
-            _field("site_defaults.enable_splice_global", "Enable TCP splicing", "boolean"),
             _field(
                 "site_defaults.certificate_source",
                 "Default certificate source",
@@ -206,7 +205,6 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
             _field("site_defaults.rate_window", "Request-rate window", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.rate_ban", "Ban clients that exceed the request rate", "boolean"),
             _field("site_defaults.rate_errors", "Request-rate strike threshold", "integer", minimum=0, maximum=1000000),
-            _field("site_defaults.waf", "WAF profile", "choice", options=("none", "strict", "balanced")),
             _field("site_defaults.conn_table_expire", "Connection table expiry", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.conn_rate_window", "Connection-rate window", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.conn_rate_burst", "Connection burst limit", "integer", minimum=0, maximum=1000000),

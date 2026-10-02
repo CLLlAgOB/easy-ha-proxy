@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Configuration history": "История конфигурации",
+    "A version is kept every time a configuration change is confirmed. What is compared is the managed model — sites, TCP proxies and variables — not the generated HAProxy file, so the list shows what you changed rather than every line it produced.": "Версия сохраняется каждый раз, когда изменение конфигурации подтверждено. Сравнивается управляемая модель — сайты, TCP-прокси и переменные, — а не сгенерированный файл HAProxy: в списке видно, что вы поменяли, а не все строки, которые из этого получились.",
+    "Versions": "Версии",
+    "No versions have been recorded yet": "Пока ни одной версии не сохранено",
+    "Compare": "Сравнить",
+    "Applied now": "Применено сейчас",
+    "Select a version to see what changed": "Выберите версию, чтобы увидеть изменения",
+    "These two versions are identical": "Эти две версии одинаковы",
+    "tcp": "TCP-прокси",
+    "variable": "переменные",
+    "removed": "удалён",
+    "modified": "изменён",
+    "Restoring puts these files back and applies them through the normal guarded path: the configuration is validated, your own administrative access is checked, and the change still has to be confirmed before its deadline or it rolls itself back.": "Восстановление возвращает эти файлы на место и применяет их обычным защищённым путём: конфигурация проверяется, проверяется и ваш собственный административный доступ, а изменение всё равно нужно подтвердить до истечения срока — иначе оно откатится само.",
+    "Restore this version": "Восстановить эту версию",
+    "Confirm restore": "Подтвердить восстановление",
+    "Replace the running configuration with the version from": "Заменить работающую конфигурацию версией от",
+    "Applied and awaiting confirmation — confirm it on the HAProxy configuration page before the deadline.": "Применено и ждёт подтверждения — подтвердите на странице конфигурации HAProxy до истечения срока."
+  }
+}

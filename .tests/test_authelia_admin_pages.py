@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 
 
-APP = Path(__file__).resolve().parent / "haproxy_admin"
+APP = Path(__file__).resolve().parents[1] / "docker" / "app" / "haproxy_admin"
 TEMPLATES = APP / "templates"
 
 

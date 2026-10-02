@@ -1,0 +1,21 @@
+{
+  "enabled": {{ (metricsd_enabled | default(true) | bool) | tojson }},
+  "poll_interval_seconds": {{ metricsd_poll_interval | default(10) }},
+  "haproxy_socket": {{ (metricsd_haproxy_socket | default(socket_path | default('/run/haproxy/admin.sock'))) | tojson }},
+  "maintenance_interval_seconds": {{ metricsd_maintenance_interval | default(300) }},
+  "retention": {
+    "one_minute_days": {{ metricsd_retention_one_minute_days | default(7) }},
+    "one_minute_server_hours": {{ metricsd_retention_one_minute_server_hours | default(24) }},
+    "one_hour_days": {{ metricsd_retention_one_hour_days | default(365) }}
+  },
+  "exclude": {
+    "exact": {{ (metricsd_exclude_exact | default(ui_exclude_backends_exact | default(['be_admin', 'be_http_challenge', 'be_tls_terminator', 'be_maintenance']))) | tojson }},
+    "prefix": {{ (metricsd_exclude_prefix | default(ui_exclude_backends_prefix | default(['tbl_']))) | tojson }}
+  },
+  "storage": {
+    "max_database_size": {{ (metricsd_max_database_size | default('auto')) | string | tojson }},
+    "reserved_free_space": {{ (metricsd_reserved_free_space | default('auto')) | string | tojson }},
+    "auto_reduce_retention": {{ (metricsd_auto_reduce_retention | default(true) | bool) | tojson }},
+    "wal_soft_limit": {{ (metricsd_wal_soft_limit | default('64MiB')) | string | tojson }}
+  }
+}

@@ -1,4 +1,4 @@
-authelia_version: "4.39.20"
+authelia_version: "4.39.28"
 authelia_jwt_secret: ""        # openssl rand -hex 64
 authelia_session_secret: ""    # openssl rand -hex 64
 authelia_storage_key: ""       # openssl rand -hex 64

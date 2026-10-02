@@ -15,8 +15,17 @@ Environment="HAPROXY_CERTD_DRY_RUN={{ haproxy_certd_dry_run | default('0') }}"
 Environment="HAPROXY_CERTD_SOCKET={{ certd_socket_path }}"
 Environment="HAPROXY_CERTD_SOCKET_GROUP={{ app_group }}"
 Environment="HAPROXY_CERTS_DIR={{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+# Standby certificates, kept out of the directory above on purpose: one file
+# there that is not a certificate is a fatal HAProxy configuration error.
+Environment="HAPROXY_CERTS_AVAILABLE_DIR={{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}"
 Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
 Environment="HAPROXY_CA_ROOT_DIR={{ haproxy_ca_root_dir | default('/etc/haproxy/certificate-authorities') }}"
+Environment="HAPROXY_MTLS_DIR={{ haproxy_mtls_dir | default('/etc/haproxy/mtls') }}"
+Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-certd.py', rstrip=false) | hash('sha256') }}"
 
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py

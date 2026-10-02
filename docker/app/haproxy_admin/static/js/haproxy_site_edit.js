@@ -577,11 +577,6 @@ if (effTcpPassForCheck === true) {
         }
       }
 
-      var wafEl = document.getElementById("waf");
-      if (wafEl) {
-        var wv = wafEl.value.trim();
-        if (wv) site.waf = wv;
-      }
 
       // Load balancing / sticky / sessions
       var balanceEl = document.getElementById("balance");
@@ -645,9 +640,28 @@ if (effTcpPassForCheck === true) {
         site.prefer_last_server = pls;
       }
 
-      var spliceVal = tristateSelectValue("enable_splice_backend");
-      if (spliceVal !== undefined) {
-        site.enable_splice_backend = spliceVal;
+
+      // Only these addresses may reach the site. Sent as a list; an empty
+      // textarea removes the key and the site is public again.
+      var allowEl = document.getElementById("allow_ips");
+      if (allowEl) {
+        var allowLines = allowEl.value
+          .split(/[\s,;]+/)
+          .map(function (s) { return s.trim(); })
+          .filter(function (s) { return s.length > 0; });
+        if (allowLines.length) {
+          site.allow_ips = allowLines;
+        }
+      }
+
+      // Client certificates. Independent of the certificate source above:
+      // which authority signs this site's server certificate says nothing
+      // about which authority may vouch for a visitor.
+      var mtlsModeEl = document.getElementById("mtls_mode");
+      var mtlsCaEl = document.getElementById("mtls_ca_id");
+      if (mtlsModeEl && (mtlsModeEl.value === "optional" || mtlsModeEl.value === "required")) {
+        site.mtls_mode = mtlsModeEl.value;
+        site.mtls_ca_id = mtlsCaEl ? mtlsCaEl.value : "";
       }
 
       // Certificate source. Keep le_managed for backward compatibility.
@@ -659,6 +673,33 @@ if (effTcpPassForCheck === true) {
           var externalCaSelect = document.getElementById("external_ca_id");
           if (externalCaSelect && externalCaSelect.value) {
             site.external_ca_id = externalCaSelect.value;
+          }
+        }
+      }
+
+      // ACME challenge. A saved DNS profile is what selects DNS-01, so there
+      // is no separate stored flag: no profile means HTTP-01.
+      var dnsChallengeEl = document.getElementById("acme_challenge_dns");
+      var dnsProfileEl = document.getElementById("dns_profile");
+      if (
+        certModeRadio &&
+        certModeRadio.value === "letsencrypt" &&
+        dnsChallengeEl &&
+        dnsChallengeEl.checked &&
+        dnsProfileEl &&
+        dnsProfileEl.value
+      ) {
+        site.dns_profile = dnsProfileEl.value;
+
+        // Certificate-only names, where a wildcard is allowed.
+        var certAltEl = document.getElementById("field-cert-alt-names");
+        if (certAltEl) {
+          var certAltLines = certAltEl.value
+            .split("\n")
+            .map(function (s) { return s.trim(); })
+            .filter(function (s) { return s.length > 0; });
+          if (certAltLines.length) {
+            site.cert_alt_names = certAltLines;
           }
         }
       }
@@ -697,10 +738,18 @@ delete site.le_managed;
 delete site.key_types;
 delete site.certificate_source;
 delete site.external_ca_id;
+delete site.dns_profile;
+delete site.cert_alt_names;
 
 delete site.redirect_to_https;
 delete site.authelia_enabled;
 delete site.zero_trust;
+// The client certificate is checked in the HTTP frontend, which a
+// passthrough site never reaches.
+delete site.mtls_mode;
+delete site.mtls_ca_id;
+// A passthrough site is routed on SNI before any HTTP rule runs.
+delete site.allow_ips;
 
 delete site.backend_ssl;
 delete site.backend_ssl_verify;
@@ -722,7 +771,6 @@ delete site.health_status;
 
 // HTTP-only extras
 delete site.hsts;
-delete site.waf;
 
 // Sticky/cookie/HTTP timeouts — not актуальны for TCP passthrough
 delete site.sticky;
@@ -732,7 +780,6 @@ delete site.http_reuse;
 delete site.session_timeout;
 delete site.http_keepalive_timeout;
 delete site.prefer_last_server;
-delete site.enable_splice_backend;
 
 // Geo/ACL (in текущей реализации у тебя это HTTP-only)
 delete site.geo;
@@ -925,6 +972,23 @@ delete site.geo_countries;
     if (certModeExternal) certModeExternal.addEventListener("change", updateCertModeUI);
     if (certModeInternal) certModeInternal.addEventListener("change", updateCertModeUI);
     updateCertModeUI();
+
+    // ------------------------------------------------------------------
+    // HTTP-01 / DNS-01 selector.
+    // ------------------------------------------------------------------
+    var challengeHttp = document.getElementById("acme_challenge_http");
+    var challengeDns = document.getElementById("acme_challenge_dns");
+    var blockDns = document.getElementById("block-dns-01");
+
+    function updateChallengeUI() {
+      if (!blockDns) return;
+      var useDns = !!(challengeDns && challengeDns.checked);
+      blockDns.style.display = useDns ? "" : "none";
+    }
+
+    if (challengeHttp) challengeHttp.addEventListener("change", updateChallengeUI);
+    if (challengeDns) challengeDns.addEventListener("change", updateChallengeUI);
+    updateChallengeUI();
 
     // ------------------------------------------------------------------
     // Модальное окно логов выпуска сертификата
@@ -1143,7 +1207,8 @@ delete site.geo_countries;
 
       certFileInput.addEventListener("change", function () {
         if (!certFileInput.files || certFileInput.files.length === 0) {
-          certFileNameSpan.textContent = "No file selected";
+          // The span is exempt: a file name must not be translated.
+          certFileNameSpan.textContent = window.t("No file selected");
         } else {
           certFileNameSpan.textContent =
             certFileInput.files[0].name || "File selected";
@@ -1306,13 +1371,12 @@ delete site.geo_countries;
   var blockHttpRight = document.getElementById("block-http-right");
 
   var rowHsts = document.getElementById("row-hsts");
-  var rowWaf = document.getElementById("row-waf");
 
   // In TCP passthrough:
   // - скрываем backend_host (Host header not применим)
   // - оставляем alt_names and balance, but скрываем cert + sticky/cookie/HTTP-only таймауты
   // - скрываем HTTP-only правую колонку
-  // - скрываем hsts/waf
+  // - скрываем hsts
   if (isTcpMode) {
     setBlockVisible(blockBackendHost, false);
     setInputsDisabled(blockBackendHost, true);
@@ -1332,8 +1396,6 @@ delete site.geo_countries;
     setBlockVisible(rowHsts, false);
     setInputsDisabled(rowHsts, true);
 
-    setBlockVisible(rowWaf, false);
-    setInputsDisabled(rowWaf, true);
   } else {
     setBlockVisible(blockBackendHost, true);
     setInputsDisabled(blockBackendHost, false);
@@ -1353,8 +1415,6 @@ delete site.geo_countries;
     setBlockVisible(rowHsts, true);
     setInputsDisabled(rowHsts, false);
 
-    setBlockVisible(rowWaf, true);
-    setInputsDisabled(rowWaf, false);
   }
 
   // Health-check зависит and от tcp_passthrough тоже

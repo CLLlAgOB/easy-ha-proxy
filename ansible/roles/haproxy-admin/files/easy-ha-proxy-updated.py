@@ -179,6 +179,30 @@ CONTAINER_COMPONENTS = frozenset(
 )
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: the
+# job still runs on a gateway without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="updated")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine a job failed. Never disturbs the job itself."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 HAPROXY_TRANSACTION_ACTIVE_STATES = frozenset(
     {"prepared", "pending_confirmation", "rolling_back", "rollback_failed"}
 )
@@ -989,7 +1013,43 @@ def plan_component_map(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+CHANNEL_MISMATCH_MESSAGE = (
+    "This update was checked for a different release channel than the one "
+    "this gateway is set to. Save the channel first, or run the check again."
+)
+
+
+def validate_plan_channel(plan: dict[str, Any]) -> None:
+    """Refuse to apply a plan checked for a channel this gateway is not on.
+
+    The check deliberately previews whichever channel is selected on the
+    page, saved or not. Applying that preview was never a supported path, and
+    it failed in the least helpful way available: the apply-time recheck fell
+    back to the branch in the gateway's metadata, found a different
+    candidate, and reported "the update candidate changed; check again" --
+    which it would repeat after every check, for ever. Had the recheck
+    followed the preview instead, the gateway would have been moved to
+    another branch without its channel ever being saved.
+
+    So it is refused up front, in words that say what actually happened.
+    """
+
+    deployment = read_deployment()
+    planned_source = str(plan.get("source_channel") or "github")
+    planned_image = str(plan.get("image_channel") or "latest")
+    mismatch = (
+        planned_source != deployment.get("source_channel", "github")
+        or planned_image != deployment.get("image_channel", "latest")
+    )
+    planned_branch = plan.get("branch")
+    if not mismatch and planned_source != "local" and planned_branch:
+        mismatch = str(planned_branch) != deployment.get("branch", "main")
+    if mismatch:
+        raise UpdatedError(CHANNEL_MISMATCH_MESSAGE, code="channel_mismatch")
+
+
 def validate_selection(plan: dict[str, Any], components: list[str]) -> None:
+    validate_plan_channel(plan)
     available = plan_component_map(plan)
     for component_id in components:
         component = available.get(component_id)
@@ -1219,6 +1279,12 @@ def finish_failed(job_id: str, exc: Exception, log: str = "") -> None:
         updates["output"] = {"log": candidate_log}
     update_job(job_id, **updates)
     LOG.warning("Update job %s failed: %s", job_id, exc)
+    report_alert(
+        "update.failed",
+        job_id,
+        "A software update job failed",
+        (str(exc) or exc.__class__.__name__)[:1000],
+    )
 
 
 def check_worker(
@@ -1336,6 +1402,9 @@ def apply_worker(
             job_id,
             image_channel=str(plan.get("image_channel") or "latest"),
             source_channel=str(plan.get("source_channel") or "github"),
+            # The branch the plan was checked against, so the recheck
+            # compares like with like instead of trusting the metadata.
+            branch=(str(plan["branch"]) if plan.get("branch") else None),
         )
         validate_fresh_candidates(plan, fresh, components)
         validate_reviewed_container_candidates(plan, fresh, components)

@@ -992,7 +992,12 @@ def _probe_compose(
                 "error": _short_error(compose_result),
             },
         )
-    images = list(
+    # Sorted, because the plan is signed. docker compose config --images
+    # prints images in no fixed order -- two checks run back to back on a
+    # live gateway listed the same three differently -- so an unsorted list
+    # changed the signature of an unchanged component by itself, and
+    # applying it failed with "the update candidate changed" at random.
+    images = sorted(
         dict.fromkeys(
             line.strip()
             for line in compose_result.stdout.splitlines()
@@ -1398,6 +1403,10 @@ def build_update_plan(
         "generated_at": generated_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "source_channel": resolved_source_channel,
         "image_channel": resolved_image_channel,
+        # Recorded so applying this plan can be held to the branch it was
+        # checked against; the apply-time recheck used to fall back to
+        # whatever the gateway's metadata said.
+        "branch": resolved_branch,
         "components": components,
         "has_updates": bool(actionable),
         "actionable_components": actionable,

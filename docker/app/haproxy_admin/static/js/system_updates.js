@@ -370,6 +370,22 @@
   function technicalCell(value) {
     return `<span class="mono notranslate" translate="no" data-i18n-skip>${escape(versionText(value))}</span>`;
   }
+  // The release channel a plan was checked for, derived the way the broker
+  // derives it: local if the source is local, otherwise keyed off the image.
+  function planRelease(plan) {
+    if (!plan) return "";
+    if (String(plan.source_channel || "github") === "local") return "local";
+    return String(plan.image_channel || "latest") === "alpha" ? "alpha" : "stable";
+  }
+  // A check previews whichever channel is selected, saved or not. That
+  // preview is worth having, but it cannot be applied: the broker refuses a
+  // plan for a channel the gateway is not set to. Say so here, before the
+  // operator types UPDATE, rather than after.
+  function planForOtherChannel(plan) {
+    const release = planRelease(plan);
+    return Boolean(release) && release !== installedRelease;
+  }
+
   function renderPlan(plan) {
     currentPlan = plan;
     resetConfirmation();
@@ -382,6 +398,8 @@
     const skipped = components.filter((item) => item.state === "blocked");
     const current = components.filter((item) => item.state === "current").length;
     const stale = Boolean(plan && (plan.stale === true || plan.expired === true || plan.valid === false));
+    const otherChannel = planForOtherChannel(plan);
+    const blocked = stale || otherChannel;
     const warnings = Array.isArray(plan?.warnings) ? plan.warnings.filter(Boolean) : [];
 
     byId("updates-components-wrap").hidden = !available.length;
@@ -389,9 +407,9 @@
     byId("updates-no-updates").textContent = unknown.length
       ? t("No actionable updates were found, but some components could not be checked.")
       : t("Everything is up to date.");
-    byId("updates-confirm-panel").hidden = !available.length || stale;
-    byId("updates-select-all").disabled = !available.length || stale;
-    byId("updates-select-none").disabled = !available.length || stale;
+    byId("updates-confirm-panel").hidden = !available.length || blocked;
+    byId("updates-select-all").disabled = !available.length || blocked;
+    byId("updates-select-none").disabled = !available.length || blocked;
     byId("updates-plan-summary").textContent = !plan
       ? t("Run a check to build a current update plan.")
       : t("{available} updates available; {current} components are current; {unknown} could not be checked; {skipped} checks skipped.", {
@@ -401,10 +419,12 @@
           skipped: skipped.length
         });
     const warning = byId("updates-plan-warning");
-    warning.hidden = !stale && !warnings.length;
-    warning.textContent = stale
-      ? t("This update plan is stale. Check for updates again before applying it.")
-      : warnings.map((item) => t(String(item))).join(" ");
+    warning.hidden = !blocked && !warnings.length;
+    warning.textContent = otherChannel
+      ? t("This check previews a release channel that is not saved on this gateway. Save the channel before applying these updates.")
+      : stale
+        ? t("This update plan is stale. Check for updates again before applying it.")
+        : warnings.map((item) => t(String(item))).join(" ");
 
     byId("updates-components-body").innerHTML = available.map((component) => {
       // Components whose candidates are already named in the reason (daemons,
@@ -460,7 +480,7 @@
     const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
     const planUsable = Boolean(currentPlan && !(
       currentPlan.stale === true || currentPlan.expired === true || currentPlan.valid === false
-    ));
+    ) && !planForOtherChannel(currentPlan));
     const source = boxes.find((box) => ["source", "all"].includes(box.dataset.updateComponent));
     if (["source", "all"].includes(changedId) && source && source.checked) {
       boxes.forEach((box) => {
@@ -742,7 +762,7 @@
     byId("updates-check").classList.toggle("loading", busy);
     const planUsable = Boolean(currentPlan && !(
       currentPlan.stale === true || currentPlan.expired === true || currentPlan.valid === false
-    ));
+    ) && !planForOtherChannel(currentPlan));
     byId("updates-select-all").disabled = busy || operationRunning || !planUsable;
     byId("updates-select-none").disabled = busy || operationRunning || !planUsable;
     updateChannelControls();

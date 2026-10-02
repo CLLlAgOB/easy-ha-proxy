@@ -4,6 +4,7 @@ import traceback
 import os
 from flask import jsonify, request
 
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
 from .services_haproxy_sites import (
     delete_site,
@@ -44,7 +45,23 @@ def haproxy_site_save():
     site = payload.get("site") or {}
     original_name = payload.get("original_name") or None
 
+    # The stored site is read before the write so the record can say what
+    # moved rather than dump the whole object. An unknown name means a create.
+    name = str(site.get("name") or original_name or "").strip()
+    before = {}
+    if original_name:
+        _defaults, previous, _effective = get_site_raw_and_effective(original_name)
+        before = previous or {}
+
     ok, msg = save_site_from_json(site, original_name=original_name)
+    record_request(
+        "site.update" if before else "site.create",
+        object_type="site",
+        object_id=name,
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        summary=summarize(before, site) if ok else "",
+        detail="" if ok else str(msg)[:500],
+    )
     status = 200 if ok else 400
     return jsonify({"ok": ok, ("message" if ok else "error"): msg}), status
 
@@ -89,6 +106,17 @@ def haproxy_site_upload_cert(site_name):
         external_ca_id=external_ca_id,
     )
 
+    # The uploaded bytes hold a private key, so only the shape of the upload is
+    # recorded: which site, which authority, and how large the file was.
+    record_request(
+        "certificate.upload",
+        object_type="site",
+        object_id=site_name,
+        result=RESULT_SUCCESS if res.get("ok") else RESULT_FAILURE,
+        summary=f"authority: {external_ca_id}, bytes: {len(pem_bytes)}",
+        detail="" if res.get("ok") else str(res.get("error") or "")[:500],
+    )
+
     # upload_cert_for_site всегда возвращает dict с ok/message|error
     return jsonify(res), 200
 
@@ -100,4 +128,11 @@ def haproxy_site_delete(name):
     Пока фронт этим не пользуется, но можно будет подвязать delete по AJAX.
     """
     ok, msg = delete_site(name)
+    record_request(
+        "site.delete",
+        object_type="site",
+        object_id=name,
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        detail="" if ok else str(msg)[:500],
+    )
     return jsonify({"ok": ok, ("message" if ok else "error"): msg})

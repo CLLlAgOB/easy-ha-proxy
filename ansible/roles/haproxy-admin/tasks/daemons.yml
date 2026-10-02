@@ -5,4 +5,9 @@
 - import_tasks: controld.yml
 - import_tasks: backupd.yml
 - import_tasks: updated.yml
+# alertd first: it installs the shared alert client that the producers below
+# import from their own directory.
+- import_tasks: alertd.yml
+- import_tasks: metricsd.yml
+- import_tasks: guardd.yml
 - import_tasks: healthd.yml

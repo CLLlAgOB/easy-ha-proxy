@@ -196,7 +196,6 @@ function buildSitePayload(form) {
   if (httpKa) site.http_keepalive_timeout = httpKa;
 
   site.prefer_last_server = checked("field-prefer-last-server");
-  site.enable_splice_backend = checked("field-enable-splice-backend");
 
   // Баланс / sticky
   const balance = val("field-balance");
@@ -221,8 +220,6 @@ function buildSitePayload(form) {
   const hsts = val("field-hsts");
   if (hsts) site.hsts = hsts;
 
-  const waf = val("field-waf");
-  if (waf) site.waf = waf;
 
   site.compress = checked("field-compress");
 

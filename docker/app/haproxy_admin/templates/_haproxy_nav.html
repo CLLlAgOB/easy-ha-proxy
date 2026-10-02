@@ -1,46 +1,131 @@
 {# _haproxy_nav.html
-   Shared navigation for the HAProxy administration section. #}
+   The header navigation, shared by every administration page.
 
-<a class="btn" href="{{ url_for('routes.haproxy_sites_page') }}">
-  HTTP sites
-</a>
+   Eighteen buttons in one wrapping row took three lines and pushed the page
+   below the fold. They are grouped here by the job someone is doing, which
+   turns nineteen targets into eight and fits one line.
 
-<a class="btn" href="{{ url_for('routes.haproxy_tcp_page') }}">
-  TCP proxies
-</a>
+   One nav for the whole application, not one per section: from a HAProxy
+   page there used to be no way to reach Authelia at all except by going Home
+   first, and the dashboard offered a different set of buttons again.
 
-<a class="btn" href="{{ url_for('routes.haproxy_udp_page') }}">
-  UDP forwarding
-</a>
+   Two of the group names are chosen rather than obvious. Authelia is named
+   for the product, not for an idea like "Access": every page in it is an
+   Authelia page, and someone hunting for Authelia should not have to guess
+   which abstract noun it was filed under -- so the menu carries the name and
+   the items inside drop the prefix. And the GeoIP database sits under
+   Protection, not beside the certificates: a country list is not a naming
+   concern, it exists so that requests from somewhere can be refused.
 
-<a class="btn" href="{{ url_for('routes.haproxy_config_page') }}">
-  HAProxy configuration
-</a>
+   The menu triggers and the dashboard link carry the same class. They were
+   two rules that had to be kept identical, and they were not: on a live
+   gateway the dashboard link came out visibly different from its
+   neighbours. What differs between them now is what should -- a menu has a
+   caret, the dashboard has a rule before it, because it is a destination
+   rather than a menu.
 
-<a class="btn" href="{{ url_for('routes.haproxy_geoip_page') }}">
-  GeoIP database
-</a>
+   Built on <details>, so it opens and closes with no script; nav.js only
+   adds what a script is needed for -- closing the others, Escape, clicking
+   away. The group holding the current page is marked, so the header still
+   answers "where am I" now that the links are hidden. #}
 
-<a class="btn" href="{{ url_for('routes.haproxy_certs_page') }}">
-  Certificates
-</a>
+{% set nav_groups = [
+  {
+    "label": "Routing",
+    "items": [
+      ("routes.haproxy_sites_page",    "HTTP sites"),
+      ("routes.haproxy_tcp_page",      "TCP proxies"),
+      ("routes.haproxy_udp_page",      "UDP forwarding"),
+      ("routes.haproxy_backends_page", "Backends"),
+    ],
+  },
+  {
+    "label": "Configuration",
+    "items": [
+      ("routes.haproxy_config_page",  "HAProxy configuration"),
+      ("routes.config_history_page",  "Configuration history"),
+      ("routes.mail_settings_page",   "Mail settings"),
+    ],
+  },
+  {
+    "label": "Certificates",
+    "items": [
+      ("routes.haproxy_certs_page", "Certificates"),
+      ("routes.dns_providers_page", "DNS providers"),
+      ("routes.cert_delivery_page", "Certificate delivery"),
+    ],
+  },
+  {
+    "label": "Authelia",
+    "items": [
+      ("authelia_acl.edit_rules",         "Access rules"),
+      ("routes.authelia_users",           "Users"),
+      ("routes.authelia_bans",            "Bans"),
+      ("authelia_settings.edit_settings", "Settings"),
+    ],
+  },
+  {
+    "label": "Protection",
+    "items": [
+      ("routes.adaptive_protection_page", "Adaptive protection"),
+      ("routes.detection_rules_page",     "Detection rules"),
+      ("routes.request_log_page",         "Request log"),
+      ("routes.haproxy_geoip_page",       "GeoIP database"),
+    ],
+  },
+  {
+    "label": "Observation",
+    "items": [
+      ("routes.monitoring_page",    "Monitoring"),
+      ("routes.alerts_page",        "Alerts"),
+      ("routes.audit_page",         "Change log"),
+      ("routes.system_health_page", "Status"),
+      ("routes.haproxy_stats_page", "HAProxy statistics"),
+    ],
+  },
+  {
+    "label": "Maintenance",
+    "items": [
+      ("system_updates.page", "Software updates"),
+      ("system_backups.page", "Backup & restore"),
+    ],
+  },
+] %}
 
-<a class="btn" href="{{ url_for('routes.mail_settings_page') }}">
-  Mail settings
-</a>
+<nav class="nav-groups" aria-label="Administration sections">
+  {% for group in nav_groups %}
+  {% set here = group["items"] | selectattr("0", "equalto", request.endpoint) | list | length > 0 %}
+  <details class="nav-group">
+    <summary class="nav-item nav-item-menu{% if here %} nav-item-current{% endif %}">
+      <span>{{ group["label"] }}</span>
+      <svg class="nav-caret" width="10" height="10" viewBox="0 0 10 10"
+           aria-hidden="true" focusable="false">
+        <path d="M1 3.5L5 7.5L9 3.5" fill="none" stroke="currentColor"
+              stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </summary>
+    <div class="nav-group-items">
+      {% for endpoint, label in group["items"] %}
+      <a class="nav-group-item{% if endpoint == request.endpoint %} nav-group-item-current{% endif %}"
+         href="{{ url_for(endpoint) }}"
+         {% if endpoint == request.endpoint %}aria-current="page"{% endif %}>
+        {{ label }}
+      </a>
+      {% endfor %}
+      {% if group["label"] == "Maintenance" and debug_routes_enabled | default(false) %}
+      <a class="nav-group-item{% if request.endpoint == 'routes.debug' %} nav-group-item-current{% endif %}"
+         href="{{ url_for('routes.debug') }}">
+        Diagnostics
+      </a>
+      {% endif %}
+    </div>
+  </details>
+  {% endfor %}
 
-<a class="btn" href="{{ url_for('routes.system_health_page') }}">
-  Status
-</a>
-
-<a class="btn" href="{{ url_for('system_updates.page') }}">
-  Software updates
-</a>
-
-<a class="btn" href="{{ url_for('system_backups.page') }}">
-  Backup & restore
-</a>
-
-<a class="btn" href="{{ url_for('routes.index') }}">
-  Home
-</a>
+  <span class="nav-separator" aria-hidden="true"></span>
+  <a class="nav-item{% if request.endpoint == 'routes.index' %} nav-item-current{% endif %}"
+     href="{{ url_for('routes.index') }}"
+     {% if request.endpoint == 'routes.index' %}aria-current="page"{% endif %}>
+    Dashboard
+  </a>
+</nav>

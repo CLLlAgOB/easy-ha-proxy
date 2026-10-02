@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}DNS providers{% endblock %}
+{% block header_title %}DNS providers{% endblock %}
+
+{% block header_buttons %}
+  {% include "_haproxy_nav.html" %}
+{% endblock %}
+
+{% block content %}
+
+<style>
+.dp-profile {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(120px, auto) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.dp-profile:last-child { border-bottom: none; }
+.dp-name { font-weight: 600; }
+
+.dp-state {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.dp-ready { background: rgba(46,158,91,.15); color: #2e9e5b; }
+.dp-missing { background: rgba(200,161,58,.18); color: #c8a13a; }
+
+.dp-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 18px;
+  margin-bottom: 14px;
+}
+
+.dp-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dp-form input, .dp-form select {
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.dp-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 26px 0;
+  text-align: center;
+}
+
+.dp-note {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 10px;
+}
+</style>
+
+<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
+     background: rgba(var(--accent-primary-rgb), .07);">
+  DNS-01 proves control of a domain through a DNS record instead of an HTTP request, which is the only way to obtain a wildcard certificate and the only option when port 80 is unreachable. A saved credential is written root-only and is never sent back to this page: to change one, enter it again.
+</div>
+
+<div class="rt-notice error" id="dp-error" hidden></div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Profiles</h2>
+  </div>
+  <div id="dp-list" data-i18n-skip translate="no"></div>
+  <div class="dp-empty" id="dp-empty">No DNS provider profiles yet</div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Add or replace a profile</h2>
+  </div>
+
+  <div class="dp-form">
+    <label>
+      Profile name
+      <input type="text" id="dp-name" placeholder="my-cloudflare" maxlength="40">
+    </label>
+    <label>
+      Provider
+      <select id="dp-provider">
+        {% for provider in providers %}
+          <option value="{{ provider }}">{{ provider }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+
+  <div class="dp-form" id="dp-credentials"></div>
+
+  <div class="ap-sim-actions">
+    <button class="btn" type="button" id="dp-save">Save profile</button>
+    <span class="mon-sub" id="dp-result" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="dp-note" id="dp-plugin-note"></p>
+</div>
+
+<script src="{{ url_for('static', filename='js/dns_providers.js') }}"></script>
+{% endblock %}

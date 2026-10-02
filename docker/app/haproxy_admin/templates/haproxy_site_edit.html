@@ -120,14 +120,14 @@
                 </label>
                 <input id="field-backend-ip" name="backend_ip" type="text" class="form-input"
                     value="{{ site.backend_ip or '' }}"
-                    placeholder="{{ eff.backend_ip or site_defaults.backend_ip or '' }}">
+                    placeholder="{{ eff.backend_ip or site_defaults.backend_ip or '' }}" data-i18n-skip translate="no">
 
                 <label class="form-label" for="field-backend-port" style="margin-top: 10px;">
                     backend_port
                 </label>
                 <input id="field-backend-port" name="backend_port" type="number" min="1" max="65535" class="form-input"
                     value="{{ site.backend_port or '' }}"
-                    placeholder="{{ eff.backend_port or site_defaults.backend_port or 80 }}">
+                    placeholder="{{ eff.backend_port or site_defaults.backend_port or 80 }}" data-i18n-skip translate="no">
 
                 <div class="table-meta">
                     May be left empty if a backend server list is defined below.
@@ -139,7 +139,7 @@
                         backend_host (Host-header by default)
                     </label>
                     <input id="field-backend-host" name="backend_host" type="text" class="form-input"
-                        value="{{ site.backend_host or '' }}" placeholder="{{ eff.backend_host or eff.domain }}">
+                        value="{{ site.backend_host or '' }}" placeholder="{{ eff.backend_host or eff.domain }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         If omitted, the request <code>Host</code> is used ({{ eff.domain }}).
                     </div>
@@ -177,12 +177,12 @@
                         <tr class="backend-row">
                             <td>
                                 <input type="text" class="form-input backend-name" placeholder="srv{{ loop.index }}"
-                                    value="{{ srv.name or ('srv' ~ loop.index) }}">
+                                    value="{{ srv.name or ('srv' ~ loop.index) }}" data-i18n-skip translate="no">
                             </td>
                             <td>
                                 <input type="text" class="form-input backend-host"
                                     placeholder="{{ site.backend_ip or eff.backend_ip or '' }}"
-                                    value="{{ srv.host or '' }}">
+                                    value="{{ srv.host or '' }}" data-i18n-skip translate="no">
                             </td>
                             <td>
                                 <input type="number" min="1" max="65535" class="form-input backend-port"
@@ -214,7 +214,7 @@
                             <td>
                                 <input type="text" class="form-input backend-host"
                                     placeholder="{{ site.backend_ip or eff.backend_ip or '' }}"
-                                    value="{{ site.backend_ip or eff.backend_ip or '' }}">
+                                    value="{{ site.backend_ip or eff.backend_ip or '' }}" data-i18n-skip translate="no">
                             </td>
                             <td>
                                 <input type="number" min="1" max="65535" class="form-input backend-port"
@@ -319,6 +319,60 @@
                                 </label>
                             </div>
 
+                            <label class="form-label" style="margin-top: 14px;">Validation</label>
+                            <div class="table-meta">
+                                HTTP-01 answers the challenge on port 80. DNS-01 writes a TXT record through a
+                                saved DNS provider profile, which works when port 80 is unreachable and is the
+                                only way to get a wildcard certificate.
+                            </div>
+                            {% set current_dns_profile = site.dns_profile|default('') %}
+                            <div style="margin-top: 6px; display:flex; flex-wrap:wrap; gap:16px;">
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="acme_challenge" id="acme_challenge_http" value="http-01"
+                                        {% if not current_dns_profile %}checked{% endif %}>
+                                    <span translate="no" data-i18n-skip>HTTP-01</span>
+                                </label>
+                                <label class="form-checkbox-inline">
+                                    <input type="radio" name="acme_challenge" id="acme_challenge_dns" value="dns-01"
+                                        {% if current_dns_profile %}checked{% endif %}>
+                                    <span translate="no" data-i18n-skip>DNS-01</span>
+                                </label>
+                            </div>
+
+                            <div id="block-dns-01" style="margin-top:10px;{% if not current_dns_profile %} display:none;{% endif %}">
+                                <label class="form-label" for="dns_profile">DNS provider profile</label>
+                                {% set known_profiles = dns_profiles|default([])|map(attribute='name')|list %}
+                                <select id="dns_profile" name="dns_profile" class="form-input">
+                                    <option value="">Select a DNS provider profile</option>
+                                    {% for profile in dns_profiles|default([]) %}
+                                    <option value="{{ profile.name }}" translate="no" data-i18n-skip
+                                        {% if current_dns_profile == profile.name %}selected{% endif %}>{{ profile.name }} ({{ profile.provider }}){% if not profile.plugin_available %} [!]{% endif %}</option>
+                                    {% endfor %}
+                                    {% if current_dns_profile and current_dns_profile not in known_profiles %}
+                                    <option value="{{ current_dns_profile }}" translate="no" data-i18n-skip selected>{{ current_dns_profile }} [?]</option>
+                                    {% endif %}
+                                </select>
+                                <div class="table-meta" style="margin-top:4px;">
+                                    A profile marked [!] is missing its Certbot plugin, and one marked [?] no longer
+                                    exists; neither can issue a certificate. Profiles are created on the DNS providers page.
+                                </div>
+                                <div class="table-meta" style="margin-top:4px;">
+                                    <a href="{{ url_for('routes.dns_providers_page') }}">Open the DNS providers page</a>
+                                </div>
+
+                                <label class="form-label" for="field-cert-alt-names" style="margin-top: 12px;">
+                                    Extra certificate names
+                                </label>
+                                {% set cert_alt_list = site.cert_alt_names or [] %}
+                                <textarea id="field-cert-alt-names" name="cert_alt_names" class="form-input mono" rows="3"
+                                    placeholder="*.example.com" data-i18n-skip translate="no">{{ cert_alt_list | join("\n") }}</textarea>
+                                <div class="table-meta">
+                                    One name per line. These are added to the certificate only and are never routed,
+                                    which is where a wildcard belongs: new subdomains can then be added to alt names
+                                    later without reissuing the certificate.
+                                </div>
+                            </div>
+
                             <button type="button" class="btn" id="btn-issue-cert" style="margin-top: 10px;">
                                 Issue/renew Let's Encrypt certificate
                             </button>
@@ -353,7 +407,8 @@
                                 <button type="button" class="btn btn-icon" id="cert-file-choose">
                                     Choose file
                                 </button>
-                                <span class="file-name" id="cert-file-name">No file selected</span>
+                                <span class="file-name" id="cert-file-name"
+                                      data-i18n-skip translate="no">No file selected</span>
                             </div>
 
                             <button type="button" class="btn" id="btn-upload-cert" style="margin-top: 8px;">
@@ -384,7 +439,7 @@
 
 <label class="form-label" for="balance" style="margin-top: 10px;">balance</label>
                         <input id="balance" name="balance" type="text" class="form-input"
-                            value="{{ site.balance or '' }}" placeholder="{{ eff.balance or site_defaults.balance }}">
+                            value="{{ site.balance or '' }}" placeholder="{{ eff.balance or site_defaults.balance }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Backend load-balancing algorithm (for example, <code>roundrobin</code>,
                             <code>leastconn</code>, <code>source</code>).
@@ -409,7 +464,7 @@
                         <label class="form-label" for="cookie_name" style="margin-top: 10px;">cookie_name</label>
                         <input id="cookie_name" name="cookie_name" type="text" class="form-input"
                             value="{{ site.cookie_name or '' }}"
-                            placeholder="{{ eff.cookie_name or site_defaults.cookie_name }}">
+                            placeholder="{{ eff.cookie_name or site_defaults.cookie_name }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Cookie name when using <code>sticky="cookie"</code>.
                             Empty — value from <code>site_defaults</code>.
@@ -418,7 +473,7 @@
                         <label class="form-label" for="cookie_attrs" style="margin-top: 10px;">cookie_attrs</label>
                         <input id="cookie_attrs" name="cookie_attrs" type="text" class="form-input"
                             value="{{ site.cookie_attrs or '' }}"
-                            placeholder="{{ eff.cookie_attrs or site_defaults.cookie_attrs }}">
+                            placeholder="{{ eff.cookie_attrs or site_defaults.cookie_attrs }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Cookie attributes (for example, <code>insert nocache</code>).
                             Empty — use <code>site_defaults</code>.
@@ -443,7 +498,7 @@
                             style="margin-top: 10px;">session_timeout</label>
                         <input id="session_timeout" name="session_timeout" type="text" class="form-input"
                             value="{{ site.session_timeout or '' }}"
-                            placeholder="{{ eff.session_timeout or site_defaults.session_timeout }}">
+                            placeholder="{{ eff.session_timeout or site_defaults.session_timeout }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             Backend session timeout (for example, <code>15m</code>, <code>1h</code>).
                             Empty — use the value from <code>site_defaults</code>.
@@ -453,7 +508,7 @@
                             style="margin-top: 10px;">http_keepalive_timeout</label>
                         <input id="http_keepalive_timeout" name="http_keepalive_timeout" type="text" class="form-input"
                             value="{{ site.http_keepalive_timeout or '' }}"
-                            placeholder="{{ eff.http_keepalive_timeout or site_defaults.http_keepalive_timeout }}">
+                            placeholder="{{ eff.http_keepalive_timeout or site_defaults.http_keepalive_timeout }}" data-i18n-skip translate="no">
                         <div class="table-meta">
                             HTTP keep-alive timeout. Empty — use <code>site_defaults</code>.
                         </div>
@@ -473,20 +528,6 @@
                             Controls option <code>option prefer-last-server</code> in backend.
                         </div>
 
-                        {% set raw_enable_splice = site.enable_splice_backend if site.enable_splice_backend is defined
-                        else None %}
-                        <label class="form-label" for="enable_splice_backend"
-                            style="margin-top: 10px;">enable_splice_backend</label>
-                        <select id="enable_splice_backend" name="enable_splice_backend" class="form-input">
-                            <option value="">Default (from site_defaults)</option>
-                            <option value="true" {% if raw_enable_splice is sameas true %}selected{% endif %}>Enabled
-                            </option>
-                            <option value="false" {% if raw_enable_splice is sameas false %}selected{% endif %}>
-                                Disabled</option>
-                        </select>
-                        <div class="table-meta">
-                            Enables/disables «splice» for backend (is used in template HAProxy, if configured).
-                        </div>
                         </div>
                     </div>
 
@@ -531,6 +572,57 @@
                         <option value="false" {% if raw_authelia is sameas false %}selected{% endif %}>Disabled
                         </option>
                     </select>
+
+                    {% set allow_list = site.allow_ips or [] %}
+                    <label class="form-label" for="allow_ips" style="margin-top: 10px;">Open only to these addresses</label>
+                    <textarea id="allow_ips" name="allow_ips" class="form-input mono" rows="3"
+                        spellcheck="false" translate="no"
+                        placeholder="203.0.113.7&#10;198.51.100.0/24">{{ allow_list | join("\n") }}</textarea>
+                    <div class="table-meta">
+                        One address or network per line. Leave empty to serve everyone.
+                        Naming the addresses is the whole access policy for this site:
+                        GeoIP, Authelia, zero-trust and the adaptive error and rate limits stop
+                        applying to it, because there is nobody left for them to sort. A client
+                        certificate, if you set one below, still applies.
+                        One thing this cannot undo — a ban is checked per connection, before the
+                        host name is known, so an address banned for what it did on another site
+                        is refused here too; put it in the global whitelist if that matters.
+                    </div>
+
+                    {% set client_auth_cas = (([internal_ca] if internal_ca else []) + (external_cas|default([]))) | selectattr('client_auth') | list %}
+                    {% set raw_mtls_mode = site.mtls_mode|default('disabled') %}
+                    <label class="form-label" for="mtls_mode" style="margin-top: 10px;">Client certificate (mTLS)</label>
+                    <select name="mtls_mode" id="mtls_mode" class="form-input">
+                        <option value="disabled" {% if raw_mtls_mode not in ['optional', 'required'] %}selected{% endif %}>Disabled</option>
+                        <option value="optional" {% if raw_mtls_mode == 'optional' %}selected{% endif %}>Optional — accepted if presented</option>
+                        <option value="required" {% if raw_mtls_mode == 'required' %}selected{% endif %}>Required — no certificate, no access</option>
+                    </select>
+                    <div class="table-meta">
+                        A separate layer from Authelia, not a replacement for it: the certificate is
+                        checked first, and a site can use either, both, or neither.
+                        Optional refuses a certificate that fails to verify but lets a
+                        visitor without one through — useful while handing certificates out.
+                    </div>
+
+                    <label class="form-label" for="mtls_ca_id" style="margin-top: 10px;">Trusted client authority</label>
+                    <select name="mtls_ca_id" id="mtls_ca_id" class="form-input">
+                        <option value="">Select an authority</option>
+                        {% for ca in client_auth_cas %}
+                        <option value="{{ ca.id }}" {% if site.mtls_ca_id|default('') == ca.id %}selected{% endif %}>
+                            {{ ca.name }} ({{ ca.id }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <div class="table-meta">
+                        {% if client_auth_cas %}
+                        Only this authority is accepted for this site. Others may be trusted by the
+                        gateway for other sites; their certificates are refused here.
+                        {% else %}
+                        No authority is trusted for client authentication yet.
+                        <a href="{{ url_for('routes.haproxy_certs_page') }}">Enable one on the Certificates page</a>,
+                        then come back.
+                        {% endif %}
+                    </div>
 
                     <label class="form-label" for="zero_trust" style="margin-top: 10px;">zero_trust</label>
                     <select name="zero_trust" id="zero_trust" class="form-input">
@@ -635,7 +727,7 @@
                     <label class="form-label" for="max_req_rate" style="margin-top: 10px;">max_req_rate</label>
                     <input id="max_req_rate" name="max_req_rate" type="number" min="0" class="form-input"
                         value="{{ site.max_req_rate or '' }}"
-                        placeholder="{{ eff.max_req_rate or site_defaults.max_req_rate or 200 }}">
+                        placeholder="{{ eff.max_req_rate or site_defaults.max_req_rate or 200 }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Maximum request rate per IP for this site.
                         If value &gt; 0, then when exceeding limit:
@@ -651,7 +743,7 @@
                     <label class="form-label" for="err_limit" style="margin-top: 10px;">err_limit</label>
                     <input id="err_limit" name="err_limit" type="number" min="0" class="form-input"
                         value="{{ site.err_limit or '' }}"
-                        placeholder="{{ eff.err_limit or site_defaults.err_limit or 8 }}">
+                        placeholder="{{ eff.err_limit or site_defaults.err_limit or 8 }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Error-rate threshold for this site.
                         Used in ACL form:
@@ -665,7 +757,7 @@
                     <label class="form-label" for="err_window" style="margin-top: 10px;">err_window</label>
                     <input id="err_window" name="err_window" type="text" class="form-input"
                         value="{{ site.err_window or '' }}"
-                        placeholder="{{ eff.err_window or site_defaults.err_window or '20s' }}">
+                        placeholder="{{ eff.err_window or site_defaults.err_window or '20s' }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Time window used to count errors and storage entries stick-table.
                         Examples: <code>10s</code>, <code>20s</code>, <code>1m</code>.
@@ -677,7 +769,7 @@
                     <label class="form-label" for="err_size" style="margin-top: 10px;">err_size</label>
                     <input id="err_size" name="err_size" type="text" class="form-input"
                         value="{{ site.err_size or '' }}"
-                        placeholder="{{ eff.err_size or site_defaults.err_size or '50k' }}">
+                        placeholder="{{ eff.err_size or site_defaults.err_size or '50k' }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Error stick-table size for this site (number IP-entries),
                         for example <code>50k</code>, <code>100k</code>, <code>200k</code>.
@@ -895,14 +987,14 @@
                     <label class="form-label" for="health_uri">health_uri</label>
                     <input id="health_uri" name="health_uri" type="text" class="form-input"
                         value="{{ site.health_uri or '' }}"
-                        placeholder="{{ eff.health_uri or site_defaults.health_uri or '/' }}">
+                        placeholder="{{ eff.health_uri or site_defaults.health_uri or '/' }}" data-i18n-skip translate="no">
                 </div>
 
                 <div id="row-health-status">
                     <label class="form-label" for="health_status" style="margin-top: 10px;">health_status</label>
                     <input id="health_status" name="health_status" type="number" min="100" max="599" class="form-input"
                         value="{{ site.health_status or '' }}"
-                        placeholder="{{ eff.health_status or site_defaults.health_status or 200 }}">
+                        placeholder="{{ eff.health_status or site_defaults.health_status or 200 }}" data-i18n-skip translate="no">
                 </div>
 
                 <div id="row-hsts">
@@ -910,17 +1002,12 @@
                     <input id="hsts" name="hsts" type="text" class="form-input"
                         value="{% if site.hsts is defined and site.hsts is not none %}{% if site.hsts is sameas true %}true{% elif site.hsts is sameas false %}false{% else %}{{ site.hsts }}{% endif %}{% endif %}"
                         placeholder="{% if eff.hsts is defined and eff.hsts is not none %}{{ eff.hsts }}{% elif site_defaults.hsts is defined and site_defaults.hsts is not none %}{{ site_defaults.hsts }}{% else %}15552000{% endif %}"
-                        pattern="(?:true|false|[0-9]+|[0-9]+d)">
+                        pattern="(?:true|false|[0-9]+|[0-9]+d)" data-i18n-skip translate="no">
                     <div class="table-meta">
                         true/false, seconds, or a duration such as <code>365d</code>.
                     </div>
                 </div>
 
-                <div id="row-waf">
-                    <label class="form-label" for="waf" style="margin-top: 10px;">waf</label>
-                    <input id="waf" name="waf" type="text" class="form-input" value="{{ site.waf or '' }}"
-                        placeholder="{{ eff.waf or site_defaults.waf or 'none' }}">
-                </div>
 
             </div>
 

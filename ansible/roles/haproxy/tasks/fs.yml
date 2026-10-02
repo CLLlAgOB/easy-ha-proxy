@@ -28,3 +28,14 @@
         owner: root
         group: root
         mode: "0755"
+
+    - name: Ensure the client authentication directory exists
+      # HAProxy has to read the client CA bundle, the per-authority issuer
+      # lists and the revocation list, and the CA root is 0700 root -- so
+      # certd derives all of it here, where nothing secret is kept.
+      ansible.builtin.file:
+        path: "{{ haproxy_mtls_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"

@@ -15,6 +15,7 @@ from flask import (
     url_for,
 )
 
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .services_authelia_settings import (
     load_settings_form_data,
     load_latest_local_notification,
@@ -71,6 +72,21 @@ def update_mail_configuration():
         apply=payload["apply"],
         revision=payload.get("revision"),
     )
+    # The SMTP password is redacted by the audit layer, but the field names
+    # alone already say enough about what an operator changed.
+    supplied = payload.get("settings")
+    record_request(
+        "authelia_mail.update",
+        object_type="authelia",
+        object_id="mail",
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary=(
+            "fields: " + ", ".join(sorted(str(k) for k in supplied))
+            if isinstance(supplied, dict)
+            else ""
+        ),
+        detail="" if result.get("ok") else str(result.get("error") or "")[:500],
+    )
     if result.get("ok"):
         status = 200
     elif result.get("conflict") or result.get("relay_unavailable"):
@@ -97,6 +113,15 @@ def send_mail_test_message():
     result = test_mail_settings(
         revision=payload.get("revision"),
         recipient=payload.get("recipient"),
+    )
+    # The recipient is an address the operator typed, so it stays out of the
+    # record; that a test was sent, and whether it was accepted, is the point.
+    record_request(
+        "authelia_mail.test",
+        object_type="authelia",
+        object_id="mail",
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        detail="" if result.get("ok") else str(result.get("error") or "")[:500],
     )
     if result.get("ok"):
         status = 200
@@ -197,6 +222,14 @@ def edit_settings():
         # Сохраняем настройки через сервисный слой (он ходит в authelia-configd)
         ok, msg = save_settings_from_form(request.form)
         msg_category = "success" if ok else "danger"
+        record_request(
+            "authelia_settings.update",
+            object_type="authelia",
+            object_id="configuration",
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=f"action: {submit_action}",
+            detail="" if ok else str(msg or "")[:500],
+        )
 
         # Если всё OK и нажали «Сохранить и применить» — просим демон перезапустить Authelia
         if ok and submit_action == "apply":

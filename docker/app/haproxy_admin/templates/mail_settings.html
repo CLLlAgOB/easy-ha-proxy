@@ -113,14 +113,14 @@
           <div class="form-group">
             <label class="form-label" for="authelia-mail-sender">Sender address</label>
             <input class="form-input" id="authelia-mail-sender" name="mail_sender"
-                   type="email" maxlength="254" autocomplete="off" placeholder="authelia@example.com" required>
+                   type="email" maxlength="254" autocomplete="off" placeholder="authelia@example.com" required data-i18n-skip translate="no">
             <p class="vars-field-help">Shared by Authelia and certificate-renewal notifications.</p>
           </div>
 
           <div class="form-group">
             <label class="form-label" for="authelia-mail-recipient">Notification recipient</label>
             <input class="form-input" id="authelia-mail-recipient" name="mail_recipient"
-                   type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+                   type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com" required data-i18n-skip translate="no">
             <p class="vars-field-help">Used by the Authelia startup check and certificate-renewal notifications.</p>
           </div>
 
@@ -143,7 +143,7 @@
         <div class="form-group">
           <label class="form-label" for="authelia-mail-test-recipient">Test email recipient</label>
           <input class="form-input" id="authelia-mail-test-recipient" name="mail_test_recipient"
-                 type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com">
+                 type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com" data-i18n-skip translate="no">
           <p class="vars-field-help">
             Defaults to the startup-check recipient. Changing it here affects only the next test message and is not saved.
           </p>
@@ -175,7 +175,7 @@
       <div class="form-group">
         <label class="form-label" for="acme-email-input">Account email</label>
         <input class="form-input" id="acme-email-input" name="acme_email" type="email"
-               maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+               maxlength="254" autocomplete="off" placeholder="admin@example.com" required data-i18n-skip translate="no">
         <p class="vars-field-help">
           Applies to future certificate registrations and renewals after the next certificate operation or stack update.
         </p>

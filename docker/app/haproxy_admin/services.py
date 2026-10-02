@@ -280,6 +280,55 @@ def get_ip_auth_table() -> dict:
     }
 
 
+ADAPTIVE_BAN_CODE = "40"
+
+
+def _apply_adaptive_expiry(ban: dict | None) -> None:
+    """Show an adaptive ban's real end, not the stick table's.
+
+    A tbl_ban entry carries the table's own expiry -- expire 168h -- and for
+    the bans HAProxy places under its own rules (codes 10, 20, 30) that is
+    exactly when they end, so those rows are left alone. An adaptive ban
+    (code 40) ends when the engine's schedule says, which on a one-day ladder
+    is hours away while the table says six days. That mismatch was the whole
+    complaint, so for those rows the schedule's number is shown instead.
+
+    Only while enforcement is on, and only for addresses the engine actually
+    holds; anything else keeps the table's time as before. The engine being
+    down, slow or absent changes nothing but that: this list must not fail or
+    stall because an optional daemon did.
+    """
+
+    if not ban or not ban.get("rows"):
+        return
+    rows = ban["rows"]
+    if not any(len(row) >= 4 and str(row[2]) == ADAPTIVE_BAN_CODE for row in rows):
+        # No adaptive bans shown, so nothing to ask about.
+        return
+    try:
+        from .guardd_client import guardd_ban_schedule
+
+        schedule = guardd_ban_schedule()
+    except Exception:  # pylint: disable=broad-except
+        logger.debug("adaptive ban schedule unavailable", exc_info=True)
+        return
+    if not schedule.get("enforcing"):
+        return
+
+    held = schedule.get("bans") or {}
+    now = int(schedule.get("now") or 0)
+    from_schedule = []
+    for row in rows:
+        if len(row) < 4 or str(row[2]) != ADAPTIVE_BAN_CODE:
+            continue
+        until = held.get(row[0])
+        if not until or not now:
+            continue
+        row[3] = str(max(0, int(until) - now))
+        from_schedule.append(row[0])
+    ban.setdefault("meta", {})["expiry_from_schedule"] = from_schedule
+
+
 def get_tables():
     """
     Кэшированное чтение tbl_ban + агрегация всех tbl_err_*.
@@ -290,6 +339,7 @@ def get_tables():
     try:
         ban_raw = haproxy_runtime_command("show table tbl_ban", SOCKET, timeout=2)
         ban = parse_table_output(ban_raw)
+        _apply_adaptive_expiry(ban)
 
         err_names = _list_err_tables()
         err_multi = []
@@ -737,6 +787,23 @@ def get_whitelists() -> dict:
 def unban_ip(ip: str):
     if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip):
         return "Invalid IP", 400
+
+    # The adaptive engine keeps its own schedule and treats it as the
+    # authority on when a ban ends. Clearing only the stick table left that
+    # schedule intact, so the engine noticed the entry had gone and put it
+    # back on its next pass -- an unban that undid itself ten seconds later,
+    # which is indistinguishable from a broken button.
+    #
+    # Told first, so there is no window in which the engine could re-assert
+    # between the two steps. Best effort: an engine that is not running must
+    # not stop an operator lifting a ban HAProxy placed under its own rules.
+    try:
+        from .guardd_client import guardd_forget_ban
+
+        guardd_forget_ban(ip)
+    except Exception:  # pylint: disable=broad-except
+        logger.info("adaptive engine not reachable while unbanning %s", ip, exc_info=True)
+
     haproxy_runtime_command(
         f"set table tbl_ban key {ip} data.gpc0 0", SOCKET, timeout=2
     )

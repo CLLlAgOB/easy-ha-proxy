@@ -14,7 +14,8 @@
   <div class="card-header">
     <h2>Error</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;"
+       data-i18n-skip translate="no">
     {{ error }}
   </div>
 </div>
@@ -25,7 +26,8 @@
   <div class="card-header">
     <h2>Operation completed</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+  <div class="mono" style="white-space: pre-wrap; font-size: 13px;"
+       data-i18n-skip translate="no">
     {{ message }}
   </div>
 </div>
@@ -43,7 +45,7 @@
     <div class="form-group">
       <label class="form-label" for="acme-email-input">Account email</label>
       <input class="form-input" id="acme-email-input" name="acme_email" type="email"
-             maxlength="254" autocomplete="off" placeholder="admin@example.com" required>
+             maxlength="254" autocomplete="off" placeholder="admin@example.com" required data-i18n-skip translate="no">
       <p class="vars-field-help">
         Applies to future certificate registrations and renewals after the next certificate operation or stack update.
       </p>
@@ -89,12 +91,12 @@
       <input type="hidden" name="action" value="issue_internal_cert">
       <label class="form-label" for="internal_domain">Primary domain</label>
       <input class="form-input" id="internal_domain" name="domain" type="text"
-        placeholder="app.example.com" required>
+        placeholder="app.example.com" required data-i18n-skip translate="no">
       <label class="form-label" for="internal_alt_names" style="margin-top:8px;">
         Alternative domains (comma or space separated)
       </label>
       <input class="form-input" id="internal_alt_names" name="alt_names" type="text"
-        placeholder="www.example.com api.example.com">
+        placeholder="www.example.com api.example.com" data-i18n-skip translate="no">
       <div style="margin-top:8px;">
         <button class="btn" type="submit">Issue internal certificate</button>
       </div>
@@ -143,6 +145,50 @@
     </form>
     {% endif %}
 
+    <h3 style="margin-top:24px;">Import a certificate or an authority</h3>
+    <div class="table-meta" style="max-width:820px;">
+      One field for all of it. Choose a PEM, a DER file, or a PKCS#12 bundle
+      (.p12/.pfx) and it is read to find out what is inside:
+      certificates that are authorities go to the trust store below, and an end-entity
+      certificate that arrived with its private key becomes a server certificate.
+      Nothing is installed until you have seen what was found.
+    </div>
+    <div style="margin-top:10px; max-width:820px;">
+      <div class="file-picker">
+        <input id="material-file" type="file" class="file-input-hidden"
+          accept=".pem,.crt,.cer,.der,.p12,.pfx,.key">
+        <button type="button" class="btn btn-icon" id="material-choose">Choose file</button>
+        {# The chosen file name is the operating system's, not ours. Left translatable, the substitution pass rewrites any catalogue word inside it -- site-backup.pem is shown as site-бэкап.pem. The fallback below is translated by the script instead. #}
+        <span class="file-name" id="material-name"
+              data-i18n-skip translate="no">No file selected</span>
+      </div>
+
+      <label class="form-label" for="material-password" style="margin-top:10px;">
+        Password (PKCS#12 or an encrypted key only)
+      </label>
+      <input class="form-input" id="material-password" type="password"
+        autocomplete="new-password" style="max-width:420px;">
+
+      <label class="form-label" for="material-ca-name" style="margin-top:10px;">
+        Name for the authority (optional)
+      </label>
+      <input class="form-input" id="material-ca-name" type="text"
+        placeholder="taken from the certificate if left empty" style="max-width:420px;">
+
+      <label class="form-label" for="material-domain" style="margin-top:10px;">
+        Domain for the server certificate (optional)
+      </label>
+      <input class="form-input" id="material-domain" type="text"
+        placeholder="taken from the certificate if left empty" style="max-width:420px;">
+
+      <div style="margin-top:10px;">
+        <button type="button" class="btn" id="material-inspect">Examine the file</button>
+        <button type="button" class="btn" id="material-import" hidden>Install</button>
+      </div>
+      <div id="material-report" class="table-meta" style="margin-top:10px;"
+        data-i18n-skip></div>
+    </div>
+
     <h3 style="margin-top:20px;">External certificate authorities</h3>
     {% if external_cas %}
     <table class="table mono" style="margin-top:8px;">
@@ -180,6 +226,65 @@
       <div style="margin-top:8px;"><button class="btn" type="submit">Import certificate authority</button></div>
       <div class="table-meta" style="margin-top:6px;">
         Import public CA certificates here, then select this authority for a site and upload its server certificate, chain, and private key.
+      </div>
+    </form>
+
+    <h3 style="margin-top:24px;">Client certificate authentication</h3>
+    <div class="table-meta" style="max-width:820px;">
+      An authority listed above only vouches for servers. Tick it here to also let it
+      vouch for visitors, then choose it on a site. Nothing becomes a client authority
+      on its own: the authority that signs this gateway's own certificates has no say
+      in who may connect to it.
+    </div>
+    {% if internal_ca or external_cas %}
+    <form method="post" style="margin-top:10px;">
+      <input type="hidden" name="action" value="set_client_auth_cas">
+      <table class="table mono" style="max-width:820px;">
+        <thead><tr><th style="width:60px;">Trust</th><th>Authority</th><th>Issuer names matched</th></tr></thead>
+        <tbody>
+        {% for ca in ([internal_ca] if internal_ca else []) + external_cas %}
+        <tr>
+          <td>
+            <input type="checkbox" name="client_auth_ca" value="{{ ca.id }}"
+              id="client_auth_{{ ca.id }}" {% if ca.client_auth %}checked{% endif %}
+              {% if not ca.subject_cns %}disabled{% endif %}>
+          </td>
+          <td><label for="client_auth_{{ ca.id }}">{{ ca.name }}</label>
+            <div class="table-meta"><code>{{ ca.id }}</code></div></td>
+          <td>
+            {% if ca.subject_cns %}
+              {% for cn in ca.subject_cns %}<code>{{ cn }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}
+              <span class="table-meta">No Common Name — this authority cannot be told apart from another</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <button class="btn" type="submit" style="margin-top:8px;">Save client authentication</button>
+      <div class="table-meta" style="margin-top:6px;">
+        Turning an authority off here denies every request that relied on it, immediately.
+        Sites keep their setting, so turning it back on restores them.
+      </div>
+    </form>
+    {% else %}
+    <div class="table-meta" style="margin-top:8px;">Import or create a certificate authority first.</div>
+    {% endif %}
+
+    <h4 style="margin-top:20px;">Refused client certificates</h4>
+    <form method="post" style="margin-top:8px; max-width:820px;">
+      <input type="hidden" name="action" value="set_revoked_client_certs">
+      <label class="form-label" for="fingerprints">SHA-256 fingerprints, one per line</label>
+      <textarea class="form-input mono" id="fingerprints" name="fingerprints" rows="4"
+        spellcheck="false" translate="no"
+        placeholder="3b1f…  (openssl x509 -in client.crt -noout -fingerprint -sha256)"
+      >{{ revoked_client_certs | join('\n') }}</textarea>
+      <div style="margin-top:8px;"><button class="btn" type="submit">Save refused certificates</button></div>
+      <div class="table-meta" style="margin-top:6px;">
+        Refuses one certificate without discarding the authority that signed it.
+        Colons and upper case are accepted. Saving reloads HAProxy, because that is
+        when the list takes effect.
       </div>
     </form>
   </div>
@@ -296,6 +401,193 @@
 </div>
 
 {# ─────────────────── Let's Encrypt certificates ─────────────────── #}
+<div class="card" style="margin-top: 20px;">
+  <div class="card-header">
+    <h2>Standby certificates</h2>
+    <div class="table-meta">
+      A second certificate for a name, from another authority, kept ready in
+      case this one cannot be renewed.
+    </div>
+  </div>
+
+  <div style="padding: 12px 16px;">
+    <p class="mon-sub" style="margin-top:0;">
+      HAProxy resolves a name to exactly one certificate and never looks at
+      the dates: given an expired one and a good one in the same directory it
+      serves the expired one, and the site is down while the replacement sits
+      unused. So a standby is kept out of that directory and put into service
+      deliberately, from here. Nothing switches on its own — the certificate
+      that takes over is usually signed by an authority most visitors do not
+      carry, and that trade is yours to make, not a timer's.
+    </p>
+    <p class="mon-sub">
+      While a name is on a standby it is held there. Renewal, a configuration
+      apply and the orphan sweep all leave it alone, so the switch is not
+      undone behind your back. Hand it back when Let's Encrypt is working
+      again.
+    </p>
+
+    {% if standby_error %}
+    <div class="table-meta" style="color: var(--error);">{{ standby_error }}</div>
+    {% endif %}
+
+    {% if standby_domains %}
+    <table class="table mono" style="table-layout: fixed; width: 100%;">
+      <colgroup>
+        <col style="width:26%;">
+        <col style="width:22%;">
+        <col style="width:16%;">
+        <col style="width:16%;">
+        <col style="width:20%;">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Issued by</th>
+          <th>Until</th>
+          <th>Role</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in standby_domains %}
+        <tr>
+          <td data-i18n-skip translate="no"><b>{{ entry.domain }}</b></td>
+          <td data-i18n-skip translate="no">
+            {{ entry.active.issuer or entry.active.error or "—" }}
+          </td>
+          <td data-i18n-skip translate="no">
+            {{ entry.active.not_after or "—" }}
+            {% if entry.active.days_left is defined and entry.active.days_left <= 14 %}
+              <span class="badge danger" data-i18n-skip translate="no">
+                {{ entry.active.days_left }}
+              </span>
+            {% endif %}
+          </td>
+          <td>
+            {% if entry.pinned %}
+              <span class="badge warn">Held</span>
+            {% else %}
+              In service
+            {% endif %}
+          </td>
+          <td style="text-align:right;">
+            {% if entry.pinned %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ entry.domain }} → Let's Encrypt?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="release_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <button type="submit" class="btn-small primary">
+                Hand back to Let's Encrypt
+              </button>
+            </form>
+            {% elif entry.can_be_put_away %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ entry.domain }}?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="adopt_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="imported">
+              <button type="submit" class="btn-small">Keep as a standby</button>
+            </form>
+            {% elif not entry.has_usable_standby %}
+              <span class="mon-sub">No standby</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% for spare in entry.standbys %}
+        <tr style="opacity:.85;">
+          <td style="padding-left:24px;" data-i18n-skip translate="no">
+            ↳ {{ spare.slot }}
+          </td>
+          <td data-i18n-skip translate="no">
+            {{ spare.issuer or spare.error or "—" }}
+          </td>
+          <td data-i18n-skip translate="no">{{ spare.not_after or "—" }}</td>
+          <td>
+            {% if entry.pinned == spare.slot %}
+              <span class="badge warn">In service</span>
+            {% elif spare.usable %}Standby{% else %}Unusable{% endif %}
+          </td>
+          <td style="text-align:right; white-space:nowrap;">
+            {% if spare.usable and entry.pinned != spare.slot %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ entry.domain }} → {{ spare.slot }}?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="activate_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="{{ spare.slot }}">
+              <button type="submit" class="btn-small primary">Put into service</button>
+            </form>
+            {% endif %}
+            {% if entry.pinned != spare.slot %}
+            <form method="post" style="display:inline;"
+                  onsubmit="return confirm('{{ spare.slot }}?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="delete_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="{{ spare.slot }}">
+              <button type="submit" class="btn-small">Remove</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="table-meta">No certificates are deployed yet.</div>
+    {% endif %}
+
+    <h3 style="margin-top:20px;">Keep a standby</h3>
+    <form method="post" enctype="multipart/form-data" style="max-width:640px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="store_standby">
+      <div class="form-row">
+        <label for="standby-domain">Name it is for</label>
+        <select id="standby-domain" name="standby_domain" required>
+          <option value="*">Every name this certificate covers</option>
+          {% for entry in standby_domains %}
+          <option value="{{ entry.domain }}" data-i18n-skip translate="no">
+            {{ entry.domain }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="standby-slot">Call it</label>
+        <input id="standby-slot" name="standby_slot" required
+               placeholder="other-ca" maxlength="64">
+      </div>
+      <div class="form-row">
+        <label for="standby-cert">Certificate file</label>
+        <input id="standby-cert" name="standby_cert" type="file" required
+               accept=".pem,.crt,.cer,.key,.txt">
+      </div>
+      <div class="form-row">
+        <label for="standby-key">Key file, if it is separate</label>
+        <input id="standby-key" name="standby_key" type="file"
+               accept=".pem,.key,.txt">
+      </div>
+      <div class="table-meta">
+        One file holding the key and the chain together is the usual shape
+        and is all that is needed; the second field is only for material that
+        came as two files. Order does not matter and a file given twice is
+        not counted twice. Checked before it is accepted: the key has to
+        match the certificate and the certificate has to cover the name — a
+        standby discovered to be broken at the moment it is needed is worse
+        than none. A wildcard filed against every name it covers is stored
+        once per name, so each can be put into service on its own.
+      </div>
+      <button type="submit" class="btn primary" style="margin-top:10px;">
+        Keep it
+      </button>
+    </form>
+  </div>
+</div>
+
 <div class="card" style="margin-top: 20px;">
   <div class="card-header">
     <h2>Let's Encrypt certificates ({{ le_certs|length }})</h2>
@@ -444,7 +736,8 @@
           Choose file
         </button>
 
-        <span class="file-name" id="backup_file_name">
+        <span class="file-name" id="backup_file_name"
+              data-i18n-skip translate="no">
           No file selected
         </span>
       </div>

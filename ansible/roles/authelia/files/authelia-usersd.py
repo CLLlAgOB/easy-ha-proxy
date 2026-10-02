@@ -72,10 +72,6 @@ EMAIL_RE = re.compile(
 )
 
 LOG = logging.getLogger("authelia-usersd")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 
 
 def _backup_users_file() -> None:
@@ -567,10 +563,21 @@ def serve() -> None:
                 pass
 
 
-if __name__ == "__main__":
+def main() -> None:
+    # Настраиваем root-логгер только при запуске демона: делать это на импорте
+    # значит менять логирование любого процесса, который просто импортирует модуль.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
     try:
         serve()
     except Exception as exc:  # noqa: BLE001
         LOG.exception("fatal error in server: %s", exc)
         time.sleep(1)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

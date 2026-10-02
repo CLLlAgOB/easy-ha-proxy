@@ -78,6 +78,13 @@ global
     maxconn 6000
     chroot /var/lib/haproxy
     stats socket {{ haproxy_socket }} mode 660 user root group {{ haproxy_socket_group }} level admin expose-fd listeners
+{% if haproxy_server_state_enabled | default(true) %}
+    # Administrative server state (Ready/Drain/Maintenance and runtime weight)
+    # is written here before every reload and read back at startup. Without it
+    # a server put into maintenance silently returns to service the next time
+    # any unrelated site is saved, because saving reloads HAProxy.
+    server-state-file {{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}
+{% endif %}
     stats timeout 30s
     user haproxy
     group haproxy
@@ -111,6 +118,11 @@ defaults
     mode http
     option dontlognull
     option http-keep-alive
+{% if haproxy_server_state_enabled | default(true) %}
+    # Missing or stale entries are ignored, so a server that was added or
+    # renamed since the last dump simply starts from the configuration.
+    load-server-state-from-file global
+{% endif %}
     timeout connect 5s
     timeout client 15m
     timeout server 15m
@@ -125,8 +137,19 @@ defaults
     compression type {{ haproxy_compression_types | default('text/html text/css text/plain application/javascript application/json application/xml image/svg+xml') }}
 {% endif %}
 
+{% if request_id_enabled | default(true) %}
+    # One identifier per request, generated here and nowhere else. It goes into
+    # the log, upstream to the application, and back to the client, so a user
+    # can quote a single string and it can be found in all three places.
+    unique-id-format "%[uuid()]"
+    unique-id-header X-Request-ID
+{% endif %}
+
     # Важно: txn.ban_log может быть пустой
-    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %r"
+    # The identifier sits before %r on purpose: the access-log parser in
+    # easy-ha-proxy-guardd anchors on the request line at the end of the line
+    # and treats everything between the status and it as unparsed middle.
+    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs{% if request_id_enabled | default(true) %} id=%ID{% endif %} %r"
 
     errorfile 400 /etc/haproxy/errors/400.http
     errorfile 403 /etc/haproxy/errors/403.http
@@ -162,6 +185,7 @@ backend tbl_ip_auth
 {% set err_window = s.err_window | default(sd.err_window | default('20s')) %}
 {% set rate_window = s.rate_window | default(sd.rate_window | default('20s')) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
+{% if not (s.allow_ips | default([])) %}
 
 backend tbl_err_{{ id }}
     stick-table type ip size {{ s.err_size | default('50k') }} expire {{ err_window }} store http_err_rate({{ err_window }})
@@ -169,6 +193,7 @@ backend tbl_err_{{ id }}
 {% if max_req_rate > 0 %}
 backend tbl_rate_{{ id }}
     stick-table type ip size {{ s.rate_size | default('200k') }} expire {{ rate_window }} store http_req_rate({{ rate_window }})
+{% endif %}
 {% endif %}
 
 {% endfor %}
@@ -225,10 +250,32 @@ frontend fe_tls_router
 # FRONTEND HTTPS (:443) с TLS-терминацией
 #################################
 frontend fe_https
+{# ---- Client certificates (mTLS) ------------------------------------------
+   A bind takes one ca-file, so every site that wants client certificates
+   shares one bundle and the per-site decision happens below, on the issuer.
+
+   "verify optional" asks for a certificate without requiring one, and the
+   two ignore-err options keep a bad certificate from killing the handshake.
+   That is deliberate: the bind is shared with every other site on :443, and
+   a visitor to a site that never asked for mTLS must not be cut off because
+   their client offered a certificate this gateway does not know. The error
+   is not ignored, only deferred -- ssl_c_verify is checked per site.
+
+   Only the CA names in the bundle are advertised in the certificate request,
+   so a browser holding nothing issued by them prompts for nothing.          #}
+{% set mtls_sites = [] %}
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% if (s.mtls_mode | default('disabled')) in ['optional', 'required'] and s.mtls_ca_id | default('') %}
+{% set _ = mtls_sites.append(s) %}
+{% endif %}
+{% endfor %}
+{% set mtls_dir = haproxy_mtls_dir | default('/etc/haproxy/mtls') %}
+{% set mtls_bind = ' ca-file ' ~ mtls_dir ~ '/clients-ca.pem verify optional ca-ignore-err all crt-ignore-err all' if mtls_sites else '' %}
 {% if has_passthru %}
-    bind 127.0.0.1:8443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 accept-proxy no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+    bind 127.0.0.1:8443 ssl crt {{ haproxy_certs_dir }}{{ mtls_bind }} alpn h2,http/1.1 accept-proxy no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
 {% else %}
-    bind ipv4@*:443 ssl crt {{ haproxy_certs_dir }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
+    bind ipv4@*:443 ssl crt {{ haproxy_certs_dir }}{{ mtls_bind }} alpn h2,http/1.1 no-tls-tickets ssl-min-ver TLSv1.2 curves X25519:secp384r1:prime256v1
 {% endif %}
     mode http
     option dontlognull
@@ -296,6 +343,16 @@ frontend fe_https
     acl admin_control_plane_probe_method method GET
     http-request set-var(txn.admin_control_plane_probe) bool(true) if host_admin local_control_plane_probe admin_control_plane_probe_path admin_control_plane_probe_method
     acl admin_control_plane_probe var(txn.admin_control_plane_probe) -m bool
+{% if metrics_export_enabled | default(false) %}
+    # A Prometheus scraper cannot complete an Authelia login, so this one path
+    # is let through for an allow-listed source. That is one gate; the
+    # application still requires a bearer token, which is the other.
+    acl metrics_scrape_source src {{ (metrics_scrape_sources | default(['127.0.0.1'])) | join(' ') }}
+    acl metrics_scrape_path path -i /metrics
+    acl metrics_scrape_method method GET
+    http-request set-var(txn.admin_metrics_scrape) bool(true) if host_admin metrics_scrape_source metrics_scrape_path metrics_scrape_method
+    acl admin_metrics_scrape var(txn.admin_metrics_scrape) -m bool
+{% endif %}
 {% endif %}
 
 {% if aut_domain is defined and authelia_enabled %}
@@ -314,7 +371,24 @@ frontend fe_https
     acl valid_host hdr(host) -i {{ all_hosts | unique | join(' ') }}
 
     # ---- Исключения из учёта ошибок (txn-флаги) ----
+    # A miss on a static asset is a broken page, never an attack. The
+    # adaptive engine has always known that -- is_asset() is its single
+    # largest false-positive guard -- but this counter did not, and it is
+    # the one that bans. A link preview fetching /logo.png, /logo.svg,
+    # /images/logo.png, /assets/logo.svg, /static/logo.png, /favicon.ico
+    # and /apple-touch-icon.png found none of them, collected 30 404s and
+    # was banned for a week on example.com.
+    #
+    # Narrower than the engine's list on purpose: .json, .xml and .txt stay
+    # counted, because /config.json and /.env.txt are plausible targets and
+    # this exclusion is by path alone -- the status is not known yet when
+    # tracking is decided.
+    # Two declarations of one name, which HAProxy reads as either.
+    acl err_asset_path path_end -i .css .js .mjs .map .ico .svg .png .gif
+    acl err_asset_path path_end -i .jpg .jpeg .webp .avif .bmp
+    acl err_asset_path path_end -i .woff .woff2 .ttf .otf .eot
     http-request set-var(txn.other_excl) bool(false)
+    http-request set-var(txn.other_excl) bool(true) if err_asset_path
 
     # ---- Исключения из учёта OTHER-ошибок (tbl_err_other) для запросов БЕЗ SNI ----
     # Управляется через site_defaults:
@@ -342,10 +416,42 @@ frontend fe_https
 {% endfor %}
 {% endif %}
 
+{# ---- Per-site error-accounting exclusions (err_exclude) ----
+   The site edit page has offered these for a long time and the tracking rule
+   below has always consulted the variable, but nothing ever set it: a rule
+   could be written, saved and displayed while changing nothing at all. A
+   mail client fetching a dozen inline images that are not there produced 71
+   errors in ten seconds and was banned for a week with an exclusion for that
+   very path sitting in its site configuration.
+
+   Three shapes, matching what the page offers: path (exact), path_beg
+   (prefix), path_reg (regular expression). #}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
     http-request set-var(txn.site_{{ id }}_excl) bool(false)
+    http-request set-var(txn.site_{{ id }}_excl) bool(true) if err_asset_path
+{% for ex in s.err_exclude | default([]) %}
+{% set rule = loop.index %}
+{% if ex.path is defined and ex.path %}
+{% set matcher = 'path' %}{% set value = ex.path %}
+{% elif ex.path_beg is defined and ex.path_beg %}
+{% set matcher = 'path_beg' %}{% set value = ex.path_beg %}
+{% elif ex.path_reg is defined and ex.path_reg %}
+{% set matcher = 'path_reg' %}{% set value = ex.path_reg %}
+{% else %}
+{% set matcher = '' %}{% set value = '' %}
+{% endif %}
+{% if matcher %}
+    acl site_{{ id }}_ex{{ rule }}_path {{ matcher }} -i {{ value }}
+{% if (ex.methods | default([])) | length > 0 %}
+    acl site_{{ id }}_ex{{ rule }}_meth method {{ ex.methods | join(' ') }}
+    http-request set-var(txn.site_{{ id }}_excl) bool(true) if host_{{ id }} site_{{ id }}_ex{{ rule }}_path site_{{ id }}_ex{{ rule }}_meth
+{% else %}
+    http-request set-var(txn.site_{{ id }}_excl) bool(true) if host_{{ id }} site_{{ id }}_ex{{ rule }}_path
+{% endif %}
+{% endif %}
+{% endfor %}
 {% endfor %}
 
     # ---- GEO (опционально) ----
@@ -362,7 +468,10 @@ frontend fe_https
     {% set geo_bypass = [] %}
     {% for site in sites %}
       {% set s = sd | combine(site, recursive=True) %}
-      {% if s.geo_disable | default(false) %}
+      {% if s.allow_ips | default([]) %}
+        {# Only the named addresses reach this site at all. #}
+        {% set geo_disabled = true %}
+      {% elif s.geo_disable | default(false) %}
         {% set geo_disabled = true %}
       {% elif site.geo is defined %}
         {% set geo_disabled = site.geo is sameas false %}
@@ -388,7 +497,10 @@ frontend fe_https
     {% set geo_names = [] %}
     {% for site in sites %}
       {% set s = sd | combine(site, recursive=True) %}
-      {% if s.geo_disable | default(false) %}
+      {% if s.allow_ips | default([]) %}
+        {# Only the named addresses reach this site at all. #}
+        {% set geo_disabled = true %}
+      {% elif s.geo_disable | default(false) %}
         {% set geo_disabled = true %}
       {% elif site.geo is defined %}
         {% set geo_disabled = site.geo is sameas false %}
@@ -429,7 +541,10 @@ frontend fe_https
       {% set s = sd | combine(site, recursive=True) %}
       {% set id = sanitize(s.name) %}
       {% set site_geo_countries = site.geo_countries | default([]) %}
-      {% if s.geo_disable | default(false) %}
+      {% if s.allow_ips | default([]) %}
+        {# Only the named addresses reach this site at all. #}
+        {% set geo_disabled = true %}
+      {% elif s.geo_disable | default(false) %}
         {% set geo_disabled = true %}
       {% elif site.geo is defined %}
         {% set geo_disabled = site.geo is sameas false %}
@@ -463,7 +578,8 @@ frontend fe_https
 {% set id = sanitize(s.name) %}
 {# The gate itself must stay reachable for unauthorized IPs, otherwise nobody
    could ever log in to become authorized. #}
-{% if (s.zero_trust | default(false)) and not (s.access_gate | default(false)) %}
+{% if (s.zero_trust | default(false)) and not (s.access_gate | default(false))
+      and not (s.allow_ips | default([])) %}
     http-request deny status 451 if host_{{ id }} !ip_auth_ok !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
@@ -478,7 +594,9 @@ frontend fe_https
 {% set id = sanitize(s.name) %}
 {% set _err_mode = s.err_ignore_rules | default(sd.err_ignore_rules_default | default(false)) %}
 {% if _err_mode != 'ignore' %}
+{% if not (s.allow_ips | default([])) %}
     http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool }
+{% endif %}
     http-request set-var(txn._err_tracked) bool(true) if host_{{ id }} !{ var(txn._err_tracked) -m bool }
 {% endif %}
 {% endfor %}
@@ -507,11 +625,13 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set err_limit = s.err_limit | default(sd.err_limit | default(20)) %}
+{% if not (s.allow_ips | default([])) %}
     acl too_many_errs_{{ id }} src_http_err_rate(tbl_err_{{ id }}) gt {{ err_limit }}
     http-request set-var(txn.ban_code)   int(10) if too_many_errs_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn.ban_reason) str("ERR_LIMIT_SITE name={{ s.name }} limit={{ err_limit }}") if too_many_errs_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
+{% endif %}
 {% endfor %}
 
 {% set other_err_limit = sd.other_err_limit | default(20) %}
@@ -527,7 +647,9 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 %}
+{# A request-rate ceiling exists to slow down strangers. On a site only the
+   named addresses can reach, it can only ever throttle the operator. #}
+{% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
     http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
@@ -568,12 +690,14 @@ frontend fe_https
     # ---- Admin-домен / защита ----
 {% if admin_domain is defined %}
 {% if admin_ips_enabled %}
-    http-request deny status 403 if host_admin !allowed_admin !admin_control_plane_probe
+    http-request deny status 403 if host_admin !allowed_admin !admin_control_plane_probe{% if metrics_export_enabled | default(false) %} !admin_metrics_scrape{% endif %}
+
 {% endif %}
 {% if (not admin_authelia_enabled) and admin_password %}
     acl AuthOK http_auth(stats-auth)
     http-request auth realm "HAProxy Stats" if host_admin path_stats !AuthOK
-    http-request auth realm "ADMIN UI"     if host_admin !path_stats !AuthOK !admin_control_plane_probe
+    http-request auth realm "ADMIN UI"     if host_admin !path_stats !AuthOK !admin_control_plane_probe{% if metrics_export_enabled | default(false) %} !admin_metrics_scrape{% endif %}
+
 {% endif %}
 {% endif %}
 
@@ -582,9 +706,29 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 and not (s.rate_ban | default(false)) %}
+{% if max_req_rate > 0 and not (s.rate_ban | default(false)) and not (s.allow_ips | default([])) %}
     http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
+{% endif %}
+{% endfor %}
+
+    # ---- Сайты, доступные только с перечисленных адресов ----
+    # Naming the addresses is the whole access policy for these sites. The
+    # gates that exist to sort strangers out -- GeoIP, Authelia, zero-trust,
+    # the adaptive error and rate counters -- are not emitted for them at all,
+    # because there are no strangers left to sort.
+    #
+    # One thing this cannot undo: tbl_ban is checked per connection, before
+    # any host name is known, so an address banned for its behaviour on some
+    # other site is still refused here. Put it in the global whitelist if that
+    # matters.
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% set allow_ips = s.allow_ips | default([]) %}
+{% if allow_ips %}
+    acl site_ips_{{ id }} src {{ allow_ips | join(' ') }}
+    http-request deny status 403 if host_{{ id }} !site_ips_{{ id }}
 {% endif %}
 {% endfor %}
 
@@ -592,6 +736,36 @@ frontend fe_https
     http-request deny status 400 if !sni_found
     http-request deny status 400 if sni_found !valid_sni
     http-request deny status 400 if !valid_host
+
+{% if mtls_sites %}
+    # ---- Клиентские сертификаты ----
+    # This gate runs before Authelia on purpose. The two are independent
+    # layers: a site may ask for a certificate, a login, both, or neither,
+    # and a request that fails here never reaches the identity provider.
+    acl mtls_present  ssl_c_used
+    acl mtls_verified ssl_c_verify eq 0
+    # openssl x509 -in client.crt -outform der | openssl dgst -sha256
+    acl mtls_revoked  ssl_c_der,sha2(256),hex,lower -f {{ mtls_dir }}/revoked.list
+{# Numbered, not named after the authority: sanitize() collapses dots and
+   dashes to underscores, so "corp.pki" and "corp-pki" would share one ACL
+   name and HAProxy would quietly merge two authorities into one. The file
+   name on each line says which authority it is. #}
+{% set mtls_ca_ids = mtls_sites | map(attribute='mtls_ca_id') | unique | list %}
+{% for ca_id in mtls_ca_ids %}
+    # The bundle is shared by the whole bind, so "the certificate verified" is
+    # not yet "the certificate came from this site's authority".
+    acl mtls_ca_{{ loop.index }} ssl_c_i_dn(CN) -f {{ mtls_dir }}/issuers-{{ ca_id }}.list
+{% endfor %}
+{% for s in mtls_sites %}
+{% set id = sanitize(s.name) %}
+{% if (s.mtls_mode | default('disabled')) == 'required' %}
+    http-request deny status 403 if host_{{ id }} !mtls_present
+{% endif %}
+    http-request deny status 403 if host_{{ id }} mtls_present !mtls_verified
+    http-request deny status 403 if host_{{ id }} mtls_present !mtls_ca_{{ mtls_ca_ids.index(s.mtls_ca_id) + 1 }}
+    http-request deny status 403 if host_{{ id }} mtls_present mtls_revoked
+{% endfor %}
+{% endif %}
 
     # ---- Доверенная proxy-граница для admin UI ----
     http-request del-header Remote-User
@@ -602,6 +776,32 @@ frontend fe_https
     http-request del-header X-Easy-HAProxy-Config-Generation
     http-request del-header X-Forwarded-For
     http-request set-header X-Forwarded-For %[src]
+{% if mtls_sites %}
+    # Same rule as the Authelia headers above: deleted for everyone first, so
+    # a client cannot claim a certificate identity by sending the header.
+    http-request del-header X-Client-Cert-Subject
+    http-request del-header X-Client-Cert-Issuer
+    http-request del-header X-Client-Cert-Serial
+    http-request del-header X-Client-Cert-Fingerprint
+{% set mtls_hostnames = [] %}
+{% for s in mtls_sites %}
+{% for hn in [s.domain] + (s.alt_names | default([])) %}{% set _ = mtls_hostnames.append(hn) %}{% endfor %}
+{% endfor %}
+    acl mtls_host hdr(host) -i {{ mtls_hostnames | unique | join(' ') }}
+    # Only where the site asked for a certificate and it survived every check
+    # above -- a site that never enabled mTLS learns nothing about the client.
+    http-request set-header X-Client-Cert-Subject     %[ssl_c_s_dn] if mtls_host mtls_present mtls_verified
+    http-request set-header X-Client-Cert-Issuer      %[ssl_c_i_dn] if mtls_host mtls_present mtls_verified
+    http-request set-header X-Client-Cert-Serial      %[ssl_c_serial,hex] if mtls_host mtls_present mtls_verified
+    http-request set-header X-Client-Cert-Fingerprint %[ssl_c_der,sha2(256),hex,lower] if mtls_host mtls_present mtls_verified
+{% endif %}
+{% if request_id_enabled | default(true) %}
+    # The identifier is minted at the edge, never accepted from the client.
+    # Echoing a supplied one would let anyone make two unrelated requests share
+    # an identifier, and a log search that returns two answers is worse than
+    # one that returns none. unique-id-header re-adds ours after this.
+    http-request del-header X-Request-ID
+{% endif %}
 {% if authelia_enabled %}
     # ---- Заголовки для Authelia ForwardAuth ----
     http-request set-var(req.scheme) str(https) if { ssl_fc }
@@ -619,7 +819,8 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {# Access-gate sites are meaningless without Authelia, so they are always
    forward-auth protected regardless of their authelia_enabled value. #}
-{% if (s.authelia_enabled | default(false)) or (s.access_gate | default(false)) %}
+{% if ((s.authelia_enabled | default(false)) or (s.access_gate | default(false)))
+      and not (s.allow_ips | default([])) %}
 {% set hostnames = [s.domain] + (s.alt_names | default([])) %}
 {% for hn in hostnames %}{% set _ = authelia_hosts.append(hn) %}{% endfor %}
 {% endif %}
@@ -630,6 +831,9 @@ frontend fe_https
 
 {% if authelia_hosts | length > 0 %}
 {% set admin_probe_condition = ' !admin_control_plane_probe' if admin_domain is defined else '' %}
+{% if admin_domain is defined and (metrics_export_enabled | default(false)) %}
+{% set admin_probe_condition = admin_probe_condition ~ ' !admin_metrics_scrape' %}
+{% endif %}
     acl authelia_protected hdr(host) -i {{ authelia_hosts | unique | join(' ') }}
     http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
     http-request deny if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
@@ -655,10 +859,23 @@ frontend fe_https
     http-request set-header X-Easy-HAProxy-Config-Generation {{ config_generation }} if host_admin
     http-request set-header Remote-User easy-ha-proxy-healthcheck if host_admin admin_control_plane_probe
     http-request set-header Remote-Groups healthcheck if host_admin admin_control_plane_probe
+{% if metrics_export_enabled | default(false) %}
+    # A least-privilege identity: the application accepts it for GET /metrics
+    # and refuses it everywhere else, so a forged header buys nothing.
+    http-request set-header Remote-User easy-ha-proxy-metrics if host_admin admin_metrics_scrape
+    http-request set-header Remote-Groups metrics if host_admin admin_metrics_scrape
+{% endif %}
 {% if (not admin_authelia_enabled) and admin_password %}
     http-request set-header Remote-User %[http_auth_user] if host_admin AuthOK
     http-request set-header Remote-Groups superadmin if host_admin AuthOK
 {% endif %}
+{% endif %}
+
+{% if request_id_enabled | default(true) %}
+    # Handed back so a user can quote one string from a failed page and it can
+    # be found in the log. Set on the frontend rather than per backend, so an
+    # error page carries it too -- that is when it is needed most.
+    http-response set-header X-Request-ID %[unique-id]
 {% endif %}
 
     # ---- Маршрутизация ----

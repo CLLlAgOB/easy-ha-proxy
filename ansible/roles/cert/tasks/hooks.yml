@@ -23,6 +23,25 @@
     group: root
     mode: "0755"
 
+# Delivery to other machines that hold the same certificate. 906 runs after
+# the reload above, so an unreachable target cannot leave this gateway on an
+# old certificate -- the failure mode that started all of this.
+- name: Ensure certificate delivery targets directory exists
+  file:
+    path: /etc/easy-ha-proxy/cert-destinations
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy certificate delivery hook (DEPLOY)
+  template:
+    src: 906-deliver-certificates.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/906-deliver-certificates.sh
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Ensure HAProxy certs dir exists
   file:
     path: "{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"

@@ -21,7 +21,7 @@ import re
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 UNIT_DIR = ROOT / "ansible/roles/haproxy-admin/templates"
 DAEMON_DIR = ROOT / "ansible/roles/haproxy-admin/files"
 
