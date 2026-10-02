@@ -964,10 +964,88 @@ def _probe_image(image: str, runner: Runner) -> dict[str, Any]:
     return details
 
 
+# The images the Authelia role renders into its Compose file, by the role
+# variable that pins each one and how that value becomes an image reference.
+_AUTHELIA_DEFAULTS = Path("ansible/roles/authelia/defaults/main.yml")
+_AUTHELIA_IMAGE_VARIABLES = (
+    ("authelia_version", "authelia/authelia:{}"),
+    ("authelia_redis_image", "{}"),
+    ("mail_relay_image", "{}"),
+)
+
+
+def _source_image_changes(
+    installed_source: Path,
+    candidate_source: Path | None,
+    variables: dict[str, Any],
+) -> dict[str, str]:
+    """Map each Authelia image the source update re-pins to its new reference.
+
+    The Compose probe reads the file Ansible rendered from the installed
+    source, so it cannot see that the candidate source pins a newer image.
+    Applying the complete update then installs that image, and the check
+    after it found a digest the reviewed plan never mentioned and failed an
+    update that had in fact succeeded. Comparing the role defaults of the two
+    trees names those changes up front. A value the operator set in vars.yml
+    wins in Ansible over either default, so it is never a change.
+    """
+
+    if candidate_source is None:
+        return {}
+    pins = []
+    for root in (installed_source, candidate_source):
+        try:
+            text = (root / _AUTHELIA_DEFAULTS).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return {}
+        pins.append(_parse_scalar_yaml(text))
+    installed, candidate = pins
+    changes: dict[str, str] = {}
+    for variable, template in _AUTHELIA_IMAGE_VARIABLES:
+        if variable in variables:
+            continue
+        old = installed.get(variable)
+        new = candidate.get(variable)
+        if old and new and old != new:
+            changes[template.format(old)] = template.format(new)
+    return changes
+
+
+def _probe_retargeted_image(image: str, target: str, runner: Runner) -> dict[str, Any]:
+    """Probe an image the source update replaces: what runs now, what will."""
+
+    current = _probe_image(image, runner)
+    if current.get("current_digest") is None:
+        return current
+    candidate = _probe_image(target, runner)
+    details: dict[str, Any] = {
+        "image": image,
+        "target_image": target,
+        "reason": "source-update-changes-image",
+        "current_digest": current["current_digest"],
+        "available_digest": candidate.get("available_digest"),
+    }
+    if details["available_digest"] is None:
+        details.update(
+            {
+                "state": "unknown",
+                "reason": "registry-digest-unavailable",
+                "error": candidate.get("error"),
+            }
+        )
+    elif details["available_digest"] == details["current_digest"]:
+        details["state"] = "current"
+    else:
+        details["state"] = "available"
+    return details
+
+
 def _probe_compose(
     component_id: str,
     compose_file: Path,
     runner: Runner,
+    *,
+    retarget: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not compose_file.is_file():
         return _component(
@@ -1011,7 +1089,13 @@ def _probe_compose(
             "The managed Docker Compose file contains no images.",
             details={"reason": "no-compose-images", "compose_file": str(compose_file)},
         )
-    image_results = [_probe_image(image, runner) for image in images]
+    retarget = retarget or {}
+    image_results = [
+        _probe_retargeted_image(image, retarget[image], runner)
+        if image in retarget
+        else _probe_image(image, runner)
+        for image in images
+    ]
     available = [item for item in image_results if item["state"] == "available"]
     unknown = [item for item in image_results if item["state"] == "unknown"]
     details = {"compose_file": str(compose_file), "images": image_results}
@@ -1313,6 +1397,9 @@ def build_update_plan(
                 runner=command_runner,
             )
         comparison_source = candidate_source or Path(source_dir)
+        image_changes = _source_image_changes(
+            Path(source_dir), candidate_source, variables
+        )
         components = [
             source,
             _probe_services(
@@ -1332,7 +1419,10 @@ def build_update_plan(
             ),
             _probe_os(command_runner),
             _probe_compose(
-                "authelia-container", Path(authelia_compose), command_runner
+                "authelia-container",
+                Path(authelia_compose),
+                command_runner,
+                retarget=image_changes,
             ),
             _probe_admin_compose(
                 Path(admin_compose),
@@ -1364,6 +1454,24 @@ def build_update_plan(
                 "depends_on": "all",
             },
         )
+
+    authelia = components[4]
+    retargeted = {
+        str(item.get("image")): str(item.get("target_image"))
+        for item in (authelia.get("details") or {}).get("images") or []
+        if isinstance(item, dict) and item.get("target_image")
+    }
+    if retargeted:
+        # Only the complete update brings the source that re-pins these
+        # images; the container update on its own keeps the old pins. So the
+        # change is listed against the complete update, and the component
+        # cannot be applied by itself until then.
+        authelia["actionable"] = False
+        authelia["details"]["depends_on"] = "all"
+        components[0]["details"] = {
+            **(components[0].get("details") or {}),
+            "image_changes": retargeted,
+        }
 
     if components[0].get("actionable") is True:
         unavailable_containers = [

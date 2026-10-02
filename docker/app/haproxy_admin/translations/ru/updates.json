@@ -7,6 +7,7 @@
     "Helper daemons to update: {names}": "Обновить вспомогательные демоны: {names}",
     "Host-service files to update: {names}": "Обновить файлы служб хоста: {names}",
     "This update was checked for a different release channel than the one this gateway is set to. Save the channel first, or run the check again.": "Эта проверка сделана для другого канала выпуска, чем тот, что сохранён на шлюзе. Сначала сохраните канал или запустите проверку заново.",
-    "This check previews a release channel that is not saved on this gateway. Save the channel before applying these updates.": "Эта проверка показывает канал выпуска, который не сохранён на шлюзе. Сохраните канал, прежде чем применять эти обновления."
+    "This check previews a release channel that is not saved on this gateway. Save the channel before applying these updates.": "Эта проверка показывает канал выпуска, который не сохранён на шлюзе. Сохраните канал, прежде чем применять эти обновления.",
+    "A different remote managed source revision is available. It also changes these images: {images}": "Доступна другая ревизия удалённых управляемых исходников. Она также меняет эти образы: {images}"
   }
 }

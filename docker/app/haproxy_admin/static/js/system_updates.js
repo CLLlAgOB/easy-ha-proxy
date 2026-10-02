@@ -288,7 +288,16 @@
   function componentReason(component) {
     if (component.state !== "available") return t(String(component.reason));
     if (component.id === "all" || component.id === "source") {
-      return t("A different remote managed source revision is available.");
+      // A source update can re-pin managed images (the Authelia stack's are
+      // pinned in its role). Name them here: the container row itself is not
+      // offered, because only the complete update brings the new pins.
+      const changes = component.details && component.details.image_changes;
+      const moves = changes && typeof changes === "object"
+        ? Object.entries(changes).map(([from, to]) => `${from} → ${to}`)
+        : [];
+      return moves.length
+        ? t("A different remote managed source revision is available. It also changes these images: {images}", {images: moves.join(", ")})
+        : t("A different remote managed source revision is available.");
     }
     if (component.id === "services") {
       const names = outdatedArtifactLabels(component);

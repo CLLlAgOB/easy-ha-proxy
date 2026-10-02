@@ -119,6 +119,18 @@ def _replacement_rules(language: str) -> tuple[tuple[re.Pattern[str] | None, str
     return tuple(rules)
 
 
+def _sentence_fragment(source: str) -> bool:
+    """Whether a catalogue entry is written as a piece of a longer sentence.
+
+    Such entries are marked by their edges: they open with punctuation that
+    continues a sentence, or open or close on the space where the rest of it
+    goes. Three words at least, so a stray short label never qualifies.
+    """
+
+    marked = source != source.strip() or source[:1] in ".,;:)"
+    return marked and len(source.split()) >= 3
+
+
 def translate(message: str, language: str | None = None, **values: Any) -> str:
     """Translate a source message and optionally format placeholders."""
 
@@ -131,17 +143,20 @@ def translate(message: str, language: str | None = None, **values: Any) -> str:
     normalized = " ".join(message.split())
     translated = messages.get(message, messages.get(normalized, message))
     if translated == message:
-        # Phrases only. A catalogue fragment such as "Let's Encrypt cannot
-        # issue certificates for reserved/private domains: " carries its own
-        # context and substitutes cleanly into a message with a name inside
-        # it. A single word does not: this is the path every error, message
-        # and warning from the daemons takes to the page, and replacing "for",
-        # "all" and "check" one at a time left "the update candidate changed
-        # for all; check again" with three Russian words in an English
-        # sentence. A sentence the catalogue does not know stays in English,
-        # which can at least be read.
+        # Sentence fragments only. A catalogue entry written as a piece of a
+        # sentence -- "Let's Encrypt cannot issue certificates for
+        # reserved/private domains: ", ". Select Internal CA for this site."
+        # -- carries its own context and substitutes cleanly around a name.
+        # Anything else does not: this is the path every error, message and
+        # warning from the daemons takes to the page, and the catalogue holds
+        # hundreds of short labels. Single words turned "the update candidate
+        # changed for all; check again" into three Russian words in an English
+        # sentence; once those were excluded, the two-word label "differs
+        # from" did the same to "an applied image digest differs from the
+        # reviewed update plan". A sentence the catalogue does not know stays
+        # in English, which can at least be read.
         for pattern, source, target in _replacement_rules(selected):
-            if pattern is not None:
+            if pattern is not None or not _sentence_fragment(source):
                 continue
             translated = translated.replace(source, target)
     if not values:
