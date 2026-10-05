@@ -320,5 +320,50 @@ class DragAcrossAChartToZoom(unittest.TestCase):
         )
 
 
+class TheLegendDescribesThePeriodShown(unittest.TestCase):
+    """A Peak line's reading is the highest over the period, with its time.
+
+    The legend used to print the last bucket of every line, so a connections
+    chart that climbed to 44 read "Peak: 7" underneath -- the peak of the
+    final few minutes. Peak lines now read the maximum over the shown period
+    and when it was, Average lines the mean over it; counters keep their
+    latest value, and every reading says which of the three it is.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
+
+    def test_every_peak_and_average_line_says_how_to_summarise_it(self):
+        charts = self.script.split("const CHARTS = [")[1].split("\n  ];")[0]
+        for line in charts.splitlines():
+            if 'label: "Peak"' in line:
+                self.assertIn('summary: "max"', line)
+            if 'label: "Average"' in line:
+                self.assertIn('summary: "mean"', line)
+
+    def test_the_reading_is_the_maximum_or_the_mean_not_the_last_bucket(self):
+        reading = self.script.split("function legendReading(")[1].split("\n  function ")[0]
+        self.assertIn('spec.summary === "max"', reading)
+        self.assertIn("number > value", reading)
+        self.assertIn('spec.summary === "mean"', reading)
+        legend = self.script.split("function renderLegend(")[1].split("\n  function ")[0]
+        self.assertIn("legendReading(spec, raw)", legend)
+        self.assertIn("points[reading.index]", legend)
+        self.assertIn("LEGEND_HINTS[spec.summary", legend)
+
+    def test_the_hints_are_in_russian(self):
+        catalogue = json.loads(
+            (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
+        )["messages"]
+        for phrase in (
+            "Highest over the shown period",
+            "Average over the shown period",
+            "Latest value",
+        ):
+            self.assertIn(phrase, catalogue)
+            self.assertIn(phrase, self.script)
+
+
 if __name__ == "__main__":
     unittest.main()

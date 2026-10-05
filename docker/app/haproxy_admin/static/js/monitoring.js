@@ -54,15 +54,15 @@
     {
       name: "latency",
       series: [
-        { key: "response_ms_avg", label: "Average", color: "#4a86c8" },
-        { key: "response_ms_max", label: "Peak", color: "#c8a13a" }
+        { key: "response_ms_avg", label: "Average", color: "#4a86c8", summary: "mean" },
+        { key: "response_ms_max", label: "Peak", color: "#c8a13a", summary: "max" }
       ]
     },
     {
       name: "connections",
       series: [
-        { key: "conn_cur_avg", label: "Average", color: "#4a86c8" },
-        { key: "conn_cur_max", label: "Peak", color: "#c8a13a" }
+        { key: "conn_cur_avg", label: "Average", color: "#4a86c8", summary: "mean" },
+        { key: "conn_cur_max", label: "Peak", color: "#c8a13a", summary: "max" }
       ]
     },
     {
@@ -70,9 +70,9 @@
       // bucket step would turn 40% into 0.7 of nothing.
       name: "cpu",
       series: [
-        { key: "cpu_avg", label: "Average", color: "#4a86c8", percent: true },
-        { key: "cpu_max", label: "Peak", color: "#c8a13a", percent: true },
-        { key: "haproxy_busy_avg", label: "HAProxy", color: "#8a63d2", percent: true }
+        { key: "cpu_avg", label: "Average", color: "#4a86c8", percent: true, summary: "mean" },
+        { key: "cpu_max", label: "Peak", color: "#c8a13a", percent: true, summary: "max" },
+        { key: "haproxy_busy_avg", label: "HAProxy", color: "#8a63d2", percent: true, summary: "mean" }
       ]
     }
   ];
@@ -282,37 +282,80 @@
     });
   }
 
+  // What the number beside each line stands for. A "Peak" line is the
+  // highest value in each bucket, so its reading is the highest over the
+  // period shown -- with when it was -- and an "Average" line's is the mean
+  // over the period. Showing the last bucket for both, as the legend used
+  // to, put "Peak: 7" under a chart that climbs to 44.
+  const LEGEND_HINTS = {
+    max: "Highest over the shown period",
+    mean: "Average over the shown period",
+    last: "Latest value"
+  };
+
+  function legendReading(spec, raw) {
+    let value = 0;
+    let index = null;
+    if (spec.summary === "max") {
+      raw.forEach((item, position) => {
+        const number = Number(item);
+        if (Number.isFinite(number) && (index === null || number > value)) {
+          value = number;
+          index = position;
+        }
+      });
+    } else if (spec.summary === "mean") {
+      const numbers = raw.map(Number).filter(Number.isFinite);
+      value = numbers.length ? numbers.reduce((sum, item) => sum + item, 0) / numbers.length : 0;
+    } else {
+      for (let position = raw.length - 1; position >= 0; position -= 1) {
+        if (Number.isFinite(Number(raw[position]))) {
+          value = Number(raw[position]);
+          break;
+        }
+      }
+    }
+    return { value: value, index: index };
+  }
+
   function renderLegend(chart, payload) {
     const legend = byId(`mon-legend-${chart.name}`);
     if (!legend) return;
     legend.textContent = "";
     const step = Number(payload && payload.resolution_seconds) || 60;
+    const points = (payload && payload.points) || [];
+    const spanSeconds = points.length > 1
+      ? Number(points[points.length - 1]) - Number(points[0])
+      : 0;
     chart.series.forEach((spec) => {
       const raw = (payload && payload.series && payload.series[spec.key]) || [];
-      let last = 0;
-      for (let index = raw.length - 1; index >= 0; index -= 1) {
-        if (Number.isFinite(Number(raw[index]))) {
-          last = Number(raw[index]);
-          break;
-        }
-      }
-      const value = spec.rate ? last / step : last;
+      const reading = legendReading(spec, raw);
+      const value = spec.rate ? reading.value / step : reading.value;
       const item = document.createElement("span");
+      item.title = uiText(LEGEND_HINTS[spec.summary || "last"]);
       const swatch = document.createElement("i");
       swatch.style.background = spec.color;
       item.appendChild(swatch);
       const label = document.createElement("span");
       label.textContent = `${uiText(spec.label)}: `;
       item.appendChild(label);
-      const reading = document.createElement("b");
-      reading.setAttribute("data-i18n-skip", "");
-      reading.setAttribute("translate", "no");
-      reading.textContent = spec.percent
+      const shown = document.createElement("b");
+      shown.setAttribute("data-i18n-skip", "");
+      shown.setAttribute("translate", "no");
+      shown.textContent = spec.percent
         ? `${decimalFormat.format(value)}%`
         : spec.bytes
           ? `${formatBytes(value)}/s`
           : formatRate(value);
-      item.appendChild(reading);
+      item.appendChild(shown);
+      if (reading.index !== null && points[reading.index] !== undefined) {
+        const when = document.createElement("small");
+        when.setAttribute("data-i18n-skip", "");
+        when.setAttribute("translate", "no");
+        const at = new Date(Number(points[reading.index]) * 1000);
+        when.textContent = ` · ${(spanSeconds >= 86400 ? dateTimeFormat : timeFormat).format(at)}`;
+        item.appendChild(when);
+      }
       legend.appendChild(item);
     });
   }
