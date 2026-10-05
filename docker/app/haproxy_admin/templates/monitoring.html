@@ -301,6 +301,8 @@
 }
 
 .mon-timeline-track i { display: block; height: 100%; }
+/* An outage stays visible at any scale; up time gives way (see monitoring.js). */
+.mon-span-down, .mon-span-other { min-width: 4px; }
 .mon-span-up { background: #2e9e5b; }
 .mon-span-down { background: #cc4b4b; }
 .mon-span-other { background: #c8a13a; }
@@ -313,6 +315,7 @@
 }
 
 .mon-timeline-meta b { color: var(--text-primary); }
+.mon-timeline-meta small { display: block; font-size: 11px; }
 
 .mon-storage-grid {
   display: grid;

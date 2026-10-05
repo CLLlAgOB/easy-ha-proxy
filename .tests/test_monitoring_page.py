@@ -224,5 +224,48 @@ class CatalogCoverageTests(unittest.TestCase):
         self.assertTrue(messages)
 
 
+
+class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
+    """The same outage reads differently in an hour and in a day.
+
+    The unavailable total is a sum over the chosen window, so a day also
+    counts outages an hour does not reach. Drawn strictly to scale, a
+    six-minute outage in a day was two or three pixels wide: the total
+    counted it and the bar all but hid it, and the two windows looked like
+    they disagreed. Outages now keep a minimum width, and the total says
+    how many outages it is made of and whether one is still going on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
+        cls.page = (APP_DIR / "templates/monitoring.html").read_text(encoding="utf-8")
+        cls.render = cls.script.split("function renderTimeline(")[1].split("\n  function ")[0]
+
+    def test_an_outage_keeps_a_visible_width_and_up_time_gives_way(self):
+        self.assertRegex(self.page, r"\.mon-span-down, \.mon-span-other \{ min-width: \d+px; \}")
+        self.assertIn('span.state === "UP" ? `1 1 ${width}%` : `0 0 ${width}%`', self.render)
+        self.assertNotIn("piece.style.width", self.render)
+
+    def test_each_piece_says_when_it_was(self):
+        self.assertIn("spanPeriod(span, window)", self.render)
+
+    def test_the_total_names_its_outages_and_an_ongoing_one(self):
+        self.assertIn("outageSummary(entry, until)", self.render)
+        summary = self.script.split("function outageSummary(")[1].split("\n  function ")[0]
+        self.assertIn('t("outages: {count}", {count: outages.length})', summary)
+        self.assertIn('t("ongoing for")', summary)
+        self.assertIn('entry.current_state !== "UP"', summary)
+        # The duration is a number, not a phrase for the page translator.
+        self.assertIn('setAttribute("data-i18n-skip", "")', summary)
+
+    def test_the_new_words_are_in_russian(self):
+        catalogue = json.loads(
+            (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
+        )["messages"]
+        self.assertEqual(catalogue["outages: {count}"], "отключений: {count}")
+        self.assertEqual(catalogue["ongoing for"], "идёт сейчас")
+
+
 if __name__ == "__main__":
     unittest.main()

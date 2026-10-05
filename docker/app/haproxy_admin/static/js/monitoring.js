@@ -324,6 +324,39 @@
     return `${rest}s`;
   }
 
+  function spanPeriod(span, windowSeconds) {
+    const format = windowSeconds >= 86400 ? dateTimeFormat : timeFormat;
+    const start = format.format(new Date(Number(span.start) * 1000));
+    const end = format.format(new Date(Number(span.end) * 1000));
+    return `${start}–${end}`;
+  }
+
+  // The unavailable total is a sum over the chosen window, so the same
+  // outage reads differently in an hour and in a day. Say what the sum is
+  // made of: how many outages, and whether one is still going on.
+  function outageSummary(entry, until) {
+    const outages = (entry.spans || []).filter((span) => span.state !== "UP");
+    const line = document.createElement("small");
+    const parts = [];
+    if (outages.length) {
+      parts.push(t("outages: {count}", {count: outages.length}));
+    }
+    const last = outages[outages.length - 1];
+    const ongoing = last && entry.current_state !== "UP" && Number(last.end) >= until;
+    line.textContent = parts.join(" · ");
+    if (ongoing) {
+      const label = document.createElement("span");
+      label.textContent = `${parts.length ? " · " : ""}${t("ongoing for")} `;
+      line.appendChild(label);
+      const duration = document.createElement("span");
+      duration.setAttribute("data-i18n-skip", "");
+      duration.setAttribute("translate", "no");
+      duration.textContent = formatDuration(Number(last.end) - Number(last.start));
+      line.appendChild(duration);
+    }
+    return line;
+  }
+
   function spanClass(state) {
     if (state === "UP") return "mon-span-up";
     if (state === "DOWN") return "mon-span-down";
@@ -370,12 +403,18 @@
       const track = document.createElement("div");
       track.className = "mon-timeline-track";
       (entry.spans || []).forEach((span) => {
-        const width = ((Number(span.end) - Number(span.start)) / window) * 100;
+        const seconds = Number(span.end) - Number(span.start);
+        const width = (seconds / window) * 100;
         if (!(width > 0)) return;
         const piece = document.createElement("i");
         piece.className = spanClass(span.state);
-        piece.style.width = `${width}%`;
-        piece.title = `${span.state} · ${formatDuration(Number(span.end) - Number(span.start))}`;
+        // Up time gives way; anything else keeps the few pixels its CSS
+        // min-width asks for. Drawn strictly to scale, a six-minute outage
+        // in a day was two or three pixels wide -- the total counted it and
+        // the bar all but hid it, so the day and the hour looked like they
+        // disagreed.
+        piece.style.flex = span.state === "UP" ? `1 1 ${width}%` : `0 0 ${width}%`;
+        piece.title = `${span.state} · ${spanPeriod(span, window)} · ${formatDuration(seconds)}`;
         track.appendChild(piece);
       });
       row.appendChild(track);
@@ -400,6 +439,7 @@
         duration.setAttribute("translate", "no");
         duration.textContent = formatDuration(entry.downtime_seconds);
         meta.appendChild(duration);
+        meta.appendChild(outageSummary(entry, until));
       }
       row.appendChild(meta);
 
