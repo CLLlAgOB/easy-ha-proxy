@@ -8,6 +8,18 @@
     "Host-service files to update: {names}": "Обновить файлы служб хоста: {names}",
     "This update was checked for a different release channel than the one this gateway is set to. Save the channel first, or run the check again.": "Эта проверка сделана для другого канала выпуска, чем тот, что сохранён на шлюзе. Сначала сохраните канал или запустите проверку заново.",
     "This check previews a release channel that is not saved on this gateway. Save the channel before applying these updates.": "Эта проверка показывает канал выпуска, который не сохранён на шлюзе. Сохраните канал, прежде чем применять эти обновления.",
-    "A different remote managed source revision is available. It also changes these images: {images}": "Доступна другая ревизия удалённых управляемых исходников. Она также меняет эти образы: {images}"
+    "A different remote managed source revision is available. It also changes these images: {images}": "Доступна другая ревизия удалённых управляемых исходников. Она также меняет эти образы: {images}",
+    "A HAProxy Admin image update is available in the selected channel.": "В выбранном канале доступно обновление образа HAProxy Admin.",
+    "An operating-system package candidate could not be parsed safely from the APT simulation.": "Не удалось надёжно разобрать кандидата пакета ОС из пробного запуска APT.",
+    "One or more managed Docker image versions could not be checked; the stack cannot be updated partially.": "Не удалось проверить версии одного или нескольких управляемых образов Docker; стек нельзя обновить частично.",
+    "The HAProxy Admin image is current in the selected channel.": "Образ HAProxy Admin актуален в выбранном канале.",
+    "The HAProxy Admin image is missing or ambiguous in its Compose file.": "Образ HAProxy Admin отсутствует в Compose-файле или указан неоднозначно.",
+    "The HAProxy Admin image reference is invalid.": "Ссылка на образ HAProxy Admin некорректна.",
+    "The complete stack update is blocked until every managed image candidate can be verified.": "Обновление всего стека заблокировано, пока не удастся проверить кандидатов для всех управляемых образов.",
+    "The installed HAProxy Admin image digest could not be read.": "Не удалось прочитать дайджест установленного образа HAProxy Admin.",
+    "The managed HAProxy Admin image could not be read.": "Не удалось прочитать управляемый образ HAProxy Admin.",
+    "The remote source changed, but its helper daemon files could not be compared safely.": "Удалённые исходники изменились, но файлы вспомогательных демонов не удалось надёжно сравнить.",
+    "The requested HAProxy Admin channel could not be verified.": "Не удалось проверить запрошенный канал HAProxy Admin.",
+    "The requested HAProxy Admin image channel differs from the deployed channel.": "Запрошенный канал образа HAProxy Admin отличается от установленного."
   }
 }
