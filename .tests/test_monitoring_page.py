@@ -267,5 +267,58 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
         self.assertEqual(catalogue["ongoing for"], "идёт сейчас")
 
 
+class DragAcrossAChartToZoom(unittest.TestCase):
+    """A stretch selected on a chart becomes the period every chart shows.
+
+    It is the same mechanism as typing a period into "Period...", so the
+    availability bars follow it too; each zoom remembers the one before, so
+    "Zoom out" or a double-click steps back, and a preset starts afresh.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
+        cls.page = (APP_DIR / "templates/monitoring.html").read_text(encoding="utf-8")
+
+    def section(self, name):
+        return self.script.split(f"function {name}(")[1].split("\n  function ")[0]
+
+    def test_every_chart_can_be_dragged_across(self):
+        self.assertIn("svg.__geometry = {", self.section("drawChart"))
+        self.assertIn("svg.__geometry = null;", self.section("drawEmpty"))
+        bind = self.section("bindControls")
+        self.assertIn("bindZoom(svg)", bind)
+        self.assertIn('byId("mon-zoom-out")', bind)
+        zoom = self.section("bindZoom")
+        for event in ("pointerdown", "pointermove", "pointerup", "pointercancel", "dblclick"):
+            self.assertIn(f'"{event}"', zoom)
+        # A click is not a selection.
+        self.assertIn("if (right - left < 6) return;", zoom)
+
+    def test_the_selection_becomes_the_shown_period_and_can_be_undone(self):
+        self.assertIn("zoomHistory.push(", self.section("zoomTo"))
+        self.assertIn("showWindow(zoomHistory.pop())", self.section("zoomOut"))
+        show = self.section("showWindow")
+        self.assertIn("customWindow = next;", show)
+        self.assertIn("loadAll();", show)
+        # Presets, a typed period and "Back to presets" start a new history.
+        self.assertEqual(self.script.count("zoomHistory.length = 0;"), 3)
+
+    def test_a_refresh_does_not_drop_a_selection_in_progress(self):
+        self.assertIn("if (inFlight || zoomDragging) return;", self.section("loadAll"))
+
+    def test_the_page_offers_it_and_says_so(self):
+        self.assertIn('id="mon-zoom-out" hidden>Zoom out</button>', self.page)
+        self.assertIn("Drag across a chart to zoom in, double-click to zoom out", self.page)
+        self.assertIn("touch-action: pan-y", self.page)
+        catalogue = json.loads(
+            (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
+        )["messages"]
+        self.assertEqual(catalogue["Zoom out"], "Отдалить")
+        self.assertIn(
+            "Drag across a chart to zoom in, double-click to zoom out", catalogue
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

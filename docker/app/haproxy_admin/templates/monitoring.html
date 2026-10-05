@@ -230,6 +230,14 @@
 .mon-plot .mon-tick { fill: var(--text-secondary); font-size: 10px; }
 .mon-plot .mon-line { fill: none; stroke-width: 2; }
 .mon-plot .mon-area { opacity: .12; }
+/* Drag to zoom: a horizontal drag selects, a vertical one still scrolls. */
+.mon-plot { cursor: crosshair; touch-action: pan-y; user-select: none; }
+.mon-plot .mon-brush {
+  fill: rgba(var(--accent-primary-rgb), .18);
+  stroke: rgba(var(--accent-primary-rgb), .6);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
 
 .mon-legend {
   display: flex;
@@ -363,6 +371,7 @@
       {% endfor %}
       <button type="button" class="mon-range" id="mon-range-custom"
               aria-pressed="false">Period…</button>
+      <button type="button" class="mon-range" id="mon-zoom-out" hidden>Zoom out</button>
     </div>
 
     {# A preset answers "how are things". It cannot answer "what happened
@@ -425,6 +434,7 @@
 <div class="card" style="margin-top:25px;">
   <div class="card-header">
     <h2>Graphs</h2>
+    <span class="mon-sub">Drag across a chart to zoom in, double-click to zoom out</span>
     <span class="mon-sub" id="mon-resolution"></span>
   </div>
 

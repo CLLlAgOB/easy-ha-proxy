@@ -159,6 +159,7 @@
   }
 
   function drawEmpty(svg, message) {
+    svg.__geometry = null;
     clear(svg);
     svg.setAttribute("viewBox", "0 0 600 190");
     const text = element("text", {
@@ -207,6 +208,16 @@
     const xFor = (index) =>
       padding.left + (points.length === 1 ? plotWidth / 2 : (index / (points.length - 1)) * plotWidth);
     const yFor = (value) => padding.top + plotHeight - (Math.max(0, value) / top) * plotHeight;
+    // What a drag across the chart needs to turn a stretch of it into times.
+    svg.__geometry = {
+      points: points,
+      step: step,
+      width: width,
+      left: padding.left,
+      top: padding.top,
+      plotWidth: plotWidth,
+      plotHeight: plotHeight
+    };
 
     for (let tick = 0; tick <= 2; tick += 1) {
       const value = (top / 2) * tick;
@@ -898,7 +909,8 @@
   }
 
   async function loadAll() {
-    if (inFlight) return;
+    // A refresh redraws the charts, which would drop a selection in progress.
+    if (inFlight || zoomDragging) return;
     inFlight = true;
     const params = Object.assign({ range: currentRange }, windowParams());
     if (currentSite) params.site = currentSite;
@@ -920,7 +932,9 @@
       // Not scoped by site: a link carries every site pointed at it.
       await loadChannels();
 
-      const seconds = rangeSeconds(currentRange);
+      const seconds = customWindow
+        ? customWindow.until - customWindow.since
+        : rangeSeconds(currentRange);
       const results = await Promise.all(
         CHARTS.map((chart) =>
           getJson("/api/monitoring/series", Object.assign({ chart: chart.name }, params)).catch(
@@ -957,6 +971,138 @@
     } finally {
       inFlight = false;
     }
+  }
+
+  /* ---------- drag to zoom ---------- */
+
+  // Drag across a chart to look at just that stretch: the selection becomes
+  // the chosen period for every chart and the availability bars, exactly as
+  // if it had been typed into "Period...". Each zoom remembers what was shown
+  // before it, so "Zoom out" -- or a double-click on a chart -- steps back
+  // one level at a time, and a preset or "Back to presets" starts afresh.
+  const MIN_ZOOM_SECONDS = 300;
+  const zoomHistory = [];
+  let zoomDragging = false;
+
+  function updateZoomOut() {
+    const button = byId("mon-zoom-out");
+    if (button) button.hidden = !zoomHistory.length;
+  }
+
+  function markCustomRange(active) {
+    const ranges = byId("mon-ranges");
+    if (!ranges) return;
+    ranges.querySelectorAll("button").forEach((item) => {
+      const pressed = active
+        ? item.id === "mon-range-custom"
+        : item.dataset.range === currentRange;
+      item.setAttribute("aria-pressed", pressed ? "true" : "false");
+    });
+  }
+
+  function showWindow(next) {
+    customWindow = next;
+    markCustomRange(Boolean(next));
+    if (next) {
+      const from = byId("mon-window-from");
+      const to = byId("mon-window-to");
+      if (from) from.value = toLocalInput(next.since);
+      if (to) to.value = toLocalInput(next.until);
+    }
+    updateZoomOut();
+    setWindowNote("");
+    loadAll();
+  }
+
+  // The x axis is spaced by sample, not by clock, so a position maps to a
+  // time through the samples either side of it -- which is also what the
+  // operator saw under the pointer.
+  function timeAtX(geometry, x) {
+    const points = geometry.points;
+    if (points.length === 1) return Number(points[0]);
+    const fraction = Math.min(Math.max((x - geometry.left) / geometry.plotWidth, 0), 1);
+    const position = fraction * (points.length - 1);
+    const lower = Math.floor(position);
+    const upper = Math.min(lower + 1, points.length - 1);
+    return Number(points[lower]) +
+      (Number(points[upper]) - Number(points[lower])) * (position - lower);
+  }
+
+  function zoomTo(since, until) {
+    if (until - since < MIN_ZOOM_SECONDS) {
+      const middle = (since + until) / 2;
+      since = middle - MIN_ZOOM_SECONDS / 2;
+      until = middle + MIN_ZOOM_SECONDS / 2;
+    }
+    zoomHistory.push(customWindow ? Object.assign({}, customWindow) : null);
+    showWindow({ since: Math.floor(since), until: Math.ceil(until) });
+  }
+
+  function zoomOut() {
+    if (!zoomHistory.length) return;
+    showWindow(zoomHistory.pop());
+  }
+
+  function bindZoom(svg) {
+    let start = null;
+    let band = null;
+    const toX = (event, geometry) => {
+      const box = svg.getBoundingClientRect();
+      const x = ((event.clientX - box.left) / Math.max(box.width, 1)) * geometry.width;
+      return Math.min(Math.max(x, geometry.left), geometry.left + geometry.plotWidth);
+    };
+    const stop = () => {
+      if (band && band.parentNode) band.parentNode.removeChild(band);
+      band = null;
+      start = null;
+      zoomDragging = false;
+    };
+
+    svg.addEventListener("pointerdown", (event) => {
+      const geometry = svg.__geometry;
+      if (!geometry || event.button !== 0) return;
+      start = toX(event, geometry);
+      zoomDragging = true;
+      // Keeps the drag ours when the pointer leaves the chart; a selection
+      // still works without it, so a refusal must not abort the drag.
+      try {
+        svg.setPointerCapture(event.pointerId);
+      } catch (error) {
+        /* not capturable: carry on uncaptured */
+      }
+      band = element("rect", {
+        class: "mon-brush",
+        x: start,
+        y: geometry.top,
+        width: 0,
+        height: geometry.plotHeight
+      });
+      svg.appendChild(band);
+      event.preventDefault();
+    });
+    svg.addEventListener("pointermove", (event) => {
+      const geometry = svg.__geometry;
+      if (start === null || !geometry || !band) return;
+      const x = toX(event, geometry);
+      band.setAttribute("x", Math.min(start, x));
+      band.setAttribute("width", Math.abs(x - start));
+    });
+    svg.addEventListener("pointerup", (event) => {
+      const geometry = svg.__geometry;
+      if (start === null || !geometry) {
+        stop();
+        return;
+      }
+      const end = toX(event, geometry);
+      const left = Math.min(start, end);
+      const right = Math.max(start, end);
+      stop();
+      // A click or a twitch is not a selection.
+      if (right - left < 6) return;
+      zoomTo(timeAtX(geometry, left), timeAtX(geometry, right) + geometry.step);
+    });
+    svg.addEventListener("pointercancel", stop);
+    svg.addEventListener("dblclick", zoomOut);
   }
 
   function scheduleRefresh() {
@@ -1007,6 +1153,8 @@
           return;
         }
         customWindow = { since: since, until: until };
+        zoomHistory.length = 0;
+        updateZoomOut();
         const ranges = byId("mon-ranges");
         if (ranges) {
           ranges.querySelectorAll("button").forEach((item) => {
@@ -1024,6 +1172,8 @@
     if (clear) {
       clear.addEventListener("click", () => {
         customWindow = null;
+        zoomHistory.length = 0;
+        updateZoomOut();
         setWindowNote("");
         if (panel) panel.hidden = true;
         const ranges = byId("mon-ranges");
@@ -1066,6 +1216,8 @@
         // Choosing a preset leaves the explicit period, or the page would
         // show one thing and highlight another.
         customWindow = null;
+        zoomHistory.length = 0;
+        updateZoomOut();
         setWindowNote("");
         ranges.querySelectorAll("button").forEach((item) => {
           item.setAttribute("aria-pressed", item === button ? "true" : "false");
@@ -1077,6 +1229,13 @@
     }
 
     bindWindowControls();
+
+    CHARTS.forEach((chart) => {
+      const svg = byId(`mon-plot-${chart.name}`);
+      if (svg) bindZoom(svg);
+    });
+    const zoomOutButton = byId("mon-zoom-out");
+    if (zoomOutButton) zoomOutButton.addEventListener("click", zoomOut);
 
     const site = byId("mon-site");
     if (site) {

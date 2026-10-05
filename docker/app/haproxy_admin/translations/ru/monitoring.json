@@ -74,6 +74,8 @@
     "Processor": "Процессор",
     "Percent of the machine": "Процентов от машины",
     "outages: {count}": "отключений: {count}",
-    "ongoing for": "идёт сейчас"
+    "ongoing for": "идёт сейчас",
+    "Zoom out": "Отдалить",
+    "Drag across a chart to zoom in, double-click to zoom out": "Протяните по графику, чтобы приблизить; двойной щелчок — отдалить"
   }
 }
