@@ -2739,6 +2739,36 @@ def verify_remote_copy(
     return True, "download", ""
 
 
+REMOTE_PREFIX = "easy-ha-proxy-"
+
+
+def remote_archive_name(backup_id: str, archive: Path) -> str:
+    """The name a copy carries off-host: dated, so retention can group it.
+
+    On the gateway an archive is named after its id alone, and that name used
+    to be sent off-host unchanged. Retention groups copies by the date in
+    their names and looks only at easy-ha-proxy-* files, so it recognised
+    none of them: no destination was ever pruned, and one had a hundred files
+    where the policy allowed seventeen archives. The date comes from the
+    backup's own record, falling back to the archive's modification time.
+    """
+    created = None
+    with contextlib.suppress(Exception):
+        raw = str(safe_json_file(backup_meta_path(backup_id)).get("created_at") or "")
+        created = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if created is None:
+        created = dt.datetime.fromtimestamp(archive.stat().st_mtime, dt.timezone.utc)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=dt.timezone.utc)
+    stamp = created.astimezone(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"{REMOTE_PREFIX}{stamp}-{backup_id}{ARCHIVE_SUFFIX}"
+
+
+def remote_checksum_body(expected: str, remote_name: str) -> bytes:
+    # Names the remote file, so sha256sum -c works where the copy lands.
+    return f"{expected}  {remote_name}\n".encode("ascii")
+
+
 def remote_listing(record: dict[str, Any]) -> list[str]:
     """Archive names already on the far end, newest last."""
     result = run_sftp(record, f"ls -1 {remote_quote(record['path'])}\n")
@@ -2747,7 +2777,7 @@ def remote_listing(record: dict[str, Any]) -> list[str]:
     names = []
     for row in (result.stdout or b"").decode("utf-8", "replace").splitlines():
         candidate = row.strip().rsplit("/", 1)[-1]
-        if candidate.startswith("easy-ha-proxy-") and candidate.endswith(".tar.gz.enc"):
+        if candidate.startswith(REMOTE_PREFIX) and candidate.endswith(ARCHIVE_SUFFIX):
             names.append(candidate)
     return sorted(names)
 
@@ -2760,10 +2790,19 @@ def retention_victims(names: list[str], record: dict[str, Any]) -> list[str]:
     per month; anything else goes.
     """
     by_day: dict[str, str] = {}
+    dated: set[str] = set()
     for name in sorted(names):
-        match = re.search(r"(\d{4})(\d{2})(\d{2})", name)
+        # The date directly after the prefix, and nowhere else: an id is hex
+        # and can hold eight digits in a row -- "...70977473..." read as a
+        # date is month 74, which used to raise out of the whole upload.
+        match = re.match(rf"{re.escape(REMOTE_PREFIX)}(\d{{4}})(\d{{2}})(\d{{2}})", name)
         if match is None:
             continue
+        try:
+            dt.date(*(int(part) for part in match.groups()))
+        except ValueError:
+            continue
+        dated.add(name)
         # The last archive of a day represents that day.
         by_day["-".join(match.groups())] = name
 
@@ -2792,7 +2831,10 @@ def retention_victims(names: list[str], record: dict[str, Any]) -> list[str]:
         if len(seen_months) <= int(record.get("keep_monthly") or 0):
             keep.add(by_day[day])
 
-    return [name for name in names if name not in keep]
+    # Only copies recognised above can be victims. A file of any other name
+    # in the folder -- an undated copy from before copies were dated, or
+    # something that is not a backup at all -- is never retention's to remove.
+    return [name for name in names if name in dated and name not in keep]
 
 
 # ---------------------------------------------------------------------------
@@ -2988,13 +3030,13 @@ def s3_listing(record: dict[str, Any]) -> list[str]:
     names = []
     for match in re.finditer(r"<Key>([^<]+)</Key>", text):
         candidate = match.group(1).rsplit("/", 1)[-1]
-        if candidate.startswith("easy-ha-proxy-") and candidate.endswith(".tar.gz.enc"):
+        if candidate.startswith(REMOTE_PREFIX) and candidate.endswith(ARCHIVE_SUFFIX):
             names.append(candidate)
     return sorted(names)
 
 
 def s3_upload(
-    record: dict[str, Any], archive: Path, checksum: Path, expected: str
+    record: dict[str, Any], archive: Path, remote_name: str, expected: str
 ) -> dict[str, Any]:
     """PUT the archive, then the checksum beside it.
 
@@ -3005,22 +3047,21 @@ def s3_upload(
     size = archive.stat().st_size
     with archive.open("rb") as stream:
         status, _headers, body = s3_request(
-            record, "PUT", archive.name, body=stream, body_sha=expected, length=size
+            record, "PUT", remote_name, body=stream, body_sha=expected, length=size
         )
     if status not in (200, 201):
         detail = body.decode("utf-8", "replace").strip()[:400]
         raise BackupdError(f"the upload failed ({status}): {detail}", code="upstream")
 
-    if checksum.is_file():
-        payload = checksum.read_bytes()
-        s3_request(
-            record,
-            "PUT",
-            checksum.name,
-            body=payload,
-            body_sha=hashlib.sha256(payload).hexdigest(),
-            length=len(payload),
-        )
+    payload = remote_checksum_body(expected, remote_name)
+    s3_request(
+        record,
+        "PUT",
+        remote_name + ".sha256",
+        body=payload,
+        body_sha=hashlib.sha256(payload).hexdigest(),
+        length=len(payload),
+    )
     # The service verified the body against the hash carried in the signature,
     # so a success here is the integrity proof; re-reading would prove nothing
     # more and cost the transfer twice.
@@ -3050,9 +3091,10 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
     if not expected:
         expected = sha256_file(archive)
     size = archive.stat().st_size
+    remote_name = remote_archive_name(backup_id, archive)
 
     if record.get("type") == "s3":
-        outcome = s3_upload(record, archive, checksum, expected)
+        outcome = s3_upload(record, archive, remote_name, expected)
         response = {
             "ok": True,
             "backup_id": backup_id,
@@ -3066,22 +3108,22 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
         return response
 
     remote_dir = record["path"]
-    remote_file = f"{remote_dir}/{archive.name}"
+    remote_file = f"{remote_dir}/{remote_name}"
     # Upload beside the final name and rename, so an interrupted transfer
     # cannot look like a complete backup to whoever prunes next.
     staging = remote_file + ".part"
-    batch = (
-        f"-mkdir {remote_quote(remote_dir)}\n"
-        f"put {remote_quote(str(archive))} {remote_quote(staging)}\n"
-        f"-rm {remote_quote(remote_file)}\n"
-        f"rename {remote_quote(staging)} {remote_quote(remote_file)}\n"
-    )
-    if checksum.is_file():
-        batch += (
-            f"put {remote_quote(str(checksum))} "
-            f"{remote_quote(remote_dir + '/' + checksum.name)}\n"
+    with tempfile.TemporaryDirectory(prefix="backupd-upload-") as work:
+        checksum_copy = Path(work) / (remote_name + ".sha256")
+        checksum_copy.write_bytes(remote_checksum_body(expected, remote_name))
+        batch = (
+            f"-mkdir {remote_quote(remote_dir)}\n"
+            f"put {remote_quote(str(archive))} {remote_quote(staging)}\n"
+            f"-rm {remote_quote(remote_file)}\n"
+            f"rename {remote_quote(staging)} {remote_quote(remote_file)}\n"
+            f"put {remote_quote(str(checksum_copy))} "
+            f"{remote_quote(remote_file + '.sha256')}\n"
         )
-    result = run_sftp(record, batch)
+        result = run_sftp(record, batch)
     if result.returncode != 0:
         detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:500]
         report_alert(

@@ -196,8 +196,11 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(sorted(victims), sorted(names))
 
     def test_a_file_that_is_not_ours_is_ignored(self):
+        # As the name says. It used to assert the opposite: a file retention
+        # could not date was put up for deletion, and only the listing's own
+        # name filter kept it from being removed.
         victims = backupd.retention_victims(["someone-elses-file.tar.gz.enc"], self.POLICY)
-        self.assertEqual(victims, ["someone-elses-file.tar.gz.enc"])
+        self.assertEqual(victims, [])
 
 
 class UploadTests(DestinationTestCase):
