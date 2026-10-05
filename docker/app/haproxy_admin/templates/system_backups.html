@@ -148,6 +148,7 @@
       <div>
         <h2 id="backup-artifacts-title">Backups stored on this server</h2>
         <p class="table-meta">Download both the encrypted archive and its SHA-256 checksum, then store them separately from the server.</p>
+        <p class="table-meta" id="backup-local-summary" data-i18n-skip translate="no"></p>
       </div>
     </div>
     <div class="table-wrap">
@@ -359,6 +360,15 @@
       <div id="schedule-destinations" data-i18n-skip translate="no">
         <p class="vars-field-help">Loading…</p>
       </div>
+
+      <label class="form-label" for="schedule-keep-local">Keep on this server</label>
+      <input id="schedule-keep-local" class="form-input" type="number"
+             min="1" max="50" step="1" value="3" required style="max-width:120px;">
+      <p class="vars-field-help">
+        How many of the newest backups stay on this server. Older ones are
+        removed only after every destination holds a verified copy of the new
+        one; if any copy fails, nothing is removed.
+      </p>
 
       <label class="backup-option" for="schedule-quiesce">
         <input id="schedule-quiesce" type="checkbox" checked>

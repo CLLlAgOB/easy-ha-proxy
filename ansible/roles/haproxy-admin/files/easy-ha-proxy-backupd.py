@@ -121,6 +121,11 @@ MAX_ARCHIVE_BYTES = env_int(
     "BACKUPD_MAX_ARCHIVE_BYTES", 8 * 1024 * 1024 * 1024
 )
 MIN_FREE_BYTES = env_int("BACKUPD_MIN_FREE_BYTES", 512 * 1024 * 1024)
+# Free space below this -- or below a tenth of the filesystem, on a small
+# one -- is reported after a scheduled run, well before MIN_FREE_BYTES makes
+# the next backup refuse to start at all.
+LOW_SPACE_BYTES = env_int("BACKUPD_LOW_SPACE_BYTES", 2 * 1024 * 1024 * 1024)
+LOW_SPACE_FRACTION = 0.10
 MAX_CAPTURE_BYTES = env_int(
     "BACKUPD_MAX_CAPTURE_BYTES", 64 * 1024, maximum=512 * 1024
 )
@@ -223,7 +228,7 @@ REQUEST_FIELDS = {
     "schedule_save": frozenset(
         {
             "action", "enabled", "destinations", "include_ssh", "quiesce",
-            "passphrase", "time",
+            "passphrase", "time", "keep_local",
         }
     ),
     "run_scheduled": frozenset({"action", "on_demand"}),
@@ -1435,6 +1440,16 @@ def public_backup(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_backups() -> list[dict[str, Any]]:
+    return all_backups()[:LIST_LIMIT]
+
+
+def all_backups() -> list[dict[str, Any]]:
+    """Every valid archive on this server, newest first.
+
+    The page lists at most LIST_LIMIT of them; retention and the storage
+    summary have to see all of them, or an archive past the limit would sit
+    on the disk where nothing could see it, count it or remove it.
+    """
     backups: list[dict[str, Any]] = []
     for path in BACKUPS_DIR.glob(f"*{META_SUFFIX}"):
         backup_id = path.name[: -len(META_SUFFIX)]
@@ -1460,7 +1475,84 @@ def list_backups() -> list[dict[str, Any]]:
         except (BackupdError, OSError, ValueError, json.JSONDecodeError):
             LOG.warning("Ignoring unsafe backup metadata %s", path.name)
     backups.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-    return backups[:LIST_LIMIT]
+    return backups
+
+
+def local_storage(backups: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """How much the archives on this server take, and how much room is left."""
+
+    if backups is None:
+        backups = all_backups()
+    # Before the first backup the directory may not exist yet; the space
+    # that matters is that of the filesystem it will be created on.
+    anchor = BACKUPS_DIR
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    usage = shutil.disk_usage(anchor)
+    threshold = max(
+        2 * MIN_FREE_BYTES,
+        min(LOW_SPACE_BYTES, int(usage.total * LOW_SPACE_FRACTION)),
+    )
+    return {
+        "count": len(backups),
+        "bytes": sum(int(item.get("size_bytes") or 0) for item in backups),
+        "free_bytes": usage.free,
+        "filesystem_bytes": usage.total,
+        "low_space_bytes": threshold,
+        "low": usage.free < threshold,
+    }
+
+
+def staged_backup_ids() -> set[str]:
+    """Archives a restore has been staged from; those are not pruned."""
+
+    staged: set[str] = set()
+    for path in JOBS_DIR.glob(f"{STAGE_RECORD_PREFIX}*{STAGE_RECORD_SUFFIX}"):
+        with contextlib.suppress(Exception):
+            backup_id = str(safe_json_file(path).get("backup_id") or "")
+            if IDENTIFIER_RE.fullmatch(backup_id):
+                staged.add(backup_id)
+    return staged
+
+
+def remove_backup_files(backup_id: str) -> list[str]:
+    """Delete one archive with its checksum and metadata, checked first."""
+
+    paths = (
+        (backup_archive_path(backup_id), MAX_ARCHIVE_BYTES),
+        (backup_checksum_path(backup_id), 64 * 1024),
+        (backup_meta_path(backup_id), MAX_STATE_BYTES),
+    )
+    for path, maximum in paths:
+        safe_regular_file(path, expected_uid=0, maximum_size=maximum)
+    deleted = []
+    for path, _maximum in paths:
+        path.unlink()
+        deleted.append(path.name)
+    return deleted
+
+
+def prune_local_backups(keep: int) -> list[str]:
+    """Keep the newest ``keep`` archives on this server and remove the rest.
+
+    Only ever called once every destination holds a verified copy of the
+    newest archive, so nothing removed here is the last copy of anything
+    recent. An archive a restore has been staged from is left alone.
+    """
+
+    staged = staged_backup_ids()
+    removed: list[str] = []
+    for backup in all_backups()[max(keep, 1):]:
+        backup_id = backup["id"]
+        if backup_id in staged:
+            continue
+        try:
+            remove_backup_files(backup_id)
+        except (BackupdError, OSError) as exc:
+            LOG.warning("Could not remove old local backup %s: %s", backup_id, exc)
+            continue
+        removed.append(backup_id)
+    return removed
 
 
 def read_checksum_file(path: Path, info: os.stat_result) -> str:
@@ -2197,19 +2289,7 @@ def delete_item(request: dict[str, Any]) -> dict[str, Any]:
             path.unlink()
             deleted.append(path.name)
         elif kind == "backup":
-            for path, maximum in (
-                (backup_archive_path(item_id), MAX_ARCHIVE_BYTES),
-                (backup_checksum_path(item_id), 64 * 1024),
-                (backup_meta_path(item_id), MAX_STATE_BYTES),
-            ):
-                safe_regular_file(path, expected_uid=0, maximum_size=maximum)
-            for path in (
-                backup_archive_path(item_id),
-                backup_checksum_path(item_id),
-                backup_meta_path(item_id),
-            ):
-                path.unlink()
-                deleted.append(path.name)
+            deleted.extend(remove_backup_files(item_id))
         else:
             job = load_job(item_id)
             if job.get("status") in ACTIVE_STATUSES:
@@ -2233,10 +2313,12 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         if "job_id" in request
         else list_jobs()
     )
+    backups = all_backups()
     return {
         "ok": True,
         "jobs": jobs,
-        "backups": list_backups(),
+        "backups": backups[:LIST_LIMIT],
+        "local": local_storage(backups),
         "uploads": list_uploads(),
         "active_job": active_job(),
     }
@@ -3189,6 +3271,31 @@ def timer_next_run() -> str:
     return properties.get("NextElapseUSecRealtime", "") or ""
 
 
+DEFAULT_KEEP_LOCAL = 3
+
+
+def keep_local_value(value: Any, *, default: int = DEFAULT_KEEP_LOCAL) -> int:
+    """How many archives to keep on this server: a whole number, 1 to 50.
+
+    Absent means the default; anything else is checked rather than coerced,
+    so a deliberate value is never quietly replaced by the default.
+    """
+    if value is None or value == "":
+        return default
+    whole = isinstance(value, int) and not isinstance(value, bool)
+    if not whole and not (isinstance(value, str) and value.strip().isdigit()):
+        raise BackupdError(
+            "the number of backups kept on this server must be a whole number", code="invalid"
+        )
+    number = int(value)
+    if not 1 <= number <= LIST_LIMIT:
+        raise BackupdError(
+            f"the number of backups kept on this server must be between 1 and {LIST_LIMIT}",
+            code="invalid",
+        )
+    return number
+
+
 def load_schedule() -> dict[str, Any]:
     try:
         record = safe_json_file(SCHEDULE_PATH)
@@ -3211,7 +3318,16 @@ def load_schedule() -> dict[str, Any]:
         # the timer is stopped or the drop-in never landed.
         "time": schedule_time(record.get("time"), default=DEFAULT_SCHEDULE_TIME),
         "next_run": timer_next_run(),
+        "keep_local": stored_keep_local(record.get("keep_local")),
     }
+
+
+def stored_keep_local(value: Any) -> int:
+    # A hand-edited file must not stop the daemon; it falls back instead.
+    try:
+        return keep_local_value(value)
+    except BackupdError:
+        return DEFAULT_KEEP_LOCAL
 
 
 def schedule_status(_request: dict[str, Any]) -> dict[str, Any]:
@@ -3267,6 +3383,9 @@ def save_schedule(request: dict[str, Any]) -> dict[str, Any]:
         "last_run": current["last_run"],
         "last_result": current["last_result"],
         "time": wanted_time,
+        "keep_local": keep_local_value(
+            request.get("keep_local"), default=current["keep_local"]
+        ),
     }
     atomic_json(SCHEDULE_PATH, record, mode=0o600)
     # Only when the hour actually moved. Saving a destination or a passphrase
@@ -3356,15 +3475,48 @@ def run_scheduled_backup(request: dict[str, Any]) -> dict[str, Any]:
         if not outcome.get("ok"):
             failures.append(f"{name}: {outcome.get('error')}")
 
-    record_schedule_outcome(
+    # Old local archives go only once every destination has a verified copy
+    # of this one. A failed or unverified upload keeps them all: then the
+    # local archives may be the only recent copies there are.
+    pruned: list[str] = []
+    if uploads and not failures:
+        try:
+            lock_fd = acquire_operation()
+        except BackupdError as exc:
+            LOG.warning("Local retention skipped this run: %s", exc)
+        else:
+            try:
+                pruned = prune_local_backups(schedule["keep_local"])
+            finally:
+                release_operation(lock_fd)
+
+    outcome = (
         "; ".join(failures) if failures else f"copied to {len(uploads)} destination(s)"
     )
+    if pruned:
+        outcome += f"; removed {len(pruned)} older local backup(s)"
+    record_schedule_outcome(outcome)
+
+    storage = local_storage()
+    if storage["low"]:
+        report_alert(
+            "backup.space_low",
+            "local",
+            "Backup storage is running out of space",
+            (
+                f"{storage['free_bytes']} bytes free, below "
+                f"{storage['low_space_bytes']}; {storage['count']} local "
+                f"backup(s) use {storage['bytes']} bytes"
+            ),
+        )
     return {
         "ok": not failures,
         "job_id": job_id,
         "backup_id": backup_id,
         "uploads": uploads,
         "errors": failures,
+        "pruned": pruned,
+        "local": storage,
     }
 
 

@@ -211,6 +211,8 @@ RULES: Tuple[Rule, ...] = (
          "Adaptive protection acted on an address", auto_clear=3600),
     Rule("backup.failed", KIND_EVENT, SEVERITY_CRITICAL,
          "Backup job failed", auto_clear=6 * 3600),
+    Rule("backup.space_low", KIND_EVENT, SEVERITY_WARNING,
+         "Backup storage is running out of space", auto_clear=24 * 3600),
     Rule("restore.failed", KIND_EVENT, SEVERITY_CRITICAL,
          "Restore job failed", auto_clear=6 * 3600),
     Rule("update.failed", KIND_EVENT, SEVERITY_WARNING,

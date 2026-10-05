@@ -81,6 +81,13 @@
     "Checking the copy": "Проверка копии",
     "Read it back if the far end cannot hash": "Скачать обратно, если та сторона не умеет считать хеш",
     "Trust the transfer": "Доверять передаче",
-    "verify must be auto or transfer": "verify должен быть auto или transfer"
+    "verify must be auto or transfer": "verify должен быть auto или transfer",
+    "Keep on this server": "Хранить на этом сервере",
+    "How many of the newest backups stay on this server. Older ones are removed only after every destination holds a verified copy of the new one; if any copy fails, nothing is removed.": "Сколько последних копий остаётся на этом сервере. Более старые удаляются, только когда во всех хранилищах лежит проверенная копия новой; если хоть одна отправка не удалась, ничего не удаляется.",
+    "{count} backups on this server use {size}; {free} free on the disk.": "Копий на этом сервере: {count}, занимают {size}; свободно на диске {free}.",
+    "Showing the newest {shown}.": "Показаны последние {shown}.",
+    "Free space is low: below {threshold}.": "Мало свободного места: меньше {threshold}.",
+    "the number of backups kept on this server must be a whole number": "число копий на этом сервере должно быть целым",
+    "the number of backups kept on this server must be between 1 and 50": "число копий на этом сервере должно быть от 1 до 50"
   }
 }

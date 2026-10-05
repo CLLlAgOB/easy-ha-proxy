@@ -486,6 +486,7 @@ class CatalogueTests(unittest.TestCase):
             "monitoring.storage", "monitoring.paused", "certificate.expiring",
             "certificate.renewal_failed", "backup.failed", "restore.failed",
             "update.failed", "authelia.unavailable", "config.apply_failed",
+            "backup.space_low",
         }
         self.assertEqual(set(alertd.RULES_BY_NAME), expected)
 

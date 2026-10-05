@@ -476,7 +476,10 @@ def schedule_view():
 def save_schedule_view():
     payload = _json_payload(
         set(),
-        {"enabled", "destinations", "include_ssh", "quiesce", "passphrase", "time"},
+        {
+            "enabled", "destinations", "include_ssh", "quiesce", "passphrase",
+            "time", "keep_local",
+        },
     )
     command = {"action": "schedule_save"}
 
@@ -497,6 +500,13 @@ def save_schedule_view():
         if not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", wanted):
             abort(400, description="the time must be given as HH:MM on a 24-hour clock")
         command["time"] = wanted
+
+    if "keep_local" in payload:
+        # Shape only; the daemon owns the range.
+        keep = payload["keep_local"]
+        if isinstance(keep, bool) or not isinstance(keep, int):
+            abort(400, description="the number of backups kept on this server must be a whole number")
+        command["keep_local"] = keep
 
     if "destinations" in payload:
         names = payload["destinations"]

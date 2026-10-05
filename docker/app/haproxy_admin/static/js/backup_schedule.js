@@ -88,6 +88,7 @@
     byId("schedule-quiesce").checked = schedule.quiesce !== false;
     byId("schedule-include-ssh").checked = Boolean(schedule.include_ssh);
     if (schedule.time) byId("schedule-time").value = schedule.time;
+    if (schedule.keep_local) byId("schedule-keep-local").value = String(schedule.keep_local);
     byId("schedule-next-run").textContent = schedule.next_run || "—";
     byId("schedule-last-run").textContent = schedule.last_run || "—";
     byId("schedule-last-result").textContent = schedule.last_result || "—";
@@ -120,7 +121,8 @@
       destinations: chosen(),
       time: byId("schedule-time").value,
       quiesce: byId("schedule-quiesce").checked,
-      include_ssh: byId("schedule-include-ssh").checked
+      include_ssh: byId("schedule-include-ssh").checked,
+      keep_local: Number(byId("schedule-keep-local").value)
     };
     const passphrase = byId("schedule-passphrase").value;
     // Empty means keep the stored one, so it must not be sent at all: an

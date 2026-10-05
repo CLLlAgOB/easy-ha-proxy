@@ -133,6 +133,35 @@
     updateRestoreButton();
   }
 
+  // How much the archives on this server take and how much room is left.
+  // The list shows at most fifty; this line counts all of them, so an archive
+  // past the list's end can never sit on the disk unnoticed.
+  function renderLocalSummary(local, shown) {
+    const element = byId("backup-local-summary");
+    if (!element) return;
+    if (!local || typeof local !== "object") {
+      element.textContent = "";
+      return;
+    }
+    const parts = [
+      t("{count} backups on this server use {size}; {free} free on the disk.", {
+        count: Number(local.count) || 0,
+        size: formatBytes(local.bytes),
+        free: formatBytes(local.free_bytes)
+      })
+    ];
+    if (Number(local.count) > shown) {
+      parts.push(t("Showing the newest {shown}.", {shown: shown}));
+    }
+    if (local.low) {
+      parts.push(t("Free space is low: below {threshold}.", {
+        threshold: formatBytes(local.low_space_bytes)
+      }));
+    }
+    element.textContent = parts.join(" ");
+    element.classList.toggle("error", Boolean(local.low));
+  }
+
   function renderBackups(backups) {
     const body = byId("backup-artifacts-body");
     if (!Array.isArray(backups) || !backups.length) {
@@ -331,6 +360,7 @@
       const payload = await requestJson(endpoints.status);
       const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
       renderBackups(payload.backups || []);
+      renderLocalSummary(payload.local, (payload.backups || []).length);
       const active = renderJobs(jobs);
       if (selectedJobId && !jobs.some((job) => jobId(job) === selectedJobId)) {
         selectedJobId = "";
