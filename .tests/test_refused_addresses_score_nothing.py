@@ -60,9 +60,12 @@ guardd = load()
 
 
 class WhatCountsAsRefused(unittest.TestCase):
-    def test_the_identity_refusals_are_403_and_451(self):
+    def test_the_identity_refusals_are_401_403_and_451(self):
+        # 401 joined when the zero-trust refusal got a status of its own
+        # instead of sharing GeoIP's 451. Only the gateway's own 401 counts;
+        # an application's is covered in test_adaptive_evidence.
         self.assertEqual(
-            set(guardd.ParsedRequest.IDENTITY_REFUSALS), {403, 451}
+            set(guardd.ParsedRequest.IDENTITY_REFUSALS), {401, 403, 451}
         )
 
     def test_a_malformed_request_is_not_a_shield(self):

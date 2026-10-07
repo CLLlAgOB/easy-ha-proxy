@@ -64,6 +64,25 @@ class RefusalTests(unittest.TestCase):
     def test_a_per_site_address_rule_counts_too(self):
         self.assertTrue(request_with(403).denied_by_gateway)
 
+    def test_a_zero_trust_refusal_stops_the_scoring_too(self):
+        # The gateway's own 401: the address has not authenticated, so it
+        # reaches nothing on that site. No server was chosen.
+        self.assertTrue(request_with(401).denied_by_gateway)
+
+    def test_an_applications_401_is_evidence_not_a_shield(self):
+        # A wrong password answered by the application behind the gateway.
+        # That is what password guessing looks like; it must keep scoring.
+        wrong_password = guardd.ParsedRequest(
+            client_ip="203.0.113.9",
+            status=401,
+            frontend="fe_https",
+            backend="be_shop/srv1",
+            method="POST",
+            path="/login",
+            host="shop.example.test",
+        )
+        self.assertFalse(wrong_password.denied_by_gateway)
+
     def test_a_malformed_request_is_evidence_not_a_shield(self):
         # The production case: 21 of these from one scanner, every one of
         # them a probe, every one of them previously worth zero.
@@ -76,7 +95,7 @@ class RefusalTests(unittest.TestCase):
 
     def test_the_set_is_stated_once_and_named(self):
         # So the next person changing it sees the reasoning attached.
-        self.assertEqual(guardd.ParsedRequest.IDENTITY_REFUSALS, (403, 451))
+        self.assertEqual(guardd.ParsedRequest.IDENTITY_REFUSALS, (401, 403, 451))
 
 
 class ScoringTests(unittest.TestCase):

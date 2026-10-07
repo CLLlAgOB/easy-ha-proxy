@@ -816,7 +816,8 @@ outlives the process that placed it.
 The engine never acts on anything HAProxy already exempts. It mirrors the same
 four ACLs -- the global whitelist, the admin allow-list, the GeoIP whitelist,
 and addresses that completed Authelia authentication -- and it treats a 451 as
-a request GeoIP already refused. Bans, when they eventually arrive, will be
+a request GeoIP already refused, and the gateway's own 401 as one a zero-trust
+site refused for want of that authentication. Bans, when they eventually arrive, will be
 IPv4 only: `tbl_ban` is an IPv4 stick table and the firewall ruleset is `inet`,
 so addresses that cannot be acted upon are recorded as such instead of
 accumulating a score nothing can use.

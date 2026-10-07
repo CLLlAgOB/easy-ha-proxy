@@ -836,10 +836,11 @@ class ParsedRequest:
     duration_ms: int = 0
 
     # A refusal counts as "already handled" only when it was about who the
-    # client is, not about what it sent. 451 is a geo block or a failed IP
-    # authorisation and 403 a per-site address rule: in both the address can
-    # reach nothing, so scoring it further changes nothing.
-    IDENTITY_REFUSALS = (403, 451)
+    # client is, not about what it sent. 451 is a geo block, 401 a failed IP
+    # authorisation on a zero-trust site and 403 a per-site address rule: in
+    # all three the address can reach nothing, so scoring it further changes
+    # nothing.
+    IDENTITY_REFUSALS = (401, 403, 451)
 
     @property
     def denied_by_gateway(self) -> bool:
@@ -855,7 +856,14 @@ class ParsedRequest:
         zero for every one of them.
         """
 
-        return self.status in self.IDENTITY_REFUSALS
+        if self.status not in self.IDENTITY_REFUSALS:
+            return False
+        # 401 is also what an application answers a wrong password with, and
+        # that is evidence, not a shield. Only the gateway's own 401 -- no
+        # server was chosen -- is the zero-trust refusal.
+        if self.status == 401:
+            return self.backend.endswith("/<NOSRV>")
+        return True
 
 
 def normalize_path(value: str) -> str:

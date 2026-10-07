@@ -92,6 +92,24 @@ class AccessGateTemplateTests(unittest.TestCase):
             TEMPLATE,
         )
 
+    def test_a_zero_trust_refusal_has_a_status_of_its_own(self) -> None:
+        # It used to answer 451, the GeoIP refusal's status: a gateway with
+        # GeoIP switched off still logged 451s, and the two could not be told
+        # apart. 401 is what the refusal means, and no other rule answers it.
+        block = TEMPLATE.split("# ---- Zero-trust")[1].split("{% endfor %}")[0]
+        self.assertIn(
+            "http-request deny status 401 if host_{{ id }} !ip_auth_ok !ip_whitelist",
+            block,
+        )
+        self.assertNotIn("status 451", block.split("#}")[-1])
+        answered_401 = [
+            line for line in TEMPLATE.splitlines()
+            if "deny status 401" in line
+        ]
+        self.assertEqual(len(answered_401), 1, answered_401)
+        # GeoIP keeps 451, including its exemption for authorised addresses.
+        self.assertIn("http-request deny status 451 if geo_filter_domains", TEMPLATE)
+
     def test_site_editor_exposes_the_flag(self) -> None:
         self.assertIn('id="access_gate"', EDITOR_TEMPLATE)
         self.assertIn('tristateSelectValue("access_gate")', EDITOR_SCRIPT)

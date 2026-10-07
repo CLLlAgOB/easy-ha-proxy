@@ -577,10 +577,16 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {# The gate itself must stay reachable for unauthorized IPs, otherwise nobody
-   could ever log in to become authorized. #}
+   could ever log in to become authorized.
+
+   401, not the 451 a GeoIP refusal answers with. Both used to say 451, so a
+   gateway with GeoIP switched off still logged 451s and there was no telling
+   the two apart. 401 is what this refusal means -- authenticate first -- and
+   no other rule here answers with it, so "401 with <NOSRV>" in the log is a
+   zero-trust refusal and nothing else. #}
 {% if (s.zero_trust | default(false)) and not (s.access_gate | default(false))
       and not (s.allow_ips | default([])) %}
-    http-request deny status 451 if host_{{ id }} !ip_auth_ok !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    http-request deny status 401 if host_{{ id }} !ip_auth_ok !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
 {% endfor %}
