@@ -79,6 +79,9 @@ REBOOT_SYSTEMD_UNIT_PREFIX = "easy-ha-proxy-reboot"
 UPDATE_SOURCE_REFRESHED_ENV = "EASY_HA_PROXY_UPDATE_SOURCE_REFRESHED"
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 RUNTIME_HAPROXY_CONFIG_DIR = Path("/opt/haproxy-admin/config")
+# The configuration Authelia actually runs with. The panel's access-rule
+# editor writes here, and nowhere else.
+RUNTIME_AUTHELIA_CONFIG = Path("/opt/authelia/configuration.yml")
 RUNTIME_CONFIG_MAX_BYTES = 2 * 1024 * 1024
 # Only values consumed directly by haproxy.cfg may flow from the app-owned
 # runtime vars.yml back into root-managed installer configuration. Stack
@@ -2455,6 +2458,58 @@ def sync_runtime_haproxy_config_to_managed(
     return True
 
 
+def sync_runtime_authelia_rules_to_managed(
+    directory: Path | None = None,
+    *,
+    runtime_config: Path | None = None,
+) -> bool:
+    """Persist access rules edited in the panel before the playbook renders.
+
+    The panel saves Authelia access rules into the configuration Authelia
+    runs with. The playbook renders that same file from the managed
+    authelia.yml -- which the panel never wrote to. So every full update, and
+    every restore, quietly replaced the operator's rules with whatever the
+    managed file last held: a site put behind Authelia in the panel lost its
+    rule and, the default policy being deny, answered 403 to its own owner.
+    Sites and TCP proxies edited in the panel were already carried across
+    this way; access rules were not.
+
+    An unreadable file, or one whose rules are missing or empty while the
+    managed list is not, is treated as damage rather than intent and changes
+    nothing: an empty list would deny every site at once.
+    """
+
+    directory = directory or config_dir()
+    runtime_config = runtime_config or RUNTIME_AUTHELIA_CONFIG
+    if managed_configuration_is_pending(directory):
+        return False
+    managed_path = directory / "authelia.yml"
+    if not managed_path.is_file() or not runtime_config.is_file():
+        return False
+    try:
+        runtime = _load_bounded_runtime_yaml(runtime_config)
+    except InstallerError:
+        return False
+    access = runtime.get("access_control")
+    rules = access.get("rules") if isinstance(access, dict) else None
+    if not isinstance(rules, list) or not all(isinstance(rule, dict) for rule in rules):
+        return False
+    managed = load_yaml_mapping(managed_path)
+    current = managed.get("authelia_access_control_rules")
+    if rules == current:
+        return False
+    if not rules and current:
+        return False
+    backup_configuration(directory)
+    managed["authelia_access_control_rules"] = copy.deepcopy(rules)
+    write_yaml(managed_path, managed)
+    print(
+        "Synchronized Authelia access rules edited in the panel into the "
+        "managed update source."
+    )
+    return True
+
+
 def replace_domain_text(
     value: str,
     old_domain: str,
@@ -3164,6 +3219,7 @@ def command_update(args: argparse.Namespace) -> None:
     managed_pending = managed_configuration_is_pending(directory)
     if not managed_pending:
         sync_runtime_haproxy_config_to_managed(directory)
+        sync_runtime_authelia_rules_to_managed(directory)
     if component == "all":
         if source_was_refreshed:
             print("Continuing with the refreshed GitHub source.")
@@ -3371,6 +3427,10 @@ def command_apply_restored(args: argparse.Namespace) -> None:
         return
     if offline:
         offline_restore_image_preflight(directory=directory)
+    # The archive holds both the running configuration and the managed one,
+    # taken at the same moment -- so a rule that was only ever in the running
+    # one would be rendered away by the playbook below.
+    sync_runtime_authelia_rules_to_managed(directory)
     extra_vars = {
         "authelia_force_restart": "true",
         "haproxy_admin_force_recreate": "true",
