@@ -493,27 +493,62 @@ class Quiesce:
         self._resume()
 
 
+class WrongPassphrase(BackupError):
+    """The archive did not open with the passphrase given."""
+
+
+def passphrase_is_typed(from_stdin: bool) -> bool:
+    """Whether a person is at a terminal typing the passphrase.
+
+    Only then is asking again any use. A passphrase piped in, or supplied by
+    the test environment, is the same on every attempt, so a second try
+    would only repeat the failure -- or loop for ever.
+    """
+    if from_stdin:
+        return False
+    if (
+        os.environ.get("EASY_HA_PROXY_TEST_PASSPHRASE") is not None
+        and os.environ.get("EASY_HA_PROXY_ALLOW_NON_ROOT") == "1"
+    ):
+        return False
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def read_passphrase(*, confirm: bool, from_stdin: bool = False) -> str:
     if from_stdin:
         first = sys.stdin.readline()
         if first == "":
             raise BackupError("No backup passphrase was supplied on stdin.")
         first = first.rstrip("\r\n")
-    else:
-        testing = os.environ.get("EASY_HA_PROXY_TEST_PASSPHRASE")
-        if (
-            testing is not None
-            and os.environ.get("EASY_HA_PROXY_ALLOW_NON_ROOT") == "1"
-        ):
-            return testing
+        if len(first) < 12:
+            raise BackupError("Use a backup passphrase of at least 12 characters.")
+        return first
+    testing = os.environ.get("EASY_HA_PROXY_TEST_PASSPHRASE")
+    if (
+        testing is not None
+        and os.environ.get("EASY_HA_PROXY_ALLOW_NON_ROOT") == "1"
+    ):
+        return testing
+    # A slip of the finger used to end the whole run -- after the archive
+    # had been uploaded and the host prepared -- and the only way back was
+    # to start again from the top. A person typing gets asked again, for as
+    # long as it takes; Ctrl+C stops it.
+    retry = passphrase_is_typed(from_stdin)
+    while True:
         first = getpass.getpass("Backup passphrase: ")
-    if len(first) < 12:
-        raise BackupError("Use a backup passphrase of at least 12 characters.")
-    if confirm and not from_stdin:
-        second = getpass.getpass("Repeat backup passphrase: ")
-        if first != second:
-            raise BackupError("Backup passphrases do not match.")
-    return first
+        problem = ""
+        if len(first) < 12:
+            problem = "Use a backup passphrase of at least 12 characters."
+        elif confirm and first != getpass.getpass("Repeat backup passphrase: "):
+            problem = "Backup passphrases do not match."
+        if not problem:
+            return first
+        if not retry:
+            raise BackupError(problem)
+        print(f"{problem} Try again, or press Ctrl+C to stop.", file=sys.stderr)
 
 
 def openssl_crypt(source: Path, destination: Path, password: str, *, decrypt: bool) -> None:
@@ -535,7 +570,11 @@ def openssl_crypt(source: Path, destination: Path, password: str, *, decrypt: bo
     try:
         run(argv, input_text=password + "\n")
     except subprocess.CalledProcessError as exc:
-        raise BackupError("Cannot decrypt backup: wrong passphrase or damaged file.") from exc
+        if decrypt:
+            raise WrongPassphrase(
+                "Cannot decrypt backup: wrong passphrase or damaged file."
+            ) from exc
+        raise BackupError("Cannot encrypt backup.") from exc
     os.chmod(destination, 0o600)
 
 
@@ -1007,19 +1046,41 @@ def validate_backup_archive(
     return manifest, payload, ssh_payload
 
 
+def open_backup_archive(
+    archive: Path, work: Path, *, from_stdin: bool
+) -> tuple[dict[str, Any], Path, Path | None]:
+    """Ask for the passphrase and open the archive with it.
+
+    A person at a terminal is asked again when the passphrase does not open
+    the archive, instead of the run ending there. Anything else about the
+    archive being wrong still ends it: only a failed decryption is retried.
+    """
+    retry = passphrase_is_typed(from_stdin)
+    while True:
+        password = read_passphrase(confirm=False, from_stdin=from_stdin)
+        try:
+            return validate_backup_archive(
+                archive, password, work, outer_checksum_verified=True
+            )
+        except WrongPassphrase:
+            if not retry:
+                raise
+            (work / "bundle.tar.gz").unlink(missing_ok=True)
+            print(
+                "That passphrase does not open this backup (or the file is "
+                "damaged). Try again, or press Ctrl+C to stop.",
+                file=sys.stderr,
+            )
+
+
 def inspect_backup(args: argparse.Namespace) -> dict[str, Any]:
     archive = Path(args.archive).expanduser().resolve()
     verify_encrypted_archive(archive)
-    password = read_passphrase(
-        confirm=False,
-        from_stdin=bool(getattr(args, "passphrase_stdin", False)),
-    )
     with tempfile.TemporaryDirectory(prefix="easy-ha-proxy-inspect.") as temporary:
-        manifest, _payload, _ssh_payload = validate_backup_archive(
+        manifest, _payload, _ssh_payload = open_backup_archive(
             archive,
-            password,
             Path(temporary),
-            outer_checksum_verified=True,
+            from_stdin=bool(getattr(args, "passphrase_stdin", False)),
         )
     print(
         "EASY_HA_PROXY_BACKUP_MANIFEST_JSON="
@@ -1629,17 +1690,12 @@ def restore_backup(args: argparse.Namespace) -> None:
     require_root()
     archive = Path(args.archive).expanduser().resolve()
     verify_encrypted_archive(archive)
-    password = read_passphrase(
-        confirm=False,
-        from_stdin=bool(getattr(args, "passphrase_stdin", False)),
-    )
     with tempfile.TemporaryDirectory(prefix="easy-ha-proxy-restore.") as temporary:
         work = Path(temporary)
-        manifest, payload, ssh_payload = validate_backup_archive(
+        manifest, payload, ssh_payload = open_backup_archive(
             archive,
-            password,
             work,
-            outer_checksum_verified=True,
+            from_stdin=bool(getattr(args, "passphrase_stdin", False)),
         )
 
         installed = (managed_config_dir() / "metadata.yml").is_file()
