@@ -417,6 +417,58 @@
     return "mon-span-other";
   }
 
+  // An outage narrower than this share of the period is drawn wider than it
+  // was (see the min-width in the page's CSS), and outages closer together
+  // than the gap leave no room for the up time between them.
+  const FLAP_SHORT_SHARE = 0.006;
+  const FLAP_GAP_SHARE = 0.02;
+  const FLAP_STRIPE_PX = 10;
+
+  // Short outages each keep a few pixels so that one of them is not lost in
+  // a day. Sixty-nine of them in a row, 24 minutes in all, then painted
+  // nine hours of the bar red: a server 98% available looked 40% down. A
+  // run of such outages becomes one piece, drawn to scale and striped in
+  // proportion to the time it was really down.
+  function timelinePieces(spans, window) {
+    const isShort = (span) =>
+      span.state !== "UP" && (Number(span.end) - Number(span.start)) / window < FLAP_SHORT_SHARE;
+    const isGap = (span) =>
+      span.state === "UP" && (Number(span.end) - Number(span.start)) / window < FLAP_GAP_SHARE;
+    const pieces = [];
+    let index = 0;
+    while (index < spans.length) {
+      const span = spans[index];
+      if (!isShort(span)) {
+        pieces.push({span});
+        index += 1;
+        continue;
+      }
+      let last = index;
+      while (true) {
+        let next = last + 1;
+        if (next < spans.length && isGap(spans[next])) next += 1;
+        if (next >= spans.length || !isShort(spans[next])) break;
+        last = next;
+      }
+      const run = spans.slice(index, last + 1);
+      const outages = run.filter((item) => item.state !== "UP");
+      if (outages.length < 2) {
+        pieces.push({span});
+        index += 1;
+        continue;
+      }
+      pieces.push({
+        flapping: true,
+        start: Number(run[0].start),
+        end: Number(run[run.length - 1].end),
+        outages: outages.length,
+        down: outages.reduce((sum, item) => sum + Number(item.end) - Number(item.start), 0),
+      });
+      index = last + 1;
+    }
+    return pieces;
+  }
+
   function renderTimeline(payload) {
     const host = byId("mon-timeline");
     if (!host) return;
@@ -456,7 +508,27 @@
 
       const track = document.createElement("div");
       track.className = "mon-timeline-track";
-      (entry.spans || []).forEach((span) => {
+      timelinePieces(entry.spans || [], window).forEach((part) => {
+        if (part.flapping) {
+          const length = part.end - part.start;
+          const piece = document.createElement("i");
+          piece.className = "mon-span-flap";
+          piece.style.flex = `0 0 ${(length / window) * 100}%`;
+          const stripe = Math.round((part.down / length) * FLAP_STRIPE_PX);
+          piece.style.setProperty(
+            "--down",
+            `${Math.min(FLAP_STRIPE_PX - 1, Math.max(1, stripe))}px`
+          );
+          piece.title = [
+            t("Unstable"),
+            spanPeriod(part, window),
+            t("outages: {count}", {count: part.outages}),
+            `${uiText("Unavailable")} ${formatDuration(part.down)}`,
+          ].join(" · ");
+          track.appendChild(piece);
+          return;
+        }
+        const span = part.span;
         const seconds = Number(span.end) - Number(span.start);
         const width = (seconds / window) * 100;
         if (!(width > 0)) return;

@@ -247,6 +247,31 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
         self.assertIn('span.state === "UP" ? `1 1 ${width}%` : `0 0 ${width}%`', self.render)
         self.assertNotIn("piece.style.width", self.render)
 
+    def test_a_run_of_short_outages_is_one_piece_drawn_to_scale(self):
+        # Sixty-nine short outages, 24 minutes in all, each kept its minimum
+        # width and painted nine hours of the bar red: a server 98% available
+        # looked 40% down.
+        self.assertIn("timelinePieces(entry.spans || [], window).forEach", self.render)
+        flap = self.render.split("if (part.flapping) {")[1].split("return;")[0]
+        self.assertIn('piece.className = "mon-span-flap"', flap)
+        self.assertIn("piece.style.flex = `0 0 ${(length / window) * 100}%`", flap)
+        # Red in proportion to the time really down, never none and never all.
+        self.assertIn("(part.down / length) * FLAP_STRIPE_PX", flap)
+        self.assertIn("Math.min(FLAP_STRIPE_PX - 1, Math.max(1, stripe))", flap)
+        self.assertIn('t("outages: {count}", {count: part.outages})', flap)
+        self.assertIn("formatDuration(part.down)", flap)
+        self.assertRegex(
+            self.page,
+            r"\.mon-span-flap \{\s*min-width: \d+px;\s*background: repeating-linear-gradient\(",
+        )
+
+    def test_one_short_outage_alone_is_still_an_outage(self):
+        pieces = self.script.split("function timelinePieces(")[1].split("\n  function ")[0]
+        self.assertIn("if (outages.length < 2) {", pieces)
+        # A long outage, and up time long enough to be seen, end a run.
+        self.assertIn("< FLAP_SHORT_SHARE", pieces)
+        self.assertIn("< FLAP_GAP_SHARE", pieces)
+
     def test_each_piece_says_when_it_was(self):
         self.assertIn("spanPeriod(span, window)", self.render)
 
@@ -265,6 +290,7 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
         )["messages"]
         self.assertEqual(catalogue["outages: {count}"], "отключений: {count}")
         self.assertEqual(catalogue["ongoing for"], "идёт сейчас")
+        self.assertEqual(catalogue["Unstable"], "Нестабильно")
 
 
 class DragAcrossAChartToZoom(unittest.TestCase):

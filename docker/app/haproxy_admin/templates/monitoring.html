@@ -311,6 +311,12 @@
 .mon-timeline-track i { display: block; height: 100%; }
 /* An outage stays visible at any scale; up time gives way (see monitoring.js). */
 .mon-span-down, .mon-span-other { min-width: 4px; }
+.mon-span-flap {
+    min-width: 4px;
+    background: repeating-linear-gradient(
+        90deg, #cc4b4b 0 var(--down, 1px), #2e9e5b var(--down, 1px) 10px
+    );
+}
 .mon-span-up { background: #2e9e5b; }
 .mon-span-down { background: #cc4b4b; }
 .mon-span-other { background: #c8a13a; }
