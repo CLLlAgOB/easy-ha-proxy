@@ -68,10 +68,27 @@ class TheFrontendWritesIt(unittest.TestCase):
     def test_both_http_frontends_capture_it_before_any_rule_can_refuse(self):
         for name in ("fe_https", "fe_http80"):
             with self.subTest(frontend=name):
-                body = frontend(name)
-                self.assertIn(CAPTURE, body)
-                first_rule = body.index("http-request ")
-                self.assertEqual(first_rule, body.index(CAPTURE))
+                rules = [
+                    row.strip() for row in frontend(name).splitlines()
+                    if row.strip().startswith(("http-request ", "tcp-request "))
+                ]
+                http_rules = [row for row in rules if row.startswith("http-request ")]
+                self.assertEqual(http_rules[0], CAPTURE)
+
+    def test_no_tcp_rule_is_written_below_it(self):
+        # HAProxy runs tcp-request rules first wherever they are written, and
+        # warns on every configuration check when one follows an http-request
+        # rule -- three warnings an operator then has to learn to ignore.
+        for name in ("fe_https", "fe_http80"):
+            with self.subTest(frontend=name):
+                rules = [
+                    row.strip() for row in frontend(name).splitlines()
+                    if row.strip().startswith(("http-request ", "tcp-request "))
+                ]
+                after = rules[rules.index(CAPTURE):]
+                self.assertEqual(
+                    [row for row in after if row.startswith("tcp-request ")], []
+                )
 
     def test_what_is_logged_is_reduced_to_hostname_characters(self):
         # The header is whatever the client chose to send, and the line it

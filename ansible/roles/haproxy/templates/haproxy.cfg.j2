@@ -285,11 +285,6 @@ frontend fe_https
     mode http
     option dontlognull
 
-    # What the client asked for, for the log (see log-format). Set before any
-    # rule can refuse the request; reduced to hostname characters, because
-    # the header is whatever the client chose to send.
-    http-request set-var(txn.log_host) req.hdr(host),lower,regsub([^a-z0-9.:_-],_,g),bytes(0,128)
-
     # Slowloris
     timeout http-request {{ sd.http_request_timeout | default('5s') }}
     timeout client {{ sd.frontend_client_timeout | default('300s') }}
@@ -315,6 +310,12 @@ frontend fe_https
     tcp-request connection reject if conn_rate_burst !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     tcp-request connection reject if conn_too_many  !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    # What the client asked for, for the log (see log-format). Set before any
+    # http-request rule can refuse the request, and below the tcp-request
+    # rules, which HAProxy runs first wherever they are written; reduced to hostname characters, because
+    # the header is whatever the client chose to send.
+    http-request set-var(txn.log_host) req.hdr(host),lower,regsub([^a-z0-9.:_-],_,g),bytes(0,128)
 
     # SNI / HOST
     acl sni_found ssl_fc_sni -m found
