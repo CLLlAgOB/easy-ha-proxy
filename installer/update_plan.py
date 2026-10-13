@@ -941,6 +941,29 @@ def _probe_image(image: str, runner: Runner) -> dict[str, Any]:
         "current_digest": local,
         "available_digest": remote,
     }
+    repository = _image_repository(image)
+    if local is None and remote is not None and repository:
+        # The tag can go missing while the image stays: a container keeps its
+        # image alive, but a cleanup tool or a pull of another tag may drop
+        # the name it was started under. Asked for by tag, Docker then says
+        # "No such image" about an image that is running, and one lost label
+        # blocked every update of the stack. Asking for it by content settles
+        # it: if what the registry offers is already here, it is current.
+        by_content = runner.run(
+            (
+                "docker",
+                "image",
+                "inspect",
+                f"{repository}@{remote}",
+                "--format",
+                "{{json .RepoDigests}}",
+            ),
+            timeout=COMPOSE_TIMEOUT,
+        )
+        if by_content.returncode == 0:
+            local = remote
+            details["current_digest"] = local
+            details["reason"] = "local-tag-missing"
     if local is None:
         details.update(
             {
