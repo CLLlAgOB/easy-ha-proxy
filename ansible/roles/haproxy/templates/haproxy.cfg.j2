@@ -146,10 +146,15 @@ defaults
 {% endif %}
 
     # Важно: txn.ban_log может быть пустой
+    # host= is the site the client asked for. A request this gateway refuses
+    # itself is logged against <NOSRV>, so without it a 451 or a 401 could not
+    # be traced to a site at all. Like the identifier it is a labelled field
+    # before %r; it comes after the identifier so that nothing a client sends
+    # can be read as one.
     # The identifier sits before %r on purpose: the access-log parser in
     # easy-ha-proxy-guardd anchors on the request line at the end of the line
     # and treats everything between the status and it as unparsed middle.
-    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs{% if request_id_enabled | default(true) %} id=%ID{% endif %} %r"
+    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs{% if request_id_enabled | default(true) %} id=%ID{% endif %} host=%[var(txn.log_host)] %r"
 
     errorfile 400 /etc/haproxy/errors/400.http
     errorfile 403 /etc/haproxy/errors/403.http
@@ -279,6 +284,11 @@ frontend fe_https
 {% endif %}
     mode http
     option dontlognull
+
+    # What the client asked for, for the log (see log-format). Set before any
+    # rule can refuse the request; reduced to hostname characters, because
+    # the header is whatever the client chose to send.
+    http-request set-var(txn.log_host) req.hdr(host),lower,regsub([^a-z0-9.:_-],_,g),bytes(0,128)
 
     # Slowloris
     timeout http-request {{ sd.http_request_timeout | default('5s') }}
@@ -963,6 +973,11 @@ frontend fe_http80
     bind ipv4@*:80
     mode http
     option dontlognull
+
+    # What the client asked for, for the log (see log-format). Set before any
+    # rule can refuse the request; reduced to hostname characters, because
+    # the header is whatever the client chose to send.
+    http-request set-var(txn.log_host) req.hdr(host),lower,regsub([^a-z0-9.:_-],_,g),bytes(0,128)
 
     acl acme_challenge_http path_beg /.well-known/acme-challenge/
 
