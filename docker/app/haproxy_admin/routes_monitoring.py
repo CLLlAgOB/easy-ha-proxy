@@ -58,6 +58,17 @@ def api_monitoring_channels():
         return jsonify(monitoring.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/monitoring/backends")
+def api_monitoring_backends():
+    """Traffic per backend over the period, busiest first."""
+
+    range_key = monitoring.normalize_range(request.args.get("range"))
+    try:
+        return jsonify(monitoring.backend_traffic(range_key, _window()))
+    except MetricsdUnavailable as exc:
+        return jsonify(monitoring.unavailable_payload(exc)), 503
+
+
 @bp.post("/api/monitoring/channels/labels")
 def api_monitoring_channel_labels():
     payload = request.get_json(silent=True) or {}

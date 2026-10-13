@@ -317,6 +317,8 @@
         90deg, #cc4b4b 0 var(--down, 1px), #2e9e5b var(--down, 1px) 10px
     );
 }
+.mon-traffic-in { background: rgba(var(--accent-primary-rgb), .45); }
+.mon-traffic-out { background: rgba(var(--accent-primary-rgb), .9); }
 .mon-span-up { background: #2e9e5b; }
 .mon-span-down { background: #cc4b4b; }
 .mon-span-other { background: #c8a13a; }
@@ -516,13 +518,33 @@
 
 <div class="card" style="margin-top:25px;">
   <div class="card-header">
-    <h2>Backend availability</h2>
+    <h2 id="mon-backends-title">Backend availability</h2>
     <span class="mon-sub" id="mon-timeline-note"></span>
+  </div>
+
+  {# The same list of backends answers two questions: was it up, and how
+     much went through it. #}
+  <div class="mon-toolbar">
+    <div class="mon-ranges" id="mon-backends-view" role="group" aria-label="Show">
+      <button type="button" class="mon-range" data-view="availability"
+              aria-pressed="true">Availability</button>
+      <button type="button" class="mon-range" data-view="traffic"
+              aria-pressed="false">Traffic</button>
+    </div>
+    <label for="mon-backends-sort" id="mon-backends-sort-wrap" hidden>
+      Sort
+      <select id="mon-backends-sort">
+        <option value="desc">Most traffic first</option>
+        <option value="asc">Least traffic first</option>
+        <option value="name">By name</option>
+      </select>
+    </label>
   </div>
 
   <div id="mon-timeline">
     <div class="mon-empty">No state changes recorded for this period</div>
   </div>
+  <div id="mon-backend-traffic" hidden></div>
 </div>
 
 <div class="card" style="margin-top:25px;">

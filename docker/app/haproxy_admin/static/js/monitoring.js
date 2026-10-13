@@ -578,6 +578,183 @@
     );
   }
 
+  /* ---------- traffic per backend ---------- */
+
+  // The same card answers "was it up" and "how much went through it". The
+  // choice is kept in the browser: someone who came for traffic yesterday
+  // comes for traffic today.
+  const BACKEND_VIEWS = ["availability", "traffic"];
+  const BACKEND_SORTS = ["desc", "asc", "name"];
+  let backendsView = "availability";
+  let backendsSort = "desc";
+  let backendTrafficState = null;
+
+  function remembered(key, allowed, fallback) {
+    try {
+      const value = window.localStorage.getItem(key);
+      return allowed.includes(value) ? value : fallback;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function remember(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (error) {
+      // Private mode: the choice lasts for this page only.
+    }
+  }
+
+  function sortedBackends(backends) {
+    const items = backends.slice();
+    if (backendsSort === "name") {
+      items.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+    } else {
+      const direction = backendsSort === "asc" ? 1 : -1;
+      items.sort(
+        (a, b) =>
+          direction * (Number(a.bytes_total) - Number(b.bytes_total)) ||
+          String(a.label).localeCompare(String(b.label))
+      );
+    }
+    return items;
+  }
+
+  function renderBackendTraffic(payload) {
+    const host = byId("mon-backend-traffic");
+    if (!host) return;
+    if (payload !== undefined) backendTrafficState = payload;
+    host.textContent = "";
+
+    const backends = (backendTrafficState && backendTrafficState.backends) || [];
+    if (!backends.length) {
+      const empty = document.createElement("div");
+      empty.className = "mon-empty";
+      empty.textContent = uiText("No data for this period");
+      host.appendChild(empty);
+      if (backendsView === "traffic") setText("mon-timeline-note", "");
+      return;
+    }
+
+    // Bars are measured against the busiest backend, not against the total:
+    // against the total, everything below the first row is a sliver.
+    const busiest = Math.max(1, ...backends.map((entry) => Number(entry.bytes_total) || 0));
+
+    sortedBackends(backends).forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "mon-timeline-row";
+
+      const name = document.createElement("div");
+      name.className = "mon-timeline-name";
+      const title = document.createElement("span");
+      title.setAttribute("data-i18n-skip", "");
+      title.setAttribute("translate", "no");
+      title.textContent = entry.label || entry.proxy;
+      name.appendChild(title);
+      const sessions = document.createElement("small");
+      sessions.textContent = `${uiText("Sessions")}: ${formatCount(entry.sessions)}`;
+      name.appendChild(sessions);
+      row.appendChild(name);
+
+      const track = document.createElement("div");
+      track.className = "mon-timeline-track";
+      [
+        ["mon-traffic-in", "Inbound", entry.bytes_in],
+        ["mon-traffic-out", "Outbound", entry.bytes_out],
+      ].forEach(([className, label, bytes]) => {
+        const width = ((Number(bytes) || 0) / busiest) * 100;
+        if (!(width > 0)) return;
+        const piece = document.createElement("i");
+        piece.className = className;
+        piece.style.flex = `0 0 ${width}%`;
+        piece.title = `${uiText(label)} ${formatBytes(bytes)}`;
+        track.appendChild(piece);
+      });
+      row.appendChild(track);
+
+      const meta = document.createElement("div");
+      meta.className = "mon-timeline-meta";
+      const total = document.createElement("b");
+      total.setAttribute("data-i18n-skip", "");
+      total.setAttribute("translate", "no");
+      total.textContent = `${formatBytes(entry.bytes_total)} · ${decimalFormat.format(Number(entry.share) || 0)}%`;
+      meta.appendChild(total);
+      const split = document.createElement("small");
+      split.textContent =
+        `${uiText("Inbound")} ${formatBytes(entry.bytes_in)} · ` +
+        `${uiText("Outbound")} ${formatBytes(entry.bytes_out)}`;
+      meta.appendChild(split);
+      row.appendChild(meta);
+
+      host.appendChild(row);
+    });
+
+    if (backendsView === "traffic") {
+      setText(
+        "mon-timeline-note",
+        `${backends.length} · ${formatBytes(backendTrafficState.bytes_total)}`
+      );
+    }
+  }
+
+  async function loadBackendTraffic() {
+    const payload = await getJson(
+      "/api/monitoring/backends",
+      Object.assign({ range: currentRange }, windowParams())
+    ).catch(() => null);
+    renderBackendTraffic(payload);
+  }
+
+  function showBackendsView() {
+    const traffic = backendsView === "traffic";
+    const timeline = byId("mon-timeline");
+    const table = byId("mon-backend-traffic");
+    const sortWrap = byId("mon-backends-sort-wrap");
+    if (timeline) timeline.hidden = traffic;
+    if (table) table.hidden = !traffic;
+    if (sortWrap) sortWrap.hidden = !traffic;
+    const title = byId("mon-backends-title");
+    if (title) {
+      title.textContent = uiText(traffic ? "Backend traffic" : "Backend availability");
+    }
+    const group = byId("mon-backends-view");
+    if (group) {
+      group.querySelectorAll("button").forEach((item) => {
+        item.setAttribute("aria-pressed", item.dataset.view === backendsView ? "true" : "false");
+      });
+    }
+  }
+
+  function bindBackendsView() {
+    backendsView = remembered("mon-backends-view", BACKEND_VIEWS, "availability");
+    backendsSort = remembered("mon-backends-sort", BACKEND_SORTS, "desc");
+    const sort = byId("mon-backends-sort");
+    if (sort) {
+      sort.value = backendsSort;
+      sort.addEventListener("change", () => {
+        if (!BACKEND_SORTS.includes(sort.value)) return;
+        backendsSort = sort.value;
+        remember("mon-backends-sort", backendsSort);
+        renderBackendTraffic();
+      });
+    }
+    const group = byId("mon-backends-view");
+    if (group) {
+      group.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-view]");
+        if (!button || !BACKEND_VIEWS.includes(button.dataset.view)) return;
+        backendsView = button.dataset.view;
+        remember("mon-backends-view", backendsView);
+        showBackendsView();
+        // The note beside the heading belongs to whichever list is shown.
+        if (backendsView === "traffic") loadBackendTraffic();
+        else loadAll();
+      });
+    }
+    showBackendsView();
+  }
+
   /* ---------- data loading ---------- */
 
   async function getJson(path, params) {
@@ -1043,6 +1220,9 @@
 
       const timeline = await getJson("/api/monitoring/states", params).catch(() => null);
       renderTimeline(timeline);
+      // After the timeline: both write the note beside the heading, and the
+      // list on show has the last word.
+      if (backendsView === "traffic") await loadBackendTraffic();
 
       // Not scoped by site: a link carries every site pointed at it.
       await loadChannels();
@@ -1344,6 +1524,7 @@
     }
 
     bindWindowControls();
+    bindBackendsView();
 
     CHARTS.forEach((chart) => {
       const svg = byId(`mon-plot-${chart.name}`);

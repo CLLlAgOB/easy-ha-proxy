@@ -314,6 +314,54 @@ def channels(range_key: str,
     }
 
 
+def backend_traffic(range_key: str,
+                    window: Dict[str, int] | None = None) -> Dict[str, Any]:
+    """How much went through each backend, busiest first.
+
+    The availability bars say whether a backend was up; they cannot say
+    which of twenty backends the traffic of a busy hour belonged to. The
+    collector already keeps bytes per server, so a backend's figure is the
+    sum over its servers. The machine's own services are kept: here the
+    question is where the bytes went, and the interface is one of the
+    answers.
+    """
+
+    payload = metricsd_servers(range_key, window)
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in payload.get("servers") or []:
+        proxy = str(row.get("proxy") or "")
+        if not proxy:
+            continue
+        entry = grouped.setdefault(proxy, {
+            "proxy": proxy,
+            "bytes_in": 0,
+            "bytes_out": 0,
+            "sessions": 0,
+        })
+        for column in ("bytes_in", "bytes_out", "sessions"):
+            entry[column] += int(row.get(column) or 0)
+
+    items = list(grouped.values())
+    for entry in items:
+        entry["label"] = display_name(entry["proxy"])
+        entry["bytes_total"] = entry["bytes_in"] + entry["bytes_out"]
+    items.sort(key=lambda e: (-e["bytes_total"], e["label"].lower()))
+    total = sum(entry["bytes_total"] for entry in items)
+    for entry in items:
+        entry["share"] = round(
+            100.0 * entry["bytes_total"] / total, 1
+        ) if total else 0.0
+
+    return {
+        "ok": True,
+        "range": payload.get("range", range_key),
+        "since": payload.get("since", 0),
+        "until": payload.get("until", 0),
+        "backends": items,
+        "bytes_total": total,
+    }
+
+
 def save_channel_labels(labels: Any, hidden: Any = None) -> Dict[str, Any]:
     if not isinstance(labels, dict):
         raise ValueError("labels must be an object")
