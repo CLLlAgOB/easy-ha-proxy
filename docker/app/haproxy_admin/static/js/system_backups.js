@@ -128,6 +128,9 @@
     byId("backup-expanded-size").textContent = expandedSize > 0 ? formatBytes(expandedSize) : "—";
     byId("backup-quiesced-state").textContent = manifest.quiesced ? t("Yes") : t("No");
     byId("backup-ssh-state").textContent = manifest.ssh_included ? t("Yes") : t("No");
+    // Archives made before the history was backed up do not carry the field,
+    // and they do not carry the history either.
+    byId("backup-metrics-state").textContent = manifest.metrics_included ? t("Yes") : t("No");
     if (!manifest.ssh_included) byId("backup-restore-ssh").checked = false;
     updateScopeControls();
     updateRestoreButton();

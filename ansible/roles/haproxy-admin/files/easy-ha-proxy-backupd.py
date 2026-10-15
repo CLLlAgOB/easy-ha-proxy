@@ -183,6 +183,7 @@ MANIFEST_KEYS = (
     "hostname",
     "machine",
     "ssh_included",
+    "metrics_included",
     "quiesced",
     "payload_sha256",
     "ssh_payload_sha256",

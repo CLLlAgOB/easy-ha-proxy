@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import posixpath
 import shutil
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -40,10 +41,9 @@ CORE_PATHS = (
     "/opt/authelia",
     "/opt/haproxy-admin",
     "/var/lib/haproxy",
-    # Who changed what, and the security engine's findings. Both are small and
-    # are the kind of continuity a restored gateway should not lose. The
-    # metrics database lives under the same root and is excluded below: it can
-    # be large and is not needed to restore a working gateway.
+    # Who changed what, the security engine's findings and -- as a snapshot,
+    # see METRICS_SNAPSHOT -- the monitoring history. The live metrics
+    # database under the same root is excluded below.
     "/var/lib/easy-ha-proxy",
     "/var/log/haproxy",
     "/var/log/haproxy.log",
@@ -87,9 +87,9 @@ BACKUP_EXCLUDES = (
     "opt/authelia/notification.log",
     "var/lib/easy-ha-proxy/authelia-notification-state.json",
     "var/lib/easy-ha-proxy/authelia-notifications",
-    # Historical metrics can reach gigabytes and are not needed to restore a
-    # working gateway; the change log and the security database beside them
-    # are small and are kept.
+    # The live metrics database is written to every few seconds, so a copy
+    # taken by tar can be torn between the database and its write-ahead log.
+    # The history travels as a consistent snapshot instead (METRICS_SNAPSHOT).
     "var/lib/easy-ha-proxy/metrics",
     # Finished archives live under the tree being archived, so without these
     # every backup swallowed all its predecessors and each run roughly doubled:
@@ -102,6 +102,19 @@ BACKUP_EXCLUDES = (
     "var/lib/easy-ha-proxy/backup-web/uploads",
     "var/lib/easy-ha-proxy/update-web",
 )
+# Monitoring history. It used to be left out entirely as too large and not
+# needed for a working gateway -- and a gateway rebuilt from its backup came
+# back with its graphs gone. The collector caps its own database, and
+# SQLite's online backup copies it consistently while the collector keeps
+# writing. The snapshot lives under an archived root only while the archive
+# is being written, and a restore moves it into place.
+METRICS_DATABASE = Path("/var/lib/easy-ha-proxy/metrics/metrics.db")
+METRICS_SNAPSHOT = Path("/var/lib/easy-ha-proxy/monitoring-history/metrics.db")
+METRICS_UNIT = "easy-ha-proxy-metricsd.service"
+# Free space kept beyond the snapshot itself, so a backup never fills the disk
+# the gateway logs to.
+METRICS_SNAPSHOT_RESERVE_BYTES = 512 * 1024 * 1024
+
 SSH_GLOBS = (
     "/etc/ssh/ssh_host_*",
     "/root/.ssh",
@@ -394,6 +407,103 @@ def create_payload(
     return warnings
 
 
+def snapshot_metrics(
+    database: Path = METRICS_DATABASE,
+    snapshot: Path = METRICS_SNAPSHOT,
+) -> dict[str, Any]:
+    """Copy the monitoring history consistently, or say why it was not.
+
+    A missing history, a disk too full to hold a second copy, or a database
+    that cannot be read leaves the backup without the history rather than
+    without a backup: the gateway's configuration matters more than its
+    graphs.
+    """
+    discard_metrics_snapshot(snapshot)
+    if not database.is_file():
+        return {"included": False, "reason": "no monitoring history on this gateway"}
+    size = database.stat().st_size
+    wal = Path(str(database) + "-wal")
+    if wal.is_file():
+        size += wal.stat().st_size
+    free = shutil.disk_usage(_existing_ancestor(snapshot.parent)).free
+    if free < size + METRICS_SNAPSHOT_RESERVE_BYTES:
+        return {
+            "included": False,
+            "reason": "not enough free space for a copy of the monitoring history",
+            "database_bytes": size,
+            "free_bytes": free,
+        }
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(snapshot.parent, 0o700)
+    partial = snapshot.with_name(snapshot.name + ".partial")
+    source = target = None
+    try:
+        source = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
+        target = sqlite3.connect(str(partial))
+        source.backup(target, pages=4096)
+        target.close()
+        target = None
+        os.chmod(partial, 0o600)
+        os.replace(partial, snapshot)
+    except (sqlite3.Error, OSError) as exc:
+        if target is not None:
+            target.close()
+            target = None
+        discard_metrics_snapshot(snapshot)
+        return {
+            "included": False,
+            "reason": f"the monitoring history could not be read: {exc}",
+        }
+    finally:
+        for connection in (target, source):
+            if connection is not None:
+                connection.close()
+        partial.unlink(missing_ok=True)
+    return {"included": True, "snapshot_bytes": snapshot.stat().st_size}
+
+
+def discard_metrics_snapshot(snapshot: Path = METRICS_SNAPSHOT) -> None:
+    for path in (snapshot, snapshot.with_name(snapshot.name + ".partial")):
+        path.unlink(missing_ok=True)
+    try:
+        snapshot.parent.rmdir()
+    except OSError:
+        pass
+
+
+def install_restored_metrics(
+    snapshot: Path = METRICS_SNAPSHOT,
+    database: Path = METRICS_DATABASE,
+) -> bool:
+    """Put a restored monitoring history where the collector reads it.
+
+    The collector holds its database open, so it is stopped for the swap and
+    started again only if it was running. The write-ahead log beside the old
+    database belongs to that database and goes with it; left in place SQLite
+    would replay it into the restored one.
+    """
+    if not snapshot.is_file():
+        return False
+    systemctl = shutil.which("systemctl")
+    running = bool(systemctl) and run(
+        [systemctl, "is-active", "--quiet", METRICS_UNIT], check=False
+    ).returncode == 0
+    if running:
+        run([systemctl, "stop", METRICS_UNIT], check=False)
+    try:
+        database.parent.mkdir(parents=True, exist_ok=True)
+        for suffix in ("-wal", "-shm"):
+            Path(str(database) + suffix).unlink(missing_ok=True)
+        os.replace(snapshot, database)
+        os.chmod(database, 0o640)
+    finally:
+        discard_metrics_snapshot(snapshot)
+        if running:
+            run([systemctl, "start", METRICS_UNIT], check=False)
+    print(f"Restored the monitoring history: {database}")
+    return True
+
+
 def command_output(argv: list[str]) -> str:
     try:
         return run(argv, check=False, capture=True).stdout
@@ -618,10 +728,17 @@ def create_backup(args: argparse.Namespace) -> Path:
         work = Path(temporary)
         payload = work / "payload.tar.gz"
         ssh_payload = work / "ssh.tar.gz"
-        with Quiesce(args.quiesce):
-            payload_warnings = create_payload(payload, core)
-            if included_ssh and ssh:
-                payload_warnings += create_payload(ssh_payload, ssh)
+        # Under /var/lib/easy-ha-proxy, so the archive picks it up from there.
+        metrics = snapshot_metrics()
+        if not metrics["included"]:
+            print(f"Monitoring history is not included: {metrics['reason']}.")
+        try:
+            with Quiesce(args.quiesce):
+                payload_warnings = create_payload(payload, core)
+                if included_ssh and ssh:
+                    payload_warnings += create_payload(ssh_payload, ssh)
+        finally:
+            discard_metrics_snapshot()
 
         payload_expanded_bytes = validate_payload(payload)
         ssh_payload_expanded_bytes = (
@@ -641,6 +758,8 @@ def create_backup(args: argparse.Namespace) -> Path:
             "ssh_included": bool(included_ssh and ssh),
             "ssh_paths": ssh,
             "quiesced": bool(args.quiesce),
+            "metrics": metrics,
+            "metrics_included": bool(metrics["included"]),
             "payload_sha256": sha256_file(payload),
             "ssh_payload_sha256": sha256_file(ssh_payload) if ssh_payload.exists() else None,
             "payload_expanded_bytes": payload_expanded_bytes,
@@ -1778,6 +1897,7 @@ def restore_backup(args: argparse.Namespace) -> None:
                 if bool(getattr(args, "replace_managed", False)):
                     remove_paths(rollback_paths)
                 extract_payload(payload)
+                install_restored_metrics()
                 # Extraction replaced /var/log/haproxy.log with the archived
                 # copy; rsyslog still writes to the old inode until restarted,
                 # which would leave the banned-IP log viewer without fresh

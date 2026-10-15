@@ -1492,6 +1492,7 @@
     "Managed data size": "Объём управляемых данных",
     "Consistent snapshot": "Согласованный снимок",
     "SSH keys included": "SSH-ключи включены",
+    "Monitoring history included": "История мониторинга включена",
     "Restore archived SSH keys and merge current authorized_keys": "Восстановить архивные SSH-ключи и объединить текущие authorized_keys",
     "I understand that all managed state on this server will be replaced": "Я понимаю, что всё управляемое состояние этого сервера будет заменено",
     "Type RESTORE to continue": "Введите RESTORE для продолжения",
