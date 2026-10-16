@@ -32,7 +32,10 @@
 {% set prometheus_port = runtime_vars.get('prometheus_port', prometheus_port | default(8404)) %}
 {% set sd = site_defaults %}
 {# гарантируем списки #}
-{% set sites = (runtime_websites.get('sites', sites | default([], true))) | list %}
+{# A paused site keeps its configuration but is not published: nothing below
+   sees it, so it has no routing, no certificate name in the SNI list and no
+   backend. Only an explicit true pauses; anything else publishes. #}
+{% set sites = (runtime_websites.get('sites', sites | default([], true))) | list | rejectattr('paused', 'sameas', true) | list %}
 {% set tcp_proxies = (runtime_tcp.get('tcp_proxies', runtime_tcp.get('tcp', tcp_proxies | default([], true)))) | list %}
 {# утилиты #}
 {% macro san(v) -%}{{ (v | default('')) | regex_replace('[^A-Za-z0-9_]', '_') }}{%- endmacro %}

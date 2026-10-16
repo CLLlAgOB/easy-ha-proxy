@@ -1649,7 +1649,14 @@ class SiteAlertEngine(threading.Thread):
             return None
         result: List[Dict[str, Any]] = []
         for site in sites:
-            if isinstance(site, dict) and site.get("alert_enabled") is True:
+            # A paused site is not published at all, so it is expected to be
+            # unreachable; alerting on that would only teach the operator to
+            # ignore the alert.
+            if (
+                isinstance(site, dict)
+                and site.get("alert_enabled") is True
+                and site.get("paused") is not True
+            ):
                 result.append(site)
         return result
 

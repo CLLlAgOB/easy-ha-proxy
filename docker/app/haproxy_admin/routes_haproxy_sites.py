@@ -10,6 +10,7 @@ from .services_haproxy_sites import (
     delete_site,
     get_site_raw_and_effective,
     save_site_from_json,
+    sync_renewal_pauses,
 )
 from .certd_client import upload_cert_for_site
 
@@ -62,6 +63,16 @@ def haproxy_site_save():
         summary=summarize(before, site) if ok else "",
         detail="" if ok else str(msg)[:500],
     )
+    if ok and (before.get("cert_renewal_paused") is True) != (
+        site.get("cert_renewal_paused", before.get("cert_renewal_paused")) is True
+    ):
+        synced = sync_renewal_pauses()
+        if not synced.get("ok"):
+            msg = (
+                f"{msg} The certificate service could not be told about the "
+                f"renewal pause yet ({synced.get('error') or 'unknown error'}); "
+                "it will be told on the next apply."
+            )
     status = 200 if ok else 400
     return jsonify({"ok": ok, ("message" if ok else "error"): msg}), status
 

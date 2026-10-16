@@ -138,6 +138,30 @@ def _delivery_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def set_renewal_pauses(domains: List[str]) -> Dict[str, Any]:
+    """Name every domain whose certificate certbot must not renew.
+
+    The whole list each time, not a change: certd makes the renewal files
+    match it, so a missed call is corrected by the next one.
+    """
+
+    url = f"{CERTD_API_BASE}/certs/renewal-pauses"
+    try:
+        resp = _post(url, json={"domains": list(domains)}, timeout=30.0)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning("haproxy-certd unreachable (%s): %s", url, exc)
+        raise CertdUnavailable(str(exc)) from exc
+    if resp.status_code == 404:
+        return {"ok": False, "error": "certd does not support renewal pauses yet"}
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise CertdUnavailable("certd returned a non-JSON response") from exc
+    if not isinstance(data, dict):
+        raise CertdUnavailable("certd returned an unexpected payload")
+    return data
+
+
 def cert_deliveries_list() -> Dict[str, Any]:
     return _delivery_request("deliveries", {})
 

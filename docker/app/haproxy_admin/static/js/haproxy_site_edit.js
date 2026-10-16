@@ -384,6 +384,13 @@
       site.name = text("field-name");
       site.domain = text("field-domain");
 
+      // Pauses: always sent, true or false, so the server can tell "resumed"
+      // from "this page did not say" -- the second keeps what is stored.
+      ["paused", "cert_renewal_paused"].forEach(function (key) {
+        var el = document.getElementById(key);
+        if (el) site[key] = el.value === "true";
+      });
+
       // Site mode: tcp_passthrough (tri-state)
       var tcpPassVal = tristateSelectValue("tcp_passthrough");
       if (tcpPassVal !== undefined) {

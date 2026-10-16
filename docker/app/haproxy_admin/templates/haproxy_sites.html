@@ -138,6 +138,13 @@
               ID: {{ raw.name }}
             </div>
             {% endif %}
+
+            {% if raw.paused is sameas true %}
+            <div class="site-paused" title="Kept in the configuration, not served by HAProxy">Publication paused</div>
+            {% endif %}
+            {% if raw.cert_renewal_paused is sameas true %}
+            <div class="site-paused" title="The certificate is not renewed or reissued">Certificate renewal paused</div>
+            {% endif %}
           </td>
 
           {# Backend: with поддержкой нескольких servers (main/backup) #}
@@ -450,6 +457,22 @@
             <a class="btn btn-sm" href="{{ url_for('routes.haproxy_site_edit', name=raw.name) }}">
               Edit
             </a>
+            {# Pausing keeps the configuration and the certificate: for a site
+               that should go quiet for a while without being deleted. #}
+            <form method="post" action="{{ url_for('routes.haproxy_sites_page') }}" class="site-pause-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="name" value="{{ raw.name }}">
+              {% if raw.paused is sameas true %}
+              <button type="submit" class="btn btn-sm" name="action" value="resume">Resume publication</button>
+              {% else %}
+              <button type="submit" class="btn btn-sm" name="action" value="pause">Pause publication</button>
+              {% endif %}
+              {% if raw.cert_renewal_paused is sameas true %}
+              <button type="submit" class="btn btn-sm" name="action" value="resume_renewal">Resume renewal</button>
+              {% else %}
+              <button type="submit" class="btn btn-sm" name="action" value="pause_renewal">Pause renewal</button>
+              {% endif %}
+            </form>
           </td>
         </tr>
         {% endfor %}

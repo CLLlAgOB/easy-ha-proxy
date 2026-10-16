@@ -17,9 +17,14 @@
       {%- set out = [] -%}
       {%- set existing = [] -%}
 
-      {# 2.1. Копируем все реальные sites как есть #}
+      {# 2.1. Копируем все реальные sites как есть -- except a site whose
+         renewal is paused in the panel: that pause means "do not issue",
+         and its name may point somewhere a challenge cannot reach. It still
+         counts as existing, so its name is not re-added below. #}
       {%- for s in (sites | default([], true)) -%}
-        {%- set _ = out.append(s) -%}
+        {%- if s.cert_renewal_paused is not defined or s.cert_renewal_paused is not sameas true -%}
+          {%- set _ = out.append(s) -%}
+        {%- endif -%}
         {%- if s.domain is defined -%}
           {%- set _ = existing.append(s.domain) -%}
         {%- endif -%}

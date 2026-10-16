@@ -72,6 +72,8 @@ from .services_haproxy_sites import (
     get_configured_geoip_countries,
     save_site_raw,
     ensure_certs_before_apply,
+    set_site_pause,
+    sync_renewal_pauses,
 )
 
 from .services_haproxy_tcp import (
@@ -90,6 +92,14 @@ from .services_haproxy_tcp import (
 # Certificate material is small; anything larger is not a certificate, and the
 # daemon on the other side has its own limit besides.
 MAX_CERT_UPLOAD_BYTES = 4 * 1024 * 1024
+# Buttons on the site list: action -> (site key, paused).
+PAUSE_ACTIONS = {
+    "pause": ("paused", True),
+    "resume": ("paused", False),
+    "pause_renewal": ("cert_renewal_paused", True),
+    "resume_renewal": ("cert_renewal_paused", False),
+}
+
 FORM_TEXT_FIELDS = ("backend_host", "health_uri", "hsts")
 FORM_NUMBER_FIELDS = ("max_req_rate", "health_status")
 FORM_TRISTATE_FIELDS = (
@@ -191,6 +201,15 @@ def merge_site_from_edit_form(name, existing, form):
         else:
             site.pop("mtls_mode", None)
             site.pop("mtls_ca_id", None)
+
+    # Two-way selects: "true" pauses, anything else resumes.
+    for field in ("paused", "cert_renewal_paused"):
+        if field not in form:
+            continue
+        if (form.get(field) or "").strip() == "true":
+            site[field] = True
+        else:
+            site.pop(field, None)
 
     for field in FORM_TRISTATE_FIELDS:
         if field not in form:
@@ -609,6 +628,9 @@ def haproxy_config_apply():
                 }
             ), 409 if drift_confirmation_required else 400
 
+        # Every apply restates the paused renewals, so a pause that could not
+        # be passed on when it was set -- certd restarting, say -- is not lost.
+        sync_renewal_pauses()
         cert_res = ensure_certs_before_apply()
         if not cert_res.get("ok"):
             return jsonify(
@@ -1044,8 +1066,49 @@ def haproxy_sites_page():
     if request.method == "POST":
         action = (request.form.get("action") or "add").strip()
 
+        # ─── Pause or resume publication / certificate renewal ───────────────
+        if action in PAUSE_ACTIONS:
+            name = (request.form.get("name") or "").strip()
+            key, paused = PAUSE_ACTIONS[action]
+            ok, msg = set_site_pause(name, key, paused) if name else (
+                False, "Site name is required"
+            )
+            record_request(
+                f"site.{action}",
+                object_type="site",
+                object_id=name,
+                result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                detail="" if ok else str(msg)[:500],
+            )
+            if not ok:
+                error = msg
+            elif key == "paused":
+                message = (
+                    "Publication paused. Apply the configuration to take the site off HAProxy."
+                    if paused
+                    else "Publication resumed. Apply the configuration to serve the site again."
+                )
+            else:
+                synced = sync_renewal_pauses()
+                message = (
+                    "Certificate renewal paused."
+                    if paused
+                    else "Certificate renewal resumed."
+                )
+                if not synced.get("ok"):
+                    message += (
+                        " The certificate service could not be told yet: "
+                        + str(synced.get("error") or "unknown error")
+                        + ". It will be told on the next apply."
+                    )
+                elif paused and synced.get("without_lineage"):
+                    message += (
+                        " No certificate of its own was found for it here, so there"
+                        " is nothing for certbot to skip."
+                    )
+
         # ─── Удаление сайта (если откуда-то ещё прилетает) ───────────────────
-        if action == "delete":
+        elif action == "delete":
             name = (request.form.get("name") or "").strip()
             if not name:
                 error = 'Site name is required for deletion'
@@ -1656,6 +1719,10 @@ def haproxy_site_edit(name):
             )
             if not error:
                 ok, msg = save_site_raw(name, new_site)
+                if ok and (site_raw or {}).get("cert_renewal_paused") != new_site.get(
+                    "cert_renewal_paused"
+                ):
+                    sync_renewal_pauses()
                 record_request(
                     "site.update",
                     object_type="site",

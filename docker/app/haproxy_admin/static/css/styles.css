@@ -1180,6 +1180,23 @@ footer {
   white-space: nowrap;
 }
 
+.site-pause-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.site-paused {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #d69e2e;
+  border: 1px solid rgba(214, 158, 46, 0.55);
+}
+
 .site-flags-empty {
   font-size: 11px;
   opacity: 0.6;

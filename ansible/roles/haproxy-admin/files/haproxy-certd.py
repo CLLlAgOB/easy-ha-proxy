@@ -1663,6 +1663,109 @@ def _resolve_lineage(domain: str) -> Optional[Path]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Paused renewals
+# ---------------------------------------------------------------------------
+#
+# A site can be paused without being deleted -- its name pointed straight at
+# its server for a while, say. Its certificate must then be left alone:
+# renewing it would fail on a challenge that no longer reaches this gateway,
+# and certbot would mail about the failure twice a day. certbot has its own
+# switch for exactly this, "autorenew = False" in a lineage's renewalparams,
+# which `certbot renew` honours. This keeps those switches in line with the
+# sites the panel has paused, and touches only the lines it wrote itself: an
+# autorenew an operator set by hand is theirs.
+
+RENEWAL_PAUSE_MARKER = "# easy-ha-proxy: renewal paused from the panel"
+_LINEAGE_SUFFIX_RE = re.compile(r"(?:-(?:rsa|ecdsa))?(?:-\d{4})?$")
+
+
+def _lineage_domain(name: str) -> str:
+    """example.com-ecdsa, example.com-0001 and example.com are all example.com."""
+
+    return _LINEAGE_SUFFIX_RE.sub("", name, count=1).lower()
+
+
+def _renewal_text_with_pause(text: str, paused: bool) -> str:
+    lines = text.splitlines()
+    kept: List[str] = []
+    skip_next = False
+    for line in lines:
+        if skip_next:
+            skip_next = False
+            if line.strip().replace(" ", "").lower() == "autorenew=false":
+                continue
+        if line.strip() == RENEWAL_PAUSE_MARKER:
+            skip_next = True
+            continue
+        kept.append(line)
+    if paused:
+        section = next(
+            (i for i, line in enumerate(kept) if line.strip() == "[renewalparams]"),
+            None,
+        )
+        if section is None:
+            kept += ["[renewalparams]", RENEWAL_PAUSE_MARKER, "autorenew = False"]
+        else:
+            kept[section + 1:section + 1] = [RENEWAL_PAUSE_MARKER, "autorenew = False"]
+    return "\n".join(kept) + "\n"
+
+
+def sync_renewal_pauses(domains: Sequence[str]) -> Dict[str, Any]:
+    paused = {_normalize_dns_name(str(domain)) for domain in domains}
+    renewal_dir = _get_letsencrypt_root_dir() / "renewal"
+    changed: List[str] = []
+    lineages: Dict[str, bool] = {}
+    if renewal_dir.is_dir():
+        for conf in sorted(renewal_dir.glob("*.conf")):
+            if conf.is_symlink() or not conf.is_file():
+                continue
+            name = conf.name[: -len(".conf")]
+            want = _lineage_domain(name) in paused
+            lineages[name] = want
+            text = conf.read_text(encoding="utf-8")
+            updated = _renewal_text_with_pause(text, want)
+            if updated == text:
+                continue
+            info = conf.stat()
+            fd, temporary = tempfile.mkstemp(dir=str(renewal_dir), prefix=".pause.")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(updated)
+                os.chmod(temporary, stat.S_IMODE(info.st_mode))
+                os.chown(temporary, info.st_uid, info.st_gid)
+                os.replace(temporary, conf)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary)
+                raise
+            changed.append(name)
+    if changed:
+        LOG.info("renewal pauses updated for: %s", ", ".join(changed))
+    return {
+        "ok": True,
+        "paused": sorted(name for name, want in lineages.items() if want),
+        "changed": changed,
+        # A paused domain with no lineage of its own -- covered by a wildcard,
+        # or never issued here -- has nothing to pause, and pausing a shared
+        # lineage would stop renewal for the other sites on it.
+        "without_lineage": sorted(
+            domain for domain in paused
+            if not any(_lineage_domain(name) == domain for name in lineages)
+        ),
+    }
+
+
+def handle_renewal_pauses(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    domains = body.get("domains")
+    if not isinstance(domains, list) or len(domains) > 1000:
+        return 400, {"ok": False, "error": "domains must be a list"}
+    try:
+        return 200, sync_renewal_pauses([str(domain) for domain in domains])
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+
+
 def handle_deliveries_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     return 200, list_cert_deliveries()
 
@@ -4408,6 +4511,8 @@ class CertdHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/v1/certs/status":
                 status, resp = handle_certs_status(body)
+            elif path == "/api/v1/certs/renewal-pauses":
+                status, resp = handle_renewal_pauses(body)
             elif path == "/api/v1/certs/issue":
                 status, resp = handle_certs_issue(body)
             elif path == "/api/v1/certs/backup":

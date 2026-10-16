@@ -209,6 +209,63 @@ def get_websites_list() -> List[Dict[str, Any]]:
     return sites
 
 
+# Two independent pauses, for a site that should go quiet for a while without
+# its configuration being deleted -- say, a domain pointed straight at its
+# server for now. "paused" takes it out of HAProxy; "cert_renewal_paused"
+# stops its certificate being renewed or reissued. Only an explicit true
+# pauses, so a site written before these keys existed is unaffected.
+PAUSE_KEYS = ("paused", "cert_renewal_paused")
+
+
+def site_is_paused(site: Dict[str, Any]) -> bool:
+    return isinstance(site, dict) and site.get("paused") is True
+
+
+def renewal_is_paused(site: Dict[str, Any]) -> bool:
+    return isinstance(site, dict) and site.get("cert_renewal_paused") is True
+
+
+def renewal_paused_domains() -> List[str]:
+    """The domains whose certificates must not be renewed, for certd."""
+
+    domains = []
+    for site in get_websites_list():
+        if renewal_is_paused(site) and site.get("domain"):
+            domains.append(str(site["domain"]).strip().lower())
+    return sorted(set(domains))
+
+
+def set_site_pause(name: str, key: str, paused: bool) -> Tuple[bool, str]:
+    """Pause or resume one aspect of a site, leaving the rest as it is."""
+
+    if key not in PAUSE_KEYS:
+        return False, f"Unknown pause setting {key!r}"
+    for site in get_websites_list():
+        if isinstance(site, dict) and site.get("name") == name:
+            updated = dict(site)
+            if paused:
+                updated[key] = True
+            else:
+                updated.pop(key, None)
+            return save_site_raw(name, updated)
+    return False, f"Site {name!r} was not found"
+
+
+def sync_renewal_pauses() -> Dict[str, Any]:
+    """Tell certd which certificates certbot must leave alone.
+
+    Best effort: a gateway whose certd predates this feature keeps renewing
+    as before, and saying so is better than failing the save it follows.
+    """
+
+    from . import certd_client
+
+    try:
+        return certd_client.set_renewal_pauses(renewal_paused_domains())
+    except Exception as exc:  # noqa: BLE001 - never fail the caller over it
+        return {"ok": False, "error": str(exc)}
+
+
 def get_configured_geoip_countries() -> List[str]:
     """Return the canonical country set materialized by the GeoIP updater."""
     config_vars = _load_yaml(CONFIG_YAML)
@@ -733,6 +790,23 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
     name_norm = name
     orig_norm = (original_name or "").strip() or None
 
+    # The editor rebuilds the whole site from its form, so a key it does not
+    # mention would be dropped. A page loaded before the pauses existed must
+    # not resume a paused site by saving something else.
+    previous = next(
+        (s for s in sites if isinstance(s, dict)
+         and (s.get("name") or "").strip() == (orig_norm or "")),
+        {},
+    )
+    for key in PAUSE_KEYS:
+        if key not in site:
+            if previous.get(key) is True:
+                site_out[key] = True
+        elif site.get(key) is True:
+            site_out[key] = True
+        else:
+            site_out.pop(key, None)
+
     if orig_norm is None:
         # Создание нового сайта
         for s in sites:
@@ -898,6 +972,11 @@ def ensure_certs_before_apply() -> Dict[str, Any]:
         eff = item.get("effective") or {}
         raw = item.get("raw") or {}
         if eff.get("tcp_passthrough"):
+            continue
+        # A paused site is not published, and a paused renewal is exactly the
+        # instruction not to issue: its name may well point elsewhere by now,
+        # and a challenge that cannot succeed would block every apply.
+        if site_is_paused(raw) or renewal_is_paused(raw):
             continue
         source = raw.get("certificate_source")
         if source not in ("letsencrypt", "external", "internal"):

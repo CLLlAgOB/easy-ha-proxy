@@ -93,6 +93,24 @@
                 <input id="field-domain" name="domain" type="text" class="form-input" required
                     value="{{ site.domain or '' }}">
 
+                {# Pausing keeps the configuration and the certificate, for a site
+                   that should go quiet for a while without being deleted. #}
+                <label class="form-label" for="paused" style="margin-top: 10px;">Publication</label>
+                <select id="paused" name="paused" class="form-input">
+                    <option value="false" {% if site.paused is not sameas true %}selected{% endif %}>Published</option>
+                    <option value="true" {% if site.paused is sameas true %}selected{% endif %}>Paused: not served by HAProxy</option>
+                </select>
+
+                <label class="form-label" for="cert_renewal_paused" style="margin-top: 10px;">Certificate renewal</label>
+                <select id="cert_renewal_paused" name="cert_renewal_paused" class="form-input">
+                    <option value="false" {% if site.cert_renewal_paused is not sameas true %}selected{% endif %}>Automatic</option>
+                    <option value="true" {% if site.cert_renewal_paused is sameas true %}selected{% endif %}>Paused: not renewed or reissued</option>
+                </select>
+                <div class="table-meta">
+                    A paused site keeps its settings and certificate. Apply the configuration
+                    for a change of publication to take effect.
+                </div>
+
                 {# --- Site mode: HTTP vs TCP passthrough --- #}
                 {% set raw_tcp_passthrough = site.tcp_passthrough if site.tcp_passthrough is defined else None %}
                 {% set eff_tcp_passthrough = eff.tcp_passthrough | default(site_defaults.tcp_passthrough |
