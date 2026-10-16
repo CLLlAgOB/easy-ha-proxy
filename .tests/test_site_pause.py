@@ -343,6 +343,11 @@ class NothingElseKeepsItAlive(unittest.TestCase):
         menu = page.split('<details class="site-more">')[1].split("</details>")[0]
         self.assertIn('class="site-more-menu"', menu)
         self.assertIn('value="pause_renewal"', menu)
+        # And no wider than the buttons above it: a long label wraps instead.
+        styles = (APP_DIR / "static/css/styles.css").read_text(encoding="utf-8")
+        rule = styles.split(".site-more-menu {")[1].split("}")[0]
+        self.assertIn("width: 0;", rule)
+        self.assertIn("min-width: 100%;", rule)
         editor = (APP_DIR / "templates/haproxy_site_edit.html").read_text(encoding="utf-8")
         self.assertIn('id="paused"', editor)
         self.assertIn('id="cert_renewal_paused"', editor)

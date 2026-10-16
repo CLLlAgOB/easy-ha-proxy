@@ -1216,10 +1216,13 @@ footer {
 .site-more-menu {
   display: flex;
   flex-direction: column;
-  width: max-content;
-  max-width: 240px;
+  /* Exactly as wide as the buttons above: width 0 keeps the menu out of the
+     column's width, min-width then stretches it to the buttons. A longer
+     label wraps instead of widening the column. */
+  width: 0;
+  min-width: 100%;
+  box-sizing: border-box;
   margin-top: 6px;
-  margin-left: auto;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1227,7 +1230,8 @@ footer {
 }
 
 .site-more-menu button {
-  padding: 8px 10px;
+  padding: 7px 8px;
+  line-height: 1.25;
   border: none;
   border-radius: 6px;
   background: transparent;
