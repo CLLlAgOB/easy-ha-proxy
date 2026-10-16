@@ -339,6 +339,10 @@ class NothingElseKeepsItAlive(unittest.TestCase):
         page = (APP_DIR / "templates/haproxy_sites.html").read_text(encoding="utf-8")
         for value in ("pause", "resume", "pause_renewal", "resume_renewal"):
             self.assertIn(f'name="action" value="{value}"', page)
+        # Kept in a menu, so the actions column stays one button wide.
+        menu = page.split('<details class="site-more">')[1].split("</details>")[0]
+        self.assertIn('class="site-more-menu"', menu)
+        self.assertIn('value="pause_renewal"', menu)
         editor = (APP_DIR / "templates/haproxy_site_edit.html").read_text(encoding="utf-8")
         self.assertIn('id="paused"', editor)
         self.assertIn('id="cert_renewal_paused"', editor)
