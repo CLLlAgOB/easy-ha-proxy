@@ -454,15 +454,18 @@
 
           {# Actions #}
           <td class="site-actions">
+            <div class="site-actions-stack">
             <a class="btn btn-sm" href="{{ url_for('routes.haproxy_site_edit', name=raw.name) }}">
               Edit
             </a>
             {# Pausing keeps the configuration and the certificate: for a site
                that should go quiet for a while without being deleted. #}
             {# A menu rather than more buttons: the full wording fits there,
-               and the column stays as narrow as one button. #}
+               and the column stays as narrow as one button. It opens inside
+               the cell: the table scrolls sideways, and a floating menu
+               would be cut off by it. #}
             <details class="site-more">
-              <summary class="btn btn-sm" title="More actions" aria-label="More actions">⋯</summary>
+              <summary class="btn btn-sm" title="More actions">More ▾</summary>
               <form method="post" action="{{ url_for('routes.haproxy_sites_page') }}" class="site-more-menu">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="name" value="{{ raw.name }}">
@@ -478,6 +481,7 @@
                 {% endif %}
               </form>
             </details>
+            </div>
           </td>
         </tr>
         {% endfor %}

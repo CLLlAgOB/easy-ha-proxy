@@ -1755,6 +1755,7 @@
     "Resume renewal": "Возобновить продление",
     "Pause renewal": "Приостановить продление",
     "More actions": "Другие действия",
+    "More ▾": "Ещё ▾",
     "Publication": "Публикация",
     "Published": "Опубликован",
     "Paused: not served by HAProxy": "Приостановлен: HAProxy его не обслуживает",
