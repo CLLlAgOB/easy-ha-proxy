@@ -1331,6 +1331,25 @@ def policy_from_query(
     )
 
 
+# Findings that score even when HAProxy had already refused the request.
+#
+# A refusal used to excuse everything: an address whose every request was
+# answered 451 scored nothing, whatever it asked for. One spent a morning
+# working through /.git-credentials under every common web root, was
+# recognised for secrets, vcs and backup on each request, and stayed at score
+# zero -- free to try the next site, one without a country filter, or the
+# login page, which cannot have one.
+#
+# A decisive category is the content of the request, not the identity of the
+# client, and no browser, framework or crawler ever asks for one. The 451
+# only kept that one request out; a ban keeps the address out of every host
+# and port before the TLS handshake. A plain 451 still scores nothing, so a
+# person whose authorisation lapsed is never banned for being turned away.
+# `handled` stays a true record of what HAProxy did, which is why the rule
+# lives here: changing it re-scores the history that is already stored.
+REFUSAL_DOES_NOT_EXCUSE: frozenset = frozenset({EVENT_SCANNER_DECISIVE})
+
+
 def state_for(score: int) -> str:
     for threshold, name in DEFAULT_THRESHOLDS:
         if score >= threshold:
@@ -1362,7 +1381,7 @@ def score_events(
         base = policy.weight(event_type)
         if base <= 0:
             continue
-        if int(event.get("handled", 0)):
+        if int(event.get("handled", 0)) and event_type not in REFUSAL_DOES_NOT_EXCUSE:
             # HAProxy already refused this request; banning on top of a GeoIP
             # denial adds nothing.
             contributions.append(

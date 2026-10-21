@@ -271,9 +271,10 @@ class DrivenThroughTheEngine(unittest.TestCase):
             "an address that is being answered somewhere still scores zero",
         )
 
-    def test_an_address_answered_nowhere_is_still_left_alone(self):
-        # The case the shield exists for, and the one that must not change:
-        # geography refuses it everywhere, so a ban would add nothing.
+    def test_an_address_answered_nowhere_is_still_recorded_as_refused(self):
+        # The record stays true to what HAProxy did. Whether a refused
+        # finding scores is decided in score_events: a decisive one does,
+        # see test_decisive_scans_score_through_a_refusal.
         seen = self.run_scan("203.0.113.21", [
             ("/.aws/credentials", 451), ("/.git/config", 451), ("/.env", 451),
         ])
@@ -298,7 +299,9 @@ class DrivenThroughTheEngine(unittest.TestCase):
 class TheScoreIsActuallyZero(unittest.TestCase):
     def test_a_handled_event_contributes_nothing_and_says_why(self):
         source = GUARDD.read_text(encoding="utf-8")
-        block = source.split('if int(event.get("handled", 0)):')[1][:600]
+        block = source.split(
+            'if int(event.get("handled", 0)) and event_type not in REFUSAL_DOES_NOT_EXCUSE:'
+        )[1][:600]
         self.assertIn('"points": 0', block)
         self.assertIn('"already refused by the gateway"', block)
 

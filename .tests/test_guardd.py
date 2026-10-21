@@ -826,12 +826,19 @@ class DetectionTests(EngineTestCase):
         self.assertNotIn(guardd.EVENT_NOT_FOUND_ENUM, self.types())
 
     def test_a_geo_denied_scan_is_recorded_as_already_handled(self):
-        # Nothing this address asked for was answered, so a ban would add
-        # nothing to the refusal it already gets.
+        # The record says what HAProxy did. A decisive finding scores all the
+        # same: asking for /.env is the content of the request, and the 451
+        # kept out only that one request, not the address.
         self.append(self.line("203.0.113.9", "/.env", 451))
         self.engine.ingest_log(1000)
         self.assertEqual(self.events()[0]["handled"], 1)
-        self.assertEqual(self.engine.reputation("203.0.113.9", 1000)["score"], 0)
+        self.assertGreater(self.engine.reputation("203.0.113.9", 1000)["score"], 0)
+
+    def test_a_geo_denied_ordinary_scan_still_scores_nothing(self):
+        self.append(self.line("203.0.113.7", "/wp-admin/install.php", 451))
+        self.engine.ingest_log(1000)
+        self.assertEqual(self.events()[0]["handled"], 1)
+        self.assertEqual(self.engine.reputation("203.0.113.7", 1000)["score"], 0)
 
     def test_a_denied_scan_still_counts_once_the_address_gets_answered(self):
         # The refusals are per host. An address turned away from a gated
