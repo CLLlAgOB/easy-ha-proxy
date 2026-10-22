@@ -291,6 +291,13 @@ frontend fe_https
     # Slowloris
     timeout http-request {{ sd.http_request_timeout | default('5s') }}
     timeout client {{ sd.frontend_client_timeout | default('300s') }}
+    # How long an idle browser connection is kept for its next request.
+    # Unset, HAProxy falls back to http-request above -- 5s -- so a page that
+    # polls every few seconds opened a fresh connection, and a fresh TLS
+    # handshake, almost every time: one request per connection was measured
+    # on a live gateway, and a monitoring dashboard alone pushed an office
+    # into the connection-burst limit below.
+    timeout http-keep-alive {{ sd.frontend_keepalive_timeout | default('30s') }}
 
     # lists
     acl ip_whitelist src -f {{ whitelist_global_file }}
@@ -304,8 +311,13 @@ frontend fe_https
     # Conn-flood limits (таблица прямо в fe_https)
 {% set conn_expire = sd.conn_table_expire | default('30s') %}
 {% set conn_rate_window = sd.conn_rate_window | default('10s') %}
-{% set conn_rate_burst = sd.conn_rate_burst | default(40) %}
-{% set conn_cur_limit = sd.conn_cur_limit | default(100) %}
+{# New connections per window and open connections per address. 40 and 100
+   were met by ordinary use: a web application loading dozens of resources
+   at once, an office behind one address, a dashboard reconnecting after a
+   network blip. Rejected attempts count too, so a client over the line stays
+   over it for as long as it keeps retrying. Floods still run to thousands. #}
+{% set conn_rate_burst = sd.conn_rate_burst | default(200) %}
+{% set conn_cur_limit = sd.conn_cur_limit | default(500) %}
     stick-table type ip size 200k expire {{ conn_expire }} store conn_rate({{ conn_rate_window }}),conn_cur
     tcp-request connection track-sc0 src
     acl conn_rate_burst sc0_conn_rate(fe_https) gt {{ conn_rate_burst }}

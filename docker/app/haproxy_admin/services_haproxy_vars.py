@@ -195,6 +195,17 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
                 pattern=INTERVAL_RE.pattern,
                 help_text="Examples: 500ms, 5s, 2m.",
             ),
+            _field(
+                "site_defaults.frontend_keepalive_timeout",
+                "Client keep-alive timeout",
+                "interval",
+                pattern=INTERVAL_RE.pattern,
+                default="30s",
+                help_text=(
+                    "How long an idle browser connection is kept for its next "
+                    "request. Default: 30s."
+                ),
+            ),
         ),
     },
     {
@@ -207,8 +218,24 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
             _field("site_defaults.rate_errors", "Request-rate strike threshold", "integer", minimum=0, maximum=1000000),
             _field("site_defaults.conn_table_expire", "Connection table expiry", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.conn_rate_window", "Connection-rate window", "interval", pattern=INTERVAL_RE.pattern),
-            _field("site_defaults.conn_rate_burst", "Connection burst limit", "integer", minimum=0, maximum=1000000),
-            _field("site_defaults.conn_cur_limit", "Concurrent connection limit", "integer", minimum=0, maximum=1000000),
+            _field(
+                "site_defaults.conn_rate_burst",
+                "Connection burst limit",
+                "integer",
+                minimum=0,
+                maximum=1000000,
+                default=200,
+                help_text="New connections from one address per window. Default: 200.",
+            ),
+            _field(
+                "site_defaults.conn_cur_limit",
+                "Concurrent connection limit",
+                "integer",
+                minimum=0,
+                maximum=1000000,
+                default=500,
+                help_text="Open connections from one address. Default: 500.",
+            ),
             _field("site_defaults.err_limit", "Per-site error limit", "integer", minimum=0, maximum=1000000),
             _field("site_defaults.err_window", "Per-site error window", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.other_err_limit", "Other error limit", "integer", minimum=0, maximum=1000000),
