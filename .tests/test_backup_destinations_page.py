@@ -114,8 +114,11 @@ class PageTests(unittest.TestCase):
         self.assertIn("if (secret) body.secret_key = secret;", self.javascript)
 
     def test_the_page_explains_why_the_host_key_matters(self):
-        self.assertIn("whoever answers on that address", self.template)
-        self.assertIn("ssh-keyscan", self.template)
+        # The key is pinned on first use now rather than typed in, so what the
+        # page has to say is that a change stops the transfer.
+        self.assertIn("pinned", self.template)
+        self.assertIn("nothing", self.template)
+        self.assertIn("is sent until you choose to trust the new one", self.template)
 
     def test_the_script_is_loaded(self):
         self.assertIn("js/backup_destinations.js", self.template)

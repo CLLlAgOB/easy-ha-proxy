@@ -60,6 +60,56 @@
     const kind = byId("dest-type").value;
     byId("dest-sftp-fields").hidden = kind !== "sftp";
     byId("dest-s3-fields").hidden = kind !== "s3";
+    showAuth();
+  }
+
+  function showAuth() {
+    const password = byId("dest-auth").value === "password";
+    byId("dest-key-field").hidden = password;
+    byId("dest-password-field").hidden = !password;
+  }
+
+  // Fingerprints, and a way out when the far end's key has changed. The
+  // daemon has already refused to send anything; this only lets the operator
+  // decide that the new key is the right one.
+  function hostKeyCell(destination) {
+    const box = document.createElement("div");
+    if (destination.type !== "sftp") {
+      box.textContent = "—";
+      return box;
+    }
+    (destination.host_key_fingerprints || []).forEach((print) => {
+      const line = document.createElement("div");
+      line.className = "mono";
+      line.setAttribute("data-i18n-skip", "");
+      line.setAttribute("translate", "no");
+      line.textContent = print;
+      box.appendChild(line);
+    });
+    if (destination.host_key_changed) {
+      const warning = document.createElement("div");
+      warning.className = "result-message error";
+      warning.textContent = t("The server presented a different host key. Nothing is sent until you trust it.");
+      box.appendChild(warning);
+      (destination.host_key_changed.offered || []).forEach((print) => {
+        const line = document.createElement("div");
+        line.className = "mono";
+        line.setAttribute("data-i18n-skip", "");
+        line.setAttribute("translate", "no");
+        line.textContent = `→ ${print}`;
+        box.appendChild(line);
+      });
+      box.appendChild(button("Trust the new key", () => trustHostKey(destination.name), "btn btn-danger"));
+    }
+    return box;
+  }
+
+  async function trustHostKey(name) {
+    if (!window.confirm(t("Trust the key this server offers now? Do this only if you know why it changed."))) return;
+    status(t("Saving…"));
+    const { ok, payload } = await api("/api/destinations/trust-host-key", { name });
+    status(ok ? t("The new host key is pinned") : payload.error || t("It was not saved"));
+    refresh();
   }
 
   function fill(destination) {
@@ -70,6 +120,7 @@
     byId("dest-user").value = destination.user || "";
     byId("dest-path").value = destination.path || "";
     byId("dest-verify").value = destination.verify || "auto";
+    byId("dest-auth").value = destination.auth || "key";
     byId("dest-endpoint").value = destination.endpoint || "";
     byId("dest-region").value = destination.region || "";
     byId("dest-bucket").value = destination.bucket || "";
@@ -82,6 +133,7 @@
     // Every secret is stored root-only and never returned; leaving the field
     // empty keeps what is already there.
     byId("dest-key").value = "";
+    byId("dest-password").value = "";
     byId("dest-host-key").value = "";
     byId("dest-secret-key").value = "";
     showKind();
@@ -109,7 +161,7 @@
     if (!destinations.length) {
       const row = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 4;
+      td.colSpan = 5;
       td.className = "muted";
       td.textContent = t("No destination yet");
       row.appendChild(td);
@@ -125,6 +177,7 @@
           ? `${destination.bucket}/${destination.prefix || ""} @ ${destination.endpoint}`
           : `${destination.user}@${destination.host}:${destination.port}${destination.path}`
       );
+      cell(row, hostKeyCell(destination));
       cell(
         row,
         `${destination.keep_daily}/${destination.keep_weekly}/${destination.keep_monthly}`
@@ -172,8 +225,14 @@
       body.port = Number(byId("dest-port").value || 22);
       body.user = byId("dest-user").value.trim();
       body.path = byId("dest-path").value.trim();
-      const key = byId("dest-key").value.trim();
-      if (key) body.private_key = key;
+      body.auth = byId("dest-auth").value;
+      if (body.auth === "password") {
+        const password = byId("dest-password").value;
+        if (password) body.password = password;
+      } else {
+        const key = byId("dest-key").value.trim();
+        if (key) body.private_key = key;
+      }
       const hostKey = byId("dest-host-key").value.trim();
       if (hostKey) body.host_key = hostKey;
     }
@@ -181,8 +240,10 @@
     status(t("Saving…"));
     const { ok, payload } = await api("/api/destinations", body);
     if (ok) {
-      status(t("Saved"));
+      const prints = (payload.destination && payload.destination.host_key_fingerprints) || [];
+      status(prints.length ? `${t("Saved")}. ${t("Pinned host key")}: ${prints.join(", ")}` : t("Saved"));
       byId("dest-key").value = "";
+      byId("dest-password").value = "";
       byId("dest-host-key").value = "";
       byId("dest-secret-key").value = "";
       refresh();
@@ -196,6 +257,7 @@
     if (!form) return;
     form.addEventListener("submit", save);
     byId("dest-type").addEventListener("change", showKind);
+    byId("dest-auth").addEventListener("change", showAuth);
     showKind();
     refresh();
   });

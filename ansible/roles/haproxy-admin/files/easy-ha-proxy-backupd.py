@@ -220,10 +220,12 @@ REQUEST_FIELDS = {
             "private_key", "host_key", "keep_daily", "keep_weekly",
             "keep_monthly", "endpoint", "region", "bucket", "prefix",
             "access_key", "secret_key", "allow_insecure", "verify",
+            "auth", "password",
         }
     ),
     "destination_delete": frozenset({"action", "name"}),
     "destination_test": frozenset({"action", "name"}),
+    "destination_retrust": frozenset({"action", "name"}),
     "upload": frozenset({"action", "backup_id", "destination"}),
     "schedule": frozenset({"action"}),
     "schedule_save": frozenset(
@@ -2384,6 +2386,140 @@ def destination_known_hosts(name: str) -> Path:
     return DESTINATIONS_DIR / (str(name).strip().lower() + ".known_hosts")
 
 
+def destination_password_path(name: str) -> Path:
+    return DESTINATIONS_DIR / (str(name).strip().lower() + ".password")
+
+
+# How the gateway signs in to an SFTP destination.
+DESTINATION_AUTH = ("key", "password")
+SSH_KEYSCAN = "/usr/bin/ssh-keyscan"
+SSH_KEYGEN = "/usr/bin/ssh-keygen"
+KEYSCAN_TIMEOUT_SECONDS = 15
+
+# OpenSSH reads a password only from a terminal or from an askpass program,
+# and an unattended backup has no terminal. This program prints the password
+# file it is pointed at; the password itself stays in a root-only file and
+# never reaches an argument list or the environment.
+def askpass_path() -> Path:
+    return DESTINATIONS_DIR / ".askpass"
+
+
+ASKPASS_SCRIPT = b'#!/bin/sh\nexec cat -- "$EASY_HA_PROXY_SFTP_PASSWORD_FILE"\n'
+
+# What OpenSSH prints when the far end is not the one that was pinned.
+HOST_KEY_FAILURES = (
+    "REMOTE HOST IDENTIFICATION HAS CHANGED",
+    "Host key verification failed",
+    "host key for",
+    "No matching host key",
+)
+
+
+def destination_auth(record: dict[str, Any]) -> str:
+    value = str(record.get("auth") or "key")
+    return value if value in DESTINATION_AUTH else "key"
+
+
+def scan_host_key(host: str, port: int) -> bytes:
+    """Ask the far end for its host keys, as known_hosts lines.
+
+    This is trust on first use: whatever answers now is what will be
+    accepted from then on, and the fingerprints are shown so they can be
+    compared with what the server itself reports. After that a different
+    key stops every transfer until someone decides to trust it.
+    """
+    try:
+        result = subprocess.run(
+            [SSH_KEYSCAN, "-T", "10", "-p", str(port), "-t",
+             "ed25519,ecdsa,rsa", "--", host],
+            capture_output=True,
+            timeout=KEYSCAN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BackupdError(f"cannot read the host key: {exc}", code="upstream") from exc
+    lines = [
+        line for line in (result.stdout or b"").decode("utf-8", "replace").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    if not lines:
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:300]
+        raise BackupdError(
+            "the far end did not offer a host key"
+            + (f": {detail}" if detail else ""),
+            code="upstream",
+        )
+    return ("\n".join(sorted(lines)) + "\n").encode("utf-8")
+
+
+def host_key_fingerprints(known_hosts: bytes) -> list[str]:
+    """SHA256 fingerprints, the form `ssh-keygen -lf` and servers print."""
+    with tempfile.NamedTemporaryFile(prefix="backupd-hostkey-") as handle:
+        handle.write(known_hosts)
+        handle.flush()
+        try:
+            result = subprocess.run(
+                [SSH_KEYGEN, "-l", "-E", "sha256", "-f", handle.name],
+                capture_output=True, timeout=15, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+    prints = []
+    for line in (result.stdout or b"").decode("utf-8", "replace").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1].startswith("SHA256:"):
+            kind = fields[-1].strip("()") if fields[-1].startswith("(") else ""
+            prints.append(f"{kind} {fields[1]}".strip())
+    return prints
+
+
+def pin_host_key(name: str, known_hosts: bytes) -> list[str]:
+    write_private(destination_known_hosts(name), known_hosts)
+    return host_key_fingerprints(known_hosts)
+
+
+def pinned_fingerprints(record: dict[str, Any]) -> list[str]:
+    """Fingerprints of the pinned key, worked out for profiles saved before
+    they were recorded, so every SFTP destination can show what it trusts."""
+    stored = list(record.get("host_key_fingerprints") or [])
+    if stored or record.get("type") != "sftp" or not record.get("name"):
+        return stored
+    try:
+        return host_key_fingerprints(destination_known_hosts(record["name"]).read_bytes())
+    except OSError:
+        return []
+
+
+def host_key_problem(stderr: bytes) -> bool:
+    text = (stderr or b"").decode("utf-8", "replace")
+    return any(marker.lower() in text.lower() for marker in HOST_KEY_FAILURES)
+
+
+def note_host_key_change(record: dict[str, Any]) -> str:
+    """Remember that the far end presented a different key, and say so.
+
+    Nothing is trusted here: the transfer has already been refused. The new
+    key's fingerprints are recorded so the page can show what would be
+    trusted, and the operator decides.
+    """
+    offered: list[str] = []
+    with contextlib.suppress(BackupdError):
+        offered = host_key_fingerprints(
+            scan_host_key(record["host"], int(record.get("port") or 22))
+        )
+    with contextlib.suppress(Exception):
+        stored = load_destination(record["name"])
+        stored["host_key_changed"] = {"at": utc_now(), "offered": offered}
+        atomic_json(destination_path(record["name"]), stored, mode=0o600)
+    return (
+        "the far end presented a different host key than the one pinned, so "
+        "nothing was sent. If the server was reinstalled or its key replaced "
+        "on purpose, trust the new key on the backups page"
+        + (f" (offered: {', '.join(offered)})" if offered else "")
+        + "."
+    )
+
+
 def normalize_private_key(material: str) -> bytes:
     """Make a pasted key into a file OpenSSH will actually open.
 
@@ -2440,7 +2576,12 @@ def public_destination(record: dict[str, Any]) -> dict[str, Any]:
         "user": record.get("user", ""),
         "path": record.get("path", ""),
         "has_key": bool(record.get("key_installed")),
+        "auth": destination_auth(record),
+        "has_password": bool(record.get("password_installed")),
         "host_key_pinned": bool(record.get("host_key_pinned")),
+        "host_key_fingerprints": pinned_fingerprints(record),
+        "host_key_source": record.get("host_key_source", ""),
+        "host_key_changed": record.get("host_key_changed") or None,
         "verify": verify_mode(record.get("verify")),
         "endpoint": record.get("endpoint", ""),
         "region": record.get("region", ""),
@@ -2500,27 +2641,54 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
 
     existing = existing_probe
 
-    key = str(request.get("private_key") or "")
-    if key:
-        if "PRIVATE KEY" not in key:
-            raise BackupdError("that does not look like a private key", code="invalid")
-        # The key never goes through the archive path and never leaves this
-        # directory; the browser cannot read it back.
-        write_private(destination_key_path(name), normalize_private_key(key))
-    elif not existing.get("key_installed"):
-        raise BackupdError("a private key is required", code="invalid")
+    auth = str(request.get("auth") or existing.get("auth") or "key").strip().lower()
+    if auth not in DESTINATION_AUTH:
+        raise BackupdError("auth must be key or password", code="invalid")
+    key_installed = bool(existing.get("key_installed"))
+    password_installed = bool(existing.get("password_installed"))
+    if auth == "key":
+        key = str(request.get("private_key") or "")
+        if key:
+            if "PRIVATE KEY" not in key:
+                raise BackupdError("that does not look like a private key", code="invalid")
+            # The key never goes through the archive path and never leaves
+            # this directory; the browser cannot read it back.
+            write_private(destination_key_path(name), normalize_private_key(key))
+            key_installed = True
+        elif not key_installed:
+            raise BackupdError("a private key is required", code="invalid")
+    else:
+        password = request.get("password")
+        if password:
+            if (
+                not isinstance(password, str)
+                or len(password) > 1024
+                or any(ch in password for ch in "\x00\r\n")
+            ):
+                raise BackupdError("the password is not valid", code="invalid")
+            # Root-only, like the key, and never returned to the browser.
+            write_private(destination_password_path(name), password.encode("utf-8"))
+            password_installed = True
+        elif not password_installed:
+            raise BackupdError("a password is required", code="invalid")
 
+    # The host key: the one supplied, the one already pinned for this same
+    # host and port, or -- trust on first use -- the one the far end offers
+    # now. Typing it in used to be mandatory, and a key copied by hand was
+    # one more thing to get wrong; what matters is that it cannot change
+    # silently afterwards.
     host_key = str(request.get("host_key") or "").strip()
+    same_endpoint = (
+        existing.get("host") == host and int(existing.get("port") or 22) == port
+    )
+    fingerprints = list(existing.get("host_key_fingerprints") or [])
+    source = existing.get("host_key_source") or "supplied"
     if host_key:
-        write_private(
-            destination_known_hosts(name), (host_key + "\n").encode("utf-8")
-        )
-    elif not existing.get("host_key_pinned"):
-        raise BackupdError(
-            "the host key is required: pin the one you expect rather than"
-            " accepting whatever answers",
-            code="invalid",
-        )
+        fingerprints = pin_host_key(name, (host_key + "\n").encode("utf-8"))
+        source = "supplied"
+    elif not (existing.get("host_key_pinned") and same_endpoint):
+        fingerprints = pin_host_key(name, scan_host_key(host, port))
+        source = "first-use"
 
     record = {
         "name": name,
@@ -2529,8 +2697,12 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
         "port": port,
         "user": user,
         "path": remote.rstrip("/") or "/",
-        "key_installed": True,
+        "auth": auth,
+        "key_installed": key_installed,
+        "password_installed": password_installed,
         "host_key_pinned": True,
+        "host_key_fingerprints": fingerprints,
+        "host_key_source": source,
         # "or" would read a deliberate zero as "not supplied" and quietly
         # restore the default, so an operator asking to keep no weeklies would
         # silently keep four of them.
@@ -2610,6 +2782,7 @@ def delete_destination(request: dict[str, Any]) -> dict[str, Any]:
         path_target,
         destination_key_path(name),
         destination_known_hosts(name),
+        destination_password_path(name),
         destination_secret_path(name),
     ):
         with contextlib.suppress(FileNotFoundError):
@@ -2627,36 +2800,105 @@ def sftp_base_command(record: dict[str, Any], binary: str) -> list[str]:
     attack offline.
     """
     name = record["name"]
-    return [
+    command = [
         binary,
-        "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={destination_known_hosts(name)}",
         "-o", "IdentitiesOnly=yes",
         "-o", "ConnectTimeout=20",
-        "-i", str(destination_key_path(name)),
-        "-P" if binary.endswith("sftp") else "-p", str(record.get("port") or 22),
     ]
+    if destination_auth(record) == "password":
+        # BatchMode would forbid the askpass program, so the prompts are
+        # bounded instead: one attempt, password methods only.
+        command += [
+            "-o", "BatchMode=no",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "PreferredAuthentications=password,keyboard-interactive",
+            "-o", "NumberOfPasswordPrompts=1",
+        ]
+    else:
+        command += ["-o", "BatchMode=yes", "-i", str(destination_key_path(name))]
+    command += ["-P" if binary.endswith("sftp") else "-p", str(record.get("port") or 22)]
+    return command
+
+
+def ensure_askpass() -> None:
+    path = askpass_path()
+    with contextlib.suppress(FileNotFoundError):
+        if path.read_bytes() == ASKPASS_SCRIPT:
+            os.chmod(path, 0o700)
+            return
+    ensure_destinations_dir()
+    write_private(path, ASKPASS_SCRIPT)
+    os.chmod(path, 0o700)
+
+
+def sftp_environment(record: dict[str, Any]) -> dict[str, str] | None:
+    """The environment for a password login; None keeps the inherited one."""
+    if destination_auth(record) != "password":
+        return None
+    ensure_askpass()
+    environment = dict(os.environ)
+    environment.update({
+        "SSH_ASKPASS": str(askpass_path()),
+        # OpenSSH 8.4+: use the askpass program even without a display or a
+        # terminal, which is exactly an unattended backup.
+        "SSH_ASKPASS_REQUIRE": "force",
+        "DISPLAY": environment.get("DISPLAY") or ":0",
+        "EASY_HA_PROXY_SFTP_PASSWORD_FILE": str(destination_password_path(record["name"])),
+    })
+    return environment
+
+
+def _checked(record: dict[str, Any], result: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
+    """Turn a refused host key into a statement anyone can act on."""
+    if result.returncode != 0 and host_key_problem(result.stderr):
+        message = note_host_key_change(record)
+        result = subprocess.CompletedProcess(
+            result.args, result.returncode, result.stdout, message.encode("utf-8")
+        )
+    return result
 
 
 def run_sftp(record: dict[str, Any], batch: str) -> subprocess.CompletedProcess:
     command = sftp_base_command(record, "/usr/bin/sftp")
     command += ["-b", "-", f"{record['user']}@{record['host']}"]
-    return subprocess.run(
+    return _checked(record, subprocess.run(
         command,
         input=batch.encode("utf-8"),
         capture_output=True,
         timeout=SFTP_TIMEOUT_SECONDS,
         check=False,
-    )
+        env=sftp_environment(record),
+    ))
 
 
 def run_ssh(record: dict[str, Any], remote_command: list[str]) -> subprocess.CompletedProcess:
     command = sftp_base_command(record, "/usr/bin/ssh")
     command += [f"{record['user']}@{record['host']}", "--"] + remote_command
-    return subprocess.run(
-        command, capture_output=True, timeout=SFTP_TIMEOUT_SECONDS, check=False
-    )
+    return _checked(record, subprocess.run(
+        command,
+        capture_output=True,
+        timeout=SFTP_TIMEOUT_SECONDS,
+        check=False,
+        env=sftp_environment(record),
+        stdin=subprocess.DEVNULL,
+    ))
+
+
+def retrust_destination(request: dict[str, Any]) -> dict[str, Any]:
+    """Pin whatever key the far end offers now, after a deliberate change."""
+    record = load_destination(request.get("name"))
+    if record.get("type") != "sftp":
+        raise BackupdError("only an SFTP destination has a host key", code="invalid")
+    known_hosts = scan_host_key(record["host"], int(record.get("port") or 22))
+    record["host_key_fingerprints"] = pin_host_key(record["name"], known_hosts)
+    record["host_key_pinned"] = True
+    record["host_key_source"] = "trusted-after-change"
+    record.pop("host_key_changed", None)
+    record["updated_at"] = utc_now()
+    atomic_json(destination_path(record["name"]), record, mode=0o600)
+    return {"ok": True, "destination": public_destination(record)}
 
 
 def remote_quote(value: str) -> str:
@@ -3207,6 +3449,11 @@ def test_destination(request: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "error": (result.stderr or b"").decode("utf-8", "replace").strip()[:500],
         }
+    if record.get("host_key_changed"):
+        # The pinned key works again -- the change was transient, or put
+        # back -- so the warning no longer describes anything.
+        record.pop("host_key_changed", None)
+        atomic_json(destination_path(record["name"]), record, mode=0o600)
     return {"ok": True, "destination": record["name"]}
 
 
@@ -3590,6 +3837,8 @@ def dispatch(request: Any) -> dict[str, Any]:
         return delete_destination(request)
     if action == "destination_test":
         return test_destination(request)
+    if action == "destination_retrust":
+        return retrust_destination(request)
     if action == "upload":
         return upload_backup(request)
     if action == "schedule":

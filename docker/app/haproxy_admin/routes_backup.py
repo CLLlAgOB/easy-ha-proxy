@@ -71,6 +71,7 @@ AUDITED_ACTIONS = {
     "destination_save": ("backup_destination.save", ("name", "type", "host", "user")),
     "destination_delete": ("backup_destination.delete", ("name",)),
     "destination_test": ("backup_destination.test", ("name",)),
+    "destination_retrust": ("backup_destination.retrust", ("name",)),
     "upload": ("backup.upload", ("backup_id", "destination")),
     # The passphrase travels in this payload, which is why the summary
     # is built from named fields and never from the payload itself.
@@ -410,7 +411,7 @@ def save_destination_view():
             "host", "user", "path", "port", "private_key", "host_key",
             "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
             "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
-            "verify",
+            "verify", "auth", "password",
         },
     )
     command = {"action": "destination_save", "name": _destination_name(payload["name"])}
@@ -418,11 +419,12 @@ def save_destination_view():
         "type", "host", "user", "path", "port", "private_key", "host_key",
         "keep_daily", "keep_weekly", "keep_monthly", "endpoint", "region",
         "bucket", "prefix", "access_key", "secret_key", "allow_insecure",
-        "verify",
+        "verify", "auth", "password",
     ):
         if key in payload:
             command[key] = payload[key]
-    return _call_daemon(command)
+    # Without a host key the daemon reads the far end's, which takes a moment.
+    return _call_daemon(command, timeout=60.0)
 
 
 @bp_system_backups.post("/api/destinations/delete")
@@ -440,6 +442,19 @@ def test_destination_view():
     return _call_daemon(
         {"action": "destination_test", "name": _destination_name(payload["name"])},
         timeout=90.0,
+    )
+
+
+@bp_system_backups.post("/api/destinations/trust-host-key")
+def trust_destination_host_key_view():
+    """Accept the key the far end offers now, after it changed on purpose."""
+    payload = _json_payload({"name"})
+    return _call_daemon(
+        {
+            "action": "destination_retrust",
+            "name": _destination_name(payload["name"]),
+        },
+        timeout=60.0,
     )
 
 

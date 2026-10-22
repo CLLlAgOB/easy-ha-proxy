@@ -212,7 +212,7 @@
     <div class="table-wrap">
       <table class="backup-table">
         <thead>
-          <tr><th>Name</th><th>Where</th><th>Keep</th><th>Actions</th></tr>
+          <tr><th>Name</th><th>Where</th><th>Host key</th><th>Keep</th><th>Actions</th></tr>
         </thead>
         <tbody id="backup-destinations-body" data-i18n-skip translate="no">
           <tr><td colspan="4" class="muted">Loading…</td></tr>
@@ -271,19 +271,30 @@
                    placeholder="/srv/backups/gateway">
           </label>
         </div>
-        <label>Private key
+        <label>Sign in with
+          <select id="dest-auth" class="form-input">
+            <option value="key">Private key</option>
+            <option value="password">Password</option>
+          </select>
+        </label>
+        <label id="dest-key-field">Private key
           <textarea id="dest-key" class="form-input mono" rows="4"
                     placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                     data-i18n-skip translate="no"></textarea>
         </label>
-        <label>Host key
+        <label id="dest-password-field" hidden>Password
+          <input id="dest-password" class="form-input" type="password"
+                 autocomplete="new-password">
+        </label>
+        <label>Host key (optional)
           <textarea id="dest-host-key" class="form-input mono" rows="2"
                     placeholder="backup.example.com ssh-ed25519 AAAA..." data-i18n-skip translate="no"></textarea>
         </label>
         <p class="muted">
-          Take it from <code translate="no" data-i18n-skip>ssh-keyscan backup.example.com</code>
-          and check it against what the far end reports. This is the whole
-          defence against sending the archive to whoever answers on that address.
+          Leave it empty and the key the server offers on the first connection
+          is pinned; its fingerprint is shown in the list to compare with the
+          server's own. If the server later presents a different key, nothing
+          is sent until you choose to trust the new one.
         </p>
       </div>
 

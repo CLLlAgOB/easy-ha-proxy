@@ -88,6 +88,14 @@
     "Showing the newest {shown}.": "Показаны последние {shown}.",
     "Free space is low: below {threshold}.": "Мало свободного места: меньше {threshold}.",
     "the number of backups kept on this server must be a whole number": "число копий на этом сервере должно быть целым",
-    "the number of backups kept on this server must be between 1 and 50": "число копий на этом сервере должно быть от 1 до 50"
+    "the number of backups kept on this server must be between 1 and 50": "число копий на этом сервере должно быть от 1 до 50",
+    "Sign in with": "Вход",
+    "Host key (optional)": "Ключ хоста (необязательно)",
+    "Leave it empty and the key the server offers on the first connection is pinned; its fingerprint is shown in the list to compare with the server's own. If the server later presents a different key, nothing is sent until you choose to trust the new one.": "Оставьте пустым — будет закреплён ключ, который сервер предъявит при первом подключении; его отпечаток показан в списке, чтобы сверить с сервером. Если позже сервер предъявит другой ключ, ничего не будет отправлено, пока вы не решите доверять новому.",
+    "The server presented a different host key. Nothing is sent until you trust it.": "Сервер предъявил другой ключ хоста. Пока вы ему не доверитесь, ничего не отправляется.",
+    "Trust the new key": "Доверять новому ключу",
+    "Trust the key this server offers now? Do this only if you know why it changed.": "Доверять ключу, который сервер предъявляет сейчас? Делайте это, только если знаете, почему он сменился.",
+    "The new host key is pinned": "Новый ключ хоста закреплён",
+    "Pinned host key": "Закреплён ключ хоста"
   }
 }

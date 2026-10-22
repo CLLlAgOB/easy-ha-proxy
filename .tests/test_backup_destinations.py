@@ -76,12 +76,18 @@ class ProfileTests(DestinationTestCase):
         self.assertTrue(listing["destinations"][0]["has_key"])
         self.assertTrue(listing["destinations"][0]["host_key_pinned"])
 
-    def test_a_destination_without_a_pinned_host_key_is_refused(self):
-        # Accepting whatever answers would hand the archive to whoever can
-        # answer on that address.
-        with self.assertRaises(backupd.BackupdError) as caught:
-            self.save(host_key="")
+    def test_a_destination_whose_host_key_cannot_be_read_is_refused(self):
+        # Without a key typed in, the one the far end offers is pinned (see
+        # test_backup_host_key_first_use). If nothing can be read, nothing is
+        # saved: an unpinned destination would accept whoever answers.
+        with mock.patch.object(
+            backupd, "scan_host_key",
+            side_effect=backupd.BackupdError("the far end did not offer a host key"),
+        ):
+            with self.assertRaises(backupd.BackupdError) as caught:
+                self.save(host_key="")
         self.assertIn("host key", str(caught.exception))
+        self.assertFalse((backupd.DESTINATIONS_DIR / "offsite.json").exists())
 
     def test_a_destination_without_a_key_is_refused(self):
         with self.assertRaises(backupd.BackupdError):
