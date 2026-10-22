@@ -2633,11 +2633,7 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
         raise BackupdError("the port must be a number", code="invalid") from None
     if not 1 <= port <= 65535:
         raise BackupdError("the port is out of range", code="invalid")
-    remote = str(request.get("path") or "").strip()
-    if not remote.startswith("/") or ".." in remote or len(remote) > 512:
-        raise BackupdError(
-            "the remote path must be absolute and free of '..'", code="invalid"
-        )
+    remote = normalize_remote_dir(request.get("path"))
 
     existing = existing_probe
 
@@ -2696,7 +2692,7 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
         "host": host,
         "port": port,
         "user": user,
-        "path": remote.rstrip("/") or "/",
+        "path": remote,
         "auth": auth,
         "key_installed": key_installed,
         "password_installed": password_installed,
@@ -2899,6 +2895,35 @@ def retrust_destination(request: dict[str, Any]) -> dict[str, Any]:
     record["updated_at"] = utc_now()
     atomic_json(destination_path(record["name"]), record, mode=0o600)
     return {"ok": True, "destination": public_destination(record)}
+
+
+def normalize_remote_dir(value: Any) -> str:
+    """The remote directory as stored: absolute, relative, or "." for home.
+
+    Shared hosting confines an SFTP account to one directory and starts the
+    session there, often deep inside the site -- and its "/" is not
+    writable. Asking for an absolute path meant knowing the full path the
+    host chose, and "/" failed the write test on "//.easy-ha-proxy-write-test".
+    An empty field or "." now means the directory the session starts in,
+    and a relative path is taken from there.
+    """
+    text = str(value or "").strip()
+    if not text or text in (".", "./"):
+        return "."
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if ".." in parts or len(text) > 512 or any(ord(ch) < 32 for ch in text):
+        raise BackupdError("the remote path must be free of '..'", code="invalid")
+    joined = "/".join(parts)
+    if text.startswith("/"):
+        return "/" + joined
+    return joined or "."
+
+
+def remote_join(directory: str, name: str) -> str:
+    """A file in the remote directory, without "//" or a leading "./"."""
+    if directory in ("", "."):
+        return name
+    return directory.rstrip("/") + "/" + name
 
 
 def remote_quote(value: str) -> str:
@@ -3351,7 +3376,7 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
         return response
 
     remote_dir = record["path"]
-    remote_file = f"{remote_dir}/{remote_name}"
+    remote_file = remote_join(remote_dir, remote_name)
     # Upload beside the final name and rename, so an interrupted transfer
     # cannot look like a complete backup to whoever prunes next.
     staging = remote_file + ".part"
@@ -3405,8 +3430,8 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
     victims = retention_victims(remote_listing(record), record)
     if victims:
         prune = "".join(
-            f"-rm {remote_quote(remote_dir + '/' + name)}\n"
-            f"-rm {remote_quote(remote_dir + '/' + name + '.sha256')}\n"
+            f"-rm {remote_quote(remote_join(remote_dir, name))}\n"
+            f"-rm {remote_quote(remote_join(remote_dir, name + '.sha256'))}\n"
             for name in victims
         )
         run_sftp(record, prune)
@@ -3434,7 +3459,7 @@ def test_destination(request: dict[str, Any]) -> dict[str, Any]:
             }
         return {"ok": True, "destination": record["name"]}
 
-    marker = f"{record['path']}/.easy-ha-proxy-write-test"
+    marker = remote_join(record["path"], ".easy-ha-proxy-write-test")
     with tempfile.TemporaryDirectory(prefix="backupd-test-") as work:
         probe = Path(work) / "probe"
         probe.write_text(utc_now() + "\n", encoding="utf-8")

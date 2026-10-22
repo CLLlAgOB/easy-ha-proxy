@@ -113,10 +113,27 @@ class ProfileTests(DestinationTestCase):
             backupd.destination_path("offsite").name,
         )
 
-    def test_a_relative_or_traversing_remote_path_is_refused(self):
-        for hostile in ("srv/backups", "/srv/../etc", ""):
+    def test_a_traversing_remote_path_is_refused(self):
+        for hostile in ("/srv/../etc", "../up", "a/../../b"):
             with self.assertRaises(backupd.BackupdError, msg=hostile):
                 self.save(path=hostile)
+
+    def test_the_login_directory_and_relative_paths_are_accepted(self):
+        # Shared hosting starts the session in the account's own directory
+        # and does not let it write to "/".
+        for given, stored in (
+            ("", "."), (".", "."), ("backups", "backups"), ("./backups/gw/", "backups/gw"),
+            ("/", "/"), ("/srv//backups/", "/srv/backups"),
+        ):
+            with self.subTest(given=given):
+                self.save(path=given)
+                self.assertEqual(backupd.load_destination("offsite")["path"], stored)
+
+    def test_files_are_joined_without_a_double_slash(self):
+        self.assertEqual(backupd.remote_join(".", "a.enc"), "a.enc")
+        self.assertEqual(backupd.remote_join("/", "a.enc"), "/a.enc")
+        self.assertEqual(backupd.remote_join("/srv/b", "a.enc"), "/srv/b/a.enc")
+        self.assertEqual(backupd.remote_join("rel/b", "a.enc"), "rel/b/a.enc")
 
     def test_a_retention_count_of_zero_is_stored_as_zero(self):
         # A live upload kept everything because "or" read a deliberate 0 as

@@ -96,6 +96,7 @@
     "Trust the new key": "Доверять новому ключу",
     "Trust the key this server offers now? Do this only if you know why it changed.": "Доверять ключу, который сервер предъявляет сейчас? Делайте это, только если знаете, почему он сменился.",
     "The new host key is pinned": "Новый ключ хоста закреплён",
-    "Pinned host key": "Закреплён ключ хоста"
+    "Pinned host key": "Закреплён ключ хоста",
+    "/srv/backups/gateway or empty for the login directory": "/srv/backups/gateway или пусто — стартовый каталог"
   }
 }
