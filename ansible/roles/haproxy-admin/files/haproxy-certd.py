@@ -136,8 +136,27 @@ DEFAULT_HAPROXY_CERTS_DIR = Path("/etc/haproxy/certs")
 DEFAULT_LETSENCRYPT_ROOT_DIR = Path("/etc/letsencrypt")
 DEFAULT_CA_ROOT_DIR = Path("/etc/haproxy/certificate-authorities")
 
-# Предупреждать, если до конца срока действия меньше N дней
+# How long before expiry a certificate is reported, for one renewed by hand.
 CERT_WARN_DAYS = 30
+# A certificate that lives this long or less is renewed automatically.
+AUTOMATED_LIFETIME_DAYS = 100
+
+
+def cert_warn_days(lifetime_days: Optional[int]) -> int:
+    """How many days before expiry this certificate deserves a warning.
+
+    A fixed 30 warned about every Let's Encrypt certificate once per cycle.
+    certbot renews when less than 30 days remain, the remaining time is
+    counted in whole days rounded down, so "30 or fewer" fired a day before
+    certbot even looked -- and certbot looks only twice a day besides. The
+    warning has to mean that renewal is failing: for an automated
+    certificate it comes at a quarter of its lifetime (22 days of a 90-day
+    one, eight days of failed renewals later; 11 of a 45-day one). One
+    renewed by hand keeps the full 30 days to act in.
+    """
+    if lifetime_days and 0 < lifetime_days <= AUTOMATED_LIFETIME_DAYS:
+        return max(1, lifetime_days // 4)
+    return CERT_WARN_DAYS
 
 
 # The alert client lives beside this script in /usr/local/sbin, which is
@@ -707,11 +726,17 @@ def _load_cert_info(path: Path) -> Optional[Dict[str, Any]]:
 
     now = datetime.now(timezone.utc)
     days_left = (not_after_dt - now).days
+    not_before_dt = _parse_not_after(info.get("notBefore") or "")
+    lifetime_days = (
+        (not_after_dt - not_before_dt).days if not_before_dt else None
+    )
 
     return {
         "path": str(path),
         "not_after": not_after_dt,
         "days_left": days_left,
+        "lifetime_days": lifetime_days,
+        "warn_days": cert_warn_days(lifetime_days),
     }
 
 
@@ -1261,7 +1286,7 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
         if days < 0:
             state = "expired"
             short = "Expired"
-        elif days <= CERT_WARN_DAYS:
+        elif days <= hap_info["warn_days"]:
             state = "warning"
             short = f"Expires soon ({days} days)"
         else:
@@ -1280,12 +1305,13 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
     days_left = min(hap_info["days_left"], le_info["days_left"])
     result["haproxy_days_left"] = hap_info["days_left"]
     result["le_days_left"] = le_info["days_left"]
+    warn_days = min(hap_info["warn_days"], le_info["warn_days"])
 
     if days_left < 0:
         result["state"] = "expired"
         result["short"] = "Expired"
         result["tooltip"] = "The certificate has expired and must be renewed."
-    elif days_left <= CERT_WARN_DAYS:
+    elif days_left <= warn_days:
         result["state"] = "warning"
         result["short"] = f"Expires soon ({days_left} days)"
         result["tooltip"] = (
@@ -1325,7 +1351,7 @@ def _build_cert_item_for_list(path: Path) -> Optional[Dict[str, Any]]:
     elif days_left < 0:
         state = "expired"
         short = "Expired"
-    elif days_left <= CERT_WARN_DAYS:
+    elif days_left <= info["warn_days"]:
         state = "warning"
         short = f"Expires soon ({days_left} days)"
     else:
@@ -4633,7 +4659,7 @@ class CertificateExpiryWatch(threading.Thread):
                 continue
             days = int(info["days_left"])
             domain = path.stem
-            expiring = days <= CERT_WARN_DAYS
+            expiring = days <= int(info["warn_days"])
             report_alert_level(
                 "certificate.expiring",
                 domain,
