@@ -49,7 +49,15 @@ class GatewayNameTests(unittest.TestCase):
             if "ALERTD_GATEWAY_NAME=" in row
         ][0]
         # The admin domain is a name the operator chose and already knows.
-        self.assertIn("haproxy_admin_domain", line)
+        # It is called admin_domain; the template once asked for a
+        # haproxy_admin_domain that nothing defines, rendered an empty value,
+        # and every alert fell back to the cloud machine name.
+        self.assertIn("default(admin_domain", line)
+        self.assertNotIn("haproxy_admin_domain", line)
+
+    def test_the_variable_it_reads_is_one_the_installation_defines(self):
+        installer = (ROOT / "installer" / "easy_ha_proxy.py").read_text(encoding="utf-8")
+        self.assertIn('"admin_domain"', installer)
 
     def test_the_name_reaches_the_subject_line(self):
         self.assertIn("head = f\"[{self.hostname}]", self.source)
