@@ -256,9 +256,14 @@
       badges.push(`<span class="la-badge la-limit">${esc(t("Connection limit"))} · ${esc(c.rate)}/${esc(c.cur)}</span>`);
     }
     if (row.allow_listed) badges.push(`<span class="la-badge la-allow">${esc(t("Allow-listed"))}</span>`);
-    if (row.authorized) badges.push(`<span class="la-badge la-allow">${esc(t("Signed in"))}</span>`);
+    if (row.authorized) {
+      badges.push(`<span class="la-badge la-allow" title="${esc(t("Authorized through Authelia right now: zero-trust sites let it in"))}">${esc(t("Signed in now"))}</span>`);
+    }
+    // Refusals belong to the window, not to the present: an address refused
+    // by zero trust and signed in a minute later shows both, and the two
+    // must not read as a contradiction.
     if (row.reason && row.blocked) {
-      badges.push(`<span class="la-badge la-refused" title="${esc(row.reason)}">${esc(refusalLabel(row.reason))}</span>`);
+      badges.push(`<span class="la-badge la-refused" title="${esc(t("Refused in this window"))}: ${esc(row.reason)}">${esc(t("Refused"))} ×${esc(row.blocked)}: ${esc(refusalLabel(row.reason))}</span>`);
     }
     return badges.join("") || '<span class="la-sub">—</span>';
   }

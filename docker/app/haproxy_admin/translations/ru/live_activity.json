@@ -45,7 +45,6 @@
     "one bar per": "один столбец —",
     "Connection limit": "Лимит соединений",
     "Allow-listed": "В белом списке",
-    "Signed in": "Вошёл",
     "Ban address": "Забанить",
     "Log lines": "Журнал",
     "New connections per window": "Новых соединений за окно",
@@ -68,6 +67,9 @@
     "Reading is capped so that watching cannot slow the gateway down.": "Чтение ограничено, чтобы наблюдение не замедляло шлюз.",
     "Only the last": "В памяти только последние",
     "of the window are in memory": "окна",
-    "Adaptive protection is not answering. Live activity is read from its memory, so it needs adaptive protection running in monitor or enforce mode": "Адаптивная защита не отвечает. Активность онлайн берётся из её памяти, поэтому защита должна работать в режиме наблюдения или боевом"
+    "Adaptive protection is not answering. Live activity is read from its memory, so it needs adaptive protection running in monitor or enforce mode": "Адаптивная защита не отвечает. Активность онлайн берётся из её памяти, поэтому защита должна работать в режиме наблюдения или боевом",
+    "Signed in now": "Сейчас авторизован",
+    "Authorized through Authelia right now: zero-trust sites let it in": "Сейчас авторизован через Authelia: сайты с zero trust его пускают",
+    "Refused in this window": "Отказы в этом окне"
   }
 }
