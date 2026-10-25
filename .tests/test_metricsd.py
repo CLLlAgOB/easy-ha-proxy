@@ -172,6 +172,8 @@ class CollectorTestCase(unittest.TestCase):
         self.addCleanup(self.database.close)
         self.config = metricsd.load_config("/nonexistent/metricsd.json")
         self.collector = metricsd.Collector(self.config, self.database)
+        # Never the test machine's own services: those are not the question.
+        self.collector.cgroup_root = str(Path(self._temporary.name) / "no-cgroup")
         self.collector._baselines = self.database.load_baselines()
         self.collector._last_states = self.database.load_last_states()
 
@@ -199,7 +201,9 @@ class CollectorTestCase(unittest.TestCase):
         connection.row_factory = sqlite3.Row
         try:
             if kind is None:
-                predicate, parameters = "o.kind != ?", [metricsd.HOST_KIND]
+                predicate, parameters = "o.kind NOT IN (?, ?)", [
+                    metricsd.HOST_KIND, metricsd.COMPONENT_KIND,
+                ]
             else:
                 predicate, parameters = "o.kind = ?", [kind]
             return [
@@ -1173,7 +1177,12 @@ class ReadApiTests(CollectorTestCase):
             payload = self.database.series(
                 chart=chart, site="", since=0, until=1200
             )
-            self.assertEqual(sorted(payload["series"]), sorted(columns), chart)
+            # The machine charts add the group totals beside their columns.
+            extra = (
+                ["containers", "helpers", "other"]
+                if chart in metricsd.COMPONENT_COLUMNS else []
+            )
+            self.assertEqual(sorted(payload["series"]), sorted([*columns, *extra]), chart)
             for column in columns:
                 self.assertEqual(len(payload["series"][column]), 1, chart)
 

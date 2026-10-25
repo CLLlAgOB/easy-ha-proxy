@@ -86,6 +86,16 @@
     "Drag across a chart to zoom in, double-click to zoom out": "Протяните по графику, чтобы приблизить; двойной щелчок — отдалить",
     "Highest over the shown period": "Максимум за показанный период",
     "Average over the shown period": "Среднее за показанный период",
-    "Latest value": "Последнее значение"
+    "Latest value": "Последнее значение",
+    "Memory": "Память",
+    "Memory of the machine and who uses it": "Память машины и кто её занимает",
+    "Helper services": "Хелперы",
+    "Containers": "Контейнеры",
+    "Other processes": "Прочие процессы",
+    "By component": "По компонентам",
+    "Full screen": "На весь экран",
+    "Exit full screen": "Свернуть",
+    "Click to show or hide the line": "Щелчок показывает или скрывает линию",
+    "HAProxy busy": "Занятость HAProxy"
   }
 }

@@ -198,6 +198,9 @@ _AGGREGATIONS: Dict[str, str] = {
     "cpu_max": "max",
     "haproxy_busy_avg": "wavg",
     "haproxy_busy_max": "max",
+    "memory_avg": "wavg",
+    "memory_max": "max",
+    "memory_total": "max",
 }
 
 CHART_SERIES: Dict[str, Tuple[str, ...]] = {
@@ -211,13 +214,43 @@ CHART_SERIES: Dict[str, Tuple[str, ...]] = {
     # every request is queueing behind it, and on a two-core gateway that
     # difference is the whole diagnosis.
     "cpu": ("cpu_avg", "cpu_max", "haproxy_busy_avg"),
+    "memory": ("memory_avg", "memory_max", "memory_total"),
 }
 
 # Charts about the machine rather than about a proxy object. They select the
 # synthetic 'host' row and ignore any site: one machine's CPU is not
 # divisible among the sites it serves.
-HOST_CHARTS = frozenset({"cpu"})
+HOST_CHARTS = frozenset({"cpu", "memory"})
 HOST_KIND = "host"
+
+# What each part of the gateway uses: HAProxy, every helper service, the
+# containers and the Docker engine under them. One object per part, kind
+# 'component', with the name in `proxy` and the group in `server`. They
+# share the host's bucketing, rollup and retention, and nothing selects
+# them except the two machine charts, so they cannot leak into traffic.
+COMPONENT_KIND = "component"
+COMPONENT_SERVICE = "service"
+COMPONENT_CONTAINER = "container"
+COMPONENT_ENGINE = "engine"
+# Each chart's (average, peak) column for one component.
+COMPONENT_COLUMNS: Dict[str, Tuple[str, str]] = {
+    "cpu": ("cpu_avg", "cpu_max"),
+    "memory": ("memory_avg", "memory_max"),
+}
+CGROUP_ROOT = "/sys/fs/cgroup"
+DOCKER_CONTAINERS_DIR = "/var/lib/docker/containers"
+# Our units, by name. Anything else on the machine is "other processes".
+COMPONENT_UNIT_PREFIXES = ("haproxy", "easy-ha-proxy-", "authelia-")
+ENGINE_UNITS = {"docker.service": "dockerd", "containerd.service": "containerd"}
+# A bound on objects, not a limit anyone should meet: a machine where
+# containers come and go under random names would otherwise add a row per
+# name for ever.
+MAX_COMPONENTS = 48
+_CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
+
+# Memory is stored in KiB: bytes would need wider integers in every row for
+# a precision nobody reads. The read API multiplies it back out.
+MEMORY_UNIT = 1024
 
 # CPU is stored as tenths of a percent. Whole percent would round a gateway
 # that idles at 0.4% down to a flat zero line, which reads as "broken"
@@ -252,6 +285,17 @@ def _aggregate_sql(column: str) -> str:
         f"CAST(COALESCE(SUM({column} * samples) / NULLIF(SUM(samples), 0), 0) "
         "AS INTEGER)"
     )
+
+
+def _from_storage(chart: str, value: Any) -> Any:
+    """A stored machine value as the read API returns it.
+
+    CPU leaves as a percentage with one decimal, memory as bytes.
+    """
+
+    if chart == "memory":
+        return int(value or 0) * MEMORY_UNIT
+    return round(int(value or 0) / CPU_SCALE, 1)
 
 
 def resolve_range(value: Any) -> Tuple[str, int]:
@@ -357,6 +401,9 @@ METRIC_COLUMNS: Tuple[str, ...] = (
     "cpu_max",
     "haproxy_busy_avg",
     "haproxy_busy_max",
+    "memory_avg",
+    "memory_max",
+    "memory_total",
 )
 # Columns summed when rolling minutes up into hours; the rest are averaged
 # (weighted by sample count) or maxed, see _ROLLUP_MAX.
@@ -756,6 +803,9 @@ class Bucket:
             "cpu_max": self.gauge_maxima.get("cpu", 0),
             "haproxy_busy_avg": average("haproxy_busy"),
             "haproxy_busy_max": self.gauge_maxima.get("haproxy_busy", 0),
+            "memory_avg": average("memory"),
+            "memory_max": self.gauge_maxima.get("memory", 0),
+            "memory_total": self.gauge_maxima.get("memory_total", 0),
         }
 
 
@@ -1158,11 +1208,11 @@ class MetricsDatabase:
 
         points = [int(row["slot"]) for row in rows]
         if chart in HOST_CHARTS:
-            # Back to a plain percentage, one decimal, at the edge -- the
-            # tenths are a storage detail and nothing outside this file
-            # should have to know about them.
+            # Back to plain percentages and bytes at the edge -- tenths and
+            # KiB are storage details nothing outside this file should have
+            # to know about.
             values = {
-                column: [round(row[index + 1] / CPU_SCALE, 1) for row in rows]
+                column: [_from_storage(chart, row[index + 1]) for row in rows]
                 for index, column in enumerate(columns)
             }
         else:
@@ -1170,7 +1220,7 @@ class MetricsDatabase:
                 column: [int(row[index + 1]) for row in rows]
                 for index, column in enumerate(columns)
             }
-        return {
+        payload: Dict[str, Any] = {
             "chart": chart,
             "resolution_seconds": step,
             "source": table,
@@ -1179,6 +1229,99 @@ class MetricsDatabase:
                 name: value[:MAX_CHART_POINTS] for name, value in values.items()
             },
         }
+        if chart in COMPONENT_COLUMNS:
+            self._add_components(
+                payload, chart=chart, table=table, step=step,
+                since=since, until=until, host=[row[1] for row in rows],
+            )
+        return payload
+
+    def _add_components(
+        self,
+        payload: Dict[str, Any],
+        *,
+        chart: str,
+        table: str,
+        step: int,
+        since: int,
+        until: int,
+        host: List[int],
+    ) -> None:
+        """Who uses the machine: one line per component, plus group totals.
+
+        Aligned to the host's own slots, so every line has a value wherever
+        the machine line has one; a component that was not running has zero
+        there, which is the truth. The totals are added here rather than in
+        the browser so that "helpers" means the same thing everywhere.
+        """
+
+        average, peak = COMPONENT_COLUMNS[chart]
+        points = payload["points"]
+        position = {slot: index for index, slot in enumerate(points)}
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT (m.bucket_ts / {step}) * {step} AS slot, o.id AS id, "
+                f"o.proxy AS name, o.server AS grp, {_aggregate_sql(average)} AS value "
+                f"FROM {table} m JOIN objects o ON o.id = m.object_id "
+                "WHERE o.kind = 'component' AND m.bucket_ts >= ? AND m.bucket_ts < ? "
+                "GROUP BY slot, o.id",
+                [since, until],
+            ).fetchall()
+            peaks = {
+                int(row["id"]): int(row["value"])
+                for row in self._conn.execute(
+                    f"SELECT o.id AS id, {_aggregate_sql(peak)} AS value "
+                    f"FROM {table} m JOIN objects o ON o.id = m.object_id "
+                    "WHERE o.kind = 'component' AND m.bucket_ts >= ? "
+                    "AND m.bucket_ts < ? GROUP BY o.id",
+                    [since, until],
+                )
+            }
+
+        size = len(points)
+        found: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            index = position.get(int(row["slot"]))
+            if index is None:
+                continue
+            key = int(row["id"])
+            entry = found.get(key)
+            if entry is None:
+                entry = found[key] = {
+                    "name": str(row["name"]),
+                    "group": str(row["grp"]),
+                    "raw": [0] * size,
+                }
+            entry["raw"][index] = int(row["value"])
+
+        helpers = [0] * size
+        containers = [0] * size
+        claimed = [0] * size
+        components = []
+        for key, entry in found.items():
+            raw = entry.pop("raw")
+            for index, value in enumerate(raw):
+                claimed[index] += value
+                if entry["group"] == COMPONENT_CONTAINER:
+                    containers[index] += value
+                elif entry["group"] == COMPONENT_SERVICE and entry["name"] != "haproxy":
+                    helpers[index] += value
+            entry["values"] = [_from_storage(chart, value) for value in raw]
+            entry["mean"] = _from_storage(chart, sum(raw) // max(1, size))
+            entry["peak"] = _from_storage(chart, peaks.get(key, 0))
+            components.append(entry)
+        components.sort(key=lambda item: (-item["mean"], item["name"]))
+
+        series = payload["series"]
+        series["helpers"] = [_from_storage(chart, value) for value in helpers]
+        series["containers"] = [_from_storage(chart, value) for value in containers]
+        # The rest of the machine: the kernel, sshd, whatever else runs here.
+        # Never negative: the host and its parts are sampled a moment apart.
+        series["other"] = [
+            _from_storage(chart, max(0, int(host[index]) - claimed[index]))
+            for index in range(min(size, len(host)))
+        ]
+        payload["components"] = components
 
     def host_load(self, *, since: int, until: int) -> Dict[str, float]:
         """Average and peak load over the window, as percentages.
@@ -1190,7 +1333,10 @@ class MetricsDatabase:
         """
 
         table, _ = choose_resolution(max(1, until - since))
-        columns = ("cpu_avg", "cpu_max", "haproxy_busy_avg", "haproxy_busy_max")
+        columns = (
+            "cpu_avg", "cpu_max", "haproxy_busy_avg", "haproxy_busy_max",
+            "memory_avg", "memory_max", "memory_total",
+        )
         projection = ", ".join(_aggregate_sql(column) for column in columns)
         with self._lock:
             row = self._conn.execute(
@@ -1204,7 +1350,10 @@ class MetricsDatabase:
         return {
             "observed": True,
             **{
-                column: round(row[index + 1] / CPU_SCALE, 1)
+                column: _from_storage(
+                    "memory" if column.startswith("memory") else "cpu",
+                    row[index + 1],
+                )
                 for index, column in enumerate(columns)
             },
         }
@@ -1907,6 +2056,12 @@ class Collector:
         # Previous (total, idle) jiffies. CPU is a rate, so the first poll
         # after a start has nothing to compare against and reports nothing.
         self._cpu_previous: Optional[Tuple[int, int]] = None
+        # Per component: (cpu usage in microseconds, monotonic time) at the
+        # previous poll, and the names of containers already looked up.
+        self.cgroup_root = CGROUP_ROOT
+        self.containers_dir = DOCKER_CONTAINERS_DIR
+        self._component_previous: Dict[Tuple[str, str], Tuple[int, float]] = {}
+        self._container_names: Dict[str, str] = {}
 
         self.last_poll_ts: Optional[int] = None
         self.last_flush_ts: Optional[int] = None
@@ -2017,24 +2172,195 @@ class Collector:
 
         cpu = self._read_host_cpu()
         busy = self._read_haproxy_busy()
-        if cpu is None and busy is None:
+        memory = self._read_host_memory()
+        if cpu is None and busy is None and memory is None:
             return
 
-        key = (HOST_KIND, "", "")
-        object_id = self._object_ids.get(key)
-        if object_id is None:
-            object_id = self.database.object_id(HOST_KIND, "", "", now)
-            self._object_ids[key] = object_id
-
-        bucket = self._buckets.get(object_id)
-        if bucket is None:
-            bucket = Bucket()
-            self._buckets[object_id] = bucket
+        bucket = self._machine_bucket(HOST_KIND, "", "", now)
         bucket.samples += 1
         if cpu is not None:
             bucket.add_gauge("cpu", cpu)
         if busy is not None:
             bucket.add_gauge("haproxy_busy", busy)
+        if memory is not None:
+            bucket.add_gauge("memory", memory[0])
+            bucket.add_gauge("memory_total", memory[1])
+
+        try:
+            self._observe_components(now)
+        except Exception as exc:  # pylint: disable=broad-except
+            # Supplementary, like the host load: never worth a poll.
+            LOG.debug("component usage unavailable: %s", exc)
+
+    def _machine_bucket(self, kind: str, proxy: str, server: str, now: int) -> Bucket:
+        key = (kind, proxy, server)
+        object_id = self._object_ids.get(key)
+        if object_id is None:
+            object_id = self.database.object_id(kind, proxy, server, now)
+            self._object_ids[key] = object_id
+        bucket = self._buckets.get(object_id)
+        if bucket is None:
+            bucket = Bucket()
+            self._buckets[object_id] = bucket
+        return bucket
+
+    @staticmethod
+    def _read_host_memory() -> Optional[Tuple[int, int]]:
+        """(used, total) KiB: what `free` calls used, everything not available.
+
+        MemAvailable rather than MemFree, so page cache the kernel would hand
+        back on demand does not read as a machine running out of memory.
+        """
+
+        values: Dict[str, int] = {}
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    name, _, rest = line.partition(":")
+                    if name in ("MemTotal", "MemAvailable"):
+                        values[name] = int(rest.split()[0])
+                        if len(values) == 2:
+                            break
+        except (OSError, ValueError, IndexError) as exc:
+            LOG.debug("cannot read /proc/meminfo: %s", exc)
+            return None
+        total = values.get("MemTotal", 0)
+        if total <= 0 or "MemAvailable" not in values:
+            return None
+        return max(0, total - values["MemAvailable"]), total
+
+    # -- components ---------------------------------------------------------
+
+    def _component_cgroups(self) -> List[Tuple[str, str, str]]:
+        """(name, group, cgroup directory) for every part of the gateway.
+
+        Units come from system.slice by name; containers are found under
+        either cgroup driver -- system.slice/docker-<id>.scope with systemd,
+        docker/<id> with cgroupfs -- and named from Docker's own record,
+        read once per container rather than on every poll.
+        """
+
+        found: List[Tuple[str, str, str]] = []
+        containers: List[Tuple[str, str]] = []
+        system = os.path.join(self.cgroup_root, "system.slice")
+        try:
+            entries = sorted(os.listdir(system))
+        except OSError:
+            entries = []
+        for entry in entries:
+            path = os.path.join(system, entry)
+            if entry in ENGINE_UNITS:
+                found.append((ENGINE_UNITS[entry], COMPONENT_ENGINE, path))
+            elif entry.endswith(".service") and entry.startswith(COMPONENT_UNIT_PREFIXES):
+                found.append((entry[: -len(".service")], COMPONENT_SERVICE, path))
+            elif entry.startswith("docker-") and entry.endswith(".scope"):
+                identifier = entry[len("docker-"): -len(".scope")]
+                if _CONTAINER_ID.match(identifier):
+                    containers.append((identifier, path))
+        docker = os.path.join(self.cgroup_root, "docker")
+        try:
+            for entry in sorted(os.listdir(docker)):
+                if _CONTAINER_ID.match(entry):
+                    containers.append((entry, os.path.join(docker, entry)))
+        except OSError:
+            pass
+
+        live = set()
+        for identifier, path in containers:
+            live.add(identifier)
+            found.append((self._container_name(identifier), COMPONENT_CONTAINER, path))
+        # Forget containers that are gone, so the cache cannot grow without end.
+        for identifier in list(self._container_names):
+            if identifier not in live:
+                del self._container_names[identifier]
+        return found[:MAX_COMPONENTS]
+
+    def _container_name(self, identifier: str) -> str:
+        name = self._container_names.get(identifier)
+        if name is None:
+            name = identifier[:12]
+            try:
+                with open(
+                    os.path.join(self.containers_dir, identifier, "config.v2.json"),
+                    "r", encoding="utf-8",
+                ) as handle:
+                    recorded = str(json.load(handle).get("Name") or "").lstrip("/")
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", recorded):
+                    name = recorded
+            except (OSError, ValueError, AttributeError) as exc:
+                LOG.debug("cannot name container %s: %s", identifier[:12], exc)
+            self._container_names[identifier] = name
+        return name
+
+    @staticmethod
+    def _read_cgroup(path: str) -> Tuple[Optional[int], Optional[int]]:
+        """(cpu usage in microseconds, memory in KiB) of one cgroup.
+
+        Memory as `docker stats` counts it: the cgroup's charge minus the
+        file cache it could drop at once. Without that, the helper that reads
+        the access log would be charged for every page of it the kernel
+        happens to keep cached.
+        """
+
+        usage: Optional[int] = None
+        memory: Optional[int] = None
+        try:
+            with open(os.path.join(path, "cpu.stat"), "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("usage_usec "):
+                        usage = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+        try:
+            with open(os.path.join(path, "memory.current"), "r", encoding="utf-8") as handle:
+                current = int(handle.read().strip())
+            inactive = 0
+            with open(os.path.join(path, "memory.stat"), "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("inactive_file "):
+                        inactive = int(line.split()[1])
+                        break
+            memory = max(0, current - inactive) // MEMORY_UNIT
+        except (OSError, ValueError, IndexError):
+            pass
+        return usage, memory
+
+    def _observe_components(self, now: int) -> None:
+        moment = time.monotonic()
+        processors = os.cpu_count() or 1
+        seen = set()
+        for name, group, path in self._component_cgroups():
+            key = (name, group)
+            if key in seen:
+                continue
+            seen.add(key)
+            usage, memory = self._read_cgroup(path)
+            if usage is None and memory is None:
+                continue
+            cpu: Optional[int] = None
+            if usage is not None:
+                previous = self._component_previous.get(key)
+                self._component_previous[key] = (usage, moment)
+                if previous is not None:
+                    used = usage - previous[0]
+                    elapsed = moment - previous[1]
+                    # A restarted unit starts its counter again: no reading
+                    # rather than a negative one.
+                    if used >= 0 and elapsed > 0:
+                        cpu = min(
+                            100 * CPU_SCALE,
+                            round(100 * CPU_SCALE * used / (elapsed * 1e6 * processors)),
+                        )
+            bucket = self._machine_bucket(COMPONENT_KIND, name, group, now)
+            bucket.samples += 1
+            if cpu is not None:
+                bucket.add_gauge("cpu", cpu)
+            if memory is not None:
+                bucket.add_gauge("memory", memory)
+        for key in list(self._component_previous):
+            if key not in seen:
+                del self._component_previous[key]
 
     def _read_host_cpu(self) -> Optional[int]:
         """Host CPU since the previous poll, in tenths of a percent.

@@ -8,6 +8,9 @@
 {% endblock %}
 
 {% block content %}
+{% macro expand_button() -%}
+<button type="button" class="mon-expand" title="Full screen" aria-label="Full screen" aria-pressed="false"><svg class="mon-icon-open" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><svg class="mon-icon-close" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2v4H2M14 6h-4V2M10 14v-4h4M2 10h4v4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+{%- endmacro %}
 
 <style>
 .mon-toolbar {
@@ -132,7 +135,7 @@
 
 .mon-charts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
   gap: 20px;
 }
 
@@ -241,12 +244,82 @@
 
 .mon-legend {
   display: flex;
-  gap: 14px;
+  gap: 4px 14px;
   flex-wrap: wrap;
   margin-top: 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }
+
+/* A legend entry is a button: a click hides or shows its line. */
+.mon-line-toggle {
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.mon-line-toggle:hover span { text-decoration: underline; }
+.mon-line-toggle[aria-pressed="false"] { opacity: .45; }
+.mon-line-toggle[aria-pressed="false"] i { background: transparent !important; outline: 1px solid currentColor; }
+
+.mon-components { flex-basis: 100%; margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+.mon-components summary { cursor: pointer; user-select: none; }
+.mon-components .mon-legend { margin-top: 6px; }
+
+.mon-chart-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mon-expand {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.mon-expand:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+.mon-expand svg { width: 14px; height: 14px; }
+.mon-expand .mon-icon-close { display: none; }
+.mon-expand[aria-pressed="true"] .mon-icon-open { display: none; }
+.mon-expand[aria-pressed="true"] .mon-icon-close { display: inline; }
+
+/* Full screen: the card sits in an overlay on top of the page. */
+.mon-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, .5);
+  padding: 16px;
+  display: flex;
+}
+.mon-overlay[hidden] { display: none; }
+body.mon-overlay-open { overflow: hidden; }
+.mon-chart.mon-chart-expanded {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
+}
+.mon-chart-expanded .mon-plot { flex: 1 1 0; height: auto; min-height: 220px; }
+.mon-chart-expanded .mon-plot .mon-tick { font-size: 12px; }
+.mon-chart-expanded .mon-legend { font-size: 13px; }
+.mon-chart-placeholder { visibility: hidden; }
 
 .mon-legend i {
   display: inline-block;
@@ -431,6 +504,11 @@
       <div class="mon-value" id="mon-cpu" data-i18n-skip translate="no">—</div>
       <div class="mon-sub" id="mon-cpu-detail" data-i18n-skip translate="no"></div>
     </div>
+    <div class="mon-card" id="mon-card-memory" hidden>
+      <div class="mon-label">Memory</div>
+      <div class="mon-value" id="mon-memory" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-memory-detail" data-i18n-skip translate="no"></div>
+    </div>
     <div class="mon-card">
       <div class="mon-label">Backend health</div>
       <div class="mon-value" id="mon-health" data-i18n-skip translate="no">—</div>
@@ -447,46 +525,74 @@
   </div>
 
   <div class="mon-charts">
-    <div class="mon-chart">
-      <h3>Requests</h3>
+    <div class="mon-chart" data-chart="requests">
+      <div class="mon-chart-head">
+        <h3>Requests</h3>
+        {{ expand_button() }}
+      </div>
       <div class="mon-sub">Requests per second</div>
       <svg class="mon-plot" id="mon-plot-requests" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-requests"></div>
     </div>
 
-    <div class="mon-chart">
-      <h3>Traffic</h3>
+    <div class="mon-chart" data-chart="traffic">
+      <div class="mon-chart-head">
+        <h3>Traffic</h3>
+        {{ expand_button() }}
+      </div>
       <div class="mon-sub">Bytes per second</div>
       <svg class="mon-plot" id="mon-plot-traffic" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-traffic"></div>
     </div>
 
-    <div class="mon-chart">
-      <h3>Response classes</h3>
+    <div class="mon-chart" data-chart="responses">
+      <div class="mon-chart-head">
+        <h3>Response classes</h3>
+        {{ expand_button() }}
+      </div>
       <div class="mon-sub">Responses per second</div>
       <svg class="mon-plot" id="mon-plot-responses" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-responses"></div>
     </div>
 
-    <div class="mon-chart">
-      <h3>Response time</h3>
+    <div class="mon-chart" data-chart="latency">
+      <div class="mon-chart-head">
+        <h3>Response time</h3>
+        {{ expand_button() }}
+      </div>
       <div class="mon-sub">Milliseconds</div>
       <svg class="mon-plot" id="mon-plot-latency" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-latency"></div>
     </div>
 
-    <div class="mon-chart">
-      <h3>Connections</h3>
+    <div class="mon-chart" data-chart="connections">
+      <div class="mon-chart-head">
+        <h3>Connections</h3>
+        {{ expand_button() }}
+      </div>
       <div class="mon-sub">Concurrent connections</div>
       <svg class="mon-plot" id="mon-plot-connections" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-connections"></div>
     </div>
 
-    <div class="mon-chart">
-      <h3>Processor</h3>
+    <div class="mon-chart" data-chart="cpu">
+      <div class="mon-chart-head">
+        <h3>Processor</h3>
+        {{ expand_button() }}
+      </div>
       <div class="mon-sub">Percent of the machine</div>
       <svg class="mon-plot" id="mon-plot-cpu" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-cpu"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="memory">
+      <div class="mon-chart-head">
+        <h3>Memory</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Memory of the machine and who uses it</div>
+      <svg class="mon-plot" id="mon-plot-memory" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-memory"></div>
     </div>
   </div>
 </div>
@@ -572,6 +678,8 @@
     Growth is the measured change over the period, not a prediction.
   </div>
 </div>
+
+<div class="mon-overlay" id="mon-overlay" hidden></div>
 
 <script src="{{ url_for('static', filename='js/monitoring.js') }}"></script>
 {% endblock %}

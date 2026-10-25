@@ -38,7 +38,20 @@ CHARTS: Tuple[str, ...] = (
     "latency",
     "connections",
     "cpu",
+    "memory",
 )
+
+# Shorter names for the helper services: the prefix says only that the unit
+# belongs to this gateway, which on this page goes without saying.
+_COMPONENT_PREFIXES = ("easy-ha-proxy-", "haproxy-")
+
+
+def component_label(name: str, group: str) -> str:
+    if group == "service":
+        for prefix in _COMPONENT_PREFIXES:
+            if name.startswith(prefix) and len(name) > len(prefix):
+                return name[len(prefix):]
+    return name
 
 
 def normalize_range(value: Any) -> str:
@@ -119,7 +132,12 @@ def summary(range_key: str, site: str,
 
 def series(chart: str, range_key: str, site: str,
            window: Dict[str, int] | None = None) -> Dict[str, Any]:
-    return metricsd_series(chart, range_key, site, window)
+    payload = metricsd_series(chart, range_key, site, window)
+    for entry in payload.get("components") or []:
+        entry["label"] = component_label(
+            str(entry.get("name") or ""), str(entry.get("group") or "")
+        )
+    return payload
 
 
 def states(range_key: str, site: str,

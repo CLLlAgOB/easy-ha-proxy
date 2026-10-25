@@ -69,13 +69,96 @@
       // Never a rate: these arrive as percentages and dividing them by the
       // bucket step would turn 40% into 0.7 of nothing.
       name: "cpu",
+      components: true,
       series: [
         { key: "cpu_avg", label: "Average", color: "#4a86c8", percent: true, summary: "mean" },
         { key: "cpu_max", label: "Peak", color: "#c8a13a", percent: true, summary: "max" },
-        { key: "haproxy_busy_avg", label: "HAProxy", color: "#8a63d2", percent: true, summary: "mean" }
+        { key: "haproxy_busy_avg", label: "HAProxy busy", color: "#8a63d2", percent: true, summary: "mean" },
+        { key: "helpers", label: "Helper services", color: "#2e9e5b", percent: true, summary: "mean" },
+        { key: "containers", label: "Containers", color: "#d0743c", percent: true, summary: "mean" },
+        { key: "other", label: "Other processes", color: "#9e9e9e", percent: true, summary: "mean", hidden: true }
+      ]
+    },
+    {
+      // Used is what `free` calls used: everything the kernel could not hand
+      // back at once. Total is drawn so the scale reads against the machine.
+      name: "memory",
+      components: true,
+      series: [
+        { key: "memory_avg", label: "Used", color: "#4a86c8", bytes: true, summary: "mean" },
+        { key: "memory_max", label: "Peak", color: "#c8a13a", bytes: true, summary: "max" },
+        { key: "memory_total", label: "Total", color: "#6b6b6b", bytes: true, summary: "last", dash: true },
+        { key: "helpers", label: "Helper services", color: "#2e9e5b", bytes: true, summary: "mean" },
+        { key: "containers", label: "Containers", color: "#d0743c", bytes: true, summary: "mean" },
+        { key: "other", label: "Other processes", color: "#9e9e9e", bytes: true, summary: "mean", hidden: true }
       ]
     }
   ];
+
+  // One line per part of the gateway, coloured by its place in the sorted
+  // list of names rather than by its rank: the rank changes with every
+  // refresh, and a line that changed colour each time would be unreadable.
+  const COMPONENT_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
+    "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#aec7e8", "#ffbb78",
+    "#98df8a", "#ff9896", "#c5b0d5", "#c49c94", "#f7b6d2", "#dbdb8d",
+    "#9edae5", "#393b79"
+  ];
+
+  function seriesFor(chart, payload) {
+    if (!chart.components) return chart.series;
+    const parts = (payload && payload.components) || [];
+    const ids = parts.map((part) => `${part.group}:${part.name}`).sort();
+    return chart.series.concat(
+      parts.map((part) => {
+        const id = `${part.group}:${part.name}`;
+        return {
+          key: `component:${id}`,
+          label: part.label || part.name,
+          group: part.group,
+          component: true,
+          color: COMPONENT_COLORS[ids.indexOf(id) % COMPONENT_COLORS.length],
+          percent: chart.name === "cpu",
+          bytes: chart.name === "memory",
+          summary: "mean",
+          hidden: true,
+          values: part.values || [],
+          peak: part.peak
+        };
+      })
+    );
+  }
+
+  // Which lines are shown, per chart. Only choices the operator made are
+  // stored; everything else follows the line's own default.
+  const VISIBILITY_KEY = "monitoring.lines";
+  let lineChoices = {};
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(VISIBILITY_KEY) || "{}");
+    if (stored && typeof stored === "object") lineChoices = stored;
+  } catch (error) {
+    lineChoices = {};
+  }
+
+  function lineVisible(chart, spec) {
+    const choices = lineChoices[chart.name];
+    if (choices && Object.prototype.hasOwnProperty.call(choices, spec.key)) {
+      return Boolean(choices[spec.key]);
+    }
+    return !spec.hidden;
+  }
+
+  function setLineVisible(chart, spec, visible) {
+    const choices = Object.assign({}, lineChoices[chart.name]);
+    if (visible === !spec.hidden) delete choices[spec.key];
+    else choices[spec.key] = visible;
+    lineChoices[chart.name] = choices;
+    try {
+      window.localStorage.setItem(VISIBILITY_KEY, JSON.stringify(lineChoices));
+    } catch (error) {
+      // Private mode: the choice lasts for this page only.
+    }
+  }
 
   let currentRange = "24h";
   let currentSite = "";
@@ -122,8 +205,14 @@
 
   /* ---------- chart drawing ---------- */
 
-  function niceCeiling(value) {
+  function niceCeiling(value, binary) {
     if (!(value > 0)) return 1;
+    if (binary && value >= 1024) {
+      // Bytes round in their own units: 2 GiB at the top, not 4.66.
+      let unit = 1;
+      while (value / unit >= 1024) unit *= 1024;
+      return niceCeiling(value / unit, false) * unit;
+    }
     const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
     const normalized = value / magnitude;
     let step;
@@ -179,20 +268,30 @@
       return;
     }
 
-    const width = 600;
-    const height = 190;
-    const padding = { top: 10, right: 8, bottom: 22, left: 54 };
+    // Full screen draws at the size it is shown, so text stays text-sized;
+    // the cards keep the fixed frame the page was laid out around.
+    let width = 600;
+    let height = 190;
+    if (svg.closest(".mon-chart-expanded")) {
+      const box = svg.getBoundingClientRect();
+      width = Math.max(320, Math.round(box.width));
+      height = Math.max(200, Math.round(box.height));
+    }
+    const padding = { top: 10, right: 8, bottom: 22, left: chart.series[0].bytes ? 70 : 54 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
     const step = Number(payload.resolution_seconds) || 60;
 
     // Counters are stored per bucket; a rate is the only comparable value once
-    // the server changes resolution between ranges.
-    const datasets = chart.series.map((spec) => {
-      const raw = (payload.series && payload.series[spec.key]) || [];
-      const values = raw.map((value) => (spec.rate ? Number(value) / step : Number(value)));
-      return { spec: spec, values: values };
-    });
+    // the server changes resolution between ranges. Hidden lines are left out
+    // of the scale too, so hiding the big ones lets the small ones fill it.
+    const datasets = seriesFor(chart, payload)
+      .filter((spec) => lineVisible(chart, spec))
+      .map((spec) => {
+        const raw = spec.values || (payload.series && payload.series[spec.key]) || [];
+        const values = raw.map((value) => (spec.rate ? Number(value) / step : Number(value)));
+        return { spec: spec, values: values };
+      });
 
     let maximum = 0;
     datasets.forEach((dataset) => {
@@ -200,7 +299,7 @@
         if (Number.isFinite(value) && value > maximum) maximum = value;
       });
     });
-    const top = niceCeiling(maximum);
+    const top = niceCeiling(maximum, Boolean(chart.series[0].bytes));
 
     clear(svg);
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -251,7 +350,8 @@
       })
     );
 
-    const labelCount = Math.min(5, points.length);
+    // No more time labels than fit: full screen on a phone is narrow.
+    const labelCount = Math.min(5, points.length, Math.max(2, Math.floor(plotWidth / 90)));
     for (let index = 0; index < labelCount; index += 1) {
       const pointIndex =
         labelCount === 1 ? 0 : Math.round((index / (labelCount - 1)) * (points.length - 1));
@@ -270,15 +370,15 @@
         .map((value, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(value).toFixed(1)}`)
         .join(" ");
       if (!path) return;
-      if (chart.series.length <= 2) {
+      if (datasets.length <= 2 && !dataset.spec.dash) {
         const area =
           `${path} L${xFor(dataset.values.length - 1).toFixed(1)},${(padding.top + plotHeight).toFixed(1)}` +
           ` L${xFor(0).toFixed(1)},${(padding.top + plotHeight).toFixed(1)} Z`;
         svg.appendChild(element("path", { class: "mon-area", d: area, fill: dataset.spec.color }));
       }
-      svg.appendChild(
-        element("path", { class: "mon-line", d: path, stroke: dataset.spec.color })
-      );
+      const line = { class: "mon-line", d: path, stroke: dataset.spec.color };
+      if (dataset.spec.dash) line["stroke-dasharray"] = "6 4";
+      svg.appendChild(element("path", line));
     });
   }
 
@@ -318,6 +418,23 @@
     return { value: value, index: index };
   }
 
+  function legendValue(spec, value) {
+    if (spec.percent) return `${decimalFormat.format(value)}%`;
+    if (spec.bytes) return spec.rate ? `${formatBytes(value)}/s` : formatBytes(value);
+    return formatRate(value);
+  }
+
+  // Whether the per-component list is unfolded, per chart. Folded by
+  // default: on a card it is a long list, in full screen it always opens.
+  const COMPONENTS_OPEN_KEY = "monitoring.components.open";
+  let componentsOpen = {};
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(COMPONENTS_OPEN_KEY) || "{}");
+    if (stored && typeof stored === "object") componentsOpen = stored;
+  } catch (error) {
+    componentsOpen = {};
+  }
+
   function renderLegend(chart, payload) {
     const legend = byId(`mon-legend-${chart.name}`);
     if (!legend) return;
@@ -327,26 +444,40 @@
     const spanSeconds = points.length > 1
       ? Number(points[points.length - 1]) - Number(points[0])
       : 0;
-    chart.series.forEach((spec) => {
-      const raw = (payload && payload.series && payload.series[spec.key]) || [];
+    const expanded = Boolean(legend.closest(".mon-chart-expanded"));
+    let parts = null;
+    seriesFor(chart, payload).forEach((spec) => {
+      const raw = spec.values || (payload && payload.series && payload.series[spec.key]) || [];
       const reading = legendReading(spec, raw);
       const value = spec.rate ? reading.value / step : reading.value;
-      const item = document.createElement("span");
-      item.title = uiText(LEGEND_HINTS[spec.summary || "last"]);
+      const visible = lineVisible(chart, spec);
+      // A button, so a line can be hidden to let the others fill the scale.
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "mon-line-toggle";
+      item.setAttribute("aria-pressed", visible ? "true" : "false");
+      let hint = uiText(LEGEND_HINTS[spec.summary || "last"]);
+      if (spec.component) {
+        hint += ` · ${uiText("Peak")}: ${legendValue(spec, Number(spec.peak) || 0)}`;
+      }
+      item.title = `${hint}. ${uiText("Click to show or hide the line")}`;
       const swatch = document.createElement("i");
       swatch.style.background = spec.color;
       item.appendChild(swatch);
       const label = document.createElement("span");
-      label.textContent = `${uiText(spec.label)}: `;
+      if (spec.component) {
+        // A unit or container name: machine data, never translated.
+        label.setAttribute("data-i18n-skip", "");
+        label.setAttribute("translate", "no");
+        label.textContent = `${spec.label}: `;
+      } else {
+        label.textContent = `${uiText(spec.label)}: `;
+      }
       item.appendChild(label);
       const shown = document.createElement("b");
       shown.setAttribute("data-i18n-skip", "");
       shown.setAttribute("translate", "no");
-      shown.textContent = spec.percent
-        ? `${decimalFormat.format(value)}%`
-        : spec.bytes
-          ? `${formatBytes(value)}/s`
-          : formatRate(value);
+      shown.textContent = legendValue(spec, value);
       item.appendChild(shown);
       if (reading.index !== null && points[reading.index] !== undefined) {
         const when = document.createElement("small");
@@ -356,7 +487,33 @@
         when.textContent = ` · ${(spanSeconds >= 86400 ? dateTimeFormat : timeFormat).format(at)}`;
         item.appendChild(when);
       }
-      legend.appendChild(item);
+      item.addEventListener("click", () => {
+        setLineVisible(chart, spec, !lineVisible(chart, spec));
+        redrawChart(chart.name);
+      });
+
+      if (!spec.component) {
+        legend.appendChild(item);
+        return;
+      }
+      if (!parts) {
+        const details = document.createElement("details");
+        details.className = "mon-components";
+        details.open = expanded || Boolean(componentsOpen[chart.name]);
+        const summary = document.createElement("summary");
+        summary.textContent = uiText("By component");
+        details.appendChild(summary);
+        parts = document.createElement("div");
+        parts.className = "mon-legend";
+        details.appendChild(parts);
+        details.addEventListener("toggle", () => {
+          if (legend.closest(".mon-chart-expanded")) return;
+          componentsOpen[chart.name] = details.open;
+          remember(COMPONENTS_OPEN_KEY, JSON.stringify(componentsOpen));
+        });
+        legend.appendChild(details);
+      }
+      parts.appendChild(item);
     });
   }
 
@@ -864,6 +1021,19 @@
         + ` · HAProxy: ${decimalFormat.format(load.haproxy_busy_avg)}%`
       );
     }
+    // The same rule for memory, which a collector older than the memory
+    // columns never recorded: no total means nothing was measured.
+    const memoryObserved = Boolean(load.observed) && Number(load.memory_total) > 0;
+    const memoryCard = byId("mon-card-memory");
+    if (memoryCard) memoryCard.hidden = !memoryObserved;
+    if (memoryObserved) {
+      setText("mon-memory", formatBytes(load.memory_avg));
+      setText(
+        "mon-memory-detail",
+        `${uiText("Peak")}: ${formatBytes(load.memory_max)}`
+        + ` · ${uiText("Total")}: ${formatBytes(load.memory_total)}`
+      );
+    }
 
     const collector = data.collector || {};
     showPaused(Boolean(collector.writes_paused));
@@ -1200,6 +1370,115 @@
     if (payload) renderChannels(payload);
   }
 
+  // The last answer for each chart, so hiding a line or opening a chart in
+  // full screen redraws at once instead of asking the server again.
+  const lastCharts = {};
+
+  function redrawChart(name) {
+    const chart = CHARTS.find((item) => item.name === name);
+    const svg = byId(`mon-plot-${name}`);
+    if (!chart || !svg) return;
+    const last = lastCharts[name];
+    if (!last) {
+      drawEmpty(svg, uiText("No data for this period"));
+      return;
+    }
+    drawChart(svg, chart, last.payload, last.seconds);
+    renderLegend(chart, last.payload);
+  }
+
+  /* ---------- full screen ---------- */
+
+  // The card is moved into an overlay on <body> rather than restyled where
+  // it stands: a transformed or filtered ancestor would turn position:fixed
+  // into "fixed to that ancestor". A placeholder keeps its place in the grid.
+  let expandedChart = null;
+  let expandedPlaceholder = null;
+
+  function expandButtonState(card, open) {
+    const button = card.querySelector(".mon-expand");
+    if (!button) return;
+    const label = uiText(open ? "Exit full screen" : "Full screen");
+    button.setAttribute("aria-pressed", open ? "true" : "false");
+    button.title = label;
+    button.setAttribute("aria-label", label);
+  }
+
+  function setExpanded(name) {
+    const overlay = byId("mon-overlay");
+    if (!overlay) return;
+    if (expandedChart) {
+      const card = document.querySelector(`.mon-chart[data-chart="${expandedChart}"]`);
+      if (card && expandedPlaceholder && expandedPlaceholder.parentNode) {
+        expandedPlaceholder.parentNode.replaceChild(card, expandedPlaceholder);
+      }
+      if (card) {
+        card.classList.remove("mon-chart-expanded");
+        expandButtonState(card, false);
+      }
+      const previous = expandedChart;
+      expandedChart = null;
+      expandedPlaceholder = null;
+      redrawChart(previous);
+    }
+    const card = name ? document.querySelector(`.mon-chart[data-chart="${name}"]`) : null;
+    if (card) {
+      expandedPlaceholder = document.createElement("div");
+      expandedPlaceholder.className = "mon-chart mon-chart-placeholder";
+      expandedPlaceholder.style.height = `${card.offsetHeight}px`;
+      card.parentNode.replaceChild(expandedPlaceholder, card);
+      overlay.appendChild(card);
+      card.classList.add("mon-chart-expanded");
+      expandButtonState(card, true);
+      expandedChart = name;
+    }
+    overlay.hidden = !expandedChart;
+    document.body.classList.toggle("mon-overlay-open", Boolean(expandedChart));
+    // In the address, so a reload -- or a link sent to a colleague -- opens
+    // the same chart.
+    try {
+      const url = new URL(window.location.href);
+      url.hash = expandedChart ? `chart=${expandedChart}` : "";
+      window.history.replaceState(null, "", url.toString().replace(/#$/, ""));
+    } catch (error) {
+      /* the address stays as it was */
+    }
+    if (expandedChart) {
+      redrawChart(expandedChart);
+      const button = card.querySelector(".mon-expand");
+      if (button) button.focus();
+    }
+  }
+
+  function bindFullScreen() {
+    document.querySelectorAll(".mon-chart[data-chart] .mon-expand").forEach((button) => {
+      button.addEventListener("click", () => {
+        const name = button.closest(".mon-chart").dataset.chart;
+        setExpanded(expandedChart === name ? null : name);
+      });
+    });
+    const overlay = byId("mon-overlay");
+    if (overlay) {
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) setExpanded(null);
+      });
+    }
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && expandedChart && !zoomDragging) setExpanded(null);
+    });
+    let pending = false;
+    window.addEventListener("resize", () => {
+      if (!expandedChart || pending) return;
+      pending = true;
+      window.requestAnimationFrame(() => {
+        pending = false;
+        if (expandedChart) redrawChart(expandedChart);
+      });
+    });
+    const wanted = /^#chart=([a-z_]+)$/.exec(window.location.hash || "");
+    if (wanted && CHARTS.some((chart) => chart.name === wanted[1])) setExpanded(wanted[1]);
+  }
+
   async function loadAll() {
     // A refresh redraws the charts, which would drop a selection in progress.
     if (inFlight || zoomDragging) return;
@@ -1239,15 +1518,9 @@
       );
       results.forEach((payload, index) => {
         const chart = CHARTS[index];
-        const svg = byId(`mon-plot-${chart.name}`);
-        if (!svg) return;
-        if (!payload) {
-          drawEmpty(svg, uiText("No data for this period"));
-          return;
-        }
-        drawChart(svg, chart, payload, seconds);
-        renderLegend(chart, payload);
-        if (index === 0) {
+        lastCharts[chart.name] = payload ? { payload: payload, seconds: seconds } : null;
+        redrawChart(chart.name);
+        if (payload && index === 0) {
           // Always in minutes: "min" is already in the catalog, and one unit
           // keeps the reading comparable as the server changes resolution.
           const step = Number(payload.resolution_seconds) || 60;
@@ -1260,8 +1533,8 @@
     } catch (error) {
       showUnavailable(Boolean(error.unavailable));
       CHARTS.forEach((chart) => {
-        const svg = byId(`mon-plot-${chart.name}`);
-        if (svg) drawEmpty(svg, uiText("No data for this period"));
+        lastCharts[chart.name] = null;
+        redrawChart(chart.name);
       });
     } finally {
       inFlight = false;
@@ -1525,6 +1798,7 @@
 
     bindWindowControls();
     bindBackendsView();
+    bindFullScreen();
 
     CHARTS.forEach((chart) => {
       const svg = byId(`mon-plot-${chart.name}`);

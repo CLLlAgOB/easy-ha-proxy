@@ -150,7 +150,7 @@ class PageAssetTests(unittest.TestCase):
             sorted(charts),
             sorted([
                 "requests", "traffic", "responses", "latency", "connections",
-                "cpu",
+                "cpu", "memory",
             ]),
         )
         for chart in charts:
