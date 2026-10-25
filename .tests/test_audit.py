@@ -281,7 +281,7 @@ class InstrumentationTests(unittest.TestCase):
         "routes_geoip.py": ("geoip.update", "geoip.countries", "geoip.schedule"),
         "routes_health.py": ("service.control",),
         "routes_security.py": ("adaptive.mode", "request_log.enabled"),
-        "routes_monitoring.py": ("monitoring.channel_labels",),
+        "routes_monitoring.py": ("monitoring.channel_labels", "ban.place"),
         "routes_cert_delivery.py": (
             "cert_delivery.save", "cert_delivery.delete", "cert_delivery.test",
         ),

@@ -10,9 +10,10 @@ import logging
 
 from flask import g, jsonify, render_template, request
 
-from .audit import RESULT_DENIED, RESULT_FAILURE, record_request
+from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .metricsd_client import MetricsdUnavailable
 from .routes import bp
+from . import services_live as live
 from . import services_monitoring as monitoring
 
 LOG = logging.getLogger("haproxy-admin")
@@ -154,3 +155,43 @@ def api_monitoring_storage():
         return jsonify(monitoring.storage())
     except MetricsdUnavailable as exc:
         return jsonify(monitoring.unavailable_payload(exc)), 503
+
+
+# ---------------------------------------------------------------------------
+# Live activity
+# ---------------------------------------------------------------------------
+
+
+@bp.get("/monitoring/live")
+def live_activity_page():
+    return render_template("live_activity.html", windows=live.WINDOWS)
+
+
+@bp.get("/api/monitoring/live")
+def api_live_activity():
+    try:
+        return jsonify(live.live_view(request.args))
+    except live.LiveUnavailable as exc:
+        LOG.warning("live activity unavailable: %s", exc)
+        return jsonify({"ok": False, "unavailable": True, "error": str(exc)}), 503
+
+
+@bp.post("/api/monitoring/live/ban")
+def api_live_ban():
+    """Ban one address by hand from the live page."""
+    payload = request.get_json(silent=True) or {}
+    ip = str(payload.get("ip") or "").strip()
+    # The operator's own address, as HAProxy saw it, so the page can refuse to
+    # lock them out.
+    from .routes_haproxy_config import _trusted_client_ip
+
+    result = live.ban_address(ip, _trusted_client_ip())
+    record_request(
+        "ban.place",
+        object_type="ip",
+        object_id=ip[:64],
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary="by hand from the live activity page",
+        detail="" if result.get("ok") else str(result.get("error"))[:300],
+    )
+    return jsonify(result), (200 if result.get("ok") else 400)

@@ -50,6 +50,12 @@ MACHINE_OUTPUT = {
     "haproxy_site_edit.html": (
         "cert-file-name",
     ),
+    # Addresses, names, paths and counts, refreshed every few seconds.
+    "live_activity.html": (
+        "la-updated", "la-addresses-body", "la-sites-body", "la-events-body",
+        "la-banned-body", "la-limited-body", "la-note", "la-reasons",
+        "la-limits-note", "la-rate", "la-requests",
+    ),
     "detection_rules.html": (
         "dr-mine",          # the operator's own signatures
         "dr-shipped",       # every shipped signature

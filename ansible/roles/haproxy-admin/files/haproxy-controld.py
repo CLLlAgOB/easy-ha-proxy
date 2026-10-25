@@ -28,6 +28,8 @@ haproxy-controld — единый root-демон управления HAProxy:
    - "udp-apply-json" → synchronously install udp.yml and return runtime state
    - "udp-status" → return the last successfully installed UDP ruleset state
    - "udp-port-check <start> <end>" → inspect host UDP listener conflicts
+   - "logs-live <b64-json>" → what the access log says about the last N
+     seconds, aggregated by address, site and status, for the live page
    - "logs-ip <ip> <n>"    → поиск логов по IP (journalctl/файл) + фикc времени через epoch
 
 Не зависит от haproxy_admin/Flask, работает только с:
@@ -1307,6 +1309,377 @@ def logs_attackers() -> dict:
         "code_451": [{"ip": ip, "count": cnt} for ip, cnt in _top(a451)],
         "diagnostic": diag,
     }
+
+
+# ───── logs-live: the live activity page ─────
+#
+# Who is hitting the gateway right now, what they get, and what the gateway
+# refuses them -- read straight from the access log for a window of seconds
+# to minutes. The log is read here, by path, rather than by the web
+# container: its bind mount pins one inode, so after the nightly rotation it
+# would go on reading yesterday's file.
+#
+# The window is read backwards from the end and only as far as it reaches;
+# under a flood that could be a great deal, so reading stops at a byte cap
+# and the answer says how many seconds it actually covers.
+
+LIVE_MAX_WINDOW_SECONDS = 3600
+LIVE_MAX_BYTES = int(os.getenv("HAPADM_LIVE_MAX_BYTES", str(48 * 1024 * 1024)))
+LIVE_MAX_LINES = int(os.getenv("HAPADM_LIVE_MAX_LINES", "400000"))
+LIVE_MAX_ADDRESSES = 300
+LIVE_MAX_BLOCKED_ADDRESSES = 500
+LIVE_MAX_EVENTS = 300
+LIVE_CACHE_SECONDS = 1.5
+
+_LIVE_HEAD = re.compile(
+    r"^(?P<stamp>\S+)\s+\S+\s+haproxy\[\d+\]:\s*"
+    r"(?P<client>\[[0-9A-Fa-f:]+\]|[0-9.]+):\d+\s+"
+    r"\[[^\]]*\]\s+"
+    r"(?P<frontend>\S+)\s+(?P<backend>\S+)\s+"
+    r"(?P<times>\S+)\s+"
+    r"(?P<status>-|\d{3})\s+"
+    r"(?P<bytes>-|\d+)\s+"
+    r"(?P<term>\S+)"
+)
+_LIVE_TAIL = re.compile(r"(?P<method>[A-Z]{3,10})\s+(?P<uri>\S+)\s+HTTP/[0-9.]+\s*$")
+_LIVE_HOST = re.compile(r"(?:^|\s)host=(?P<host>\S+)")
+_LIVE_BAN_CODE = re.compile(r"ban_code=(?P<code>\d+)")
+_LIVE_BAN_REASON = re.compile(r'ban_reason="(?P<reason>[^"]*)"')
+
+_live_cache_lock = threading.Lock()
+_live_cache: dict = {}
+
+
+def _live_epoch(stamp: str) -> float | None:
+    try:
+        return datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_live_line(line: str) -> dict | None:
+    """One access-log line, reduced to what the live page shows, or None."""
+    head = _LIVE_HEAD.match(line)
+    if head is None:
+        return None
+    ts = _live_epoch(head.group("stamp"))
+    if ts is None:
+        return None
+    client = head.group("client").strip("[]")
+    status_text = head.group("status")
+    status = 0 if status_text == "-" else int(status_text)
+    rest = line[head.end():]
+    tail = _LIVE_TAIL.search(rest)
+    method, uri = (tail.group("method"), tail.group("uri")) if tail else ("", "")
+    host_match = _LIVE_HOST.search(rest)
+    host = host_match.group("host") if host_match else ""
+    path = uri
+    if uri.startswith(("http://", "https://")):
+        without_scheme = uri.split("://", 1)[1]
+        authority, _, remainder = without_scheme.partition("/")
+        host = host if host not in ("", "-") else authority
+        path = "/" + remainder
+    if host == "-":
+        host = ""
+    host = host.split(":", 1)[0].lower()[:253]
+    path = path.split("?", 1)[0][:300]
+    times = head.group("times").rsplit("/", 1)[-1]
+    try:
+        duration = max(0, int(times))
+    except ValueError:
+        duration = 0
+    code = _LIVE_BAN_CODE.search(rest)
+    reason = _LIVE_BAN_REASON.search(rest)
+    return {
+        "ts": ts,
+        "ip": client,
+        "frontend": head.group("frontend").rstrip("~"),
+        "backend": head.group("backend"),
+        "status": status,
+        "bytes": 0 if head.group("bytes") == "-" else int(head.group("bytes")),
+        "term": head.group("term"),
+        "duration_ms": duration,
+        "method": method,
+        "path": path if tail else ("<BADREQ>" if "<BADREQ>" in rest else ""),
+        "host": host,
+        "ban_code": int(code.group("code")) if code else 0,
+        "ban_reason": reason.group("reason")[:160] if reason else "",
+    }
+
+
+def live_refusal(record: dict) -> str:
+    """Why the gateway itself turned this request away, or "" if it did not.
+
+    The codes are the gateway's own: a server never chose them, which is
+    what the <NOSRV> in the backend field says. An application's own 403 or
+    401 is not a refusal by the gateway and is not counted as one.
+    """
+    status = record["status"]
+    if status == 423 or record["ban_reason"]:
+        return "banned"
+    if status == 429:
+        return "rate-limited"
+    if not record["backend"].endswith("/<NOSRV>"):
+        return ""
+    return {
+        451: "geo",
+        401: "zero-trust",
+        403: "denied",
+        400: "invalid-request",
+    }.get(status, "refused" if record["term"].startswith("PR") else "")
+
+
+def read_live_window(paths: list, since: float, *, max_bytes: int, max_lines: int):
+    """Lines of the access log at or after `since`, oldest first.
+
+    Read backwards in chunks from the end of the current file, and into the
+    previous one if the window starts before it does. Returns
+    (lines, truncated) -- truncated when a cap stopped the reading before the
+    window's start was reached.
+    """
+    collected: list = []
+    budget = max_bytes
+    for path in paths:
+        try:
+            handle = open(path, "rb")
+        except OSError:
+            continue
+        reached_start = False
+        with handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            carry = b""
+            while position > 0:
+                if budget <= 0 or len(collected) >= max_lines:
+                    return list(reversed(collected)), True
+                size = min(65536, position, budget)
+                position -= size
+                handle.seek(position)
+                block = handle.read(size) + carry
+                budget -= size
+                lines = block.split(b"\n")
+                carry = lines.pop(0) if position > 0 else b""
+                for raw_line in reversed(lines):
+                    if not raw_line:
+                        continue
+                    if len(collected) >= max_lines:
+                        return list(reversed(collected)), True
+                    text = raw_line.decode("utf-8", "replace")
+                    stamp = text.split(" ", 1)[0]
+                    ts = _live_epoch(stamp)
+                    if ts is not None and ts < since:
+                        reached_start = True
+                        break
+                    collected.append(text)
+                if reached_start:
+                    break
+        if reached_start:
+            break
+    return list(reversed(collected)), False
+
+
+def _live_matches(record: dict, refusal: str, filters: dict) -> bool:
+    ip = filters.get("ip") or ""
+    if ip and not record["ip"].startswith(ip):
+        return False
+    host = filters.get("host") or ""
+    if host and record["host"] != host:
+        return False
+    query = (filters.get("q") or "").lower()
+    if query and query not in record["path"].lower() and query not in record["host"]:
+        return False
+    status_class = filters.get("status") or ""
+    if status_class and str(record["status"])[:1] != status_class[:1]:
+        return False
+    if filters.get("blocked") and not refusal:
+        return False
+    return True
+
+
+def live_snapshot(lines, *, now: float, window: int, filters: dict, truncated: bool = False) -> dict:
+    """Aggregate the window by address, site, status and time."""
+    since = now - window
+    bucket = max(1, window // 60)
+    buckets = (window + bucket - 1) // bucket
+    timeline = [{"ok": 0, "errors": 0, "blocked": 0} for _ in range(buckets)]
+    addresses: dict = {}
+    sites: dict = {}
+    statuses: dict = defaultdict(int)
+    reasons: dict = defaultdict(int)
+    events: list = []
+    totals = {"requests": 0, "errors": 0, "server_errors": 0, "blocked": 0, "bytes": 0}
+    earliest = None
+
+    for line in lines:
+        record = parse_live_line(line)
+        if record is None or record["ts"] < since or record["ts"] > now + 5:
+            continue
+        refusal = live_refusal(record)
+        if not _live_matches(record, refusal, filters):
+            continue
+        earliest = record["ts"] if earliest is None else min(earliest, record["ts"])
+        status = record["status"]
+        error = status >= 400
+        totals["requests"] += 1
+        totals["bytes"] += record["bytes"]
+        totals["errors"] += int(error)
+        totals["server_errors"] += int(status >= 500)
+        totals["blocked"] += int(bool(refusal))
+        statuses[str(status)] += 1
+        if refusal:
+            reasons[refusal] += 1
+        slot = min(buckets - 1, max(0, int((record["ts"] - since) // bucket)))
+        timeline[slot]["blocked" if refusal else ("errors" if error else "ok")] += 1
+
+        entry = addresses.get(record["ip"])
+        if entry is None:
+            entry = addresses[record["ip"]] = {
+                "ip": record["ip"], "requests": 0, "errors": 0, "server_errors": 0,
+                "blocked": 0, "bytes": 0, "duration_ms": 0, "hosts": defaultdict(int),
+                "reasons": defaultdict(int), "first": record["ts"],
+            }
+        entry["requests"] += 1
+        entry["errors"] += int(error)
+        entry["server_errors"] += int(status >= 500)
+        entry["blocked"] += int(bool(refusal))
+        entry["bytes"] += record["bytes"]
+        entry["duration_ms"] += record["duration_ms"]
+        if record["host"]:
+            entry["hosts"][record["host"]] += 1
+        if refusal:
+            entry["reasons"][record["ban_reason"] or refusal] += 1
+        entry.update({
+            "last": record["ts"], "last_status": status, "last_path": record["path"],
+            "last_method": record["method"], "last_host": record["host"],
+        })
+
+        site = sites.get(record["host"])
+        if site is None:
+            site = sites[record["host"]] = {
+                "host": record["host"], "requests": 0, "errors": 0, "server_errors": 0,
+                "blocked": 0, "duration_ms": 0, "ips": set(), "backend": "",
+            }
+        site["requests"] += 1
+        site["errors"] += int(error)
+        site["server_errors"] += int(status >= 500)
+        site["blocked"] += int(bool(refusal))
+        site["duration_ms"] += record["duration_ms"]
+        site["ips"].add(record["ip"])
+        if not record["backend"].endswith("/<NOSRV>"):
+            site["backend"] = record["backend"].split("/", 1)[0]
+
+        events.append({
+            "ts": record["ts"], "ip": record["ip"], "host": record["host"],
+            "method": record["method"], "path": record["path"], "status": status,
+            "duration_ms": record["duration_ms"], "bytes": record["bytes"],
+            "backend": record["backend"], "term": record["term"],
+            "refusal": refusal, "ban_reason": record["ban_reason"],
+        })
+        if len(events) > LIVE_MAX_EVENTS * 4:
+            del events[: len(events) - LIVE_MAX_EVENTS]
+
+    covered = window if not truncated or earliest is None else max(1, int(now - earliest))
+
+    def address_row(entry: dict) -> dict:
+        hosts = sorted(entry["hosts"].items(), key=lambda item: -item[1])
+        reason = max(entry["reasons"].items(), key=lambda item: item[1])[0] if entry["reasons"] else ""
+        span = max(1.0, min(covered, now - entry["first"] + 1))
+        return {
+            "ip": entry["ip"], "requests": entry["requests"],
+            "rate": round(entry["requests"] / span, 2),
+            "errors": entry["errors"], "server_errors": entry["server_errors"],
+            "blocked": entry["blocked"], "bytes": entry["bytes"],
+            "avg_ms": int(entry["duration_ms"] / entry["requests"]) if entry["requests"] else 0,
+            "top_host": hosts[0][0] if hosts else "", "hosts": len(hosts),
+            "last": entry["last"], "last_status": entry["last_status"],
+            "last_method": entry["last_method"], "last_path": entry["last_path"][:160],
+            "last_host": entry["last_host"], "reason": reason,
+        }
+
+    ranked = sorted(addresses.values(), key=lambda e: (-e["requests"], e["ip"]))
+    chosen = {e["ip"] for e in ranked[:LIVE_MAX_ADDRESSES]}
+    chosen |= {e["ip"] for e in sorted(
+        (e for e in addresses.values() if e["blocked"]), key=lambda e: -e["blocked"]
+    )[:LIVE_MAX_BLOCKED_ADDRESSES]}
+    rows = [address_row(addresses[ip]) for ip in chosen]
+    rows.sort(key=lambda row: (-row["requests"], row["ip"]))
+
+    site_rows = sorted(
+        (
+            {
+                "host": site["host"], "requests": site["requests"], "errors": site["errors"],
+                "server_errors": site["server_errors"], "blocked": site["blocked"],
+                "addresses": len(site["ips"]), "backend": site["backend"],
+                "avg_ms": int(site["duration_ms"] / site["requests"]) if site["requests"] else 0,
+            }
+            for site in sites.values()
+        ),
+        key=lambda row: -row["requests"],
+    )
+    return {
+        "ok": True,
+        "now": now,
+        "window": window,
+        "covered_seconds": covered,
+        "truncated": truncated,
+        "bucket_seconds": bucket,
+        "totals": {**totals, "addresses": len(addresses), "rate": round(totals["requests"] / max(1, covered), 2)},
+        "timeline": timeline,
+        "statuses": dict(statuses),
+        "refusals": dict(reasons),
+        "addresses": rows,
+        "addresses_total": len(addresses),
+        "sites": site_rows[:200],
+        "events": list(reversed(events[-LIVE_MAX_EVENTS:])),
+    }
+
+
+def _live_filters(raw: dict) -> dict:
+    filters = {}
+    ip = str(raw.get("ip") or "").strip()
+    if ip:
+        if not re.fullmatch(r"[0-9A-Fa-f:.]{1,45}", ip):
+            raise ValueError("invalid ip filter")
+        filters["ip"] = ip
+    host = str(raw.get("host") or "").strip().lower()
+    if host:
+        if not re.fullmatch(r"[a-z0-9.-]{1,253}", host):
+            raise ValueError("invalid host filter")
+        filters["host"] = host
+    query = str(raw.get("q") or "").strip()
+    if query:
+        filters["q"] = query[:120]
+    status = str(raw.get("status") or "").strip()
+    if status:
+        if status not in ("1xx", "2xx", "3xx", "4xx", "5xx"):
+            raise ValueError("invalid status filter")
+        filters["status"] = status
+    if raw.get("blocked") is True:
+        filters["blocked"] = True
+    return filters
+
+
+def logs_live(request: dict) -> dict:
+    try:
+        window = int(request.get("window") or 60)
+    except (TypeError, ValueError):
+        raise ValueError("window must be a number of seconds")
+    window = max(5, min(LIVE_MAX_WINDOW_SECONDS, window))
+    filters = _live_filters(request)
+    key = json.dumps([window, filters], sort_keys=True)
+    with _live_cache_lock:
+        cached = _live_cache.get(key)
+        if cached and time.time() - cached[0] < LIVE_CACHE_SECONDS:
+            return cached[1]
+        now = time.time()
+        lines, truncated = read_live_window(
+            [LOG_FILE, LOG_FILE + ".1"], now - window,
+            max_bytes=LIVE_MAX_BYTES, max_lines=LIVE_MAX_LINES,
+        )
+        result = live_snapshot(lines, now=now, window=window, filters=filters, truncated=truncated)
+        _live_cache.clear()
+        _live_cache[key] = (time.time(), result)
+        return result
 
 # ───── обработка команд по сокету ─────
 
@@ -4318,6 +4691,20 @@ def handle_client(conn: socket.socket) -> None:
             except Exception as e:
                 conn.sendall(
                     f"ERROR logs-ip: {e}\n".encode("utf-8", "replace"))
+            return
+
+        # ---- logs-live ----
+        if cmd.startswith("logs-live "):
+            try:
+                raw_request = json.loads(
+                    base64.b64decode(cmd.split(" ", 1)[1].strip(), validate=True)
+                )
+                if not isinstance(raw_request, dict):
+                    raise ValueError("the request must be a JSON object")
+                payload = json.dumps(logs_live(raw_request), ensure_ascii=False).encode("utf-8")
+                conn.sendall(b"OK " + base64.b64encode(payload) + b"\n")
+            except Exception as e:  # pylint: disable=broad-except
+                conn.sendall(f"ERROR logs-live: {e}\n".encode("utf-8", "replace"))
             return
 
         # ---- logs-attackers ----

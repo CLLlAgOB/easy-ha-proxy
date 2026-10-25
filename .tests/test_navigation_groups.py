@@ -37,6 +37,7 @@ EXPECTED_ENDPOINTS = {
     "routes.cert_delivery_page",
     "routes.mail_settings_page",
     "routes.haproxy_backends_page",
+    "routes.live_activity_page",
     "routes.monitoring_page",
     "routes.adaptive_protection_page",
     "routes.detection_rules_page",
