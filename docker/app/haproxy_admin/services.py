@@ -1510,6 +1510,36 @@ def get_attackers():
     В текущей версии UI лог-файл читать не пытаемся — всё берём через root-демон
     haproxy-controld, чтобы не раздавать права на LOG_FILE процессу веб-приложения.
     """
+    def _normalize(src):
+        # dict{ip:count} → list[dict]
+        if isinstance(src, dict):
+            src = [{"ip": ip, "count": cnt} for ip, cnt in src.items()]
+
+        out = []
+        if not isinstance(src, list):
+            return out
+
+        for item in src:
+            if not isinstance(item, dict):
+                continue
+            ip = str(item.get("ip", "")).strip()
+            if not ip:
+                continue
+            try:
+                cnt = int(item.get("count") or item.get(
+                    "cnt") or item.get("hits") or 0)
+            except Exception:
+                cnt = 0
+
+            # guardd counts per IP but does no geo lookup, so it never carries
+            # a country -- without filling it in here the dashboard loses its
+            # flags. The lookup is cached, so the ten-plus IPs cost little.
+            country = item.get("country") or get_country_code(ip)
+            out.append({"ip": ip, "count": cnt, "country": country})
+        # сортировка по убыванию на всякий случай
+        out.sort(key=lambda x: x.get("count", 0), reverse=True)
+        return out[:10]
+
     # guardd counts these as it reads the log anyway; reading the whole day's
     # log again on every visit to the dashboard is what this replaces. Right
     # after a restart it has too little to show, and the full read answers.
@@ -1519,8 +1549,8 @@ def get_attackers():
         counted = guardd_attackers()
         if counted.get("ok") and float(counted.get("since") or 0) <= time.time() - 3600:
             return {
-                "code_400": counted.get("code_400") or [],
-                "code_451": counted.get("code_451") or [],
+                "code_400": _normalize(counted.get("code_400")),
+                "code_451": _normalize(counted.get("code_451")),
                 "diagnostic": {"source": "guardd", "since": counted.get("since")},
             }
     except Exception:  # pylint: disable=broad-except
@@ -1544,33 +1574,6 @@ def get_attackers():
     diag = data.get("diagnostic") or {}
     if isinstance(diag, dict):
         diag.setdefault("source", "controld")
-
-    def _normalize(src):
-        # dict{ip:count} → list[dict]
-        if isinstance(src, dict):
-            src = [{"ip": ip, "count": cnt} for ip, cnt in src.items()]
-
-        out = []
-        if not isinstance(src, list):
-            return out
-
-        for item in src:
-            if not isinstance(item, dict):
-                continue
-            ip = str(item.get("ip", "")).strip()
-            if not ip:
-                continue
-            try:
-                cnt = int(item.get("count") or item.get(
-                    "cnt") or item.get("hits") or 0)
-            except Exception:
-                cnt = 0
-
-            country = item.get("country") or get_country_code(ip)
-            out.append({"ip": ip, "count": cnt, "country": country})
-        # сортировка по убыванию на всякий случай
-        out.sort(key=lambda x: x.get("count", 0), reverse=True)
-        return out[:10]
 
     return {"code_400": _normalize(raw_400), "code_451": _normalize(raw_451), "diagnostic": diag}
 
