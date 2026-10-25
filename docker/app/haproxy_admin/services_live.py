@@ -136,6 +136,46 @@ def _listed(ip: str, networks: List[ipaddress._BaseNetwork]) -> bool:
     return any(address in network for network in networks)
 
 
+def allow_entry(ip: str, networks: List[ipaddress._BaseNetwork]) -> Optional[str]:
+    """How an address is allow-listed: "host", "range", or None.
+
+    "host" means a single-host entry exists, which "Drop & ban" can remove.
+    "range" means only a broader network covers it; dropping that would
+    un-protect everyone else in it, so the page offers no one-click ban.
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    covering = [network for network in networks if address in network]
+    if not covering:
+        return None
+    if any(network.num_addresses == 1 for network in covering):
+        return "host"
+    return "range"
+
+
+def address_status(ip: str) -> Dict[str, Any]:
+    """What the IP page shows above the log lines: allowed, banned, or neither.
+
+    Read-only and best effort: a runtime socket that does not answer leaves
+    the ban unknown rather than taking the log page down with it.
+    """
+    status: Dict[str, Any] = {
+        "ipv4": bool(_IPV4.match(ip or "")),
+        "allow_entry": allow_entry(ip, _networks(WHITELIST_GLOBAL_FILE)),
+        "ban": None,
+        "ban_known": True,
+    }
+    status["allow_listed"] = status["allow_entry"] is not None
+    try:
+        status["ban"] = current_bans().get(ip)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("ban state unavailable for %s", ip, exc_info=True)
+        status["ban_known"] = False
+    return status
+
+
 def current_bans() -> Dict[str, Dict[str, Any]]:
     """Addresses HAProxy refuses right now, by tbl_ban."""
     table = (get_tables() or {}).get("ban") or {}
@@ -222,11 +262,13 @@ def live_view(args: Dict[str, Any]) -> Dict[str, Any]:
         over = bool(connection) and (
             connection["rate"] > limits["burst"] or connection["cur"] > limits["concurrent"]
         )
-        allow_listed = _listed(ip, allowed)
+        entry = allow_entry(ip, allowed)
+        allow_listed = entry is not None
         return {
             "country": _country(ip, countries),
             "ban": bans.get(ip),
             "allow_listed": allow_listed,
+            "allow_entry": entry,
             "authorized": ip in authorized,
             # The allow list is exempt from the connection limit.
             "connection_limited": over and not allow_listed,

@@ -354,6 +354,28 @@ class BanningByHand(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertNotIn("203.0.113.9", self.allow.read_text())
 
+    def test_allow_entry_tells_a_host_entry_from_a_range(self):
+        import ipaddress as ipa
+        nets = [ipa.ip_network("10.0.0.0/8"), ipa.ip_network("203.0.113.9/32")]
+        self.assertEqual(live.allow_entry("203.0.113.9", nets), "host")
+        self.assertEqual(live.allow_entry("10.4.5.6", nets), "range")
+        self.assertIsNone(live.allow_entry("198.51.100.1", nets))
+
+    def test_address_status_for_the_ip_page(self):
+        self.allow.write_text("203.0.113.9\n", encoding="utf-8")
+        with mock.patch.object(live, "current_bans", return_value={}):
+            status = live.address_status("203.0.113.9")
+        self.assertTrue(status["allow_listed"])
+        self.assertEqual(status["allow_entry"], "host")
+        self.assertIsNone(status["ban"])
+        self.assertTrue(status["ban_known"])
+
+    def test_address_status_survives_a_dead_runtime_socket(self):
+        with mock.patch.object(live, "current_bans", side_effect=OSError("gone")):
+            status = live.address_status("198.51.100.1")
+        self.assertFalse(status["ban_known"])
+        self.assertFalse(status["allow_listed"])
+
     def test_drop_and_ban_refuses_when_only_a_range_covers_the_host(self):
         # A single office machine must not drop the whole office range.
         self.allow.write_text("203.0.113.0/24\n", encoding="utf-8")
@@ -389,12 +411,28 @@ class ThePage(unittest.TestCase):
         self.assertIn("drop_allowlist: true", script)
         self.assertIn("function forceBan(", script)
         # It is only offered to allow-listed rows.
-        self.assertIn("banButton(row.ip, Boolean(row.ban), Boolean(row.allow_listed))", script)
+        self.assertIn('allowEntry === "host"', script)
+        # A host covered only by a range gets no one-click ban.
+        self.assertIn('allowEntry === "range"', script)
         catalogue = json.loads(
             (APP / "translations/ru/live_activity.json").read_text(encoding="utf-8")
         )["messages"]
         self.assertEqual(catalogue["Drop & ban"], "Снять и бан")
         self.assertIn("Remove from the allow list and ban", catalogue)
+
+    def test_the_ip_page_offers_the_action_that_works(self):
+        page = (APP / "templates/ip_logs.html").read_text(encoding="utf-8")
+        script = (APP / "static/js/ip_page.js").read_text(encoding="utf-8")
+        routes = (APP / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("services_live.address_status(ip)", routes)
+        for action in ('data-ipp-action="unban"', 'data-ipp-action="drop-ban"',
+                       'data-ipp-action="ban"'):
+            self.assertIn(action, page)
+        self.assertIn('status.allow_entry == "host"', page)
+        self.assertIn('status.allow_entry == "range"', page)
+        self.assertIn("js/ip_page.js", page)
+        self.assertIn("drop_allowlist: dropAllowlist", script)
+        self.assertIn("/api/unban", script)
 
     def test_the_dashboard_counts_come_from_guardd_first(self):
         source = (APP / "services.py").read_text(encoding="utf-8")

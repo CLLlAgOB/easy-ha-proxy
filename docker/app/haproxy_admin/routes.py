@@ -215,7 +215,16 @@ def view_ip_logs(ip: str):
         return "Invalid IP", 400
 
     lines = grep_last_logs_for_ip(ip, limit=30)
-    return render_template("ip_logs.html", ip=ip, lines=lines)
+    # Whether it is allow-listed or banned, so the page can offer the one
+    # action that will actually work. Never worth losing the log lines over.
+    try:
+        from . import services_live
+
+        status = services_live.address_status(ip)
+    except Exception:  # pylint: disable=broad-except
+        current_app.logger.exception("Failed to read the state of %s", ip)
+        status = None
+    return render_template("ip_logs.html", ip=ip, lines=lines, status=status)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Authelia users (управление users_database.yml)

@@ -268,15 +268,20 @@
     return badges.join("") || '<span class="la-sub">—</span>';
   }
 
-  function banButton(ip, banned, allowListed) {
+  function banButton(ip, banned, allowEntry) {
     if (banned) {
       return `<button type="button" class="btn" data-unban="${esc(ip)}">${esc(t("Unban"))}</button>`;
     }
     // A plain ban on an allow-listed address does nothing, so offer the one
     // action that works: drop its allow-list entry, then ban. Kept short so it
     // fits the same column as the ordinary button.
-    if (allowListed) {
+    if (allowEntry === "host") {
       return `<button type="button" class="btn btn-danger" data-force-ban="${esc(ip)}" title="${esc(t("Remove from the allow list, then ban"))}">${esc(t("Drop & ban"))}</button>`;
+    }
+    // Covered only by a wider range: dropping it would un-protect the rest,
+    // so there is no one-click ban -- just say why.
+    if (allowEntry === "range") {
+      return `<span class="la-sub" title="${esc(t("Allowed by a network range: edit the allow list to ban it"))}">${esc(t("In an allowed range"))}</span>`;
     }
     return `<button type="button" class="btn btn-danger" data-ban="${esc(ip)}">${esc(t("Ban address"))}</button>`;
   }
@@ -298,7 +303,7 @@
         <td class="la-mono">${statusBadge(row.last_status)} <span class="la-path" title="${esc(row.last_method)} ${esc(row.last_path)}">${esc(row.last_method)} ${esc(row.last_path)}</span><div class="la-sub">${esc(clock(row.last))}</div></td>
         <td>${stateBadges(row)}</td>
         <td class="la-actions"><div class="la-actions-stack">
-          ${banButton(row.ip, Boolean(row.ban), Boolean(row.allow_listed))}
+          ${banButton(row.ip, Boolean(row.ban), row.allow_entry || (row.allow_listed ? "host" : null))}
           <a class="la-link" href="/ip/${encodeURIComponent(row.ip)}" target="_blank" rel="noopener">${esc(t("Log lines"))}</a>
         </div></td>
       </tr>`).join("");

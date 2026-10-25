@@ -7,6 +7,43 @@
 {% endblock %}
 
 {% block content %}
+<style>
+.ipp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.ipp-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }
+.ipp-allow { color: #2e9e5b; border-color: rgba(46,158,91,.55); }
+.ipp-ban { color: #cc4b4b; border-color: rgba(204,75,75,.55); }
+.ipp-muted { color: var(--text-secondary); font-size: 12px; }
+.ipp-row .btn { padding: 4px 10px; font-size: 12px; box-shadow: none; }
+</style>
+
+{% if status %}
+<div class="card" style="margin-bottom:20px;">
+  <div class="ipp-row" id="ipp-status" data-ip="{{ ip }}">
+    {% if status.allow_listed %}
+      <span class="ipp-badge ipp-allow">Allow-listed</span>
+    {% endif %}
+    {% if status.ban %}
+      <span class="ipp-badge ipp-ban" title="{{ status.ban.label }}">Banned</span>
+      <span class="ipp-muted">{{ status.ban.label }}</span>
+    {% elif status.ban_known %}
+      <span class="ipp-muted">Not banned</span>
+    {% endif %}
+
+    {% if status.ipv4 %}
+      {% if status.ban %}
+        <button type="button" class="btn" data-ipp-action="unban">Unban</button>
+      {% elif status.allow_entry == "host" %}
+        <button type="button" class="btn btn-danger" data-ipp-action="drop-ban" title="Remove from the allow list, then ban">Drop &amp; ban</button>
+      {% elif status.allow_entry == "range" %}
+        <span class="ipp-muted">Allowed by a network range: edit the allow list to ban it</span>
+      {% else %}
+        <button type="button" class="btn btn-danger" data-ipp-action="ban">Ban address</button>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <div class="card-header">
     <h2>Last 30 matches</h2>
@@ -19,4 +56,6 @@
     <div class="alert alert-info">No matches found.</div>
   {% endif %}
 </div>
+
+<script src="{{ url_for('static', filename='js/ip_page.js') }}"></script>
 {% endblock %}
