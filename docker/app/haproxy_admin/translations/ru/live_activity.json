@@ -6,7 +6,6 @@
   "messages": {
     "Live activity": "Активность онлайн",
     "What is happening now": "Что происходит сейчас",
-    "The access log cannot be read right now, so live activity is unavailable. HAProxy traffic is unaffected.": "Журнал доступа сейчас не читается, поэтому активность онлайн недоступна. Трафик HAProxy не затронут.",
     "The access log cannot be read right now": "Журнал доступа сейчас не читается",
     "Time window": "Окно",
     "Window in seconds": "Окно в секундах",
@@ -70,6 +69,7 @@
     "Adaptive protection is not answering. Live activity is read from its memory, so it needs adaptive protection running in monitor or enforce mode": "Адаптивная защита не отвечает. Активность онлайн берётся из её памяти, поэтому защита должна работать в режиме наблюдения или боевом",
     "Signed in now": "Сейчас авторизован",
     "Authorized through Authelia right now: zero-trust sites let it in": "Сейчас авторизован через Authelia: сайты с zero trust его пускают",
-    "Refused in this window": "Отказы в этом окне"
+    "Refused in this window": "Отказы в этом окне",
+    "Live activity is read from the memory of adaptive protection, and it is not answering right now: it is restarting, or it is switched off. HAProxy traffic is unaffected. The reason is shown below the summary.": "Активность онлайн берётся из памяти адаптивной защиты, а она сейчас не отвечает: перезапускается или выключена. Трафик HAProxy не затронут. Причина показана под сводкой."
   }
 }
