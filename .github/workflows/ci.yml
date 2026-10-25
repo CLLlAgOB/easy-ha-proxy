@@ -78,10 +78,18 @@ jobs:
           cache: pip
           cache-dependency-path: installer/requirements.txt
 
+      # Galaxy downloads fail now and then for reasons that have nothing to do
+      # with the code (the same commit passed on one branch and failed on the
+      # other minutes later), so the download is retried before the job fails.
       - name: Install Ansible and the pinned collections
         run: |
           pip install -r installer/requirements.txt
-          ansible-galaxy collection install -r ansible/requirements.yml
+          for attempt in 1 2 3; do
+            ansible-galaxy collection install -r ansible/requirements.yml && exit 0
+            echo "collection download failed (attempt $attempt), retrying"
+            sleep $((attempt * 15))
+          done
+          exit 1
 
       # vars.yml, the inventories and group_vars are deliberately untracked, so
       # the playbook is parsed against a throwaway inventory. This validates
