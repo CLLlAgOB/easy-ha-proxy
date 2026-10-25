@@ -268,10 +268,17 @@
     return badges.join("") || '<span class="la-sub">—</span>';
   }
 
-  function banButton(ip, banned) {
-    return banned
-      ? `<button type="button" class="btn" data-unban="${esc(ip)}">${esc(t("Unban"))}</button>`
-      : `<button type="button" class="btn btn-danger" data-ban="${esc(ip)}">${esc(t("Ban address"))}</button>`;
+  function banButton(ip, banned, allowListed) {
+    if (banned) {
+      return `<button type="button" class="btn" data-unban="${esc(ip)}">${esc(t("Unban"))}</button>`;
+    }
+    // A plain ban on an allow-listed address does nothing, so offer the one
+    // action that works: drop its allow-list entry, then ban. Kept short so it
+    // fits the same column as the ordinary button.
+    if (allowListed) {
+      return `<button type="button" class="btn btn-danger" data-force-ban="${esc(ip)}" title="${esc(t("Remove from the allow list, then ban"))}">${esc(t("Drop & ban"))}</button>`;
+    }
+    return `<button type="button" class="btn btn-danger" data-ban="${esc(ip)}">${esc(t("Ban address"))}</button>`;
   }
 
   function renderAddresses(data) {
@@ -291,7 +298,7 @@
         <td class="la-mono">${statusBadge(row.last_status)} <span class="la-path" title="${esc(row.last_method)} ${esc(row.last_path)}">${esc(row.last_method)} ${esc(row.last_path)}</span><div class="la-sub">${esc(clock(row.last))}</div></td>
         <td>${stateBadges(row)}</td>
         <td class="la-actions"><div class="la-actions-stack">
-          ${banButton(row.ip, Boolean(row.ban))}
+          ${banButton(row.ip, Boolean(row.ban), Boolean(row.allow_listed))}
           <a class="la-link" href="/ip/${encodeURIComponent(row.ip)}" target="_blank" rel="noopener">${esc(t("Log lines"))}</a>
         </div></td>
       </tr>`).join("");
@@ -413,6 +420,23 @@
     refresh();
   }
 
+  async function forceBan(ip) {
+    // Louder confirm than a plain ban: this also changes the allow list.
+    if (!window.confirm(`${t("Remove from the allow list and ban")} ${ip}?`)) return;
+    const response = await fetch("/api/monitoring/live/ban", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken() },
+      body: JSON.stringify({ ip, drop_allowlist: true }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.ok) {
+      window.alert(t(payload.error || "The ban was not placed"));
+      return;
+    }
+    refresh();
+  }
+
   async function unban(ip) {
     if (!window.confirm(`${t("Unban")} ${ip}?`)) return;
     const response = await fetch("/api/unban", {
@@ -509,6 +533,11 @@
       const banTarget = event.target.closest("[data-ban]");
       if (banTarget) {
         ban(banTarget.dataset.ban);
+        return;
+      }
+      const forceBanTarget = event.target.closest("[data-force-ban]");
+      if (forceBanTarget) {
+        forceBan(forceBanTarget.dataset.forceBan);
         return;
       }
       const unbanTarget = event.target.closest("[data-unban]");

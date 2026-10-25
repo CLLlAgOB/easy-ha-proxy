@@ -278,14 +278,21 @@ def live_view(args: Dict[str, Any]) -> Dict[str, Any]:
     return snapshot
 
 
-def ban_address(ip: str, client_ip: str) -> Dict[str, Any]:
+def ban_address(ip: str, client_ip: str, drop_allowlist: bool = False) -> Dict[str, Any]:
     """Ban one address by hand, the way HAProxy's own rules do.
 
     It goes into tbl_ban with its own code, so the ban list, the unban button
     and the firewall mirror all treat it like any other ban; it lasts as long
     as the table keeps its entries. The operator's own address is refused:
     banning it would lock the operator out of the page that lifts the ban.
-    An allow-listed address is refused too, because the ban would not apply.
+
+    An allow-listed address is refused too, because every ban rule carries
+    `!ip_whitelist` and the firewall mirror skips the list -- a plain ban on
+    such an address does nothing. With ``drop_allowlist`` the one-host entry is
+    taken off the global allow list first, so the ban can bite; this is the
+    "it's whitelisted but the machine behind it is compromised" case. A host
+    that stays covered by a broader allow-listed range afterwards is reported
+    rather than banned, because the ban still would not apply.
     """
     if not _IPV4.match(ip or ""):
         return {"ok": False, "error": "Only an IPv4 address can be banned"}
@@ -295,15 +302,40 @@ def ban_address(ip: str, client_ip: str) -> Dict[str, Any]:
         return {"ok": False, "error": "Invalid IP"}
     if client_ip and ip == client_ip:
         return {"ok": False, "error": "That is your own address; banning it would lock you out"}
+
+    from . import services
+
     if _listed(ip, _networks(WHITELIST_GLOBAL_FILE)):
-        return {"ok": False, "error": "The address is on the global allow list, so a ban would not apply"}
+        if not drop_allowlist:
+            return {
+                "ok": False,
+                "allow_listed": True,
+                "error": "The address is on the global allow list, so a ban would not apply",
+            }
+        removed, error = services.remove_host_from_global_whitelist(ip)
+        if error:
+            return {"ok": False, "error": f"Could not update the allow list: {error}"}
+        # A single-host entry is gone now; if the address is still covered it
+        # was only ever inside a range, which this must not quietly widen away.
+        if _listed(ip, _networks(WHITELIST_GLOBAL_FILE)):
+            return {
+                "ok": False,
+                "error": (
+                    "The address is allowed by a network range, not its own entry. "
+                    "Remove or narrow that range first, then ban."
+                ),
+            }
+        if not removed:
+            return {
+                "ok": False,
+                "error": "The address was not found as a single allow-list entry",
+            }
+
     answer = haproxy_runtime_command(
         f"set table tbl_ban key {ip} data.gpc0 1 data.gpt0 {MANUAL_BAN_CODE}", SOCKET, timeout=2
     )
     if str(answer).strip():
         return {"ok": False, "error": f"HAProxy refused: {str(answer).strip()[:200]}"}
     # get_tables caches for a few seconds; the page should see the ban now.
-    from . import services
-
     services.cache_time = services.datetime.min
-    return {"ok": True, "ip": ip, "code": MANUAL_BAN_CODE}
+    return {"ok": True, "ip": ip, "code": MANUAL_BAN_CODE, "dropped_from_allowlist": bool(drop_allowlist)}

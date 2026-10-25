@@ -1027,6 +1027,58 @@ def add_to_global_whitelist(ip: str):
     return f"Added to global allow list: {cidr}", 200
 
 
+def remove_host_from_global_whitelist(ip: str) -> tuple[bool, str | None]:
+    """Remove the single-host entries for one address from the global list.
+
+    Only exact-host lines are touched -- the bare address and its /32 or /128
+    form, whichever the file happens to hold. A broader network that merely
+    covers the address is left alone on purpose: dropping a whole office range
+    to stop one infected machine behind it would be the wrong call, and the
+    caller is told the host is still covered so it can refuse the ban rather
+    than place one that cannot bite.
+
+    Returns ``(removed_any, error)``.
+    """
+    text = str(ip or "").strip()
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False, "Invalid IP"
+    forms = {str(address), f"{address}/{address.max_prefixlen}"}
+
+    ensure_whitelist_global_file()
+    removed_forms: list[str] = []
+    try:
+        with open(WHITELIST_GLOBAL_FILE, "r+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                lines = handle.readlines()
+                kept = []
+                for line in lines:
+                    if line.strip() in forms:
+                        removed_forms.append(line.strip())
+                    else:
+                        kept.append(line if line.endswith("\n") else line + "\n")
+                if removed_forms:
+                    handle.seek(0)
+                    handle.writelines(kept)
+                    handle.truncate()
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        logger.error("remove_host_from_global_whitelist: file error: %s", exc)
+        return False, str(exc)
+
+    for form in removed_forms:
+        _safe_runtime_acl("remove-global", form, _del_acl_runtime_global)
+    if removed_forms:
+        _safe_reload_haproxy()
+        logger.info("global whitelist drop-host %s (forms=%s)", text, removed_forms)
+    return bool(removed_forms), None
+
+
 # ───────── активные сессии (агрегация по IP) ─────────────────────
 
 def _all_admin_sockets() -> list[str]:

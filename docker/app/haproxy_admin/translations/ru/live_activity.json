@@ -70,6 +70,11 @@
     "Signed in now": "Сейчас авторизован",
     "Authorized through Authelia right now: zero-trust sites let it in": "Сейчас авторизован через Authelia: сайты с zero trust его пускают",
     "Refused in this window": "Отказы в этом окне",
-    "Live activity is read from the memory of adaptive protection, and it is not answering right now: it is restarting, or it is switched off. HAProxy traffic is unaffected. The reason is shown below the summary.": "Активность онлайн берётся из памяти адаптивной защиты, а она сейчас не отвечает: перезапускается или выключена. Трафик HAProxy не затронут. Причина показана под сводкой."
+    "Live activity is read from the memory of adaptive protection, and it is not answering right now: it is restarting, or it is switched off. HAProxy traffic is unaffected. The reason is shown below the summary.": "Активность онлайн берётся из памяти адаптивной защиты, а она сейчас не отвечает: перезапускается или выключена. Трафик HAProxy не затронут. Причина показана под сводкой.",
+    "Drop & ban": "Снять и бан",
+    "Remove from the allow list, then ban": "Убрать из белого списка, затем забанить",
+    "Remove from the allow list and ban": "Убрать из белого списка и забанить",
+    "The address is allowed by a network range, not its own entry. Remove or narrow that range first, then ban.": "Адрес разрешён диапазоном сети, а не отдельной записью. Сначала уберите или сузьте диапазон, потом баньте.",
+    "The address was not found as a single allow-list entry": "Адрес не найден как отдельная запись белого списка"
   }
 }

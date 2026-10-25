@@ -181,17 +181,22 @@ def api_live_ban():
     """Ban one address by hand from the live page."""
     payload = request.get_json(silent=True) or {}
     ip = str(payload.get("ip") or "").strip()
+    drop_allowlist = bool(payload.get("drop_allowlist"))
     # The operator's own address, as HAProxy saw it, so the page can refuse to
     # lock them out.
     from .routes_haproxy_config import _trusted_client_ip
 
-    result = live.ban_address(ip, _trusted_client_ip())
+    result = live.ban_address(ip, _trusted_client_ip(), drop_allowlist=drop_allowlist)
     record_request(
         "ban.place",
         object_type="ip",
         object_id=ip[:64],
         result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
-        summary="by hand from the live activity page",
+        summary=(
+            "dropped from the allow list and banned by hand from the live activity page"
+            if drop_allowlist
+            else "by hand from the live activity page"
+        ),
         detail="" if result.get("ok") else str(result.get("error"))[:300],
     )
     return jsonify(result), (200 if result.get("ok") else 400)

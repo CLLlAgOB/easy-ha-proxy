@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -44,6 +45,7 @@ SPEC.loader.exec_module(guardd)
 WINDOWS = sys.platform == "win32"
 if not WINDOWS:
     from haproxy_admin import services_live as live  # noqa: E402
+    from haproxy_admin import services as services  # noqa: E402
 
 ZONE = timezone(timedelta(hours=3))
 
@@ -300,6 +302,13 @@ class BanningByHand(unittest.TestCase):
         for patcher in (
             mock.patch.object(live, "haproxy_runtime_command", self.runtime),
             mock.patch.object(live, "WHITELIST_GLOBAL_FILE", str(self.allow)),
+            # The drop-and-ban path edits the list through the services module,
+            # which keeps its own copy of the path and its own file-reload
+            # helpers; point them at the throwaway file and stub the reload.
+            mock.patch.object(services, "WHITELIST_GLOBAL_FILE", str(self.allow)),
+            mock.patch.object(services, "ensure_whitelist_global_file", lambda: None),
+            mock.patch.object(services, "_safe_runtime_acl", lambda *a, **k: ""),
+            mock.patch.object(services, "_safe_reload_haproxy", lambda *a, **k: ""),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -316,6 +325,42 @@ class BanningByHand(unittest.TestCase):
                            ("300.1.1.1", ""), ("2001:db8::1", ""), ("1.2.3.4; clear table", "")):
             with self.subTest(ip=ip):
                 self.assertFalse(live.ban_address(ip, client)["ok"])
+        self.runtime.assert_not_called()
+
+    def test_a_plain_ban_on_an_allow_listed_address_is_flagged(self):
+        # 10.4.5.6 is inside the 10.0.0.0/8 entry the fixture wrote.
+        result = live.ban_address("10.4.5.6", "198.51.100.1")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("allow_listed"))
+        self.runtime.assert_not_called()
+
+    def test_drop_and_ban_removes_the_host_entry_then_bans(self):
+        self.allow.write_text("10.0.0.0/8\n203.0.113.9/32\n", encoding="utf-8")
+        result = live.ban_address("203.0.113.9", "198.51.100.1", drop_allowlist=True)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dropped_from_allowlist"])
+        self.assertNotIn("203.0.113.9", self.allow.read_text())
+        # The unrelated range is untouched.
+        self.assertIn("10.0.0.0/8", self.allow.read_text())
+        self.assertEqual(
+            self.runtime.call_args.args[0],
+            "set table tbl_ban key 203.0.113.9 data.gpc0 1 data.gpt0 50",
+        )
+
+    def test_drop_and_ban_removes_a_bare_host_line_too(self):
+        # The entry may have been written without a /32, as a bare address.
+        self.allow.write_text("203.0.113.9\n", encoding="utf-8")
+        result = live.ban_address("203.0.113.9", "198.51.100.1", drop_allowlist=True)
+        self.assertTrue(result["ok"])
+        self.assertNotIn("203.0.113.9", self.allow.read_text())
+
+    def test_drop_and_ban_refuses_when_only_a_range_covers_the_host(self):
+        # A single office machine must not drop the whole office range.
+        self.allow.write_text("203.0.113.0/24\n", encoding="utf-8")
+        result = live.ban_address("203.0.113.9", "198.51.100.1", drop_allowlist=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("range", result["error"].lower())
+        self.assertIn("203.0.113.0/24", self.allow.read_text())
         self.runtime.assert_not_called()
 
 
@@ -335,6 +380,21 @@ class ThePage(unittest.TestCase):
         sort_handler = script.split('document.querySelectorAll("th[data-sort]").forEach')[1].split("});\n    });")[0]
         self.assertIn("render();", sort_handler)
         self.assertNotIn("refresh()", sort_handler)
+
+    def test_the_allow_listed_rows_offer_drop_and_ban(self):
+        script = (APP / "static/js/live_activity.js").read_text(encoding="utf-8")
+        # The compact control, its handler and the request flag.
+        self.assertIn("data-force-ban", script)
+        self.assertIn("Drop & ban", script)
+        self.assertIn("drop_allowlist: true", script)
+        self.assertIn("function forceBan(", script)
+        # It is only offered to allow-listed rows.
+        self.assertIn("banButton(row.ip, Boolean(row.ban), Boolean(row.allow_listed))", script)
+        catalogue = json.loads(
+            (APP / "translations/ru/live_activity.json").read_text(encoding="utf-8")
+        )["messages"]
+        self.assertEqual(catalogue["Drop & ban"], "Снять и бан")
+        self.assertIn("Remove from the allow list and ban", catalogue)
 
     def test_the_dashboard_counts_come_from_guardd_first(self):
         source = (APP / "services.py").read_text(encoding="utf-8")
