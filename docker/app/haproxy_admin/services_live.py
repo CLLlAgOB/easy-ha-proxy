@@ -3,17 +3,17 @@
 # The live activity page: who is hitting the gateway right now, what they get
 # and what the gateway refuses them.
 #
-# The access log is read by haproxy-controld (logs-live), which aggregates a
-# window of seconds to minutes. What the log cannot show is added here from
-# HAProxy itself: an address that is banned, or over the connection limit, is
-# refused before HTTP and never reaches the log at all -- the office that
-# lost every site for an hour on a connection-rate limit left no line behind.
+# The requests come from easy-ha-proxy-guardd, which reads every line of the
+# access log once anyway and keeps the latest ones in memory: the page costs
+# no extra read of the log, however many people have it open and however
+# heavy the traffic. What the log cannot show is added here from HAProxy
+# itself: an address that is banned, or over the connection limit, is refused
+# before HTTP and never reaches the log at all -- the office that lost every
+# site for an hour on a connection-rate limit left no line behind.
 
 from __future__ import annotations
 
-import base64
 import ipaddress
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -26,7 +26,8 @@ from .services import (
     get_tables,
 )
 from .services_haproxy_config import CONFIG_YAML, _load_yaml
-from .utils import _controld_request, haproxy_runtime_command
+from .guardd_client import GuarddUnavailable, guardd_live
+from .utils import haproxy_runtime_command
 
 LOG = logging.getLogger("haproxy-admin")
 
@@ -63,7 +64,7 @@ _CONN_ROW = re.compile(
 
 
 class LiveUnavailable(RuntimeError):
-    """haproxy-controld did not answer the snapshot request."""
+    """guardd did not answer the snapshot request."""
 
 
 def normalize_request(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,17 +95,19 @@ def normalize_request(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def fetch_snapshot(request: Dict[str, Any]) -> Dict[str, Any]:
-    payload = {key: value for key, value in request.items() if key != "country"}
-    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-    response = _controld_request(f"logs-live {encoded}", timeout=30.0)
-    if not response.startswith("OK "):
-        raise LiveUnavailable(response[:300] or "empty response from controld")
+    params = {key: value for key, value in request.items() if key != "country"}
+    if params.get("blocked"):
+        params["blocked"] = "1"
     try:
-        data = json.loads(base64.b64decode(response[3:].strip()))
-    except (ValueError, TypeError) as exc:
-        raise LiveUnavailable(f"unreadable response from controld: {exc}") from exc
-    if not isinstance(data, dict):
-        raise LiveUnavailable("controld returned something other than an object")
+        data = guardd_live(params)
+    except GuarddUnavailable as exc:
+        raise LiveUnavailable(
+            "Adaptive protection is not answering. Live activity is read from its "
+            "memory, so it needs adaptive protection running in monitor or enforce "
+            f"mode ({exc})"
+        ) from exc
+    if not data.get("ok"):
+        raise LiveUnavailable(str(data.get("error") or "guardd refused the request"))
     return data
 
 

@@ -59,5 +59,13 @@ ReadOnlyPaths=/run/haproxy /etc/haproxy {{ guardd_log_file | default('/var/log/h
 # keeps a mistake in that accounting from crowding out HAProxy.
 MemoryMax={{ guardd_memory_max | default('320M') }}
 
+# Under a flood HAProxy needs the CPU more than this does. Reading the log is
+# bounded per cycle anyway; at a lower priority it also gives way, and the
+# live activity page falls behind rather than the gateway.
+Nice=10
+CPUWeight=50
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
 [Install]
 WantedBy=multi-user.target

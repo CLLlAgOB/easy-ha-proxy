@@ -42,8 +42,6 @@
     "New connections": "Новых соединений",
     "Nobody is over the connection limit": "Сверх лимита соединений никого нет",
     "Updated at": "Обновлено в",
-    "Heavy traffic: only the last": "Большой поток: прочитаны только последние",
-    "of the window could be read": "окна",
     "one bar per": "один столбец —",
     "Connection limit": "Лимит соединений",
     "Allow-listed": "В белом списке",
@@ -65,6 +63,11 @@
     "Unknown name or bad request": "Неизвестное имя или неверный запрос",
     "Only an IPv4 address can be banned": "Забанить можно только IPv4-адрес",
     "That is your own address; banning it would lock you out": "Это ваш собственный адрес: бан закрыл бы вам доступ",
-    "The address is on the global allow list, so a ban would not apply": "Адрес в глобальном белом списке, бан на него не подействует"
+    "The address is on the global allow list, so a ban would not apply": "Адрес в глобальном белом списке, бан на него не подействует",
+    "Heavy traffic: the data is behind the log by": "Большой поток: данные отстают от журнала на",
+    "Reading is capped so that watching cannot slow the gateway down.": "Чтение ограничено, чтобы наблюдение не замедляло шлюз.",
+    "Only the last": "В памяти только последние",
+    "of the window are in memory": "окна",
+    "Adaptive protection is not answering. Live activity is read from its memory, so it needs adaptive protection running in monitor or enforce mode": "Адаптивная защита не отвечает. Активность онлайн берётся из её памяти, поэтому защита должна работать в режиме наблюдения или боевом"
   }
 }

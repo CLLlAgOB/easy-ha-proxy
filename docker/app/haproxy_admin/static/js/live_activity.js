@@ -189,8 +189,15 @@
     setText("la-updated", `${t("Updated at")} ${clock(data.now)}`);
 
     const note = byId("la-note");
-    if (data.truncated) {
-      note.textContent = `${t("Heavy traffic: only the last")} ${duration(data.covered_seconds)} ${t("of the window could be read")}`;
+    // Reading the log is capped so that watching it can never compete with
+    // HAProxy; under a flood the page falls behind instead, and says so.
+    const behind = Number(data.lag_bytes || 0) > 0 && Number(data.lag_seconds || 0) > 15;
+    if (behind) {
+      note.textContent = `${t("Heavy traffic: the data is behind the log by")} ${duration(data.lag_seconds)}. ` +
+        t("Reading is capped so that watching cannot slow the gateway down.");
+      note.classList.add("la-warn");
+    } else if (data.truncated) {
+      note.textContent = `${t("Only the last")} ${duration(data.covered_seconds)} ${t("of the window are in memory")}`;
       note.classList.add("la-warn");
     } else {
       note.textContent = `${t("Time window")}: ${duration(data.window)} · ${t("one bar per")} ${duration(data.bucket_seconds)}`;

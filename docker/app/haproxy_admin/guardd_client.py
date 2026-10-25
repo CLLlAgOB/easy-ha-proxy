@@ -218,6 +218,16 @@ def _request_log_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict
     return data
 
 
+def guardd_live(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The live activity snapshot, answered from guardd's memory."""
+    return _request_log_get("/api/v1/guard/live", params=params)
+
+
+def guardd_attackers() -> Dict[str, Any]:
+    """Top addresses answered 400 and 451 over the last day, from memory."""
+    return _request_log_get("/api/v1/guard/attackers")
+
+
 def guardd_requests(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Search the bounded request log."""
     return _request_log_get("/api/v1/guard/requests", params=params)

@@ -24,6 +24,7 @@ import ipaddress
 import logging
 import subprocess
 import shlex
+import time
 from io import StringIO
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -1509,6 +1510,21 @@ def get_attackers():
     В текущей версии UI лог-файл читать не пытаемся — всё берём через root-демон
     haproxy-controld, чтобы не раздавать права на LOG_FILE процессу веб-приложения.
     """
+    # guardd counts these as it reads the log anyway; reading the whole day's
+    # log again on every visit to the dashboard is what this replaces. Right
+    # after a restart it has too little to show, and the full read answers.
+    try:
+        from .guardd_client import guardd_attackers
+
+        counted = guardd_attackers()
+        if counted.get("ok") and float(counted.get("since") or 0) <= time.time() - 3600:
+            return {
+                "code_400": counted.get("code_400") or [],
+                "code_451": counted.get("code_451") or [],
+                "diagnostic": {"source": "guardd", "since": counted.get("since")},
+            }
+    except Exception:  # pylint: disable=broad-except
+        logger.debug("guardd attackers unavailable; reading the log", exc_info=True)
     data = controld_get_attackers()
 
     # ошибки демона пробрасываем как есть, чтобы было видно причину (сокет/команда/и т.д.)

@@ -38,7 +38,8 @@ import socket
 import sqlite3
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict, deque
+from datetime import datetime
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -747,6 +748,7 @@ _BAD_REQUEST_TAIL = re.compile(r"<BADREQ>\s*$")
 # rather than by position, which is what keeps the middle free to change.
 _ID_FIELD = re.compile(r"(?:^|\s)id=(?P<id>\S+)")
 _HOST_FIELD = re.compile(r"(?:^|\s)host=(?P<host>\S+)")
+_BAN_REASON_FIELD = re.compile(r'ban_reason="(?P<reason>[^"]*)"')
 _MONTHS = {
     name: index
     for index, name in enumerate(
@@ -834,6 +836,10 @@ class ParsedRequest:
     request_id: str = ""
     bytes_out: int = 0
     duration_ms: int = 0
+    # HAProxy's termination state and the ban fragment's reason, for the live
+    # activity page: what the gateway did with the request, and why.
+    term: str = ""
+    ban_reason: str = ""
 
     # A refusal counts as "already handled" only when it was about who the
     # client is, not about what it sent. 451 is a geo block, 401 a failed IP
@@ -1031,6 +1037,11 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
     stamp = parse_stamp(head.group("stamp"))
     identifier = _ID_FIELD.search(remainder)
     request_id = identifier.group("id") if identifier else ""
+    term = remainder.split(None, 1)[0] if remainder else ""
+    ban_reason = ""
+    if 'ban_reason="' in remainder:
+        found = _BAN_REASON_FIELD.search(remainder)
+        ban_reason = found.group("reason")[:160] if found else ""
 
     tail = _ACCESS_TAIL.search(remainder)
     if tail is None:
@@ -1047,6 +1058,8 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
                 ts=stamp,
                 request_id=request_id,
                 bytes_out=bytes_out,
+                term=term,
+                ban_reason=ban_reason,
             )
         return None
 
@@ -1070,6 +1083,8 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         request_id=request_id,
         bytes_out=bytes_out,
         duration_ms=_total_time(head.group("times")),
+        term=term,
+        ban_reason=ban_reason,
     )
 
 
@@ -1095,6 +1110,10 @@ class GuardConfig:
     haproxy_socket: str = "/run/haproxy/admin.sock"
     log_file: str = "/var/log/haproxy.log"
     log_read_bytes_per_cycle: int = 4 * 1024 * 1024
+    # The live activity page keeps the latest requests in memory. Bounded by
+    # count and by age, whichever bites first; 0 records turns it off.
+    live_buffer_records: int = 100_000
+    live_buffer_seconds: int = 3600
     whitelist_files: Tuple[str, ...] = (
         "/etc/haproxy/whitelist.ip",
         "/etc/haproxy/admin.allow",
@@ -1168,6 +1187,12 @@ def load_config(path: str) -> GuardConfig:
             default=4 * 1024 * 1024,
             min_v=64 * 1024,
             max_v=64 * 1024 * 1024,
+        ),
+        live_buffer_records=_clamp_int(
+            limits.get("live_buffer_records"), default=100_000, min_v=0, max_v=1_000_000
+        ),
+        live_buffer_seconds=_clamp_int(
+            limits.get("live_buffer_seconds"), default=3600, min_v=60, max_v=6 * 3600
         ),
         whitelist_files=_string_tuple(
             exclusions.get("whitelist_files"),
@@ -2643,6 +2668,400 @@ class Enforcer:
 # ---------------------------------------------------------------------------
 
 
+
+# ---------------------------------------------------------------------------
+# Live activity
+# ---------------------------------------------------------------------------
+#
+# The live activity page asks "who is hitting the gateway right now". It used
+# to be answered by reading the access log again on every refresh of every
+# open page: harmless at three requests a second, several seconds of CPU per
+# refresh under a flood -- exactly when HAProxy needs the CPU. This daemon
+# already reads every line once, within a byte budget, for scoring. So the
+# latest requests are kept here in memory, compactly, and the page is
+# answered from memory: no extra read, no second parse, and a flood larger
+# than the budget makes the page fall behind instead of the gateway.
+
+LIVE_MAX_ADDRESSES = 300
+LIVE_MAX_BLOCKED_ADDRESSES = 500
+LIVE_MAX_EVENTS = 300
+LIVE_CACHE_SECONDS = 2.0
+LIVE_WANTED_SECONDS = 120
+LIVE_FAST_TICK_SECONDS = 2.0
+# Index of each field in a live record.
+(L_TS, L_IP, L_STATUS, L_HOST, L_PATH, L_METHOD, L_BACKEND, L_BYTES,
+ L_DURATION, L_TERM, L_REASON, L_REFUSAL) = range(12)
+
+_INTERN: Dict[str, str] = {}
+
+
+def _interned(value: str) -> str:
+    """Hosts, backends and states repeat endlessly; keep one copy of each."""
+    if len(_INTERN) > 50_000:
+        _INTERN.clear()
+    return _INTERN.setdefault(value, value)
+
+
+def line_epoch(line: str) -> Optional[float]:
+    """The syslog timestamp at the start of a line, which carries its zone."""
+    stamp = line[:40].split(" ", 1)[0]
+    try:
+        return datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return None
+
+
+def live_refusal(status: int, backend: str, term: str, ban_reason: str) -> str:
+    """Why the gateway itself turned this request away, or "".
+
+    The codes are the gateway's own: a server never chose them, which is
+    what <NOSRV> in the backend field says. An application's own 401 or 403
+    is not a refusal by the gateway.
+    """
+    if status == 423 or ban_reason:
+        return "banned"
+    if status == 429:
+        return "rate-limited"
+    if not backend.endswith("/<NOSRV>"):
+        return ""
+    return {451: "geo", 401: "zero-trust", 403: "denied", 400: "invalid-request"}.get(
+        status, "refused" if term.startswith("PR") else ""
+    )
+
+
+def live_record(request: "ParsedRequest", ts: float) -> tuple:
+    return (
+        ts,
+        request.client_ip,
+        request.status,
+        _interned(request.host),
+        request.path[:200] if not request.bad_request else "<BADREQ>",
+        _interned(request.method),
+        _interned(request.backend),
+        request.bytes_out,
+        request.duration_ms,
+        _interned(request.term),
+        request.ban_reason,
+        live_refusal(request.status, request.backend, request.term, request.ban_reason),
+    )
+
+
+def _live_matches(record: tuple, filters: Dict[str, Any]) -> bool:
+    ip = filters.get("ip")
+    if ip and not record[L_IP].startswith(ip):
+        return False
+    host = filters.get("host")
+    if host and record[L_HOST] != host:
+        return False
+    query = filters.get("q")
+    if query and query not in record[L_PATH].lower() and query not in record[L_HOST]:
+        return False
+    status = filters.get("status")
+    if status and str(record[L_STATUS])[:1] != status[:1]:
+        return False
+    if filters.get("blocked") and not record[L_REFUSAL]:
+        return False
+    return True
+
+
+def live_filters(raw: Dict[str, Any]) -> Dict[str, Any]:
+    filters: Dict[str, Any] = {}
+    ip = str(raw.get("ip") or "").strip()
+    if ip:
+        if not re.fullmatch(r"[0-9A-Fa-f:.]{1,45}", ip):
+            raise ValueError("invalid ip filter")
+        filters["ip"] = ip
+    host = str(raw.get("host") or "").strip().lower()
+    if host:
+        if not re.fullmatch(r"[a-z0-9.-]{1,253}", host):
+            raise ValueError("invalid host filter")
+        filters["host"] = host
+    query = str(raw.get("q") or "").strip().lower()
+    if query:
+        filters["q"] = query[:120]
+    status = str(raw.get("status") or "").strip()
+    if status:
+        if status not in ("1xx", "2xx", "3xx", "4xx", "5xx"):
+            raise ValueError("invalid status filter")
+        filters["status"] = status
+    if str(raw.get("blocked") or "").lower() in ("1", "true", "yes", "on"):
+        filters["blocked"] = True
+    return filters
+
+
+def live_aggregate(
+    records: Iterable[tuple], *, now: float, window: int, filters: Dict[str, Any],
+    covered: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Totals, addresses, sites, a timeline and the latest requests.
+
+    Written for the worst case it has to survive: a flood from tens of
+    thousands of distinct addresses. Each address is a short list, and its
+    sites and refusal reasons are counted only once it has more than one.
+    """
+    since = now - window
+    bucket = max(1, window // 60)
+    buckets = (window + bucket - 1) // bucket
+    ok_counts = [0] * buckets
+    error_counts = [0] * buckets
+    blocked_counts = [0] * buckets
+    # address -> [requests, errors, 5xx, refused, bytes, ms, first ts,
+    #             last record, {host: n} or host, {reason: n} or reason]
+    addresses: Dict[str, list] = {}
+    # site -> [requests, errors, 5xx, refused, ms, set of addresses, backend]
+    sites: Dict[str, list] = {}
+    statuses: Counter = Counter()
+    refusals: Counter = Counter()
+    events: deque = deque(maxlen=LIVE_MAX_EVENTS)
+    total = errors_total = server_total = blocked_total = bytes_total = 0
+    filtering = bool(filters)
+
+    for record in records:
+        ts = record[0]
+        if ts < since or (filtering and not _live_matches(record, filters)):
+            continue
+        status = record[2]
+        refusal = record[11]
+        error = status >= 400
+        server_error = status >= 500
+        size = record[7]
+        host = record[3]
+        total += 1
+        bytes_total += size
+        statuses[status] += 1
+        slot = int((ts - since) // bucket)
+        if slot >= buckets:
+            slot = buckets - 1
+        if refusal:
+            blocked_total += 1
+            refusals[refusal] += 1
+            blocked_counts[slot] += 1
+        elif error:
+            error_counts[slot] += 1
+        else:
+            ok_counts[slot] += 1
+        if error:
+            errors_total += 1
+            if server_error:
+                server_total += 1
+
+        ip = record[1]
+        entry = addresses.get(ip)
+        if entry is None:
+            addresses[ip] = [1, int(error), int(server_error), int(bool(refusal)), size,
+                             record[8], ts, record, host, (record[10] or refusal) if refusal else ""]
+        else:
+            entry[0] += 1
+            entry[1] += error
+            entry[2] += server_error
+            entry[4] += size
+            entry[5] += record[8]
+            entry[7] = record
+            known = entry[8]
+            if known.__class__ is dict:
+                known[host] = known.get(host, 0) + 1
+            elif known != host:
+                entry[8] = {known: entry[0] - 1, host: 1}
+            if refusal:
+                entry[3] += 1
+                reason = record[10] or refusal
+                held = entry[9]
+                if held.__class__ is dict:
+                    held[reason] = held.get(reason, 0) + 1
+                elif not held:
+                    entry[9] = reason
+                elif held != reason:
+                    entry[9] = {held: entry[3] - 1, reason: 1}
+
+        site = sites.get(host)
+        if site is None:
+            site = sites[host] = [0, 0, 0, 0, 0, set(), ""]
+        site[0] += 1
+        site[1] += error
+        site[2] += server_error
+        site[3] += bool(refusal)
+        site[4] += record[8]
+        site[5].add(ip)
+        if not site[6] and not record[6].endswith("/<NOSRV>"):
+            site[6] = record[6].split("/", 1)[0]
+        events.append(record)
+
+    covered = window if covered is None else max(1, min(window, covered))
+
+    def most(value: Any) -> Tuple[str, int]:
+        if value.__class__ is dict:
+            return max(value.items(), key=lambda item: item[1])[0], len(value)
+        return value, 1 if value else 0
+
+    def address_row(ip: str, entry: list) -> Dict[str, Any]:
+        last = entry[7]
+        top_host, host_count = most(entry[8])
+        reason, _ = most(entry[9])
+        span = max(1.0, min(covered, now - entry[6] + 1))
+        return {
+            "ip": ip, "requests": entry[0], "rate": round(entry[0] / span, 2),
+            "errors": entry[1], "server_errors": entry[2], "blocked": entry[3],
+            "bytes": entry[4], "avg_ms": entry[5] // entry[0],
+            "top_host": top_host, "hosts": host_count if top_host or host_count > 1 else 0,
+            "last": last[0], "last_status": last[2], "last_method": last[5],
+            "last_path": last[4][:160], "last_host": last[3], "reason": reason,
+        }
+
+    ranked = sorted(addresses.items(), key=lambda item: -item[1][0])[:LIVE_MAX_ADDRESSES]
+    chosen = {ip for ip, _ in ranked}
+    blocked = sorted(
+        ((ip, e) for ip, e in addresses.items() if e[3] and ip not in chosen),
+        key=lambda item: -item[1][3],
+    )[:LIVE_MAX_BLOCKED_ADDRESSES]
+    rows = [address_row(ip, e) for ip, e in ranked] + [address_row(ip, e) for ip, e in blocked]
+    site_rows = sorted(
+        (
+            {
+                "host": host, "requests": v[0], "errors": v[1], "server_errors": v[2],
+                "blocked": v[3], "addresses": len(v[5]), "backend": v[6],
+                "avg_ms": v[4] // v[0],
+            }
+            for host, v in sites.items()
+        ),
+        key=lambda row: -row["requests"],
+    )[:200]
+    return {
+        "ok": True,
+        "now": now,
+        "window": window,
+        "covered_seconds": covered,
+        "truncated": covered < window,
+        "bucket_seconds": bucket,
+        "totals": {
+            "requests": total, "errors": errors_total, "server_errors": server_total,
+            "blocked": blocked_total, "bytes": bytes_total, "addresses": len(addresses),
+            "rate": round(total / max(1, covered), 2),
+        },
+        "timeline": [
+            {"ok": ok_counts[i], "errors": error_counts[i], "blocked": blocked_counts[i]}
+            for i in range(buckets)
+        ],
+        "statuses": {str(code): count for code, count in statuses.items()},
+        "refusals": dict(refusals),
+        "addresses": rows,
+        "addresses_total": len(addresses),
+        "sites": site_rows,
+        "events": [
+            {
+                "ts": r[0], "ip": r[1], "host": r[3], "method": r[5], "path": r[4],
+                "status": r[2], "duration_ms": r[8], "bytes": r[7], "backend": r[6],
+                "term": r[9], "refusal": r[11], "ban_reason": r[10],
+            }
+            for r in reversed(events)
+        ],
+    }
+
+
+class LiveBuffer:
+    """The latest requests, in memory, bounded by count and by age."""
+
+    def __init__(self, max_records: int, max_seconds: int) -> None:
+        self.max_records = max(1, int(max_records))
+        self.max_seconds = max(60, int(max_seconds))
+        self._records: deque = deque()
+        self._lock = threading.Lock()
+        self._compute_lock = threading.Lock()
+        self._cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._wanted_at = 0.0
+        self.started = time.time()
+        self.evicted_for_size = 0
+        # (hour start, status) -> Counter of addresses, for the dashboard's
+        # top 400/451 -- which used to read the whole day's log on every visit.
+        self._hourly: Dict[Tuple[int, int], Counter] = {}
+
+    def wanted(self) -> bool:
+        """Someone has the live page open, so the log is followed closely."""
+        return time.monotonic() - self._wanted_at < LIVE_WANTED_SECONDS
+
+    def extend(self, records: List[tuple]) -> None:
+        if not records:
+            return
+        with self._lock:
+            self._records.extend(records)
+            overflow = len(self._records) - self.max_records
+            for _ in range(max(0, overflow)):
+                self._records.popleft()
+            self.evicted_for_size += max(0, overflow)
+            horizon = records[-1][L_TS] - self.max_seconds
+            while self._records and self._records[0][L_TS] < horizon:
+                self._records.popleft()
+            for record in records:
+                if record[L_STATUS] in (400, 451):
+                    hour = int(record[L_TS]) // 3600 * 3600
+                    self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
+            if len(self._hourly) > 60:
+                oldest = int(records[-1][L_TS]) // 3600 * 3600 - 25 * 3600
+                for key in [key for key in self._hourly if key[0] < oldest]:
+                    del self._hourly[key]
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            oldest = self._records[0][L_TS] if self._records else None
+            newest = self._records[-1][L_TS] if self._records else None
+            return {"records": len(self._records), "max_records": self.max_records,
+                    "oldest": oldest, "newest": newest, "started": self.started}
+
+    def snapshot(self, raw: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        self._wanted_at = time.monotonic()
+        try:
+            window = int(raw.get("window") or 60)
+        except (TypeError, ValueError):
+            raise ValueError("window must be a number of seconds")
+        window = max(5, min(self.max_seconds, window))
+        filters = live_filters(raw)
+        key = json.dumps([window, filters], sort_keys=True)
+        # One computation at a time, however many pages are open; the same
+        # question asked twice inside two seconds gets the same answer.
+        with self._compute_lock:
+            cached = self._cache.get(key)
+            if cached and time.monotonic() - cached[0] < LIVE_CACHE_SECONDS:
+                return cached[1]
+            now = time.time() if now is None else now
+            since = now - window
+            with self._lock:
+                selected = []
+                for record in reversed(self._records):
+                    if record[L_TS] < since:
+                        break
+                    selected.append(record)
+                oldest = self._records[0][L_TS] if self._records else now
+            selected.reverse()
+            # Fewer seconds than asked for when the buffer does not reach back
+            # that far: the daemon just started, or a flood filled it.
+            if oldest <= since:
+                covered = window
+            elif self.evicted_for_size:
+                covered = max(1, int(now - oldest))
+            elif self.started > since:
+                covered = max(1, int(now - self.started))
+            else:
+                covered = window  # simply no traffic before the oldest request
+            result = live_aggregate(selected, now=now, window=window, filters=filters, covered=covered)
+            if len(self._cache) > 32:
+                self._cache.clear()
+            self._cache[key] = (time.monotonic(), result)
+            return result
+
+    def attackers(self, now: Optional[float] = None, limit: int = 10) -> Dict[str, Any]:
+        now = time.time() if now is None else now
+        since = int(now) // 3600 * 3600 - 23 * 3600
+        totals = {400: Counter(), 451: Counter()}
+        with self._lock:
+            for (hour, status), counter in self._hourly.items():
+                if hour >= since:
+                    totals[status].update(counter)
+        return {
+            "code_400": [{"ip": ip, "count": n} for ip, n in totals[400].most_common(limit)],
+            "code_451": [{"ip": ip, "count": n} for ip, n in totals[451].most_common(limit)],
+            "since": max(self.started, since),
+            "diagnostic": {"source": "guardd"},
+        }
+
 class GuardEngine:
     """Collects from both sources; contains no detection rules yet."""
 
@@ -2680,6 +3099,14 @@ class GuardEngine:
                 self.database.get_state("log_cursor", "{}")
             )
         self.cursor = LogCursor(config.log_file, cursor_state)
+        self.live: Optional[LiveBuffer] = (
+            LiveBuffer(config.live_buffer_records, config.live_buffer_seconds)
+            if config.live_buffer_records > 0 else None
+        )
+        # Bytes the fast ticks between polls already took from this cycle's
+        # read budget, so following the log closely never reads more per
+        # cycle than the configured limit.
+        self._cycle_bytes = 0
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -2736,8 +3163,26 @@ class GuardEngine:
                 next_maintenance = (
                     time.monotonic() + self.config.maintenance_interval_seconds
                 )
-            elapsed = time.monotonic() - started
-            self._stop.wait(max(0.5, interval - elapsed))
+            deadline = started + interval
+            while not self._stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.5:
+                    break
+                if self.live is None or not self.live.wanted():
+                    self._stop.wait(remaining)
+                    break
+                # Someone is watching: read the new lines every couple of
+                # seconds instead of every interval -- out of the same budget.
+                if self._stop.wait(min(LIVE_FAST_TICK_SECONDS, remaining)):
+                    break
+                share = int(self.config.log_read_bytes_per_cycle * LIVE_FAST_TICK_SECONDS / interval)
+                allowance = min(share, self.config.log_read_bytes_per_cycle - self._cycle_bytes)
+                if allowance > 0:
+                    try:
+                        self.ingest_log(_utc_now(), max_bytes=allowance)
+                    except Exception:  # pylint: disable=broad-except
+                        LOG.debug("fast log read failed", exc_info=True)
+            self._cycle_bytes = 0
 
     # -- collection -------------------------------------------------------
 
@@ -2746,7 +3191,10 @@ class GuardEngine:
         self.exclusions.reload_files()
         tables = self.read_tables()
         from_tables = self.ingest_tables(tables, now)
-        from_log = self.ingest_log(now)
+        from_log = self.ingest_log(
+            now,
+            max_bytes=max(64 * 1024, self.config.log_read_bytes_per_cycle - self._cycle_bytes),
+        )
 
         # Runs in every mode: expiry and the kill switch have to keep working
         # after enforcement is turned off.
@@ -2880,17 +3328,23 @@ class GuardEngine:
                     written += 1
         return written
 
-    def ingest_log(self, now: int) -> int:
-        lines = self.cursor.read(self.config.log_read_bytes_per_cycle)
+    def ingest_log(self, now: int, max_bytes: Optional[int] = None) -> int:
+        before = self.cursor.offset
+        lines = self.cursor.read(max_bytes or self.config.log_read_bytes_per_cycle)
+        self._cycle_bytes += max(0, self.cursor.offset - before)
         if not lines:
             return 0
         self.lines_read += len(lines)
         parsed = 0
+        live: List[tuple] = []
         for line in lines:
             request = parse_access_line(line)
             if request is None:
                 continue
             parsed += 1
+            if self.live is not None:
+                ts = line_epoch(line)
+                live.append(live_record(request, ts if ts is not None else float(now)))
             if self.requests is not None:
                 # Diagnostics and scoring are separate concerns that happen to
                 # need the same read of the same file. The request log keeps
@@ -2899,6 +3353,8 @@ class GuardEngine:
                 self.requests.add(request)
             self.observe_request(request, now)
         self.lines_parsed += parsed
+        if self.live is not None:
+            self.live.extend(live)
         if self.requests is not None:
             self.requests.flush(now)
         return len(lines)
@@ -3761,6 +4217,37 @@ class GuardHandler(BaseHTTPRequestHandler):
                         ],
                     },
                 )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path in ("/api/v1/guard/live", "/api/v1/guard/attackers"):
+            live = engine.live
+            if live is None:
+                self._send_json(404, {"ok": False, "error": "the live buffer is off"})
+                return
+            try:
+                if path.endswith("/attackers"):
+                    self._send_json(200, {"ok": True, **live.attackers()})
+                    return
+                query = parse_qs(urlparse(self.path).query or "")
+                raw = {name: (values[0] if values else "") for name, values in query.items()}
+                result = live.snapshot(raw)
+                # How far behind the log the buffer is: the newest line it
+                # holds, and how many bytes are still unread.
+                status = live.status()
+                result = {
+                    **result,
+                    "buffer": status,
+                    "lag_bytes": engine.cursor.lag_bytes,
+                    "lag_seconds": (
+                        max(0, int(result["now"] - status["newest"]))
+                        if status.get("newest") else None
+                    ),
+                }
+                self._send_json(200, result)
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return

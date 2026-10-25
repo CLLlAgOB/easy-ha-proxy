@@ -24,6 +24,8 @@
     "max_tracked_ips": {{ guardd_max_tracked_ips | default(5000) }},
     "max_paths_per_ip": {{ guardd_max_paths_per_ip | default(32) }},
     "log_read_bytes_per_cycle": {{ guardd_log_read_bytes_per_cycle | default(4194304) }},
+    "live_buffer_records": {{ guardd_live_buffer_records | default(100000) }},
+    "live_buffer_seconds": {{ guardd_live_buffer_seconds | default(3600) }},
     "event_retention_days": {{ guardd_event_retention_days | default(30) }}
   }
 }
