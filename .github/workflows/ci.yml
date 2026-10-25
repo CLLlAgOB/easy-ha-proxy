@@ -78,18 +78,29 @@ jobs:
           cache: pip
           cache-dependency-path: installer/requirements.txt
 
-      # Galaxy downloads fail now and then for reasons that have nothing to do
-      # with the code (the same commit passed on one branch and failed on the
-      # other minutes later), so the download is retried before the job fails.
+      # Galaxy keeps failing to serve GitHub's runners now and then (the same
+      # commit passes on one branch and fails on the other minutes later), so
+      # the job must not depend on it: the collections are cached, and when
+      # Galaxy does not answer they are built from the same tagged versions on
+      # GitHub. --no-deps there because community.docker's dependency comes
+      # from Galaxy again, and a syntax check does not need it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ansible/collections
+          key: ansible-collections-${{ hashFiles('ansible/requirements.yml') }}
+
       - name: Install Ansible and the pinned collections
         run: |
           pip install -r installer/requirements.txt
-          for attempt in 1 2 3; do
+          for attempt in 1 2; do
             ansible-galaxy collection install -r ansible/requirements.yml && exit 0
-            echo "collection download failed (attempt $attempt), retrying"
-            sleep $((attempt * 15))
+            echo "Galaxy download failed (attempt $attempt)"
+            sleep 10
           done
-          exit 1
+          echo "Galaxy is not answering; installing from the GitHub tags instead"
+          ansible-galaxy collection install --no-deps --force \
+            "git+https://github.com/ansible-collections/ansible.posix.git,1.6.2" \
+            "git+https://github.com/ansible-collections/community.docker.git,5.2.1"
 
       # vars.yml, the inventories and group_vars are deliberately untracked, so
       # the playbook is parsed against a throwaway inventory. This validates
