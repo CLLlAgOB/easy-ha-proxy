@@ -2967,7 +2967,9 @@ class LiveBuffer:
         self._lock = threading.Lock()
         self._compute_lock = threading.Lock()
         self._cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-        self._wanted_at = 0.0
+        # Never, rather than zero: the monotonic clock counts from boot, and
+        # on a machine up for less than two minutes zero is "just now".
+        self._wanted_at = float("-inf")
         self.started = time.time()
         self.evicted_for_size = 0
         # (hour start, status) -> Counter of addresses, for the dashboard's

@@ -164,6 +164,10 @@ class TheBuffer(unittest.TestCase):
 
     def test_watching_switches_on_close_following(self):
         self.assertFalse(self.buffer.wanted())
+        # Even on a machine that booted a moment ago, where the monotonic
+        # clock is still small -- a fresh CI runner is one.
+        with mock.patch.object(guardd.time, "monotonic", return_value=30.0):
+            self.assertFalse(guardd.LiveBuffer(10, 3600).wanted())
         self.buffer.snapshot({"window": "60"})
         self.assertTrue(self.buffer.wanted())
 
