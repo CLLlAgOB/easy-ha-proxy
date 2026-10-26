@@ -120,6 +120,36 @@ def guardd_set_signatures(overrides: Dict[str, Any]) -> Dict[str, Any]:
         raise GuarddUnavailable(str(exc)) from exc
 
 
+def guardd_signature_candidates() -> Dict[str, Any]:
+    """Paths refused to many addresses that no rule matches yet."""
+
+    return _get_json("/api/v1/guard/signatures/candidates")
+
+
+def guardd_dismiss_candidate(path: str, restore: bool = False) -> Dict[str, Any]:
+    """Hide a suggested signature for good, or bring a hidden one back."""
+
+    url = (
+        "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="")
+        + "/api/v1/guard/signatures/candidates/dismiss"
+    )
+    try:
+        response = _session().post(
+            url,
+            json={"path": path, "restore": bool(restore)},
+            timeout=15,
+            headers={"X-Guardd-Token": GUARDD_TOKEN} if GUARDD_TOKEN else {},
+        )
+        if response.status_code == 400:
+            raise ValueError((response.json() or {}).get("error") or "rejected")
+        response.raise_for_status()
+        return response.json()
+    except (GuarddUnavailable, ValueError):
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+
+
 def guardd_set_ban_durations(durations: Any) -> Dict[str, Any]:
     """Replace the escalating ban ladder.
 

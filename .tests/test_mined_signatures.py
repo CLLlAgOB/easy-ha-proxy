@@ -70,6 +70,15 @@ class WithTheShippedFile(unittest.TestCase):
                 self.assertEqual(category, "app-framework")
                 self.assertFalse(guardd.category_is_decisive(category))
 
+    def test_what_the_suggestions_found_on_their_first_run(self):
+        # The candidate list's own first replay of the same week surfaced these.
+        for path, category in (("/terraform.tfstate", "secrets"), ("/terraform.tfvars", "secrets"),
+                               ("/.gitlab-ci.yml", "secrets"), ("/site.zip", "backup"),
+                               ("/db.sql", "backup"), ("/application.yml", "config"),
+                               ("/Dockerfile", "config"), ("/docker-compose.yaml", "config")):
+            with self.subTest(path=path):
+                self.assertEqual(guardd.classify_path(path), category)
+
     def test_the_registry_listing_is_left_alone(self):
         self.assertEqual(guardd.classify_path("/v2/_catalog"), "")
 

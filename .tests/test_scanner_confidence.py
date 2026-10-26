@@ -104,7 +104,10 @@ class ServedPathTests(unittest.TestCase):
 
     def test_the_rule_is_applied_before_a_finding_is_emitted(self):
         source = GUARDD.read_text(encoding="utf-8")
-        block = source.split("category = classify_path(request.path)")[1][:1200]
+        # Up to the branch that emits the finding, however much sits between.
+        block = source.split("category = classify_path(request.path)")[1].split(
+            "        if category:\n"
+        )[0]
         self.assertIn("is_served(request.status)", block)
         # It must clear the category, not merely skip the weight, or the
         # request would still count towards the multi-category finding.
@@ -117,7 +120,10 @@ class ServedPathTests(unittest.TestCase):
         # /.env, /backup.sql and /phpinfo.php -- or a genuine leak. Neither
         # is a reason to stop scoring the client that asked.
         source = GUARDD.read_text(encoding="utf-8")
-        block = source.split("category = classify_path(request.path)")[1][:1200]
+        # Up to the branch that emits the finding, however much sits between.
+        block = source.split("category = classify_path(request.path)")[1].split(
+            "        if category:\n"
+        )[0]
         guard = block.split('category = ""')[0]
         self.assertIn("not category_is_decisive(category)", guard)
 

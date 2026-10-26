@@ -32,6 +32,15 @@
     "Remove": "Убрать",
     "Removed": "Убрано",
     "Added": "Добавлено",
-    "Type a signature first": "Сначала введите сигнатуру"
+    "Type a signature first": "Сначала введите сигнатуру",
+    "Suggested by traffic": "Предложено по трафику",
+    "Paths that no rule matches, refused to at least three different addresses and never served to anyone. Add one as a signature, or hide it. Paths that ordinary clients asked for too are listed last and marked: those are more likely a broken link than a probe.": "Пути, которые не совпали ни с одним правилом, получили отказ минимум у трёх разных адресов и никому не были отданы. Добавьте путь как сигнатуру или скройте его. Пути, которые запрашивали и обычные клиенты, идут в конце и помечены: это скорее битая ссылка, чем зонд.",
+    "Add as": "Добавлять как",
+    "last {days} days, at least {count} different addresses": "последние {days} дн., не меньше {count} разных адресов",
+    "No suggestions right now": "Сейчас предложений нет",
+    "Client-like": "Похожи на клиентов",
+    "Status codes": "Коды ответов",
+    "Ordinary clients asked for this too: more likely a broken link": "Это запрашивали и обычные клиенты: скорее битая ссылка",
+    "Hidden": "Скрыто"
   }
 }

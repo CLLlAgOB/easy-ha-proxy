@@ -38,6 +38,7 @@ import socket
 import sqlite3
 import threading
 import time
+import zlib
 from collections import Counter, OrderedDict, deque
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -450,9 +451,19 @@ def validate_token(token: str) -> str:
         raise ValueError("empty signature")
     if len(text) > MAX_TOKEN_LENGTH:
         raise ValueError(f"longer than {MAX_TOKEN_LENGTH} characters")
-    if not _TOKEN_OK.match(text):
+    # A trailing * on a segment token matches by prefix (".env*"). Only on a
+    # segment, and only after three characters: "a*" would match half of
+    # every site's own paths.
+    base = text[:-1] if text.endswith("*") else text
+    if text.endswith("*"):
+        if text.startswith("/"):
+            raise ValueError("a prefix (*) works on a path segment, not on a whole path")
+        if len(base) < 3:
+            raise ValueError("a prefix needs at least three characters before *")
+    if not _TOKEN_OK.match(base):
         raise ValueError(
-            "a signature may hold letters, digits and . _ ~ / @ : + - only"
+            "a signature may hold letters, digits and . _ ~ / @ : + - only, "
+            "with an optional * at the end of a segment"
         )
     if text.startswith("/") and text.strip("/") == "":
         # "/" would classify every request ever made.
@@ -551,6 +562,29 @@ def store_overrides(database: "SecurityDatabase", data: Any) -> Dict[str, Any]:
         len(checked["disabled"]),
     )
     return checked
+
+
+def _dismissed_candidates(database: "SecurityDatabase") -> List[str]:
+    with contextlib.suppress(ValueError, TypeError):
+        value = json.loads(database.get_state(CANDIDATES_DISMISSED_KEY, "[]") or "[]")
+        if isinstance(value, list):
+            return [str(item) for item in value]
+    return []
+
+
+def dismiss_candidate(database: "SecurityDatabase", path: str,
+                      restore: bool = False) -> Dict[str, Any]:
+    """Hide a suggestion for good, or bring a hidden one back."""
+
+    text = (path or "").strip()
+    if not text.startswith("/") or len(text) > CANDIDATE_MAX_PATH_LENGTH:
+        raise ValueError("expected a path")
+    dismissed = [item for item in _dismissed_candidates(database) if item != text]
+    if not restore:
+        dismissed.append(text)
+    dismissed = dismissed[-CANDIDATES_MAX_DISMISSED:]
+    database.set_state(CANDIDATES_DISMISSED_KEY, json.dumps(dismissed))
+    return {"dismissed": dismissed}
 
 
 def signature_summary() -> Dict[str, Any]:
@@ -787,6 +821,19 @@ RECURRING_RECHECK = 600
 CATCH_ALL_MIN_PATHS = 3
 CATCH_ALL_MAX_HOSTS = 256
 CATCH_ALL_MAX_SIZES = 16
+
+# Suggested signatures: paths no rule matched, refused to several different
+# addresses and never served to anyone. Only a suggestion -- the operator
+# adds one or hides it on the detection rules page.
+CANDIDATE_MIN_ADDRESSES = 3
+CANDIDATE_MAX_PATHS = 20000
+CANDIDATE_MAX_ADDRESSES = 64
+CANDIDATE_MAX_SERVED = 50000
+CANDIDATE_TTL = 7 * 86400
+CANDIDATE_MAX_PATH_LENGTH = 200
+CANDIDATES_KEY = "signature_candidates"
+CANDIDATES_DISMISSED_KEY = "signature_candidates_dismissed"
+CANDIDATES_MAX_DISMISSED = 500
 
 SIGNATURE_EVENTS = frozenset({
     EVENT_SCANNER_PATH, EVENT_SCANNER_DECISIVE, EVENT_QUERY_INJECTION,
@@ -1847,6 +1894,12 @@ class CatchAllPages:
     def __init__(self) -> None:
         self._hosts: "OrderedDict[str, OrderedDict[int, Set[int]]]" = OrderedDict()
 
+    def known(self, host: str, size: int) -> bool:
+        """Is this size already this host's catch-all page? Records nothing."""
+
+        sizes = self._hosts.get(host)
+        return bool(sizes) and len(sizes.get(size, ())) >= CATCH_ALL_MIN_PATHS
+
     def is_catch_all(self, host: str, size: int, path: str) -> bool:
         sizes = self._hosts.get(host)
         if sizes is None:
@@ -1863,6 +1916,111 @@ class CatchAllPages:
         if len(seen) < CATCH_ALL_MIN_PATHS:
             seen.add(hash(path) & 0xFFFFFFFF)
         return len(seen) >= CATCH_ALL_MIN_PATHS
+
+
+def _address_key(ip: str) -> int:
+    # Stable across restarts, unlike hash(), so persisted counts stay right.
+    return zlib.crc32(ip.encode("utf-8", "replace"))
+
+
+class PathCandidates:
+    """Paths refused to many addresses that no signature matches."""
+
+    def __init__(self) -> None:
+        # path -> {"first", "last", "ips": set, "clients": set,
+        #          "status": {code: n}, "hosts": {host: n}}
+        self._paths: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._served: "OrderedDict[int, int]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def note(self, path: str, ip: str, host: str, status: int, served: bool,
+             client: bool, ts: int) -> None:
+        if len(path) > CANDIDATE_MAX_PATH_LENGTH:
+            return
+        digest = hash(path)
+        with self._lock:
+            if served:
+                self._served[digest] = ts
+                self._served.move_to_end(digest)
+                while len(self._served) > CANDIDATE_MAX_SERVED:
+                    self._served.popitem(last=False)
+                self._paths.pop(path, None)
+                return
+            if status not in ENUMERATION_STATUSES or digest in self._served:
+                return
+            entry = self._paths.get(path)
+            if entry is None:
+                entry = self._paths[path] = {
+                    "first": ts, "last": ts, "ips": set(), "clients": set(),
+                    "status": {}, "hosts": {},
+                }
+                while len(self._paths) > CANDIDATE_MAX_PATHS:
+                    self._paths.popitem(last=False)
+            self._paths.move_to_end(path)
+            entry["last"] = ts
+            key = _address_key(ip)
+            if len(entry["ips"]) < CANDIDATE_MAX_ADDRESSES:
+                entry["ips"].add(key)
+            if client and len(entry["clients"]) < CANDIDATE_MAX_ADDRESSES:
+                entry["clients"].add(key)
+            code = str(status)
+            entry["status"][code] = entry["status"].get(code, 0) + 1
+            if host and (host in entry["hosts"] or len(entry["hosts"]) < 5):
+                entry["hosts"][host] = entry["hosts"].get(host, 0) + 1
+
+    def prune(self, before: int) -> int:
+        with self._lock:
+            stale = [path for path, entry in self._paths.items() if entry["last"] < before]
+            for path in stale:
+                del self._paths[path]
+        return len(stale)
+
+    def suggestions(self, dismissed: Set[str], limit: int = 100) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = [
+                {
+                    "path": path,
+                    "addresses": len(entry["ips"]),
+                    "clients": len(entry["clients"]),
+                    "first": entry["first"],
+                    "last": entry["last"],
+                    "status": dict(entry["status"]),
+                    "hosts": sorted(entry["hosts"], key=lambda h: -entry["hosts"][h]),
+                }
+                for path, entry in self._paths.items()
+                if len(entry["ips"]) >= CANDIDATE_MIN_ADDRESSES
+                and path not in dismissed
+            ]
+        # A rule added since is already doing the job.
+        rows = [row for row in rows if not classify_path(row["path"])]
+        # Paths that clients asked for too sink to the bottom: likely a real link.
+        rows.sort(key=lambda row: (row["clients"] > 0, -row["addresses"], -row["last"]))
+        return rows[:limit]
+
+    def snapshot(self, limit: int = 2000) -> List[List[Any]]:
+        with self._lock:
+            ranked = sorted(self._paths.items(), key=lambda kv: -len(kv[1]["ips"]))[:limit]
+            return [
+                [path, e["first"], e["last"], sorted(e["ips"]), sorted(e["clients"]),
+                 e["status"], e["hosts"]]
+                for path, e in ranked if len(e["ips"]) >= 2
+            ]
+
+    def restore(self, rows: Any) -> None:
+        if not isinstance(rows, list):
+            return
+        with self._lock:
+            for row in rows[:CANDIDATE_MAX_PATHS]:
+                try:
+                    path, first, last, ips, clients, status, hosts = row
+                    self._paths[str(path)] = {
+                        "first": int(first), "last": int(last),
+                        "ips": {int(x) for x in ips}, "clients": {int(x) for x in clients},
+                        "status": {str(k): int(v) for k, v in dict(status).items()},
+                        "hosts": {str(k): int(v) for k, v in dict(hosts).items()},
+                    }
+                except (TypeError, ValueError):
+                    continue
 
 
 class IpMemory:
@@ -3238,6 +3396,11 @@ class GuardEngine:
         self.policy = ScoringPolicy()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
+        self.candidates = PathCandidates()
+        with contextlib.suppress(ValueError, TypeError):
+            self.candidates.restore(
+                json.loads(database.get_state(CANDIDATES_KEY, "[]") or "[]")
+            )
         cursor_state: Dict[str, Any] = {}
         with contextlib.suppress(ValueError):
             cursor_state = json.loads(
@@ -3563,6 +3726,18 @@ class GuardEngine:
             self._check_multi_category(ip, activity, now)
 
         category = classify_path(request.path)
+        if not category and request.path not in ("", "/") and not is_asset(request.path):
+            served = is_served(request.status) and not self.catch_all.known(
+                request.host, request.bytes_out
+            )
+            looks_like_client = activity.requests >= 20 and (
+                activity.requests - activity.errors - activity.not_found
+                - activity.gateway_denied - activity.bad_requests
+            ) * 2 >= activity.requests
+            self.candidates.note(
+                request.path, ip, request.host, request.status, served,
+                looks_like_client, now,
+            )
         if (
             category
             and is_served(request.status)
@@ -4297,6 +4472,11 @@ class GuardEngine:
         if any(deleted.values()):
             self.database.incremental_vacuum()
         pruned = self.memory.prune(now - 6 * 3600)
+        self.candidates.prune(now - CANDIDATE_TTL)
+        with contextlib.suppress(sqlite3.Error):
+            self.database.set_state(
+                CANDIDATES_KEY, json.dumps(self.candidates.snapshot())
+            )
         LOG.info(
             "Maintenance: deleted=%s pruned_ips=%d tracked=%d",
             json.dumps(deleted),
@@ -4514,6 +4694,17 @@ class GuardHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **signature_summary()})
             return
 
+        if path == "/api/v1/guard/signatures/candidates":
+            dismissed = set(_dismissed_candidates(engine.database))
+            self._send_json(200, {
+                "ok": True,
+                "candidates": engine.candidates.suggestions(dismissed),
+                "dismissed": sorted(dismissed),
+                "min_addresses": CANDIDATE_MIN_ADDRESSES,
+                "window_days": CANDIDATE_TTL // 86400,
+            })
+            return
+
         if path == "/api/v1/guard/shadow":
             query = parse_qs(urlparse(self.path).query or "")
             try:
@@ -4581,6 +4772,25 @@ class GuardHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # pylint: disable=broad-except
                 LOG.exception("cannot change the request log")
                 self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, **result})
+            return
+
+        if path == "/api/v1/guard/signatures/candidates/dismiss":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+                if length <= 0 or length > 4096:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+                result = dismiss_candidate(
+                    engine.database, str(payload.get("path", "")),
+                    restore=bool(payload.get("restore")),
+                )
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
                 return
             self._send_json(200, {"ok": True, **result})
             return

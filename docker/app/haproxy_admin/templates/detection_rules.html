@@ -117,6 +117,14 @@
 .dr-result { margin-top: 10px; font-size: 13px; }
 .dr-result.error { color: #cc4b4b; }
 
+.dr-suggest { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+.dr-suggest th, .dr-suggest td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.dr-suggest td.num { text-align: right; white-space: nowrap; }
+.dr-suggest code { word-break: break-all; }
+.dr-suggest .dr-client-warn { color: #c8a13a; }
+.dr-suggest .btn { padding: 3px 10px; font-size: 12px; box-shadow: none; margin: 0 4px 4px 0; }
+.dr-suggest-wrap { overflow-x: auto; }
+
 .dr-empty {
   color: var(--text-secondary);
   font-size: 13px;
@@ -167,6 +175,30 @@
   <div class="dr-rules" id="dr-mine" data-i18n-skip translate="no"></div>
 
   <p class="dr-result" id="dr-result" data-i18n-skip translate="no"></p>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
+    <h2>Suggested by traffic</h2>
+    <span class="mon-sub" id="dr-suggest-meta" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Paths that no rule matches, refused to at least three different addresses
+    and never served to anyone. Add one as a signature, or hide it. Paths that
+    ordinary clients asked for too are listed last and marked: those are more
+    likely a broken link than a probe.
+  </p>
+
+  <div class="dr-add">
+    <label>
+      <span class="form-label">Add as</span>
+      <select class="form-input" id="dr-suggest-category"
+              data-i18n-skip translate="no"></select>
+    </label>
+  </div>
+
+  <div class="dr-suggest-wrap" id="dr-suggestions"></div>
 </div>
 
 <div class="card" style="margin-top:25px;">

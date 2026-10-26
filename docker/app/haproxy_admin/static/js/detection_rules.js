@@ -205,7 +205,10 @@
   }
 
   function renderCategories(signatures) {
-    const select = byId("dr-category");
+    ["dr-category", "dr-suggest-category"].forEach((id) => fillCategories(byId(id), signatures));
+  }
+
+  function fillCategories(select, signatures) {
     if (!select || select.options.length) return;
     const names = (signatures.categories || []).map((c) => c.name);
     if (!names.includes(signatures.custom_category)) {
@@ -238,6 +241,128 @@
     renderCategories(signatures);
     renderMine(signatures);
     renderShipped(signatures);
+  }
+
+  /* ---------- suggestions ---------- */
+
+  function clock(seconds) {
+    const date = new Date(Number(seconds) * 1000);
+    return Number.isFinite(date.getTime()) ? date.toLocaleString() : "";
+  }
+
+  function cell(row, text, className) {
+    const td = keepVerbatim(document.createElement("td"));
+    if (className) td.className = className;
+    if (text instanceof Node) td.appendChild(text);
+    else td.textContent = text;
+    row.appendChild(td);
+    return td;
+  }
+
+  function renderSuggestions(payload) {
+    const host = byId("dr-suggestions");
+    if (!host) return;
+    host.textContent = "";
+    const rows = (payload && payload.candidates) || [];
+    const meta = byId("dr-suggest-meta");
+    if (meta) {
+      meta.textContent = payload
+        ? t("last {days} days, at least {count} different addresses", {
+          days: payload.window_days, count: payload.min_addresses
+        })
+        : "";
+    }
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "dr-empty";
+      empty.textContent = uiText("No suggestions right now");
+      host.appendChild(empty);
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "dr-suggest";
+    const head = document.createElement("tr");
+    ["Path", "Addresses", "Client-like", "Sites", "Status codes", "Last seen", ""].forEach((title) => {
+      const th = document.createElement("th");
+      th.textContent = title ? uiText(title) : "";
+      head.appendChild(th);
+    });
+    const thead = document.createElement("thead");
+    thead.appendChild(head);
+    table.appendChild(thead);
+    const body = document.createElement("tbody");
+    rows.forEach((item) => {
+      const row = document.createElement("tr");
+      const code = document.createElement("code");
+      code.textContent = item.path;
+      cell(row, code);
+      cell(row, String(item.addresses), "num");
+      const clients = cell(row, String(item.clients), "num");
+      if (item.clients > 0) {
+        clients.classList.add("dr-client-warn");
+        clients.title = uiText("Ordinary clients asked for this too: more likely a broken link");
+      }
+      cell(row, (item.hosts || []).slice(0, 3).join(", "));
+      cell(row, Object.keys(item.status || {}).sort().join(", "));
+      cell(row, clock(item.last));
+      const actions = document.createElement("td");
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "btn";
+      add.textContent = uiText("Add");
+      add.addEventListener("click", () => addSuggestion(item.path));
+      const hide = document.createElement("button");
+      hide.type = "button";
+      hide.className = "btn";
+      hide.textContent = uiText("Hide");
+      hide.addEventListener("click", () => hideSuggestion(item.path));
+      actions.appendChild(add);
+      actions.appendChild(hide);
+      row.appendChild(actions);
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    host.appendChild(table);
+  }
+
+  async function loadSuggestions() {
+    try {
+      const response = await fetch("/api/security/detection-rules/candidates", {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin"
+      });
+      if (!response.ok) return;
+      renderSuggestions(await response.json());
+    } catch (error) {
+      /* the rules above still work without suggestions */
+    }
+  }
+
+  function addSuggestion(path) {
+    const select = byId("dr-suggest-category");
+    const next = current();
+    next.added[path] = select ? select.value : (latest || {}).custom_category;
+    save(next, `${uiText("Added")}: ${path}`).then((ok) => { if (ok) loadSuggestions(); });
+  }
+
+  async function hideSuggestion(path) {
+    try {
+      const response = await fetch("/api/security/detection-rules/candidates/dismiss", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken() },
+        body: JSON.stringify({ path: path })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        say(payload.error || `HTTP ${response.status}`, true);
+        return;
+      }
+      say(`${uiText("Hidden")}: ${path}`, false);
+      loadSuggestions();
+    } catch (error) {
+      say(String(error), true);
+    }
   }
 
   /* ---------- editing ---------- */
@@ -349,5 +474,6 @@
       });
     }
     load();
+    loadSuggestions();
   });
 })();

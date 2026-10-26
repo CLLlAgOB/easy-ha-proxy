@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-26a",
+  "version": "2026-10-26b",
   "source": "curated, plus paths mined from 713945 requests across two live gateways",
   "notes": [
     "A category is decisive when no client has any legitimate reason to ask:",
@@ -88,7 +88,15 @@
     "hudson": "app-framework",
     "+CSCOE+": "known-exploit",
     "GponForm": "known-exploit",
-    "HNAP1": "known-exploit"
+    "HNAP1": "known-exploit",
+    "terraform.tfstate": "secrets",
+    "terraform.tfvars": "secrets",
+    ".gitlab-ci.yml": "secrets",
+    "application.yml": "config",
+    "Dockerfile": "config",
+    "docker-compose.yaml": "config",
+    "site.zip": "backup",
+    "db.sql": "backup"
   },
   "paths": {
     "/.env": "secrets",

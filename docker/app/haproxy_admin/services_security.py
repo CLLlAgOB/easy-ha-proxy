@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 from .cache import get_country_code
 from .guardd_client import (
     guardd_signatures,
+    guardd_signature_candidates,
+    guardd_dismiss_candidate,
     guardd_set_signatures,
     guardd_requests,
     guardd_requests_status,
@@ -228,6 +230,19 @@ def health() -> Dict[str, Any]:
 
 def detection_rules() -> Dict[str, Any]:
     return guardd_signatures()
+
+
+def signature_candidates() -> Dict[str, Any]:
+    return guardd_signature_candidates()
+
+
+def dismiss_candidate(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    path = str(payload.get("path") or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("expected a path")
+    return guardd_dismiss_candidate(path, restore=bool(payload.get("restore")))
 
 
 def set_detection_rules(payload: Any) -> Dict[str, Any]:

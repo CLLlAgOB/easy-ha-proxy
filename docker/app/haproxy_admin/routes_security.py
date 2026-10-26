@@ -44,6 +44,42 @@ def api_detection_rules():
         return jsonify(security.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/security/detection-rules/candidates")
+def api_detection_rule_candidates():
+    """Signatures the traffic suggests: refused to many, matched by nothing."""
+    try:
+        return jsonify(security.signature_candidates())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules/candidates/dismiss")
+def api_dismiss_detection_rule_candidate():
+    """Hide a suggestion, or bring it back. Changes no rule, but is recorded."""
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.dismiss_candidate(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "adaptive.rules",
+        object_type="detection_rules",
+        object_id=str(payload.get("path") or "")[:200],
+        detail=("suggestion restored" if payload.get("restore") else "suggestion hidden"),
+    )
+    return jsonify(result)
+
+
 @bp.post("/api/security/detection-rules")
 def api_set_detection_rules():
     """Store the operator's own rules.
