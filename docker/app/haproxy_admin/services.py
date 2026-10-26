@@ -1212,6 +1212,47 @@ def _pretty_backend(pxname: str) -> str:
     return n.replace("_", ".")
 
 
+# Backends the gateway runs for itself rather than for a site. The dashboard
+# leaves them out while they are healthy; a broken one is still listed,
+# because a dashboard that hides an Authelia outage is worse than one with an
+# extra line.
+SYSTEM_BACKENDS: dict[str, str] = {
+    "authelia_backend": "Authelia",
+    "be_access_granted": "Authelia",
+}
+_SITE_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+def backend_kind(pxname: str) -> str:
+    """"site" (a website: its names are links), "tcp" (a port: never a
+    link) or "system" (the gateway's own)."""
+    if pxname in SYSTEM_BACKENDS:
+        return "system"
+    if pxname.startswith("be_tcp_"):
+        return "tcp"
+    return "site"
+
+
+def site_hosts(display: str) -> list[str]:
+    """The names a site answers to, from its display name, fit for a link.
+
+    A wildcard or anything that is not a plain host name is left out: there
+    is nothing to open at *.example.com.
+    """
+    hosts: list[str] = []
+    for part in str(display or "").split(","):
+        host = part.strip().lower().rstrip(".")
+        # An address is not a site's name, even though it looks like one.
+        if host.replace(".", "").isdigit():
+            continue
+        if _SITE_HOST_RE.fullmatch(host) and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
 # ───────── основная: статусы бэкендов для UI ─────────────────────
 
 def get_backends_status() -> dict:
@@ -1273,9 +1314,17 @@ def get_backends_status() -> dict:
         downs = total - ups
         color = "red" if total == 0 or ups == 0 else (
             "yellow" if downs > 0 else "green")
-        display = name_map.get(be) or _pretty_backend(be)
+        kind = backend_kind(be)
+        if kind == "system" and color == "green":
+            continue
+        display = name_map.get(be) or SYSTEM_BACKENDS.get(be) or _pretty_backend(be)
         items.append({"backend": be, "site": display, "up": ups,
-                     "down": downs, "total": total, "status": color})
+                     "down": downs, "total": total, "status": color,
+                     "kind": kind,
+                     # Only a site's names become links; a TCP proxy is a
+                     # port, and the gateway's own services are not for
+                     # opening.
+                     "hosts": site_hosts(name_map.get(be, "")) if kind == "site" else []})
 
     return {"items": items}
 

@@ -23,7 +23,27 @@
       const name = document.createElement('span');
       name.className = 'site-name';
       name.title = String(it.backend || '');
-      name.textContent = String(it.site || it.backend || '');
+      // A site's names open the site; a TCP proxy is a port and the gateway's
+      // own services are not for opening, so those stay plain text. The
+      // server hands over only checked host names; this checks again.
+      const hosts = it.kind === 'site' && Array.isArray(it.hosts)
+        ? it.hosts.filter((host) => /^[a-z0-9.-]{1,253}$/i.test(String(host)))
+        : [];
+      if (hosts.length) {
+        hosts.forEach((host, index) => {
+          if (index) name.append(', ');
+          const link = document.createElement('a');
+          link.className = 'site-link';
+          link.href = `https://${host}/`;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = host;
+          name.append(link);
+        });
+      } else {
+        name.textContent = String(it.site || it.backend || '');
+      }
+      if (it.kind === 'system') li.classList.add('site-system');
       const cnt = document.createElement('span');
       cnt.className = 'counts';
       cnt.textContent = `${Number(it.up) || 0}/${Number(it.total) || 0}`;
