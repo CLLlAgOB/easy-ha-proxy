@@ -651,6 +651,7 @@ EVENT_NOT_FOUND_ENUM = "NOT_FOUND_ENUMERATION"
 EVENT_WIDE_ENUM = "WIDE_ENUMERATION"
 EVENT_MASS_ENUM = "MASS_ENUMERATION"
 EVENT_INVALID_HOST = "INVALID_HOST_ACTIVITY"
+EVENT_RECURRING = "RECURRING_SCANNER"
 EVENT_NOSNI_PROBING = "NOSNI_PROBING"
 EVENT_RATE_EXCEEDED = "RATE_EXCEEDED"
 EVENT_ERROR_RATE_EXCEEDED = "ERROR_RATE_EXCEEDED"
@@ -660,7 +661,11 @@ EVENT_BAN_APPLIED = "BAN_APPLIED"
 EVENT_BAN_LIFTED = "BAN_LIFTED"
 
 DEFAULT_WEIGHTS: Dict[str, int] = {
-    EVENT_SCANNER_PATH: 25,
+    # 25 left a scanner that brought one signature, a sweep by IP and six
+    # missing paths to one visit at 50 -- under the line every time. Measured
+    # on two gateways over a week: 35 adds only such scanners and no client,
+    # because no client in either log ever produced a signature finding.
+    EVENT_SCANNER_PATH: 35,
     # One request for a file no client ever wants is enough on
     # its own; that is what makes it decisive.
     EVENT_SCANNER_DECISIVE: 60,
@@ -678,6 +683,11 @@ DEFAULT_WEIGHTS: Dict[str, int] = {
     # Breadth now escalates as findings of their own.
     EVENT_WIDE_ENUM: 30,
     EVENT_MASS_ENUM: 60,
+    # A scanner that comes back. Every visit of the slow ones scored the
+    # same capped category and faded within six hours, so an address that
+    # probed for WordPress eight times in a week never got past 45. Coming
+    # back is its own finding, worth a ban together with one signature.
+    EVENT_RECURRING: 30,
     EVENT_INVALID_HOST: 10,
     EVENT_NOSNI_PROBING: 10,
     EVENT_RATE_EXCEEDED: 15,
@@ -721,6 +731,7 @@ COOLDOWN_SECONDS: Dict[str, int] = {
     EVENT_NOT_FOUND_ENUM: 900,
     EVENT_WIDE_ENUM: 900,
     EVENT_MASS_ENUM: 3600,
+    EVENT_RECURRING: 6 * 3600,
     EVENT_INVALID_HOST: 600,
     EVENT_NOSNI_PROBING: 600,
     EVENT_RATE_EXCEEDED: 60,
@@ -749,6 +760,15 @@ WIDE_ENUM_WINDOW = 600
 # sweep of names or paths by IP is many.
 INVALID_HOST_MIN = 5
 INVALID_HOST_WINDOW = 6 * 3600
+# A return visit: a scanner signature now, and another at least two hours
+# earlier within the week. Only signatures count -- a client with a few
+# stale links or odd requests never has one.
+RECURRING_WINDOW = 7 * 86400
+RECURRING_GAP = 2 * 3600
+RECURRING_RECHECK = 600
+SIGNATURE_EVENTS = frozenset({
+    EVENT_SCANNER_PATH, EVENT_SCANNER_DECISIVE, EVENT_QUERY_INJECTION,
+})
 
 # rsyslog writes "<ts> <host> haproxy[pid]: <log-format>".
 _SYSLOG_PREFIX = re.compile(r"^\S+\s+\S+\s+haproxy\[\d+\]:\s*")
@@ -1699,6 +1719,9 @@ class IpActivity:
     burst_misses: int = 0
     invalid_host_keys: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
     invalid_host_since: int = 0
+    # When the stored history was last asked about a return visit, so a
+    # burst of signatures costs one query, not one per request.
+    recurring_checked: int = 0
 
     @property
     def scanning_was_all_refused(self) -> bool:
@@ -3524,6 +3547,7 @@ class GuardEngine:
             )
             self._check_multi_category(ip, activity, now)
             self._check_low_and_slow(ip, activity, now)
+            self._check_recurring(ip, activity, now)
         elif request.status in ENUMERATION_STATUSES and not is_asset(request.path):
             # Enumeration without a known signature: only distinct, non-asset
             # paths count, which is what separates a scanner from a stale link
@@ -3634,6 +3658,36 @@ class GuardEngine:
             now,
             source="haproxy-log",
             detail=f"distinct={distinct}",
+        )
+
+    def _check_recurring(self, ip: str, activity: IpActivity, now: int) -> None:
+        """A scanner signature again, hours after an earlier one this week.
+
+        Read from the stored findings rather than memory, so a return after a
+        restart or after the address fell out of the bounded memory still
+        counts. Refused the same way as the other derived findings: an
+        address the gateway has walled off entirely scores nothing.
+        """
+
+        if now - activity.recurring_checked < RECURRING_RECHECK:
+            return
+        activity.recurring_checked = now
+        history = self.database.events_for(ip, now - RECURRING_WINDOW, limit=200)
+        earlier = [
+            int(event["ts"]) for event in history
+            if event["event_type"] in SIGNATURE_EVENTS
+            and int(event["ts"]) <= now - RECURRING_GAP
+        ]
+        if not earlier:
+            return
+        hours = (now - max(earlier)) // 3600
+        self._emit(
+            ip,
+            EVENT_RECURRING,
+            now,
+            source="haproxy-log",
+            detail=f"back after {hours}h",
+            handled=activity.scanning_was_all_refused,
         )
 
     def _check_enumeration_breadth(

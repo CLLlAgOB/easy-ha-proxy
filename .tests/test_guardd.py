@@ -627,7 +627,11 @@ class ScoringTests(unittest.TestCase):
             1000,
             self.policy(),
         )
-        self.assertEqual(result["score"], 25)
+        # One finding scores its own weight and stays well short of a ban.
+        self.assertEqual(
+            result["score"], guardd.DEFAULT_WEIGHTS[guardd.EVENT_SCANNER_PATH]
+        )
+        self.assertLess(result["score"], guardd.WOULD_BAN_SCORE)
         self.assertEqual(result["state"], "WATCH")
 
     def test_combinations_of_categories_are_what_add_up(self):
@@ -649,7 +653,13 @@ class ScoringTests(unittest.TestCase):
             for _ in range(50)
         ]
         result = guardd.score_events(events, 1000, self.policy())
-        self.assertEqual(result["score"], guardd.DEFAULT_CATEGORY_CAP)
+        # The cap never clips one event below its own weight, so a category
+        # is worth at most the larger of the two -- however many hits.
+        self.assertEqual(
+            result["score"],
+            max(guardd.DEFAULT_CATEGORY_CAP,
+                guardd.DEFAULT_WEIGHTS[guardd.EVENT_SCANNER_PATH]),
+        )
 
     def test_an_ordinary_visitor_stays_near_zero(self):
         events = [
@@ -917,6 +927,51 @@ class DetectionTests(EngineTestCase):
         self.engine.ingest_log(1000)
         self.assertNotIn(guardd.EVENT_WIDE_ENUM, self.types())
         self.assertNotIn(guardd.EVENT_MASS_ENUM, self.types())
+
+    def test_a_scanner_that_comes_back_hours_later_is_banned(self):
+        # The slow kind: one WordPress probe, then the same probe the next
+        # morning. Each visit alone is one capped category that fades within
+        # hours; coming back is the finding.
+        self.append(self.line("203.0.113.9", "/app", 200))
+        self.append(self.line("203.0.113.9", "/xmlrpc.php", 404))
+        self.engine.ingest_log(1000)
+        self.assertLess(
+            self.engine.reputation("203.0.113.9", 1000)["score"], guardd.WOULD_BAN_SCORE
+        )
+        self.append(self.line("203.0.113.9", "/xmlrpc.php", 404))
+        self.engine.ingest_log(1000 + 14 * 3600)
+        self.assertIn(guardd.EVENT_RECURRING, self.types())
+        self.assertGreaterEqual(
+            self.engine.reputation("203.0.113.9", 1000 + 14 * 3600)["score"],
+            guardd.WOULD_BAN_SCORE,
+        )
+
+    def test_one_visit_with_many_signatures_is_not_a_return(self):
+        for minute in range(30):
+            self.append(self.line("203.0.113.9", "/xmlrpc.php", 404))
+            self.engine.ingest_log(1000 + minute * 60)
+        self.assertNotIn(guardd.EVENT_RECURRING, self.types())
+
+    def test_a_client_with_stale_links_never_counts_as_returning(self):
+        # Missing pages day after day are not signatures, so no return
+        # visit is ever recorded however often the client comes back.
+        for day in range(5):
+            for index in range(8):
+                self.append(self.line("203.0.113.9", f"/old-page{index}", 404))
+            self.engine.ingest_log(1000 + day * 86400)
+        self.assertNotIn(guardd.EVENT_RECURRING, self.types())
+
+    def test_a_returning_scanner_the_gateway_walls_off_scores_nothing(self):
+        # Refused on identity every time and never answered: a ban would
+        # change nothing, as for every other derived finding.
+        self.append(self.line("203.0.113.9", "/xmlrpc.php", 403))
+        self.engine.ingest_log(1000)
+        self.append(self.line("203.0.113.9", "/xmlrpc.php", 403))
+        self.engine.ingest_log(1000 + 14 * 3600)
+        recurring = [e for e in self.events() if e["event_type"] == guardd.EVENT_RECURRING]
+        self.assertEqual(len(recurring), 1)
+        self.assertEqual(recurring[0]["handled"], 1)
+        self.assertEqual(self.engine.reputation("203.0.113.9", 1000 + 14 * 3600)["score"], 0)
 
     def test_a_sweep_the_gateway_refused_for_a_walled_off_address_scores_nothing(self):
         # 403 from the gateway itself, and the address never reached a site:
