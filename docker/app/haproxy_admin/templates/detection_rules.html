@@ -248,6 +248,14 @@
   <p class="mon-sub" id="dr-query-note" data-i18n-skip translate="no"></p>
 
   <p class="mon-sub">
+    Programs that name themselves in the User-Agent header. Attack tools ban
+    on one request; internet-wide surveys only count towards a ban. Generic
+    libraries such as curl are not listed, because monitors use them too.
+    These come with the shipped list and are not switched off here.
+  </p>
+  <div class="dr-rules" id="dr-agents" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub">
     The shipped list is a file on the gateway, replaceable without rebuilding
     anything. A broken or missing one keeps the built-in rules rather than
     switching detection off.

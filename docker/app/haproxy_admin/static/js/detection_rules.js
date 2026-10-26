@@ -204,6 +204,28 @@
     }
   }
 
+  function renderAgents(signatures) {
+    const host = byId("dr-agents");
+    if (!host) return;
+    host.textContent = "";
+    const byCategory = {};
+    (signatures.user_agents || []).forEach((rule) => {
+      (byCategory[rule.category] = byCategory[rule.category] || { decisive: rule.decisive, tokens: [] })
+        .tokens.push(rule.token);
+    });
+    Object.keys(byCategory).sort((a, b) => {
+      if (byCategory[a].decisive !== byCategory[b].decisive) return byCategory[a].decisive ? -1 : 1;
+      return a.localeCompare(b);
+    }).forEach((category) => {
+      const entry = byCategory[category];
+      const { card, tokens } = ruleCard(
+        category, costLabel(signatures, entry.decisive), entry.decisive ? "decisive" : ""
+      );
+      entry.tokens.sort().forEach((name) => tokens.appendChild(token(name, false)));
+      host.appendChild(card);
+    });
+  }
+
   function renderCategories(signatures) {
     ["dr-category", "dr-suggest-category"].forEach((id) => fillCategories(byId(id), signatures));
   }
@@ -241,6 +263,7 @@
     renderCategories(signatures);
     renderMine(signatures);
     renderShipped(signatures);
+    renderAgents(signatures);
   }
 
   /* ---------- suggestions ---------- */

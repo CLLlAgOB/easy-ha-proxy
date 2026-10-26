@@ -119,3 +119,10 @@ metrics_scrape_sources:
 # header is always discarded first: two requests sharing an identifier make
 # the log worse, not better.
 request_id_enabled: true
+
+# --- User-Agent in the access log ---
+# Logged as one word (anything that could split the line becomes "_"), cut to
+# 128 characters. Scanners often name themselves -- sqlmap, nikto, zgrab --
+# and the adaptive protection engine bans on that. Costs roughly a fifth to
+# a half more log volume; set to false to leave it out.
+log_user_agent: true

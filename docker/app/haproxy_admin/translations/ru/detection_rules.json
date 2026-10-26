@@ -51,6 +51,7 @@
     "No requests for names without a site": "Запросов к именам без сайта не было",
     "Ordinary clients use this name too: they would be spared, but check first": "Этим именем пользуются и обычные клиенты: их ловушка пощадит, но сначала проверьте",
     "Make a trap": "Сделать ловушкой",
-    "Trap added": "Ловушка добавлена"
+    "Trap added": "Ловушка добавлена",
+    "Programs that name themselves in the User-Agent header. Attack tools ban on one request; internet-wide surveys only count towards a ban. Generic libraries such as curl are not listed, because monitors use them too. These come with the shipped list and are not switched off here.": "Программы, которые сами называют себя в заголовке User-Agent. Инструменты атаки банятся с одного запроса; массовые исследовательские сканеры только добавляют очки к бану. Общие библиотеки вроде curl не перечислены: ими пользуются и системы мониторинга. Этот список приходит вместе с поставляемыми сигнатурами и здесь не отключается."
   }
 }

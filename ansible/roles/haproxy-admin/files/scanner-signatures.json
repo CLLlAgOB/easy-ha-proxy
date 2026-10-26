@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-26b",
+  "version": "2026-10-26c",
   "source": "curated, plus paths mined from 713945 requests across two live gateways",
   "notes": [
     "A category is decisive when no client has any legitimate reason to ask:",
@@ -13,7 +13,11 @@
     "",
     "traps are paths this installation does not serve and never links to.",
     "Nothing can reach one by accident, so a request for one is decisive by",
-    "construction. Add your own; they cost nothing and never false-positive."
+    "construction. Add your own; they cost nothing and never false-positive.",
+    "",
+    "user_agents are matched anywhere in the User-Agent header. A scanner-tool",
+    "is decisive; a survey (internet-wide research scanners) only counts towards",
+    "a ban. Generic libraries such as curl are absent on purpose: monitors use them."
   ],
   "decisive": [
     "secrets",
@@ -24,7 +28,8 @@
     "shell",
     "trap",
     "cloud-credentials",
-    "known-exploit"
+    "known-exploit",
+    "scanner-tool"
   ],
   "segments": {
     ".env": "secrets",
@@ -145,5 +150,30 @@
     "shell-chaining": "(;\\s*(sh|bash|cat|ls|id|uname|rm)\\b|\\|\\s*(sh|bash)\\b)",
     "substitution": "(\\$\\(|`[a-z/]{2,})",
     "absolute-binary": "/(bin|usr/bin|sbin)/(sh|bash|nc|perl|python)"
+  },
+  "user_agents": {
+    "sqlmap": "scanner-tool",
+    "nikto": "scanner-tool",
+    "nuclei": "scanner-tool",
+    "wpscan": "scanner-tool",
+    "gobuster": "scanner-tool",
+    "dirbuster": "scanner-tool",
+    "feroxbuster": "scanner-tool",
+    "dirsearch": "scanner-tool",
+    "fuzz faster u fool": "scanner-tool",
+    "wfuzz": "scanner-tool",
+    "acunetix": "scanner-tool",
+    "netsparker": "scanner-tool",
+    "openvas": "scanner-tool",
+    "w3af": "scanner-tool",
+    "nmap scripting engine": "scanner-tool",
+    "jorgee": "scanner-tool",
+    "zgrab": "survey",
+    "masscan": "survey",
+    "censysinspect": "survey",
+    "expanse, a palo alto": "survey",
+    "internet-measurement": "survey",
+    "leakix": "survey",
+    "l9explore": "survey"
   }
 }

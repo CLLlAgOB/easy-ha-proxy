@@ -157,7 +157,7 @@ defaults
     # The identifier sits before %r on purpose: the access-log parser in
     # easy-ha-proxy-guardd anchors on the request line at the end of the line
     # and treats everything between the status and it as unparsed middle.
-    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs{% if request_id_enabled | default(true) %} id=%ID{% endif %} host=%[var(txn.log_host)] %r"
+    log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc%[var(txn.ban_log)] %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs{% if request_id_enabled | default(true) %} id=%ID{% endif %} host=%[var(txn.log_host)]{% if log_user_agent | default(true) %} ua=%[var(txn.log_ua)]{% endif %} %r"
 
     errorfile 400 /etc/haproxy/errors/400.http
     errorfile 403 /etc/haproxy/errors/403.http
@@ -338,6 +338,12 @@ frontend fe_https
     # rules, which HAProxy runs first wherever they are written; reduced to hostname characters, because
     # the header is whatever the client chose to send.
     http-request set-var(txn.log_host) req.hdr(host),lower,regsub([^a-z0-9.:_-],_,g),bytes(0,128)
+{% if log_user_agent | default(true) %}
+    # The User-Agent too: scanners often name themselves (sqlmap, nikto,
+    # zgrab). One token with no spaces or quotes, so the line still splits
+    # unambiguously and no substring search can mistake it for a status.
+    http-request set-var(txn.log_ua) req.fhdr(user-agent),bytes(0,128),regsub([^A-Za-z0-9./;:_-],_,g)
+{% endif %}
 
     # SNI / HOST
     acl sni_found ssl_fc_sni -m found
@@ -1004,6 +1010,12 @@ frontend fe_http80
     # rule can refuse the request; reduced to hostname characters, because
     # the header is whatever the client chose to send.
     http-request set-var(txn.log_host) req.hdr(host),lower,regsub([^a-z0-9.:_-],_,g),bytes(0,128)
+{% if log_user_agent | default(true) %}
+    # The User-Agent too: scanners often name themselves (sqlmap, nikto,
+    # zgrab). One token with no spaces or quotes, so the line still splits
+    # unambiguously and no substring search can mistake it for a status.
+    http-request set-var(txn.log_ua) req.fhdr(user-agent),bytes(0,128),regsub([^A-Za-z0-9./;:_-],_,g)
+{% endif %}
 
     acl acme_challenge_http path_beg /.well-known/acme-challenge/
 

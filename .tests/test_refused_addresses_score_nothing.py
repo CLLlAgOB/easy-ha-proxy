@@ -159,10 +159,11 @@ class BothDerivedFindingsPassIt(unittest.TestCase):
                       self.block("_check_low_and_slow"))
 
     def test_the_counter_is_kept_where_the_hit_is_counted(self):
-        # Both emission paths -- a matched path and a query injection --
-        # have to feed it, or the ratio silently under-counts.
+        # Every emission path -- a matched path, a query injection and a
+        # self-named tool in the User-Agent -- has to feed it, or the ratio
+        # silently under-counts.
         self.assertEqual(
-            self.source.count("activity.scanner_hits_denied += 1"), 2
+            self.source.count("activity.scanner_hits_denied += 1"), 3
         )
 
     def test_enumeration_needs_no_flag_because_a_404_is_not_a_refusal(self):

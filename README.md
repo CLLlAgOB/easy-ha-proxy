@@ -493,6 +493,12 @@ the adaptive protection engine anchors its parser on the request line at the
 end, so this stays out of its way. Set `request_id_enabled: false` to turn the
 whole thing off.
 
+The User-Agent header is logged the same way, as a `ua=` field before the
+request line, reduced to one word and cut to 128 characters. Attack tools that
+name themselves there (sqlmap, nikto, nuclei and the like) are banned on one
+request; internet-wide survey scanners only count towards a ban. It makes the
+log roughly a fifth to a half larger; `log_user_agent: false` leaves it out.
+
 ### Log Explorer
 
 Off by default, with **Start recording** on the page itself -- no

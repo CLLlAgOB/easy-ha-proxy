@@ -53,7 +53,8 @@ class TheFrontendWritesIt(unittest.TestCase):
         )
 
     def test_the_field_is_in_the_log_format(self):
-        self.assertIn(" host=%[var(txn.log_host)] ", self.format)
+        # Followed by a space, or by the optional User-Agent field.
+        self.assertRegex(self.format, r" host=%\[var\(txn\.log_host\)\](?: |\{% if log_user_agent)")
 
     def test_it_sits_before_the_request_line_and_after_the_identifier(self):
         # Before %r, or the parser's tail anchor stops matching. After the
@@ -63,7 +64,13 @@ class TheFrontendWritesIt(unittest.TestCase):
         self.assertLess(self.format.index("id=%ID"), position)
 
     def test_it_is_written_whether_or_not_request_ids_are_on(self):
-        self.assertIn("{% endif %} host=%[var(txn.log_host)] %r", self.format)
+        # Outside the request-id conditional; only the User-Agent field may
+        # stand between it and the request line.
+        self.assertRegex(
+            self.format,
+            r"\{% endif %\} host=%\[var\(txn\.log_host\)\]"
+            r"(?:\{% if log_user_agent [^%]*%\} ua=%\[var\(txn\.log_ua\)\]\{% endif %\})? %r\"$",
+        )
 
     def test_both_http_frontends_capture_it_before_any_rule_can_refuse(self):
         for name in ("fe_https", "fe_http80"):

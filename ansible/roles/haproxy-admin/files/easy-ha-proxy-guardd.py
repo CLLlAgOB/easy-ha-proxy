@@ -267,7 +267,7 @@ SCANNER_PATHS: Dict[str, str] = {
 # The three tiers this file has always described in its comments were never
 # actually built: every category weighed the same, so asking for /.env scored
 # what asking for /wp-admin scored.
-DECISIVE_CATEGORIES: frozenset = frozenset({"secrets", "vcs", "backup"})
+DECISIVE_CATEGORIES: frozenset = frozenset({"secrets", "vcs", "backup", "scanner-tool"})
 
 # Nothing above looks at the query string, and one gateway carried 11,413
 # requests whose attack lived entirely there. The obvious rule -- treat
@@ -294,6 +294,79 @@ QUERY_RULES: Dict[str, "re.Pattern"] = {
     name: re.compile(pattern, re.I)
     for name, pattern in DEFAULT_QUERY_RULES.items()
 }
+# Programs that name themselves in the User-Agent header. The attack tools
+# are decisive: nobody runs sqlmap or nikto against a site by accident, and
+# the operator who runs one on purpose adds their own address to the
+# allow-list first. The internet-wide surveys are only probable -- they ask
+# for "/" and leave -- so they count towards a ban but never make one alone.
+#
+# Generic libraries (curl, python-requests, Go's http client) are left out
+# on purpose: plenty of monitors and integrations send exactly those.
+#
+# Tokens match case-insensitively anywhere in the logged value. HAProxy has
+# already reduced that value to one word -- every character outside
+# [A-Za-z0-9./;:_-] became "_" -- and the tokens go through the same
+# reduction, so they can be written the way the header reads.
+DEFAULT_USER_AGENTS: Dict[str, str] = {
+    "sqlmap": "scanner-tool",
+    "nikto": "scanner-tool",
+    "nuclei": "scanner-tool",
+    "wpscan": "scanner-tool",
+    "gobuster": "scanner-tool",
+    "dirbuster": "scanner-tool",
+    "feroxbuster": "scanner-tool",
+    "dirsearch": "scanner-tool",
+    "fuzz faster u fool": "scanner-tool",
+    "wfuzz": "scanner-tool",
+    "acunetix": "scanner-tool",
+    "netsparker": "scanner-tool",
+    "openvas": "scanner-tool",
+    "w3af": "scanner-tool",
+    "nmap scripting engine": "scanner-tool",
+    "jorgee": "scanner-tool",
+    "zgrab": "survey",
+    "masscan": "survey",
+    "censysinspect": "survey",
+    "expanse, a palo alto": "survey",
+    "internet-measurement": "survey",
+    "leakix": "survey",
+    "l9explore": "survey",
+}
+MAX_USER_AGENT_RULES = 200
+MIN_USER_AGENT_TOKEN = 4
+_UA_UNSAFE = re.compile(r"[^a-z0-9./;:_-]")
+
+
+def user_agent_token(text: str) -> str:
+    """A token or a logged value, reduced the way HAProxy reduces the header."""
+    return _UA_UNSAFE.sub("_", (text or "").lower())
+
+
+def _compile_user_agents(table: Dict[str, str]) -> Dict[str, Tuple[str, str]]:
+    """token as matched -> (token as written, category)."""
+    compiled: Dict[str, Tuple[str, str]] = {}
+    for written, category in list(table.items())[:MAX_USER_AGENT_RULES]:
+        token = user_agent_token(str(written))
+        # Too short a token would match inside ordinary browser strings.
+        if len(token.strip("_")) >= MIN_USER_AGENT_TOKEN and str(category):
+            compiled[token] = (str(written), str(category))
+    return compiled
+
+
+USER_AGENTS: Dict[str, Tuple[str, str]] = _compile_user_agents(DEFAULT_USER_AGENTS)
+
+
+def classify_user_agent(value: str) -> Tuple[str, str]:
+    """(token as written, category) for a logged User-Agent, or ("", "")."""
+    if not value or value == "-":
+        return "", ""
+    text = value.lower()
+    for token, found in USER_AGENTS.items():
+        if token in text:
+            return found
+    return "", ""
+
+
 # The query is decoded twice before matching, because %252e%252e is the
 # same attack wearing one more coat. Past that, decoding invents requests
 # nobody made.
@@ -401,8 +474,17 @@ def load_signatures(path: str = "") -> bool:
         if compiled:
             rules = compiled
 
+    agents = USER_AGENTS
+    if isinstance(data.get("user_agents"), dict):
+        agents = _compile_user_agents(
+            {str(k): str(v) for k, v in data["user_agents"].items()}
+        ) or USER_AGENTS
+
     QUERY_RULES.clear()
     QUERY_RULES.update(rules)
+    if agents is not USER_AGENTS:
+        USER_AGENTS.clear()
+        USER_AGENTS.update(agents)
     _SHIPPED_SEGMENTS = segments
     _SHIPPED_PATHS = paths
     DECISIVE_CATEGORIES = frozenset(decisive)
@@ -411,12 +493,13 @@ def load_signatures(path: str = "") -> bool:
     SIGNATURE_SOURCE = source
     LOG.info(
         "Loaded scanner signatures %s: %d segments, %d paths, %d decisive, "
-        "%d query rules",
+        "%d query rules, %d user agents",
         SIGNATURE_VERSION,
         len(segments),
         len(paths),
         len(decisive),
         len(QUERY_RULES),
+        len(USER_AGENTS),
     )
     return True
 
@@ -623,6 +706,11 @@ def signature_summary() -> Dict[str, Any]:
         # show, but they are regular expressions against a query string and
         # the page is not the place to teach anyone to read one.
         "query_rules": sorted(QUERY_RULES),
+        "user_agents": [
+            {"token": written, "category": category,
+             "decisive": category_is_decisive(category)}
+            for written, category in sorted(USER_AGENTS.values())
+        ],
         # What the operator changed, so the page can offer to change it back.
         "added": dict(_overrides.get("added") or {}),
         "disabled": list(_overrides.get("disabled") or []),
@@ -871,6 +959,9 @@ _BAD_REQUEST_TAIL = re.compile(r"<BADREQ>\s*$")
 # rather than by position, which is what keeps the middle free to change.
 _ID_FIELD = re.compile(r"(?:^|\s)id=(?P<id>\S+)")
 _HOST_FIELD = re.compile(r"(?:^|\s)host=(?P<host>\S+)")
+# Already one word: the template replaces anything that could split the line.
+_UA_FIELD = re.compile(r"(?:^|\s)ua=(?P<ua>\S*)")
+MAX_USER_AGENT_LENGTH = 128
 _BAN_REASON_FIELD = re.compile(r'ban_reason="(?P<reason>[^"]*)"')
 _MONTHS = {
     name: index
@@ -963,6 +1054,8 @@ class ParsedRequest:
     # activity page: what the gateway did with the request, and why.
     term: str = ""
     ban_reason: str = ""
+    # Present when the template logs it (log_user_agent); "" on older lines.
+    user_agent: str = ""
 
     # A refusal counts as "already handled" only when it was about who the
     # client is, not about what it sent. 451 is a geo block, 401 a failed IP
@@ -1195,6 +1288,11 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         return None
 
     uri = tail.group("uri")
+    # Only the part before the request line: the URI is the client's to write.
+    agent_field = _UA_FIELD.search(remainder, 0, tail.start())
+    user_agent = agent_field.group("ua")[:MAX_USER_AGENT_LENGTH] if agent_field else ""
+    if user_agent == "-":
+        user_agent = ""
     # The Host header, when the frontend captures it, is a labelled field; the
     # absolute-form URI is the fallback and is rare in practice.
     host_field = _HOST_FIELD.search(remainder)
@@ -1216,6 +1314,7 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         duration_ms=_total_time(head.group("times")),
         term=term,
         ban_reason=ban_reason,
+        user_agent=user_agent,
     )
 
 
@@ -3851,6 +3950,32 @@ class GuardEngine:
                 detail=request.path,
                 handled=handled,
                 fingerprint=f"{ip}|{EVENT_QUERY_INJECTION}|{request.query_flag}",
+            )
+            self._check_multi_category(ip, activity, now)
+
+        agent, agent_category = classify_user_agent(request.user_agent)
+        if agent:
+            # The client said what it is. Not gated on is_served either: a
+            # sqlmap run the site answers 200 is the worse case, not a
+            # better one.
+            activity.scanner_hits += 1
+            if handled:
+                activity.scanner_hits_denied += 1
+            activity.note_category(agent_category, now)
+            agent_event = (
+                EVENT_SCANNER_DECISIVE
+                if category_is_decisive(agent_category)
+                else EVENT_SCANNER_PATH
+            )
+            self._emit(
+                ip,
+                agent_event,
+                now,
+                source="haproxy-log",
+                category=agent_category,
+                detail=f"user agent {agent}",
+                handled=handled,
+                fingerprint=f"{ip}|ua|{agent}|{int(bool(handled))}",
             )
             self._check_multi_category(ip, activity, now)
 

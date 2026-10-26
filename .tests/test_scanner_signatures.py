@@ -48,7 +48,8 @@ class FileTests(unittest.TestCase):
         self.assertTrue(str(self.data.get("version") or "").strip())
 
     def test_every_category_used_is_declared_somewhere(self):
-        used = set(self.data["segments"].values()) | set(self.data["paths"].values())
+        used = (set(self.data["segments"].values()) | set(self.data["paths"].values())
+                | set((self.data.get("user_agents") or {}).values()))
         self.assertTrue(used)
         # decisive is a subset of what is actually used; a decisive category
         # nothing maps to would silently do nothing.
