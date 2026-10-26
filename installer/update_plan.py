@@ -46,6 +46,12 @@ APT_TIMEOUT = 45.0
 COMPOSE_TIMEOUT = 15.0
 REGISTRY_TIMEOUT = 30.0
 CLONE_TIMEOUT = 60.0
+# "What's new": the commit subjects between the installed and the candidate
+# revision, read from a history-only clone (no files, no trees).
+CHANGELOG_DEPTH = 200
+CHANGELOG_LIMIT = 40
+CHANGELOG_SUBJECT_CHARS = 160
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _REVISION_RE = re.compile(r"[0-9a-f]{40,64}")
@@ -500,15 +506,8 @@ def _probe_source(
     )
 
 
-def _remote_candidate(
-    *,
-    source_dir: Path,
-    repository: str,
-    branch: str,
-    expected_revision: str,
-    destination: Path,
-    runner: Runner,
-) -> tuple[Path | None, str | None]:
+def _source_origin(source_dir: Path, repository: str, runner: Runner) -> str:
+    """Where the managed source comes from, or "" when that is not usable."""
     # A tarball install has no checkout to read the origin from; use the
     # configured repository URL directly. Only a real checkout is asked for its
     # own origin (which may legitimately differ from the metadata default).
@@ -525,6 +524,89 @@ def _remote_candidate(
     else:
         origin = repository
     if not origin or any(character in origin for character in "\r\n\x00"):
+        return ""
+    return origin
+
+
+def _changelog(
+    *,
+    source_dir: Path,
+    repository: str,
+    branch: str,
+    installed_revision: str,
+    candidate_revision: str,
+    destination: Path,
+    runner: Runner,
+) -> dict[str, Any] | None:
+    """The commits an update brings, newest first; None when unknown.
+
+    Best effort by design: a missing changelog must never cost the plan, so
+    every failure, whatever it is, just leaves it out.
+    """
+    try:
+        if not (_REVISION_RE.fullmatch(installed_revision or "")
+                and _REVISION_RE.fullmatch(candidate_revision or "")):
+            return None
+        origin = _source_origin(source_dir, repository, runner)
+        if not origin:
+            return None
+        clone = runner.run(
+            (
+                "git", "clone", "--quiet", "--bare", "--filter=tree:0",
+                f"--depth={CHANGELOG_DEPTH}", "--single-branch", "--branch", branch,
+                "--", origin, str(destination),
+            ),
+            timeout=CLONE_TIMEOUT,
+        )
+        if clone.returncode != 0:
+            return None
+        log = runner.run(
+            (
+                "git", "-C", str(destination), "log", f"--max-count={CHANGELOG_DEPTH}",
+                "--format=%H%x1f%s", candidate_revision,
+            ),
+            timeout=GIT_TIMEOUT,
+        )
+        if log.returncode != 0:
+            return None
+        commits: list[dict[str, str]] = []
+        complete = False
+        for line in log.stdout.splitlines():
+            revision, _, subject = line.partition("\x1f")
+            revision = revision.strip().lower()
+            if not _REVISION_RE.fullmatch(revision):
+                continue
+            if revision == installed_revision:
+                complete = True
+                break
+            commits.append({
+                "revision": revision[:12],
+                "subject": _CONTROL_RE.sub("", subject).strip()[:CHANGELOG_SUBJECT_CHARS],
+            })
+        if not commits:
+            return None
+        return {
+            "count": len(commits),
+            # False: the installed revision is further back than the history
+            # read, so there are at least this many.
+            "complete": complete,
+            "commits": commits[:CHANGELOG_LIMIT],
+        }
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
+
+
+def _remote_candidate(
+    *,
+    source_dir: Path,
+    repository: str,
+    branch: str,
+    expected_revision: str,
+    destination: Path,
+    runner: Runner,
+) -> tuple[Path | None, str | None]:
+    origin = _source_origin(source_dir, repository, runner)
+    if not origin:
         return None, "repository-missing"
     clone_result = runner.run(
         (
@@ -1477,6 +1559,17 @@ def build_update_plan(
                 **(components[0].get("details") or {}),
                 "scope": scope,
             }
+            changelog = _changelog(
+                source_dir=Path(source_dir),
+                repository=repository,
+                branch=resolved_branch,
+                installed_revision=str(components[0].get("current_version") or ""),
+                candidate_revision=str(components[0].get("available_version") or ""),
+                destination=Path(temporary) / "history",
+                runner=command_runner,
+            )
+            if changelog is not None:
+                components[0]["details"]["changelog"] = changelog
 
     if (
         resolved_source_channel == "github"

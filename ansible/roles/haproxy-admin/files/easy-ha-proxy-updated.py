@@ -152,6 +152,14 @@ PLAN_TTL_SECONDS = env_int(
     "UPDATED_PLAN_TTL_SECONDS", 15 * 60, maximum=24 * 60 * 60
 )
 LIST_LIMIT = env_int("UPDATED_LIST_LIMIT", 30, maximum=100)
+# A read-only check on a schedule, so "updates are available" reaches the
+# operator without anyone opening the page. 0 switches it off. The first one
+# waits a while after start, so a reboot does not begin with a git clone.
+AUTO_CHECK_HOURS = env_int("UPDATED_AUTO_CHECK_HOURS", 24, minimum=0, maximum=24 * 30)
+AUTO_CHECK_DELAY_SECONDS = env_int(
+    "UPDATED_AUTO_CHECK_DELAY_SECONDS", 900, minimum=0, maximum=24 * 3600
+)
+AUTO_CHECK_RETRY_SECONDS = 3600
 MAX_CONNECTIONS = env_int("UPDATED_MAX_CONNECTIONS", 16, maximum=64)
 
 PROTOCOL_VERSION = 2
@@ -216,6 +224,70 @@ _ALERTS = None
 if AlertClient is not None:
     _candidate = AlertClient(source="updated")
     _ALERTS = _candidate if _candidate.configured else None
+
+
+AVAILABLE_RULE = "update.available"
+AVAILABLE_SUBJECT = "software"
+# Names for the alert text, which is read away from the page.
+ALERT_COMPONENT_NAMES = {
+    "all": "a new source revision",
+    "services": "host services",
+    "daemons": "helper daemons",
+    "authelia-container": "Authelia containers",
+    "admin-container": "the web application",
+    "os": "operating-system packages",
+}
+ALERT_CHANGELOG_LINES = 15
+
+
+def availability_report(plan: dict[str, Any]) -> tuple[bool, str, str] | None:
+    """(active, summary, detail) for the "updates available" level, or None
+    when the check could not tell either way."""
+
+    components = [item for item in plan.get("components") or [] if isinstance(item, dict)]
+    actionable = [
+        item for item in components
+        if item.get("state") == "available" and item.get("actionable") is True
+    ]
+    if not actionable:
+        if any(item.get("state") == "unknown" for item in components):
+            return None
+        return False, "Software is up to date", ""
+    names = []
+    for item in actionable:
+        name = ALERT_COMPONENT_NAMES.get(str(item.get("id")), str(item.get("id")))
+        count = (item.get("details") or {}).get("package_count") if item.get("id") == "os" else None
+        names.append(f"{name} ({count})" if isinstance(count, int) and count > 0 else name)
+    summary = f"Software updates are available: {', '.join(names)}"
+    lines: list[str] = []
+    source = next((item for item in actionable if item.get("id") == "all"), None)
+    changelog = ((source or {}).get("details") or {}).get("changelog")
+    if isinstance(changelog, dict) and isinstance(changelog.get("commits"), list):
+        count = changelog.get("count")
+        more = "" if changelog.get("complete") else "+"
+        lines.append(f"{count}{more} new change(s):")
+        for commit in changelog["commits"][:ALERT_CHANGELOG_LINES]:
+            if isinstance(commit, dict):
+                lines.append(f"- {commit.get('subject') or commit.get('revision')}")
+        lines.append("")
+    lines.append("Install them from Software updates in HAProxy Admin.")
+    return True, summary, "\n".join(lines)
+
+
+def report_availability(plan: dict[str, Any]) -> None:
+    """Keep the "updates available" level in step with the newest check."""
+    if _ALERTS is None:
+        return
+    try:
+        report = availability_report(plan)
+        if report is None:
+            return
+        active, summary, detail = report
+        _ALERTS.observe(
+            AVAILABLE_RULE, AVAILABLE_SUBJECT, active=active, summary=summary, detail=detail
+        )
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
 
 
 def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
@@ -475,6 +547,10 @@ def public_job(state: dict[str, Any], *, include_log: bool = True) -> dict[str, 
         "component_index": state.get("component_index")
         if isinstance(state.get("component_index"), int)
         else None,
+        "component_started_at": str(state.get("component_started_at"))[:40]
+        if state.get("component_started_at")
+        else None,
+        "scheduled": state.get("scheduled") is True,
         "progress": public_progress(state.get("progress")),
         "plan_id": state.get("plan_id"),
         "output": output,
@@ -1359,7 +1435,7 @@ def release_operation(descriptor: int) -> None:
             STOP_EVENT.set()
 
 
-def finish_failed(job_id: str, exc: Exception, log: str = "") -> None:
+def finish_failed(job_id: str, exc: Exception, log: str = "", *, alert: bool = True) -> None:
     current_log = ""
     try:
         current = load_job(job_id)
@@ -1380,6 +1456,8 @@ def finish_failed(job_id: str, exc: Exception, log: str = "") -> None:
         updates["output"] = {"log": candidate_log}
     update_job(job_id, **updates)
     LOG.warning("Update job %s failed: %s", job_id, exc)
+    if not alert:
+        return
     report_alert(
         "update.failed",
         job_id,
@@ -1388,13 +1466,14 @@ def finish_failed(job_id: str, exc: Exception, log: str = "") -> None:
     )
 
 
-def check_worker(
+def run_check(
     job_id: str,
-    lock_fd: int,
     image_channel: str | None,
     source_channel: str | None,
     branch: str | None = None,
-) -> None:
+    *,
+    alert_on_failure: bool = True,
+) -> bool:
     try:
         update_job(
             job_id,
@@ -1421,10 +1500,97 @@ def check_worker(
                 if item.get("state") == "available" and item.get("actionable") is True
             )},
         )
+        report_availability(plan)
+        return True
     except Exception as exc:  # noqa: BLE001 - stored as bounded job failure
-        finish_failed(job_id, exc)
+        finish_failed(job_id, exc, alert=alert_on_failure)
+        return False
+
+
+def check_worker(
+    job_id: str,
+    lock_fd: int,
+    image_channel: str | None,
+    source_channel: str | None,
+    branch: str | None = None,
+) -> None:
+    try:
+        run_check(job_id, image_channel, source_channel, branch)
     finally:
         release_operation(lock_fd)
+
+
+def maintenance_lock_busy() -> bool:
+    """Whether a backup, restore or update holds the shared lock right now."""
+    try:
+        descriptor = os.open(
+            MAINTENANCE_LOCK_PATH,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return True
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def auto_check_once() -> str:
+    """One scheduled check: "done", "failed" or "busy".
+
+    It reads and never changes the host, so unlike a check from the page it
+    does not hold the maintenance lock for its minute: a nightly backup that
+    starts meanwhile must not fail for being "busy". It still steps aside for
+    anything running, and keeps the broker's own lock so the page cannot start
+    an installation underneath it.
+    """
+    if SHUTDOWN_REQUESTED.is_set() or reboot_guard_present() or ACTIVE_MARKER.exists():
+        return "busy"
+    if not OPERATION_THREAD_LOCK.acquire(blocking=False):
+        return "busy"
+    try:
+        if maintenance_lock_busy():
+            return "busy"
+        job = new_job("check", scheduled=True)
+        done = run_check(job["id"], None, None, None, alert_on_failure=False)
+        return "done" if done else "failed"
+    finally:
+        OPERATION_THREAD_LOCK.release()
+        if SHUTDOWN_REQUESTED.is_set():
+            STOP_EVENT.set()
+
+
+def seconds_until_auto_check(now: float) -> float:
+    """How long until the newest check is a schedule interval old."""
+    try:
+        plan = load_latest_plan()
+        created = dt.datetime.fromisoformat(str((plan or {}).get("created_at") or ""))
+        last = created.timestamp()
+    except (UpdatedError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        last = 0.0
+    return max(0.0, last + AUTO_CHECK_HOURS * 3600 - now)
+
+
+def auto_check_loop() -> None:
+    delay = float(AUTO_CHECK_DELAY_SECONDS)
+    while not STOP_EVENT.wait(delay):
+        try:
+            wait = seconds_until_auto_check(time.time())
+            if wait > 0:
+                delay = wait
+                continue
+            outcome = auto_check_once()
+            LOG.info("Scheduled update check: %s", outcome)
+            delay = AUTO_CHECK_HOURS * 3600.0 if outcome == "done" else AUTO_CHECK_RETRY_SECONDS
+        except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
+            LOG.exception("Scheduled update check failed")
+            delay = AUTO_CHECK_RETRY_SECONDS
 
 
 def update_command(
@@ -1520,11 +1686,14 @@ def apply_worker(
         source_channel = str(plan.get("source_channel"))
         image_channel = str(plan.get("image_channel"))
         expected_source_revision = reviewed_source_revision(plan, components)
+        component_seconds: dict[str, int] = {}
         for index, component in enumerate(components):
+            begun = time.monotonic()
             update_job(
                 job_id,
                 current_component=component,
                 component_index=index,
+                component_started_at=utc_now(),
                 progress={"phase": "starting"},
             )
             heading = f"\n=== Applying component: {component} ==="
@@ -1545,10 +1714,13 @@ def apply_worker(
                 raise UpdatedError(
                     f"component update failed: {component} (exit code {returncode})"
                 )
+            component_seconds[component] = int(time.monotonic() - begun)
         reboot_required = Path("/var/run/reboot-required").exists()
         result: dict[str, Any] = {
             "components": components,
             "reboot_required": reboot_required,
+            # How long each part took, for the next installation's estimate.
+            "component_seconds": component_seconds,
         }
         update_job(job_id, progress={"phase": "rechecking"})
         try:
@@ -1559,6 +1731,7 @@ def apply_worker(
             )
             validate_applied_container_digests(plan, refreshed_payload, components)
             refreshed = store_plan(refreshed_payload)
+            report_availability(refreshed)
             result["refreshed_plan_id"] = refreshed["id"]
         except Exception as exc:  # noqa: BLE001 - update already succeeded
             if container_components_for_selection(components):
@@ -2133,6 +2306,8 @@ def signal_stop(_signum: int, _frame: Any) -> None:
 def serve() -> None:
     ensure_layout()
     recover_stale_jobs()
+    if AUTO_CHECK_HOURS > 0:
+        threading.Thread(target=auto_check_loop, name="auto-check", daemon=True).start()
     try:
         SOCKET_PATH.unlink()
     except FileNotFoundError:

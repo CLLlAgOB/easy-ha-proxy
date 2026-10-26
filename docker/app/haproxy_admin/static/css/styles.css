@@ -2919,6 +2919,40 @@ tr.job-row-selected > td:first-child {
   font-size: 12px;
 }
 
+.updates-changelog {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.updates-changelog[hidden] {
+  display: none;
+}
+
+.updates-changelog > summary {
+  width: fit-content;
+  color: var(--accent-primary);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.updates-changelog-list {
+  display: grid;
+  gap: 4px;
+  max-height: 260px;
+  margin: 8px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-changelog-list code {
+  margin-right: 6px;
+  color: var(--text-secondary);
+  opacity: .7;
+}
+
 .updates-badge {
   display: inline-block;
   margin-left: 8px;

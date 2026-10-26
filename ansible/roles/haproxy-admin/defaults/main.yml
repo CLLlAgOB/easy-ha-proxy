@@ -216,6 +216,9 @@ updated_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-updated-restart
 updated_maintenance_lock_path: "{{ backupd_operation_lock_path }}"
 updated_haproxy_transaction_marker: /opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json
 updated_reboot_delay_seconds: 60
+# A read-only update check every this many hours; it raises the
+# "update.available" alert when something can be installed. 0 switches it off.
+updates_auto_check_hours: 24
 
 # Authelia user-management daemon socket.
 authelia_users_socket: /run/easy-ha-proxy/authelia-usersd.sock

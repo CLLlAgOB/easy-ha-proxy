@@ -24,6 +24,7 @@ Environment="UPDATED_JOB_TIMEOUT_SECONDS={{ updated_job_timeout_seconds | defaul
 Environment="UPDATED_CHECK_TIMEOUT_SECONDS={{ updated_check_timeout_seconds | default(600) }}"
 Environment="UPDATED_PLAN_TTL_SECONDS={{ updated_plan_ttl_seconds | default(900) }}"
 Environment="UPDATED_LIST_LIMIT={{ updated_list_limit | default(30) }}"
+Environment="UPDATED_AUTO_CHECK_HOURS={{ updates_auto_check_hours | default(24) }}"
 Environment="UPDATED_ACTIVE_MARKER={{ updated_active_marker | default('/run/easy-ha-proxy/easy-ha-proxy-update.active') }}"
 Environment="UPDATED_RESTART_REQUEST_MARKER={{ updated_restart_request_marker | default('/run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested') }}"
 Environment="UPDATED_MAINTENANCE_LOCK={{ updated_maintenance_lock_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock') }}"

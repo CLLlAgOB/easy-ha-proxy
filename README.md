@@ -355,8 +355,17 @@ container itself, and cached operating-system packages. Nothing is installed
 merely by opening the page. After a check the recommended set is ticked --
 "Only what changed" and the containers, never the OS packages -- and one dialog
 lists what will restart before anything runs. While a job runs the page shows a
-progress bar with the current step; the log is behind "Show details", and the
-history and release channel are folded away.
+progress bar with the current step and an estimate of the time left (from how
+long each part took before); the log is behind "Show details", and the history
+and release channel are folded away. A "What's new" list shows the commit
+subjects between the installed and the available revision.
+
+The broker also runs the same read-only check once a day
+(`updates_auto_check_hours`, 0 switches it off) and keeps the
+`update.available` alert in step: raised when something can be installed,
+resolved by the check after it was. The scheduled check never holds the
+maintenance lock, so it cannot make a nightly backup fail as busy, and a
+scheduled check that fails (no network, say) is not reported as a failed update.
 
 Applying selected components creates a durable job in
 `easy-ha-proxy-updated.service`. The root broker accepts only fixed component

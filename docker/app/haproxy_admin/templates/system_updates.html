@@ -37,6 +37,7 @@
       <div class="updates-run-meta">
         <strong id="updates-progress-label">Working…</strong>
         <span>
+          <span id="updates-progress-eta"></span>
           <span id="updates-progress-percent" class="mono notranslate" translate="no" data-i18n-skip></span>
           <span id="updates-progress-elapsed" class="mono notranslate" translate="no" data-i18n-skip>0:00</span>
         </span>
@@ -81,6 +82,12 @@
     </div>
 
     <div id="updates-plan-warning" class="alert alert-warning" hidden></div>
+
+    {# Commit subjects are the repository's own words: shown as they are. #}
+    <details id="updates-changelog" class="updates-changelog" hidden>
+      <summary id="updates-changelog-summary">What's new</summary>
+      <ul id="updates-changelog-list" class="updates-changelog-list notranslate" translate="no" data-i18n-skip></ul>
+    </details>
 
     <div id="updates-components-wrap" hidden>
       <table class="updates-table updates-choice-table">

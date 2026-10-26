@@ -217,6 +217,12 @@ RULES: Tuple[Rule, ...] = (
          "Restore job failed", auto_clear=6 * 3600),
     Rule("update.failed", KIND_EVENT, SEVERITY_WARNING,
          "Software update failed", auto_clear=6 * 3600),
+    # A level: true from the check that finds something to install until the
+    # check after it is installed. The broker checks once a day, so it goes
+    # stale only after a week of silence, and repeats weekly, not daily.
+    Rule("update.available", KIND_LEVEL, SEVERITY_INFO,
+         "Software updates are available", trigger_delay=0,
+         repeat_after=7 * 86400, stale_after=8 * 86400),
     Rule("config.apply_failed", KIND_EVENT, SEVERITY_CRITICAL,
          "HAProxy apply or reload failed", auto_clear=3600),
 )

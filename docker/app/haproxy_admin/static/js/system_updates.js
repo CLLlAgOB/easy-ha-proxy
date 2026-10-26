@@ -104,6 +104,8 @@
   let planHasContent = false;
   let planSummaryText = "";
   let preselectedPlanId = "";
+  // The job list, kept for the time estimate: how long each part took before.
+  let jobHistory = [];
   // The bar never runs backwards for a job, whatever order the polls arrive in.
   const highestPercent = {};
 
@@ -471,10 +473,30 @@
     return Boolean(release) && release !== installedRelease;
   }
 
+  function renderChangelog(components) {
+    const source = components.find((item) => item.id === "all");
+    const changelog = source && source.details && source.details.changelog;
+    const box = byId("updates-changelog");
+    const commits = changelog && Array.isArray(changelog.commits) ? changelog.commits : [];
+    box.hidden = !commits.length;
+    if (!commits.length) return;
+    const count = Number(changelog.count) || commits.length;
+    byId("updates-changelog-summary").textContent = changelog.complete
+      ? t("What's new: {count} change(s)", {count})
+      : t("What's new: more than {count} change(s)", {count});
+    const items = commits.map((commit) =>
+      `<li><code>${escape(commit.revision || "")}</code> ${escape(commit.subject || "")}</li>`
+    );
+    if (count > commits.length) {
+      items.push(`<li class="muted">${escape(t("… and {count} more", {count: count - commits.length}))}</li>`);
+    }
+    byId("updates-changelog-list").innerHTML = items.join("");
+  }
   function renderPlan(plan) {
     currentPlan = plan;
     resetConfirmation();
     const components = withChangesRow(normalizeComponents(plan));
+    renderChangelog(components);
     const available = components.filter((item) => item.actionable && availableStates.has(item.state));
     // "blocked" means a check was intentionally skipped (e.g. the local source
     // channel, or a synced non-git source on the github channel) — that is
@@ -519,7 +541,7 @@
       // Components whose candidates are already named in the reason (daemons,
       // host-service files) skip the raw digest dump to stay readable.
       const shown = component.details && typeof component.details === "object" && !Array.isArray(component.details)
-        ? Object.fromEntries(Object.entries(component.details).filter(([key]) => key !== "scope"))
+        ? Object.fromEntries(Object.entries(component.details).filter(([key]) => !["scope", "changelog"].includes(key)))
         : component.details;
       const details = Array.isArray(component.details && component.details.artifacts)
         ? ""
@@ -653,7 +675,7 @@
         const result = job.error || job.message || job.result?.message || (state === "completed" ? t("Completed successfully") : "—");
         return `<tr data-update-job="${escape(jobId(job))}" tabindex="0">
           <td>${escape(formatDate(job.started_at || job.created_at))}</td>
-          <td>${escape(operationLabel(jobOperation(job)))}</td>
+          <td>${escape(job.scheduled ? t("Scheduled check") : operationLabel(jobOperation(job)))}</td>
           <td>${escape(components.map((id) => t(componentLabels[id] || id)).join(", ") || "—")}</td>
           <td><span class="backup-job-state backup-job-state--${escape(state)}">${escape(t(state))}</span></td>
           <td class="notranslate" translate="no" data-i18n-skip>${escape(String(result))}</td>
@@ -668,6 +690,7 @@
     }
     markSelectedRow();
     byId("updates-history-count").textContent = jobs.length ? String(jobs.length) : "";
+    jobHistory = jobs;
     resultJobSnapshot = recentResult(jobs);
     renderProgress(active);
     return Boolean(active);
@@ -681,6 +704,64 @@
     const ended = until ? new Date(until).getTime() : Date.now();
     return Number.isFinite(started) && Number.isFinite(ended) ? (ended - started) / 1000 : 0;
   }
+  function median(values) {
+    const sorted = values.slice().sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+  // How long a component took in the last few installations that finished.
+  function typicalSeconds(component) {
+    const values = [];
+    for (const job of jobHistory) {
+      if (jobOperation(job) !== "apply" || jobState(job) !== "completed") continue;
+      const seconds = Number(job.result && job.result.component_seconds && job.result.component_seconds[component]);
+      if (Number.isFinite(seconds) && seconds > 0) values.push(seconds);
+      if (values.length >= 5) break;
+    }
+    return values.length ? median(values) : null;
+  }
+  function typicalCheckSeconds() {
+    const values = [];
+    for (const job of jobHistory) {
+      if (jobOperation(job) !== "check" || jobState(job) !== "completed" || !job.completed_at) continue;
+      const seconds = jobSeconds(job, job.completed_at);
+      if (seconds > 0) values.push(seconds);
+      if (values.length >= 5) break;
+    }
+    return values.length ? median(values) : 45;
+  }
+  // Seconds left, or null when there is nothing honest to say. The current
+  // component is judged by its own pace once it is a quarter done -- a
+  // "changes only" run is as long as its changes, so history says little --
+  // and by history before that; the components after it by history alone.
+  function remainingSeconds(job, index, phase, fraction) {
+    const components = jobComponents(job);
+    if (phase === "rechecking" || !components.length) return null;
+    const current = components[Math.min(index, components.length - 1)];
+    const started = Date.parse(job.component_started_at || "");
+    const elapsed = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : null;
+    let left;
+    if (phase === "verifying") {
+      left = typicalSeconds(current);
+    } else if (elapsed != null && fraction >= 0.25) {
+      left = elapsed * (1 - fraction) / fraction;
+    } else {
+      const typical = typicalSeconds(current);
+      left = typical == null || elapsed == null ? null : Math.max(typical - elapsed, 15);
+    }
+    if (left == null) return null;
+    for (const later of components.slice(index + 1)) {
+      const typical = typicalSeconds(later);
+      if (typical == null) return null;
+      left += typical;
+    }
+    return left + typicalCheckSeconds();
+  }
+  function remainingText(seconds) {
+    if (seconds == null || !Number.isFinite(seconds)) return "";
+    if (seconds < 60) return t("less than a minute left");
+    return t("about {minutes} min left", {minutes: Math.round(seconds / 60)});
+  }
   // The task name without its role prefix: "guardd | Install script".
   function taskText(value) {
     return String(value || "").replace(/^[^:|]{1,60} : /, "");
@@ -688,7 +769,7 @@
   function progressModel(job) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {};
     if (jobOperation(job) !== "apply") {
-      return {percent: null, label: t("Checking for updates…"), step: ""};
+      return {percent: null, label: t("Checking for updates…"), step: "", eta: ""};
     }
     const components = jobComponents(job);
     const count = Math.max(1, components.length);
@@ -698,17 +779,19 @@
     if (index < 0) index = 0;
     const phase = String(progress.phase || "verifying");
     let percent;
+    let share = 0;
     if (phase === "verifying") {
       percent = 2;
     } else if (phase === "rechecking") {
       percent = 97;
     } else {
-      let share = PHASE_SHARE[phase] ?? 0;
+      share = PHASE_SHARE[phase] ?? 0;
       if (phase === "playbook" && Number(progress.total) > 0) {
         share = 0.15 + 0.85 * Math.min(1, Number(progress.done || 0) / Number(progress.total));
       }
       percent = 3 + 94 * ((index + share) / count);
     }
+    const eta = remainingText(remainingSeconds(job, index, phase, share));
     const id = jobId(job);
     percent = Math.max(highestPercent[id] || 0, Math.round(Math.min(99, Math.max(1, percent))));
     highestPercent[id] = percent;
@@ -725,7 +808,7 @@
     const step = phase === "playbook" && progress.task
       ? taskText(progress.task)
       : t(PHASE_LABELS[phase] || "");
-    return {percent, label, step};
+    return {percent, label, step, eta};
   }
   function renderProgress(active) {
     const wrap = byId("updates-progress");
@@ -750,6 +833,7 @@
       byId("updates-progress-percent").textContent = "";
     }
     byId("updates-progress-label").textContent = model.label;
+    byId("updates-progress-eta").textContent = model.eta;
     byId("updates-progress-step").textContent = model.step;
     const components = jobComponents(active);
     byId("updates-self-restart-running").hidden = !(

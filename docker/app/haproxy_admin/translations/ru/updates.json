@@ -76,6 +76,13 @@
     "The update failed": "Обновление не удалось",
     "Stable": "Стабильный",
     "Alpha": "Альфа",
-    "Local": "Локальный"
+    "Local": "Локальный",
+    "What's new": "Что нового",
+    "What's new: {count} change(s)": "Что нового: изменений — {count}",
+    "What's new: more than {count} change(s)": "Что нового: изменений — больше {count}",
+    "… and {count} more": "… и ещё {count}",
+    "Scheduled check": "Проверка по расписанию",
+    "less than a minute left": "осталось меньше минуты",
+    "about {minutes} min left": "осталось ≈ {minutes} мин"
   }
 }
