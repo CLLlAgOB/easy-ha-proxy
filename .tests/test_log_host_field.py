@@ -73,6 +73,12 @@ class TheFrontendWritesIt(unittest.TestCase):
                     if row.strip().startswith(("http-request ", "tcp-request "))
                 ]
                 http_rules = [row for row in rules if row.startswith("http-request ")]
+                # Only the default-port strip may come first: it rewrites the
+                # Host header so the log records the plain name, and it never
+                # refuses anything.
+                if http_rules[0].startswith("http-request set-header Host "):
+                    self.assertNotIn("deny", http_rules[0])
+                    http_rules = http_rules[1:]
                 self.assertEqual(http_rules[0], CAPTURE)
 
     def test_no_tcp_rule_is_written_below_it(self):
