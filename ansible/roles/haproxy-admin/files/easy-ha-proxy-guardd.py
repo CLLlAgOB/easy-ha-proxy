@@ -1510,6 +1510,23 @@ def parse_table(payload: str) -> Dict[str, Dict[str, str]]:
     return rows
 
 
+def banned_now(socket_path: str) -> Set[str]:
+    """Every address tbl_ban refuses right now, whoever put it there.
+
+    Not only this daemon's bans: a ban made by hand on the panel or by
+    HAProxy's own rules refuses the address just the same, and that is what
+    an operator filtering for "banned" means.
+    """
+    try:
+        payload = runtime_command(socket_path, "show table tbl_ban")
+    except OSError as exc:
+        raise RuntimeError(f"cannot read the ban table: {exc}") from exc
+    return {
+        ip for ip, fields in parse_table(payload).items()
+        if _safe_int(fields.get("gpc0")) > 0
+    }
+
+
 def list_tables(payload: str) -> List[str]:
     names: List[str] = []
     for line in payload.splitlines():
@@ -3278,6 +3295,9 @@ def _live_matches(record: tuple, filters: Dict[str, Any]) -> bool:
         return False
     if filters.get("blocked") and not record[L_REFUSAL]:
         return False
+    ips = filters.get("ips")
+    if ips is not None and record[L_IP] not in ips:
+        return False
     return True
 
 
@@ -3303,6 +3323,11 @@ def live_filters(raw: Dict[str, Any]) -> Dict[str, Any]:
         filters["status"] = status
     if str(raw.get("blocked") or "").lower() in ("1", "true", "yes", "on"):
         filters["blocked"] = True
+    # Addresses in the ban table now, with everything they sent in the
+    # window -- including the requests from before the ban, which the
+    # gateway let through and "blocked" therefore does not show.
+    if str(raw.get("banned") or "").lower() in ("1", "true", "yes", "on"):
+        filters["banned"] = True
     return filters
 
 
@@ -3525,7 +3550,8 @@ class LiveBuffer:
             return {"records": len(self._records), "max_records": self.max_records,
                     "oldest": oldest, "newest": newest, "started": self.started}
 
-    def snapshot(self, raw: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    def snapshot(self, raw: Dict[str, Any], now: Optional[float] = None,
+                 banned: Optional[Iterable[str]] = None) -> Dict[str, Any]:
         self._wanted_at = time.monotonic()
         try:
             window = int(raw.get("window") or 60)
@@ -3534,6 +3560,8 @@ class LiveBuffer:
         window = max(5, min(self.max_seconds, window))
         filters = live_filters(raw)
         key = json.dumps([window, filters], sort_keys=True)
+        if filters.get("banned"):
+            filters["ips"] = frozenset(banned or ())
         # One computation at a time, however many pages are open; the same
         # question asked twice inside two seconds gets the same answer.
         with self._compute_lock:
@@ -4928,7 +4956,10 @@ class GuardHandler(BaseHTTPRequestHandler):
                     return
                 query = parse_qs(urlparse(self.path).query or "")
                 raw = {name: (values[0] if values else "") for name, values in query.items()}
-                result = live.snapshot(raw)
+                banned = None
+                if live_filters(raw).get("banned"):
+                    banned = banned_now(engine.config.haproxy_socket)
+                result = live.snapshot(raw, banned=banned)
                 # How far behind the log the buffer is: the newest line it
                 # holds, and how many bytes are still unread.
                 status = live.status()

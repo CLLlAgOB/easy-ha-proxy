@@ -140,6 +140,40 @@ class TheBuffer(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.buffer.snapshot({"ip": "1; rm"}, now=self.now)
 
+    def test_banned_now_shows_what_a_banned_address_sent_before_the_ban(self):
+        # "Only refused" misses an address whose requests all went through
+        # before it was banned; "banned now" is about the address instead.
+        self.fill()
+        data = self.buffer.snapshot({"window": "60", "banned": "1"}, now=self.now,
+                                    banned={"203.0.113.9"})
+        self.assertEqual(data["totals"]["requests"], 3)
+        self.assertEqual(data["totals"]["blocked"], 0)
+        self.assertEqual([row["ip"] for row in data["addresses"]], ["203.0.113.9"])
+        # Nobody banned, nothing shown -- never everything.
+        self.buffer._cache.clear()
+        empty = self.buffer.snapshot({"window": "60", "banned": "1"}, now=self.now)
+        self.assertEqual(empty["totals"]["requests"], 0)
+
+    def test_the_ban_table_is_read_whoever_banned(self):
+        payload = (
+            "# table: tbl_ban, type: ip, size:1048576, used:3\n"
+            "0x1: key=198.51.100.7 use=0 exp=3000 shard=0 gpt0=40 gpc0=1\n"
+            "0x2: key=192.0.2.8 use=0 exp=3000 shard=0 gpt0=10 gpc0=1\n"
+            "0x3: key=192.0.2.9 use=0 exp=3000 shard=0 gpt0=10 gpc0=0\n"
+        )
+        with mock.patch.object(guardd, "runtime_command", return_value=payload):
+            self.assertEqual(guardd.banned_now("/run/haproxy/admin.sock"),
+                             {"198.51.100.7", "192.0.2.8"})
+        with mock.patch.object(guardd, "runtime_command", side_effect=OSError("gone")):
+            with self.assertRaises(RuntimeError):
+                guardd.banned_now("/run/haproxy/admin.sock")
+
+    def test_the_api_reads_the_ban_table_only_when_asked(self):
+        source = GUARDD_PATH.read_text(encoding="utf-8")
+        handler = source.split('if path in ("/api/v1/guard/live", "/api/v1/guard/attackers"):')[1][:1500]
+        self.assertIn('if live_filters(raw).get("banned"):', handler)
+        self.assertIn("banned_now(engine.config.haproxy_socket)", handler)
+
     def test_it_is_bounded_by_count_and_by_age(self):
         small = guardd.LiveBuffer(3, 3600)
         small.extend([record(line("192.0.2.%d" % i, 200, at=self.now - 10 + i)) for i in range(5)])
@@ -284,6 +318,10 @@ class ThePanel(unittest.TestCase):
         self.assertEqual([r["ip"] for r in data["connection_limited"]], ["203.0.113.9"])
         self.assertEqual(data["current_connections"], 4)
 
+    def test_banned_now_is_passed_on(self):
+        live.live_view({"window": "60", "banned": "on"})
+        self.assertEqual(self.guardd.call_args.args[0], {"window": 60, "banned": "1"})
+
     def test_guardd_down_is_said_plainly(self):
         self.guardd.side_effect = live.GuarddUnavailable("no socket")
         with self.assertRaises(live.LiveUnavailable) as caught:
@@ -402,6 +440,15 @@ class ThePage(unittest.TestCase):
         sort_handler = script.split('document.querySelectorAll("th[data-sort]").forEach')[1].split("});\n    });")[0]
         self.assertIn("render();", sort_handler)
         self.assertNotIn("refresh()", sort_handler)
+
+    def test_two_filters_say_what_they_are(self):
+        page = (APP / "templates/live_activity.html").read_text(encoding="utf-8")
+        script = (APP / "static/js/live_activity.js").read_text(encoding="utf-8")
+        self.assertIn('id="la-blocked"> Only refused by the gateway', page)
+        self.assertIn('id="la-banned-only"> Only banned now', page)
+        self.assertIn('params.banned = "1"', script)
+        reset = script.split('byId("la-reset")')[1].split("applyNow();")[0]
+        self.assertIn('byId("la-banned-only").checked = false', reset)
 
     def test_the_allow_listed_rows_offer_drop_and_ban(self):
         script = (APP / "static/js/live_activity.js").read_text(encoding="utf-8")

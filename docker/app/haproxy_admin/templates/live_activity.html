@@ -183,8 +183,11 @@
       Path or site contains
       <input type="text" id="la-q" placeholder="/login" data-i18n-skip translate="no">
     </label>
-    <label class="la-check">
-      <input type="checkbox" id="la-blocked"> Only blocked
+    <label class="la-check" title="Requests the gateway refused itself: a ban, a geo block, a limit, an address rule. A request it let through to the site is not one of them, even from an address banned later.">
+      <input type="checkbox" id="la-blocked"> Only refused by the gateway
+    </label>
+    <label class="la-check" title="Addresses in the ban table right now, with everything they sent in the window -- including requests from before the ban.">
+      <input type="checkbox" id="la-banned-only"> Only banned now
     </label>
     <button type="button" class="btn btn-small" id="la-reset">Reset filters</button>
   </div>

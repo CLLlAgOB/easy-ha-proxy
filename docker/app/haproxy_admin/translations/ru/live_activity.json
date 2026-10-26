@@ -18,7 +18,6 @@
     "All countries": "Все страны",
     "Any status": "Любой",
     "Path or site contains": "Путь или сайт содержит",
-    "Only blocked": "Только заблокированные",
     "Reset filters": "Сбросить фильтры",
     "Requests in the window": "Запросов в окне",
     "Errors (4xx/5xx)": "Ошибки (4xx/5xx)",
@@ -78,6 +77,10 @@
     "The address was not found as a single allow-list entry": "Адрес не найден как отдельная запись белого списка",
     "Not banned": "Не забанен",
     "Allowed by a network range: edit the allow list to ban it": "Разрешён диапазоном сети: чтобы забанить, измените белый список",
-    "In an allowed range": "В разрешённом диапазоне"
+    "In an allowed range": "В разрешённом диапазоне",
+    "Only refused by the gateway": "Только отказы шлюза",
+    "Requests the gateway refused itself: a ban, a geo block, a limit, an address rule. A request it let through to the site is not one of them, even from an address banned later.": "Запросы, которые шлюз отклонил сам: бан, геоблок, лимит, правило по адресу. Запрос, пропущенный на сайт, сюда не входит, даже если адрес потом забанили.",
+    "Only banned now": "Только забаненные сейчас",
+    "Addresses in the ban table right now, with everything they sent in the window -- including requests from before the ban.": "Адреса, которые сейчас в таблице банов, со всеми их запросами за окно — в том числе отправленными до бана."
   }
 }

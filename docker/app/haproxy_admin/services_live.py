@@ -88,6 +88,8 @@ def normalize_request(args: Dict[str, Any]) -> Dict[str, Any]:
         request["status"] = status
     if str(args.get("blocked") or "").lower() in ("1", "true", "yes", "on"):
         request["blocked"] = True
+    if str(args.get("banned") or "").lower() in ("1", "true", "yes", "on"):
+        request["banned"] = True
     country = str(args.get("country") or "").strip().upper()
     if re.fullmatch(r"[A-Z]{2}", country):
         request["country"] = country
@@ -96,8 +98,9 @@ def normalize_request(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def fetch_snapshot(request: Dict[str, Any]) -> Dict[str, Any]:
     params = {key: value for key, value in request.items() if key != "country"}
-    if params.get("blocked"):
-        params["blocked"] = "1"
+    for flag in ("blocked", "banned"):
+        if params.get(flag):
+            params[flag] = "1"
     try:
         data = guardd_live(params)
     except GuarddUnavailable as exc:

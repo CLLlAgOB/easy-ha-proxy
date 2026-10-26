@@ -124,6 +124,7 @@
     const query = byId("la-q").value.trim();
     if (query) params.q = query;
     if (byId("la-blocked").checked) params.blocked = "1";
+    if (byId("la-banned-only").checked) params.banned = "1";
     return params;
   }
 
@@ -487,7 +488,7 @@
       if (!state.paused) refresh();
       schedule();
     });
-    ["la-host", "la-country", "la-status", "la-blocked"].forEach((id) => {
+    ["la-host", "la-country", "la-status", "la-blocked", "la-banned-only"].forEach((id) => {
       byId(id).addEventListener("change", applyNow);
     });
     ["la-ip", "la-q"].forEach((id) => {
@@ -501,6 +502,7 @@
       ["la-ip", "la-q"].forEach((id) => { byId(id).value = ""; });
       ["la-host", "la-country", "la-status"].forEach((id) => { byId(id).value = ""; });
       byId("la-blocked").checked = false;
+      byId("la-banned-only").checked = false;
       applyNow();
     });
     byId("la-tabs").addEventListener("click", (event) => {
