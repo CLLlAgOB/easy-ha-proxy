@@ -11,7 +11,6 @@ checks the copy, keeps the newest few, and stops the update if it cannot.
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 import sqlite3
 import stat

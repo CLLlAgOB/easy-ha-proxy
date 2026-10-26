@@ -1,7 +1,6 @@
 # haproxy_admin/routes_haproxy_sites.py
 
 import traceback
-import os
 from flask import jsonify, request
 
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize

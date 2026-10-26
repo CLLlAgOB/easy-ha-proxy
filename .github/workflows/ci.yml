@@ -52,7 +52,7 @@ jobs:
         run: python -m unittest discover -s .tests -p 'test_*.py'
 
   shell:
-    name: Shell syntax
+    name: Shell syntax and ShellCheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +65,34 @@ jobs:
           install-remote.sh
           easy-ha-proxy-helper.sh
           installer/easy-ha-proxy
+
+      # Warnings and up: unquoted expansions, unused variables, tildes that do
+      # not expand. Style notes are left alone.
+      - name: ShellCheck
+        run: >-
+          shellcheck -S warning
+          install.sh
+          install-local.sh
+          install-remote.sh
+          easy-ha-proxy-helper.sh
+          installer/easy-ha-proxy
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Only what is certainly a mistake (see ruff.toml): an undefined name,
+      # an unused import, a dictionary key given twice.
+      - name: Ruff
+        run: |
+          pip install ruff==0.6.9
+          ruff check --output-format=github .
 
   ansible:
     name: Ansible syntax
@@ -107,3 +135,93 @@ jobs:
       # task and role structure, not host-specific variable resolution.
       - name: Syntax-check the playbook
         run: ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
+
+  # The web application image, published from the commit CI has just tested.
+  # Each image is labelled with the fingerprint of its build inputs (the
+  # sha256 of `git ls-tree` over Dockerfile, .dockerignore and docker/app):
+  # gateways pair the host with the web application by it, and hold a host
+  # update back until the matching image exists. Publishing here, on every
+  # push, is what keeps that wait short.
+  image:
+    name: Publish the web application image
+    needs: [python, shell, ansible, lint]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: clllagob/haproxy-admin-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fingerprint the web application
+        id: tree
+        run: |
+          tree="$(git ls-tree -r --full-tree HEAD -- Dockerfile .dockerignore docker/app | sha256sum | cut -d' ' -f1)"
+          echo "tree=${tree}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "channel=latest" >> "$GITHUB_OUTPUT"
+            echo "key=source-${tree}" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=alpha" >> "$GITHUB_OUTPUT"
+            echo "key=alpha-${tree}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Without the secrets (a fork, say) the job says so and stops quietly.
+      - name: Check for registry credentials
+        id: credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set; the image was not published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@v3
+        if: steps.credentials.outputs.ready == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@v3
+        if: steps.credentials.outputs.ready == 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.credentials.outputs.ready == 'true'
+
+      # An image built from these exact web files is reused, not rebuilt: the
+      # channel is just pointed at it. main is usually alpha promoted, so its
+      # build is normally there already under the alpha key.
+      - name: Publish
+        if: steps.credentials.outputs.ready == 'true'
+        env:
+          TREE: ${{ steps.tree.outputs.tree }}
+          KEY: ${{ steps.tree.outputs.key }}
+          CHANNEL: ${{ steps.tree.outputs.channel }}
+        run: |
+          key_image="${REPOSITORY}:${KEY}"
+          channel_image="${REPOSITORY}:${CHANNEL}"
+          alpha_image="${REPOSITORY}:alpha-${TREE}"
+          if docker buildx imagetools inspect "${key_image}" >/dev/null 2>&1; then
+            echo "Already built: ${key_image}"
+            docker buildx imagetools create --tag "${channel_image}" "${key_image}"
+          elif [ "${CHANNEL}" = "latest" ] && docker buildx imagetools inspect "${alpha_image}" >/dev/null 2>&1; then
+            echo "Promoting ${alpha_image}"
+            docker buildx imagetools create --tag "${key_image}" --tag "${channel_image}" "${alpha_image}"
+          else
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --label "org.opencontainers.image.version=${CHANNEL}" \
+              --label "io.easy-ha-proxy.source-tree=${TREE}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --tag "${key_image}" \
+              --tag "${channel_image}" \
+              --push \
+              .
+          fi
+          echo "Published ${channel_image} (web files ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"

@@ -235,8 +235,9 @@ def build_rule_commands(forwards: list[dict]) -> list[list[str]]:
         listen_start = int(fwd["listen_start"])
         listen_end = int(fwd["listen_end"])
         backend_ip = fwd["backend_ip"]
+        # The two ranges are the same length (checked when saved), so the
+        # backend port is the start plus the listening port's offset.
         backend_start = int(fwd["backend_start"])
-        backend_end = int(fwd["backend_end"])
         listen_tokens = _dport_tokens(listen_start, listen_end)
         if fwd["ban_check"]:
             # DROP in raw/PREROUTING matches every packet on the original port

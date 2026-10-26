@@ -36,22 +36,23 @@ from .security import (
 )
 
 # Import routes so they register themselves on their blueprints.
+# The imports are the point, so the names are not used here.
 from . import routes
-from . import routes_haproxy_config
-from . import routes_haproxy_sites
-from . import routes_haproxy_tcp
-from . import routes_haproxy_udp
-from . import routes_health
-from . import routes_geoip
-from . import routes_monitoring
-from . import routes_security
-from . import routes_runtime
-from . import routes_audit
-from . import routes_config_history
-from . import routes_cert_delivery
-from . import routes_dns_providers
-from . import routes_alerts
-from . import routes_prometheus
+from . import routes_haproxy_config  # noqa: F401
+from . import routes_haproxy_sites  # noqa: F401
+from . import routes_haproxy_tcp  # noqa: F401
+from . import routes_haproxy_udp  # noqa: F401
+from . import routes_health  # noqa: F401
+from . import routes_geoip  # noqa: F401
+from . import routes_monitoring  # noqa: F401
+from . import routes_security  # noqa: F401
+from . import routes_runtime  # noqa: F401
+from . import routes_audit  # noqa: F401
+from . import routes_config_history  # noqa: F401
+from . import routes_cert_delivery  # noqa: F401
+from . import routes_dns_providers  # noqa: F401
+from . import routes_alerts  # noqa: F401
+from . import routes_prometheus  # noqa: F401
 
 from .routes_authelia_settings import bp_authelia_settings
 from .authelia_acl import bp_authelia_acl

@@ -9,7 +9,6 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -280,7 +279,10 @@ class InstrumentationTests(unittest.TestCase):
         ),
         "routes_geoip.py": ("geoip.update", "geoip.countries", "geoip.schedule"),
         "routes_health.py": ("service.control",),
-        "routes_security.py": ("adaptive.mode", "request_log.enabled"),
+        "routes_security.py": (
+            "adaptive.mode", "adaptive.rules", "adaptive.ban_durations",
+            "request_log.enabled",
+        ),
         "routes_monitoring.py": ("monitoring.channel_labels", "ban.place"),
         "routes_cert_delivery.py": (
             "cert_delivery.save", "cert_delivery.delete", "cert_delivery.test",
@@ -308,7 +310,6 @@ class InstrumentationTests(unittest.TestCase):
             "system.reboot_cancel",
         ),
         "routes_runtime.py": ("backend.state", "backend.weight"),
-        "routes_security.py": ("adaptive.mode",),
         "routes_config_history.py": ("config.restore",),
         "routes_dns_providers.py": ("dns_provider.save", "dns_provider.delete"),
         "routes_alerts.py": ("alerts.config", "alerts.test"),

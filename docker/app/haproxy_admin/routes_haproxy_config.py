@@ -1,7 +1,6 @@
 # routes_haproxy_config.py
 
 from flask import (
-    Blueprint,
     render_template,
     request,
     jsonify,
@@ -64,7 +63,6 @@ from .services_haproxy_vars import (
 )
 
 from .services_haproxy_sites import (
-    get_websites_list,
     add_site_minimal,
     delete_site_by_name,
     get_sites_and_defaults_for_ui,

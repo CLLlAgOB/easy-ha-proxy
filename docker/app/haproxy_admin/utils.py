@@ -15,7 +15,6 @@ import socket
 import base64
 import json
 import shlex
-from datetime import datetime, timedelta
 
 logger = logging.getLogger('haproxy-admin')
 

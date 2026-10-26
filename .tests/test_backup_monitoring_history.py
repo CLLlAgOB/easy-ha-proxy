@@ -17,7 +17,6 @@ disk or an unreadable database costs the history, never the backup.
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 import shutil
 import sqlite3

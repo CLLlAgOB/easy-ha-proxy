@@ -2689,7 +2689,7 @@ def _handle_mail_view(req: Dict[str, Any]) -> Dict[str, Any]:
     except MailSettingsError as exc:
         LOG.error("Failed to load mail settings: managed configuration is invalid")
         return {"ok": False, "error": f"failed to load mail settings: {exc}"}
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         LOG.exception("Failed to load mail settings")
         return {"ok": False, "error": "failed to load mail settings"}
 

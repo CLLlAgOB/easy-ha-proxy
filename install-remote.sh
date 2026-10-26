@@ -533,6 +533,8 @@ ssh_port="${ssh_port:-22}"
 [[ "${ssh_port}" =~ ^[0-9]+$ ]] || die "SSH port must be numeric."
 ((ssh_port >= 1 && ssh_port <= 65535)) || die "SSH port is out of range."
 
+# A literal "~/" typed by the user, expanded here on purpose.
+# shellcheck disable=SC2088
 if [[ "${identity_file}" == "~/"* ]]; then
   identity_file="${HOME}/${identity_file#~/}"
 fi

@@ -13,7 +13,7 @@ import base64
 import logging
 import os
 import stat
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import yaml
 

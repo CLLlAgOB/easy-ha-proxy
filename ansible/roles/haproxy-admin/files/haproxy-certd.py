@@ -2263,7 +2263,7 @@ def _list_certificate_authorities() -> Dict[str, Any]:
     expiry_watch = CertificateExpiryWatch()
     expiry_watch.start()
 
-    ca_root = _prepare_ca_root()
+    _prepare_ca_root()
     client_auth_ids = set(_load_client_auth_ids())
 
     def _decorate(item: Dict[str, Any], certs: List[x509.Certificate]) -> Dict[str, Any]:
@@ -3398,13 +3398,11 @@ def handle_internal_ca_rotate(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         staged_dir = Path(tempfile.mkdtemp(prefix=".internal-ca-new-", dir=ca_root))
         rollback_dir = ca_root / f".internal-ca-rollback-{time.time_ns()}"
         old_moved = False
-        swapped = False
         try:
             _write_internal_ca_material(staged_dir, new_cert, new_key)
             internal_dir.replace(rollback_dir)
             old_moved = True
             staged_dir.replace(internal_dir)
-            swapped = True
             for path, pem in replacement_pems.items():
                 _replace_server_pem_without_reload(path, pem)
             reload_rc, reload_stdout, reload_stderr = _reload_haproxy()
@@ -3531,7 +3529,7 @@ def handle_external_ca_upload_form(
 
 
 def handle_ca_export(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
-    ca_root = _prepare_ca_root()
+    _prepare_ca_root()
     ca_id = (body.get("ca_id") or "").strip()
     if ca_id == "internal":
         _, path = _internal_ca_paths()
@@ -3554,7 +3552,7 @@ def handle_ca_export(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
 def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     try:
-        ca_root = _prepare_ca_root()
+        _prepare_ca_root()
         ca_id = _safe_slug(str(body.get("ca_id") or "")).lower()
         external_dir = _prepare_ca_subdir("external")
         path = _ensure_within(external_dir, external_dir / f"{ca_id}.pem")
@@ -4248,7 +4246,7 @@ def handle_certs_upload_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, A
 
     if external_ca_id:
         try:
-            ca_root = _prepare_ca_root()
+            _prepare_ca_root()
             external_ca_id = _safe_slug(external_ca_id).lower()
             external_dir = _prepare_ca_subdir("external")
             ca_path = _ensure_within(

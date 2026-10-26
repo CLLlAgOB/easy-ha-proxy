@@ -313,7 +313,7 @@ def check_cfg_via_controld(cfg_text: str) -> Optional[Tuple[int, str, str]]:
 
         return rc, stdout, stderr
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         # Логически здесь лучше залогировать, но не ломать UI —
         # пусть дальше отработает локальный haproxy -c
         return None

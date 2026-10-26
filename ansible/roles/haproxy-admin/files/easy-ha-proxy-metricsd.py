@@ -2648,7 +2648,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
         numbers it labels.
         """
 
-        database: Database = self.server.database  # type: ignore[attr-defined]
+        database: MetricsDatabase = self.server.database  # type: ignore[attr-defined]
         if urlparse(self.path).path != "/api/v1/metrics/channel-labels":
             self._send_json(404, {"ok": False, "error": "unknown path"})
             return

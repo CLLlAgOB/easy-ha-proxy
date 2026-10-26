@@ -11,7 +11,7 @@ import hmac
 import logging
 import os
 
-from flask import Response, g, request
+from flask import Response, request
 
 from .routes import bp
 from .services_prometheus import collect

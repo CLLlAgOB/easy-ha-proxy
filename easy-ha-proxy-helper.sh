@@ -501,7 +501,6 @@ inspect_system() {
   local source_revision="none"
   local source_branch="none"
   local unit=""
-  local ignored=""
   local -A known_daemons=()
 
   if [[ -r "${metadata_file}" ]]; then
@@ -553,7 +552,7 @@ inspect_system() {
       "${host_unit_labels[i]}"
   done
   if command -v systemctl >/dev/null 2>&1; then
-    while read -r unit ignored; do
+    while read -r unit _; do
       [[ -n "${unit}" ]] || continue
       if [[ -z "${known_daemons[${unit}]+x}" ]]; then
         print_service_line "${unit}" "${unit} (discovered)"

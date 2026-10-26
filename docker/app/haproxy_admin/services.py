@@ -22,7 +22,6 @@ import yaml
 import re
 import ipaddress
 import logging
-import subprocess
 import shlex
 import time
 from io import StringIO
@@ -33,7 +32,6 @@ from .utils import (
     run_cmd,
     haproxy_runtime_command,
     parse_table_output,
-    logger,
     parse_sessions,
     reload_haproxy,
     # is_ip_in_whitelist,

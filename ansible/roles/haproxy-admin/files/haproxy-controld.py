@@ -57,7 +57,7 @@ import secrets
 from collections import defaultdict
 from typing import Set
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 
 # ───── конфигурация через ENV (с дефолтами) ─────
