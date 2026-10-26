@@ -475,6 +475,14 @@ Cloudflare, DigitalOcean, Route 53 и RFC 2136. Секреты пишутся в
 Задержка и получатель могут принадлежать объекту, а не правилу: сайт сохраняет
 свои `alert_after` и `alert_email` из собственных настроек.
 
+У каждого правила на странице есть источник. Среди них: Authelia не отвечает
+(по состоянию её бэкенда в HAProxy), доля ошибок 5xx или среднее время ответа
+сайта выше порога пять минут подряд (`metricsd_alert_error_ratio_percent`, по
+умолчанию 10; `metricsd_alert_slow_response_ms`, по умолчанию 3000; минута, в
+которой меньше `metricsd_alert_min_requests` запросов, по умолчанию 20, ничего
+не решает), и волна адаптивных банов — 15 адресов за пять минут, не чаще раза
+в час.
+
 Почта использует те же настройки уведомлений, что и сообщения о сертификатах.
 Необязательный **webhook** отправляет по одному JSON-объекту на уведомление и
 только по HTTPS. Имя резолвится один раз, и соединение идёт именно на этот
@@ -1199,10 +1207,26 @@ PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
+shellcheck -S warning install.sh install-local.sh install-remote.sh \
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+ruff check .   # только явные ошибки, см. ruff.toml
 
 ansible-galaxy collection install -r ansible/requirements.yml
 ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
+
+Когда проверки прошли, пуш в `alpha` или `main` публикует образ
+веб-приложения из этого коммита (`alpha` или `latest`) с меткой-отпечатком
+входных файлов сборки, по которой шлюзы связывают его с исходниками. Образ из
+тех же файлов используется повторно, а `main` повышает уже собранный alpha.
+Нужны секреты репозитория `DOCKERHUB_USERNAME` и `DOCKERHUB_TOKEN`; без них
+задача ничего не публикует и пишет об этом.
+
+Dependabot предлагает обновления для файлов requirements, Dockerfile и
+workflow в ветку `alpha`. Еженедельный workflow **Dependencies** сообщает об
+известных уязвимостях (pip-audit) и держит открытым одно issue, пока у версии,
+закреплённой в роли Ansible (Authelia, Redis, почтовый релей, пакеты GeoIP),
+есть более новый выпуск.
 
 Переводы UI хранятся в JSON-каталогах в
 [`docker/app/haproxy_admin/translations/`](docker/app/haproxy_admin/translations/README.md).

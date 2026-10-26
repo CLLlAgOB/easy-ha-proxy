@@ -467,6 +467,15 @@ must not leave an alert pinned open.
 Delay and recipient can also belong to the object rather than the rule: a site
 keeps its own `alert_after` and `alert_email` from its settings.
 
+Every rule on the page has something that raises it. Among them: Authelia
+not answering (from HAProxy's view of its backend), a site whose server
+errors or average response time cross a threshold for five minutes
+(`metricsd_alert_error_ratio_percent`, default 10;
+`metricsd_alert_slow_response_ms`, default 3000; a minute with fewer than
+`metricsd_alert_min_requests`, default 20, says nothing either way), and a
+wave of adaptive bans -- 15 addresses within five minutes, at most once an
+hour.
+
 Email uses the same notification settings as certificate notices. The optional
 **webhook** posts one JSON object per notification over HTTPS only. The host is
 resolved once and the connection is made to exactly that address, so a name
@@ -1206,10 +1215,26 @@ PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
+shellcheck -S warning install.sh install-local.sh install-remote.sh \
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+ruff check .   # mistakes only, see ruff.toml
 
 ansible-galaxy collection install -r ansible/requirements.yml
 ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
+
+After the checks pass, a push to `alpha` or `main` publishes the web
+application image from that commit (`alpha`, or `latest`), labelled with the
+fingerprint of its build inputs that gateways use to pair it with its source.
+An image built from the same web files is reused; `main` promotes the alpha
+build. This needs the repository secrets `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN`; without them the job publishes nothing and says so.
+
+Dependabot proposes updates for the requirements files, the Dockerfile and the
+workflows against `alpha`. The weekly **Dependencies** workflow reports known
+vulnerabilities (pip-audit) and keeps one issue open while a version pinned in
+an Ansible role (Authelia, Redis, the mail relay, the GeoIP packages) has a
+newer release.
 
 UI translations are JSON catalogs under
 [`docker/app/haproxy_admin/translations/`](docker/app/haproxy_admin/translations/README.md).
