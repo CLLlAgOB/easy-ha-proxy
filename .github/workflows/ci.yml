@@ -112,7 +112,7 @@ jobs:
       # Galaxy does not answer they are built from the same tagged versions on
       # GitHub. --no-deps there because community.docker's dependency comes
       # from Galaxy again, and a syntax check does not need it.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.ansible/collections
           key: ansible-collections-${{ hashFiles('ansible/requirements.yml') }}
