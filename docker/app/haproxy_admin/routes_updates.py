@@ -52,6 +52,7 @@ def _daemon_response(result: dict, *, accepted: bool = False):
         "stale_plan",
         "stale_boot",
         "not_required",
+        "dependency",
     } or result.get("conflict"):
         status_code = 409
     elif code in {"not_found", "missing"}:
@@ -73,6 +74,7 @@ AUDITED_ACTIONS = {
         ("release_channel", "image_channel", "source_channel"),
     ),
     "start_apply": ("update.apply", ("plan_id", "components")),
+    "set_settings": ("update.settings", ("auto_check_hours",)),
     "reboot": ("system.reboot", ("expected_boot_id",)),
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
 }
@@ -211,6 +213,19 @@ def save_channels():
     if len(command) == 1:
         abort(400, description="select a channel to persist")
     return _call_daemon(command)
+
+
+AUTO_CHECK_HOURS = frozenset({0, 6, 12, 24, 72, 168})
+
+
+@bp_system_updates.post("/api/settings")
+def save_settings():
+    """How often the broker checks for updates by itself; 0 switches it off."""
+    payload = _json_payload({"auto_check_hours"})
+    value = payload["auto_check_hours"]
+    if isinstance(value, bool) or not isinstance(value, int) or value not in AUTO_CHECK_HOURS:
+        abort(400, description="choose one of the offered check intervals")
+    return _call_daemon({"action": "set_settings", "auto_check_hours": value})
 
 
 @bp_system_updates.post("/api/apply")

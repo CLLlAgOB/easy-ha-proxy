@@ -82,6 +82,7 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
             UPDATED.REQUEST_FIELDS,
             {
                 "status": frozenset({"action", "job_id"}),
+                "set_settings": frozenset({"action", "auto_check_hours"}),
                 "start_check": frozenset(
                     {"action", "image_channel", "source_channel", "release_channel"}
                 ),

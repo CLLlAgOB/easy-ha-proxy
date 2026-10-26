@@ -83,6 +83,24 @@
     "… and {count} more": "… и ещё {count}",
     "Scheduled check": "Проверка по расписанию",
     "less than a minute left": "осталось меньше минуты",
-    "about {minutes} min left": "осталось ≈ {minutes} мин"
+    "about {minutes} min left": "осталось ≈ {minutes} мин",
+    "Installed together with: {components}": "Ставится только вместе с: {components}",
+    "This version also changes the web application, and its image is not published yet. Check again once it is.": "Эта версия меняет и веб-приложение, а его образ ещё не опубликован. Проверьте снова, когда он появится.",
+    "This web application image was built from a source version this gateway cannot install with it.": "Этот образ веб-приложения собран из версии исходников, которую шлюз не может установить вместе с ним.",
+    "Automatic check": "Автоматическая проверка",
+    "Every 6 hours": "Каждые 6 часов",
+    "Every 12 hours": "Каждые 12 часов",
+    "Every day": "Раз в день",
+    "Every 3 days": "Раз в 3 дня",
+    "Every week": "Раз в неделю",
+    "Every {hours} hours": "Каждые {hours} ч",
+    "Automatic checks are off. Updates are found only when you check.": "Автоматические проверки выключены. Обновления находятся только при ручной проверке.",
+    "Next automatic check: {time}": "Следующая автоматическая проверка: {time}",
+    "The next automatic check is being scheduled.": "Следующая автоматическая проверка планируется.",
+    "next: {time}": "следующая: {time}",
+    "checks: {interval}": "проверка: {interval}",
+    "automatic checks off": "автопроверка выключена",
+    "A check only reads: nothing is installed without you. When it finds updates it raises an alert (update.available), and the alert settings decide whom to tell.": "Проверка только читает: без вас ничего не устанавливается. Найдя обновления, она поднимает оповещение (update.available), а настройки оповещений решают, кому о нём сообщить.",
+    "Alert settings": "Настройки оповещений"
   }
 }

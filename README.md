@@ -360,10 +360,28 @@ long each part took before); the log is behind "Show details", and the history
 and release channel are folded away. A "What's new" list shows the commit
 subjects between the installed and the available revision.
 
-The broker also runs the same read-only check once a day
-(`updates_auto_check_hours`, 0 switches it off) and keeps the
-`update.available` alert in step: raised when something can be installed,
-resolved by the check after it was. The scheduled check never holds the
+The broker also runs the same read-only check on a schedule -- once a day by
+default (`updates_auto_check_hours`), and the **Settings** fold on the page
+changes it (off, 6 h, 12 h, a day, 3 days, a week) without Ansible -- and keeps
+the `update.available` alert in step: raised when something can be installed,
+resolved by the check after it was.
+
+The host and the web application are installed as one version. The web
+application talks to the host's daemons and renders HAProxy's configuration
+from the host's template, so one without the other can break the panel. Each
+published image is labelled `io.easy-ha-proxy.source-tree` with the sha256 of
+`git ls-tree` over its build inputs (`Dockerfile`, `.dockerignore`,
+`docker/app`); Git objects are the same on every machine, so a gateway
+computes the same value from the source it would install. When that source
+has other web files than the running image, the host update is offered only
+together with the web application ("Installed together with"), and only once
+the matching image is published -- until then it waits, and says so. An image
+built from source the gateway cannot install is not offered; one rebuilt from
+the same files, and a host update that leaves the web files alone, go by
+themselves. The broker enforces the pairs as well as the page. Images without
+the label (published before it) are simply paired with any source update
+available at the same time.
+ The scheduled check never holds the
 maintenance lock, so it cannot make a nightly backup fail as busy, and a
 scheduled check that fails (no network, say) is not reported as a failed update.
 

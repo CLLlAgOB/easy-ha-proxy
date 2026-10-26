@@ -3095,6 +3095,12 @@ tr.job-row-selected > td:first-child {
   font-size: 12px;
 }
 
+.updates-row-requires {
+  margin-top: 3px;
+  color: var(--warning);
+  font-size: 12px;
+}
+
 .updates-row-more {
   margin-top: 6px;
   color: var(--text-secondary);
@@ -3199,6 +3205,16 @@ tr.job-row-selected > td:first-child {
 
 .updates-fold-body {
   padding: 0 25px 20px;
+}
+
+.updates-setting {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.updates-fold-body > .updates-field-label {
+  margin-top: 2px;
 }
 
 .updates-channel-line {

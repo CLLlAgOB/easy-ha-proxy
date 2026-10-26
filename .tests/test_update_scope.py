@@ -432,7 +432,7 @@ class ThePage(unittest.TestCase):
         self.assertIn("withChangesRow(normalizeComponents(plan))", script)
         self.assertIn('changes: "Only what changed"', script)
         # The scope is its own row, not a dump inside the source row.
-        self.assertIn('!["scope", "changelog"].includes(key)', script)
+        self.assertIn('!["scope", "changelog", "requires"].includes(key)', script)
 
     def test_the_words_are_translated(self):
         catalogue = json.loads((APP / "translations/ru/updates.json").read_text(encoding="utf-8"))["messages"]

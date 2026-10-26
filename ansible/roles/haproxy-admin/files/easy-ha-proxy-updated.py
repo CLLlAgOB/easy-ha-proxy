@@ -160,6 +160,12 @@ AUTO_CHECK_DELAY_SECONDS = env_int(
     "UPDATED_AUTO_CHECK_DELAY_SECONDS", 900, minimum=0, maximum=24 * 3600
 )
 AUTO_CHECK_RETRY_SECONDS = 3600
+# The page can change the interval without Ansible: its choice is kept in the
+# broker's own state and wins over the default above. The schedule looks at it
+# once a minute, so a change takes effect without a restart.
+AUTO_CHECK_CHOICES = (0, 6, 12, 24, 72, 168)
+AUTO_CHECK_POLL_SECONDS = 60
+SETTINGS_PATH = STATE_ROOT / "settings.json"
 MAX_CONNECTIONS = env_int("UPDATED_MAX_CONNECTIONS", 16, maximum=64)
 
 PROTOCOL_VERSION = 2
@@ -324,6 +330,7 @@ def derive_release_channel(
     return "stable"
 REQUEST_FIELDS = {
     "status": frozenset({"action", "job_id"}),
+    "set_settings": frozenset({"action", "auto_check_hours"}),
     "start_check": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
     ),
@@ -1179,6 +1186,45 @@ def plan_source_component(plan_map: dict[str, dict[str, Any]], component_id: str
     return plan_map.get(component_id)
 
 
+def component_requirements(entry: dict[str, Any] | None, component_id: str) -> list[list[str]]:
+    """What has to be installed with a component, as clauses: every clause
+    needs one of its components in the same selection."""
+
+    details = (entry or {}).get("details") if isinstance(entry, dict) else None
+    if not isinstance(details, dict):
+        return []
+    if component_id == CHANGES_COMPONENT:
+        scope = details.get("scope")
+        clauses = scope.get("requires") if isinstance(scope, dict) else None
+    else:
+        clauses = details.get("requires")
+    if not isinstance(clauses, list):
+        return []
+    return [
+        [str(item) for item in clause if item in ALLOWED_COMPONENTS]
+        for clause in clauses
+        if isinstance(clause, list)
+    ]
+
+
+def validate_requirements(plan_map: dict[str, dict[str, Any]], components: list[str]) -> None:
+    """The host and the web application come from one source: a selection that
+    would install one without the other is refused here, not only on the page."""
+
+    selected = set(components)
+    # The full stack pulls the web application image itself.
+    satisfied = selected | ({"admin-container"} if "all" in selected else set())
+    for component_id in components:
+        entry = plan_source_component(plan_map, component_id)
+        for clause in component_requirements(entry, component_id):
+            if clause and not satisfied.intersection(clause):
+                raise UpdatedError(
+                    f"{component_id} has to be installed together with "
+                    + " or ".join(clause),
+                    code="dependency",
+                )
+
+
 def plan_component_map(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
     components = plan.get("components")
     if not isinstance(components, list):
@@ -1239,6 +1285,7 @@ def validate_selection(plan: dict[str, Any], components: list[str]) -> None:
                 f"component is not an actionable update: {component_id}",
                 code="stale_plan",
             )
+    validate_requirements(available, components)
     if SOURCE_COMPONENTS.intersection(components):
         metadata = CONFIG_DIR / "metadata.yml"
         try:
@@ -1566,31 +1613,99 @@ def auto_check_once() -> str:
             STOP_EVENT.set()
 
 
-def seconds_until_auto_check(now: float) -> float:
-    """How long until the newest check is a schedule interval old."""
+def read_settings() -> dict[str, Any]:
+    try:
+        return safe_json_file(SETTINGS_PATH) if SETTINGS_PATH.exists() else {}
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        LOG.warning("Ignoring unreadable update settings %s", SETTINGS_PATH.name)
+        return {}
+
+
+def auto_check_hours() -> int:
+    """The interval in force: the page's choice, else the configured default."""
+    value = read_settings().get("auto_check_hours")
+    if isinstance(value, int) and not isinstance(value, bool) and value in AUTO_CHECK_CHOICES:
+        return value
+    return AUTO_CHECK_HOURS
+
+
+# What the schedule decided last; the page shows it.
+AUTO_CHECK_STATE: dict[str, float | None] = {"next_at": None, "retry_after": 0.0}
+
+
+def settings_payload() -> dict[str, Any]:
+    next_at = AUTO_CHECK_STATE.get("next_at")
+    return {
+        "auto_check_hours": auto_check_hours(),
+        "default_auto_check_hours": AUTO_CHECK_HOURS,
+        "choices": list(AUTO_CHECK_CHOICES),
+        "next_auto_check_at": (
+            dt.datetime.fromtimestamp(next_at, dt.timezone.utc).isoformat()
+            if isinstance(next_at, (int, float)) and next_at > 0
+            else None
+        ),
+    }
+
+
+def set_settings(request: dict[str, Any]) -> dict[str, Any]:
+    value = request.get("auto_check_hours")
+    if isinstance(value, bool) or not isinstance(value, int) or value not in AUTO_CHECK_CHOICES:
+        raise UpdatedError(
+            "auto_check_hours must be one of " + ", ".join(str(item) for item in AUTO_CHECK_CHOICES),
+            code="invalid",
+        )
+    settings = read_settings()
+    settings["auto_check_hours"] = value
+    atomic_json(SETTINGS_PATH, settings)
+    # The next pass of the schedule recomputes from the new interval.
+    AUTO_CHECK_STATE["next_at"] = None
+    AUTO_CHECK_STATE["retry_after"] = 0.0
+    LOG.info("Automatic update checks set to every %s h (0 = off)", value)
+    return {"ok": True, "settings": settings_payload()}
+
+
+def last_check_time() -> float:
     try:
         plan = load_latest_plan()
         created = dt.datetime.fromisoformat(str((plan or {}).get("created_at") or ""))
-        last = created.timestamp()
+        return created.timestamp()
     except (UpdatedError, OSError, ValueError, TypeError, json.JSONDecodeError):
-        last = 0.0
-    return max(0.0, last + AUTO_CHECK_HOURS * 3600 - now)
+        return 0.0
+
+
+def seconds_until_auto_check(now: float) -> float | None:
+    """How long until the newest check is an interval old; None when off."""
+    hours = auto_check_hours()
+    if hours <= 0:
+        return None
+    return max(0.0, last_check_time() + hours * 3600 - now)
 
 
 def auto_check_loop() -> None:
-    delay = float(AUTO_CHECK_DELAY_SECONDS)
-    while not STOP_EVENT.wait(delay):
+    started = time.time()
+    while True:
         try:
-            wait = seconds_until_auto_check(time.time())
-            if wait > 0:
-                delay = wait
-                continue
-            outcome = auto_check_once()
-            LOG.info("Scheduled update check: %s", outcome)
-            delay = AUTO_CHECK_HOURS * 3600.0 if outcome == "done" else AUTO_CHECK_RETRY_SECONDS
+            now = time.time()
+            wait = seconds_until_auto_check(now)
+            if wait is None:
+                AUTO_CHECK_STATE["next_at"] = None
+            else:
+                due = max(
+                    now + wait,
+                    started + AUTO_CHECK_DELAY_SECONDS,
+                    float(AUTO_CHECK_STATE.get("retry_after") or 0.0),
+                )
+                AUTO_CHECK_STATE["next_at"] = due
+                if now >= due:
+                    outcome = auto_check_once()
+                    LOG.info("Scheduled update check: %s", outcome)
+                    if outcome != "done":
+                        AUTO_CHECK_STATE["retry_after"] = time.time() + AUTO_CHECK_RETRY_SECONDS
         except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
             LOG.exception("Scheduled update check failed")
-            delay = AUTO_CHECK_RETRY_SECONDS
+            AUTO_CHECK_STATE["retry_after"] = time.time() + AUTO_CHECK_RETRY_SECONDS
+        if STOP_EVENT.wait(AUTO_CHECK_POLL_SECONDS):
+            return
 
 
 def update_command(
@@ -1933,6 +2048,7 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         "reboot_scheduled": reboot_is_scheduled(),
         "reboot_scheduled_elsewhere": os.path.lexists(ASSISTANT_REBOOT_MARKER),
         "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+        "settings": settings_payload(),
     }
 
 
@@ -2194,6 +2310,8 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_check(request)
     if action == "set_channels":
         return set_channels(request)
+    if action == "set_settings":
+        return set_settings(request)
     if action == "reboot":
         return request_reboot(request)
     if action == "cancel_reboot":
@@ -2306,8 +2424,9 @@ def signal_stop(_signum: int, _frame: Any) -> None:
 def serve() -> None:
     ensure_layout()
     recover_stale_jobs()
-    if AUTO_CHECK_HOURS > 0:
-        threading.Thread(target=auto_check_loop, name="auto-check", daemon=True).start()
+    # Always running: it idles while the interval is 0, so the page can switch
+    # checks on without a restart.
+    threading.Thread(target=auto_check_loop, name="auto-check", daemon=True).start()
     try:
         SOCKET_PATH.unlink()
     except FileNotFoundError:

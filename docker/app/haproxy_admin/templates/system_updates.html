@@ -13,6 +13,7 @@
      data-check-url="{{ url_for('system_updates.start_check') }}"
      data-apply-url="{{ url_for('system_updates.start_apply') }}"
      data-channels-url="{{ url_for('system_updates.save_channels') }}"
+     data-settings-url="{{ url_for('system_updates.save_settings') }}"
      data-reboot-url="{{ url_for('system_updates.reboot') }}"
      data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}">
 
@@ -24,7 +25,7 @@
         <h2 id="updates-hero-title">Software updates</h2>
         <p id="updates-hero-summary" class="updates-hero-summary">Not checked yet.</p>
         <p class="updates-hero-meta" id="updates-hero-meta">
-          <span>Last check:</span> <span id="updates-checked-at">Never</span>
+          <span>Last check:</span> <span id="updates-checked-at">Never</span><span id="updates-next-check"></span>
         </p>
       </div>
       <button type="button" class="btn btn-refresh" id="updates-check">
@@ -82,6 +83,9 @@
     </div>
 
     <div id="updates-plan-warning" class="alert alert-warning" hidden></div>
+    {# The host and the web application come from one source; what is held
+       back for that is said here, not filed under skipped checks. #}
+    <div id="updates-pairing-note" class="alert alert-info" hidden></div>
 
     {# Commit subjects are the repository's own words: shown as they are. #}
     <details id="updates-changelog" class="updates-changelog" hidden>
@@ -179,12 +183,13 @@
 
   <details class="card updates-fold" id="updates-settings">
     <summary>
-      <span>Release channel</span>
+      <span>Settings</span>
       <strong id="updates-channel-summary" class="updates-fold-value">—</strong>
     </summary>
     <div class="updates-fold-body">
+      <label class="updates-field-label" for="updates-release-channel">Release channel</label>
       <div class="updates-channel-line">
-        <select id="updates-release-channel" class="form-input" aria-label="Release channel">
+        <select id="updates-release-channel" class="form-input">
           <option value="stable">Stable — main branch + release image</option>
           <option value="alpha">Alpha — development branch + test image</option>
           <option value="local">Local — synchronized source</option>
@@ -196,6 +201,21 @@
       <p id="updates-local-source-note" class="updates-hero-meta" hidden>
         This installation uses locally synchronized source. The web interface cannot copy uncommitted files from your workstation; synchronize them with install.sh before checking again.
       </p>
+
+      <div class="updates-setting">
+        <label class="updates-field-label" for="updates-auto-check">Automatic check</label>
+        <div class="updates-channel-line">
+          <select id="updates-auto-check" class="form-input"></select>
+          <button type="button" class="btn btn-small" id="updates-save-auto-check" disabled>Save</button>
+        </div>
+        <div id="updates-auto-check-status" class="result-message" role="status" aria-live="polite"></div>
+        <p id="updates-auto-check-note" class="updates-hero-meta"></p>
+        <p class="updates-hero-meta">
+          A check only reads: nothing is installed without you. When it finds updates it raises
+          an alert (update.available), and the alert settings decide whom to tell.
+        </p>
+        <p class="updates-hero-meta"><a href="{{ url_for('routes.alerts_page') }}">Alert settings</a></p>
+      </div>
     </div>
   </details>
 

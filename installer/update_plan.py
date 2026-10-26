@@ -53,6 +53,18 @@ CHANGELOG_LIMIT = 40
 CHANGELOG_SUBJECT_CHARS = 160
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
+# Which source version a web application image was built from. The publish
+# scripts label each image with the sha256 of `git ls-tree` over its build
+# inputs; git objects are the same on every platform, so a gateway can work
+# out the same value from any source tree it has in Git and know exactly which
+# source an image belongs to, whatever line endings the build machine used.
+WEB_TREE_LABEL = "io.easy-ha-proxy.source-tree"
+WEB_TREE_INPUTS = ("Dockerfile", ".dockerignore", "docker/app")
+_WEB_TREE_RE = re.compile(r"^[0-9a-f]{64}$")
+# Components that move the host to the candidate source revision. "changes"
+# is not in the plan as a component of its own; it lives in all's scope.
+HOST_SOURCE_COMPONENTS = ("all", "services", "daemons")
+
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _REVISION_RE = re.compile(r"[0-9a-f]{40,64}")
 _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
@@ -593,6 +605,67 @@ def _changelog(
             "commits": commits[:CHANGELOG_LIMIT],
         }
     except Exception:  # noqa: BLE001 - see the docstring
+        return None
+
+
+def _web_tree(root: Path, runner: Runner) -> str | None:
+    """The web application's build-input fingerprint for a Git source tree."""
+    try:
+        if not (root / ".git").exists():
+            return None
+        result = runner.run(
+            ("git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--", *WEB_TREE_INPUTS),
+            timeout=GIT_TIMEOUT,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+    except Exception:  # noqa: BLE001 - unknown is an answer the rules handle
+        return None
+
+
+def _labels_from_config(config: Any) -> dict[str, str]:
+    if not isinstance(config, dict):
+        return {}
+    labels = (config.get("config") or {}).get("Labels") if "config" in config else config.get("Labels")
+    if not isinstance(labels, dict):
+        return {}
+    return {str(key): str(value) for key, value in labels.items()}
+
+
+def _web_tree_label(labels: dict[str, str]) -> str | None:
+    value = (labels.get(WEB_TREE_LABEL) or "").strip().lower()
+    return value if _WEB_TREE_RE.fullmatch(value) else None
+
+
+def _local_web_tree(image: str, runner: Runner) -> str | None:
+    try:
+        result = runner.run(
+            ("docker", "image", "inspect", image, "--format", "{{json .Config.Labels}}"),
+            timeout=COMPOSE_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return None
+        return _web_tree_label(_labels_from_config({"Labels": json.loads(result.stdout or "null")}))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _remote_web_tree(image: str, runner: Runner) -> str | None:
+    """The label of a published image; a multi-platform index has one config
+    per platform, all built from the same inputs in one command."""
+    try:
+        result = runner.run(
+            ("docker", "buildx", "imagetools", "inspect", image, "--format", "{{json .Image}}"),
+            timeout=REGISTRY_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout or "null")
+        if isinstance(data, dict) and "config" not in data:
+            data = next((value for value in data.values() if isinstance(value, dict)), None)
+        return _web_tree_label(_labels_from_config(data))
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -1382,6 +1455,10 @@ def _probe_admin_compose(
             details=details,
         )
 
+    # Which source each side was built from, when the images say so.
+    image_detail["current_source_tree"] = _local_web_tree(current_image, runner)
+    image_detail["available_source_tree"] = _remote_web_tree(target_image, runner)
+
     configured_reference = (
         _normalized_tagged_image(configured_image)
         if configured_image
@@ -1422,6 +1499,100 @@ def _probe_admin_compose(
         available_version=candidate,
         details=details,
     )
+
+
+def _block(component: dict[str, Any], reason: str, summary: str) -> None:
+    component.update({"state": "blocked", "actionable": False, "summary": summary})
+    component["details"] = {**(component.get("details") or {}), "reason": reason}
+
+
+def link_web_application(components: list[dict[str, Any]], target_tree: str | None) -> None:
+    """Make the host and the web application move together.
+
+    The web application talks to the host's daemons and renders HAProxy's
+    configuration from the host's template, so the two must come from the
+    same source. The rule, in terms of build inputs: after an update the
+    running image must have been built from the host source's web files.
+
+    - A host update whose source has other web files than the running image
+      needs the web application update with it -- and only works if the
+      published image is that source's build. Until it is published, the host
+      update waits.
+    - A web application update whose image was built from other web files
+      than the running one needs the host source that has them; an image that
+      no reachable source has is not offered.
+    - An image rebuilt from the same files (a new base layer, say) goes alone,
+      and so does a host update that leaves the web files as they were.
+
+    Without the labels -- images published before them, or a source tree
+    without Git -- it falls back to installing the two together whenever both
+    have updates.
+    """
+    by_id = {str(item.get("id")): item for item in components}
+    source = by_id.get("all")
+    admin = by_id.get("admin-container")
+    scope = ((source or {}).get("details") or {}).get("scope")
+    scope = scope if isinstance(scope, dict) else None
+
+    host_ids = [cid for cid in HOST_SOURCE_COMPONENTS if by_id.get(cid, {}).get("state") == "available"]
+    changes_offered = bool(scope and scope.get("ready") is True)
+    host_offered = bool(host_ids) or changes_offered
+    admin_offered = bool(admin and admin.get("state") == "available")
+    images = ((admin or {}).get("details") or {}).get("images") or [{}]
+    running = images[0].get("current_source_tree") if isinstance(images[0], dict) else None
+    offered = images[0].get("available_source_tree") if isinstance(images[0], dict) else None
+    source_moves = bool(source and source.get("state") == "available")
+
+    def require(component_id: str, clause: list[str]) -> None:
+        if component_id == "changes":
+            scope.setdefault("requires", []).append(clause)
+        else:
+            details = by_id[component_id].setdefault("details", {})
+            details.setdefault("requires", []).append(clause)
+
+    host_choices = (["changes"] if changes_offered else []) + host_ids
+    exact = bool(target_tree and running and (offered or not admin_offered))
+
+    if not exact:
+        # Without labels the two are paired whenever both move.
+        if host_offered and admin_offered:
+            for component_id in host_choices:
+                if component_id != "all":
+                    require(component_id, ["admin-container"])
+            require("admin-container", host_choices)
+        return
+
+    host_needs_web = host_offered and source_moves and target_tree != running
+    if host_needs_web:
+        if admin_offered and offered == target_tree:
+            for component_id in host_choices:
+                # The full stack pulls the image itself.
+                if component_id != "all":
+                    require(component_id, ["admin-container"])
+        else:
+            message = (
+                "This version also changes the web application, and its image is "
+                "not published yet. Check again once it is."
+            )
+            for component_id in host_ids:
+                _block(by_id[component_id], "web-application-not-published", message)
+            if changes_offered:
+                scope["ready"] = False
+                scope["reason"] = "web-application-not-published"
+            host_choices = []
+
+    if admin_offered and offered != running:
+        if host_choices and source_moves and offered == target_tree:
+            require("admin-container", host_choices)
+        elif not source_moves and offered == target_tree:
+            pass  # the host already has this image's source: it catches up
+        else:
+            _block(
+                admin,
+                "web-application-without-source",
+                "This web application image was built from a source version this "
+                "gateway cannot install with it.",
+            )
 
 
 def build_update_plan(
@@ -1570,6 +1741,26 @@ def build_update_plan(
             )
             if changelog is not None:
                 components[0]["details"]["changelog"] = changelog
+
+        # The host and the web application must come from one source. A
+        # moving source is judged by the candidate; a candidate that could
+        # not be read leaves the fingerprint unknown, never the old one.
+        # The installed tree is only read when an image update needs it.
+        admin_offered = any(
+            item.get("id") == "admin-container" and item.get("state") == "available"
+            for item in components
+        )
+        if components[0].get("state") == "available":
+            target_tree = (
+                _web_tree(candidate_source, command_runner)
+                if candidate_source is not None
+                else None
+            )
+        elif admin_offered:
+            target_tree = _web_tree(Path(source_dir), command_runner)
+        else:
+            target_tree = None
+        link_web_application(components, target_tree)
 
     if (
         resolved_source_channel == "github"

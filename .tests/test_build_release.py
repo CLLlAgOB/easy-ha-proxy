@@ -35,6 +35,28 @@ exit 0
 """
 
 
+def commit_build_context(root: Path) -> str:
+    """Make the context a Git checkout; return the fingerprint a gateway
+    computes for it."""
+    import hashlib
+
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test",
+    }
+    for command in (["init", "-q"], ["add", "Dockerfile", ".dockerignore", "docker"],
+                    ["commit", "-q", "-m", "x"]):
+        subprocess.run(["git", "-C", str(root), *command], check=True,
+                       capture_output=True, env=environment)
+    listing = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--",
+         "Dockerfile", ".dockerignore", "docker/app"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return hashlib.sha256(listing.encode("utf-8")).hexdigest()
+
+
 # The publish scripts are gitignored on purpose, so a fresh checkout --
 # which is what CI runs -- does not have them. Skipping keeps the cover
 # where the scripts do exist without failing where they cannot.
@@ -55,6 +77,8 @@ class BuildReleaseTests(unittest.TestCase):
         alpha_exists: bool = False,
         inspect_error: bool = False,
         script: Path = BUILD_SCRIPT,
+        git_commit: bool = False,
+        dirty: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], str, str]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -70,6 +94,11 @@ class BuildReleaseTests(unittest.TestCase):
             app_dir = root / "docker" / "app"
             app_dir.mkdir(parents=True)
             (app_dir / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            self.tree = ""
+            if git_commit:
+                self.tree = commit_build_context(root)
+                if dirty:
+                    (app_dir / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
             log_file = root / "docker.log"
             environment = os.environ.copy()
             environment.update(
@@ -176,6 +205,37 @@ class BuildReleaseTests(unittest.TestCase):
         self.assertIn("--tag example/ui:alpha-", docker_log)
         self.assertIn("--tag example/ui:alpha", docker_log)
         self.assertNotIn("example/ui:latest", docker_log)
+
+    def test_a_committed_build_carries_its_source_tree(self) -> None:
+        # Gateways pair the web application with its host source by this
+        # label, computed from Git objects so line endings cannot change it.
+        for script in (BUILD_SCRIPT, TEST_BUILD_SCRIPT):
+            with self.subTest(script=script.name):
+                result, _, docker_log = self.run_build("0.9", script=script, git_commit=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--label io.easy-ha-proxy.source-tree={self.tree}", docker_log)
+                self.assertIn("--label org.opencontainers.image.revision=", docker_log)
+                # The committed fingerprint also names the build.
+                self.assertIn(self.tree, docker_log.split("--tag", 1)[1])
+
+    def test_uncommitted_web_changes_are_refused(self) -> None:
+        for script in (BUILD_SCRIPT, TEST_BUILD_SCRIPT):
+            with self.subTest(script=script.name):
+                result, recorded, docker_log = self.run_build(
+                    "0.9", script=script, git_commit=True, dirty=True
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(recorded, "0.9")
+                self.assertIn("uncommitted changes", result.stderr)
+                self.assertNotIn("buildx build", docker_log)
+
+    def test_allow_dirty_publishes_without_the_pairing_label(self) -> None:
+        result, _, docker_log = self.run_build(
+            "0.9", "--allow-dirty", script=TEST_BUILD_SCRIPT, git_commit=True, dirty=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("buildx build", docker_log)
+        self.assertNotIn("io.easy-ha-proxy.source-tree", docker_log)
 
     def test_unchanged_alpha_build_is_a_no_op(self) -> None:
         result, recorded, docker_log = self.run_build(

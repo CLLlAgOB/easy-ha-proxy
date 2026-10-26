@@ -11,6 +11,7 @@
     check: app.dataset.checkUrl,
     apply: app.dataset.applyUrl,
     channels: app.dataset.channelsUrl,
+    settings: app.dataset.settingsUrl,
     reboot: app.dataset.rebootUrl,
     rebootCancel: app.dataset.rebootCancelUrl
   };
@@ -106,6 +107,8 @@
   let preselectedPlanId = "";
   // The job list, kept for the time estimate: how long each part took before.
   let jobHistory = [];
+  // The rows on screen, for what each one has to be installed with.
+  let shownComponents = [];
   // The bar never runs backwards for a job, whatever order the polls arrive in.
   const highestPercent = {};
 
@@ -336,6 +339,9 @@
       : t("{count} changed file(s); nothing on the host needs redeploying", {count: scope.changed});
   }
   function changesUnavailableReason(scope) {
+    if (scope.reason === "web-application-not-published") {
+      return t("This version also changes the web application, and its image is not published yet. Check again once it is.");
+    }
     if (scope.reason === "no-applied-record") {
       return t("Available after the next complete update: there is no record of the last one yet.");
     }
@@ -355,7 +361,10 @@
       current: source.current,
       available: source.available,
       reason: scope.ready === true ? changesReason(scope) : changesUnavailableReason(scope),
-      details: {paths: Array.isArray(scope.paths) ? scope.paths.join(", ") : ""},
+      details: {
+        paths: Array.isArray(scope.paths) ? scope.paths.join(", ") : "",
+        requires: Array.isArray(scope.requires) ? scope.requires : []
+      },
       impact: componentImpacts.changes
     };
     const rest = components.filter((item) => !(row.actionable && changesSupersedes.has(item.id)));
@@ -473,6 +482,58 @@
     return Boolean(release) && release !== installedRelease;
   }
 
+  // What a component has to be installed with: clauses, each needing one of
+  // its components. The full stack pulls the web application itself.
+  function requiredClauses(id) {
+    const component = shownComponents.find((item) => item.id === id);
+    const clauses = component && component.details && component.details.requires;
+    return Array.isArray(clauses) ? clauses.filter((clause) => Array.isArray(clause) && clause.length) : [];
+  }
+  function clauseMet(clause, checked) {
+    return clause.some((id) => checked.has(id) || (id === "admin-container" && checked.has("all")));
+  }
+  function requirementNote(component) {
+    const clauses = Array.isArray(component.details && component.details.requires)
+      ? component.details.requires.filter((clause) => Array.isArray(clause) && clause.length)
+      : [];
+    if (!clauses.length) return "";
+    // Name only what is on screen: a hidden narrower row is no help.
+    const onScreen = new Set(shownComponents.map((item) => item.id));
+    const names = clauses.map((clause) => {
+      const visible = clause.filter((id) => onScreen.has(id));
+      return (visible.length ? visible : clause).map((id) => t(componentLabels[id] || id)).join(` ${t("or")} `);
+    }).join("; ");
+    return `<div class="updates-row-requires">${escape(t("Installed together with: {components}", {components: names}))}</div>`;
+  }
+  // Keeps the selection installable: checking a component brings what it
+  // needs; unchecking one takes along what cannot go without it. The broker
+  // refuses anything else, so this only saves the round trip.
+  function enforceRequirements(changedId) {
+    const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
+    const boxFor = Object.fromEntries(boxes.map((box) => [box.dataset.updateComponent, box]));
+    const checked = () => new Set(boxes.filter((box) => box.checked).map((box) => box.dataset.updateComponent));
+    const dropping = Boolean(changedId && boxFor[changedId] && !boxFor[changedId].checked);
+    for (let round = 0; round < boxes.length + 1; round += 1) {
+      let changed = false;
+      const now = checked();
+      for (const box of boxes) {
+        if (!box.checked) continue;
+        for (const clause of requiredClauses(box.dataset.updateComponent)) {
+          if (clauseMet(clause, now)) continue;
+          const pick = dropping ? null : clause.map((id) => boxFor[id]).find((candidate) => candidate && !candidate.disabled);
+          if (pick) {
+            pick.checked = true;
+          } else {
+            box.checked = false;
+          }
+          changed = true;
+          break;
+        }
+        if (changed) break;
+      }
+      if (!changed) break;
+    }
+  }
   function renderChangelog(components) {
     const source = components.find((item) => item.id === "all");
     const changelog = source && source.details && source.details.changelog;
@@ -498,11 +559,18 @@
     const components = withChangesRow(normalizeComponents(plan));
     renderChangelog(components);
     const available = components.filter((item) => item.actionable && availableStates.has(item.state));
+    shownComponents = available;
     // "blocked" means a check was intentionally skipped (e.g. the local source
     // channel, or a synced non-git source on the github channel) — that is
     // expected, not a failure, so keep it apart from genuinely-unknown results.
     const unknown = components.filter((item) => ["unknown", "error"].includes(item.state));
-    const skipped = components.filter((item) => item.state === "blocked");
+    // Held back so the host and the web application stay one version: said
+    // once, plainly, instead of filed under "skipped by design".
+    const pairingReasons = new Set(["web-application-not-published", "web-application-without-source"]);
+    const heldBack = components.filter((item) =>
+      item.state === "blocked" && pairingReasons.has(String(item.details && item.details.reason || ""))
+    );
+    const skipped = components.filter((item) => item.state === "blocked" && !heldBack.includes(item));
     const stale = Boolean(plan && (plan.stale === true || plan.expired === true || plan.valid === false));
     const otherChannel = planForOtherChannel(plan);
     const blocked = stale || otherChannel;
@@ -511,8 +579,13 @@
     byId("updates-components-wrap").hidden = !available.length;
     byId("updates-apply-bar").hidden = !available.length || blocked;
     planHasContent = Boolean(plan) && Boolean(
-      available.length || unknown.length || skipped.length || blocked || warnings.length
+      available.length || unknown.length || skipped.length || heldBack.length || blocked || warnings.length
     );
+    const pairing = byId("updates-pairing-note");
+    pairing.hidden = !heldBack.length;
+    pairing.textContent = heldBack.length
+      ? `${heldBack.map((item) => t(componentLabels[item.id] || item.id)).join(", ")}: ${t(String(heldBack[0].reason))}`
+      : "";
     planSummaryText = !plan
       ? t("Not checked yet. Check for updates to see what is new.")
       : stale
@@ -541,7 +614,7 @@
       // Components whose candidates are already named in the reason (daemons,
       // host-service files) skip the raw digest dump to stay readable.
       const shown = component.details && typeof component.details === "object" && !Array.isArray(component.details)
-        ? Object.fromEntries(Object.entries(component.details).filter(([key]) => !["scope", "changelog"].includes(key)))
+        ? Object.fromEntries(Object.entries(component.details).filter(([key]) => !["scope", "changelog", "requires"].includes(key)))
         : component.details;
       const details = Array.isArray(component.details && component.details.artifacts)
         ? ""
@@ -557,6 +630,7 @@
           <label for="${escape(pickId)}" class="updates-choice-name">${escape(t(componentLabels[component.id] || component.id))}</label>
           ${component.id === "changes" ? `<span class="updates-badge">${escape(t("Recommended"))}</span>` : ""}
           <div class="updates-row-reason">${escape(componentReason(component))}</div>
+          ${requirementNote(component)}
           <details class="updates-row-more">
             <summary>${escape(t("Versions and impact"))}</summary>
             <div>${technicalCell(component.current)} → ${technicalCell(component.available)}</div>
@@ -629,6 +703,12 @@
     } else if (changedId && sourceSupersedes.has(changedId)) {
       if (source) source.checked = false;
       if (changes && changesSupersedes.has(changedId)) changes.checked = false;
+    }
+    enforceRequirements(changedId);
+    if (source && source.checked) {
+      boxes.forEach((box) => {
+        if (sourceSupersedes.has(box.dataset.updateComponent)) box.checked = false;
+      });
     }
     const sourceSelected = Boolean(source && source.checked);
     const changesSelected = Boolean(changes && changes.checked);
@@ -950,6 +1030,79 @@
     log.scrollTop = stick ? log.scrollHeight : keep;
   }
   const RELEASE_NAMES = {stable: "Stable", alpha: "Alpha", local: "Local"};
+  // The intervals the broker accepts, and what they are called.
+  const CHECK_INTERVALS = {
+    0: "Off",
+    6: "Every 6 hours",
+    12: "Every 12 hours",
+    24: "Every day",
+    72: "Every 3 days",
+    168: "Every week"
+  };
+  let checkSettings = null;
+  function intervalName(hours) {
+    return CHECK_INTERVALS[hours] ? t(CHECK_INTERVALS[hours]) : t("Every {hours} hours", {hours});
+  }
+  function renderSettings(settings) {
+    if (!settings || typeof settings !== "object") return;
+    checkSettings = settings;
+    const select = byId("updates-auto-check");
+    const hours = Number(settings.auto_check_hours);
+    const choices = (Array.isArray(settings.choices) ? settings.choices : Object.keys(CHECK_INTERVALS))
+      .map(Number).filter((value) => Number.isFinite(value));
+    if (!choices.includes(hours)) choices.push(hours);
+    const wanted = choices.join(",");
+    if (select.dataset.choices !== wanted) {
+      select.dataset.choices = wanted;
+      select.innerHTML = choices.map((value) =>
+        `<option value="${escape(value)}">${escape(intervalName(value))}</option>`
+      ).join("");
+    }
+    if (!select.dataset.dirty) select.value = String(hours);
+    const next = settings.next_auto_check_at;
+    byId("updates-auto-check-note").textContent = hours <= 0
+      ? t("Automatic checks are off. Updates are found only when you check.")
+      : next
+        ? t("Next automatic check: {time}", {time: formatDate(next)})
+        : t("The next automatic check is being scheduled.");
+    byId("updates-next-check").textContent = hours > 0 && next
+      ? ` · ${t("next: {time}", {time: formatDate(next)})}`
+      : "";
+    updateSettingsSummary();
+    updateAutoCheckControls();
+  }
+  function updateSettingsSummary() {
+    const parts = [t(RELEASE_NAMES[installedRelease] || installedRelease)];
+    if (checkSettings) {
+      const hours = Number(checkSettings.auto_check_hours);
+      parts.push(hours > 0 ? t("checks: {interval}", {interval: intervalName(hours).toLowerCase()}) : t("automatic checks off"));
+    }
+    byId("updates-channel-summary").textContent = parts.join(" · ");
+  }
+  function updateAutoCheckControls() {
+    const select = byId("updates-auto-check");
+    const saved = checkSettings ? String(checkSettings.auto_check_hours) : select.value;
+    const dirty = select.value !== saved;
+    select.dataset.dirty = dirty ? "1" : "";
+    byId("updates-save-auto-check").disabled = !checkSettings || !dirty || requestRunning;
+  }
+  async function saveAutoCheck() {
+    const select = byId("updates-auto-check");
+    const value = Number(select.value);
+    byId("updates-save-auto-check").disabled = true;
+    setMessage("updates-auto-check-status", t("Saving…"));
+    try {
+      const response = await postJson(endpoints.settings, {auto_check_hours: value});
+      delete select.dataset.dirty;
+      renderSettings(response.settings);
+      setMessage("updates-auto-check-status", t("Saved."), true);
+      clearMessageLater("updates-auto-check-status");
+      schedulePoll(1500);
+    } catch (error) {
+      setMessage("updates-auto-check-status", error.message, false, true);
+      updateAutoCheckControls();
+    }
+  }
   const RELEASE_NOTES = {
     stable: "Stable follows the main branch and the release image.",
     alpha: "Alpha follows the development branch and the test image.",
@@ -964,7 +1117,8 @@
     // Only snap the dropdown to the installed value when the operator is not
     // mid-selection (i.e. it currently matches the last known installed value).
     if (!select.dataset.dirty) select.value = installedRelease;
-    byId("updates-channel-summary").textContent = t(RELEASE_NAMES[installedRelease] || installedRelease);
+    updateSettingsSummary();
+    renderSettings(payload.settings);
     updateChannelControls();
   }
   function selectedRelease() {
@@ -1454,6 +1608,8 @@
     renderView();
   });
   byId("updates-save-channels").addEventListener("click", saveChannels);
+  byId("updates-save-auto-check").addEventListener("click", saveAutoCheck);
+  byId("updates-auto-check").addEventListener("change", updateAutoCheckControls);
   byId("updates-reboot-confirm").addEventListener("input", updateRebootButton);
   byId("updates-reboot-now").addEventListener("click", requestReboot);
   byId("updates-reboot-cancel").addEventListener("click", cancelReboot);

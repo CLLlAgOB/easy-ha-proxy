@@ -283,7 +283,7 @@ class ThePage(unittest.TestCase):
         self.assertIn("data-i18n-skip", tag)
         self.assertIn("renderChangelog(components)", SCRIPT)
         # Kept out of the raw "versions" dump of the source row.
-        self.assertIn('!["scope", "changelog"].includes(key)', SCRIPT)
+        self.assertIn('!["scope", "changelog", "requires"].includes(key)', SCRIPT)
 
     def test_the_estimate_uses_pace_then_history(self):
         body = SCRIPT.split("function remainingSeconds(")[1].split("\n  }\n")[0]
