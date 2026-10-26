@@ -104,6 +104,7 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
             frozenset(
                 {
                     "all",
+                    "changes",
                     "services",
                     "daemons",
                     "authelia-container",

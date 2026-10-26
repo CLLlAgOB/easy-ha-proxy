@@ -22,6 +22,13 @@ from typing import Any
 
 import yaml
 
+# The sibling module that decides what a source change needs. The CLI runs as
+# a script from this directory, but tests and tools may load it by path.
+_INSTALLER_DIR = str(Path(__file__).resolve().parent)
+if _INSTALLER_DIR not in sys.path:
+    sys.path.insert(0, _INSTALLER_DIR)
+import update_scope  # noqa: E402
+
 
 PRODUCT = "easy-ha-proxy"
 DEFAULT_HOME = Path("/opt/easy-ha-proxy")
@@ -270,8 +277,13 @@ HOST_SERVICE_TAGS = ",".join(
         "status",
     )
 )
+# "changes" has no fixed tags: they are worked out from the files that differ
+# from the last complete update (see update_scope), and anything the map does
+# not know turns it into "all".
+CHANGES_COMPONENT = "changes"
 UPDATE_COMPONENT_TAGS = {
     "all": UPDATE_TAGS,
+    CHANGES_COMPONENT: "",
     "ui": UI_TAGS,
     "daemons": DAEMON_TAGS,
     "services": HOST_SERVICE_TAGS,
@@ -283,6 +295,8 @@ UPDATE_COMPONENT_TAGS = {
     "os": "upgrade,status",
 }
 CONFIGURE_TAGS = f"crt-renew,{UPDATE_TAGS}"
+# Components that refresh the managed source from GitHub before they run.
+SOURCE_UPDATE_COMPONENTS = frozenset({"all", "daemons", "services", CHANGES_COMPONENT})
 LANGUAGE_TAGS = "aut-install,ha-adm-cfg,ha-adm-start,status"
 DOMAIN_MIGRATION_TAGS = ",".join(
     (
@@ -3127,6 +3141,7 @@ def command_install(args: argparse.Namespace) -> None:
         ),
     )
     mark_installation_complete(directory)
+    record_applied_source(directory)
     print(f"\n{_('easy-ha-proxy installation completed.')}")
     if internal_ca:
         print_internal_ca_instructions(directory)
@@ -3155,12 +3170,63 @@ def command_plan(args: argparse.Namespace) -> None:
         )
 
 
+def changes_scope(directory: Path | None = None) -> dict[str, Any]:
+    """What the installed source needs compared with the last complete update."""
+
+    return update_scope.plan_scope(directory or config_dir(), source_dir())
+
+
+def describe_changes_scope(scope: dict[str, Any]) -> None:
+    if scope.get("reason") == "no-applied-record":
+        print(
+            "No record of a complete update yet, so the changed files cannot be "
+            "worked out: running the full stack. Later updates can be narrower."
+        )
+        return
+    if scope.get("full"):
+        listed = ", ".join(scope.get("unmapped") or [])
+        print(
+            f"{scope.get('changed', 0)} changed file(s); some need the full stack"
+            + (f": {listed}" if listed else ".")
+        )
+        return
+    steps = scope.get("steps") or []
+    print(
+        f"{scope.get('changed', 0)} changed file(s). Steps to run: "
+        + (", ".join(steps) if steps else "none -- nothing on the host changes")
+        + "."
+    )
+
+
+def record_applied_source(directory: Path | None = None) -> None:
+    """Remember the source a complete update has just applied.
+
+    Never fatal: without the record the next "changes only" update simply
+    runs the full stack.
+    """
+
+    try:
+        revision = git_revision(source_dir(), "HEAD")
+    except (InstallerError, OSError):
+        revision = ""
+    try:
+        update_scope.write_applied(directory or config_dir(), source_dir(), revision)
+    except OSError as exc:
+        print(f"Warning: could not record the applied source ({exc}).")
+
+
 def update_tags_for_args(args: argparse.Namespace, *, check_mode: bool = False) -> str:
     component = getattr(args, "component", "all")
     if getattr(args, "ui_only", False):
         if component != "all":
             raise SystemExit("--ui-only cannot be combined with --component")
         component = "ui"
+    if component == CHANGES_COMPONENT:
+        scope = changes_scope()
+        describe_changes_scope(scope)
+        if scope.get("full"):
+            return UPDATE_TAGS
+        return ",".join(scope.get("tags") or ["status"])
     try:
         return UPDATE_COMPONENT_TAGS[component]
     except KeyError as exc:
@@ -3185,13 +3251,13 @@ def command_update(args: argparse.Namespace) -> None:
     # --no-fetch means "use the installed source for this run".  It must not
     # silently rewrite a GitHub-managed installation as a local-source one.
     fetch_source = source_channel == "github" and not args.no_fetch
-    refresh_source = fetch_source and component in {"all", "daemons", "services"}
+    refresh_source = fetch_source and component in SOURCE_UPDATE_COMPONENTS
     source_was_refreshed = os.environ.pop(UPDATE_SOURCE_REFRESHED_ENV, "") == "1"
     if expected_source_revision and source_channel != "github":
         raise InstallerError(
             "An expected source revision can only be used with the GitHub source channel."
         )
-    if expected_source_revision and component not in {"all", "daemons", "services"}:
+    if expected_source_revision and component not in SOURCE_UPDATE_COMPONENTS:
         raise InstallerError(
             "An expected source revision is only valid for a source update component."
         )
@@ -3200,7 +3266,7 @@ def command_update(args: argparse.Namespace) -> None:
     # the new tree, but only the CLI from that tree is allowed to run config
     # migrations and apply its playbook.
     if refresh_source and not source_was_refreshed:
-        if component in {"daemons", "services"}:
+        if component in {"daemons", "services", CHANGES_COMPONENT}:
             print("Updating managed source before the targeted host-service update.")
         if update_managed_source(expected_source_revision):
             reexec_after_source_update()
@@ -3221,6 +3287,25 @@ def command_update(args: argparse.Namespace) -> None:
     if not managed_pending:
         sync_runtime_haproxy_config_to_managed(directory)
         sync_runtime_authelia_rules_to_managed(directory)
+    changes_tags = ""
+    if component == CHANGES_COMPONENT:
+        # Worked out from the refreshed source. Pending managed configuration
+        # can only be applied by the full stack, and so can anything the map
+        # does not know.
+        scope = changes_scope(directory)
+        describe_changes_scope(scope)
+        if (managed_pending or scope.get("full")) and getattr(args, "no_full_fallback", False):
+            raise InstallerError(
+                "These changes need the full stack, which this update was not "
+                "approved for. Check for updates again."
+            )
+        if managed_pending:
+            print("Managed configuration is pending: running the full stack.")
+            component = "all"
+        elif scope.get("full"):
+            component = "all"
+        else:
+            changes_tags = ",".join(scope.get("tags") or ["status"])
     if component == "all":
         if source_was_refreshed:
             print("Continuing with the refreshed GitHub source.")
@@ -3234,7 +3319,12 @@ def command_update(args: argparse.Namespace) -> None:
     elif component != "all" and fetch_source:
         print("Source fetch skipped for targeted component update.")
     syntax_check()
-    tags = update_tags_for_args(args)
+    if changes_tags:
+        tags = changes_tags
+    elif component == "all":
+        tags = UPDATE_TAGS
+    else:
+        tags = update_tags_for_args(args)
     run_playbook(
         tags,
         extra_vars=(
@@ -3243,6 +3333,9 @@ def command_update(args: argparse.Namespace) -> None:
             else None
         ),
     )
+    if component == "all" or changes_tags:
+        # Everything the source asked for has been applied.
+        record_applied_source(directory)
     if managed_pending and component != "all":
         print(
             "Managed configuration remains pending because a targeted update "
@@ -3470,6 +3563,7 @@ def command_configure(args: argparse.Namespace) -> None:
             extra_vars={"haproxy_admin_sync_managed_config": "true"},
         )
         mark_installation_complete(directory)
+        record_applied_source(directory)
         if internal_ca:
             print_internal_ca_instructions(directory)
 
@@ -3553,6 +3647,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update_parser.add_argument(
         "--expected-source-revision",
+        help=argparse.SUPPRESS,
+    )
+    # Set by the update broker: a "changes only" update it approved must not
+    # quietly grow into the full stack, which would also update the
+    # containers without their image review.
+    update_parser.add_argument(
+        "--no-full-fallback",
+        action="store_true",
         help=argparse.SUPPRESS,
     )
     update_parser.set_defaults(func=command_update)

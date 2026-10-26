@@ -26,11 +26,16 @@
   ]);
   const availableStates = new Set(["available", "update", "outdated", "missing"]);
   const sourceSupersedes = new Set([
-    "services", "daemons", "authelia-container", "admin-container"
+    "changes", "services", "daemons", "authelia-container", "admin-container"
   ]);
+  // "Only what changed" is the source update with fewer steps: it does what
+  // the narrower source rows would, but not the containers, which keep their
+  // own rows.
+  const changesSupersedes = new Set(["services", "daemons"]);
   const componentLabels = {
     source: "Source code and complete stack",
     all: "Source code and complete stack",
+    changes: "Only what changed",
     services: "Host services and scripts",
     daemons: "Auxiliary daemons",
     "authelia-container": "Authelia containers",
@@ -40,6 +45,7 @@
   const componentImpacts = {
     source: "Managed source, host services and application containers",
     all: "Managed source, host services and application containers",
+    changes: "Only the listed steps; containers update in their own rows",
     services: "Host services",
     daemons: "Auxiliary systemd services",
     "authelia-container": "Authelia and its supporting containers",
@@ -285,7 +291,44 @@
       .map((item) => item.label || item.id)
       .filter(Boolean);
   }
+  function changesScope(component) {
+    const scope = component && component.details && component.details.scope;
+    return scope && typeof scope === "object" ? scope : null;
+  }
+  function changesReason(scope) {
+    const steps = Array.isArray(scope.steps) ? scope.steps.map((step) => t(String(step))) : [];
+    return steps.length
+      ? t("{count} changed file(s). Steps to run: {steps}", {count: scope.changed, steps: steps.join(", ")})
+      : t("{count} changed file(s); nothing on the host needs redeploying", {count: scope.changed});
+  }
+  function changesUnavailableReason(scope) {
+    if (scope.reason === "no-applied-record") {
+      return t("Available after the next complete update: there is no record of the last one yet.");
+    }
+    const listed = Array.isArray(scope.unmapped) ? scope.unmapped.join(", ") : "";
+    return t("These changes need the complete stack: {paths}", {paths: listed || "—"});
+  }
+  // The plan carries "only what changed" inside the source component, so a
+  // broker that predates it still accepts the plan. The row is derived here.
+  function withChangesRow(components) {
+    const source = components.find((item) => item.id === "all" && item.actionable);
+    const scope = changesScope(source);
+    if (!scope) return components;
+    const row = {
+      id: "changes",
+      state: scope.ready === true ? "available" : "blocked",
+      actionable: scope.ready === true,
+      current: source.current,
+      available: source.available,
+      reason: scope.ready === true ? changesReason(scope) : changesUnavailableReason(scope),
+      details: {paths: Array.isArray(scope.paths) ? scope.paths.join(", ") : ""},
+      impact: componentImpacts.changes
+    };
+    const index = components.indexOf(source);
+    return components.slice(0, index + 1).concat([row], components.slice(index + 1));
+  }
   function componentReason(component) {
+    if (component.id === "changes") return String(component.reason);
     if (component.state !== "available") return t(String(component.reason));
     if (component.id === "all" || component.id === "source") {
       // A source update can re-pin managed images (the Authelia stack's are
@@ -398,7 +441,7 @@
   function renderPlan(plan) {
     currentPlan = plan;
     resetConfirmation();
-    const components = normalizeComponents(plan);
+    const components = withChangesRow(normalizeComponents(plan));
     const available = components.filter((item) => item.actionable && availableStates.has(item.state));
     // "blocked" means a check was intentionally skipped (e.g. the local source
     // channel, or a synced non-git source on the github channel) — that is
@@ -438,9 +481,12 @@
     byId("updates-components-body").innerHTML = available.map((component) => {
       // Components whose candidates are already named in the reason (daemons,
       // host-service files) skip the raw digest dump to stay readable.
+      const shown = component.details && typeof component.details === "object" && !Array.isArray(component.details)
+        ? Object.fromEntries(Object.entries(component.details).filter(([key]) => key !== "scope"))
+        : component.details;
       const details = Array.isArray(component.details && component.details.artifacts)
         ? ""
-        : detailsText(component.details);
+        : detailsText(shown);
       return `<tr data-component-row="${escape(component.id)}">
         <td class="updates-select-column">
           <input type="checkbox" data-update-component="${escape(component.id)}"
@@ -465,7 +511,7 @@
     skippedDetails.hidden = !skipped.length;
     byId("updates-skipped-summary").textContent = t("{count} checks skipped by design", {count: skipped.length});
     byId("updates-skipped-list").innerHTML = skipped.map((component) =>
-      `<li><strong>${escape(t(componentLabels[component.id] || component.id))}</strong>: ${escape(t(String(component.reason)))}</li>`
+      `<li><strong>${escape(t(componentLabels[component.id] || component.id))}</strong>: ${escape(component.id === "changes" ? String(component.reason) : t(String(component.reason)))}</li>`
     ).join("");
 
     byId("updates-checked-at").textContent = formatDate(
@@ -491,19 +537,29 @@
       currentPlan.stale === true || currentPlan.expired === true || currentPlan.valid === false
     ) && !planForOtherChannel(currentPlan));
     const source = boxes.find((box) => ["source", "all"].includes(box.dataset.updateComponent));
+    const changes = boxes.find((box) => box.dataset.updateComponent === "changes");
     if (["source", "all"].includes(changedId) && source && source.checked) {
       boxes.forEach((box) => {
         if (sourceSupersedes.has(box.dataset.updateComponent)) box.checked = false;
       });
+    } else if (changedId === "changes" && changes && changes.checked) {
+      if (source) source.checked = false;
+      boxes.forEach((box) => {
+        if (changesSupersedes.has(box.dataset.updateComponent)) box.checked = false;
+      });
     } else if (changedId && sourceSupersedes.has(changedId)) {
       if (source) source.checked = false;
+      if (changes && changesSupersedes.has(changedId)) changes.checked = false;
     }
     const sourceSelected = Boolean(source && source.checked);
+    const changesSelected = Boolean(changes && changes.checked);
     boxes.forEach((box) => {
-      const superseded = sourceSupersedes.has(box.dataset.updateComponent);
-      box.disabled = requestRunning || operationRunning || !planUsable || (sourceSelected && superseded);
+      const id = box.dataset.updateComponent;
+      const superseded = (sourceSelected && sourceSupersedes.has(id)) ||
+        (changesSelected && changesSupersedes.has(id));
+      box.disabled = requestRunning || operationRunning || !planUsable || superseded;
       const row = box.closest("tr");
-      if (row) row.classList.toggle("updates-row-superseded", sourceSelected && superseded);
+      if (row) row.classList.toggle("updates-row-superseded", superseded);
     });
     const selected = selectedPlanComponents();
     byId("updates-self-restart-note").hidden = !(
@@ -1160,6 +1216,15 @@
   byId("updates-select-all").addEventListener("click", () => {
     const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
     const source = boxes.find((box) => ["source", "all"].includes(box.dataset.updateComponent));
+    const changes = boxes.find((box) => box.dataset.updateComponent === "changes");
+    if (changes) {
+      boxes.forEach((box) => {
+        const id = box.dataset.updateComponent;
+        box.checked = box === changes || ["authelia-container", "admin-container", "os"].includes(id);
+      });
+      updateSelection("changes");
+      return;
+    }
     boxes.forEach((box) => {
       box.checked = source ? box === source || box.dataset.updateComponent === "os" : true;
     });

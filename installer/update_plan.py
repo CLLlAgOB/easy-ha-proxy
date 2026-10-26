@@ -18,7 +18,15 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import sys
 from typing import Any, Callable, Protocol, Sequence
+
+# The broker runs this file as a script from the installer directory; tests
+# and tools may load it by path.
+_INSTALLER_DIR = str(Path(__file__).resolve().parent)
+if _INSTALLER_DIR not in sys.path:
+    sys.path.insert(0, _INSTALLER_DIR)
+import update_scope  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -1455,6 +1463,20 @@ def build_update_plan(
                 target_channel=resolved_image_channel,
             ),
         ]
+        if candidate_source is not None and components[0].get("state") == "available":
+            # What a "changes only" update of this candidate would run,
+            # measured against the last complete update. Part of the signed
+            # details, so the apply-time recheck refuses a scope that moved.
+            try:
+                scope = update_scope.plan_scope(Path(config_dir), candidate_source)
+            except OSError as exc:
+                scope = {"ready": False, "reason": f"scope-unavailable: {exc}"[:200],
+                         "full": True, "tags": [], "steps": [], "changed": 0,
+                         "unmapped": [], "paths": []}
+            components[0]["details"] = {
+                **(components[0].get("details") or {}),
+                "scope": scope,
+            }
 
     if (
         resolved_source_channel == "github"

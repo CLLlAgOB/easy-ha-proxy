@@ -28,6 +28,8 @@ RELEASE_CHANNELS = frozenset({"stable", "alpha", "local"})
 UPDATE_COMPONENTS = frozenset(
     {
         "all",
+        # The source update with only the steps its changed files need.
+        "changes",
         "services",
         "daemons",
         "authelia-container",
@@ -35,7 +37,7 @@ UPDATE_COMPONENTS = frozenset(
         "os",
     }
 )
-CONFIG_SENSITIVE_COMPONENTS = frozenset({"all", "services", "daemons"})
+CONFIG_SENSITIVE_COMPONENTS = frozenset({"all", "changes", "services", "daemons"})
 
 
 def _daemon_response(result: dict, *, accepted: bool = False):

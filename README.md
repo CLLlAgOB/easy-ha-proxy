@@ -298,6 +298,7 @@ sudo easy-ha-proxy-assistant check-updates
 sudo easy-ha-proxy-assistant smart-update
 sudo easy-ha-proxy plan
 sudo easy-ha-proxy update
+sudo easy-ha-proxy update --component changes
 sudo easy-ha-proxy update --component daemons
 sudo easy-ha-proxy update --component services
 sudo easy-ha-proxy update --ui-only
@@ -325,6 +326,14 @@ backup. This also upgrades older installations whose CLI predates the
 - `smart-update` performs the same checks and offers the updates it found.
 - `plan` runs Ansible check mode without applying changes.
 - `update` refreshes the managed checkout, dependencies, and complete stack.
+- `update --component changes` refreshes the checkout and runs only the
+  playbook steps the changed files need, measured against the last complete
+  update: a changed daemon redeploys that daemon, a changed HAProxy template
+  re-renders the configuration, documentation and tests deploy nothing. A file
+  it cannot place -- the playbook, a role's defaults or handlers, the Python
+  requirements -- runs the complete stack instead. Container images are not
+  touched; update them as their own components. The web interface offers it as
+  "Only what changed" and lists the steps before anything runs.
 - `update --component daemons` updates only managed helper daemons.
 - `update --component services` applies the host-side service layer without
   refreshing container images.

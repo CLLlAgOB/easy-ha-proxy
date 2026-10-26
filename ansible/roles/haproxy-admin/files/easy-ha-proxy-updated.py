@@ -163,9 +163,14 @@ ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# "changes" never appears in a plan of its own: it is the source update with
+# only the playbook steps the changed files need, and the plan describes it in
+# the "all" component's details.scope.
+CHANGES_COMPONENT = "changes"
 ALLOWED_COMPONENTS = frozenset(
     {
         "all",
+        CHANGES_COMPONENT,
         "services",
         "daemons",
         "authelia-container",
@@ -173,7 +178,7 @@ ALLOWED_COMPONENTS = frozenset(
         "os",
     }
 )
-SOURCE_COMPONENTS = frozenset({"all", "services", "daemons"})
+SOURCE_COMPONENTS = frozenset({"all", "services", "daemons", CHANGES_COMPONENT})
 CONTAINER_COMPONENTS = frozenset(
     {"authelia-container", "admin-container"}
 )
@@ -862,7 +867,11 @@ def parse_checker_output(raw: str) -> dict[str, Any]:
         if not isinstance(component, dict):
             raise UpdatedError("the update checker returned an invalid component")
         component_id = component.get("id")
-        if component_id not in ALLOWED_COMPONENTS or component_id in seen:
+        if (
+            component_id not in ALLOWED_COMPONENTS
+            or component_id == CHANGES_COMPONENT
+            or component_id in seen
+        ):
             raise UpdatedError("the update checker returned an unsupported component")
         seen.add(component_id)
         if component.get("state") not in {
@@ -989,10 +998,14 @@ def selected_components(value: Any) -> list[str]:
     if "all" in result:
         result = [item for item in result if item not in SOURCE_COMPONENTS - {"all"}]
         result = [item for item in result if item not in CONTAINER_COMPONENTS]
+    elif CHANGES_COMPONENT in result:
+        # It covers what the narrower source updates would do.
+        result = [item for item in result if item not in {"services", "daemons"}]
     # Updating the web application last reduces avoidable reconnects.  APT is
     # always last because it can leave the host awaiting a reboot.
     order = {
         "all": 0,
+        CHANGES_COMPONENT: 1,
         "services": 1,
         "daemons": 2,
         "authelia-container": 3,
@@ -1000,6 +1013,28 @@ def selected_components(value: Any) -> list[str]:
         "os": 5,
     }
     return sorted(result, key=order.__getitem__)
+
+
+def changes_scope(component: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The scope a plan's source component offers for a changes-only update."""
+
+    details = component.get("details") if isinstance(component, dict) else None
+    scope = details.get("scope") if isinstance(details, dict) else None
+    if not isinstance(scope, dict) or scope.get("ready") is not True:
+        return None
+    tags = scope.get("tags")
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        return None
+    return scope
+
+
+def plan_source_component(plan_map: dict[str, dict[str, Any]], component_id: str) -> dict[str, Any] | None:
+    """The plan entry a selected component is checked against."""
+
+    if component_id == CHANGES_COMPONENT:
+        source = plan_map.get("all")
+        return source if changes_scope(source) is not None else None
+    return plan_map.get(component_id)
 
 
 def plan_component_map(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1052,7 +1087,7 @@ def validate_selection(plan: dict[str, Any], components: list[str]) -> None:
     validate_plan_channel(plan)
     available = plan_component_map(plan)
     for component_id in components:
-        component = available.get(component_id)
+        component = plan_source_component(available, component_id)
         if (
             component is None
             or component.get("state") != "available"
@@ -1115,8 +1150,8 @@ def validate_fresh_candidates(
     old_map = plan_component_map(stored)
     new_map = plan_component_map(fresh)
     for component_id in components:
-        old = old_map.get(component_id)
-        new = new_map.get(component_id)
+        old = plan_source_component(old_map, component_id)
+        new = plan_source_component(new_map, component_id)
         if (
             old is None
             or new is None
@@ -1349,6 +1384,8 @@ def update_command(
         if not SOURCE_REVISION_RE.fullmatch(revision):
             raise UpdatedError("the approved source revision is unavailable")
         command.extend(("--expected-source-revision", revision))
+    if component == CHANGES_COMPONENT:
+        command.append("--no-full-fallback")
     return command
 
 

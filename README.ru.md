@@ -303,6 +303,7 @@ sudo easy-ha-proxy-assistant check-updates
 sudo easy-ha-proxy-assistant smart-update
 sudo easy-ha-proxy plan
 sudo easy-ha-proxy update
+sudo easy-ha-proxy update --component changes
 sudo easy-ha-proxy update --component daemons
 sudo easy-ha-proxy update --component services
 sudo easy-ha-proxy update --ui-only
@@ -330,6 +331,15 @@ sudo easy-ha-proxy language --language ru --apply
 - `smart-update` выполняет ту же проверку и предлагает установить найденное.
 - `plan` запускает Ansible check mode без применения изменений.
 - `update` обновляет управляемый checkout, зависимости и весь стек.
+- `update --component changes` обновляет checkout и выполняет только те шаги
+  плейбука, которые нужны изменившимся файлам — по сравнению с последним
+  полным обновлением: изменился демон — переустанавливается этот демон,
+  изменился шаблон HAProxy — перегенерируется конфигурация, документация и
+  тесты не разворачивают ничего. Если изменился файл, для которого шаг не
+  определён (сам плейбук, defaults или handlers роли, зависимости Python),
+  выполняется полный стек. Образы контейнеров не трогаются — они обновляются
+  своими компонентами. В веб-интерфейсе это пункт «Только изменения», и шаги
+  видны до запуска.
 - `update --component daemons` обновляет только управляемые helper-демоны.
 - `update --component services` применяет host-side сервисы без обновления
   контейнерных образов.
