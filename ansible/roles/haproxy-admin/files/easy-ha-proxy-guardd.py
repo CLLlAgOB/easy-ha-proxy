@@ -648,6 +648,8 @@ EVENT_QUERY_INJECTION = "QUERY_INJECTION"
 EVENT_SCANNER_MULTI = "SCANNER_MULTI_CATEGORY"
 EVENT_LOW_AND_SLOW = "LOW_AND_SLOW_SCANNER"
 EVENT_NOT_FOUND_ENUM = "NOT_FOUND_ENUMERATION"
+EVENT_WIDE_ENUM = "WIDE_ENUMERATION"
+EVENT_MASS_ENUM = "MASS_ENUMERATION"
 EVENT_INVALID_HOST = "INVALID_HOST_ACTIVITY"
 EVENT_NOSNI_PROBING = "NOSNI_PROBING"
 EVENT_RATE_EXCEEDED = "RATE_EXCEEDED"
@@ -670,6 +672,12 @@ DEFAULT_WEIGHTS: Dict[str, int] = {
     EVENT_SCANNER_MULTI: 20,
     EVENT_LOW_AND_SLOW: 30,
     EVENT_NOT_FOUND_ENUM: 15,
+    # The low tier above is one category, so the category cap held it at 25
+    # however wide the sweep: five hundred random paths in five minutes
+    # scored the same as six, and enumeration alone could never reach a ban.
+    # Breadth now escalates as findings of their own.
+    EVENT_WIDE_ENUM: 30,
+    EVENT_MASS_ENUM: 60,
     EVENT_INVALID_HOST: 10,
     EVENT_NOSNI_PROBING: 10,
     EVENT_RATE_EXCEEDED: 15,
@@ -711,6 +719,8 @@ COOLDOWN_SECONDS: Dict[str, int] = {
     EVENT_SCANNER_MULTI: 900,
     EVENT_LOW_AND_SLOW: 3600,
     EVENT_NOT_FOUND_ENUM: 900,
+    EVENT_WIDE_ENUM: 900,
+    EVENT_MASS_ENUM: 3600,
     EVENT_INVALID_HOST: 600,
     EVENT_NOSNI_PROBING: 600,
     EVENT_RATE_EXCEEDED: 60,
@@ -725,6 +735,18 @@ LOW_AND_SLOW_MIN_CATEGORIES = 3
 LOW_AND_SLOW_WINDOW = 6 * 3600
 NOT_FOUND_MIN_DISTINCT = 6
 NOT_FOUND_WINDOW = 3600
+# Breadth tiers. They count every refusal of a path the address made up --
+# 401, 403 and 410 as well as 404 -- because a site behind authorisation
+# answers a sweep with 401 or 403 for every path and the 404-only tier never
+# saw it. The thresholds are high enough that an application polling its own
+# dozen endpoints after a session expired stays below them.
+ENUMERATION_STATUSES = frozenset({401, 403, 404, 410})
+WIDE_ENUM_MIN = 30
+MASS_ENUM_MIN = 100
+WIDE_ENUM_WINDOW = 600
+# Distinct host-and-path pairs, not hits: a monitor that asks the gateway's
+# bare IP for "/" every minute is one pair however long it runs, while a
+# sweep of names or paths by IP is many.
 INVALID_HOST_MIN = 5
 INVALID_HOST_WINDOW = 6 * 3600
 
@@ -1670,7 +1692,12 @@ class IpActivity:
     # was derived from scored nothing.
     scanner_hits_denied: int = 0
     missing_paths: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
-    invalid_host_hits: int = 0
+    # Paths refused with any enumeration status, and how many fresh ones the
+    # current burst has produced: two integers per address, however wide.
+    refused_paths: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
+    burst_start: int = 0
+    burst_misses: int = 0
+    invalid_host_keys: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
     invalid_host_since: int = 0
 
     @property
@@ -1713,6 +1740,44 @@ class IpActivity:
         while len(self.missing_paths) > limit:
             self.missing_paths.popitem(last=False)
         return fresh
+
+    def note_refused(self, path: str, ts: int, limit: int, window: int) -> bool:
+        """Count a refused path toward the current burst if it is new.
+
+        The set is a bounded LRU, so a path the address keeps repeating stays
+        in it and never counts twice; a sweep's paths are all new.
+        """
+
+        digest = hash(path) & 0xFFFFFFFF
+        fresh = digest not in self.refused_paths
+        self.refused_paths[digest] = ts
+        self.refused_paths.move_to_end(digest)
+        while len(self.refused_paths) > limit:
+            self.refused_paths.popitem(last=False)
+        if not fresh:
+            return False
+        if ts - self.burst_start > window:
+            self.burst_start = ts
+            self.burst_misses = 0
+        self.burst_misses += 1
+        return True
+
+    def note_invalid_host(
+        self, key: str, ts: int, limit: int, window: int
+    ) -> Optional[int]:
+        """Distinct host-and-path pairs in the window, or None for a repeat."""
+
+        if self.invalid_host_since < ts - window:
+            self.invalid_host_since = ts
+            self.invalid_host_keys.clear()
+        digest = hash(key) & 0xFFFFFFFF
+        if digest in self.invalid_host_keys:
+            self.invalid_host_keys.move_to_end(digest)
+            return None
+        self.invalid_host_keys[digest] = ts
+        while len(self.invalid_host_keys) > limit:
+            self.invalid_host_keys.popitem(last=False)
+        return len(self.invalid_host_keys)
 
     def recent_categories(self, since: int) -> List[str]:
         return [
@@ -3459,13 +3524,24 @@ class GuardEngine:
             )
             self._check_multi_category(ip, activity, now)
             self._check_low_and_slow(ip, activity, now)
-        elif request.status == 404 and not is_asset(request.path):
+        elif request.status in ENUMERATION_STATUSES and not is_asset(request.path):
             # Enumeration without a known signature: only distinct, non-asset
-            # paths count, which is what separates a scanner from a stale link.
-            if activity.note_missing(
+            # paths count, which is what separates a scanner from a stale link
+            # or a monitor that keeps asking for the same one.
+            if request.status == 404 and activity.note_missing(
                 request.path, now, self.config.max_paths_per_ip
             ):
                 self._check_not_found_enumeration(ip, activity, now)
+            # Room for twice the first threshold: an application cycling
+            # through more endpoints than the set holds would otherwise look
+            # like an endless supply of new paths.
+            if activity.note_refused(
+                request.path,
+                now,
+                max(self.config.max_paths_per_ip, 2 * WIDE_ENUM_MIN),
+                WIDE_ENUM_WINDOW,
+            ):
+                self._check_enumeration_breadth(ip, activity, now, request)
 
         if request.status == 400 or request.backend.endswith("/<NOSRV>"):
             self._note_invalid_host(ip, activity, now, request)
@@ -3560,21 +3636,43 @@ class GuardEngine:
             detail=f"distinct={distinct}",
         )
 
+    def _check_enumeration_breadth(
+        self, ip: str, activity: IpActivity, now: int, request: ParsedRequest
+    ) -> None:
+        """Escalate a wide sweep of made-up paths into its own findings."""
+
+        count = activity.burst_misses
+        if count < WIDE_ENUM_MIN:
+            return
+        handled = refusal_is_a_shield(request, activity)
+        detail = f"distinct={count} within {WIDE_ENUM_WINDOW}s"
+        self._emit(
+            ip, EVENT_WIDE_ENUM, now,
+            source="haproxy-log", detail=detail, handled=handled,
+        )
+        if count >= MASS_ENUM_MIN:
+            self._emit(
+                ip, EVENT_MASS_ENUM, now,
+                source="haproxy-log", detail=detail, handled=handled,
+            )
+
     def _note_invalid_host(
         self, ip: str, activity: IpActivity, now: int, request: ParsedRequest
     ) -> None:
-        if activity.invalid_host_since < now - INVALID_HOST_WINDOW:
-            activity.invalid_host_since = now
-            activity.invalid_host_hits = 0
-        activity.invalid_host_hits += 1
-        if activity.invalid_host_hits < INVALID_HOST_MIN:
+        distinct = activity.note_invalid_host(
+            f"{request.host}|{request.path}",
+            now,
+            self.config.max_paths_per_ip,
+            INVALID_HOST_WINDOW,
+        )
+        if distinct is None or distinct < INVALID_HOST_MIN:
             return
         self._emit(
             ip,
             EVENT_INVALID_HOST,
             now,
             source="haproxy-log",
-            detail=f"hits={activity.invalid_host_hits}",
+            detail=f"distinct={distinct}",
             handled=refusal_is_a_shield(request, activity),
         )
 

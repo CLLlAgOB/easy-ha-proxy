@@ -37,6 +37,8 @@ EVENT_TYPES: tuple[str, ...] = (
     "SCANNER_MULTI_CATEGORY",
     "LOW_AND_SLOW_SCANNER",
     "NOT_FOUND_ENUMERATION",
+    "WIDE_ENUMERATION",
+    "MASS_ENUMERATION",
     "INVALID_HOST_ACTIVITY",
     "NOSNI_PROBING",
     "RATE_EXCEEDED",
@@ -185,7 +187,12 @@ def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:
 
 # Findings that say the address is not a misconfigured client but something
 # probing the gateway.
-_HOSTILE_MARKERS = ("SCANNER", "INVALID_HOST", "NOSNI", "LEGACY_HAPROXY_BAN")
+# A sweep of thirty or more made-up paths is probing too; the six-path tier
+# is not on the list, because a client with a few stale links trips it.
+_HOSTILE_MARKERS = (
+    "SCANNER", "INVALID_HOST", "NOSNI", "LEGACY_HAPROXY_BAN",
+    "WIDE_ENUMERATION", "MASS_ENUMERATION",
+)
 
 
 def _withhold_advice_from_attackers(contributions: List[Dict[str, Any]]) -> None:

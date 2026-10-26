@@ -855,14 +855,79 @@ class DetectionTests(EngineTestCase):
             self.engine.reputation("203.0.113.8", 1000)["score"], 0
         )
 
-    def test_invalid_host_activity_needs_repetition(self):
+    def test_invalid_host_activity_needs_distinct_requests(self):
         for index in range(4):
-            self.append(self.line("203.0.113.9", "/", 400))
+            self.append(self.line("203.0.113.9", f"/probe{index}", 400))
             self.engine.ingest_log(1000 + index)
         self.assertNotIn(guardd.EVENT_INVALID_HOST, self.types())
-        self.append(self.line("203.0.113.9", "/", 400))
+        self.append(self.line("203.0.113.9", "/probe4", 400))
         self.engine.ingest_log(1005)
         self.assertIn(guardd.EVENT_INVALID_HOST, self.types())
+
+    def test_a_monitor_pinging_the_bare_ip_is_not_invalid_host_activity(self):
+        # An application that asks the gateway's address for "/" every
+        # minute, and is a real client of a site besides, is one request
+        # repeated -- not a sweep of names.
+        self.append(self.line("203.0.113.9", "/app", 200))
+        for minute in range(60):
+            self.append(self.line("203.0.113.9", "/", 400))
+            self.engine.ingest_log(1000 + minute * 60)
+        self.assertNotIn(guardd.EVENT_INVALID_HOST, self.types())
+        self.assertEqual(self.engine.reputation("203.0.113.9", 4600)["score"], 0)
+
+    def test_a_wide_sweep_escalates_past_the_category_cap(self):
+        for index in range(30):
+            self.append(self.line("203.0.113.9", f"/sweep{index}", 404))
+        self.engine.ingest_log(1000)
+        self.assertIn(guardd.EVENT_WIDE_ENUM, self.types())
+        self.assertNotIn(guardd.EVENT_MASS_ENUM, self.types())
+        for index in range(30, 100):
+            self.append(self.line("203.0.113.9", f"/sweep{index}", 404))
+        self.engine.ingest_log(1100)
+        self.assertIn(guardd.EVENT_MASS_ENUM, self.types())
+        # Enumeration alone now reaches a ban, which the 25-point cap on the
+        # single low tier never allowed.
+        reputation = self.engine.reputation("203.0.113.9", 1100)
+        self.assertGreaterEqual(reputation["score"], guardd.WOULD_BAN_SCORE)
+
+    def test_a_sweep_answered_with_401_counts_toward_breadth(self):
+        # A site behind authorisation answers every made-up path with 401;
+        # the 404-only tier never saw this sweep.
+        for index in range(30):
+            self.append(self.line("203.0.113.9", f"/admin{index}", 401))
+        self.engine.ingest_log(1000)
+        self.assertIn(guardd.EVENT_WIDE_ENUM, self.types())
+        # ...but 401s are not stale links, so the low 404 tier stays quiet.
+        self.assertNotIn(guardd.EVENT_NOT_FOUND_ENUM, self.types())
+
+    def test_an_app_polling_its_endpoints_after_logout_is_not_a_sweep(self):
+        # A dashboard that keeps asking for the same dozen endpoints and is
+        # told 401 for every one of them, for an hour.
+        endpoints = [f"/api/widget{index}" for index in range(12)]
+        for minute in range(60):
+            for endpoint in endpoints:
+                self.append(self.line("203.0.113.9", endpoint, 401))
+            self.engine.ingest_log(1000 + minute * 60)
+        self.assertNotIn(guardd.EVENT_WIDE_ENUM, self.types())
+        self.assertNotIn(guardd.EVENT_MASS_ENUM, self.types())
+
+    def test_missing_assets_never_count_toward_breadth(self):
+        for index in range(120):
+            self.append(self.line("203.0.113.9", f"/img/photo{index}.jpg", 404))
+        self.engine.ingest_log(1000)
+        self.assertNotIn(guardd.EVENT_WIDE_ENUM, self.types())
+        self.assertNotIn(guardd.EVENT_MASS_ENUM, self.types())
+
+    def test_a_sweep_the_gateway_refused_for_a_walled_off_address_scores_nothing(self):
+        # 403 from the gateway itself, and the address never reached a site:
+        # a ban would change nothing, same as every other refused finding.
+        for index in range(40):
+            self.append(self.line("203.0.113.9", f"/admin{index}", 403))
+        self.engine.ingest_log(1000)
+        wide = [e for e in self.events() if e["event_type"] == guardd.EVENT_WIDE_ENUM]
+        self.assertEqual(len(wide), 1)
+        self.assertEqual(wide[0]["handled"], 1)
+        self.assertEqual(self.engine.reputation("203.0.113.9", 1000)["score"], 0)
 
     def test_an_excluded_address_produces_no_findings_at_all(self):
         for path in ("/.env", "/.git/config", "/wp-login.php", "/phpmyadmin/"):
