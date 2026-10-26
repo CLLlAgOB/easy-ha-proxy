@@ -131,7 +131,7 @@ class ServedPathTests(unittest.TestCase):
         # Sharing one fingerprint across both tiers would let a decisive
         # finding be swallowed by the cooldown of a probable one.
         source = GUARDD.read_text(encoding="utf-8")
-        self.assertIn('fingerprint=f"{ip}|{event}|{category}"', source)
+        self.assertIn('fingerprint=f"{ip}|{event}|{category}|{int(bool(handled))}"', source)
 
 
 if __name__ == "__main__":

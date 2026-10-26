@@ -928,6 +928,42 @@ class DetectionTests(EngineTestCase):
         self.assertNotIn(guardd.EVENT_WIDE_ENUM, self.types())
         self.assertNotIn(guardd.EVENT_MASS_ENUM, self.types())
 
+    def sized(self, ip, path, size, status=200):
+        return self.line(ip, path, status).replace(f" {status} 100 ", f" {status} {size} ")
+
+    def test_a_refused_probe_does_not_silence_an_answered_one(self):
+        # The first probe is refused on identity and scores nothing; the next
+        # of the same kind gets through a minute later and must still count.
+        self.append(self.line("203.0.113.9", "/server-status", 403))
+        self.engine.ingest_log(1000)
+        self.append(self.line("203.0.113.9", "/phpinfo.php", 404))
+        self.engine.ingest_log(1060)
+        findings = [e for e in self.events()
+                    if e["event_type"] == guardd.EVENT_SCANNER_PATH]
+        self.assertEqual(sorted(e["handled"] for e in findings), [0, 1])
+
+    def test_a_catch_all_page_does_not_excuse_a_probe(self):
+        # The sign-in portal answered every path with the same 3323 bytes,
+        # so WordPress probes against it looked served and were forgiven.
+        for path in ("/wp-login.php", "/xmlrpc.php", "/wp-admin/", "/phpmyadmin/"):
+            self.append(self.sized("203.0.113.9", path, 3323))
+        self.engine.ingest_log(1000)
+        self.assertIn(guardd.EVENT_SCANNER_PATH, self.types())
+
+    def test_a_real_wordpress_still_excuses_its_own_pages(self):
+        # Its own pages differ in size, so nothing looks like a catch-all.
+        for path, size in (("/wp-login.php", 4211), ("/xmlrpc.php", 182),
+                           ("/wp-admin/", 6150), ("/wp-login.php", 4211)):
+            self.append(self.sized("203.0.113.9", path, size))
+        self.engine.ingest_log(1000)
+        self.assertNotIn(guardd.EVENT_SCANNER_PATH, self.types())
+
+    def test_one_path_answered_alike_many_times_is_not_a_catch_all(self):
+        for _ in range(10):
+            self.append(self.sized("203.0.113.9", "/wp-login.php", 3323))
+        self.engine.ingest_log(1000)
+        self.assertNotIn(guardd.EVENT_SCANNER_PATH, self.types())
+
     def test_a_scanner_that_comes_back_hours_later_is_banned(self):
         # The slow kind: one WordPress probe, then the same probe the next
         # morning. Each visit alone is one capped category that fades within

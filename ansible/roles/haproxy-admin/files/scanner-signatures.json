@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-20b",
+  "version": "2026-10-26a",
   "source": "curated, plus paths mined from 713945 requests across two live gateways",
   "notes": [
     "A category is decisive when no client has any legitimate reason to ask:",
@@ -73,7 +73,22 @@
     "config.php": "config",
     "configuration.php": "config",
     "web.config": "config",
-    "docker-compose.yml": "config"
+    "docker-compose.yml": "config",
+    ".env*": "secrets",
+    ".git-credentials": "secrets",
+    ".gitconfig": "secrets",
+    ".netrc": "secrets",
+    ".pypirc": "secrets",
+    ".npmrc": "secrets",
+    ".bash_history": "secrets",
+    "settings.py": "config",
+    "config.yaml": "config",
+    "info.php": "server-info",
+    "phpinfo": "server-info",
+    "hudson": "app-framework",
+    "+CSCOE+": "known-exploit",
+    "GponForm": "known-exploit",
+    "HNAP1": "known-exploit"
   },
   "paths": {
     "/.env": "secrets",
@@ -111,7 +126,9 @@
     "/this_is_a_new_hello_world.php": "rce-probe",
     "/mcp": "ai-endpoint",
     "/sse": "ai-endpoint",
-    "/api/mcp": "ai-endpoint"
+    "/api/mcp": "ai-endpoint",
+    "/remote/login": "app-framework",
+    "/manager/html": "app-framework"
   },
   "traps": [],
   "queries": {

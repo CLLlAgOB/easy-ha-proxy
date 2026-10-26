@@ -211,6 +211,7 @@ DEFAULT_MAX_PATHS_PER_IP = 32
 # request and still catches "/phpmyadmin/index.php" from "phpmyadmin".
 SCANNER_SEGMENTS: Dict[str, str] = {
     ".env": "secrets",
+    ".env*": "secrets",
     ".git": "vcs",
     ".svn": "vcs",
     ".hg": "vcs",
@@ -338,6 +339,14 @@ SIGNATURE_SOURCE = ""
 # The shipped list as read from the file, before the operator's rules go
 # on top. Kept apart so the two can be merged and published in one step.
 _SHIPPED_SEGMENTS: Dict[str, str] = dict(SCANNER_SEGMENTS)
+# Segment tokens ending in "*" match by prefix. Scanners invent file names
+# faster than a list can follow -- /.env.anthropic, /.env-example,
+# /.env.production.local -- and every one of them is a secrets probe.
+SCANNER_PREFIXES: Tuple[Tuple[str, str], ...] = tuple(
+    (token[:-1].lower(), category)
+    for token, category in SCANNER_SEGMENTS.items()
+    if token.endswith("*") and len(token) > 1
+)
 _SHIPPED_PATHS: Dict[str, str] = dict(SCANNER_PATHS)
 # A path has few segments, but a hostile one can be made to have many; the
 # scan stops well before the cost matters.
@@ -483,7 +492,7 @@ def publish_signatures() -> None:
     a suppressed signature is live again.
     """
 
-    global SCANNER_SEGMENTS, SCANNER_PATHS
+    global SCANNER_SEGMENTS, SCANNER_PATHS, SCANNER_PREFIXES
 
     segments = dict(_SHIPPED_SEGMENTS)
     paths = dict(_SHIPPED_PATHS)
@@ -497,6 +506,11 @@ def publish_signatures() -> None:
             segments[token] = category
     SCANNER_SEGMENTS = segments
     SCANNER_PATHS = paths
+    SCANNER_PREFIXES = tuple(
+        (token[:-1].lower(), category)
+        for token, category in segments.items()
+        if token.endswith("*") and len(token) > 1
+    )
 
 
 def apply_overrides(overrides: Optional[Dict[str, Any]] = None) -> None:
@@ -766,6 +780,14 @@ INVALID_HOST_WINDOW = 6 * 3600
 RECURRING_WINDOW = 7 * 86400
 RECURRING_GAP = 2 * 3600
 RECURRING_RECHECK = 600
+# A catch-all page answers every path alike: one size, whatever was asked.
+# Three different scanner paths answered 2xx with the same size on one host
+# are that page, not three things the site really has -- a real WordPress
+# answers /wp-login.php, /xmlrpc.php and /wp-admin/ differently.
+CATCH_ALL_MIN_PATHS = 3
+CATCH_ALL_MAX_HOSTS = 256
+CATCH_ALL_MAX_SIZES = 16
+
 SIGNATURE_EVENTS = frozenset({
     EVENT_SCANNER_PATH, EVENT_SCANNER_DECISIVE, EVENT_QUERY_INJECTION,
 })
@@ -997,6 +1019,14 @@ def is_authentication_endpoint(path: str) -> bool:
     return lowered.startswith(AUTHENTICATION_PATHS)
 
 
+def _prefix_category(segment: str) -> str:
+    lowered = segment.lower()
+    for prefix, category in SCANNER_PREFIXES:
+        if lowered.startswith(prefix):
+            return category
+    return ""
+
+
 def classify_path(path: str) -> str:
     """Return the scanner category for a normalised path, or "".
 
@@ -1031,7 +1061,7 @@ def classify_path(path: str) -> str:
             continue
         category = SCANNER_SEGMENTS.get(segment) or SCANNER_SEGMENTS.get(
             segment.lower()
-        )
+        ) or _prefix_category(segment)
         if not category:
             continue
         if category_is_decisive(category):
@@ -1809,6 +1839,30 @@ class IpActivity:
 
     def distinct_missing(self, since: int) -> int:
         return sum(1 for ts in self.missing_paths.values() if ts >= since)
+
+
+class CatchAllPages:
+    """Per host: response sizes that several scanner paths all received."""
+
+    def __init__(self) -> None:
+        self._hosts: "OrderedDict[str, OrderedDict[int, Set[int]]]" = OrderedDict()
+
+    def is_catch_all(self, host: str, size: int, path: str) -> bool:
+        sizes = self._hosts.get(host)
+        if sizes is None:
+            sizes = self._hosts[host] = OrderedDict()
+            while len(self._hosts) > CATCH_ALL_MAX_HOSTS:
+                self._hosts.popitem(last=False)
+        self._hosts.move_to_end(host)
+        seen = sizes.get(size)
+        if seen is None:
+            seen = sizes[size] = set()
+            while len(sizes) > CATCH_ALL_MAX_SIZES:
+                sizes.popitem(last=False)
+        sizes.move_to_end(size)
+        if len(seen) < CATCH_ALL_MIN_PATHS:
+            seen.add(hash(path) & 0xFFFFFFFF)
+        return len(seen) >= CATCH_ALL_MIN_PATHS
 
 
 class IpMemory:
@@ -3183,6 +3237,7 @@ class GuardEngine:
         )
         self.policy = ScoringPolicy()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
+        self.catch_all = CatchAllPages()
         cursor_state: Dict[str, Any] = {}
         with contextlib.suppress(ValueError):
             cursor_state = json.loads(
@@ -3512,6 +3567,9 @@ class GuardEngine:
             category
             and is_served(request.status)
             and not category_is_decisive(category)
+            and not self.catch_all.is_catch_all(
+                request.host, request.bytes_out, request.path
+            )
         ):
             # The application answered with content, so this is a path the
             # site actually has. A real WordPress installation would
@@ -3543,7 +3601,10 @@ class GuardEngine:
                 category=category,
                 detail=request.path,
                 handled=handled,
-                fingerprint=f"{ip}|{event}|{category}",
+                # Refused and answered findings cool down apart: a refused
+                # probe scores nothing, and sharing its cooldown silenced an
+                # answered probe of the same kind a minute later.
+                fingerprint=f"{ip}|{event}|{category}|{int(bool(handled))}",
             )
             self._check_multi_category(ip, activity, now)
             self._check_low_and_slow(ip, activity, now)
