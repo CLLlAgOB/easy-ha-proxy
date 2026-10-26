@@ -86,6 +86,8 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Python dependencies, which only the full update reinstalls.
     ("installer/requirements.txt", (FULL,)),
     ("installer/*", ()),
+    # Ansible loads its callback plugins from the source directory itself.
+    ("ansible/callback_plugins/*", ()),
     # Always run, and the OS packages have their own update.
     ("ansible/roles/healthcheck/*", ()),
     ("ansible/roles/update_packages/*", ()),

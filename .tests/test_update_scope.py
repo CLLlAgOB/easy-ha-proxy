@@ -159,6 +159,7 @@ class WhatAChangeNeeds(unittest.TestCase):
             "README.ru.md", ".tests/test_x.py", ".github/workflows/ci.yml",
             "docker/app/haproxy_admin/static/js/live_activity.js", "Dockerfile",
             "installer/easy_ha_proxy.py",
+            "ansible/callback_plugins/easy_ha_proxy_progress.py",
         ])
         self.assertFalse(scope["full"])
         self.assertEqual(scope["tags"], [])
