@@ -523,8 +523,8 @@ cache. The result lists actionable source, host-service, daemon, Authelia,
 HAProxy Admin, and OS-package components; unknown registry/network states are
 shown but cannot be selected.
 
-Apply requires a fresh expiring plan, a service-restart acknowledgement, and
-the exact `UPDATE` confirmation. `easy-ha-proxy-updated.service` runs the fixed
+Apply requires a fresh expiring plan and one confirmation dialog that lists
+what will restart; the page sends the broker its fixed `UPDATE` confirmation. `easy-ha-proxy-updated.service` runs the fixed
 CLI component allowlist asynchronously, stores bounded progress on the host,
 and remains available while the HAProxy Admin container updates itself. A full
 source selection supersedes its nested service/container choices; OS packages

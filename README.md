@@ -351,8 +351,12 @@ backup. This also upgrades older installations whose CLI predates the
 A `superadmin` can open **Software updates** in HAProxy Admin. The page runs an
 explicit read-only check and separates updates for the managed source/full
 stack, host services, helper daemons, Authelia containers, the HAProxy Admin
-container itself, and cached operating-system packages. Nothing is selected or
-installed merely by opening the page.
+container itself, and cached operating-system packages. Nothing is installed
+merely by opening the page. After a check the recommended set is ticked --
+"Only what changed" and the containers, never the OS packages -- and one dialog
+lists what will restart before anything runs. While a job runs the page shows a
+progress bar with the current step; the log is behind "Show details", and the
+history and release channel are folded away.
 
 Applying selected components creates a durable job in
 `easy-ha-proxy-updated.service`. The root broker accepts only fixed component

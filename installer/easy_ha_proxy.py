@@ -3170,6 +3170,20 @@ def command_plan(args: argparse.Namespace) -> None:
         )
 
 
+PROGRESS_ENV = "EASY_HA_PROXY_PROGRESS"
+
+
+def progress_phase(name: str) -> None:
+    """A phase marker for the web update page's progress bar.
+
+    Printed only when the update broker asks for it; the playbook's own task
+    counter comes from the easy_ha_proxy_progress callback plugin.
+    """
+
+    if os.environ.get(PROGRESS_ENV) == "1":
+        print(f"EHP-PROGRESS phase={name}", flush=True)
+
+
 def changes_scope(directory: Path | None = None) -> dict[str, Any]:
     """What the installed source needs compared with the last complete update."""
 
@@ -3266,6 +3280,7 @@ def command_update(args: argparse.Namespace) -> None:
     # the new tree, but only the CLI from that tree is allowed to run config
     # migrations and apply its playbook.
     if refresh_source and not source_was_refreshed:
+        progress_phase("source")
         if component in {"daemons", "services", CHANGES_COMPONENT}:
             print("Updating managed source before the targeted host-service update.")
         if update_managed_source(expected_source_revision):
@@ -3278,6 +3293,7 @@ def command_update(args: argparse.Namespace) -> None:
             )
 
     directory = config_dir()
+    progress_phase("prepare")
     ensure_security_secrets(directory)
     persist_deployment_channels(
         source_channel=(source_channel if not args.no_fetch or args.source_channel else None),
@@ -3318,7 +3334,9 @@ def command_update(args: argparse.Namespace) -> None:
         sync_runtime_dependencies()
     elif component != "all" and fetch_source:
         print("Source fetch skipped for targeted component update.")
+    progress_phase("syntax")
     syntax_check()
+    progress_phase("playbook")
     if changes_tags:
         tags = changes_tags
     elif component == "all":

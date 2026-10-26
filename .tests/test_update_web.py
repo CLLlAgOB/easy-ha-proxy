@@ -415,8 +415,10 @@ class UpdateWebUiTests(unittest.TestCase):
         self.assertIn('data-check-url=', TEMPLATE)
         self.assertIn('data-apply-url=', TEMPLATE)
         self.assertIn('id="updates-components-body"', TEMPLATE)
-        self.assertIn('id="updates-confirmation"', TEMPLATE)
-        self.assertIn('placeholder="UPDATE"', TEMPLATE)
+        # One confirmation dialog names what will restart; the broker still
+        # receives its fixed confirmation word.
+        self.assertIn('id="updates-confirm-modal"', TEMPLATE)
+        self.assertIn('id="updates-confirm-go"', TEMPLATE)
         self.assertIn("async function checkUpdates()", JAVASCRIPT)
         self.assertIn("async function applyUpdates()", JAVASCRIPT)
         self.assertIn("plan_id: currentPlan.id", JAVASCRIPT)
@@ -468,7 +470,7 @@ class UpdateWebUiTests(unittest.TestCase):
         self.assertIn("renderPlan(null);", JAVASCRIPT)
 
     def test_raw_versions_and_job_logs_are_not_translated(self) -> None:
-        for element_id in ("updates-job-log", "updates-confirmation"):
+        for element_id in ("updates-job-log", "updates-progress-step"):
             tag = re.search(rf'<[^>]+id="{element_id}"[^>]*>', TEMPLATE)
             self.assertIsNotNone(tag, element_id)
             self.assertIn("notranslate", tag.group(0))

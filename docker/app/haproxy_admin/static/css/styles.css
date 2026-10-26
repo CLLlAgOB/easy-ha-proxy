@@ -2892,6 +2892,304 @@ tr.job-row-selected > td:first-child {
   border-color: rgba(255,170,0,.38);
 }
 
+/* The top card: where things stand, and while a job runs, only its bar. */
+.updates-hero-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.updates-hero-text h2 {
+  margin: 0 0 6px;
+}
+
+.updates-hero-text p {
+  margin: 0;
+}
+
+.updates-hero-summary {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.updates-hero-meta {
+  margin-top: 4px !important;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid rgba(var(--accent-primary-rgb), .45);
+  border-radius: 999px;
+  color: var(--accent-primary);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: 1px;
+}
+
+.updates-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.updates-run[hidden],
+.updates-hero-text p[hidden],
+.updates-result[hidden],
+.updates-log-wrap[hidden],
+.updates-apply-bar[hidden],
+.updates-link-button[hidden],
+.updates-run-note[hidden] {
+  display: none;
+}
+
+.updates-run-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.updates-run-meta > span {
+  display: flex;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-run-track {
+  height: 10px;
+}
+
+.updates-run-step {
+  min-height: 1.3em;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.updates-run-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-result {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.updates-result--ok {
+  border-color: rgba(34,197,94,.3);
+  background: rgba(34,197,94,.07);
+  color: var(--success);
+}
+
+.updates-result--failed {
+  border-color: rgba(255,77,109,.35);
+  background: rgba(255,77,109,.07);
+  color: var(--error);
+}
+
+.updates-hero-tools {
+  margin-top: 10px;
+}
+
+.updates-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.updates-link-button:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: .6;
+  text-decoration: none;
+}
+
+.updates-log-wrap {
+  margin-top: 8px;
+}
+
+.updates-log-title {
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-log {
+  max-height: 360px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+/* The list to choose from: a name, why, and the rest folded away. */
+.updates-choice-table td {
+  padding: 12px 10px;
+}
+
+.updates-choice-name {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.updates-row-reason {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-row-more {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-row-more > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.updates-row-more > div {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.updates-apply-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.updates-confirm-dialog {
+  text-align: left;
+}
+
+.updates-confirm-list {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.updates-confirm-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.updates-confirm-list span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.updates-confirm-dialog .updates-confirm-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.updates-confirm-dialog .config-modal-actions {
+  justify-content: flex-end;
+}
+
+.updates-confirm-dialog .updates-cancel {
+  border: 1px solid var(--border);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+}
+
+/* Rarely needed: the channel and the history fold away. */
+.updates-fold {
+  padding: 0;
+}
+
+.updates-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 25px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.updates-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.updates-fold > summary::after {
+  content: "▾";
+  color: var(--text-secondary);
+  transition: transform .2s ease;
+}
+
+.updates-fold[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+.updates-fold-value {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.updates-fold-body {
+  padding: 0 25px 20px;
+}
+
+.updates-channel-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.updates-channel-line .form-input {
+  max-width: 380px;
+}
+
+#updates-app .btn[hidden] {
+  display: none;
+}
+
+#updates-app > details.updates-fold {
+  margin-top: 14px;
+}
+
+#updates-app .result-message:empty {
+  display: none;
+}
+
 .backup-job-state--partial,
 .backup-job-state--skipped {
   border-color: rgba(255,170,0,.42);
@@ -2905,6 +3203,7 @@ tr.job-row-selected > td:first-child {
 }
 
 @media (max-width: 640px) {
+  .updates-hero-head,
   .updates-card-header,
   .updates-toolbar,
   .updates-plan-actions {

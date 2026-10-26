@@ -15,76 +15,75 @@
      data-channels-url="{{ url_for('system_updates.save_channels') }}"
      data-reboot-url="{{ url_for('system_updates.reboot') }}"
      data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}">
-  <section class="card updates-overview-card" aria-labelledby="updates-overview-title">
-    <div class="card-header updates-card-header">
-      <div>
-        <h2 id="updates-overview-title">Software updates</h2>
-        <p class="table-meta">
-          Check the managed source, host services, Docker images and operating-system packages, then install only the components you select.
+
+  {# One card says where things stand. While a job runs it holds only the
+     progress bar; the log is one click away, never in the way. #}
+  <section class="card updates-hero" aria-labelledby="updates-hero-title">
+    <div class="updates-hero-head">
+      <div class="updates-hero-text">
+        <h2 id="updates-hero-title">Software updates</h2>
+        <p id="updates-hero-summary" class="updates-hero-summary">Not checked yet.</p>
+        <p class="updates-hero-meta" id="updates-hero-meta">
+          <span>Last check:</span> <span id="updates-checked-at">Never</span>
         </p>
       </div>
-      <div class="config-toolbar updates-toolbar">
-        <button type="button" class="btn btn-refresh" id="updates-check">
-          <span class="spinner" aria-hidden="true"></span>
-          <span class="icon">Check for updates</span>
-        </button>
-      </div>
+      <button type="button" class="btn btn-refresh" id="updates-check">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="icon">Check for updates</span>
+      </button>
     </div>
 
-    <div class="updates-channel-row">
-      <div>
-        <label class="updates-field-label" for="updates-release-channel">Release channel</label>
-        <select id="updates-release-channel" class="form-input">
-          <option value="stable">Stable — main branch + release image</option>
-          <option value="alpha">Alpha — development branch + test image</option>
-          <option value="local">Local — synchronized source</option>
-        </select>
+    <div id="updates-progress" class="updates-run" hidden>
+      <div class="updates-run-meta">
+        <strong id="updates-progress-label">Working…</strong>
+        <span>
+          <span id="updates-progress-percent" class="mono notranslate" translate="no" data-i18n-skip></span>
+          <span id="updates-progress-elapsed" class="mono notranslate" translate="no" data-i18n-skip>0:00</span>
+        </span>
       </div>
-      <div>
-        <button type="button" class="btn btn-small" id="updates-save-channels" disabled>Save channel</button>
-        <div id="updates-channels-status" class="result-message" role="status" aria-live="polite"></div>
+      <div id="updates-progress-track" class="job-progress-track updates-run-track"
+           role="progressbar" aria-labelledby="updates-progress-label" aria-valuemin="0" aria-valuemax="100">
+        <div id="updates-progress-fill" class="job-progress-fill"></div>
       </div>
-      <div>
-        <span class="updates-field-label">Last successful check</span>
-        <strong id="updates-checked-at">Never</strong>
-      </div>
+      <div id="updates-progress-step" class="updates-run-step mono notranslate" translate="no" data-i18n-skip></div>
+      <p id="updates-self-restart-running" class="updates-run-note" hidden>
+        The web application restarts during this update. The page reconnects by itself.
+      </p>
     </div>
 
-    <div id="updates-release-note" class="alert alert-info" hidden></div>
-
-    <div id="updates-local-source-note" class="alert alert-info" hidden>
-      This installation uses locally synchronized source. The web interface cannot copy uncommitted files from your workstation; synchronize them with install.sh before checking again.
+    <div id="updates-result" class="updates-result" role="status" aria-live="polite" hidden>
+      <span id="updates-result-text"></span>
+      <button type="button" class="updates-link-button" id="updates-result-dismiss">Dismiss</button>
     </div>
+
+    <div class="updates-hero-tools">
+      <button type="button" class="updates-link-button" id="updates-details-toggle"
+              aria-expanded="false" aria-controls="updates-log-wrap" hidden>Show details</button>
+    </div>
+    <div id="updates-log-wrap" class="updates-log-wrap" hidden>
+      <div id="updates-log-title" class="updates-log-title"></div>
+      <pre id="updates-job-log" class="mono notranslate config-technical-output updates-log" translate="no" data-i18n-skip>No job selected.</pre>
+    </div>
+
     <div id="updates-service-status" class="result-message" role="status" aria-live="polite"></div>
   </section>
 
-  <section class="card updates-plan-card" aria-labelledby="updates-plan-title">
+  <section class="card updates-plan-card" id="updates-plan-card" aria-labelledby="updates-plan-title" hidden>
     <div class="card-header updates-card-header">
       <div>
         <h2 id="updates-plan-title">Available updates</h2>
-        <p id="updates-plan-summary" class="table-meta">Run a check to build a current update plan.</p>
+        <p id="updates-plan-summary" class="updates-hero-meta"></p>
       </div>
       <div class="updates-plan-actions">
-        <button type="button" class="btn btn-small" id="updates-select-all" disabled>Select all</button>
-        <button type="button" class="btn btn-small" id="updates-select-none" disabled>Clear selection</button>
+        <button type="button" class="updates-link-button" id="updates-select-all" disabled>Select all</button>
+        <button type="button" class="updates-link-button" id="updates-select-none" disabled>Clear selection</button>
       </div>
     </div>
 
     <div id="updates-plan-warning" class="alert alert-warning" hidden></div>
-    <div id="updates-no-updates" class="updates-empty" hidden>Everything is up to date.</div>
 
-    <div class="table-wrap" id="updates-components-wrap" hidden>
-      <table class="updates-table">
-        <thead>
-          <tr>
-            <th class="updates-select-column"><span class="visually-hidden">Select</span></th>
-            <th>Component</th>
-            <th>Current</th>
-            <th>Available</th>
-            <th>Reason</th>
-            <th>Impact</th>
-          </tr>
-        </thead>
+    <div id="updates-components-wrap" hidden>
+      <table class="updates-table updates-choice-table">
         <tbody id="updates-components-body"></tbody>
       </table>
     </div>
@@ -99,28 +98,34 @@
       <ul id="updates-skipped-list"></ul>
     </details>
 
-    <div id="updates-confirm-panel" class="updates-confirm-panel" hidden>
-      <div class="alert alert-warning">
-        Selected updates may restart HAProxy, Authelia, Docker containers or this web application. Keep console or SSH access available. Software updates are not a full transactional restore; create a backup first when rollback is important.
-      </div>
-      <div id="updates-self-restart-note" class="alert alert-info" hidden>
-        The web application will restart. Temporary connection errors are expected and this page will reconnect automatically.
-      </div>
-      <div id="updates-os-note" class="alert alert-info" hidden>
-        Operating-system packages are installed last. A required server reboot is never started automatically.
-      </div>
-
-      <label class="backup-option" for="updates-impact-confirm">
-        <input id="updates-impact-confirm" type="checkbox">
-        I understand that the selected services may restart
-      </label>
-      <label class="form-label" for="updates-confirmation">Type UPDATE to continue</label>
-      <input id="updates-confirmation" class="form-input mono notranslate" translate="no" data-i18n-skip
-             type="text" autocomplete="off" spellcheck="false" placeholder="UPDATE">
-      <button type="button" class="btn" id="updates-apply" disabled>Apply selected updates</button>
+    <div id="updates-apply-bar" class="updates-apply-bar" hidden>
+      <button type="button" class="btn" id="updates-apply" disabled>Install selected</button>
       <div id="updates-apply-status" class="result-message" role="status" aria-live="polite"></div>
     </div>
   </section>
+
+  {# The one confirmation: what will restart, and the way back. #}
+  <div id="updates-confirm-modal" class="config-modal" hidden
+       role="dialog" aria-modal="true" aria-labelledby="updates-confirm-title">
+    <div class="config-modal-backdrop"></div>
+    <div class="config-modal-panel updates-confirm-dialog" tabindex="-1">
+      <h2 id="updates-confirm-title">Install these updates?</h2>
+      <ul id="updates-confirm-list" class="updates-confirm-list"></ul>
+      <p class="updates-confirm-note">
+        Services listed above may restart. Keep console or SSH access available, and take a backup first if you may need to roll back.
+      </p>
+      <p id="updates-self-restart-note" class="updates-confirm-note" hidden>
+        The web application will restart. Temporary connection errors are expected and this page will reconnect automatically.
+      </p>
+      <p id="updates-os-note" class="updates-confirm-note" hidden>
+        Operating-system packages are installed last. A required server reboot is never started automatically.
+      </p>
+      <div class="config-modal-actions">
+        <button type="button" class="btn btn-small updates-cancel" id="updates-confirm-cancel">Cancel</button>
+        <button type="button" class="btn" id="updates-confirm-go">Install</button>
+      </div>
+    </div>
+  </div>
 
   <section id="updates-reboot-card" class="card updates-reboot-card" aria-labelledby="updates-reboot-title" hidden>
     <div class="card-header">
@@ -165,36 +170,45 @@
     </div>
   </div>
 
-  <section class="card updates-jobs-card" aria-labelledby="updates-jobs-title">
-    <div class="card-header updates-card-header">
-      <div>
-        <h2 id="updates-jobs-title">Update jobs</h2>
-        <p class="table-meta">Progress is stored on the host and remains available while containers restart.</p>
+  <details class="card updates-fold" id="updates-settings">
+    <summary>
+      <span>Release channel</span>
+      <strong id="updates-channel-summary" class="updates-fold-value">—</strong>
+    </summary>
+    <div class="updates-fold-body">
+      <div class="updates-channel-line">
+        <select id="updates-release-channel" class="form-input" aria-label="Release channel">
+          <option value="stable">Stable — main branch + release image</option>
+          <option value="alpha">Alpha — development branch + test image</option>
+          <option value="local">Local — synchronized source</option>
+        </select>
+        <button type="button" class="btn btn-small" id="updates-save-channels" disabled>Save channel</button>
       </div>
-      <span id="updates-active-progress" class="config-status-pill config-status-pill--neutral">No active job</span>
+      <div id="updates-channels-status" class="result-message" role="status" aria-live="polite"></div>
+      <p id="updates-release-note" class="updates-hero-meta" hidden></p>
+      <p id="updates-local-source-note" class="updates-hero-meta" hidden>
+        This installation uses locally synchronized source. The web interface cannot copy uncommitted files from your workstation; synchronize them with install.sh before checking again.
+      </p>
     </div>
-    <div id="updates-progress" class="job-progress" hidden>
-      <div class="job-progress-meta">
-        <span id="updates-progress-label">Working…</span>
-        <span id="updates-progress-elapsed" class="mono notranslate" translate="no" data-i18n-skip>0:00</span>
+  </details>
+
+  <details class="card updates-fold" id="updates-history">
+    <summary>
+      <span>History</span>
+      <span id="updates-history-count" class="updates-fold-value muted"></span>
+    </summary>
+    <div class="updates-fold-body">
+      <p class="updates-hero-meta">Kept on the host, so it survives the web application restarting. Click a row to see its log above.</p>
+      <div class="table-wrap">
+        <table class="updates-table">
+          <thead><tr><th>Started</th><th>Operation</th><th>Components</th><th>Status</th><th>Result</th></tr></thead>
+          <tbody id="updates-jobs-body">
+            <tr><td colspan="5" class="muted">Loading…</td></tr>
+          </tbody>
+        </table>
       </div>
-      <div id="updates-progress-track" class="job-progress-track">
-        <div id="updates-progress-fill" class="job-progress-fill"></div>
-      </div>
     </div>
-    <details id="updates-log-details" class="updates-details">
-      <summary>Selected job details <span id="updates-log-mode" class="muted"></span></summary>
-      <pre id="updates-job-log" class="mono notranslate config-technical-output" translate="no" data-i18n-skip>No job selected.</pre>
-    </details>
-    <div class="table-wrap">
-      <table class="updates-table">
-        <thead><tr><th>Started</th><th>Operation</th><th>Components</th><th>Status</th><th>Result</th></tr></thead>
-        <tbody id="updates-jobs-body">
-          <tr><td colspan="5" class="muted">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+  </details>
 </div>
 {% endblock %}
 

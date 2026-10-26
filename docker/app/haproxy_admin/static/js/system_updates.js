@@ -57,7 +57,24 @@
   const RELOADED_JOB_KEY = "easy_ha_proxy_update_reloaded_job";
   const SELECTED_JOB_KEY = "easy_ha_proxy_update_selected_job";
   const LOG_OPEN_KEY = "easy_ha_proxy_update_log_open";
+  const RESULT_DISMISSED_KEY = "easy_ha_proxy_update_result_dismissed";
   const START_RECONCILE_GRACE_MS = 15 * 1000;
+  // How long a finished installation stays summarised at the top.
+  const RESULT_VISIBLE_MS = 30 * 60 * 1000;
+  // What each step of a job is called, and how far into a component it is.
+  // The playbook itself reports done/total tasks; the share before it covers
+  // downloading the source and the checks around it.
+  const PHASE_LABELS = {
+    checking: "Checking for updates…",
+    verifying: "Verifying the update plan…",
+    starting: "Starting…",
+    source: "Downloading the new version…",
+    prepare: "Preparing…",
+    syntax: "Checking the playbook…",
+    playbook: "Installing…",
+    rechecking: "Checking the result…"
+  };
+  const PHASE_SHARE = {starting: 0, source: 0.03, prepare: 0.08, syntax: 0.12, playbook: 0.15};
   const dateFormat = new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
     dateStyle: "medium",
     timeStyle: "medium"
@@ -81,6 +98,14 @@
   let logViewMode = "log";
   let renderedJobId = "";
   let renderedHadLog = false;
+  let detailsOpen = Boolean(storageGet(LOG_OPEN_KEY));
+  let shownJobSnapshot = null;
+  let resultJobSnapshot = null;
+  let planHasContent = false;
+  let planSummaryText = "";
+  let preselectedPlanId = "";
+  // The bar never runs backwards for a job, whatever order the polls arrive in.
+  const highestPercent = {};
 
   function byId(id) { return document.getElementById(id); }
   function escape(value) { return window.escapeHtml(String(value == null ? "" : value)); }
@@ -164,6 +189,13 @@
       element.removeAttribute("translate");
       element.removeAttribute("data-i18n-skip");
     }
+  }
+  // A reassurance is worth a few seconds on screen, not a permanent box.
+  function clearMessageLater(id) {
+    const shown = byId(id)?.textContent || "";
+    window.setTimeout(() => {
+      if (byId(id)?.textContent === shown) setMessage(id, "");
+    }, 6000);
   }
   function formatDate(value) {
     if (!value) return t("Never");
@@ -324,8 +356,9 @@
       details: {paths: Array.isArray(scope.paths) ? scope.paths.join(", ") : ""},
       impact: componentImpacts.changes
     };
-    const index = components.indexOf(source);
-    return components.slice(0, index + 1).concat([row], components.slice(index + 1));
+    const rest = components.filter((item) => !(row.actionable && changesSupersedes.has(item.id)));
+    const index = rest.indexOf(source);
+    return rest.slice(0, index).concat([row], rest.slice(index));
   }
   function componentReason(component) {
     if (component.id === "changes") return String(component.reason);
@@ -448,28 +481,32 @@
     // expected, not a failure, so keep it apart from genuinely-unknown results.
     const unknown = components.filter((item) => ["unknown", "error"].includes(item.state));
     const skipped = components.filter((item) => item.state === "blocked");
-    const current = components.filter((item) => item.state === "current").length;
     const stale = Boolean(plan && (plan.stale === true || plan.expired === true || plan.valid === false));
     const otherChannel = planForOtherChannel(plan);
     const blocked = stale || otherChannel;
     const warnings = Array.isArray(plan?.warnings) ? plan.warnings.filter(Boolean) : [];
 
     byId("updates-components-wrap").hidden = !available.length;
-    byId("updates-no-updates").hidden = Boolean(available.length) || !plan;
-    byId("updates-no-updates").textContent = unknown.length
-      ? t("No actionable updates were found, but some components could not be checked.")
-      : t("Everything is up to date.");
-    byId("updates-confirm-panel").hidden = !available.length || blocked;
+    byId("updates-apply-bar").hidden = !available.length || blocked;
+    planHasContent = Boolean(plan) && Boolean(
+      available.length || unknown.length || skipped.length || blocked || warnings.length
+    );
+    planSummaryText = !plan
+      ? t("Not checked yet. Check for updates to see what is new.")
+      : stale
+        ? t("The last check has expired. Check again before installing.")
+        : available.length
+          ? t("{count} update(s) available.", {count: available.length})
+          : unknown.length
+            ? t("No actionable updates were found, but some components could not be checked.")
+            : t("Everything is up to date.");
     byId("updates-select-all").disabled = !available.length || blocked;
     byId("updates-select-none").disabled = !available.length || blocked;
-    byId("updates-plan-summary").textContent = !plan
-      ? t("Run a check to build a current update plan.")
-      : t("{available} updates available; {current} components are current; {unknown} could not be checked; {skipped} checks skipped.", {
-          available: available.length,
-          current,
-          unknown: unknown.length,
-          skipped: skipped.length
-        });
+    // The top card already says how many; this line only speaks up when part
+    // of the check could not be done.
+    byId("updates-plan-summary").textContent = unknown.length
+      ? t("Some components could not be checked; they are listed below.")
+      : "";
     const warning = byId("updates-plan-warning");
     warning.hidden = !blocked && !warnings.length;
     warning.textContent = otherChannel
@@ -487,16 +524,24 @@
       const details = Array.isArray(component.details && component.details.artifacts)
         ? ""
         : detailsText(shown);
+      const pickId = `updates-pick-${String(component.id).replace(/[^a-z0-9-]/gi, "")}`;
+      // One line to decide on; versions and the raw detail are a click away.
       return `<tr data-component-row="${escape(component.id)}">
         <td class="updates-select-column">
-          <input type="checkbox" data-update-component="${escape(component.id)}"
+          <input type="checkbox" id="${escape(pickId)}" data-update-component="${escape(component.id)}"
                  aria-label="${escape(t("Select {component}", {component: componentLabels[component.id] || component.id}))}">
         </td>
-        <td><strong>${escape(t(componentLabels[component.id] || component.id))}</strong></td>
-        <td>${technicalCell(component.current)}</td>
-        <td>${technicalCell(component.available)}</td>
-        <td>${escape(componentReason(component))}${details ? `<small class="notranslate" translate="no" data-i18n-skip>${escape(details)}</small>` : ""}</td>
-        <td>${escape(t(String(component.impact)))}</td>
+        <td>
+          <label for="${escape(pickId)}" class="updates-choice-name">${escape(t(componentLabels[component.id] || component.id))}</label>
+          ${component.id === "changes" ? `<span class="updates-badge">${escape(t("Recommended"))}</span>` : ""}
+          <div class="updates-row-reason">${escape(componentReason(component))}</div>
+          <details class="updates-row-more">
+            <summary>${escape(t("Versions and impact"))}</summary>
+            <div>${technicalCell(component.current)} → ${technicalCell(component.available)}</div>
+            <div>${escape(t(String(component.impact)))}</div>
+            ${details ? `<div class="notranslate" translate="no" data-i18n-skip>${escape(details)}</div>` : ""}
+          </details>
+        </td>
       </tr>`;
     }).join("");
 
@@ -517,6 +562,19 @@
     byId("updates-checked-at").textContent = formatDate(
       plan && (plan.checked_at || plan.created_at || plan.generated_at)
     );
+    if (plan && !blocked && preselectedPlanId !== plan.id) {
+      preselectedPlanId = plan.id;
+      const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
+      const ids = boxes.map((box) => box.dataset.updateComponent);
+      const lead = ids.includes("changes") ? "changes" : (ids.includes("all") ? "all" : "");
+      boxes.forEach((box) => {
+        const id = box.dataset.updateComponent;
+        box.checked = id === lead || (lead !== "all" && ["admin-container", "authelia-container"].includes(id)) ||
+          (!lead && ["services", "daemons"].includes(id));
+      });
+      updateSelection(lead || undefined);
+    }
+    renderView();
     updateSelection();
   }
 
@@ -528,8 +586,7 @@
     return selectedPlanComponents().map((id) => id === "source" ? "all" : id);
   }
   function resetConfirmation() {
-    byId("updates-impact-confirm").checked = false;
-    byId("updates-confirmation").value = "";
+    closeConfirm();
   }
   function updateSelection(changedId) {
     const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
@@ -562,15 +619,11 @@
       if (row) row.classList.toggle("updates-row-superseded", superseded);
     });
     const selected = selectedPlanComponents();
-    byId("updates-self-restart-note").hidden = !(
-      selected.includes("admin-container") || selected.includes("source") || selected.includes("all")
-    );
-    byId("updates-os-note").hidden = !selected.includes("os");
-    byId("updates-apply").disabled = requestRunning || operationRunning || !(
-      planUsable && selected.length &&
-      byId("updates-impact-confirm").checked &&
-      byId("updates-confirmation").value.trim() === "UPDATE"
-    );
+    const apply = byId("updates-apply");
+    apply.textContent = selected.length
+      ? t("Install selected ({count})", {count: selected.length})
+      : t("Install selected");
+    apply.disabled = requestRunning || operationRunning || !(planUsable && selected.length);
   }
 
   function normalizeJobs(payload) {
@@ -614,71 +667,161 @@
       lastJobsHtml = html;
     }
     markSelectedRow();
-    if (active) {
-      const step = active.current_component || active.step || active.progress?.message || jobState(active);
-      byId("updates-active-progress").textContent = t("Running: {step}", {
-        step: t(componentLabels[step] || String(step))
-      });
-      byId("updates-active-progress").className = "config-status-pill config-status-pill--warning";
-    } else {
-      byId("updates-active-progress").textContent = t("No active job");
-      byId("updates-active-progress").className = "config-status-pill config-status-pill--neutral";
-    }
+    byId("updates-history-count").textContent = jobs.length ? String(jobs.length) : "";
+    resultJobSnapshot = recentResult(jobs);
     renderProgress(active);
     return Boolean(active);
   }
-  function componentProgress(job) {
-    const components = jobComponents(job);
-    if (jobOperation(job) !== "apply" || !components.length) return null;
-    const current = String(job.current_component || "");
-    const index = components.indexOf(current);
-    if (index < 0) {
-      return {done: jobState(job) === "running" ? components.length : 0, total: components.length, current};
+  function clock(seconds) {
+    const value = Math.max(0, Math.floor(seconds));
+    return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+  }
+  function jobSeconds(job, until) {
+    const started = new Date(job.started_at || job.created_at || Date.now()).getTime();
+    const ended = until ? new Date(until).getTime() : Date.now();
+    return Number.isFinite(started) && Number.isFinite(ended) ? (ended - started) / 1000 : 0;
+  }
+  // The task name without its role prefix: "guardd | Install script".
+  function taskText(value) {
+    return String(value || "").replace(/^[^:|]{1,60} : /, "");
+  }
+  function progressModel(job) {
+    const progress = job.progress && typeof job.progress === "object" ? job.progress : {};
+    if (jobOperation(job) !== "apply") {
+      return {percent: null, label: t("Checking for updates…"), step: ""};
     }
-    return {done: index, total: components.length, current};
+    const components = jobComponents(job);
+    const count = Math.max(1, components.length);
+    let index = Number.isInteger(job.component_index)
+      ? job.component_index
+      : components.indexOf(String(job.current_component || ""));
+    if (index < 0) index = 0;
+    const phase = String(progress.phase || "verifying");
+    let percent;
+    if (phase === "verifying") {
+      percent = 2;
+    } else if (phase === "rechecking") {
+      percent = 97;
+    } else {
+      let share = PHASE_SHARE[phase] ?? 0;
+      if (phase === "playbook" && Number(progress.total) > 0) {
+        share = 0.15 + 0.85 * Math.min(1, Number(progress.done || 0) / Number(progress.total));
+      }
+      percent = 3 + 94 * ((index + share) / count);
+    }
+    const id = jobId(job);
+    percent = Math.max(highestPercent[id] || 0, Math.round(Math.min(99, Math.max(1, percent))));
+    highestPercent[id] = percent;
+    const component = components[Math.min(index, components.length - 1)] || "";
+    const name = t(componentLabels[component] || component);
+    let label;
+    if (phase === "verifying" || phase === "rechecking") {
+      label = t(PHASE_LABELS[phase]);
+    } else if (components.length > 1) {
+      label = t("Installing {component} ({index} of {total})", {component: name, index: index + 1, total: components.length});
+    } else {
+      label = t("Installing {component}", {component: name});
+    }
+    const step = phase === "playbook" && progress.task
+      ? taskText(progress.task)
+      : t(PHASE_LABELS[phase] || "");
+    return {percent, label, step};
   }
   function renderProgress(active) {
     const wrap = byId("updates-progress");
     if (!active) {
       wrap.hidden = true;
+      renderView();
       return;
     }
     wrap.hidden = false;
     const track = byId("updates-progress-track");
     const fill = byId("updates-progress-fill");
-    const progress = componentProgress(active);
-    if (progress && progress.total > 0) {
+    const model = progressModel(active);
+    if (model.percent != null) {
       track.classList.remove("job-progress-track--indeterminate");
-      const percent = Math.min(100, Math.round((progress.done / progress.total) * 100));
-      fill.style.width = `${Math.max(4, percent)}%`;
-      byId("updates-progress-label").textContent = progress.current
-        ? t("Component {done} of {total}: {component}", {
-            done: Math.min(progress.done + 1, progress.total),
-            total: progress.total,
-            component: t(componentLabels[progress.current] || progress.current)
-          })
-        : t("Applying selected updates…");
+      fill.style.width = `${model.percent}%`;
+      track.setAttribute("aria-valuenow", String(model.percent));
+      byId("updates-progress-percent").textContent = `${model.percent}%`;
     } else {
       track.classList.add("job-progress-track--indeterminate");
       fill.style.width = "";
-      byId("updates-progress-label").textContent = jobOperation(active) === "check"
-        ? t("Checking for updates…")
-        : t("Working…");
+      track.removeAttribute("aria-valuenow");
+      byId("updates-progress-percent").textContent = "";
     }
+    byId("updates-progress-label").textContent = model.label;
+    byId("updates-progress-step").textContent = model.step;
+    const components = jobComponents(active);
+    byId("updates-self-restart-running").hidden = !(
+      jobOperation(active) === "apply" &&
+      (components.includes("admin-container") || components.includes("all"))
+    );
     renderElapsed();
+    renderView();
   }
   function renderElapsed() {
     if (!activeJobSnapshot) return;
-    const started = new Date(activeJobSnapshot.started_at || activeJobSnapshot.created_at || Date.now());
-    const seconds = Math.max(0, Math.floor((Date.now() - started.getTime()) / 1000));
-    const minutes = Math.floor(seconds / 60);
-    byId("updates-progress-elapsed").textContent =
-      `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+    byId("updates-progress-elapsed").textContent = clock(jobSeconds(activeJobSnapshot));
+  }
+  // The newest installation, if it finished recently and was not dismissed.
+  function recentResult(jobs) {
+    const job = jobs.find((item) => jobOperation(item) === "apply");
+    if (!job || !isTerminal(job)) return null;
+    const finished = new Date(job.completed_at || job.started_at || 0).getTime();
+    if (!Number.isFinite(finished) || Date.now() - finished > RESULT_VISIBLE_MS) return null;
+    if (storageGet(RESULT_DISMISSED_KEY) === jobId(job)) return null;
+    return job;
+  }
+  function renderResult() {
+    const box = byId("updates-result");
+    const job = activeJobSnapshot ? null : resultJobSnapshot;
+    box.hidden = !job;
+    if (!job) return;
+    const ok = jobState(job) === "completed";
+    box.classList.toggle("updates-result--ok", ok);
+    box.classList.toggle("updates-result--failed", !ok);
+    const took = clock(jobSeconds(job, job.completed_at));
+    const reboot = Boolean(job.result?.reboot_required);
+    byId("updates-result-text").textContent = ok
+      ? t("Updates installed in {time}.", {time: took}) +
+        (reboot ? ` ${t("A server reboot is required.")}` : "")
+      : `${t("The update failed")}: ${job.error || job.message || jobState(job)}`;
+  }
+  // Which parts of the page are on screen. A running job owns the page: the
+  // list of updates waits until it has finished.
+  function renderView() {
+    const running = Boolean(activeJobSnapshot) || Boolean(pendingStart);
+    const checking = running && (activeJobSnapshot ? jobOperation(activeJobSnapshot) : pendingStart?.operation) === "check";
+    byId("updates-check").hidden = running;
+    byId("updates-plan-card").hidden = running || !planHasContent;
+    // While a job runs the bar's own label says what is happening.
+    byId("updates-hero-summary").hidden = running;
+    byId("updates-hero-meta").hidden = running;
+    byId("updates-hero-summary").textContent = running
+      ? (checking ? t("Checking for updates…") : t("Installing updates…"))
+      : (planSummaryText || t("Not checked yet. Check for updates to see what is new."));
+    renderResult();
+    const hasLog = Boolean(shownJobSnapshot) && (running || Boolean(resultJobSnapshot) || Boolean(selectedJobId));
+    const toggle = byId("updates-details-toggle");
+    toggle.hidden = !hasLog;
+    const open = hasLog && detailsOpen;
+    toggle.textContent = open ? t("Hide details") : t("Show details");
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    byId("updates-log-wrap").hidden = !open;
+  }
+  function setDetailsOpen(open) {
+    detailsOpen = Boolean(open);
+    storageSet(LOG_OPEN_KEY, detailsOpen ? "1" : "");
+    renderView();
+    if (detailsOpen && shownJobSnapshot) renderShownJob(shownJobSnapshot);
   }
   function jobLogText(job) {
     const output = job.output && typeof job.output === "object" ? job.output : {};
     return [output.log, output.stdout, output.stderr, job.log, job.stdout, job.stderr]
-      .filter(Boolean).join("\n").trim();
+      .filter(Boolean).join("\n")
+      // The progress markers feed the bar; the log is for people.
+      .split("\n").filter((line) => !line.startsWith("EHP-PROGRESS")).join("\n")
+      .trim();
   }
   function jobDetailsText(job) {
     // Metadata view: everything except the bulky raw log streams.
@@ -707,11 +850,12 @@
     const next = logViewMode === "details"
       ? jobDetailsText(job)
       : (text || t("The job has not produced output yet."));
-    const mode = byId("updates-log-mode");
-    if (mode) {
-      mode.textContent = logViewMode === "details"
-        ? t("job details — click the job again for its log")
-        : t("log output — click the job again for details");
+    const title = byId("updates-log-title");
+    if (title) {
+      title.textContent = `${operationLabel(jobOperation(job))} · ${formatDate(job.started_at || job.created_at)}` +
+        (logViewMode === "details"
+          ? ` — ${t("job details — click the job again for its log")}`
+          : "");
     }
     renderedJobId = id;
     renderedHadLog = Boolean(text);
@@ -721,6 +865,7 @@
     log.textContent = next;
     log.scrollTop = stick ? log.scrollHeight : keep;
   }
+  const RELEASE_NAMES = {stable: "Stable", alpha: "Alpha", local: "Local"};
   const RELEASE_NOTES = {
     stable: "Stable follows the main branch and the release image.",
     alpha: "Alpha follows the development branch and the test image.",
@@ -735,6 +880,7 @@
     // Only snap the dropdown to the installed value when the operator is not
     // mid-selection (i.e. it currently matches the last known installed value).
     if (!select.dataset.dirty) select.value = installedRelease;
+    byId("updates-channel-summary").textContent = t(RELEASE_NAMES[installedRelease] || installedRelease);
     updateChannelControls();
   }
   function selectedRelease() {
@@ -793,22 +939,21 @@
     currentJobOperation = jobOperation(job) || currentJobOperation;
     if (!isTerminal(job)) return;
     const state = jobState(job);
-    if (state === "completed") {
-      setMessage(
-        currentJobOperation.includes("check") ? "updates-service-status" : "updates-apply-status",
-        currentJobOperation.includes("check")
-          ? t("Update check completed.")
-          : t("Selected updates completed successfully."),
-        true
-      );
+    // An installation's outcome is the summary at the top; a check's is the
+    // list it produced, so only its failure needs saying.
+    if (currentJobOperation.includes("check")) {
+      if (state !== "completed") {
+        setMessage(
+          "updates-service-status",
+          `${t("Update operation failed")}: ${job.error || job.message || state}`,
+          false,
+          true
+        );
+      }
     } else {
-      const message = `${t("Update operation failed")}: ${job.error || job.message || state}`;
-      setMessage(
-        currentJobOperation.includes("check") ? "updates-service-status" : "updates-apply-status",
-        message,
-        false,
-        true
-      );
+      setMessage("updates-apply-status", "");
+      // A failure is the one moment the log is wanted without asking.
+      if (state !== "completed" && !detailsOpen) setDetailsOpen(true);
     }
     storageSet(ACTIVE_JOB_KEY, "");
     const applied = currentApplyComponents.length ? currentApplyComponents : jobComponents(job);
@@ -870,7 +1015,9 @@
       const shown = jobs.find((job) => jobId(job) === selectedJobId) ||
         jobs.find((job) => jobId(job) === currentJobId) ||
         activeJob || jobs[0];
+      shownJobSnapshot = shown || null;
       if (shown) renderShownJob(shown);
+      renderView();
       const tracked = jobs.find((job) => jobId(job) === currentJobId);
       if (tracked) handleCurrentJob(tracked);
       const relevant = shown;
@@ -900,15 +1047,11 @@
                 : t("Connection restored. Software-update service is ready.")),
           true
         );
+        clearMessageLater("updates-service-status");
       } else if (pendingResult !== "missing" && !settings.quiet &&
                  !(relevant && jobId(relevant) === currentJobId && isTerminal(relevant))) {
-        setMessage(
-          "updates-service-status",
-          active || pendingStart
-            ? t("An update operation is running. Temporary connection errors are expected while services restart.")
-            : t("Software-update service is ready."),
-          true
-        );
+        // Nothing to say while all is well: the top card shows the state.
+        setMessage("updates-service-status", "");
       }
       schedulePoll(active || pendingStart ? 1500 : 10000);
       return payload;
@@ -942,26 +1085,25 @@
   }
 
   function focusJobLog(id) {
-    // A newly started job becomes the selected one and its live log is
-    // brought into view immediately.
+    // A newly started job is the one the top card follows. Its log stays
+    // folded away: the bar says enough, and "Show details" is right there.
     if (id) {
-      selectedJobId = id;
-      storageSet(SELECTED_JOB_KEY, selectedJobId);
+      selectedJobId = "";
+      storageSet(SELECTED_JOB_KEY, "");
+      storageSet(RESULT_DISMISSED_KEY, "");
     }
     logViewMode = "log";
     markSelectedRow();
-    const details = byId("updates-log-details");
-    details.open = true;
-    storageSet(LOG_OPEN_KEY, "1");
-    details.scrollIntoView({behavior: "smooth", block: "start"});
+    byId("updates-hero-title").scrollIntoView({behavior: "smooth", block: "start"});
   }
 
   let detailFetchId = "";
   async function renderShownJob(listJob) {
     showJob(listJob);
-    // The list payload strips logs; fetch the full job for the log view.
+    // The list payload strips logs; fetch the full job for the log view, and
+    // only while the log is on screen: it can be a quarter of a megabyte.
     const id = jobId(listJob);
-    if (logViewMode !== "log" || jobLogText(listJob) || detailFetchId === id) return;
+    if (!detailsOpen || logViewMode !== "log" || jobLogText(listJob) || detailFetchId === id) return;
     detailFetchId = id;
     try {
       const payload = await requestJson(`${endpoints.status}?job_id=${encodeURIComponent(id)}`);
@@ -1010,11 +1152,30 @@
       setBusy(false);
     }
   }
+  function openConfirm() {
+    if (requestRunning || operationRunning || !currentPlan) return;
+    const components = selectedApplyComponents();
+    if (!components.length) return;
+    byId("updates-confirm-list").innerHTML = components.map((id) =>
+      `<li><strong>${escape(t(componentLabels[id] || id))}</strong>` +
+      `<span>${escape(t(componentImpacts[id] || "Managed component restart"))}</span></li>`
+    ).join("");
+    byId("updates-self-restart-note").hidden = !(
+      components.includes("admin-container") || components.includes("all")
+    );
+    byId("updates-os-note").hidden = !components.includes("os");
+    byId("updates-confirm-modal").hidden = false;
+    byId("updates-confirm-go").focus();
+  }
+  function closeConfirm() {
+    const modal = byId("updates-confirm-modal");
+    if (modal) modal.hidden = true;
+  }
   async function applyUpdates() {
     if (requestRunning || !currentPlan) return;
     const components = selectedApplyComponents();
     if (!components.length) return;
-    if (!window.confirm(t("Apply the selected software updates now?"))) return;
+    closeConfirm();
     setBusy(true);
     setMessage("updates-apply-status", t("Scheduling selected updates…"));
     beginPendingStart("apply", components, currentPlan.id);
@@ -1032,13 +1193,8 @@
       storePendingStart(null);
       focusJobLog(currentJobId);
       resetConfirmation();
-      setMessage(
-        "updates-apply-status",
-        components.includes("admin-container") || components.includes("all")
-          ? t("Updates started. This page will reconnect after the web application restarts.")
-          : t("Selected updates started."),
-        true
-      );
+      setMessage("updates-apply-status", "");
+      renderView();
       schedulePoll(600);
     } catch (error) {
       if (error.payload?.error_code === "configuration_not_clean") {
@@ -1195,7 +1351,24 @@
   }
 
   byId("updates-check").addEventListener("click", checkUpdates);
-  byId("updates-apply").addEventListener("click", applyUpdates);
+  byId("updates-apply").addEventListener("click", openConfirm);
+  byId("updates-confirm-go").addEventListener("click", applyUpdates);
+  byId("updates-confirm-cancel").addEventListener("click", closeConfirm);
+  byId("updates-confirm-modal").addEventListener("click", (event) => {
+    if (event.target.classList.contains("config-modal-backdrop")) closeConfirm();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !byId("updates-confirm-modal").hidden) closeConfirm();
+  });
+  byId("updates-details-toggle").addEventListener("click", () => setDetailsOpen(!detailsOpen));
+  byId("updates-result-dismiss").addEventListener("click", () => {
+    if (resultJobSnapshot) storageSet(RESULT_DISMISSED_KEY, jobId(resultJobSnapshot));
+    resultJobSnapshot = null;
+    selectedJobId = "";
+    storageSet(SELECTED_JOB_KEY, "");
+    markSelectedRow();
+    renderView();
+  });
   byId("updates-save-channels").addEventListener("click", saveChannels);
   byId("updates-reboot-confirm").addEventListener("input", updateRebootButton);
   byId("updates-reboot-now").addEventListener("click", requestReboot);
@@ -1203,8 +1376,6 @@
   byId("updates-reboot-modal-cancel").addEventListener("click", cancelReboot);
   byId("updates-reboot-modal-close").addEventListener("click", closeRebootModal);
   byId("updates-release-channel").addEventListener("change", updateChannelControls);
-  byId("updates-impact-confirm").addEventListener("change", () => updateSelection());
-  byId("updates-confirmation").addEventListener("input", () => updateSelection());
   byId("updates-components-body").addEventListener("change", (event) => {
     const checkbox = event.target.closest("[data-update-component]");
     if (checkbox) updateSelection(checkbox.dataset.updateComponent);
@@ -1242,8 +1413,9 @@
     }
     storageSet(SELECTED_JOB_KEY, selectedJobId);
     markSelectedRow();
-    byId("updates-log-details").open = true;
-    storageSet(LOG_OPEN_KEY, "1");
+    // The history's log opens in the top card, where every log is read.
+    if (!detailsOpen) setDetailsOpen(true);
+    byId("updates-log-wrap").scrollIntoView({behavior: "smooth", block: "nearest"});
     requestJson(`${endpoints.status}?job_id=${encodeURIComponent(row.dataset.updateJob)}`)
       .then((payload) => {
         const job = normalizeJobs(payload).find((item) => jobId(item) === row.dataset.updateJob);
@@ -1262,15 +1434,12 @@
         }
       });
   });
-  byId("updates-log-details").addEventListener("toggle", () => {
-    storageSet(LOG_OPEN_KEY, byId("updates-log-details").open ? "1" : "");
-  });
   window.addEventListener("online", () => schedulePoll(100));
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && connectionWasLost) schedulePoll(100);
   });
-  if (storageGet(LOG_OPEN_KEY)) byId("updates-log-details").open = true;
   window.setInterval(renderElapsed, 1000);
+  renderView();
 
   refreshStatus();
 })();

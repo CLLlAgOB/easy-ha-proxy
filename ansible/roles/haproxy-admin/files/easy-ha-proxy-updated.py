@@ -183,6 +183,24 @@ CONTAINER_COMPONENTS = frozenset(
     {"authelia-container", "admin-container"}
 )
 ACTIVE_STATUSES = frozenset({"queued", "running"})
+# Progress for the page. The installer prints "EHP-PROGRESS phase=<name>" as it
+# moves through its own steps, and the easy_ha_proxy_progress Ansible callback
+# prints "EHP-PROGRESS <done>/<total> <task>" before each task. Only the part of
+# the log after the current component's heading counts: earlier components'
+# output is carried into the same log.
+COMPONENT_HEADING = "=== Applying component:"
+PROGRESS_RE = re.compile(
+    r"^EHP-PROGRESS (?:phase=(?P<phase>[a-z-]{1,24})"
+    r"|(?P<done>\d{1,6})/(?P<total>\d{1,6})(?: (?P<task>[^\n]{0,400}))?)[ \t]*$",
+    re.MULTILINE,
+)
+PROGRESS_PHASES = frozenset(
+    {
+        "checking", "verifying", "starting", "source", "prepare", "syntax",
+        "playbook", "rechecking",
+    }
+)
+MAX_PROGRESS_TASK = 160
 TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
@@ -402,6 +420,43 @@ def new_job(operation: str, **values: Any) -> dict[str, Any]:
     return state
 
 
+def parse_progress(text: str) -> dict[str, Any] | None:
+    """The newest progress marker of the component that is running now."""
+
+    section = text.rsplit(COMPONENT_HEADING, 1)[-1]
+    last = None
+    for last in PROGRESS_RE.finditer(section):
+        pass
+    if last is None:
+        return None
+    if last.group("phase"):
+        phase = last.group("phase")
+        return {"phase": phase} if phase in PROGRESS_PHASES else None
+    task = CONTROL_RE.sub("", last.group("task") or "").strip()[:MAX_PROGRESS_TASK]
+    return {
+        "phase": "playbook",
+        "done": int(last.group("done")),
+        "total": int(last.group("total")),
+        "task": task,
+    }
+
+
+def public_progress(value: Any) -> dict[str, Any] | None:
+    """Only the shape the page knows, whatever ended up in the state file."""
+
+    if not isinstance(value, dict) or value.get("phase") not in PROGRESS_PHASES:
+        return None
+    result: dict[str, Any] = {"phase": value["phase"]}
+    for key in ("done", "total"):
+        number = value.get(key)
+        if isinstance(number, int) and 0 <= number <= 999999:
+            result[key] = number
+    task = value.get("task")
+    if isinstance(task, str) and task:
+        result["task"] = CONTROL_RE.sub("", task)[:MAX_PROGRESS_TASK]
+    return result
+
+
 def public_job(state: dict[str, Any], *, include_log: bool = True) -> dict[str, Any]:
     output = state.get("output") if isinstance(state.get("output"), dict) else None
     if output is not None and not include_log:
@@ -417,6 +472,10 @@ def public_job(state: dict[str, Any], *, include_log: bool = True) -> dict[str, 
         if isinstance(state.get("components"), list)
         else [],
         "current_component": state.get("current_component"),
+        "component_index": state.get("component_index")
+        if isinstance(state.get("component_index"), int)
+        else None,
+        "progress": public_progress(state.get("progress")),
         "plan_id": state.get("plan_id"),
         "output": output,
         "result": state.get("result")
@@ -562,6 +621,8 @@ def child_environment() -> dict[str, str]:
         "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
         "PYTHONUNBUFFERED": "1",
         "EASY_HA_PROXY_LANGUAGE": "en",
+        # Ask the installer and Ansible for the progress markers above.
+        "EASY_HA_PROXY_PROGRESS": "1",
         # A web update reports a required reboot; it never schedules one.
         "EASY_HA_PROXY_REBOOT_DECISION": "no",
     }
@@ -748,7 +809,7 @@ def run_transient_command(
                 timed_out = True
                 raise UpdatedError("update command exceeded its timeout")
             if time.monotonic() - last_publish >= 2:
-                update_job(job_id, output={"log": read_file_tail(output_path)})
+                publish_output(job_id, read_file_tail(output_path))
                 last_publish = time.monotonic()
             time.sleep(0.5)
     finally:
@@ -756,6 +817,14 @@ def run_transient_command(
         if timed_out:
             update_job(job_id, output={"log": read_file_tail(output_path)})
         output_path.unlink(missing_ok=True)
+
+
+def publish_output(job_id: str, log: str) -> None:
+    updates: dict[str, Any] = {"output": {"log": log}}
+    progress = parse_progress(log)
+    if progress is not None:
+        updates["progress"] = progress
+    update_job(job_id, **updates)
 
 
 def run_command(
@@ -810,10 +879,7 @@ def run_direct_command(
                         process.wait()
                     raise UpdatedError("update command exceeded its timeout")
                 if time.monotonic() - last_publish >= 2:
-                    update_job(
-                        job_id,
-                        output={"log": read_tail(output_file)},
-                    )
+                    publish_output(job_id, read_tail(output_file))
                     last_publish = time.monotonic()
                 time.sleep(0.25)
         finally:
@@ -1335,6 +1401,7 @@ def check_worker(
             status="running",
             started_at=utc_now(),
             current_component="check",
+            progress={"phase": "checking"},
         )
         payload = execute_checker(
             job_id,
@@ -1434,7 +1501,12 @@ def apply_worker(
         validate_selection(plan, components)
         ACTIVE_MARKER.write_text(f"job_id={job_id}\n", encoding="utf-8")
         os.chmod(ACTIVE_MARKER, 0o600)
-        update_job(job_id, status="running", started_at=utc_now())
+        update_job(
+            job_id,
+            status="running",
+            started_at=utc_now(),
+            progress={"phase": "verifying"},
+        )
         fresh = execute_checker(
             job_id,
             image_channel=str(plan.get("image_channel") or "latest"),
@@ -1448,8 +1520,13 @@ def apply_worker(
         source_channel = str(plan.get("source_channel"))
         image_channel = str(plan.get("image_channel"))
         expected_source_revision = reviewed_source_revision(plan, components)
-        for component in components:
-            update_job(job_id, current_component=component)
+        for index, component in enumerate(components):
+            update_job(
+                job_id,
+                current_component=component,
+                component_index=index,
+                progress={"phase": "starting"},
+            )
             heading = f"\n=== Applying component: {component} ==="
             command = update_command(
                 component,
@@ -1473,6 +1550,7 @@ def apply_worker(
             "components": components,
             "reboot_required": reboot_required,
         }
+        update_job(job_id, progress={"phase": "rechecking"})
         try:
             refreshed_payload = execute_checker(
                 job_id,
