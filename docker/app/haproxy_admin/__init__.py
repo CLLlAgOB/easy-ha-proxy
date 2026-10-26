@@ -57,6 +57,7 @@ from .routes_authelia_settings import bp_authelia_settings
 from .authelia_acl import bp_authelia_acl
 from .routes_backup import bp_system_backups
 from .routes_updates import bp_system_updates
+from . import updates_badge
 
 logger = logging.getLogger("haproxy-admin")
 csrf = CSRFProtect()
@@ -221,6 +222,15 @@ def create_app() -> Flask:
     @app.context_processor
     def inject_csp_nonce():
         return {"csp_nonce": getattr(g, "csp_nonce", "")}
+
+    @app.context_processor
+    def inject_updates_badge():
+        # The navigation's "updates are waiting" dot; never a reason for a
+        # page to fail.
+        try:
+            return {"updates_badge": updates_badge.current_level()}
+        except Exception:  # pylint: disable=broad-except
+            return {"updates_badge": None}
 
     @app.context_processor
     def inject_i18n_context():

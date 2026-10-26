@@ -101,6 +101,8 @@
     "checks: {interval}": "проверка: {interval}",
     "automatic checks off": "автопроверка выключена",
     "A check only reads: nothing is installed without you. When it finds updates it raises an alert (update.available), and the alert settings decide whom to tell.": "Проверка только читает: без вас ничего не устанавливается. Найдя обновления, она поднимает оповещение (update.available), а настройки оповещений решают, кому о нём сообщить.",
-    "Alert settings": "Настройки оповещений"
+    "Alert settings": "Настройки оповещений",
+    "Software updates are available": "Есть обновления easy-ha-proxy",
+    "Operating-system package updates are available": "Есть обновления пакетов ОС"
   }
 }

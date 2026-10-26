@@ -29,6 +29,16 @@
    away. The group holding the current page is marked, so the header still
    answers "where am I" now that the links are hidden. #}
 
+{# A dot where the updates live when the newest check found something: it
+   glows for easy-ha-proxy's own updates and stays quiet for operating-system
+   packages, which come nearly every day. updates_badge comes from
+   updates_badge.py; the updates page keeps it current while it polls. #}
+{% macro update_dot(level) -%}
+<span class="nav-update-dot nav-update-dot--{{ level }}" role="img"
+      title="{{ 'Software updates are available' if level == 'product' else 'Operating-system package updates are available' }}"
+      aria-label="{{ 'Software updates are available' if level == 'product' else 'Operating-system package updates are available' }}"></span>
+{%- endmacro %}
+
 {% set nav_groups = [
   {
     "label": "Routing",
@@ -96,9 +106,11 @@
 <nav class="nav-groups" aria-label="Administration sections">
   {% for group in nav_groups %}
   {% set here = group["items"] | selectattr("0", "equalto", request.endpoint) | list | length > 0 %}
-  <details class="nav-group">
+  {% set holds_updates = group["label"] == "Maintenance" %}
+  <details class="nav-group"{% if holds_updates %} data-nav-group="maintenance"{% endif %}>
     <summary class="nav-item nav-item-menu{% if here %} nav-item-current{% endif %}">
       <span>{{ group["label"] }}</span>
+      {% if holds_updates and updates_badge %}{{ update_dot(updates_badge) }}{% endif %}
       <svg class="nav-caret" width="10" height="10" viewBox="0 0 10 10"
            aria-hidden="true" focusable="false">
         <path d="M1 3.5L5 7.5L9 3.5" fill="none" stroke="currentColor"
@@ -108,9 +120,10 @@
     <div class="nav-group-items">
       {% for endpoint, label in group["items"] %}
       <a class="nav-group-item{% if endpoint == request.endpoint %} nav-group-item-current{% endif %}"
-         href="{{ url_for(endpoint) }}"
+         href="{{ url_for(endpoint) }}" data-nav-endpoint="{{ endpoint }}"
          {% if endpoint == request.endpoint %}aria-current="page"{% endif %}>
         {{ label }}
+        {% if endpoint == "system_updates.page" and updates_badge %}{{ update_dot(updates_badge) }}{% endif %}
       </a>
       {% endfor %}
       {% if group["label"] == "Maintenance" and debug_routes_enabled | default(false) %}

@@ -3700,6 +3700,48 @@ tr.job-row-selected > td:first-child {
   font-weight: 600;
 }
 
+/* "Updates are waiting": a dot beside Maintenance and beside Software
+   updates. easy-ha-proxy's own updates glow; operating-system packages, which
+   come nearly every day, get a quiet dot that does not compete with it. */
+.nav-update-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+/* In a menu button the dot keeps to its label; on a narrow screen, where the
+   button spreads its content, the caret still goes to the far end. */
+.nav-item-menu .nav-update-dot {
+  margin-right: auto;
+}
+
+.nav-update-dot--product {
+  background: var(--accent-secondary);
+  box-shadow: 0 0 4px 1px rgba(var(--accent-secondary-rgb), .6);
+  animation: nav-update-glow 2.2s ease-in-out infinite;
+}
+
+.nav-update-dot--os {
+  background: var(--text-secondary);
+  opacity: .8;
+}
+
+@keyframes nav-update-glow {
+  0%, 100% { box-shadow: 0 0 3px 1px rgba(var(--accent-secondary-rgb), .45); }
+  50% { box-shadow: 0 0 10px 3px rgba(var(--accent-secondary-rgb), .95); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-update-dot--product {
+    animation: none;
+    box-shadow: 0 0 6px 2px rgba(var(--accent-secondary-rgb), .75);
+  }
+}
+
 /* On a narrow screen there is no room beside anything, so the panel joins
    the flow instead of covering the content underneath it. */
 @media (max-width: 720px) {

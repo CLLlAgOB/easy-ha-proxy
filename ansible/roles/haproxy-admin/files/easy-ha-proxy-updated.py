@@ -331,6 +331,7 @@ def derive_release_channel(
 REQUEST_FIELDS = {
     "status": frozenset({"action", "job_id"}),
     "set_settings": frozenset({"action", "auto_check_hours"}),
+    "summary": frozenset({"action"}),
     "start_check": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
     ),
@@ -2024,6 +2025,39 @@ def set_channels(request: dict[str, Any]) -> dict[str, Any]:
         release_operation(lock_fd)
 
 
+def summary_payload(plan: dict[str, Any] | None) -> dict[str, Any]:
+    """What the navigation shows: whether the newest check found anything.
+
+    "product" when easy-ha-proxy itself has an update, "os" when only the
+    operating system's packages do -- those come nearly every day and should
+    not shout like the rest -- and None when there is nothing to install.
+    A plan past its install deadline still counts: it is what the newest
+    check found, and the page asks for a fresh check before installing.
+    """
+
+    kinds = [
+        str(item.get("id"))
+        for item in (plan or {}).get("components") or []
+        if isinstance(item, dict)
+        and item.get("state") == "available"
+        and item.get("actionable") is True
+    ]
+    level = "product" if any(kind != "os" for kind in kinds) else ("os" if kinds else None)
+    return {
+        "level": level,
+        "components": kinds,
+        "checked_at": (plan or {}).get("created_at"),
+    }
+
+
+def summary_response() -> dict[str, Any]:
+    try:
+        plan = load_latest_plan()
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        plan = None
+    return {"ok": True, **summary_payload(plan)}
+
+
 def status_response(request: dict[str, Any]) -> dict[str, Any]:
     requested = request.get("job_id")
     jobs = (
@@ -2049,6 +2083,7 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         "reboot_scheduled_elsewhere": os.path.lexists(ASSISTANT_REBOOT_MARKER),
         "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
         "settings": settings_payload(),
+        "summary": summary_payload(plan),
     }
 
 
@@ -2312,6 +2347,8 @@ def dispatch(request: Any) -> dict[str, Any]:
         return set_channels(request)
     if action == "set_settings":
         return set_settings(request)
+    if action == "summary":
+        return summary_response()
     if action == "reboot":
         return request_reboot(request)
     if action == "cancel_reboot":

@@ -1043,6 +1043,39 @@
   function intervalName(hours) {
     return CHECK_INTERVALS[hours] ? t(CHECK_INTERVALS[hours]) : t("Every {hours} hours", {hours});
   }
+  // The navigation's dot follows this page: a check that finds something
+  // lights it, an installation that leaves nothing turns it off, with no
+  // reload. The server renders the same dot on every other page.
+  const NAV_DOT_TITLES = {
+    product: "Software updates are available",
+    os: "Operating-system package updates are available"
+  };
+  function syncNavDot(summary) {
+    const level = summary && Object.prototype.hasOwnProperty.call(NAV_DOT_TITLES, summary.level)
+      ? summary.level
+      : "";
+    const places = [
+      document.querySelector('[data-nav-group="maintenance"] > summary'),
+      document.querySelector('[data-nav-endpoint="system_updates.page"]')
+    ];
+    places.forEach((place) => {
+      if (!place) return;
+      let dot = place.querySelector(".nav-update-dot");
+      if (!level) {
+        if (dot) dot.remove();
+        return;
+      }
+      if (!dot) {
+        dot = document.createElement("span");
+        dot.setAttribute("role", "img");
+        place.insertBefore(dot, place.querySelector(".nav-caret"));
+      }
+      dot.className = `nav-update-dot nav-update-dot--${level}`;
+      const title = t(NAV_DOT_TITLES[level]);
+      dot.title = title;
+      dot.setAttribute("aria-label", title);
+    });
+  }
   function renderSettings(settings) {
     if (!settings || typeof settings !== "object") return;
     checkSettings = settings;
@@ -1225,6 +1258,7 @@
       if (BOOT_ID_RE.test(reportedBootId)) currentBootId = reportedBootId;
       const jobs = normalizeJobs(payload);
       renderDeployment(payload);
+      if (payload.summary && typeof payload.summary === "object") syncNavDot(payload.summary);
       const active = renderJobs(jobs);
       const pendingResult = reconcilePendingStart(jobs);
       knownJobIds = new Set(jobs.map(jobId).filter((id) => /^[a-f0-9]{32}$/i.test(id)));

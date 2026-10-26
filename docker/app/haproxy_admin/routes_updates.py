@@ -8,6 +8,7 @@ from flask import Blueprint, abort, g, jsonify, render_template, request
 
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .services_haproxy_config import get_haproxy_configuration_state
+from . import updates_badge
 from .updated_client import UpdatedError, updated_request
 
 
@@ -162,7 +163,13 @@ def status_view():
     job_id = (request.args.get("job_id") or "").strip().lower()
     if job_id:
         payload["job_id"] = _identifier(job_id, "job id")
-    return _call_daemon(payload)
+    response = _call_daemon(payload)
+    # Every poll of the page keeps the navigation's dot in step with it.
+    body = response[0] if isinstance(response, tuple) else response
+    data = body.get_json(silent=True) if hasattr(body, "get_json") else None
+    if isinstance(data, dict) and data.get("ok") and isinstance(data.get("summary"), dict):
+        updates_badge.remember(data["summary"])
+    return response
 
 
 def _channel(payload: dict, key: str, allowed: frozenset) -> str:
