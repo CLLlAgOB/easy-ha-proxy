@@ -515,6 +515,12 @@ class MetricsConfig:
     reserved_free_bytes: Optional[int] = None
     auto_reduce_retention: bool = True
     wal_soft_limit_bytes: int = DEFAULT_WAL_SOFT_LIMIT_BYTES
+    # Traffic alerts, judged per backend on each minute's totals; 0 turns a
+    # check off. A minute with fewer requests than the floor says nothing
+    # either way: one failure out of three requests is not a 5xx problem.
+    alert_error_ratio_percent: int = 10
+    alert_slow_response_ms: int = 3000
+    alert_min_requests: int = 20
 
     def excluded(self, proxy: str) -> bool:
         if not proxy:
@@ -551,6 +557,8 @@ def load_config(path: str) -> MetricsConfig:
     exclude = exclude if isinstance(exclude, dict) else {}
     storage = raw.get("storage")
     storage = storage if isinstance(storage, dict) else {}
+    alerts = raw.get("alerts")
+    alerts = alerts if isinstance(alerts, dict) else {}
 
     def _string_tuple(value: Any, fallback: Tuple[str, ...]) -> Tuple[str, ...]:
         if not isinstance(value, list):
@@ -597,6 +605,15 @@ def load_config(path: str) -> MetricsConfig:
             storage.get("wal_soft_limit"), default=DEFAULT_WAL_SOFT_LIMIT_BYTES
         )
         or DEFAULT_WAL_SOFT_LIMIT_BYTES,
+        alert_error_ratio_percent=_clamp_int(
+            alerts.get("error_ratio_percent"), default=10, min_v=0, max_v=100
+        ),
+        alert_slow_response_ms=_clamp_int(
+            alerts.get("slow_response_ms"), default=3000, min_v=0, max_v=600000
+        ),
+        alert_min_requests=_clamp_int(
+            alerts.get("min_requests"), default=20, min_v=1, max_v=1000000
+        ),
     )
 
 
@@ -2032,6 +2049,12 @@ class StorageGuard:
         return payload
 
 
+# Authelia's backend: the one row whose state is its own alert. Its HTTP
+# numbers are the portal's, not a site's, so the traffic alerts skip it.
+AUTHELIA_BACKEND = "authelia_backend"
+TRAFFIC_ALERT_SKIP = frozenset({AUTHELIA_BACKEND, "be_access_granted"})
+
+
 class Collector:
     """Polls HAProxy, accumulates a minute, then writes it out."""
 
@@ -2155,11 +2178,105 @@ class Collector:
 
             self._observe_host(now)
 
+        self._report_authelia(rows)
+
         self.polls_total += 1
         self.last_poll_ts = now
         self.consecutive_failures = 0
         self.last_error = None
         return observed
+
+    def _report_authelia(self, rows: List[Dict[str, str]]) -> None:
+        """authelia.unavailable, from HAProxy's own view of the portal.
+
+        A level: reported on every poll, so it holds while it is true and
+        recovers by itself; the rule's delay keeps a restart from paging
+        anyone. A gateway without Authelia has no such row and says nothing.
+        """
+        alerts = getattr(self.storage, "alerts", None)
+        if alerts is None:
+            return
+        for row in rows:
+            if (row.get("pxname") or "").strip() != AUTHELIA_BACKEND:
+                continue
+            if (row.get("svname") or "").strip() != "BACKEND":
+                continue
+            status = (row.get("status") or "").strip().upper()
+            down = not status.startswith("UP")
+            with contextlib.suppress(Exception):
+                alerts.observe(
+                    "authelia.unavailable",
+                    "authelia",
+                    active=down,
+                    summary=(
+                        "Authelia is not answering: sites behind it cannot sign anyone in"
+                        if down
+                        else "Authelia is answering"
+                    ),
+                    detail=f"HAProxy reports {AUTHELIA_BACKEND} as {status or 'unknown'}",
+                )
+            return
+
+    def _report_traffic(self, rows: Dict[int, Dict[str, int]]) -> None:
+        """http.error_ratio and response.slow, per backend, per minute.
+
+        Levels judged on the minute just closed; the rules' delay turns "this
+        minute" into "for five minutes". A quiet minute (below the request
+        floor) clears rather than raises, so a site nobody is using cannot
+        hold an alert open.
+        """
+        alerts = getattr(self.storage, "alerts", None)
+        if alerts is None:
+            return
+        config = self.config
+        names = {object_id: key for key, object_id in self._object_ids.items()}
+        for object_id, row in rows.items():
+            key = names.get(object_id)
+            if not key or key[0] != "backend" or key[1] in TRAFFIC_ALERT_SKIP:
+                continue
+            proxy = key[1]
+            requests = int(row.get("requests") or 0)
+            enough = requests >= config.alert_min_requests
+            with contextlib.suppress(Exception):
+                if config.alert_error_ratio_percent > 0:
+                    errors = int(row.get("resp_5xx") or 0)
+                    percent = errors * 100 // requests if requests else 0
+                    failing = enough and percent >= config.alert_error_ratio_percent
+                    alerts.observe(
+                        "http.error_ratio",
+                        proxy,
+                        active=failing,
+                        summary=(
+                            f"{proxy}: {percent}% of responses were server errors"
+                            if failing
+                            else f"{proxy}: server errors back below the threshold"
+                        ),
+                        detail=(
+                            f"{errors} of {requests} responses in the last minute were 5xx "
+                            f"(threshold {config.alert_error_ratio_percent}%)"
+                            if failing
+                            else ""
+                        ),
+                    )
+                if config.alert_slow_response_ms > 0:
+                    average = int(row.get("response_ms_avg") or 0)
+                    slow = enough and average >= config.alert_slow_response_ms
+                    alerts.observe(
+                        "response.slow",
+                        proxy,
+                        active=slow,
+                        summary=(
+                            f"{proxy}: responses take {average} ms on average"
+                            if slow
+                            else f"{proxy}: response time back below the threshold"
+                        ),
+                        detail=(
+                            f"average over the last minute, {requests} requests "
+                            f"(threshold {config.alert_slow_response_ms} ms)"
+                            if slow
+                            else ""
+                        ),
+                    )
 
     def _observe_host(self, now: int) -> None:
         """The machine's own load, which no `show stat` row reports.
@@ -2525,6 +2642,9 @@ class Collector:
         self._buckets = {}
         if not rows:
             return 0
+        # Judged on the minute even when it cannot be written: a full disk
+        # must not silence the alerts about the sites.
+        self._report_traffic(rows)
         if self.storage.writes_paused:
             # Counting continues in memory -- the baselines are still correct,
             # so nothing is double-counted once writing resumes -- but this

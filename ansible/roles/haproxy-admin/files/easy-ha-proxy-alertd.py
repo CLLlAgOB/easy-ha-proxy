@@ -189,8 +189,6 @@ class Rule:
 RULES: Tuple[Rule, ...] = (
     Rule("site.down", KIND_LEVEL, SEVERITY_CRITICAL,
          "Site is down", trigger_delay=300),
-    Rule("backend.no_servers", KIND_LEVEL, SEVERITY_CRITICAL,
-         "No healthy server left in a backend", trigger_delay=120),
     Rule("http.error_ratio", KIND_LEVEL, SEVERITY_WARNING,
          "HTTP 5xx ratio above the threshold", trigger_delay=300),
     Rule("response.slow", KIND_LEVEL, SEVERITY_WARNING,

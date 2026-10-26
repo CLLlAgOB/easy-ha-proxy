@@ -61,6 +61,12 @@ metricsd_maintenance_interval: 300
 metricsd_retention_one_minute_days: 7
 metricsd_retention_one_minute_server_hours: 24
 metricsd_retention_one_hour_days: 365
+# Traffic alerts, judged per backend on each minute's totals (the alert rules'
+# own delay makes it "for five minutes"); 0 switches a check off. A minute
+# with fewer requests than the floor raises nothing.
+metricsd_alert_error_ratio_percent: 10
+metricsd_alert_slow_response_ms: 3000
+metricsd_alert_min_requests: 20
 metricsd_memory_max: 256M
 # Storage safety. "auto" sizes both limits from the filesystem the database
 # actually lives on: cap = min(5GiB, 10%), reserve = max(2GiB, min(10%, 10GiB)).

@@ -187,6 +187,12 @@ RUNTIME_MAX_BYTES = 8 * 1024 * 1024
 # existing ban list -- and a kill switch can lift exactly these.
 ADAPTIVE_BAN_CODE = 40
 
+# security.burst: this many addresses banned within the window is a wave, not
+# the background; reported at most once per gap.
+BURST_WINDOW_SECONDS = 300
+BURST_MIN_BANS = 15
+BURST_REPORT_GAP_SECONDS = 3600
+
 # Sanitising limits. A request line is attacker-controlled text.
 MAX_PATH_LENGTH = 200
 MAX_HOST_LENGTH = 128
@@ -3628,6 +3634,8 @@ class GuardEngine:
         # the alert engine's decision, not this daemon's; here it is only
         # reported.
         self.alerts = alerts
+        self._burst_bans: deque = deque()
+        self._burst_reported: Optional[int] = None
         # The rendered config supplies the default; an operator's choice in the
         # interface overrides it and survives a restart.
         override = database.get_state("mode_override", "")
@@ -4556,7 +4564,41 @@ class GuardEngine:
                 row["score"],
             )
             self._report_ban(ip, duration, row, categories)
+        if applied:
+            self._check_burst(len(applied), now)
         return {"applied": applied, "lifted": lifted, "enforcing": True}
+
+    def _check_burst(self, banned: int, now: int) -> None:
+        """security.burst: many addresses banned in a few minutes.
+
+        One ban is routine -- a scanner a day is the background. A wave is
+        news: a campaign, or a rule suddenly matching ordinary clients. Once
+        per window at most, and best effort like every report.
+        """
+        self._burst_bans.extend([now] * banned)
+        while self._burst_bans and self._burst_bans[0] <= now - BURST_WINDOW_SECONDS:
+            self._burst_bans.popleft()
+        count = len(self._burst_bans)
+        if count < BURST_MIN_BANS:
+            return
+        if self._burst_reported is not None and now - self._burst_reported < BURST_REPORT_GAP_SECONDS:
+            return
+        self._burst_reported = now
+        if self.alerts is None:
+            return
+        with contextlib.suppress(Exception):
+            self.alerts.observe(
+                "security.burst",
+                "gateway",
+                summary=(
+                    f"{count} addresses banned in the last "
+                    f"{BURST_WINDOW_SECONDS // 60} minutes"
+                ),
+                detail=(
+                    "Either a campaign is under way or a rule has started to match "
+                    "ordinary clients; the adaptive protection page shows who and why."
+                ),
+            )
 
     def _report_ban(
         self, ip: str, duration: int, row: Dict[str, Any], categories: str

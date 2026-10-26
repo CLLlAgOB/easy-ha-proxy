@@ -481,7 +481,7 @@ class CatalogueTests(unittest.TestCase):
 
     def test_the_plan_conditions_are_all_present(self):
         expected = {
-            "site.down", "backend.no_servers", "http.error_ratio",
+            "site.down", "http.error_ratio",
             "response.slow", "security.burst", "security.hostile_ip",
             "monitoring.storage", "monitoring.paused", "certificate.expiring",
             "certificate.renewal_failed", "backup.failed", "restore.failed",
@@ -854,8 +854,11 @@ class ProducerWiringTests(unittest.TestCase):
     FILES = ROOT / "ansible/roles/haproxy-admin/files"
 
     EXPECTED = {
-        "easy-ha-proxy-metricsd.py": ("monitoring.storage", "monitoring.paused"),
-        "easy-ha-proxy-guardd.py": ("security.hostile_ip",),
+        "easy-ha-proxy-metricsd.py": (
+            "monitoring.storage", "monitoring.paused", "authelia.unavailable",
+            "http.error_ratio", "response.slow",
+        ),
+        "easy-ha-proxy-guardd.py": ("security.hostile_ip", "security.burst"),
         "easy-ha-proxy-backupd.py": ("backup.failed", "restore.failed"),
         "easy-ha-proxy-updated.py": ("update.failed", "update.available"),
         "haproxy-controld.py": ("config.apply_failed",),

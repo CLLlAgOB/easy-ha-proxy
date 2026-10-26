@@ -17,5 +17,10 @@
     "reserved_free_space": {{ (metricsd_reserved_free_space | default('auto')) | string | tojson }},
     "auto_reduce_retention": {{ (metricsd_auto_reduce_retention | default(true) | bool) | tojson }},
     "wal_soft_limit": {{ (metricsd_wal_soft_limit | default('64MiB')) | string | tojson }}
+  },
+  "alerts": {
+    "error_ratio_percent": {{ metricsd_alert_error_ratio_percent | default(10) | int }},
+    "slow_response_ms": {{ metricsd_alert_slow_response_ms | default(3000) | int }},
+    "min_requests": {{ metricsd_alert_min_requests | default(20) | int }}
   }
 }
