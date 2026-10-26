@@ -1,0 +1,39 @@
+# Weekly update pull requests for what Dependabot can read. They target
+# alpha: main is moved to alpha after testing, so a pull request against
+# main would be overwritten. Versions pinned as Ansible variables (Authelia,
+# Redis, the mail relay, the GeoIP packages) are not readable here; the
+# "Dependencies" workflow watches those.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /docker/app
+    target-branch: alpha
+    schedule:
+      interval: weekly
+    groups:
+      web-application:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /installer
+    target-branch: alpha
+    schedule:
+      interval: weekly
+    groups:
+      installer:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    target-branch: alpha
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: alpha
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]

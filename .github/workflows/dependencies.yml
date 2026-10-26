@@ -1,0 +1,55 @@
+name: Dependencies
+
+# Weekly, and whenever a pinned version changes. Separate from CI on purpose:
+# a vulnerability published today in a library pinned last month should be
+# reported, but must not stop a fix from being tested and published.
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [alpha]
+    paths:
+      - '**/requirements.txt'
+      - 'ansible/roles/*/defaults/main.yml'
+      - '.github/scripts/pinned_versions.py'
+      - '.github/workflows/dependencies.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Known vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: pip-audit
+        run: |
+          pip install pip-audit==2.7.3
+          pip-audit --progress-spinner off -r docker/app/requirements.txt
+          # PYSEC-2026-3458 (CVE-2026-11332): argument injection in
+          # `ansible-galaxy role install` from a malicious role's
+          # requirements. The installer only installs collections from the
+          # pinned ansible/requirements.yml, never roles, and 2.17 has no
+          # fixed release. Revisit when moving to ansible-core 2.18.
+          pip-audit --progress-spinner off -r installer/requirements.txt --ignore-vuln PYSEC-2026-3458
+
+  pinned:
+    name: Pinned versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with the registries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/pinned_versions.py --github
