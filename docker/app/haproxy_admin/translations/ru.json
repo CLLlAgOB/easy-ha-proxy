@@ -1172,6 +1172,8 @@
     "Enable TCP splicing": "Включить TCP splicing",
     "Enable backend health check": "Включить проверку backend",
     "Enable response compression": "Включить сжатие ответов",
+    "Serve a neutral favicon": "Отдавать нейтральную иконку сайта",
+    "When a site answers /favicon.ico with 404, the gateway returns a neutral icon instead. A site's own icon always wins.": "Если сайт отвечает на /favicon.ico 404, шлюз отдаёт вместо этого нейтральную иконку. Своя иконка сайта всегда в приоритете.",
     "Effective protection is disabled because global Authelia is disabled.": "Фактическая защита выключена, потому что глобальная Authelia отключена.",
     "Enter one IP address or CIDR network per line. Add the current connection IP before enabling the restriction. These addresses are trusted admin sources and may bypass HAProxy filtering, bans, or rate limits.": "Укажите по одному IP-адресу или сети CIDR в строке. Перед включением ограничения добавьте IP текущего подключения. Эти адреса считаются доверенными источниками администратора и могут обходить фильтрацию, блокировки и ограничения частоты HAProxy.",
     "Examples: 500ms, 5s, 2m.": "Примеры: 500ms, 5s, 2m.",

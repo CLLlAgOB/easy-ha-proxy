@@ -647,6 +647,11 @@ if (effTcpPassForCheck === true) {
         site.prefer_last_server = pls;
       }
 
+      var favicon = tristateSelectValue("default_favicon");
+      if (favicon !== undefined) {
+        site.default_favicon = favicon;
+      }
+
 
       // Only these addresses may reach the site. Sent as a list; an empty
       // textarea removes the key and the site is public again.
@@ -778,6 +783,7 @@ delete site.health_status;
 
 // HTTP-only extras
 delete site.hsts;
+delete site.default_favicon;
 
 // Sticky/cookie/HTTP timeouts — not актуальны for TCP passthrough
 delete site.sticky;
@@ -1378,6 +1384,7 @@ delete site.geo_countries;
   var blockHttpRight = document.getElementById("block-http-right");
 
   var rowHsts = document.getElementById("row-hsts");
+  var rowFavicon = document.getElementById("row-default-favicon");
 
   // In TCP passthrough:
   // - скрываем backend_host (Host header not применим)
@@ -1402,6 +1409,8 @@ delete site.geo_countries;
 
     setBlockVisible(rowHsts, false);
     setInputsDisabled(rowHsts, true);
+    setBlockVisible(rowFavicon, false);
+    setInputsDisabled(rowFavicon, true);
 
   } else {
     setBlockVisible(blockBackendHost, true);
@@ -1421,6 +1430,8 @@ delete site.geo_countries;
 
     setBlockVisible(rowHsts, true);
     setInputsDisabled(rowHsts, false);
+    setBlockVisible(rowFavicon, true);
+    setInputsDisabled(rowFavicon, false);
 
   }
 

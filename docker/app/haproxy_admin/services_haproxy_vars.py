@@ -173,6 +173,16 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
             ),
             _field("site_defaults.compress", "Enable response compression", "boolean"),
             _field(
+                "site_defaults.default_favicon",
+                "Serve a neutral favicon",
+                "boolean",
+                default=True,
+                help_text=(
+                    "When a site answers /favicon.ico with 404, the gateway "
+                    "returns a neutral icon instead. A site's own icon always wins."
+                ),
+            ),
+            _field(
                 "site_defaults.certificate_source",
                 "Default certificate source",
                 "choice",

@@ -78,6 +78,18 @@
         mode: "0644"
       notify: apply haproxy
 
+    # Served in place of a site's 404 for /favicon.ico. HAProxy loads it when
+    # the configuration is checked, so it has to be in place before the
+    # configuration that names it -- the same as the two pages above.
+    - name: Deploy the default favicon
+      copy:
+        src: default-favicon.ico
+        dest: /etc/haproxy/errors/default-favicon.ico
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
     - name: Ensure admin IPs file exists with static admin_allowed_ips
       copy:
         content: |

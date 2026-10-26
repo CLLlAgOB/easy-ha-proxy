@@ -1026,6 +1026,19 @@
                     </div>
                 </div>
 
+                <div id="row-default-favicon">
+                    {% set raw_default_favicon = site.default_favicon if site.default_favicon is defined else None %}
+                    <label class="form-label" for="default_favicon" style="margin-top: 10px;">default_favicon</label>
+                    <select id="default_favicon" name="default_favicon" class="form-input">
+                        <option value="">Default (from site_defaults)</option>
+                        <option value="true" {% if raw_default_favicon is sameas true %}selected{% endif %}>Enabled</option>
+                        <option value="false" {% if raw_default_favicon is sameas false %}selected{% endif %}>Disabled</option>
+                    </select>
+                    <div class="table-meta">
+                        When the site has no icon of its own, the gateway answers /favicon.ico with a neutral one instead of 404.
+                    </div>
+                </div>
+
 
             </div>
 
