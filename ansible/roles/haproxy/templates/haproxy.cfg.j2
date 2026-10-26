@@ -1138,14 +1138,6 @@ backend be_{{ id }}
     # display-name: {{ ([s.domain] + (s.alt_names | default([]))) | join(', ') }}
     mode http
     balance {{ s.balance | default('roundrobin') }}
-{% if s.default_favicon | default(true) %}
-
-    # A site without an icon of its own answers /favicon.ico with 404 on
-    # every page view. Only that 404 is replaced: a site's own icon always
-    # wins, and a site that is down still answers 503.
-    http-request set-var(txn.favicon_req) bool(true) if { path /favicon.ico }
-    http-response return status 200 content-type "image/x-icon" file /etc/haproxy/errors/default-favicon.ico hdr Cache-Control "public, max-age=86400" if { var(txn.favicon_req) -m bool } { status 404 }
-{% endif %}
 
 {% if s.authelia_enabled | default(false) %}
     # Пробрасываем Set-Cookie из ответа forward-auth к клиенту (если есть)
@@ -1174,6 +1166,16 @@ backend be_{{ id }}
     tcp-request content  reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     tcp-response content reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+{% if s.default_favicon | default(true) %}
+
+    # A site without an icon of its own answers /favicon.ico with 404 on
+    # every page view. Only that 404 is replaced: a site's own icon always
+    # wins, and a site that is down still answers 503. Below the tcp-*
+    # rules: HAProxy runs those first anyway and warns about an http-*
+    # rule written above them.
+    http-request set-var(txn.favicon_req) bool(true) if { path /favicon.ico }
+    http-response return status 200 content-type "image/x-icon" file /etc/haproxy/errors/default-favicon.ico hdr Cache-Control "public, max-age=86400" if { var(txn.favicon_req) -m bool } { status 404 }
+{% endif %}
 
     # Реальный IP и Host
     http-request set-header X-Client-IP %[src]

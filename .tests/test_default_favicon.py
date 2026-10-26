@@ -83,6 +83,41 @@ class TheRule(unittest.TestCase):
         self.assertIn("default-favicon.ico", backend)
 
 
+class NoTcpRuleBelowAnHttpRule(unittest.TestCase):
+    """HAProxy runs tcp-request rules before http-request ones whatever the
+    order, and warns about every tcp-request written below an http-request.
+    The favicon rule first went in at the top of each site backend, above
+    the ban check, and produced one warning per site on the next config
+    check. Checked over every section, so the next such slip is caught too.
+    """
+
+    def sections(self, config):
+        current, found = None, {}
+        for line in config.splitlines():
+            if line and not line[0].isspace() and line.split()[0] in (
+                "frontend", "backend", "listen", "defaults",
+            ):
+                current = line.strip()
+                found[current] = []
+            elif current and line.strip() and not line.strip().startswith("#"):
+                found[current].append(line.strip())
+        return found
+
+    def test_every_section_keeps_tcp_request_rules_on_top(self):
+        for site_defaults, site in (
+            ({}, {}),
+            ({}, {"authelia_enabled": True}),
+            ({"default_favicon": False}, {}),
+        ):
+            config = render(site_defaults, **site)
+            for name, rules in self.sections(config).items():
+                http = [i for i, r in enumerate(rules) if r.startswith("http-request ")]
+                tcp = [i for i, r in enumerate(rules) if r.startswith("tcp-request ")]
+                if http and tcp:
+                    with self.subTest(section=name, site=site, defaults=site_defaults):
+                        self.assertLess(max(tcp), min(http))
+
+
 class ThePanelKeepsTheSetting(unittest.TestCase):
     """The site form builds a site from scratch, so a key it does not know is
     dropped on the next save. The switch has to live in the form."""
