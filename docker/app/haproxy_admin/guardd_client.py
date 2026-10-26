@@ -150,6 +150,33 @@ def guardd_dismiss_candidate(path: str, restore: bool = False) -> Dict[str, Any]
         raise GuarddUnavailable(str(exc)) from exc
 
 
+def guardd_traps() -> Dict[str, Any]:
+    """Trap names, and the names that get traffic without serving a site."""
+
+    return _get_json("/api/v1/guard/traps")
+
+
+def guardd_set_traps(hosts: Any) -> Dict[str, Any]:
+    """Replace the trap names. Mutating, so it carries the shared token."""
+
+    url = "http+unix://" + quote(GUARDD_SOCKET_PATH, safe="") + "/api/v1/guard/traps"
+    try:
+        response = _session().post(
+            url,
+            json={"hosts": hosts},
+            timeout=15,
+            headers={"X-Guardd-Token": GUARDD_TOKEN} if GUARDD_TOKEN else {},
+        )
+        if response.status_code == 400:
+            raise ValueError((response.json() or {}).get("error") or "rejected")
+        response.raise_for_status()
+        return response.json()
+    except (GuarddUnavailable, ValueError):
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        raise GuarddUnavailable(str(exc)) from exc
+
+
 def guardd_set_ban_durations(durations: Any) -> Dict[str, Any]:
     """Replace the escalating ban ladder.
 

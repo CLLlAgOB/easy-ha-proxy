@@ -41,6 +41,16 @@
     "Client-like": "Похожи на клиентов",
     "Status codes": "Коды ответов",
     "Ordinary clients asked for this too: more likely a broken link": "Это запрашивали и обычные клиенты: скорее битая ссылка",
-    "Hidden": "Скрыто"
+    "Hidden": "Скрыто",
+    "Trap names": "Ловушки-имена",
+    "Names that point at this gateway but serve no site. Nobody with a reason to be here asks for one; scanners find them in public certificate logs. A request for a trap name bans the address at once, unless that address otherwise uses the gateway like an ordinary client: an old bookmark is spared and only counted.": "Имена, которые указывают на этот шлюз, но не обслуживают ни одного сайта. Тем, у кого есть причина сюда заходить, они не нужны; сканеры находят их в публичных журналах сертификатов. Запрос к имени-ловушке сразу банит адрес — если только этот адрес в остальном не ведёт себя как обычный клиент: старая закладка не наказывается, а только учитывается.",
+    "a request bans the address": "запрос банит адрес",
+    "No trap names yet": "Ловушек пока нет",
+    "names without a site, last {days} days": "имена без сайта, последние {days} дн.",
+    "The list of site names could not be read, so unknown names are not counted": "Не удалось прочитать список имён сайтов, поэтому неизвестные имена не учитываются",
+    "No requests for names without a site": "Запросов к именам без сайта не было",
+    "Ordinary clients use this name too: they would be spared, but check first": "Этим именем пользуются и обычные клиенты: их ловушка пощадит, но сначала проверьте",
+    "Make a trap": "Сделать ловушкой",
+    "Trap added": "Ловушка добавлена"
   }
 }

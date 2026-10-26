@@ -835,6 +835,18 @@ CANDIDATES_KEY = "signature_candidates"
 CANDIDATES_DISMISSED_KEY = "signature_candidates_dismissed"
 CANDIDATES_MAX_DISMISSED = 500
 
+# Trap names: hostnames that point at the gateway but serve no site. Nobody
+# with a reason to be here asks for one -- certificate-transparency scanners
+# do. The operator chooses them; the engine only lists the names that get
+# traffic, with how many of their visitors look like ordinary clients.
+TRAP_HOSTS_KEY = "trap_hosts"
+UNKNOWN_HOSTS_KEY = "unknown_hosts"
+MAX_TRAP_HOSTS = 100
+UNKNOWN_HOSTS_MAX = 2000
+UNKNOWN_HOSTS_TTL = 7 * 86400
+SITE_NAMES_RECHECK = 60
+_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+
 SIGNATURE_EVENTS = frozenset({
     EVENT_SCANNER_PATH, EVENT_SCANNER_DECISIVE, EVENT_QUERY_INJECTION,
 })
@@ -1723,6 +1735,52 @@ _THRESHOLD_RE = re.compile(
 )
 
 
+_VALID_HOST_RE = re.compile(r"^\s*acl\s+valid_host\s+hdr\(host\)\s+-i\s+(?P<names>.+?)\s*$", re.MULTILINE)
+
+
+def read_site_names(path: str = "") -> Set[str]:
+    """Every name the gateway serves, from its own valid_host ACL."""
+    try:
+        text = pathlib.Path(path or HAPROXY_CONFIG_PATH).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return set()
+    names: Set[str] = set()
+    for match in _VALID_HOST_RE.finditer(text):
+        names.update(name.lower() for name in match.group("names").split())
+    return names
+
+
+def normalize_host(host: str) -> str:
+    """Lower case, without a port; "" for an address or anything odd."""
+    text = (host or "").strip().lower()
+    if text.startswith("["):
+        return ""
+    text = re.sub(r":\d+$", "", text)
+    if not text or re.match(r"^\d+(\.\d+){3}$", text):
+        return ""
+    return text if _HOSTNAME_RE.match(text) else ""
+
+
+def validate_trap_hosts(hosts: Any, site_names: Set[str]) -> List[str]:
+    if not isinstance(hosts, list):
+        raise ValueError("expected a list of names")
+    if len(hosts) > MAX_TRAP_HOSTS:
+        raise ValueError(f"at most {MAX_TRAP_HOSTS} trap names")
+    checked: List[str] = []
+    for raw in hosts:
+        name = normalize_host(str(raw))
+        if not name:
+            raise ValueError(f"{str(raw)[:80]} is not a host name")
+        # A trap on a name that serves a site would ban its visitors.
+        if name in site_names:
+            raise ValueError(f"{name} serves a site and cannot be a trap")
+        if name not in checked:
+            checked.append(name)
+    return sorted(checked)
+
+
 def read_thresholds(path: str = "") -> Dict[str, int]:
     """Map each counter table to the value HAProxy treats as too much."""
     try:
@@ -2018,6 +2076,66 @@ class PathCandidates:
                         "ips": {int(x) for x in ips}, "clients": {int(x) for x in clients},
                         "status": {str(k): int(v) for k, v in dict(status).items()},
                         "hosts": {str(k): int(v) for k, v in dict(hosts).items()},
+                    }
+                except (TypeError, ValueError):
+                    continue
+
+
+class UnknownHosts:
+    """Names asked for that serve no site, and who asked."""
+
+    def __init__(self) -> None:
+        self._hosts: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def note(self, host: str, ip: str, client: bool, ts: int) -> None:
+        with self._lock:
+            entry = self._hosts.get(host)
+            if entry is None:
+                entry = self._hosts[host] = {
+                    "first": ts, "last": ts, "requests": 0, "ips": set(), "clients": set(),
+                }
+                while len(self._hosts) > UNKNOWN_HOSTS_MAX:
+                    self._hosts.popitem(last=False)
+            self._hosts.move_to_end(host)
+            entry["last"] = ts
+            entry["requests"] += 1
+            key = _address_key(ip)
+            if len(entry["ips"]) < CANDIDATE_MAX_ADDRESSES:
+                entry["ips"].add(key)
+            if client and len(entry["clients"]) < CANDIDATE_MAX_ADDRESSES:
+                entry["clients"].add(key)
+
+    def prune(self, before: int) -> None:
+        with self._lock:
+            for host in [h for h, e in self._hosts.items() if e["last"] < before]:
+                del self._hosts[host]
+
+    def listing(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = [
+                {"host": host, "requests": e["requests"], "addresses": len(e["ips"]),
+                 "clients": len(e["clients"]), "first": e["first"], "last": e["last"]}
+                for host, e in self._hosts.items()
+            ]
+        rows.sort(key=lambda row: (-row["addresses"], -row["last"]))
+        return rows[:limit]
+
+    def snapshot(self) -> List[List[Any]]:
+        with self._lock:
+            return [[h, e["first"], e["last"], e["requests"], sorted(e["ips"]), sorted(e["clients"])]
+                    for h, e in self._hosts.items()]
+
+    def restore(self, rows: Any) -> None:
+        if not isinstance(rows, list):
+            return
+        with self._lock:
+            for row in rows[:UNKNOWN_HOSTS_MAX]:
+                try:
+                    host, first, last, requests, ips, clients = row
+                    self._hosts[str(host)] = {
+                        "first": int(first), "last": int(last), "requests": int(requests),
+                        "ips": {int(x) for x in ips}, "clients": {int(x) for x in clients},
                     }
                 except (TypeError, ValueError):
                     continue
@@ -3397,6 +3515,16 @@ class GuardEngine:
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
+        self.unknown_hosts = UnknownHosts()
+        with contextlib.suppress(ValueError, TypeError):
+            self.unknown_hosts.restore(
+                json.loads(database.get_state(UNKNOWN_HOSTS_KEY, "[]") or "[]")
+            )
+        self.trap_hosts: Set[str] = set()
+        with contextlib.suppress(ValueError, TypeError):
+            self.trap_hosts = {str(h) for h in json.loads(database.get_state(TRAP_HOSTS_KEY, "[]") or "[]")}
+        self._site_names: Set[str] = set()
+        self._site_names_checked = 0.0
         with contextlib.suppress(ValueError, TypeError):
             self.candidates.restore(
                 json.loads(database.get_state(CANDIDATES_KEY, "[]") or "[]")
@@ -3678,6 +3806,7 @@ class GuardEngine:
 
         activity = self.memory.touch(ip, now)
         activity.requests += 1
+        self._check_unknown_host(ip, activity, now, request)
         if request.bad_request:
             activity.bad_requests += 1
             self._note_invalid_host(ip, activity, now, request)
@@ -3895,6 +4024,49 @@ class GuardEngine:
             source="haproxy-log",
             detail=f"distinct={distinct}",
         )
+
+    def site_names(self) -> Set[str]:
+        moment = time.monotonic()
+        if moment - self._site_names_checked >= SITE_NAMES_RECHECK:
+            self._site_names_checked = moment
+            self._site_names = read_site_names()
+        return self._site_names
+
+    def set_trap_hosts(self, hosts: Any) -> List[str]:
+        checked = validate_trap_hosts(hosts, self.site_names())
+        self.database.set_state(TRAP_HOSTS_KEY, json.dumps(checked))
+        self.trap_hosts = set(checked)
+        LOG.info("trap names set: %s", ", ".join(checked) or "none")
+        return checked
+
+    def _check_unknown_host(self, ip: str, activity: IpActivity, now: int,
+                            request: ParsedRequest) -> None:
+        host = normalize_host(request.host)
+        if not host:
+            return
+        sites = self.site_names()
+        # Without the site list every name would look unknown; better to say
+        # nothing than to call the gateway's own sites strangers.
+        if not sites or host in sites:
+            return
+        client = activity.requests >= 20 and (
+            activity.requests - activity.errors - activity.not_found
+            - activity.gateway_denied - activity.bad_requests
+        ) * 2 >= activity.requests
+        self.unknown_hosts.note(host, ip, client, now)
+        if host in self.trap_hosts and not client:
+            # An address that otherwise uses the gateway like a client is
+            # more likely holding an old bookmark than scanning; it is
+            # counted above and spared here.
+            self._emit(
+                ip,
+                EVENT_SCANNER_DECISIVE,
+                now,
+                source="haproxy-log",
+                category="trap",
+                detail=f"trap name {host}",
+                fingerprint=f"{ip}|trap|{host}",
+            )
 
     def _check_recurring(self, ip: str, activity: IpActivity, now: int) -> None:
         """A scanner signature again, hours after an earlier one this week.
@@ -4473,9 +4645,13 @@ class GuardEngine:
             self.database.incremental_vacuum()
         pruned = self.memory.prune(now - 6 * 3600)
         self.candidates.prune(now - CANDIDATE_TTL)
+        self.unknown_hosts.prune(now - UNKNOWN_HOSTS_TTL)
         with contextlib.suppress(sqlite3.Error):
             self.database.set_state(
                 CANDIDATES_KEY, json.dumps(self.candidates.snapshot())
+            )
+            self.database.set_state(
+                UNKNOWN_HOSTS_KEY, json.dumps(self.unknown_hosts.snapshot())
             )
         LOG.info(
             "Maintenance: deleted=%s pruned_ips=%d tracked=%d",
@@ -4694,6 +4870,16 @@ class GuardHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **signature_summary()})
             return
 
+        if path == "/api/v1/guard/traps":
+            self._send_json(200, {
+                "ok": True,
+                "trap_hosts": sorted(engine.trap_hosts),
+                "unknown_hosts": engine.unknown_hosts.listing(),
+                "site_names_known": bool(engine.site_names()),
+                "window_days": UNKNOWN_HOSTS_TTL // 86400,
+            })
+            return
+
         if path == "/api/v1/guard/signatures/candidates":
             dismissed = set(_dismissed_candidates(engine.database))
             self._send_json(200, {
@@ -4774,6 +4960,22 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             self._send_json(200, {"ok": True, **result})
+            return
+
+        if path == "/api/v1/guard/traps":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+                if length <= 0 or length > 16384:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+                hosts = engine.set_trap_hosts(payload.get("hosts"))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, "trap_hosts": hosts})
             return
 
         if path == "/api/v1/guard/signatures/candidates/dismiss":

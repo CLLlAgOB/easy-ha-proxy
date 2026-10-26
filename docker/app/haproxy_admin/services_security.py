@@ -17,6 +17,8 @@ from .guardd_client import (
     guardd_signatures,
     guardd_signature_candidates,
     guardd_dismiss_candidate,
+    guardd_traps,
+    guardd_set_traps,
     guardd_set_signatures,
     guardd_requests,
     guardd_requests_status,
@@ -243,6 +245,16 @@ def dismiss_candidate(payload: Any) -> Dict[str, Any]:
     if not path.startswith("/"):
         raise ValueError("expected a path")
     return guardd_dismiss_candidate(path, restore=bool(payload.get("restore")))
+
+
+def traps() -> Dict[str, Any]:
+    return guardd_traps()
+
+
+def set_traps(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("hosts"), list):
+        raise ValueError("expected a list of names")
+    return guardd_set_traps(payload["hosts"])
 
 
 def set_detection_rules(payload: Any) -> Dict[str, Any]:

@@ -365,6 +365,137 @@
     }
   }
 
+  /* ---------- trap names ---------- */
+
+  let trapState = null;
+
+  function renderTraps(payload) {
+    trapState = payload;
+    const chips = byId("dr-traps");
+    const table = byId("dr-unknown-hosts");
+    if (!chips || !table) return;
+    chips.textContent = "";
+    table.textContent = "";
+    const traps = (payload && payload.trap_hosts) || [];
+    const { card, tokens } = ruleCard(
+      uiText("Trap names"), uiText("a request bans the address"), "decisive", false
+    );
+    if (!traps.length) {
+      const empty = document.createElement("span");
+      empty.className = "mon-sub";
+      empty.textContent = uiText("No trap names yet");
+      tokens.appendChild(empty);
+    }
+    traps.forEach((name) => tokens.appendChild(token(name, false, removeTrap, uiText("Remove"))));
+    chips.appendChild(card);
+
+    const rows = ((payload && payload.unknown_hosts) || []).filter((r) => !traps.includes(r.host));
+    const meta = byId("dr-trap-meta");
+    if (meta) {
+      meta.textContent = payload
+        ? t("names without a site, last {days} days", { days: payload.window_days })
+        : "";
+    }
+    if (payload && payload.site_names_known === false) {
+      const note = document.createElement("p");
+      note.className = "dr-empty";
+      note.textContent = uiText("The list of site names could not be read, so unknown names are not counted");
+      table.appendChild(note);
+      return;
+    }
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "dr-empty";
+      empty.textContent = uiText("No requests for names without a site");
+      table.appendChild(empty);
+      return;
+    }
+    const grid = document.createElement("table");
+    grid.className = "dr-suggest";
+    const head = document.createElement("tr");
+    ["Name", "Requests", "Addresses", "Client-like", "Last seen", ""].forEach((title) => {
+      const th = document.createElement("th");
+      th.textContent = title ? uiText(title) : "";
+      head.appendChild(th);
+    });
+    const thead = document.createElement("thead");
+    thead.appendChild(head);
+    grid.appendChild(thead);
+    const body = document.createElement("tbody");
+    rows.forEach((item) => {
+      const row = document.createElement("tr");
+      const code = document.createElement("code");
+      code.textContent = item.host;
+      cell(row, code);
+      cell(row, String(item.requests), "num");
+      cell(row, String(item.addresses), "num");
+      const clients = cell(row, String(item.clients), "num");
+      if (item.clients > 0) {
+        clients.classList.add("dr-client-warn");
+        clients.title = uiText("Ordinary clients use this name too: they would be spared, but check first");
+      }
+      cell(row, clock(item.last));
+      const actions = document.createElement("td");
+      const make = document.createElement("button");
+      make.type = "button";
+      make.className = "btn";
+      make.textContent = uiText("Make a trap");
+      make.addEventListener("click", () => addTrap(item));
+      actions.appendChild(make);
+      row.appendChild(actions);
+      body.appendChild(row);
+    });
+    grid.appendChild(body);
+    table.appendChild(grid);
+  }
+
+  async function loadTraps() {
+    try {
+      const response = await fetch("/api/security/traps", {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin"
+      });
+      if (!response.ok) return;
+      renderTraps(await response.json());
+    } catch (error) {
+      /* the rules above still work without the trap card */
+    }
+  }
+
+  async function saveTraps(hosts, message) {
+    try {
+      const response = await fetch("/api/security/traps", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken() },
+        body: JSON.stringify({ hosts: hosts })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        say(payload.error || `HTTP ${response.status}`, true);
+        return;
+      }
+      say(message, false);
+      loadTraps();
+    } catch (error) {
+      say(String(error), true);
+    }
+  }
+
+  function addTrap(item) {
+    if (item.clients > 0 && !window.confirm(
+      `${item.host}: ${uiText("Ordinary clients use this name too: they would be spared, but check first")}`
+    )) return;
+    const hosts = ((trapState && trapState.trap_hosts) || []).slice();
+    if (!hosts.includes(item.host)) hosts.push(item.host);
+    saveTraps(hosts, `${uiText("Trap added")}: ${item.host}`);
+  }
+
+  function removeTrap(name) {
+    const hosts = ((trapState && trapState.trap_hosts) || []).filter((h) => h !== name);
+    saveTraps(hosts, `${uiText("Removed")}: ${name}`);
+  }
+
   /* ---------- editing ---------- */
 
   async function save(overrides, message) {
@@ -475,5 +606,6 @@
     }
     load();
     loadSuggestions();
+    loadTraps();
   });
 })();

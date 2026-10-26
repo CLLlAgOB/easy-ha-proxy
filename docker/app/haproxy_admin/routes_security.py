@@ -44,6 +44,50 @@ def api_detection_rules():
         return jsonify(security.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/security/traps")
+def api_traps():
+    """Trap names and the names that get traffic without serving a site."""
+    try:
+        return jsonify(security.traps())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/traps")
+def api_set_traps():
+    """Replace the trap names. A request for one bans the address that made it."""
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        before = security.traps().get("trap_hosts") or []
+        result = security.set_traps(payload)
+    except ValueError as exc:
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_FAILURE,
+            detail=str(exc)[:300],
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "adaptive.rules",
+        object_type="detection_rules",
+        before={"trap_hosts": before},
+        after={"trap_hosts": result.get("trap_hosts")},
+        detail="trap names changed",
+    )
+    return jsonify(result)
+
+
 @bp.get("/api/security/detection-rules/candidates")
 def api_detection_rule_candidates():
     """Signatures the traffic suggests: refused to many, matched by nothing."""

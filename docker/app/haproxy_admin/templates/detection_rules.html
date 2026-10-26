@@ -179,6 +179,25 @@
 
 <div class="card" style="margin-top:25px;">
   <div class="card-header">
+    <h2>Trap names</h2>
+    <span class="mon-sub" id="dr-trap-meta" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Names that point at this gateway but serve no site. Nobody with a reason to
+    be here asks for one; scanners find them in public certificate logs. A
+    request for a trap name bans the address at once, unless that address
+    otherwise uses the gateway like an ordinary client: an old bookmark is
+    spared and only counted.
+  </p>
+
+  <div class="dr-rules" id="dr-traps" data-i18n-skip translate="no"></div>
+
+  <div class="dr-suggest-wrap" id="dr-unknown-hosts"></div>
+</div>
+
+<div class="card" style="margin-top:25px;">
+  <div class="card-header">
     <h2>Suggested by traffic</h2>
     <span class="mon-sub" id="dr-suggest-meta" data-i18n-skip translate="no"></span>
   </div>
