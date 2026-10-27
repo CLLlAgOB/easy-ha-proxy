@@ -14,8 +14,11 @@
     _enable_bootstrap_dnat: true
     
 
+# ss runs on its own and lists only listeners on :8000. Piped into grep with
+# "|| echo FREE", an ss that failed read as a free port, and certbot then
+# failed to bind it; now that failure stops the run here.
 - name: Ensure port 8000 is FREE (only if we have issue targets)
-  ansible.builtin.shell: "ss -ltn | grep -q ':8000 ' && echo BUSY || echo FREE"
+  ansible.builtin.command: ss -Hltn sport = :8000
   register: _p8000
   changed_when: false
   when: (issue_targets_count | default(0) | int) > 0
@@ -25,7 +28,7 @@
     msg: "Port 8000 is in use -- standalone Certbot cannot listen on :8000."
   when:
     - (issue_targets_count | default(0) | int) > 0
-    - _p8000.stdout == 'BUSY'
+    - _p8000.stdout | trim | length > 0
 
 # IPv4
 - name: Add IPv4 DNAT 80->8000 (check)

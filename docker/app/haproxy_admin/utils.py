@@ -70,6 +70,9 @@ __all__ = [
 # ───────────────────────── Shell commands ─────────────────────────────
 
 
+RUN_CMD_TIMEOUT_SECONDS = 30
+
+
 def run_cmd(cmd: str | list[str]) -> str:
     """Run a command without invoking a shell."""
     args = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
@@ -77,19 +80,22 @@ def run_cmd(cmd: str | list[str]) -> str:
         return "Command error: empty command"
     logger.debug("Executing command: %r", args)
     try:
-        proc = subprocess.Popen(  # noqa: S603
+        # Leaving the block closes the pipes and reaps the process, so one
+        # killed for running out of time leaves no zombie and no open pipes.
+        with subprocess.Popen(  # noqa: S603
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-        )
-        out, err = proc.communicate(timeout=30)
+        ) as proc:
+            try:
+                out, err = proc.communicate(timeout=RUN_CMD_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return "Command timed out"
         if proc.returncode != 0:
             return f"Command failed ({proc.returncode}): {err.strip()}"
         return out
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return "Command timed out"
     except Exception as exc:  # pylint: disable=broad-except
         return f"Command error: {exc}"
 

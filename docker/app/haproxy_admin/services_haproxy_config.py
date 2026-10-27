@@ -75,6 +75,10 @@ HAPROXY_CONFIG_CONFIRM_TIMEOUT = int(
 )
 
 HAP_CHECK_CMD = ["/usr/sbin/haproxy", "-c", "-f"]
+# The same limits haproxy-controld keeps; these only apply where the panel
+# runs the command itself, without the control socket.
+HAPROXY_CHECK_TIMEOUT_SECONDS = 30
+HAPROXY_RELOAD_TIMEOUT_SECONDS = 120
 
 
 class ConfigApplyPreparationError(ValueError):
@@ -1254,9 +1258,15 @@ def reload_haproxy() -> tuple[bool, str, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=HAPROXY_RELOAD_TIMEOUT_SECONDS,
         )
         ok = (proc.returncode == 0)
         return ok, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return False, "", (
+            f"the reload did not finish within {HAPROXY_RELOAD_TIMEOUT_SECONDS} "
+            "seconds and was stopped"
+        )
     except FileNotFoundError:
         return False, "", (
             f"systemctl not found and control socket {sock_path!r} "
@@ -1584,11 +1594,18 @@ def check_cfg(cfg_text: str) -> Tuple[int, str, str]:
             tmp.write(cfg_text)
             tmp_path = tmp.name
 
-        proc = subprocess.run(
-            HAP_CHECK_CMD + [tmp_path],
-            text=True,
-            capture_output=True,
-        )
+        try:
+            proc = subprocess.run(
+                HAP_CHECK_CMD + [tmp_path],
+                text=True,
+                capture_output=True,
+                timeout=HAPROXY_CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, "", (
+                f"haproxy -c did not finish within {HAPROXY_CHECK_TIMEOUT_SECONDS} "
+                "seconds and was stopped"
+            )
         rc = proc.returncode
         return rc, proc.stdout, proc.stderr
     finally:
