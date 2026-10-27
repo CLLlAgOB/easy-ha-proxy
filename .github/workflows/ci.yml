@@ -97,7 +97,8 @@ jobs:
           ruff check --output-format=github .
 
   # The admin pages' scripts: every one must parse, and the logic kept apart
-  # from the page (updates_core.js and the like) is tested by behaviour.
+  # from the page (updates_core.js, monitoring_core.js, the rules in i18n.js)
+  # is tested by behaviour.
   javascript:
     name: JavaScript
     runs-on: ubuntu-latest
