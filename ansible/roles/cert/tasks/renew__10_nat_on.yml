@@ -40,6 +40,7 @@
 
 - name: Add IPv4 DNAT 80->8000
   command: iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  changed_when: true  # runs only when the check above found the rule missing
   when:
     - _enable_bootstrap_dnat
     - (issue_targets_count | default(0) | int) > 0
@@ -65,6 +66,7 @@
 
 - name: Add IPv6 DNAT 80->8000
   command: ip6tables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  changed_when: true  # runs only when the check above found the rule missing
   when:
     - _enable_bootstrap_dnat
     - (issue_targets_count | default(0) | int) > 0

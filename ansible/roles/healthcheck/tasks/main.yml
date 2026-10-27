@@ -19,7 +19,9 @@
 
 # ----------------- Checking the systemd services -----------------
 
-- name: "Status check | systemd is-active for each service"
+# systemctl rather than the systemd module: is-active answers for a unit that
+# does not exist, where the module would fail.
+- name: "Status check | systemd is-active for each service"  # noqa: command-instead-of-module
   ansible.builtin.command:
     cmd: "systemctl is-active {{ item.name }}"
   check_mode: false
@@ -261,7 +263,6 @@
     label: "{{ item.label | default(item.name) }}"
   register: status_check_docker_result
   failed_when: false
-  ignore_errors: true
   changed_when: false
 
 - name: "Status check | summary for Docker containers"

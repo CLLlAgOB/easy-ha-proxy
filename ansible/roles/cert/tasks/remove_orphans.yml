@@ -166,7 +166,20 @@
   loop: "{{ orphan_lineages }}"
   when: not (cleanup_dry_run | default(false) | bool)
   register: _certbot_del
+  # A lineage certbot keeps is cleaned up on the next removal, so it does not
+  # stop this one; it is named below instead of passing in silence.
   failed_when: false
+  changed_when: _certbot_del.rc == 0
+
+- name: "Report orphaned lineages certbot did not delete"
+  tags: [never, remove_site]
+  ansible.builtin.debug:
+    msg: >-
+      certbot did not delete {{ item.item }}:
+      {{ (item.stderr | default('') or item.stdout | default('')) | trim }}
+  loop: "{{ _certbot_del.results | default([]) | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
 
 - name: "Delete orphaned assembled HAProxy PEM files"
   tags: [never, remove_site]

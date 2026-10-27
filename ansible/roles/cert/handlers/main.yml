@@ -1,9 +1,4 @@
 ---
-- name: Mail cert issued
-  debug:
-    msg: "The certificate for {{ item.name }} was issued or renewed"
-  listen: mail_cert_issued
-
 # The PEM directory
 - name: Ensure HAProxy certs dir exists
   file:
@@ -56,11 +51,19 @@
 
     tmp="{{ dest }}.tmp.$$"
     cat "$full" "$key" > "$tmp"
+    if [ -f "{{ dest }}" ] && cmp -s "$tmp" "{{ dest }}" \
+        && [ "$(stat -c '%a %U:%G' "{{ dest }}")" = "600 root:root" ]; then
+      rm -f "$tmp"
+      exit 0
+    fi
     chown root:root "$tmp"
     chmod 0600 "$tmp"
     mv -f "$tmp" "{{ dest }}"
+    echo "PEM written: {{ dest }}"
   args:
     executable: /bin/bash
+  register: _pem_build
+  changed_when: "'PEM written:' in _pem_build.stdout"
   loop: "{{ sites | selectattr('key_types','defined') | list | subelements('key_types') }}"
   loop_control:
     loop_var: pair
@@ -97,11 +100,19 @@
 
     tmp="{{ dest }}.tmp.$$"
     cat "$full" "$key" > "$tmp"
+    if [ -f "{{ dest }}" ] && cmp -s "$tmp" "{{ dest }}" \
+        && [ "$(stat -c '%a %U:%G' "{{ dest }}")" = "600 root:root" ]; then
+      rm -f "$tmp"
+      exit 0
+    fi
     chown root:root "$tmp"
     chmod 0600 "$tmp"
     mv -f "$tmp" "{{ dest }}"
+    echo "PEM written: {{ dest }}"
   args:
     executable: /bin/bash
+  register: _pem_build
+  changed_when: "'PEM written:' in _pem_build.stdout"
   loop: "{{ sites | rejectattr('key_types','defined') | list }}"
   loop_control:
     loop_var: s

@@ -70,26 +70,22 @@
 
     - name: Stop and disable Authelia helper services
       block:
-        - name: Stop and disable authelia-configd
-          ansible.builtin.systemd:
-            name: authelia-configd.service
-            state: stopped
-            enabled: no
-          ignore_errors: true
+        - name: Collect the services systemd knows
+          ansible.builtin.service_facts:
 
-        - name: Stop and disable authelia-usersd
+        # A helper that was never installed has nothing to stop, and only that
+        # is skipped. ignore_errors used to skip everything, so a helper that
+        # failed to stop was reported as removed.
+        - name: Stop and disable the Authelia helper services
           ansible.builtin.systemd:
-            name: authelia-usersd.service
+            name: "{{ item }}"
             state: stopped
-            enabled: no
-          ignore_errors: true
-
-        - name: Stop and disable authelia-bansd
-          ansible.builtin.systemd:
-            name: authelia-bansd.service
-            state: stopped
-            enabled: no
-          ignore_errors: true
+            enabled: false
+          loop:
+            - authelia-configd.service
+            - authelia-usersd.service
+            - authelia-bansd.service
+          when: item in ansible_facts.services
 
         - name: Remove authelia-configd service unit
           ansible.builtin.file:

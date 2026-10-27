@@ -72,7 +72,10 @@
         else 'reloaded'
       }}
   register: reload_res
-  ignore_errors: true      # reload may not be supported
+  # Not swallowed: a failed reload is retried as a full restart by the next
+  # handler, and a failed restart fails the play. failed_when cannot stand in
+  # here, since it would also clear the "failed" that handler looks for.
+  ignore_errors: true  # noqa: ignore-errors
 
 - name: hard restart haproxy if reload failed
   listen: apply haproxy
