@@ -194,6 +194,16 @@
     "access_control rules updated": "Правила access_control обновлены",
     "The password must be 8 to 1024 characters long": "Пароль должен содержать от 8 до 1024 символов",
     "Could not hash the password: ": "Не удалось вычислить хэш пароля: ",
-    "Log file not found": "Файл логов не найден"
+    "Log file not found": "Файл логов не найден",
+    ": unsupported algorithm": ": неподдерживаемый алгоритм",
+    ": must be never, safe, aggressive or always": ": допустимы значения never, safe, aggressive или always",
+    ": must be a time such as 30s, 5m or 1h": ": укажите время, например 30s, 5m или 1h",
+    ": must be a size such as 50k or 1m": ": укажите размер, например 50k или 1m",
+    ": may use Latin letters, digits, '.', '_' and '-' (up to 64 characters)": ": допустимы латинские буквы, цифры, '.', '_' и '-' (до 64 символов)",
+    ": too many cookie options": ": слишком много параметров cookie",
+    ": invalid value for ": ": некорректное значение для ",
+    ": unknown cookie option ": ": неизвестный параметр cookie ",
+    " needs a value": " требует значения",
+    ": must be a comma-separated list of protocols such as h2,http/1.1": ": укажите протоколы через запятую, например h2,http/1.1"
   }
 }

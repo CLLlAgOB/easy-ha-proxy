@@ -28,6 +28,25 @@ BALANCE_VALUES = {
     "roundrobin", "static-rr", "leastconn", "first", "source",
     "uri", "url_param", "hdr", "random", "rdp-cookie",
 }
+# Backend tuning a site, or site_defaults, may set. Each value is written
+# into haproxy.cfg as it is, so a value HAProxy cannot read failed the apply
+# with a message that did not name the field, and a '#' in one ended the line
+# there: on the default-server line, backend_alpn is followed by the backend
+# certificate check. The rules take every form HAProxy itself accepts.
+BALANCE_ALGORITHMS = BALANCE_VALUES | {"hash"}
+BALANCE_ALGORITHM_RE = re.compile(r"^(?P<name>[a-z_-]+)(?:\([A-Za-z0-9_.-]{1,64}\))?$")
+BALANCE_ARGUMENT_RE = re.compile(r"^[A-Za-z0-9_.,=/:()-]{1,128}$")
+HTTP_REUSE_VALUES = ("never", "safe", "aggressive", "always")
+HAPROXY_TIME_RE = re.compile(r"^[0-9]{1,9}(?:us|ms|s|m|h|d)?$")
+HAPROXY_SIZE_RE = re.compile(r"^[1-9][0-9]{0,9}[kmgKMG]?$")
+COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+COOKIE_FLAGS = frozenset({
+    "rewrite", "insert", "prefix", "indirect", "nocache", "postonly",
+    "preserve", "httponly", "secure", "dynamic",
+})
+COOKIE_OPTIONS_WITH_VALUE = frozenset({"domain", "maxidle", "maxlife", "attr"})
+COOKIE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.=;:/-]{1,128}$")
+ALPN_RE = re.compile(r"^[A-Za-z0-9._/-]{1,32}(?:,[A-Za-z0-9._/-]{1,32}){0,7}$")
 CONTROL_PLANE_ACL_RE = re.compile(
     r"^\s*acl\s+(host_admin|host_authelia)\s+"
     r"hdr\(host\)\s+-i\s+(.+?)\s*$",
@@ -233,6 +252,82 @@ def reject_unsafe_scalars(
     return 1
 
 
+def _field_text(values: dict[str, Any], key: str) -> str | None:
+    """A field's text, or None when it is unset or empty.
+
+    An empty value is left to the template's default, as before.
+    """
+    value = values.get(key)
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
+def _validate_balance(value: str, label: str) -> None:
+    words = value.split()
+    match = BALANCE_ALGORITHM_RE.fullmatch(words[0])
+    if (
+        not match
+        or match.group("name") not in BALANCE_ALGORITHMS
+        or len(words) > 8
+        or not all(BALANCE_ARGUMENT_RE.fullmatch(word) for word in words[1:])
+    ):
+        raise ValueError(f"{label}: unsupported algorithm")
+
+
+def _validate_cookie_attrs(value: str, label: str) -> None:
+    words = value.split()
+    if len(words) > 24:
+        raise ValueError(f"{label}: too many cookie options")
+    waiting_for = None
+    for word in words:
+        if waiting_for:
+            if not COOKIE_VALUE_RE.fullmatch(word):
+                raise ValueError(f"{label}: invalid value for {waiting_for}")
+            waiting_for = None
+        elif word in COOKIE_OPTIONS_WITH_VALUE:
+            waiting_for = word
+        elif word not in COOKIE_FLAGS:
+            raise ValueError(f"{label}: unknown cookie option {word!r}")
+    if waiting_for:
+        raise ValueError(f"{label}: {waiting_for} needs a value")
+
+
+def validate_backend_tuning(values: dict[str, Any], prefix: str) -> None:
+    """Check the backend tuning fields of one site, or of site_defaults."""
+    balance = _field_text(values, "balance")
+    if balance is not None:
+        _validate_balance(balance, f"{prefix}.balance")
+    http_reuse = _field_text(values, "http_reuse")
+    if http_reuse is not None and http_reuse not in HTTP_REUSE_VALUES:
+        raise ValueError(
+            f"{prefix}.http_reuse: must be never, safe, aggressive or always"
+        )
+    for key in ("session_timeout", "http_keepalive_timeout"):
+        text = _field_text(values, key)
+        if text is not None and not HAPROXY_TIME_RE.fullmatch(text):
+            raise ValueError(f"{prefix}.{key}: must be a time such as 30s, 5m or 1h")
+    for key in ("err_size", "rate_size"):
+        text = _field_text(values, key)
+        if text is not None and not HAPROXY_SIZE_RE.fullmatch(text):
+            raise ValueError(f"{prefix}.{key}: must be a size such as 50k or 1m")
+    cookie_name = _field_text(values, "cookie_name")
+    if cookie_name is not None and not COOKIE_NAME_RE.fullmatch(cookie_name):
+        raise ValueError(
+            f"{prefix}.cookie_name: may use Latin letters, digits, '.', '_' and '-' "
+            "(up to 64 characters)"
+        )
+    cookie_attrs = _field_text(values, "cookie_attrs")
+    if cookie_attrs is not None:
+        _validate_cookie_attrs(cookie_attrs, f"{prefix}.cookie_attrs")
+    backend_alpn = _field_text(values, "backend_alpn")
+    if backend_alpn is not None and not ALPN_RE.fullmatch(backend_alpn):
+        raise ValueError(
+            f"{prefix}.backend_alpn: must be a comma-separated list of protocols "
+            "such as h2,http/1.1"
+        )
+
+
 def _validate_site(site: Any, index: int) -> None:
     if not isinstance(site, dict):
         raise ValueError(f"sites[{index}] must be an object")
@@ -338,6 +433,7 @@ def _validate_site(site: Any, index: int) -> None:
         )
         validate_host(server.get("host"), f"sites[{index}].servers[{srv_index}].host")
         validate_port(server.get("port"), f"sites[{index}].servers[{srv_index}].port")
+    validate_backend_tuning(site, f"sites[{index}]")
 
 
 def _validate_tcp(proxy: Any, index: int) -> None:
@@ -379,3 +475,8 @@ def validate_config_data(kind: str, data: dict[str, Any]) -> None:
             raise ValueError('tcp_proxies must be a list of at most 500 items')
         for index, proxy in enumerate(proxies):
             _validate_tcp(proxy, index)
+    elif kind == "vars":
+        # Every site inherits these through the template.
+        defaults = data.get("site_defaults")
+        if isinstance(defaults, dict):
+            validate_backend_tuning(defaults, "site_defaults")
