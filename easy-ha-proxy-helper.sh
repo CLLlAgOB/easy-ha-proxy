@@ -1874,8 +1874,9 @@ show_test_info() {
   printf '\n%s:\n\n' "$(message 'Add this line to the hosts file on your workstation' 'Добавьте на рабочем компьютере в hosts')"
   printf '%s %s %s\n\n' "${server_ip:-<SERVER_IP>}" "${admin_domain}" "${authelia_domain}"
   printf '%s: https://%s/\n' "$(message 'Open' 'Откройте')" "${admin_domain}"
-  printf '%s: /tmp/easy-ha-proxy-internal-ca.crt\n' \
-    "$(message 'Public internal CA export on the server' 'Публичный сертификат внутреннего CA на сервере')"
+  printf '%s: %s/internal-ca.crt\n' \
+    "$(message 'Public internal CA export on the server' 'Публичный сертификат внутреннего CA на сервере')" \
+    "${install_home}"
 }
 
 confirm() {

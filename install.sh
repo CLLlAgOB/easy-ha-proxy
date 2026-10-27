@@ -6,6 +6,7 @@ product="easy-ha-proxy"
 branch="${EASY_HA_PROXY_BRANCH:-main}"
 raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/easy-ha-proxy/${branch}}"
 temporary_components=()
+temporary_directories=()
 component=""
 inventory_candidates=()
 input_fd=0
@@ -72,6 +73,9 @@ cleanup() {
   local path
   for path in "${temporary_components[@]}"; do
     rm -f "${path}"
+  done
+  for path in "${temporary_directories[@]}"; do
+    rm -rf -- "${path}"
   done
 }
 trap cleanup EXIT
@@ -152,6 +156,7 @@ plan_legacy_config() {
   local -a command=()
   local -a pipeline_status=()
   local update_tags=""
+  local ansible_temp=""
 
   if [[ -z "${prepared_dir}" ]]; then
     prepared_dir="$(
@@ -251,12 +256,18 @@ plan_legacy_config() {
     esac
   fi
 
+  # Ansible's local working directory, private to this run. A fixed name in
+  # /tmp belonged to whichever user created it first, and Ansible writes the
+  # modules it is about to run there.
+  ansible_temp="$(mktemp -d -t easy-ha-proxy-ansible.XXXXXX)"
+  temporary_directories+=("${ansible_temp}")
+
   set +e
   {
     printf '=== syntax-check ===\n'
     ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
     ANSIBLE_VARS_ENABLED='' \
-    ANSIBLE_LOCAL_TEMP=/tmp/easy-ha-proxy-ansible \
+    ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
       "${command[@]}" --syntax-check
     if [[ "${plan_mode}" == "finalize" ]]; then
       printf '\n=== targeted apply (ha-adm-cfg,status) ===\n'
@@ -266,17 +277,17 @@ plan_legacy_config() {
     if [[ "${plan_mode}" == "haproxy-diff" ]]; then
       ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
       ANSIBLE_VARS_ENABLED='' \
-      ANSIBLE_LOCAL_TEMP=/tmp/easy-ha-proxy-ansible \
+      ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
         "${command[@]}" --check --diff
     elif [[ "${plan_mode}" == "finalize" ]]; then
       ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
       ANSIBLE_VARS_ENABLED='' \
-      ANSIBLE_LOCAL_TEMP=/tmp/easy-ha-proxy-ansible \
+      ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
         "${command[@]}"
     else
       ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
       ANSIBLE_VARS_ENABLED='' \
-      ANSIBLE_LOCAL_TEMP=/tmp/easy-ha-proxy-ansible \
+      ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
         "${command[@]}" --check
     fi
   } 2>&1 | tee "${log_file}"

@@ -948,6 +948,21 @@ def extract_bundle(bundle: Path, destination: Path) -> None:
             f"{_format_bytes(required_bytes)}, have {_format_bytes(free_bytes)}."
         )
     with tarfile.open(bundle, "r:gz") as archive:
+        _extract_all(archive, destination)
+
+
+def _extract_all(archive: tarfile.TarFile, destination: Path) -> None:
+    """Extract a bundle whose members were checked on an earlier read.
+
+    Python's "data" filter (3.12, and the security releases of 3.8 to 3.11)
+    checks every member again as it is written: nothing outside the
+    destination, no device files, no setuid bits or group/other write. The
+    restore runs as root, so this holds even if the file changed between the
+    two reads. A Python without it extracts as before.
+    """
+    if hasattr(tarfile, "data_filter"):
+        archive.extractall(destination, filter="data")
+    else:
         archive.extractall(destination)
 
 

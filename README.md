@@ -181,7 +181,7 @@ bash /tmp/easy-ha-proxy-install.sh remote \
 
 Test mode uses `ha.easy-ha-proxy.test` and `aut.easy-ha-proxy.test`, creates a
 local CA and SAN certificate, skips public DNS checks, and prints a ready-to-use
-hosts-file entry. Copy `/tmp/easy-ha-proxy-internal-ca.crt` from the server and
+hosts-file entry. Copy `/opt/easy-ha-proxy/internal-ca.crt` from the server and
 import it only on clients that should trust this CA. Its private key remains
 root-only under `/etc/haproxy/certificate-authorities/internal`.
 

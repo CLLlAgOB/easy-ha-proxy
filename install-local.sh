@@ -133,7 +133,7 @@ else
     -r "${source_dir}/installer/requirements.txt"
 
   log "Installing Ansible collections"
-  ANSIBLE_LOCAL_TEMP=/tmp/easy-ha-proxy-ansible \
+  ANSIBLE_LOCAL_TEMP="${install_root}/tmp/ansible" \
     "${venv_dir}/bin/ansible-galaxy" collection install \
     -r "${source_dir}/ansible/requirements.yml"
 fi

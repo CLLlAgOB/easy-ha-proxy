@@ -352,6 +352,22 @@ def install_home() -> Path:
     return Path(os.environ.get("EASY_HA_PROXY_HOME", str(DEFAULT_HOME))).expanduser()
 
 
+# The installer runs as root. Both of these used to be fixed names in /tmp,
+# where any local user may create a name first: a symlink planted at the CA
+# export had root write through it, and whoever owned /tmp/easy-ha-proxy-ansible
+# could swap the modules Ansible wrote there before root ran them. The install
+# home is root's alone, and readable, so the public CA can still be copied.
+def internal_ca_export_path() -> Path:
+    configured = os.environ.get("EASY_HA_PROXY_CA_EXPORT")
+    if configured:
+        return Path(configured).expanduser()
+    return install_home() / "internal-ca.crt"
+
+
+def ansible_local_temp() -> Path:
+    return install_home() / "tmp" / "ansible"
+
+
 def require_root() -> None:
     if os.geteuid() != 0 and os.environ.get("EASY_HA_PROXY_ALLOW_NON_ROOT") != "1":
         raise InstallerError("Run this command as root (sudo easy-ha-proxy ...).")
@@ -1607,13 +1623,10 @@ def generate_internal_certificate(directory: Path) -> Path:
     target = target_dir / "easy-ha-proxy-internal.pem"
     shutil.copyfile(combined, target)
     os.chmod(target, 0o600)
-    exported_ca = Path(
-        os.environ.get(
-            "EASY_HA_PROXY_CA_EXPORT", "/tmp/easy-ha-proxy-internal-ca.crt"
-        )
-    )
-    shutil.copyfile(ca_cert, exported_ca)
-    os.chmod(exported_ca, 0o644)
+    exported_ca = internal_ca_export_path()
+    # Written beside the target and renamed over it, so a link already at that
+    # name is replaced, never followed.
+    write_text(exported_ca, ca_cert.read_text(encoding="utf-8"), mode=0o644)
     if INSTALLER_LANGUAGE == "ru":
         print(f"TLS-сертификат внутреннего CA установлен: {target}")
         print(f"Сертификат внутреннего CA: {ca_cert}")
@@ -1651,17 +1664,18 @@ def print_internal_ca_instructions(directory: Path) -> None:
                 "Windows: C:\\Windows\\System32\\drivers\\etc\\hosts\n"
                 "Linux/macOS: /etc/hosts\n"
             )
+    exported_ca = internal_ca_export_path()
     if INSTALLER_LANGUAGE == "ru":
         print(
             f"\nОткройте https://{admin_domain}/\n"
-            "Скопируйте /tmp/easy-ha-proxy-internal-ca.crt на рабочий компьютер "
+            f"Скопируйте {exported_ca} на рабочий компьютер "
             "и импортируйте его как доверенный корневой CA. Никогда не копируйте "
             "закрытый ключ CA."
         )
     else:
         print(
             f"\nOpen https://{admin_domain}/\n"
-            "Copy /tmp/easy-ha-proxy-internal-ca.crt to your workstation and import it "
+            f"Copy {exported_ca} to your workstation and import it "
             "as a trusted root CA. Never copy the CA private key."
         )
 
@@ -1734,7 +1748,7 @@ def ansible_environment() -> dict[str, str]:
     environment["ANSIBLE_CONFIG"] = str(source_dir() / "ansible/ansible.cfg")
     environment["ANSIBLE_VARS_ENABLED"] = ""
     environment["ANSIBLE_NOCOWS"] = "1"
-    environment.setdefault("ANSIBLE_LOCAL_TEMP", "/tmp/easy-ha-proxy-ansible")
+    environment.setdefault("ANSIBLE_LOCAL_TEMP", str(ansible_local_temp()))
     return environment
 
 
