@@ -239,6 +239,15 @@ SYSTEMCTL_CMD = os.environ.get(
     "HAPROXY_SYSTEMCTL_CMD",
     "systemctl reload haproxy",
 )
+HAPROXY_BIN = "/usr/sbin/haproxy"
+
+# How long a command may run. Each keeps a thread of this daemon -- the ban
+# sync loop or a control request -- for as long as it runs. systemd fails a
+# reload job by itself after 90 seconds, so the reload limit only catches a
+# systemctl that hangs past that.
+IPSET_TIMEOUT_SECONDS = 15
+HAPROXY_CHECK_TIMEOUT_SECONDS = 30
+HAPROXY_RELOAD_TIMEOUT_SECONDS = 120
 
 LOG = logging.getLogger("haproxy-controld")
 
@@ -257,9 +266,9 @@ _GEOIP_OPERATION_LOCK = threading.Lock()
 
 # ───── helpers ─────
 
-def run_cmd(args, input_data: str | None = None, timeout: int | None = None) -> subprocess.CompletedProcess:
+def run_cmd(args, input_data: str | None = None, *, timeout: float) -> subprocess.CompletedProcess:
     """
-    subprocess.run with its errors logged.
+    subprocess.run with a time limit; a non-zero exit raises RuntimeError.
     """
     proc = subprocess.run(
         args,
@@ -501,11 +510,9 @@ def ensure_ipset() -> None:
     Makes sure IPSET_NAME exists.
     """
     try:
-        subprocess.run(
+        run_cmd(
             ["ipset", "create", IPSET_NAME, "hash:ip", "family", "inet", "-exist"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            timeout=IPSET_TIMEOUT_SECONDS,
         )
         LOG.info("Ensured ipset %s exists", IPSET_NAME)
     except Exception as e:
@@ -593,8 +600,8 @@ def get_ipset_members() -> Set[str]:
     Returns the set of addresses currently in the ipset IPSET_NAME.
     """
     try:
-        proc = run_cmd(["ipset", "list", IPSET_NAME], timeout=5)
-    except RuntimeError as e:
+        proc = run_cmd(["ipset", "list", IPSET_NAME], timeout=IPSET_TIMEOUT_SECONDS)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
         LOG.error("Failed to list ipset %s: %s", IPSET_NAME, e)
         return set()
 
@@ -621,6 +628,44 @@ def get_ipset_members() -> Set[str]:
     return members
 
 
+def _ipv4_entries(addresses) -> list[str]:
+    entries = []
+    for address in addresses:
+        try:
+            entries.append(str(ipaddress.IPv4Address(address)))
+        except ValueError:
+            LOG.warning("Not an IPv4 address, left out of the ipset: %r", address)
+    return sorted(entries)
+
+
+def _update_ipset(set_name: str, to_add, to_del) -> bool:
+    """Apply the whole difference to an ipset with one `ipset restore`.
+
+    One process instead of one per address. Deletions go first, so a full
+    set makes room before it takes new entries. ipset drops the whole batch
+    when one line does not parse, so only valid IPv4 addresses are sent;
+    with -exist, adding a present entry or deleting a missing one is no
+    error. Returns False, after logging why, when the batch was refused.
+    """
+    lines = [f"del {set_name} {ip}" for ip in _ipv4_entries(to_del)]
+    lines += [f"add {set_name} {ip}" for ip in _ipv4_entries(to_add)]
+    if not lines:
+        return True
+    try:
+        run_cmd(
+            ["ipset", "-exist", "restore"],
+            input_data="\n".join(lines) + "\n",
+            timeout=IPSET_TIMEOUT_SECONDS,
+        )
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+        LOG.warning(
+            "Failed to update ipset %s (+%d, -%d): %s",
+            set_name, len(to_add), len(to_del), e,
+        )
+        return False
+    return True
+
+
 def sync_bans_once() -> None:
     """
     One synchronisation pass of tbl_ban -> ipset.
@@ -634,29 +679,7 @@ def sync_bans_once() -> None:
     to_add = haproxy_banned - ipset_members
     to_del = ipset_members - haproxy_banned
 
-    for ip in sorted(to_add):
-        try:
-            subprocess.run(
-                ["ipset", "add", IPSET_NAME, ip, "-exist"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            LOG.warning("Failed to add %s to %s: %s", ip, IPSET_NAME, e)
-
-    for ip in sorted(to_del):
-        try:
-            subprocess.run(
-                ["ipset", "del", IPSET_NAME, ip],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            LOG.warning("Failed to del %s from %s: %s", ip, IPSET_NAME, e)
-
-    if to_add or to_del:
+    if _update_ipset(IPSET_NAME, to_add, to_del) and (to_add or to_del):
         LOG.info(
             "Sync done: +%d, -%d (haproxy=%d, ipset=%d)",
             len(to_add),
@@ -668,11 +691,9 @@ def sync_bans_once() -> None:
 
 def ensure_auth_ipset() -> None:
     """Ensure the zero-trust authorized-IP ipset exists."""
-    subprocess.run(
+    run_cmd(
         ["ipset", "create", AUTH_IPSET, "hash:ip", "family", "inet", "-exist"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        timeout=IPSET_TIMEOUT_SECONDS,
     )
     LOG.info("Ensured ipset %s exists", AUTH_IPSET)
 
@@ -708,8 +729,8 @@ def get_authorized_ips_from_haproxy() -> "Set[str] | None":
 def get_auth_ipset_members() -> Set[str]:
     """IPs currently in the authorized-IP ipset."""
     try:
-        proc = run_cmd(["ipset", "list", AUTH_IPSET], timeout=5)
-    except RuntimeError as e:
+        proc = run_cmd(["ipset", "list", AUTH_IPSET], timeout=IPSET_TIMEOUT_SECONDS)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
         LOG.error("Failed to list ipset %s: %s", AUTH_IPSET, e)
         return set()
     members: Set[str] = set()
@@ -736,22 +757,7 @@ def sync_auth_once() -> None:
     members = get_auth_ipset_members()
     if not authorized and not members:
         return
-    for ip in sorted(authorized - members):
-        try:
-            subprocess.run(
-                ["ipset", "add", AUTH_IPSET, ip, "-exist"],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            LOG.warning("Failed to add %s to %s: %s", ip, AUTH_IPSET, e)
-    for ip in sorted(members - authorized):
-        try:
-            subprocess.run(
-                ["ipset", "del", AUTH_IPSET, ip],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            LOG.warning("Failed to del %s from %s: %s", ip, AUTH_IPSET, e)
+    _update_ipset(AUTH_IPSET, authorized - members, members - authorized)
 
 
 def bans_loop() -> None:
@@ -1357,12 +1363,18 @@ def cmd_reload() -> tuple[bool, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=HAPROXY_RELOAD_TIMEOUT_SECONDS,
         )
         if proc.returncode == 0:
             msg = (proc.stdout or "reloaded").strip()
             return True, msg
         err = (proc.stderr or f"systemctl exit code {proc.returncode}").strip()
         return False, err
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"the reload did not finish within {HAPROXY_RELOAD_TIMEOUT_SECONDS} "
+            "seconds and was stopped"
+        )
     except Exception as e:
         return False, f"reload exception: {e!r}"
 
@@ -1387,12 +1399,19 @@ def haproxy_check_config_from_b64(b64: str) -> tuple[int, str, str]:
             tmp.write(raw)
             tmp_path = tmp.name
 
-        proc = subprocess.run(
-            ["/usr/sbin/haproxy", "-c", "-f", tmp_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                [HAPROXY_BIN, "-c", "-f", tmp_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=HAPROXY_CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, "", (
+                f"haproxy -c did not finish within {HAPROXY_CHECK_TIMEOUT_SECONDS} "
+                "seconds and was stopped"
+            )
         return proc.returncode, proc.stdout, proc.stderr
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -1497,11 +1516,11 @@ def haproxy_write_config_from_b64(b64: str) -> None:
             tmp_path = tmp.name
 
         proc = subprocess.run(
-            ["/usr/sbin/haproxy", "-c", "-f", tmp_path],
+            [HAPROXY_BIN, "-c", "-f", tmp_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=30,
+            timeout=HAPROXY_CHECK_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "validation failed").strip()
