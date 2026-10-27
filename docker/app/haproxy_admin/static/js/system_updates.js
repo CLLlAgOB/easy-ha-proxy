@@ -414,7 +414,7 @@
       return `<tr data-component-row="${escape(component.id)}">
         <td class="updates-select-column">
           <input type="checkbox" id="${escape(pickId)}" data-update-component="${escape(component.id)}"
-                 aria-label="${escape(t("Select {component}", {component: componentLabels[component.id] || component.id}))}">
+                 aria-label="${escape(t("Select {component}", {component: t(componentLabels[component.id] || component.id)}))}">
         </td>
         <td>
           <label for="${escape(pickId)}" class="updates-choice-name">${escape(t(componentLabels[component.id] || component.id))}</label>

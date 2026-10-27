@@ -485,6 +485,13 @@ class UpdateWebUiTests(unittest.TestCase):
         )
         self.assertIn('element.setAttribute("data-i18n-skip", "")', JAVASCRIPT)
 
+    def test_component_names_are_shown_in_the_page_language(self) -> None:
+        # The checkbox label was translated but the name read out for it was
+        # not: a screen reader said "Only what changed" on the Russian page.
+        uses = re.findall(r"(.{2})componentLabels\[", JAVASCRIPT)
+        self.assertGreater(len(uses), 5)
+        self.assertEqual(set(uses), {"t("})
+
     def test_english_is_source_and_russian_catalog_covers_update_workflow(self) -> None:
         self.assertIsNone(re.search(r"[А-Яа-яЁё]", TEMPLATE))
         self.assertIsNone(re.search(r"[А-Яа-яЁё]", JAVASCRIPT))
