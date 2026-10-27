@@ -246,6 +246,26 @@ ENGINE_UNITS = {"docker.service": "dockerd", "containerd.service": "containerd"}
 # containers come and go under random names would otherwise add a row per
 # name for ever.
 MAX_COMPONENTS = 48
+# Units started for one job and gone after it: an update check or apply, a
+# backup or a restore, a scheduled reboot. Their work belongs to the service
+# that started them. Counted under their own names, every update check left
+# a component behind: a day of them put 98 lines on the processor chart,
+# 780 KB in its answer and nearly three seconds into opening the page.
+_TRANSIENT_UNITS = (
+    re.compile(r"^(?P<service>.+)-job-[0-9a-f]{6,32}$"),
+    re.compile(r"^(?P<service>easy-ha-proxy-web-reboot)-[0-9a-f]{12}$"),
+    re.compile(r"^(?P<service>easy-ha-proxy-reboot)-[0-9]{14}-[0-9]+-[0-9a-f]{8}$"),
+)
+
+
+def component_name(name: str) -> str:
+    """The service a unit's work is counted under: its own, or its parent's."""
+
+    for pattern in _TRANSIENT_UNITS:
+        match = pattern.match(name)
+        if match:
+            return match.group("service")
+    return name
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
 
 # Memory is stored in KiB: bytes would need wider integers in every row for
@@ -1275,63 +1295,92 @@ class MetricsDatabase:
         average, peak = COMPONENT_COLUMNS[chart]
         points = payload["points"]
         position = {slot: index for index, slot in enumerate(points)}
+        # One pass for the line and its peak: the peak over the window is the
+        # highest of the per-slot peaks. Plain tuples, read by position -- on
+        # a small gateway this answer is the slowest thing the page waits for.
+        stored_step = BUCKET_SECONDS if table == "metric_1m" else HOUR_SECONDS
+        if step == stored_step:
+            # A slot is one stored row (a day of minutes, two months of
+            # hours): nothing to group, and grouping cost a sort of every row.
+            selected = (
+                "m.bucket_ts, o.proxy, o.server, "
+                f"CASE WHEN m.samples > 0 THEN COALESCE(m.{average}, 0) ELSE 0 END, "
+                f"COALESCE(m.{peak}, 0)"
+            )
+            grouping = ""
+        else:
+            selected = (
+                f"(m.bucket_ts / {step}) * {step} AS slot, o.proxy, o.server, "
+                f"{_aggregate_sql(average)}, {_aggregate_sql(peak)}"
+            )
+            grouping = " GROUP BY slot, o.id"
         with self._lock:
-            rows = self._conn.execute(
-                f"SELECT (m.bucket_ts / {step}) * {step} AS slot, o.id AS id, "
-                f"o.proxy AS name, o.server AS grp, {_aggregate_sql(average)} AS value "
-                f"FROM {table} m JOIN objects o ON o.id = m.object_id "
-                "WHERE o.kind = 'component' AND m.bucket_ts >= ? AND m.bucket_ts < ? "
-                "GROUP BY slot, o.id",
+            cursor = self._conn.execute(
+                f"SELECT {selected} FROM {table} m JOIN objects o ON o.id = m.object_id "
+                "WHERE o.kind = 'component' AND m.bucket_ts >= ? AND m.bucket_ts < ?"
+                + grouping,
                 [since, until],
-            ).fetchall()
-            peaks = {
-                int(row["id"]): int(row["value"])
-                for row in self._conn.execute(
-                    f"SELECT o.id AS id, {_aggregate_sql(peak)} AS value "
-                    f"FROM {table} m JOIN objects o ON o.id = m.object_id "
-                    "WHERE o.kind = 'component' AND m.bucket_ts >= ? "
-                    "AND m.bucket_ts < ? GROUP BY o.id",
-                    [since, until],
-                )
-            }
+            )
+            cursor.row_factory = None
+            rows = cursor.fetchall()
 
         size = len(points)
-        found: Dict[int, Dict[str, Any]] = {}
-        for row in rows:
-            index = position.get(int(row["slot"]))
+        # One line per service: rows a job unit left under its own name --
+        # every one recorded before the collector folded them -- are added
+        # to the service that started it.
+        found: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        names: Dict[str, str] = {}
+        for slot, proxy, group, value, highest in rows:
+            index = position.get(slot)
             if index is None:
                 continue
-            key = int(row["id"])
+            name = names.get(proxy)
+            if name is None:
+                name = names[proxy] = component_name(str(proxy))
+            key = (str(group), name)
             entry = found.get(key)
             if entry is None:
                 entry = found[key] = {
-                    "name": str(row["name"]),
-                    "group": str(row["grp"]),
+                    "name": name,
+                    "group": key[0],
                     "raw": [0] * size,
+                    "highest": 0,
                 }
-            entry["raw"][index] = int(row["value"])
+            entry["raw"][index] += int(value)
+            if highest > entry["highest"]:
+                entry["highest"] = int(highest)
+
+        # _from_storage, without a call and a branch per value.
+        if chart == "memory":
+            def convert(value: int) -> Any:
+                return value * MEMORY_UNIT
+        else:
+            def convert(value: int) -> Any:
+                return round(value / CPU_SCALE, 1)
 
         helpers = [0] * size
         containers = [0] * size
         claimed = [0] * size
         components = []
-        for key, entry in found.items():
+        for entry in found.values():
             raw = entry.pop("raw")
+            highest = entry.pop("highest")
             for index, value in enumerate(raw):
                 claimed[index] += value
                 if entry["group"] == COMPONENT_CONTAINER:
                     containers[index] += value
                 elif entry["group"] == COMPONENT_SERVICE and entry["name"] != "haproxy":
                     helpers[index] += value
-            entry["values"] = [_from_storage(chart, value) for value in raw]
+            entry["values"] = [convert(value) for value in raw]
             entry["mean"] = _from_storage(chart, sum(raw) // max(1, size))
-            entry["peak"] = _from_storage(chart, peaks.get(key, 0))
+            # A folded line is never lower than its own busiest slot.
+            entry["peak"] = _from_storage(chart, max(highest, max(raw, default=0)))
             components.append(entry)
         components.sort(key=lambda item: (-item["mean"], item["name"]))
 
         series = payload["series"]
-        series["helpers"] = [_from_storage(chart, value) for value in helpers]
-        series["containers"] = [_from_storage(chart, value) for value in containers]
+        series["helpers"] = [convert(value) for value in helpers]
+        series["containers"] = [convert(value) for value in containers]
         # The rest of the machine: the kernel, sshd, whatever else runs here.
         # Never negative: the host and its parts are sampled a moment apart.
         series["other"] = [
@@ -2083,7 +2132,8 @@ class Collector:
         # previous poll, and the names of containers already looked up.
         self.cgroup_root = CGROUP_ROOT
         self.containers_dir = DOCKER_CONTAINERS_DIR
-        self._component_previous: Dict[Tuple[str, str], Tuple[int, float]] = {}
+        # Keyed by cgroup directory: a service and its jobs share a name.
+        self._component_previous: Dict[str, Tuple[int, float]] = {}
         self._container_names: Dict[str, str] = {}
 
         self.last_poll_ts: Optional[int] = None
@@ -2369,7 +2419,9 @@ class Collector:
             if entry in ENGINE_UNITS:
                 found.append((ENGINE_UNITS[entry], COMPONENT_ENGINE, path))
             elif entry.endswith(".service") and entry.startswith(COMPONENT_UNIT_PREFIXES):
-                found.append((entry[: -len(".service")], COMPONENT_SERVICE, path))
+                found.append(
+                    (component_name(entry[: -len(".service")]), COMPONENT_SERVICE, path)
+                )
             elif entry.startswith("docker-") and entry.endswith(".scope"):
                 identifier = entry[len("docker-"): -len(".scope")]
                 if _CONTAINER_ID.match(identifier):
@@ -2446,38 +2498,44 @@ class Collector:
     def _observe_components(self, now: int) -> None:
         moment = time.monotonic()
         processors = os.cpu_count() or 1
+        # Each cgroup is measured on its own -- a job's counter starts at zero
+        # and is gone a minute later -- and the readings of one service and
+        # its jobs are added up.
+        readings: Dict[Tuple[str, str], List[Optional[int]]] = {}
         seen = set()
         for name, group, path in self._component_cgroups():
-            key = (name, group)
-            if key in seen:
+            if path in seen:
                 continue
-            seen.add(key)
+            seen.add(path)
             usage, memory = self._read_cgroup(path)
             if usage is None and memory is None:
                 continue
             cpu: Optional[int] = None
             if usage is not None:
-                previous = self._component_previous.get(key)
-                self._component_previous[key] = (usage, moment)
+                previous = self._component_previous.get(path)
+                self._component_previous[path] = (usage, moment)
                 if previous is not None:
                     used = usage - previous[0]
                     elapsed = moment - previous[1]
                     # A restarted unit starts its counter again: no reading
                     # rather than a negative one.
                     if used >= 0 and elapsed > 0:
-                        cpu = min(
-                            100 * CPU_SCALE,
-                            round(100 * CPU_SCALE * used / (elapsed * 1e6 * processors)),
-                        )
+                        cpu = round(100 * CPU_SCALE * used / (elapsed * 1e6 * processors))
+            total = readings.setdefault((name, group), [None, None])
+            if cpu is not None:
+                total[0] = (total[0] or 0) + cpu
+            if memory is not None:
+                total[1] = (total[1] or 0) + memory
+        for (name, group), (cpu, memory) in readings.items():
             bucket = self._machine_bucket(COMPONENT_KIND, name, group, now)
             bucket.samples += 1
             if cpu is not None:
-                bucket.add_gauge("cpu", cpu)
+                bucket.add_gauge("cpu", min(100 * CPU_SCALE, cpu))
             if memory is not None:
                 bucket.add_gauge("memory", memory)
-        for key in list(self._component_previous):
-            if key not in seen:
-                del self._component_previous[key]
+        for path in list(self._component_previous):
+            if path not in seen:
+                del self._component_previous[path]
 
     def _read_host_cpu(self) -> Optional[int]:
         """Host CPU since the previous poll, in tenths of a percent.

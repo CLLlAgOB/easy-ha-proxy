@@ -280,6 +280,162 @@ class TheCharts(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
+UPDATE_JOB = "easy-ha-proxy-updated-job-0123456789ab"
+BACKUP_JOB = "easy-ha-proxy-backupd-job-abcdef012345"
+
+
+class JobsCountUnderTheirService(Fixture):
+    """A unit started for one job is part of the service that started it.
+
+    Every update check runs in a transient unit with a name of its own. Counted
+    under that name, a day of checks on a test gateway left 98 components:
+    the processor chart's answer grew to 780 KB and took nearly three seconds,
+    and the page waited for it.
+    """
+
+    def test_a_job_unit_is_named_after_its_service(self):
+        for unit, service in (
+            (UPDATE_JOB, "easy-ha-proxy-updated"),
+            (BACKUP_JOB, "easy-ha-proxy-backupd"),
+            ("easy-ha-proxy-web-reboot-0123456789ab", "easy-ha-proxy-web-reboot"),
+            ("easy-ha-proxy-reboot-20261027131500-4242-0a1b2c3d", "easy-ha-proxy-reboot"),
+        ):
+            self.assertEqual(metricsd.component_name(unit), service, unit)
+        for name in ("haproxy", "haproxy-controld", "authelia-usersd",
+                     "easy-ha-proxy-updated", "easy-ha-proxy-job-runner", "netdata"):
+            self.assertEqual(metricsd.component_name(name), name)
+
+    def test_the_collector_finds_no_job_by_its_own_name(self):
+        self.tree()
+        cgroup(self.system / "easy-ha-proxy-updated.service", usage=1, current=1024)
+        cgroup(self.system / f"{UPDATE_JOB}.service", usage=1, current=1024)
+        cgroup(self.system / f"{BACKUP_JOB}.service", usage=1, current=1024)
+        names = [name for name, _, _ in self.collector._component_cgroups()]
+        self.assertEqual(names.count("easy-ha-proxy-updated"), 2)
+        self.assertIn("easy-ha-proxy-backupd", names)
+        self.assertFalse([name for name in names if "-job-" in name])
+
+    def test_a_service_and_its_running_job_are_added_up(self):
+        updated = self.system / "easy-ha-proxy-updated.service"
+        job = self.system / f"{UPDATE_JOB}.service"
+
+        def poll(moment, broker, worker):
+            cgroup(updated, usage=broker, current=20 * 1024 * 1024)
+            cgroup(job, usage=worker, current=100 * 1024 * 1024)
+            with mock.patch.object(metricsd.os, "cpu_count", return_value=2), \
+                    mock.patch.object(metricsd.time, "monotonic", return_value=moment):
+                self.collector._observe_components(60)
+
+        poll(100.0, broker=1_000_000, worker=0)
+        # One second later: the broker used 0.1 s, the job 0.9 s, on two CPUs.
+        poll(101.0, broker=1_100_000, worker=900_000)
+        key = (metricsd.COMPONENT_KIND, "easy-ha-proxy-updated", "service")
+        bucket = self.collector._buckets[self.collector._object_ids[key]]
+        self.assertEqual(bucket.gauge_maxima["cpu"], 500)
+        self.assertEqual(bucket.gauge_maxima["memory"], 120 * 1024)
+        self.assertNotIn(
+            (metricsd.COMPONENT_KIND, UPDATE_JOB, "service"), self.collector._object_ids
+        )
+
+    def test_a_job_that_just_started_does_not_hide_its_service(self):
+        updated = self.system / "easy-ha-proxy-updated.service"
+        cgroup(updated, usage=1_000_000, current=1024)
+        with mock.patch.object(metricsd.os, "cpu_count", return_value=1), \
+                mock.patch.object(metricsd.time, "monotonic", return_value=100.0):
+            self.collector._observe_components(60)
+        cgroup(updated, usage=1_200_000, current=1024)
+        # First seen now: no reading of its own yet, the service's still counts.
+        cgroup(self.system / f"{UPDATE_JOB}.service", usage=5_000_000, current=1024)
+        with mock.patch.object(metricsd.os, "cpu_count", return_value=1), \
+                mock.patch.object(metricsd.time, "monotonic", return_value=101.0):
+            self.collector._observe_components(60)
+        key = (metricsd.COMPONENT_KIND, "easy-ha-proxy-updated", "service")
+        bucket = self.collector._buckets[self.collector._object_ids[key]]
+        self.assertEqual(bucket.gauge_maxima["cpu"], 200)
+
+    def test_a_finished_job_is_forgotten(self):
+        job = self.system / f"{UPDATE_JOB}.service"
+        cgroup(job, usage=1, current=1024)
+        self.collector._observe_components(60)
+        self.assertIn(str(job), self.collector._component_previous)
+        import shutil
+        shutil.rmtree(job)
+        self.collector._observe_components(120)
+        self.assertNotIn(str(job), self.collector._component_previous)
+
+
+class JobsRecordedBeforeAreFolded(unittest.TestCase):
+    """Rows written under a job's own name read as part of its service."""
+
+    setUp = TheCharts.setUp
+    row = TheCharts.row
+
+    def test_eighty_checks_are_one_line(self):
+        self.row("host", "", "", cpu_avg=500)
+        self.row("component", "easy-ha-proxy-updated", "service", cpu_avg=10, cpu_max=20)
+        for index in range(80):
+            self.row(
+                "component", f"easy-ha-proxy-updated-job-{index:012x}", "service",
+                cpu_avg=1, cpu_max=30 + index,
+            )
+        payload = self.database.series(chart="cpu", site="", since=0, until=7200)
+        names = [entry["name"] for entry in payload["components"]]
+        self.assertEqual(names, ["easy-ha-proxy-updated"])
+        updated = payload["components"][0]
+        self.assertEqual(updated["values"], [9.0])
+        # The highest any of them reached, never below the line itself.
+        self.assertEqual(updated["peak"], 10.9)
+        # Helpers and "other" are the same with or without the fold.
+        self.assertEqual(payload["series"]["helpers"], [9.0])
+        self.assertEqual(payload["series"]["other"], [41.0])
+
+    def test_a_day_read_row_by_row_agrees_with_months_read_grouped(self):
+        # A day is read one stored row per slot; ninety days group hours by
+        # two. The same data must come out the same either way.
+        self.row("host", "", "", cpu_avg=500, cpu_max=700)
+        self.row("component", "haproxy", "service", cpu_avg=200, cpu_max=300)
+        self.row("component", "easy-ha-proxy-updated", "service", cpu_avg=10, cpu_max=20)
+        self.row("component", UPDATE_JOB, "service", cpu_avg=30, cpu_max=90)
+        self.database.rollup_hours(7200)
+        day = self.database.series(chart="cpu", site="", since=0, until=7200)
+        months = self.database.series(chart="cpu", site="", since=0, until=90 * 86400)
+        self.assertEqual(months["resolution_seconds"], 7200)
+
+        def lines(payload):
+            return {entry["name"]: (entry["values"], entry["peak"]) for entry in payload["components"]}
+
+        self.assertEqual(lines(day), lines(months))
+        self.assertEqual(lines(day)["easy-ha-proxy-updated"], ([4.0], 9.0))
+        self.assertEqual(day["series"]["helpers"], months["series"]["helpers"])
+
+    def test_a_folded_line_is_never_below_its_busiest_slot(self):
+        self.row("host", "", "", bucket=3600, cpu_avg=500)
+        self.row("host", "", "", bucket=3660, cpu_avg=500)
+        self.row("component", "easy-ha-proxy-updated", "service", bucket=3600, cpu_avg=5, cpu_max=6)
+        # Neither peak reached 4.5%, the two together did.
+        self.row("component", UPDATE_JOB, "service", bucket=3600, cpu_avg=40, cpu_max=30)
+        self.row("component", BACKUP_JOB, "service", bucket=3660, cpu_avg=70, cpu_max=90)
+        payload = self.database.series(chart="cpu", site="", since=0, until=7200)
+        lines = {entry["name"]: entry for entry in payload["components"]}
+        self.assertEqual(sorted(lines), ["easy-ha-proxy-backupd", "easy-ha-proxy-updated"])
+        self.assertEqual(lines["easy-ha-proxy-updated"]["values"], [4.5, 0.0])
+        self.assertEqual(lines["easy-ha-proxy-updated"]["peak"], 4.5)
+        self.assertEqual(lines["easy-ha-proxy-backupd"]["values"], [0.0, 7.0])
+        self.assertEqual(lines["easy-ha-proxy-backupd"]["peak"], 9.0)
+
+
+class ASlowAnswerDoesNotHoldEveryPage(unittest.TestCase):
+    def test_the_panel_serves_with_threads(self):
+        # Two single-threaded workers: the processor and memory charts took
+        # both, and any other page in any tab waited for them.
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        command = json.loads(dockerfile.split("CMD ", 1)[1].splitlines()[0])
+        self.assertEqual(command[0], "gunicorn")
+        threads = int(command[command.index("--threads") + 1])
+        workers = int(command[command.index("--workers") + 1])
+        self.assertGreaterEqual(workers * threads, 8)
+
+
 class TheCollectorMaySeeThem(unittest.TestCase):
     def test_the_sandbox_leaves_the_cgroup_tree_and_docker_records_readable(self):
         unit = (

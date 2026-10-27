@@ -28,4 +28,7 @@ RUN groupadd -g 1001 haproxyadmin \
 USER haproxyadmin
 WORKDIR /opt/haproxy-admin
 
-CMD ["gunicorn", "--workers", "2", "--timeout", "870", "--bind", "0.0.0.0:5000", "app:app"]
+# Threads, not more processes: a request mostly waits on a host daemon, and
+# with two single-threaded workers the monitoring page's slow charts held
+# both while every other page in every tab queued behind them.
+CMD ["gunicorn", "--workers", "2", "--threads", "4", "--timeout", "870", "--bind", "0.0.0.0:5000", "app:app"]
