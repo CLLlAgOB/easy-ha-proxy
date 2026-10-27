@@ -429,8 +429,9 @@ class ThePage(unittest.TestCase):
         script = (APP / "static/js/system_updates.js").read_text(encoding="utf-8")
         self.assertIn('"changes",', routes.split("UPDATE_COMPONENTS = frozenset(")[1].split(")")[0])
         self.assertIn('"changes"', routes.split("CONFIG_SENSITIVE_COMPONENTS")[1].split("\n")[0])
+        core = (APP / "static/js/updates_core.js").read_text(encoding="utf-8")
         self.assertIn("withChangesRow(normalizeComponents(plan))", script)
-        self.assertIn('changes: "Only what changed"', script)
+        self.assertIn('changes: "Only what changed"', core)
         # The scope is its own row, not a dump inside the source row.
         self.assertIn('!["scope", "changelog", "requires"].includes(key)', script)
 

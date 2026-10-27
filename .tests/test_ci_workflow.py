@@ -51,11 +51,28 @@ class TheLinters(unittest.TestCase):
         config = (ROOT / "ruff.toml").read_text(encoding="utf-8")
         self.assertIn('select = ["F", "E9"]', config)
 
+    def test_every_script_is_parsed_and_the_js_tests_run(self):
+        self.assertIn("node --check", step("javascript", "Parse every script")["run"])
+        self.assertIn("node --test .tests/js/", step("javascript", "Behaviour tests")["run"])
+        self.assertTrue(list((ROOT / ".tests/js").glob("*.test.js")))
+
+    def test_the_python_matrix_covers_every_supported_host(self):
+        versions = JOBS["python"]["strategy"]["matrix"]["python-version"]
+        self.assertEqual(versions, ["3.10", "3.11", "3.12", "3.13", "3.14"])
+
+    def test_a_pull_request_builds_the_image_without_publishing_it(self):
+        job = JOBS["image-check"]
+        self.assertEqual(job["if"], "github.event_name == 'pull_request'")
+        build = step("image-check", "Build")["run"]
+        self.assertIn("docker build", build)
+        self.assertNotIn("push", build)
+        self.assertIn('import app', step("image-check", "Smoke test")["run"])
+
 
 class ThePublishing(unittest.TestCase):
     def test_only_a_tested_push_to_a_release_branch_publishes(self):
         image = JOBS["image"]
-        self.assertEqual(set(image["needs"]), {"python", "shell", "ansible", "lint"})
+        self.assertEqual(set(image["needs"]), {"python", "shell", "ansible", "lint", "javascript"})
         self.assertIn("github.event_name == 'push'", image["if"])
         self.assertIn("refs/heads/alpha", image["if"])
         self.assertIn("refs/heads/main", image["if"])

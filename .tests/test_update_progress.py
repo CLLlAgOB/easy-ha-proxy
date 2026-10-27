@@ -218,9 +218,9 @@ class ThePage(unittest.TestCase):
 
     def test_the_markers_feed_the_bar_and_stay_out_of_the_log(self):
         self.assertIn('!line.startsWith("EHP-PROGRESS")', SCRIPT)
-        model = SCRIPT.split("function progressModel(")[1].split("\n  }\n")[0]
-        self.assertIn("progress.done", model)
-        self.assertIn("highestPercent", model)
+        # The bar is computed by updates_core.js (see .tests/js/), with the
+        # page's memory of how far each job got, so it never runs backwards.
+        self.assertIn("highest: highestPercent", SCRIPT)
 
     def test_history_and_channel_fold_away(self):
         self.assertRegex(TEMPLATE, r'<details class="card updates-fold" id="updates-history">')

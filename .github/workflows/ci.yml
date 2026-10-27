@@ -96,6 +96,27 @@ jobs:
           pip install ruff==0.6.9
           ruff check --output-format=github .
 
+  # The admin pages' scripts: every one must parse, and the logic kept apart
+  # from the page (updates_core.js and the like) is tested by behaviour.
+  javascript:
+    name: JavaScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Parse every script
+        run: |
+          for script in docker/app/haproxy_admin/static/js/*.js; do
+            node --check "$script"
+          done
+
+      - name: Behaviour tests
+        run: node --test .tests/js/*.test.js
+
   ansible:
     name: Ansible syntax
     runs-on: ubuntu-latest
@@ -166,7 +187,7 @@ jobs:
   # push, is what keeps that wait short.
   image:
     name: Publish the web application image
-    needs: [python, shell, ansible, lint]
+    needs: [python, shell, ansible, lint, javascript]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')

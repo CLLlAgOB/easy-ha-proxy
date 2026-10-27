@@ -430,8 +430,9 @@ class UpdateWebUiTests(unittest.TestCase):
         )
 
     def test_full_source_selection_supersedes_overlapping_components(self) -> None:
-        self.assertIn('"services", "daemons", "authelia-container", "admin-container"', JAVASCRIPT)
-        self.assertIn('["source", "all"].includes(changedId)', JAVASCRIPT)
+        # Which rows the complete update covers is tested by behaviour in
+        # .tests/js/updates_core.test.js; the page shows covered rows disabled.
+        self.assertIn("selection.superseded.has(id)", JAVASCRIPT)
         self.assertIn('box.dataset.updateComponent === "os"', JAVASCRIPT)
 
     def test_self_update_reconnects_and_progress_is_durable(self) -> None:

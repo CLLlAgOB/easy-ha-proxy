@@ -234,12 +234,13 @@ class TheBroker(unittest.TestCase):
 
 class ThePage(unittest.TestCase):
     def test_pairs_are_kept_on_the_page(self):
-        self.assertIn("function enforceRequirements(changedId)", SCRIPT)
-        self.assertIn("enforceRequirements(changedId);", SCRIPT)
+        # What a click leaves checked, pairs included, is decided by
+        # updates_core.js and tested in .tests/js/updates_core.test.js. The
+        # page must load it first and ask it on every click.
+        self.assertIn("core.selectionAfterClick(shownComponents,", SCRIPT)
+        self.assertLess(TEMPLATE.index("js/updates_core.js"), TEMPLATE.index("js/system_updates.js"))
         self.assertIn("requirementNote(component)", SCRIPT)
         self.assertIn('id="updates-pairing-note"', TEMPLATE)
-        # A clause naming the web application is met by the full stack.
-        self.assertIn('id === "admin-container" && checked.has("all")', SCRIPT)
 
     def test_the_settings_are_saved_through_the_broker(self):
         self.assertIn('@bp_system_updates.post("/api/settings")', ROUTES)

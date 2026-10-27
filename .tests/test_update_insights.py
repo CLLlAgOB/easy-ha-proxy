@@ -286,10 +286,11 @@ class ThePage(unittest.TestCase):
         self.assertIn('!["scope", "changelog", "requires"].includes(key)', SCRIPT)
 
     def test_the_estimate_uses_pace_then_history(self):
-        body = SCRIPT.split("function remainingSeconds(")[1].split("\n  }\n")[0]
-        self.assertIn("fraction >= 0.25", body)
-        self.assertIn("typicalSeconds(later)", body)
-        self.assertIn("typicalCheckSeconds()", body)
+        # How the estimate is made (pace once a quarter is done, history
+        # before that) is tested in .tests/js/updates_core.test.js; here, that
+        # the page hands it the job history and shows the result.
+        self.assertIn("core.progressModel(job, {history: jobHistory", SCRIPT)
+        self.assertIn('byId("updates-progress-eta").textContent = model.eta', SCRIPT)
         self.assertIn('id="updates-progress-eta"', TEMPLATE)
 
     def test_scheduled_checks_are_named_in_the_history(self):

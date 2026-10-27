@@ -1220,9 +1220,18 @@ shellcheck -S warning install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
 ruff check .   # mistakes only, see ruff.toml
 
+for script in docker/app/haproxy_admin/static/js/*.js; do node --check "$script"; done
+node --test .tests/js/*.test.js
+
 ansible-galaxy collection install -r ansible/requirements.yml
 ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
+
+Page logic that decides something -- what an update installs together, how
+far a job is and how long it has left -- lives in a script without the DOM
+(`updates_core.js`) that the page and Node load alike, and is tested by
+behaviour in `.tests/js/`. New page logic of that kind belongs there too,
+rather than in a test that searches the source for a line.
 
 After the checks pass, a push to `alpha` or `main` publishes the web
 application image from that commit (`alpha`, or `latest`), labelled with the

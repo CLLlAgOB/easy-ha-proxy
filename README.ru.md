@@ -1213,9 +1213,18 @@ shellcheck -S warning install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
 ruff check .   # только явные ошибки, см. ruff.toml
 
+for script in docker/app/haproxy_admin/static/js/*.js; do node --check "$script"; done
+node --test .tests/js/*.test.js
+
 ansible-galaxy collection install -r ansible/requirements.yml
 ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
+
+Логика страниц, которая что-то решает (что обновление ставит вместе, как
+далеко продвинулась задача и сколько ей осталось), живёт в скрипте без DOM
+(`updates_core.js`), который одинаково загружают и страница, и Node, и
+проверяется по поведению в `.tests/js/`. Новую логику такого рода стоит класть
+туда же, а не в тест, который ищет строку в исходнике.
 
 Когда проверки прошли, пуш в `alpha` или `main` публикует образ
 веб-приложения из этого коммита (`alpha` или `latest`) с меткой-отпечатком

@@ -22,37 +22,16 @@
   let rebootBootId = "";
   const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const REBOOT_WATCH_MS = 10 * 60 * 1000;
-  const terminalStates = new Set([
-    "completed", "failed", "cancelled", "interrupted", "partial", "skipped"
-  ]);
-  const availableStates = new Set(["available", "update", "outdated", "missing"]);
-  const sourceSupersedes = new Set([
-    "changes", "services", "daemons", "authelia-container", "admin-container"
-  ]);
-  // "Only what changed" is the source update with fewer steps: it does what
-  // the narrower source rows would, but not the containers, which keep their
-  // own rows.
-  const changesSupersedes = new Set(["services", "daemons"]);
-  const componentLabels = {
-    source: "Source code and complete stack",
-    all: "Source code and complete stack",
-    changes: "Only what changed",
-    services: "Host services and scripts",
-    daemons: "Auxiliary daemons",
-    "authelia-container": "Authelia containers",
-    "admin-container": "Web application",
-    os: "Operating-system packages"
-  };
-  const componentImpacts = {
-    source: "Managed source, host services and application containers",
-    all: "Managed source, host services and application containers",
-    changes: "Only the listed steps; containers update in their own rows",
-    services: "Host services",
-    daemons: "Auxiliary systemd services",
-    "authelia-container": "Authelia and its supporting containers",
-    "admin-container": "HAProxy Admin web application",
-    os: "Operating-system packages; reboot may be required"
-  };
+  // The decisions -- what a plan offers, what goes together, how far a job
+  // is -- live in updates_core.js, where the tests in .tests/js/ reach them.
+  const core = window.EasyHaProxyUpdates;
+  const {
+    jobId, jobState, jobOperation, jobComponents, isTerminal,
+    versionText, detailsText, normalizeComponents, extractPlan, planRelease, clock
+  } = core;
+  const availableStates = core.AVAILABLE_STATES;
+  const componentLabels = core.COMPONENT_LABELS;
+  const componentImpacts = core.COMPONENT_IMPACTS;
   const ACTIVE_JOB_KEY = "easy_ha_proxy_update_job";
   const PENDING_START_KEY = "easy_ha_proxy_update_pending_start";
   const RELOADED_JOB_KEY = "easy_ha_proxy_update_reloaded_job";
@@ -62,20 +41,6 @@
   const START_RECONCILE_GRACE_MS = 15 * 1000;
   // How long a finished installation stays summarised at the top.
   const RESULT_VISIBLE_MS = 30 * 60 * 1000;
-  // What each step of a job is called, and how far into a component it is.
-  // The playbook itself reports done/total tasks; the share before it covers
-  // downloading the source and the checks around it.
-  const PHASE_LABELS = {
-    checking: "Checking for updates…",
-    verifying: "Verifying the update plan…",
-    starting: "Starting…",
-    source: "Downloading the new version…",
-    prepare: "Preparing…",
-    syntax: "Checking the playbook…",
-    playbook: "Installing…",
-    rechecking: "Checking the result…"
-  };
-  const PHASE_SHARE = {starting: 0, source: 0.03, prepare: 0.08, syntax: 0.12, playbook: 0.15};
   const dateFormat = new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
     dateStyle: "medium",
     timeStyle: "medium"
@@ -231,19 +196,11 @@
       body: JSON.stringify(payload)
     });
   }
-  function jobId(job) { return String(job && (job.id || job.job_id) || ""); }
-  function jobState(job) { return String(job && (job.status || job.state) || "unknown").toLowerCase(); }
-  function jobOperation(job) { return String(job && (job.operation || job.action || job.kind) || ""); }
   function operationLabel(value) {
     if (value === "check") return t("Update check");
     if (value === "apply") return t("Install updates");
     return t(value || "—");
   }
-  function jobComponents(job) {
-    const values = job && (job.components || job.selected_components || job.result?.components);
-    return Array.isArray(values) ? values.map(String) : [];
-  }
-  function isTerminal(job) { return terminalStates.has(jobState(job)); }
 
   function pendingStartMatches(job) {
     if (!pendingStart || jobOperation(job) !== pendingStart.operation) return false;
@@ -288,38 +245,6 @@
     return "missing";
   }
 
-  function versionText(value) {
-    if (value == null || value === "") return "—";
-    if (typeof value === "string" || typeof value === "number") return String(value);
-    if (Array.isArray(value)) {
-      const shown = value.slice(0, 12).map(versionText).join(", ");
-      return value.length > 12 ? `${shown}, … (+${value.length - 12})` : shown;
-    }
-    if (typeof value === "object") {
-      for (const key of ["display", "version", "revision", "commit", "digest", "value", "count"]) {
-        if (value[key] != null && value[key] !== "") return String(value[key]);
-      }
-      const pairs = Object.entries(value)
-        .filter(([, item]) => ["string", "number", "boolean"].includes(typeof item))
-        .slice(0, 4)
-        .map(([key, item]) => `${key}=${item}`);
-      return pairs.length ? pairs.join(", ") : "—";
-    }
-    return String(value);
-  }
-  function detailsText(value) {
-    if (!value) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) return value.map(detailsText).filter(Boolean).join("; ");
-    if (typeof value === "object") {
-      return Object.entries(value)
-        .filter(([, item]) => item != null && item !== "")
-        .slice(0, 8)
-        .map(([key, item]) => `${key}: ${versionText(item)}`)
-        .join("; ");
-    }
-    return String(value);
-  }
   function outdatedArtifactLabels(component) {
     const artifacts = component && component.details && component.details.artifacts;
     if (!Array.isArray(artifacts)) return [];
@@ -328,48 +253,10 @@
       .map((item) => item.label || item.id)
       .filter(Boolean);
   }
-  function changesScope(component) {
-    const scope = component && component.details && component.details.scope;
-    return scope && typeof scope === "object" ? scope : null;
-  }
-  function changesReason(scope) {
-    const steps = Array.isArray(scope.steps) ? scope.steps.map((step) => t(String(step))) : [];
-    return steps.length
-      ? t("{count} changed file(s). Steps to run: {steps}", {count: scope.changed, steps: steps.join(", ")})
-      : t("{count} changed file(s); nothing on the host needs redeploying", {count: scope.changed});
-  }
-  function changesUnavailableReason(scope) {
-    if (scope.reason === "web-application-not-published") {
-      return t("This version also changes the web application, and its image is not published yet. Check again once it is.");
-    }
-    if (scope.reason === "no-applied-record") {
-      return t("Available after the next complete update: there is no record of the last one yet.");
-    }
-    const listed = Array.isArray(scope.unmapped) ? scope.unmapped.join(", ") : "";
-    return t("These changes need the complete stack: {paths}", {paths: listed || "—"});
-  }
   // The plan carries "only what changed" inside the source component, so a
-  // broker that predates it still accepts the plan. The row is derived here.
+  // broker that predates it still accepts the plan. The row is derived there.
   function withChangesRow(components) {
-    const source = components.find((item) => item.id === "all" && item.actionable);
-    const scope = changesScope(source);
-    if (!scope) return components;
-    const row = {
-      id: "changes",
-      state: scope.ready === true ? "available" : "blocked",
-      actionable: scope.ready === true,
-      current: source.current,
-      available: source.available,
-      reason: scope.ready === true ? changesReason(scope) : changesUnavailableReason(scope),
-      details: {
-        paths: Array.isArray(scope.paths) ? scope.paths.join(", ") : "",
-        requires: Array.isArray(scope.requires) ? scope.requires : []
-      },
-      impact: componentImpacts.changes
-    };
-    const rest = components.filter((item) => !(row.actionable && changesSupersedes.has(item.id)));
-    const index = rest.indexOf(source);
-    return rest.slice(0, index).concat([row], rest.slice(index));
+    return core.withChangesRow(components, t);
   }
   function componentReason(component) {
     if (component.id === "changes") return String(component.reason);
@@ -412,66 +299,8 @@
     }
     return t(String(component.reason));
   }
-  function normalizeComponents(plan) {
-    const raw = plan && (plan.components || plan.updates || plan.candidates);
-    const values = Array.isArray(raw)
-      ? raw
-      : (raw && typeof raw === "object"
-          ? Object.entries(raw).map(([id, value]) => Object.assign({id}, value || {}))
-          : []);
-    return values.map((item) => {
-      const value = item && typeof item === "object" ? item : {id: String(item)};
-      const id = String(value.id || value.component || value.name || "");
-      const state = String(value.state || value.status || "unknown").toLowerCase();
-      const actionable = value.actionable === true || (
-        value.actionable !== false && (availableStates.has(state) || value.update_available === true)
-      );
-      return {
-        id,
-        state,
-        actionable,
-        current: value.current_version ?? value.current ?? value.installed ?? value.local_version,
-        available: value.available_version ?? value.available ?? value.candidate ?? value.remote_version,
-        reason: value.summary || value.reason || value.message || value.reason_code || "Update available",
-        details: value.details,
-        impact: value.impact || componentImpacts[id] || "Managed component restart"
-      };
-    }).filter((item) => item.id);
-  }
-  function planFrom(value) {
-    if (!value || typeof value !== "object") return null;
-    const candidates = [
-      value.plan,
-      value.latest_plan,
-      value.update_plan,
-      value.result && value.result.plan,
-      value.result && value.result.update_plan
-    ];
-    const candidate = candidates.find((item) => item && typeof item === "object");
-    if (!candidate) return null;
-    const id = String(candidate.id || candidate.plan_id || "");
-    if (!/^[a-f0-9]{32}$/i.test(id)) return null;
-    return Object.assign({}, candidate, {id: id.toLowerCase()});
-  }
-  function extractPlan(payload, jobs) {
-    const direct = planFrom(payload);
-    if (direct) return direct;
-    for (const job of jobs || []) {
-      const fromJob = planFrom(job);
-      if (fromJob) return fromJob;
-    }
-    return null;
-  }
-
   function technicalCell(value) {
     return `<span class="mono notranslate" translate="no" data-i18n-skip>${escape(versionText(value))}</span>`;
-  }
-  // The release channel a plan was checked for, derived the way the broker
-  // derives it: local if the source is local, otherwise keyed off the image.
-  function planRelease(plan) {
-    if (!plan) return "";
-    if (String(plan.source_channel || "github") === "local") return "local";
-    return String(plan.image_channel || "latest") === "alpha" ? "alpha" : "stable";
   }
   // A check previews whichever channel is selected, saved or not. That
   // preview is worth having, but it cannot be applied: the broker refuses a
@@ -482,16 +311,6 @@
     return Boolean(release) && release !== installedRelease;
   }
 
-  // What a component has to be installed with: clauses, each needing one of
-  // its components. The full stack pulls the web application itself.
-  function requiredClauses(id) {
-    const component = shownComponents.find((item) => item.id === id);
-    const clauses = component && component.details && component.details.requires;
-    return Array.isArray(clauses) ? clauses.filter((clause) => Array.isArray(clause) && clause.length) : [];
-  }
-  function clauseMet(clause, checked) {
-    return clause.some((id) => checked.has(id) || (id === "admin-container" && checked.has("all")));
-  }
   function requirementNote(component) {
     const clauses = Array.isArray(component.details && component.details.requires)
       ? component.details.requires.filter((clause) => Array.isArray(clause) && clause.length)
@@ -504,35 +323,6 @@
       return (visible.length ? visible : clause).map((id) => t(componentLabels[id] || id)).join(` ${t("or")} `);
     }).join("; ");
     return `<div class="updates-row-requires">${escape(t("Installed together with: {components}", {components: names}))}</div>`;
-  }
-  // Keeps the selection installable: checking a component brings what it
-  // needs; unchecking one takes along what cannot go without it. The broker
-  // refuses anything else, so this only saves the round trip.
-  function enforceRequirements(changedId) {
-    const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
-    const boxFor = Object.fromEntries(boxes.map((box) => [box.dataset.updateComponent, box]));
-    const checked = () => new Set(boxes.filter((box) => box.checked).map((box) => box.dataset.updateComponent));
-    const dropping = Boolean(changedId && boxFor[changedId] && !boxFor[changedId].checked);
-    for (let round = 0; round < boxes.length + 1; round += 1) {
-      let changed = false;
-      const now = checked();
-      for (const box of boxes) {
-        if (!box.checked) continue;
-        for (const clause of requiredClauses(box.dataset.updateComponent)) {
-          if (clauseMet(clause, now)) continue;
-          const pick = dropping ? null : clause.map((id) => boxFor[id]).find((candidate) => candidate && !candidate.disabled);
-          if (pick) {
-            pick.checked = true;
-          } else {
-            box.checked = false;
-          }
-          changed = true;
-          break;
-        }
-        if (changed) break;
-      }
-      if (!changed) break;
-    }
   }
   function renderChangelog(components) {
     const source = components.find((item) => item.id === "all");
@@ -684,38 +474,22 @@
   function resetConfirmation() {
     closeConfirm();
   }
+  // The rows a click leaves checked, worked out from the rows as they stand
+  // (see selectionAfterClick in updates_core.js), then shown.
   function updateSelection(changedId) {
     const boxes = Array.from(document.querySelectorAll("[data-update-component]"));
     const planUsable = Boolean(currentPlan && !(
       currentPlan.stale === true || currentPlan.expired === true || currentPlan.valid === false
     ) && !planForOtherChannel(currentPlan));
-    const source = boxes.find((box) => ["source", "all"].includes(box.dataset.updateComponent));
-    const changes = boxes.find((box) => box.dataset.updateComponent === "changes");
-    if (["source", "all"].includes(changedId) && source && source.checked) {
-      boxes.forEach((box) => {
-        if (sourceSupersedes.has(box.dataset.updateComponent)) box.checked = false;
-      });
-    } else if (changedId === "changes" && changes && changes.checked) {
-      if (source) source.checked = false;
-      boxes.forEach((box) => {
-        if (changesSupersedes.has(box.dataset.updateComponent)) box.checked = false;
-      });
-    } else if (changedId && sourceSupersedes.has(changedId)) {
-      if (source) source.checked = false;
-      if (changes && changesSupersedes.has(changedId)) changes.checked = false;
-    }
-    enforceRequirements(changedId);
-    if (source && source.checked) {
-      boxes.forEach((box) => {
-        if (sourceSupersedes.has(box.dataset.updateComponent)) box.checked = false;
-      });
-    }
-    const sourceSelected = Boolean(source && source.checked);
-    const changesSelected = Boolean(changes && changes.checked);
+    const selection = core.selectionAfterClick(shownComponents, boxes.map((box) => ({
+      id: box.dataset.updateComponent,
+      checked: box.checked,
+      disabled: box.disabled
+    })), changedId);
     boxes.forEach((box) => {
       const id = box.dataset.updateComponent;
-      const superseded = (sourceSelected && sourceSupersedes.has(id)) ||
-        (changesSelected && changesSupersedes.has(id));
+      const superseded = selection.superseded.has(id);
+      box.checked = selection.checked.has(id);
       box.disabled = requestRunning || operationRunning || !planUsable || superseded;
       const row = box.closest("tr");
       if (row) row.classList.toggle("updates-row-superseded", superseded);
@@ -775,120 +549,13 @@
     renderProgress(active);
     return Boolean(active);
   }
-  function clock(seconds) {
-    const value = Math.max(0, Math.floor(seconds));
-    return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
-  }
   function jobSeconds(job, until) {
-    const started = new Date(job.started_at || job.created_at || Date.now()).getTime();
-    const ended = until ? new Date(until).getTime() : Date.now();
-    return Number.isFinite(started) && Number.isFinite(ended) ? (ended - started) / 1000 : 0;
+    return core.jobSeconds(job, until);
   }
-  function median(values) {
-    const sorted = values.slice().sort((a, b) => a - b);
-    const middle = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-  }
-  // How long a component took in the last few installations that finished.
-  function typicalSeconds(component) {
-    const values = [];
-    for (const job of jobHistory) {
-      if (jobOperation(job) !== "apply" || jobState(job) !== "completed") continue;
-      const seconds = Number(job.result && job.result.component_seconds && job.result.component_seconds[component]);
-      if (Number.isFinite(seconds) && seconds > 0) values.push(seconds);
-      if (values.length >= 5) break;
-    }
-    return values.length ? median(values) : null;
-  }
-  function typicalCheckSeconds() {
-    const values = [];
-    for (const job of jobHistory) {
-      if (jobOperation(job) !== "check" || jobState(job) !== "completed" || !job.completed_at) continue;
-      const seconds = jobSeconds(job, job.completed_at);
-      if (seconds > 0) values.push(seconds);
-      if (values.length >= 5) break;
-    }
-    return values.length ? median(values) : 45;
-  }
-  // Seconds left, or null when there is nothing honest to say. The current
-  // component is judged by its own pace once it is a quarter done -- a
-  // "changes only" run is as long as its changes, so history says little --
-  // and by history before that; the components after it by history alone.
-  function remainingSeconds(job, index, phase, fraction) {
-    const components = jobComponents(job);
-    if (phase === "rechecking" || !components.length) return null;
-    const current = components[Math.min(index, components.length - 1)];
-    const started = Date.parse(job.component_started_at || "");
-    const elapsed = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : null;
-    let left;
-    if (phase === "verifying") {
-      left = typicalSeconds(current);
-    } else if (elapsed != null && fraction >= 0.25) {
-      left = elapsed * (1 - fraction) / fraction;
-    } else {
-      const typical = typicalSeconds(current);
-      left = typical == null || elapsed == null ? null : Math.max(typical - elapsed, 15);
-    }
-    if (left == null) return null;
-    for (const later of components.slice(index + 1)) {
-      const typical = typicalSeconds(later);
-      if (typical == null) return null;
-      left += typical;
-    }
-    return left + typicalCheckSeconds();
-  }
-  function remainingText(seconds) {
-    if (seconds == null || !Number.isFinite(seconds)) return "";
-    if (seconds < 60) return t("less than a minute left");
-    return t("about {minutes} min left", {minutes: Math.round(seconds / 60)});
-  }
-  // The task name without its role prefix: "guardd | Install script".
-  function taskText(value) {
-    return String(value || "").replace(/^[^:|]{1,60} : /, "");
-  }
+  // The bar, its labels and the time left, judged against the jobs that
+  // finished before (see progressModel in updates_core.js).
   function progressModel(job) {
-    const progress = job.progress && typeof job.progress === "object" ? job.progress : {};
-    if (jobOperation(job) !== "apply") {
-      return {percent: null, label: t("Checking for updates…"), step: "", eta: ""};
-    }
-    const components = jobComponents(job);
-    const count = Math.max(1, components.length);
-    let index = Number.isInteger(job.component_index)
-      ? job.component_index
-      : components.indexOf(String(job.current_component || ""));
-    if (index < 0) index = 0;
-    const phase = String(progress.phase || "verifying");
-    let percent;
-    let share = 0;
-    if (phase === "verifying") {
-      percent = 2;
-    } else if (phase === "rechecking") {
-      percent = 97;
-    } else {
-      share = PHASE_SHARE[phase] ?? 0;
-      if (phase === "playbook" && Number(progress.total) > 0) {
-        share = 0.15 + 0.85 * Math.min(1, Number(progress.done || 0) / Number(progress.total));
-      }
-      percent = 3 + 94 * ((index + share) / count);
-    }
-    const eta = remainingText(remainingSeconds(job, index, phase, share));
-    const id = jobId(job);
-    percent = Math.max(highestPercent[id] || 0, Math.round(Math.min(99, Math.max(1, percent))));
-    highestPercent[id] = percent;
-    const component = components[Math.min(index, components.length - 1)] || "";
-    const name = t(componentLabels[component] || component);
-    let label;
-    if (phase === "verifying" || phase === "rechecking") {
-      label = t(PHASE_LABELS[phase]);
-    } else if (components.length > 1) {
-      label = t("Installing {component} ({index} of {total})", {component: name, index: index + 1, total: components.length});
-    } else {
-      label = t("Installing {component}", {component: name});
-    }
-    const step = phase === "playbook" && progress.task
-      ? taskText(progress.task)
-      : t(PHASE_LABELS[phase] || "");
-    return {percent, label, step, eta};
+    return core.progressModel(job, {history: jobHistory, highest: highestPercent, t});
   }
   function renderProgress(active) {
     const wrap = byId("updates-progress");
