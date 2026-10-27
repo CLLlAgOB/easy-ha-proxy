@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -228,6 +229,31 @@ class ThePlanNamesTheRepinAndTheCheckAfterAgrees(unittest.TestCase):
         )
         UPDATED.validate_applied_container_digests(reviewed, applied, ["all"])
 
+    def test_a_repin_pushed_while_the_update_ran_is_not_a_mismatch(self):
+        # The second report. The check passed, the update ran for eighteen
+        # minutes, and meanwhile the branch gained a commit re-pinning an
+        # image. The check after the update reads the branch again, so its
+        # plan already offers that next change -- and the comparison looked
+        # the running image up under the name it will have after the next
+        # update, found nothing, and failed an update that had installed
+        # exactly what was reviewed.
+        reviewed = gateway(
+            self.root / "before",
+            compose_images=f"{OLD}\n{REDIS}\n",
+            candidate_version="4.39.20",
+        )
+        applied = gateway(
+            self.root / "after",
+            compose_images=f"{OLD}\n{REDIS}\n",
+            candidate_version="4.39.28",
+        )
+        components = {item["id"]: item for item in applied["components"]}
+        images = {
+            item["image"]: item for item in components["authelia-container"]["details"]["images"]
+        }
+        self.assertEqual(images[OLD]["target_image"], NEW)
+        UPDATED.validate_applied_container_digests(reviewed, applied, ["all"])
+
     def test_the_check_still_catches_a_different_image(self):
         reviewed = self.reviewed()
         applied = gateway(
@@ -294,6 +320,19 @@ class ShortLabelsStayOutOfDaemonMessages(unittest.TestCase):
     def test_the_reported_message_stays_whole(self):
         message = "an applied image digest differs from the reviewed update plan"
         self.assertEqual(I18N.translate(message, "ru"), message)
+
+    def test_the_page_keeps_its_translator_off_a_failed_installation(self):
+        # The server left the sentence whole, and the page still showed it
+        # half in Russian: its own pass over the DOM substitutes any label
+        # it finds. The banner now goes through setMessage marked technical,
+        # like a failed check -- label translated, the broker's words kept.
+        script = UPDATES_JS.read_text(encoding="utf-8")
+        render = script.split("function renderResult(")[1].split("\n  function ")[0]
+        call = re.search(r'setMessage\(\s*"updates-result-text",(.*)\);', render, re.S)
+        self.assertIsNotNone(call)
+        self.assertTrue(call.group(1).rstrip().endswith("!ok"))
+        self.assertIn('t("The update failed")', call.group(1))
+        self.assertNotIn("textContent", render)
 
     def test_sentence_fragments_still_substitute_around_a_name(self):
         translated = I18N.translate(

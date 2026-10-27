@@ -613,10 +613,19 @@
     box.classList.toggle("updates-result--failed", !ok);
     const took = clock(jobSeconds(job, job.completed_at));
     const reboot = Boolean(job.result?.reboot_required);
-    byId("updates-result-text").textContent = ok
-      ? t("Updates installed in {time}.", {time: took}) +
-        (reboot ? ` ${t("A server reboot is required.")}` : "")
-      : `${t("The update failed")}: ${job.error || job.message || jobState(job)}`;
+    // A failure ends in the broker's own words, so the line is translated
+    // here and kept from the page-wide pass, as setMessage does for a failed
+    // check: that pass swaps in any catalogue label the words happen to
+    // contain, and "differs from" came out in Russian mid-sentence.
+    setMessage(
+      "updates-result-text",
+      ok
+        ? t("Updates installed in {time}.", {time: took}) +
+          (reboot ? ` ${t("A server reboot is required.")}` : "")
+        : `${t("The update failed")}: ${job.error || job.message || jobState(job)}`,
+      undefined,
+      !ok
+    );
   }
   // Which parts of the page are on screen. A running job owns the page: the
   // list of updates waits until it has finished.

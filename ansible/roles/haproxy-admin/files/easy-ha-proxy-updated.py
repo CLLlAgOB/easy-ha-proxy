@@ -1400,7 +1400,15 @@ def reviewed_container_digests(
         for item in images:
             if not isinstance(item, dict):
                 raise UpdatedError("the checked image plan is invalid", code="stale_plan")
-            image = str(item.get("target_image") or item.get("image") or "")
+            # A reviewed image is named by what it will become, an installed
+            # one by what runs now. The check after an update reads the
+            # branch again, and a commit pushed while the update ran may
+            # already re-pin the running image: named by its next target, it
+            # would not be found, and a faithful update would fail.
+            if current:
+                image = str(item.get("current_image") or item.get("image") or "")
+            else:
+                image = str(item.get("target_image") or item.get("image") or "")
             digest = str(item.get(digest_field) or "").lower()
             if (
                 not image
