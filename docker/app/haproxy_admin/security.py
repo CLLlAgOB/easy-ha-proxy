@@ -158,6 +158,21 @@ def apply_security_headers(response):
     return response
 
 
+def init_csrf(app, csrf) -> None:
+    """Switch on CSRF protection with a token that lasts as long as its session.
+
+    Flask-WTF's default gives a token one hour. A page reads its token once,
+    when it loads, so every write from a page left open longer -- "check for
+    updates" on a page opened in the morning -- failed with "CSRF validation
+    failed" until the page was reloaded. The token stays bound to the session
+    cookie (HttpOnly, Secure, SameSite=Strict), and a new session gets a new
+    one; how long a login lasts is Authelia's decision, not the token's.
+    """
+
+    app.config["WTF_CSRF_TIME_LIMIT"] = None
+    csrf.init_app(app)
+
+
 def keep_redirects_on_this_origin(response):
     """Send the panel's redirects to its own pages as a path, not a full URL.
 

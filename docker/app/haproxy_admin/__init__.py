@@ -33,6 +33,7 @@ from .security import (
     STATIC_CACHE_SECONDS,
     apply_security_headers,
     enforce_proxy_and_role,
+    init_csrf,
     keep_redirects_on_this_origin,
 )
 
@@ -208,7 +209,7 @@ def create_app() -> Flask:
                 )
             )
 
-    csrf.init_app(app)
+    init_csrf(app, csrf)
 
     @app.before_request
     def assign_csp_nonce():
