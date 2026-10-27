@@ -1,6 +1,6 @@
 """Signatures mined from a week of two gateways' logs (2026-10-26).
 
-Replaying a week of Oreol and privatnet with the shipped signature file left
+Replaying a week of two production gateways with the shipped signature file left
 these unmatched although 6-15 addresses a week asked for each and no client
 ever did:
 

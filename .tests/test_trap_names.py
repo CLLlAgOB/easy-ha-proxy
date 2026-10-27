@@ -1,7 +1,7 @@
 """Trap names: hostnames that point at the gateway and serve no site.
 
 Scanners find a gateway's names in public certificate logs and walk them.
-A name with a DNS record but no site gets nothing but that: on privatnet a
+A name with a DNS record but no site gets nothing but that: on one gateway a
 week brought 61 addresses to one such name and 57 to another. The operator
 marks a name as a trap; a request for it bans the address at once.
 

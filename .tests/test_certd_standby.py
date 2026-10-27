@@ -451,7 +451,7 @@ class HoldingANameOnAStandby(StandbyFixture):
 class DualKeySitesAreFiledByFileName(StandbyFixture):
     """The apex of a dual-key site is deployed as two files.
 
-    oreol-style installations issue <domain>-ecdsa and <domain>-rsa, so the
+    dual-key installations issue <domain>-ecdsa and <domain>-rsa, so the
     stem of the deployed file is not a hostname and no certificate covers it
     literally. Everything that addresses a file uses the stem; the coverage
     check uses the hostname inside it. Getting this wrong would have made a

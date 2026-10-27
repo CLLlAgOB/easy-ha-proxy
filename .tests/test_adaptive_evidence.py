@@ -45,7 +45,7 @@ guardd = load()
 def request_with(status):
     """A parsed log line shaped like a scanner probe, varying only the status."""
     return guardd.ParsedRequest(
-        client_ip="31.70.84.142",
+        client_ip="203.0.113.17",
         status=status,
         frontend="fe_https",
         backend="fe_https/<NOSRV>",

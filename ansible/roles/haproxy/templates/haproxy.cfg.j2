@@ -327,7 +327,7 @@ frontend fe_https
     tcp-request connection reject if conn_too_many  !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     # "name:443" names the same site as "name" (RFC 9110), and some clients
-    # send it: one application checked e.oreol-2010.ru:443 every minute and
+    # send it: one application checked its site as name:443 every minute and
     # got 400 every time, because every host ACL below compares the header as
     # written. The default port is stripped once, before anything reads the
     # header -- the log and the backend then see the plain name.

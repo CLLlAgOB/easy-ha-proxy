@@ -1,6 +1,6 @@
 """A Host header that carries the default port names the same site.
 
-`Host: e.oreol-2010.ru:443` is the same site as `Host: e.oreol-2010.ru`
+`Host: shop.example.com:443` is the same site as `Host: shop.example.com`
 (RFC 9110), and some clients send it. Every host ACL compared the header as
 written, so one application that checked the site every minute got 400 every
 time: 455 refusals a week to 23 real clients on one gateway. Each frontend
