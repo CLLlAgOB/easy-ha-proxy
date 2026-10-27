@@ -5,26 +5,16 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
 const path = require("node:path");
 
+const {russianCatalogue} = require("./catalogue.js");
+
 const STATIC = path.join(__dirname, "../../docker/app/haproxy_admin/static/js");
-const CATALOGUES = path.join(__dirname, "../../docker/app/haproxy_admin/translations");
 const i18n = require(path.join(STATIC, "i18n.js"));
 const monitoring = require(path.join(STATIC, "monitoring_core.js"));
 
 const CYRILLIC = /[Ѐ-ӿ]/;
 const LATIN_WORD = /[A-Za-z]{2,}/;
-
-function russianCatalogue() {
-  const messages = {};
-  for (const name of fs.readdirSync(CATALOGUES, {recursive: true})) {
-    if (!String(name).endsWith(".json")) continue;
-    const data = JSON.parse(fs.readFileSync(path.join(CATALOGUES, String(name)), "utf8"));
-    if (data.meta.code === "ru") Object.assign(messages, data.messages);
-  }
-  return messages;
-}
 
 const RUSSIAN = russianCatalogue();
 const real = i18n.createTranslator(RUSSIAN);

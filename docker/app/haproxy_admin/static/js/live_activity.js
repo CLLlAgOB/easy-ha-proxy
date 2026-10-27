@@ -3,43 +3,39 @@
  * One request every few seconds to /api/monitoring/live; everything else --
  * sorting, tabs, the timeline -- happens here on the answer. Filters that
  * change what is counted go back to the server; sorting does not.
+ *
+ * The decisions -- saved choices, filters, sort order, badges, the ban
+ * action, the timeline's bars -- live in live_activity_core.js, where the
+ * tests in .tests/js/ reach them.
  */
 (function () {
   "use strict";
 
+  const core = window.EasyHaProxyLive;
   const t = window.t || ((value) => String(value));
   const esc = window.escapeHtml;
   const flag = window.countryFlagMarkup;
   const STORE = "live-activity";
 
-  const state = {
-    window: 60,
-    refresh: 5,
+  const state = Object.assign(core.defaults(), {
     paused: false,
-    tab: "addresses",
-    sort: {
-      addresses: { key: "requests", dir: -1 },
-      sites: { key: "requests", dir: -1 },
-    },
     data: null,
     timer: null,
     inFlight: false,
-  };
+  });
 
   function byId(id) {
     return document.getElementById(id);
   }
 
   function load() {
+    let saved = {};
     try {
-      const saved = JSON.parse(window.localStorage.getItem(STORE) || "{}");
-      if (Number(saved.window) >= 5) state.window = Number(saved.window);
-      if ([2, 5, 10, 30].includes(Number(saved.refresh))) state.refresh = Number(saved.refresh);
-      if (["addresses", "sites", "events", "banned"].includes(saved.tab)) state.tab = saved.tab;
-      if (saved.sort && typeof saved.sort === "object") Object.assign(state.sort, saved.sort);
+      saved = JSON.parse(window.localStorage.getItem(STORE) || "{}");
     } catch (error) {
       // Private mode or a damaged entry: defaults.
     }
+    Object.assign(state, core.restoreSettings(saved));
   }
 
   function save() {
@@ -61,16 +57,7 @@
     return Number(value || 0).toLocaleString(document.documentElement.lang || undefined);
   }
 
-  function bytes(value) {
-    let size = Number(value || 0);
-    const units = ["B", "KiB", "MiB", "GiB"];
-    let index = 0;
-    while (size >= 1024 && index < units.length - 1) {
-      size /= 1024;
-      index += 1;
-    }
-    return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
-  }
+  const bytes = core.bytes;
 
   function clock(epoch) {
     const date = new Date(Number(epoch) * 1000);
@@ -78,17 +65,12 @@
   }
 
   function duration(seconds) {
-    const value = Math.max(0, Number(seconds) || 0);
-    if (value < 60) return `${value} ${t("sec")}`;
-    if (value < 3600) return `${Math.round(value / 60)} ${t("min")}`;
-    if (value < 86400) return `${Math.round(value / 3600)} ${t("hr")}`;
-    return `${Math.round(value / 86400)} ${t("days")}`;
+    return core.duration(seconds, t);
   }
 
   function statusBadge(status) {
     const code = Number(status) || 0;
-    const tone = code >= 500 ? "la-s5" : code >= 400 ? "la-s4" : code >= 300 ? "la-s3" : "la-s2";
-    return `<span class="la-status ${tone}">${esc(code || "—")}</span>`;
+    return `<span class="la-status ${core.statusTone(code)}">${esc(code || "—")}</span>`;
   }
 
   function countryCell(code) {
@@ -112,20 +94,16 @@
   /* ---------- request ---------- */
 
   function filters() {
-    const params = { window: state.window };
-    const ip = byId("la-ip").value.trim();
-    if (ip) params.ip = ip;
-    const host = byId("la-host").value;
-    if (host) params.host = host;
-    const country = byId("la-country").value;
-    if (country) params.country = country;
-    const status = byId("la-status").value;
-    if (status) params.status = status;
-    const query = byId("la-q").value.trim();
-    if (query) params.q = query;
-    if (byId("la-blocked").checked) params.blocked = "1";
-    if (byId("la-banned-only").checked) params.banned = "1";
-    return params;
+    return core.requestParams({
+      window: state.window,
+      ip: byId("la-ip").value,
+      host: byId("la-host").value,
+      country: byId("la-country").value,
+      status: byId("la-status").value,
+      q: byId("la-q").value,
+      blocked: byId("la-blocked").checked,
+      banned: byId("la-banned-only").checked,
+    });
   }
 
   async function refresh() {
@@ -171,8 +149,9 @@
   function tone(id, value, warnAt) {
     const card = byId(id);
     if (!card) return;
-    card.classList.toggle("la-warn", value > 0 && value < warnAt);
-    card.classList.toggle("la-bad", value >= warnAt);
+    const level = core.cardTone(value, warnAt);
+    card.classList.toggle("la-warn", level === "warn");
+    card.classList.toggle("la-bad", level === "bad");
   }
 
   function renderSummary(data) {
@@ -192,23 +171,22 @@
     const note = byId("la-note");
     // Reading the log is capped so that watching it can never compete with
     // HAProxy; under a flood the page falls behind instead, and says so.
-    const behind = Number(data.lag_bytes || 0) > 0 && Number(data.lag_seconds || 0) > 15;
-    if (behind) {
-      note.textContent = `${t("Heavy traffic: the data is behind the log by")} ${duration(data.lag_seconds)}. ` +
+    const said = core.summaryNote(data);
+    if (said.kind === "behind") {
+      note.textContent = `${t("Heavy traffic: the data is behind the log by")} ${duration(said.seconds)}. ` +
         t("Reading is capped so that watching cannot slow the gateway down.");
       note.classList.add("la-warn");
-    } else if (data.truncated) {
-      note.textContent = `${t("Only the last")} ${duration(data.covered_seconds)} ${t("of the window are in memory")}`;
+    } else if (said.kind === "partial") {
+      note.textContent = `${t("Only the last")} ${duration(said.seconds)} ${t("of the window are in memory")}`;
       note.classList.add("la-warn");
     } else {
-      note.textContent = `${t("Time window")}: ${duration(data.window)} · ${t("one bar per")} ${duration(data.bucket_seconds)}`;
+      note.textContent = `${t("Time window")}: ${duration(said.seconds)} · ${t("one bar per")} ${duration(said.bucket)}`;
       note.classList.remove("la-warn");
     }
 
     const reasons = byId("la-reasons");
     reasons.textContent = "";
-    Object.entries(data.refusals || {})
-      .sort((a, b) => b[1] - a[1])
+    core.refusalCounts(data.refusals)
       .forEach(([name, count]) => {
         const chip = document.createElement("span");
         chip.className = "la-badge la-refused";
@@ -217,74 +195,56 @@
       });
   }
 
+  const TIMELINE_COLOURS = { ok: "#2e9e5b", errors: "#c8a13a", blocked: "#cc4b4b" };
+
   function renderTimeline(data) {
     const svg = byId("la-timeline");
-    const bars = data.timeline || [];
-    const peak = Math.max(1, ...bars.map((bar) => bar.ok + bar.errors + bar.blocked));
     const width = 1000;
     const height = 70;
-    const step = width / Math.max(1, bars.length);
-    const parts = [];
-    bars.forEach((bar, index) => {
-      let y = height;
-      [["ok", "#2e9e5b"], ["errors", "#c8a13a"], ["blocked", "#cc4b4b"]].forEach(([key, color]) => {
-        const h = (bar[key] / peak) * (height - 4);
-        if (h <= 0) return;
-        y -= h;
-        parts.push(`<rect x="${(index * step + 1).toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, step - 2).toFixed(1)}" height="${h.toFixed(1)}" fill="${color}" opacity=".85"></rect>`);
-      });
-    });
+    const parts = core.timelineRects(data.timeline || [], width, height).map((rect) =>
+      `<rect x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" width="${rect.width.toFixed(1)}" height="${rect.height.toFixed(1)}" fill="${TIMELINE_COLOURS[rect.part]}" opacity=".85"></rect>`
+    );
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
     svg.innerHTML = parts.join("");
   }
 
   function sorted(rows, table) {
-    const { key, dir } = state.sort[table];
-    return rows.slice().sort((a, b) => {
-      const left = Number(a[key] || 0);
-      const right = Number(b[key] || 0);
-      return (left - right) * dir || String(a.ip || a.host).localeCompare(String(b.ip || b.host));
-    });
+    return core.sortRows(rows, state.sort[table]);
   }
 
+  // Which badges a row gets, and in what order, is core.badgeKinds.
   function stateBadges(row) {
-    const badges = [];
-    if (row.ban) {
-      badges.push(`<span class="la-badge la-ban" title="${esc(t(row.ban.label))}">${esc(t("Banned"))} · ${esc(duration(row.ban.expires_in))}</span>`);
-    }
-    if (row.connection_limited) {
-      const c = row.connections || {};
-      badges.push(`<span class="la-badge la-limit">${esc(t("Connection limit"))} · ${esc(c.rate)}/${esc(c.cur)}</span>`);
-    }
-    if (row.allow_listed) badges.push(`<span class="la-badge la-allow">${esc(t("Allow-listed"))}</span>`);
-    if (row.authorized) {
-      badges.push(`<span class="la-badge la-allow" title="${esc(t("Authorized through Authelia right now: zero-trust sites let it in"))}">${esc(t("Signed in now"))}</span>`);
-    }
-    // Refusals belong to the window, not to the present: an address refused
-    // by zero trust and signed in a minute later shows both, and the two
-    // must not read as a contradiction.
-    if (row.reason && row.blocked) {
-      badges.push(`<span class="la-badge la-refused" title="${esc(t("Refused in this window"))}: ${esc(row.reason)}">${esc(t("Refused"))} ×${esc(row.blocked)}: ${esc(refusalLabel(row.reason))}</span>`);
-    }
+    const badges = core.badgeKinds(row).map((kind) => {
+      if (kind === "banned") {
+        return `<span class="la-badge la-ban" title="${esc(t(row.ban.label))}">${esc(t("Banned"))} · ${esc(duration(row.ban.expires_in))}</span>`;
+      }
+      if (kind === "limited") {
+        const c = row.connections || {};
+        return `<span class="la-badge la-limit">${esc(t("Connection limit"))} · ${esc(c.rate)}/${esc(c.cur)}</span>`;
+      }
+      if (kind === "allow-listed") return `<span class="la-badge la-allow">${esc(t("Allow-listed"))}</span>`;
+      if (kind === "signed-in") {
+        return `<span class="la-badge la-allow" title="${esc(t("Authorized through Authelia right now: zero-trust sites let it in"))}">${esc(t("Signed in now"))}</span>`;
+      }
+      return `<span class="la-badge la-refused" title="${esc(t("Refused in this window"))}: ${esc(row.reason)}">${esc(t("Refused"))} ×${esc(row.blocked)}: ${esc(refusalLabel(row.reason))}</span>`;
+    });
     return badges.join("") || '<span class="la-sub">—</span>';
   }
 
+  // Which control an address gets is core.banAction: "drop & ban" for an
+  // address allow-listed by itself, nothing one-click inside an allowed
+  // range. Kept short so it fits the same column as the ordinary button.
   function banButton(ip, banned, allowEntry) {
-    if (banned) {
-      return `<button type="button" class="btn" data-unban="${esc(ip)}">${esc(t("Unban"))}</button>`;
+    switch (core.banAction(banned, allowEntry)) {
+      case "unban":
+        return `<button type="button" class="btn" data-unban="${esc(ip)}">${esc(t("Unban"))}</button>`;
+      case "drop-and-ban":
+        return `<button type="button" class="btn btn-danger" data-force-ban="${esc(ip)}" title="${esc(t("Remove from the allow list, then ban"))}">${esc(t("Drop & ban"))}</button>`;
+      case "in-allowed-range":
+        return `<span class="la-sub" title="${esc(t("Allowed by a network range: edit the allow list to ban it"))}">${esc(t("In an allowed range"))}</span>`;
+      default:
+        return `<button type="button" class="btn btn-danger" data-ban="${esc(ip)}">${esc(t("Ban address"))}</button>`;
     }
-    // A plain ban on an allow-listed address does nothing, so offer the one
-    // action that works: drop its allow-list entry, then ban. Kept short so it
-    // fits the same column as the ordinary button.
-    if (allowEntry === "host") {
-      return `<button type="button" class="btn btn-danger" data-force-ban="${esc(ip)}" title="${esc(t("Remove from the allow list, then ban"))}">${esc(t("Drop & ban"))}</button>`;
-    }
-    // Covered only by a wider range: dropping it would un-protect the rest,
-    // so there is no one-click ban -- just say why.
-    if (allowEntry === "range") {
-      return `<span class="la-sub" title="${esc(t("Allowed by a network range: edit the allow list to ban it"))}">${esc(t("In an allowed range"))}</span>`;
-    }
-    return `<button type="button" class="btn btn-danger" data-ban="${esc(ip)}">${esc(t("Ban address"))}</button>`;
   }
 
   function renderAddresses(data) {
@@ -292,7 +252,7 @@
     const rows = sorted(data.addresses || [], "addresses");
     byId("la-addresses-empty").hidden = rows.length > 0;
     body.innerHTML = rows.map((row) => `
-      <tr class="${row.blocked && row.blocked === row.requests ? "la-row-blocked" : ""}">
+      <tr class="${core.fullyRefused(row) ? "la-row-blocked" : ""}">
         <td>${ipLink(row.ip)}<div>${countryCell(row.country)}</div></td>
         <td class="la-num">${number(row.requests)}</td>
         <td class="la-num">${Number(row.rate || 0).toFixed(2)}</td>
@@ -304,7 +264,7 @@
         <td class="la-mono">${statusBadge(row.last_status)} <span class="la-path" title="${esc(row.last_method)} ${esc(row.last_path)}">${esc(row.last_method)} ${esc(row.last_path)}</span><div class="la-sub">${esc(clock(row.last))}</div></td>
         <td>${stateBadges(row)}</td>
         <td class="la-actions"><div class="la-actions-stack">
-          ${banButton(row.ip, Boolean(row.ban), row.allow_entry || (row.allow_listed ? "host" : null))}
+          ${banButton(row.ip, Boolean(row.ban), core.allowEntryOf(row))}
           <a class="la-link" href="/ip/${encodeURIComponent(row.ip)}" target="_blank" rel="noopener">${esc(t("Log lines"))}</a>
         </div></td>
       </tr>`).join("");
@@ -372,13 +332,9 @@
   function fillSelect(id, values, label) {
     const select = byId(id);
     const current = select.value;
+    // A choice that is no longer in the data stays selectable (selectValues).
     const options = [`<option value="">${esc(t(label))}</option>`]
-      .concat(values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`));
-    // A choice that is no longer in the data stays selectable, or the filter
-    // would silently drop the moment its last request leaves the window.
-    if (current && !values.includes(current)) {
-      options.push(`<option value="${esc(current)}">${esc(current)}</option>`);
-    }
+      .concat(core.selectValues(values, current).map((value) => `<option value="${esc(value)}">${esc(value)}</option>`));
     select.innerHTML = options.join("");
     select.value = current;
   }
@@ -471,9 +427,9 @@
       applyNow();
     });
     byId("la-window-custom").addEventListener("change", (event) => {
-      const value = Number(event.target.value);
-      if (value >= 5 && value <= 3600) {
-        state.window = Math.round(value);
+      const seconds = core.customWindow(event.target.value);
+      if (seconds !== null) {
+        state.window = seconds;
         markWindow();
         applyNow();
       }
@@ -515,10 +471,7 @@
     document.querySelectorAll("th[data-sort]").forEach((th) => {
       th.addEventListener("click", () => {
         const table = th.closest("[data-panel]").dataset.panel;
-        const current = state.sort[table];
-        state.sort[table] = current.key === th.dataset.sort
-          ? { key: current.key, dir: -current.dir }
-          : { key: th.dataset.sort, dir: -1 };
+        state.sort[table] = core.sortAfterClick(state.sort[table], th.dataset.sort);
         save();
         render();
       });
@@ -570,7 +523,7 @@
   document.addEventListener("DOMContentLoaded", () => {
     load();
     byId("la-refresh").value = String(state.refresh);
-    if (![30, 60, 300, 900].includes(state.window)) byId("la-window-custom").value = String(state.window);
+    if (!core.isPresetWindow(state.window)) byId("la-window-custom").value = String(state.window);
     // An address in the address bar (?ip=...) is where the operator came from.
     const params = new URLSearchParams(window.location.search);
     if (params.get("ip")) byId("la-ip").value = params.get("ip");

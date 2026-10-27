@@ -433,11 +433,25 @@ class ThePage(unittest.TestCase):
         nav = (APP / "templates/_haproxy_nav.html").read_text(encoding="utf-8")
         self.assertIn('("routes.live_activity_page", "Live activity")', nav)
 
+    # What the page decides -- saved choices, filters, sort order, badges,
+    # the ban control, when it says it is behind -- is tested by behaviour
+    # in .tests/js/live_activity_core.test.js; these check the page uses it.
+
+    def test_the_decisions_are_loaded_before_the_page_that_uses_them(self):
+        page = (APP / "templates/live_activity.html").read_text(encoding="utf-8")
+        script = (APP / "static/js/live_activity.js").read_text(encoding="utf-8")
+        core = "url_for('static', filename='js/live_activity_core.js')"
+        self.assertIn(core, page)
+        self.assertLess(page.index(core), page.index("filename='js/live_activity.js'"))
+        self.assertIn("const core = window.EasyHaProxyLive;", script)
+
     def test_the_script_sorts_locally_and_says_when_it_falls_behind(self):
         script = (APP / "static/js/live_activity.js").read_text(encoding="utf-8")
         self.assertIn("document.hidden", script)
-        self.assertIn("data.lag_seconds", script)
+        self.assertIn("core.summaryNote(data)", script)
+        self.assertIn('said.kind === "behind"', script)
         sort_handler = script.split('document.querySelectorAll("th[data-sort]").forEach')[1].split("});\n    });")[0]
+        self.assertIn("core.sortAfterClick(", sort_handler)
         self.assertIn("render();", sort_handler)
         self.assertNotIn("refresh()", sort_handler)
 
@@ -446,7 +460,7 @@ class ThePage(unittest.TestCase):
         script = (APP / "static/js/live_activity.js").read_text(encoding="utf-8")
         self.assertIn('id="la-blocked"> Only refused by the gateway', page)
         self.assertIn('id="la-banned-only"> Only banned now', page)
-        self.assertIn('params.banned = "1"', script)
+        self.assertIn('banned: byId("la-banned-only").checked', script)
         reset = script.split('byId("la-reset")')[1].split("applyNow();")[0]
         self.assertIn('byId("la-banned-only").checked = false', reset)
 
@@ -457,10 +471,12 @@ class ThePage(unittest.TestCase):
         self.assertIn("Drop & ban", script)
         self.assertIn("drop_allowlist: true", script)
         self.assertIn("function forceBan(", script)
-        # It is only offered to allow-listed rows.
-        self.assertIn('allowEntry === "host"', script)
-        # A host covered only by a range gets no one-click ban.
-        self.assertIn('allowEntry === "range"', script)
+        # Which rows get it -- allow-listed by themselves, not by a range --
+        # is core.banAction; the page draws each answer.
+        buttons = script.split("function banButton(")[1].split("\n  function ")[0]
+        self.assertIn("core.banAction(banned, allowEntry)", buttons)
+        for action in ('"unban"', '"drop-and-ban"', '"in-allowed-range"'):
+            self.assertIn(f"case {action}:", buttons)
         catalogue = json.loads(
             (APP / "translations/ru/live_activity.json").read_text(encoding="utf-8")
         )["messages"]
