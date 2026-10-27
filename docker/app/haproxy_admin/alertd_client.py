@@ -8,20 +8,11 @@ here -- the page sees exactly what the daemon gave.
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any, Dict, Optional
-from urllib.parse import quote
 
-import requests
+from .daemon_transport import UnixHttp
 
-try:
-    import requests_unixsocket  # type: ignore
-except Exception:  # pylint: disable=broad-except
-    requests_unixsocket = None  # type: ignore
-
-
-LOG = logging.getLogger("haproxy-admin")
 
 ALERTD_SOCKET_PATH = os.environ.get(
     "ALERTD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-alertd.sock"
@@ -37,14 +28,9 @@ class AlertdUnavailable(RuntimeError):
     """The engine does not answer: the page degrades rather than fails."""
 
 
-def _session() -> requests.Session:
-    if requests_unixsocket is None:
-        raise AlertdUnavailable("requests-unixsocket is not installed")
-    return requests_unixsocket.Session()  # type: ignore[return-value]
-
-
-def _url(path: str) -> str:
-    return "http+unix://" + quote(ALERTD_SOCKET_PATH, safe="") + path
+def _alertd() -> UnixHttp:
+    return UnixHttp("alertd", ALERTD_SOCKET_PATH, AlertdUnavailable,
+                    token_header="X-Alertd-Token", token=ALERTD_TOKEN)
 
 
 def _get_json(
@@ -52,16 +38,7 @@ def _get_json(
     params: Optional[Dict[str, Any]] = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
-    try:
-        response = _session().get(_url(path), params=params or {}, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
-    except AlertdUnavailable:
-        raise
-    except ValueError as exc:
-        raise AlertdUnavailable("alertd returned a non-JSON response") from exc
-    except Exception as exc:  # pylint: disable=broad-except
-        raise AlertdUnavailable(str(exc)) from exc
+    return _alertd().get(path, params=params, timeout=timeout)
 
 
 def _post_json(
@@ -69,25 +46,10 @@ def _post_json(
     payload: Dict[str, Any],
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
-    try:
-        response = _session().post(
-            _url(path),
-            json=payload,
-            timeout=timeout,
-            headers={"X-Alertd-Token": ALERTD_TOKEN} if ALERTD_TOKEN else {},
-        )
-        # A rejected setting comes back as 400 with a message worth showing,
-        # so the status is not raised on before the body is read.
-        data = response.json()
-        if not isinstance(data, dict):
-            raise AlertdUnavailable("alertd returned an unexpected payload")
-        return data
-    except AlertdUnavailable:
-        raise
-    except ValueError as exc:
-        raise AlertdUnavailable("alertd returned a non-JSON response") from exc
-    except Exception as exc:  # pylint: disable=broad-except
-        raise AlertdUnavailable(str(exc)) from exc
+    # A rejected setting comes back as 400 with a message worth showing, so
+    # the status is not raised on before the body is read.
+    return _alertd().post(path, payload, timeout=timeout, with_token=True,
+                          check_status=False, require_object=True)
 
 
 def alertd_health() -> Dict[str, Any]:

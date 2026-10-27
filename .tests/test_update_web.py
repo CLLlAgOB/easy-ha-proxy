@@ -27,6 +27,7 @@ RU_TRANSLATIONS_PATH = APP_ROOT / "translations/ru.json"
 
 ROUTES_SOURCE = ROUTES_PATH.read_text(encoding="utf-8")
 CLIENT_SOURCE = CLIENT_PATH.read_text(encoding="utf-8")
+TRANSPORT_SOURCE = (APP_ROOT / "daemon_transport.py").read_text(encoding="utf-8")
 TEMPLATE = TEMPLATE_PATH.read_text(encoding="utf-8")
 JAVASCRIPT = JAVASCRIPT_PATH.read_text(encoding="utf-8")
 
@@ -382,25 +383,22 @@ class UpdatedClientTests(unittest.TestCase):
                 return b'{"ok":true}\n'
 
         payload = {"action": "start_apply", "confirmation": "UPDATE"}
-        with mock.patch.object(
-            WEB_CLIENT.socket,
-            "socket",
-            return_value=WorkingSocket(),
-        ):
+        with mock.patch("socket.socket", return_value=WorkingSocket()):
             result = WEB_CLIENT.updated_request(payload)
         self.assertTrue(result["ok"])
         self.assertTrue(sent[0].endswith(b"\n"))
         self.assertEqual(json.loads(sent[0]), payload)
 
     def test_client_does_not_log_requests(self) -> None:
-        tree = ast.parse(CLIENT_SOURCE)
-        self.assertNotIn("logging", {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        })
-        self.assertNotIn("print(", CLIENT_SOURCE)
+        for source in (CLIENT_SOURCE, TRANSPORT_SOURCE):
+            tree = ast.parse(source)
+            self.assertNotIn("logging", {
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            })
+            self.assertNotIn("print(", source)
 
 
 class UpdateWebUiTests(unittest.TestCase):

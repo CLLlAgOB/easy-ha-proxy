@@ -27,6 +27,9 @@ RU_TRANSLATIONS_PATH = APP_ROOT / "translations/ru.json"
 
 ROUTES_SOURCE = ROUTES_PATH.read_text(encoding="utf-8")
 CLIENT_SOURCE = CLIENT_PATH.read_text(encoding="utf-8")
+# The socket work is done by the shared transport; it must keep the same
+# promise of never logging a request.
+TRANSPORT_SOURCE = (APP_ROOT / "daemon_transport.py").read_text(encoding="utf-8")
 TEMPLATE = TEMPLATE_PATH.read_text(encoding="utf-8")
 JAVASCRIPT = JAVASCRIPT_PATH.read_text(encoding="utf-8")
 SECURITY_JAVASCRIPT = SECURITY_JAVASCRIPT_PATH.read_text(encoding="utf-8")
@@ -409,7 +412,7 @@ class BackupDaemonClientTests(unittest.TestCase):
                 return b"x" * (64 * 1024)
 
         with (
-            mock.patch.object(WEB_CLIENT.socket, "socket", return_value=OversizedSocket()),
+            mock.patch("socket.socket", return_value=OversizedSocket()),
             self.assertRaisesRegex(WEB_CLIENT.BackupdError, "response is too large"),
         ):
             WEB_CLIENT.backupd_request({"action": "status"})
@@ -437,11 +440,7 @@ class BackupDaemonClientTests(unittest.TestCase):
                 return b'{"ok":true}\n'
 
         payload = {"action": "start_backup", "passphrase": "very-secret-value"}
-        with mock.patch.object(
-            WEB_CLIENT.socket,
-            "socket",
-            return_value=WorkingSocket(),
-        ):
+        with mock.patch("socket.socket", return_value=WorkingSocket()):
             result = WEB_CLIENT.backupd_request(payload)
         self.assertTrue(result["ok"])
         self.assertTrue(sent[0].endswith(b"\n"))
@@ -452,17 +451,18 @@ class BackupDaemonClientTests(unittest.TestCase):
             def connect(self, _path):
                 raise OSError("unavailable")
 
-        with mock.patch.object(
-            WEB_CLIENT.socket,
-            "socket",
-            return_value=FailingSocket(),
-        ):
+        with mock.patch("socket.socket", return_value=FailingSocket()):
             with self.assertRaises(WEB_CLIENT.BackupdError) as caught:
                 WEB_CLIENT.backupd_request(payload)
         self.assertNotIn("very-secret-value", str(caught.exception))
 
     def test_client_has_no_logging_or_print_calls(self) -> None:
-        tree = ast.parse(CLIENT_SOURCE)
+        for source in (CLIENT_SOURCE, TRANSPORT_SOURCE):
+            with self.subTest(source=source[:60]):
+                self._assert_no_logging(source)
+
+    def _assert_no_logging(self, source: str) -> None:
+        tree = ast.parse(source)
         imported = {
             alias.name
             for node in ast.walk(tree)

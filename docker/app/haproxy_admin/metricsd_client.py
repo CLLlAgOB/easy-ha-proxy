@@ -7,20 +7,11 @@ short, so the monitoring page does not hang a worker while the collector is busy
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any, Dict, Optional
-from urllib.parse import quote
 
-import requests
+from .daemon_transport import UnixHttp
 
-try:
-    import requests_unixsocket  # type: ignore
-except Exception:  # pylint: disable=broad-except
-    requests_unixsocket = None  # type: ignore
-
-
-LOG = logging.getLogger("haproxy-admin")
 
 METRICSD_SOCKET_PATH = os.environ.get(
     "METRICSD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-metricsd.sock"
@@ -33,10 +24,8 @@ class MetricsdUnavailable(RuntimeError):
     """The collector does not answer: the page must degrade, not fail."""
 
 
-def _session() -> requests.Session:
-    if requests_unixsocket is None:
-        raise MetricsdUnavailable("requests-unixsocket is not installed")
-    return requests_unixsocket.Session()  # type: ignore[return-value]
+def _metricsd() -> UnixHttp:
+    return UnixHttp("metricsd", METRICSD_SOCKET_PATH, MetricsdUnavailable)
 
 
 def _get_json(
@@ -44,17 +33,7 @@ def _get_json(
     params: Optional[Dict[str, Any]] = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
-    url = "http+unix://" + quote(METRICSD_SOCKET_PATH, safe="") + path
-    try:
-        response = _session().get(url, params=params or {}, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
-    except MetricsdUnavailable:
-        raise
-    except ValueError as exc:
-        raise MetricsdUnavailable("metricsd returned a non-JSON response") from exc
-    except Exception as exc:  # pylint: disable=broad-except
-        raise MetricsdUnavailable(str(exc)) from exc
+    return _metricsd().get(path, params=params, timeout=timeout)
 
 
 def _window_params(
@@ -115,27 +94,14 @@ def metricsd_channel_labels_save(
 ) -> Dict[str, Any]:
     """The operator's names for the links, and which ones they put away."""
 
-    url = ("http+unix://" + quote(METRICSD_SOCKET_PATH, safe="")
-           + "/api/v1/metrics/channel-labels")
     body: Dict[str, Any] = {"labels": labels}
     # Omitted rather than empty when unchanged: the daemon reads "absent" as
     # "leave it", so a caller that only renames cannot empty the list.
     if hidden is not None:
         body["hidden"] = list(hidden)
-    try:
-        response = _session().post(url, json=body, timeout=DEFAULT_TIMEOUT)
-        # A rejected label is the operator's typo, and the daemon says which.
-        if response.status_code == 400:
-            raise ValueError((response.json() or {}).get("error") or "rejected")
-        response.raise_for_status()
-        data = response.json()
-    except (MetricsdUnavailable, ValueError):
-        raise
-    except Exception as exc:  # pylint: disable=broad-except
-        raise MetricsdUnavailable(str(exc)) from exc
-    if not isinstance(data, dict):
-        raise MetricsdUnavailable("metricsd returned an unexpected payload")
-    return data
+    # A rejected label is the operator's typo, and the daemon says which.
+    return _metricsd().post("/api/v1/metrics/channel-labels", body, timeout=DEFAULT_TIMEOUT,
+                            rejected_status=400, require_object=True)
 
 
 def metricsd_states(range_key: str, site: str = "",
