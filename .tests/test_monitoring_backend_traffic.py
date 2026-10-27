@@ -106,6 +106,13 @@ class ThePageOffersBothViews(unittest.TestCase):
             self.assertIn(f'<option value="{value}">', self.page)
         self.assertIn('id="mon-backend-traffic" hidden', self.page)
 
+    def test_the_sort_order_is_only_offered_beside_the_traffic(self):
+        # The toolbar's label rule outranked the browser's [hidden], so the
+        # sort order stood beside the availability bars, sorting nothing.
+        self.assertIn('id="mon-backends-sort-wrap" hidden', self.page)
+        self.assertIn("sortWrap.hidden = !traffic;", self.script)
+        self.assertIn(".mon-toolbar label[hidden] { display: none; }", self.page)
+
     def test_traffic_is_only_fetched_when_it_is_shown(self):
         load = self.script.split("async function loadAll(")[1].split("\n  }\n")[0]
         self.assertIn('if (backendsView === "traffic") await loadBackendTraffic();', load)

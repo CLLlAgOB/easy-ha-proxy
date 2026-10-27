@@ -325,8 +325,11 @@ class ThePanel(unittest.TestCase):
         for key in ('key: "helpers"', 'key: "containers"', 'key: "other"', 'key: "memory_total"'):
             self.assertIn(key, charts)
         self.assertEqual(charts.count("components: true"), 2)
-        self.assertIn("seriesFor(chart, payload)", self.section("drawChart"))
-        self.assertIn("seriesFor(chart, payload)", self.section("renderLegend"))
+        # Which lines a part adds, and how they are coloured, is tested by
+        # behaviour in .tests/js/monitoring_core.test.js; here, that the
+        # chart and its legend both take their lines from there.
+        self.assertIn("core.chartData(chart, payload", self.section("drawChart"))
+        self.assertIn("core.seriesFor(chart, payload)", self.section("renderLegend"))
 
     def test_a_line_can_be_hidden_and_the_choice_is_kept(self):
         legend = self.section("renderLegend")
@@ -334,8 +337,12 @@ class ThePanel(unittest.TestCase):
         self.assertIn("setLineVisible(chart, spec, !lineVisible(chart, spec))", legend)
         self.assertIn("redrawChart(chart.name)", legend)
         self.assertIn("window.localStorage.setItem(VISIBILITY_KEY", self.section("setLineVisible"))
-        # Hidden lines leave the scale, so the small ones can fill it.
-        self.assertIn(".filter((spec) => lineVisible(chart, spec))", self.section("drawChart"))
+        # Hidden lines leave the scale, so the small ones can fill it (see
+        # chartData in .tests/js/monitoring_core.test.js).
+        self.assertIn(
+            "core.chartData(chart, payload, (spec) => lineVisible(chart, spec))",
+            self.section("drawChart"),
+        )
 
     def test_part_names_are_machine_data(self):
         legend = self.section("renderLegend")

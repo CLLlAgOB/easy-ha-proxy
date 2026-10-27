@@ -170,6 +170,14 @@ class PageAssetTests(unittest.TestCase):
             "url_for('static', filename='js/monitoring.js')", self.template
         )
 
+    def test_the_arithmetic_is_loaded_before_the_page_that_uses_it(self):
+        # monitoring.js reads window.EasyHaProxyMonitoring as it starts.
+        core = "url_for('static', filename='js/monitoring_core.js')"
+        page = "url_for('static', filename='js/monitoring.js')"
+        self.assertIn(core, self.template)
+        self.assertLess(self.template.index(core), self.template.index(page))
+        self.assertIn("const core = window.EasyHaProxyMonitoring;", self.javascript)
+
     def test_numeric_readouts_are_excluded_from_dom_translation(self):
         for element_id in (
             "mon-rps",
@@ -234,6 +242,10 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
     counted it and the bar all but hid it, and the two windows looked like
     they disagreed. Outages now keep a minimum width, and the total says
     how many outages it is made of and whether one is still going on.
+
+    How a bar is cut into pieces, how its stripes are measured and what the
+    total is made of are tested by behaviour in
+    .tests/js/monitoring_core.test.js; here, that the page draws them.
     """
 
     @classmethod
@@ -251,13 +263,12 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
         # Sixty-nine short outages, 24 minutes in all, each kept its minimum
         # width and painted nine hours of the bar red: a server 98% available
         # looked 40% down.
-        self.assertIn("timelinePieces(entry.spans || [], window).forEach", self.render)
+        self.assertIn("core.timelinePieces(entry.spans || [], window).forEach", self.render)
         flap = self.render.split("if (part.flapping) {")[1].split("return;")[0]
         self.assertIn('piece.className = "mon-span-flap"', flap)
         self.assertIn("piece.style.flex = `0 0 ${(length / window) * 100}%`", flap)
         # Red in proportion to the time really down, never none and never all.
-        self.assertIn("(part.down / length) * FLAP_STRIPE_PX", flap)
-        self.assertIn("Math.min(FLAP_STRIPE_PX - 1, Math.max(1, stripe))", flap)
+        self.assertIn('piece.style.setProperty("--down", `${core.flapStripe(part)}px`)', flap)
         self.assertIn('t("outages: {count}", {count: part.outages})', flap)
         self.assertIn("formatDuration(part.down)", flap)
         self.assertRegex(
@@ -265,22 +276,16 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
             r"\.mon-span-flap \{\s*min-width: \d+px;\s*background: repeating-linear-gradient\(",
         )
 
-    def test_one_short_outage_alone_is_still_an_outage(self):
-        pieces = self.script.split("function timelinePieces(")[1].split("\n  function ")[0]
-        self.assertIn("if (outages.length < 2) {", pieces)
-        # A long outage, and up time long enough to be seen, end a run.
-        self.assertIn("< FLAP_SHORT_SHARE", pieces)
-        self.assertIn("< FLAP_GAP_SHARE", pieces)
-
     def test_each_piece_says_when_it_was(self):
         self.assertIn("spanPeriod(span, window)", self.render)
 
     def test_the_total_names_its_outages_and_an_ongoing_one(self):
         self.assertIn("outageSummary(entry, until)", self.render)
         summary = self.script.split("function outageSummary(")[1].split("\n  function ")[0]
-        self.assertIn('t("outages: {count}", {count: outages.length})', summary)
+        self.assertIn("core.outageFacts(entry, until)", summary)
+        self.assertIn('t("outages: {count}", {count: facts.count})', summary)
         self.assertIn('t("ongoing for")', summary)
-        self.assertIn('entry.current_state !== "UP"', summary)
+        self.assertIn("formatDuration(facts.ongoingSeconds)", summary)
         # The duration is a number, not a phrase for the page translator.
         self.assertIn('setAttribute("data-i18n-skip", "")', summary)
 
@@ -369,12 +374,10 @@ class TheLegendDescribesThePeriodShown(unittest.TestCase):
                 self.assertIn('summary: "mean"', line)
 
     def test_the_reading_is_the_maximum_or_the_mean_not_the_last_bucket(self):
-        reading = self.script.split("function legendReading(")[1].split("\n  function ")[0]
-        self.assertIn('spec.summary === "max"', reading)
-        self.assertIn("number > value", reading)
-        self.assertIn('spec.summary === "mean"', reading)
+        # The reading itself is tested by behaviour in
+        # .tests/js/monitoring_core.test.js; the legend shows it, with when.
         legend = self.script.split("function renderLegend(")[1].split("\n  function ")[0]
-        self.assertIn("legendReading(spec, raw)", legend)
+        self.assertIn("core.legendReading(spec, raw)", legend)
         self.assertIn("points[reading.index]", legend)
         self.assertIn("LEGEND_HINTS[spec.summary", legend)
 

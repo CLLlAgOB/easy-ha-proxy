@@ -29,6 +29,10 @@
   color: var(--text-secondary);
 }
 
+/* The rule above outranks the browser's own [hidden], and the sort order
+   was offered beside the availability bars, where it sorts nothing. */
+.mon-toolbar label[hidden] { display: none; }
+
 .mon-hidden-toggle {
   border: none;
   background: transparent;
@@ -681,5 +685,6 @@ body.mon-overlay-open { overflow: hidden; }
 
 <div class="mon-overlay" id="mon-overlay" hidden></div>
 
+<script src="{{ url_for('static', filename='js/monitoring_core.js') }}"></script>
 <script src="{{ url_for('static', filename='js/monitoring.js') }}"></script>
 {% endblock %}

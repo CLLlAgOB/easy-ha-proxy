@@ -4,10 +4,14 @@
  * with script-src 'self', so a charting library would have to be vendored into
  * the image; a few hundred lines of line-plot code is cheaper to ship, audit
  * and keep working than a bundled dependency.
+ *
+ * The arithmetic -- scales, legend readings, availability pieces, zoom --
+ * lives in monitoring_core.js, where the tests in .tests/js/ reach it.
  */
 (function () {
   "use strict";
 
+  const core = window.EasyHaProxyMonitoring;
   const t = window.t || ((value) => String(value));
   const numberFormat = new Intl.NumberFormat(document.documentElement.lang || undefined);
   const decimalFormat = new Intl.NumberFormat(document.documentElement.lang || undefined, {
@@ -95,40 +99,6 @@
     }
   ];
 
-  // One line per part of the gateway, coloured by its place in the sorted
-  // list of names rather than by its rank: the rank changes with every
-  // refresh, and a line that changed colour each time would be unreadable.
-  const COMPONENT_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
-    "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#aec7e8", "#ffbb78",
-    "#98df8a", "#ff9896", "#c5b0d5", "#c49c94", "#f7b6d2", "#dbdb8d",
-    "#9edae5", "#393b79"
-  ];
-
-  function seriesFor(chart, payload) {
-    if (!chart.components) return chart.series;
-    const parts = (payload && payload.components) || [];
-    const ids = parts.map((part) => `${part.group}:${part.name}`).sort();
-    return chart.series.concat(
-      parts.map((part) => {
-        const id = `${part.group}:${part.name}`;
-        return {
-          key: `component:${id}`,
-          label: part.label || part.name,
-          group: part.group,
-          component: true,
-          color: COMPONENT_COLORS[ids.indexOf(id) % COMPONENT_COLORS.length],
-          percent: chart.name === "cpu",
-          bytes: chart.name === "memory",
-          summary: "mean",
-          hidden: true,
-          values: part.values || [],
-          peak: part.peak
-        };
-      })
-    );
-  }
-
   // Which lines are shown, per chart. Only choices the operator made are
   // stored; everything else follows the line's own default.
   const VISIBILITY_KEY = "monitoring.lines";
@@ -141,18 +111,11 @@
   }
 
   function lineVisible(chart, spec) {
-    const choices = lineChoices[chart.name];
-    if (choices && Object.prototype.hasOwnProperty.call(choices, spec.key)) {
-      return Boolean(choices[spec.key]);
-    }
-    return !spec.hidden;
+    return core.lineVisible(lineChoices, chart.name, spec);
   }
 
   function setLineVisible(chart, spec, visible) {
-    const choices = Object.assign({}, lineChoices[chart.name]);
-    if (visible === !spec.hidden) delete choices[spec.key];
-    else choices[spec.key] = visible;
-    lineChoices[chart.name] = choices;
+    lineChoices = core.lineChoicesAfter(lineChoices, chart.name, spec, visible);
     try {
       window.localStorage.setItem(VISIBILITY_KEY, JSON.stringify(lineChoices));
     } catch (error) {
@@ -175,17 +138,7 @@
   }
 
   function formatBytes(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return "—";
-    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let size = Math.abs(numeric);
-    let index = 0;
-    while (size >= 1024 && index < units.length - 1) {
-      size /= 1024;
-      index += 1;
-    }
-    const sign = numeric < 0 ? "-" : "";
-    return `${sign}${decimalFormat.format(size)} ${units[index]}`;
+    return core.formatBytes(value, (size) => decimalFormat.format(size));
   }
 
   function formatCount(value) {
@@ -204,24 +157,6 @@
   }
 
   /* ---------- chart drawing ---------- */
-
-  function niceCeiling(value, binary) {
-    if (!(value > 0)) return 1;
-    if (binary && value >= 1024) {
-      // Bytes round in their own units: 2 GiB at the top, not 4.66.
-      let unit = 1;
-      while (value / unit >= 1024) unit *= 1024;
-      return niceCeiling(value / unit, false) * unit;
-    }
-    const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
-    const normalized = value / magnitude;
-    let step;
-    if (normalized <= 1) step = 1;
-    else if (normalized <= 2) step = 2;
-    else if (normalized <= 5) step = 5;
-    else step = 10;
-    return step * magnitude;
-  }
 
   function axisLabel(spec, value) {
     if (spec.percent) return `${decimalFormat.format(value)}%`;
@@ -280,26 +215,12 @@
     const padding = { top: 10, right: 8, bottom: 22, left: chart.series[0].bytes ? 70 : 54 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
-    const step = Number(payload.resolution_seconds) || 60;
 
-    // Counters are stored per bucket; a rate is the only comparable value once
-    // the server changes resolution between ranges. Hidden lines are left out
-    // of the scale too, so hiding the big ones lets the small ones fill it.
-    const datasets = seriesFor(chart, payload)
-      .filter((spec) => lineVisible(chart, spec))
-      .map((spec) => {
-        const raw = spec.values || (payload.series && payload.series[spec.key]) || [];
-        const values = raw.map((value) => (spec.rate ? Number(value) / step : Number(value)));
-        return { spec: spec, values: values };
-      });
-
-    let maximum = 0;
-    datasets.forEach((dataset) => {
-      dataset.values.forEach((value) => {
-        if (Number.isFinite(value) && value > maximum) maximum = value;
-      });
-    });
-    const top = niceCeiling(maximum, Boolean(chart.series[0].bytes));
+    // Only the lines shown: hidden ones leave the scale as well.
+    const view = core.chartData(chart, payload, (spec) => lineVisible(chart, spec));
+    const step = view.step;
+    const datasets = view.datasets;
+    const top = view.top;
 
     clear(svg);
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -351,19 +272,17 @@
     );
 
     // No more time labels than fit: full screen on a phone is narrow.
-    const labelCount = Math.min(5, points.length, Math.max(2, Math.floor(plotWidth / 90)));
-    for (let index = 0; index < labelCount; index += 1) {
-      const pointIndex =
-        labelCount === 1 ? 0 : Math.round((index / (labelCount - 1)) * (points.length - 1));
+    const labelled = core.timeLabelIndexes(points.length, plotWidth);
+    labelled.forEach((pointIndex, index) => {
       const label = element("text", {
         class: "mon-tick",
         x: xFor(pointIndex),
         y: height - 6,
-        "text-anchor": index === 0 ? "start" : index === labelCount - 1 ? "end" : "middle"
+        "text-anchor": index === 0 ? "start" : index === labelled.length - 1 ? "end" : "middle"
       });
       label.textContent = timeLabel(points[pointIndex], rangeSeconds);
       svg.appendChild(label);
-    }
+    });
 
     datasets.forEach((dataset) => {
       const path = dataset.values
@@ -382,41 +301,14 @@
     });
   }
 
-  // What the number beside each line stands for. A "Peak" line is the
-  // highest value in each bucket, so its reading is the highest over the
-  // period shown -- with when it was -- and an "Average" line's is the mean
-  // over the period. Showing the last bucket for both, as the legend used
-  // to, put "Peak: 7" under a chart that climbs to 44.
+  // What the number beside each line stands for (see legendReading in
+  // monitoring_core.js): the highest over the period for a "Peak" line, the
+  // mean for an "Average" one, the latest value for the rest.
   const LEGEND_HINTS = {
     max: "Highest over the shown period",
     mean: "Average over the shown period",
     last: "Latest value"
   };
-
-  function legendReading(spec, raw) {
-    let value = 0;
-    let index = null;
-    if (spec.summary === "max") {
-      raw.forEach((item, position) => {
-        const number = Number(item);
-        if (Number.isFinite(number) && (index === null || number > value)) {
-          value = number;
-          index = position;
-        }
-      });
-    } else if (spec.summary === "mean") {
-      const numbers = raw.map(Number).filter(Number.isFinite);
-      value = numbers.length ? numbers.reduce((sum, item) => sum + item, 0) / numbers.length : 0;
-    } else {
-      for (let position = raw.length - 1; position >= 0; position -= 1) {
-        if (Number.isFinite(Number(raw[position]))) {
-          value = Number(raw[position]);
-          break;
-        }
-      }
-    }
-    return { value: value, index: index };
-  }
 
   function legendValue(spec, value) {
     if (spec.percent) return `${decimalFormat.format(value)}%`;
@@ -446,9 +338,9 @@
       : 0;
     const expanded = Boolean(legend.closest(".mon-chart-expanded"));
     let parts = null;
-    seriesFor(chart, payload).forEach((spec) => {
+    core.seriesFor(chart, payload).forEach((spec) => {
       const raw = spec.values || (payload && payload.series && payload.series[spec.key]) || [];
-      const reading = legendReading(spec, raw);
+      const reading = core.legendReading(spec, raw);
       const value = spec.rate ? reading.value / step : reading.value;
       const visible = lineVisible(chart, spec);
       // A button, so a line can be hidden to let the others fill the scale.
@@ -519,21 +411,8 @@
 
   /* ---------- availability timeline ---------- */
 
-  // Deliberately not translated: single-letter unit keys are exactly the kind
-  // of fragment the DOM translator would match inside unrelated words, and
-  // "2h 15m" reads the same in every language this UI ships.
-  function formatDuration(seconds) {
-    const total = Math.max(0, Math.round(Number(seconds) || 0));
-    if (total === 0) return "0s";
-    const days = Math.floor(total / 86400);
-    const hours = Math.floor((total % 86400) / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const rest = total % 60;
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${rest}s`;
-    return `${rest}s`;
-  }
+  // "2h 15m": never translated, see monitoring_core.js.
+  const formatDuration = core.formatDuration;
 
   function spanPeriod(span, windowSeconds) {
     const format = windowSeconds >= 86400 ? dateTimeFormat : timeFormat;
@@ -546,23 +425,21 @@
   // outage reads differently in an hour and in a day. Say what the sum is
   // made of: how many outages, and whether one is still going on.
   function outageSummary(entry, until) {
-    const outages = (entry.spans || []).filter((span) => span.state !== "UP");
+    const facts = core.outageFacts(entry, until);
     const line = document.createElement("small");
     const parts = [];
-    if (outages.length) {
-      parts.push(t("outages: {count}", {count: outages.length}));
+    if (facts.count) {
+      parts.push(t("outages: {count}", {count: facts.count}));
     }
-    const last = outages[outages.length - 1];
-    const ongoing = last && entry.current_state !== "UP" && Number(last.end) >= until;
     line.textContent = parts.join(" · ");
-    if (ongoing) {
+    if (facts.ongoingSeconds !== null) {
       const label = document.createElement("span");
       label.textContent = `${parts.length ? " · " : ""}${t("ongoing for")} `;
       line.appendChild(label);
       const duration = document.createElement("span");
       duration.setAttribute("data-i18n-skip", "");
       duration.setAttribute("translate", "no");
-      duration.textContent = formatDuration(Number(last.end) - Number(last.start));
+      duration.textContent = formatDuration(facts.ongoingSeconds);
       line.appendChild(duration);
     }
     return line;
@@ -572,58 +449,6 @@
     if (state === "UP") return "mon-span-up";
     if (state === "DOWN") return "mon-span-down";
     return "mon-span-other";
-  }
-
-  // An outage narrower than this share of the period is drawn wider than it
-  // was (see the min-width in the page's CSS), and outages closer together
-  // than the gap leave no room for the up time between them.
-  const FLAP_SHORT_SHARE = 0.006;
-  const FLAP_GAP_SHARE = 0.02;
-  const FLAP_STRIPE_PX = 10;
-
-  // Short outages each keep a few pixels so that one of them is not lost in
-  // a day. Sixty-nine of them in a row, 24 minutes in all, then painted
-  // nine hours of the bar red: a server 98% available looked 40% down. A
-  // run of such outages becomes one piece, drawn to scale and striped in
-  // proportion to the time it was really down.
-  function timelinePieces(spans, window) {
-    const isShort = (span) =>
-      span.state !== "UP" && (Number(span.end) - Number(span.start)) / window < FLAP_SHORT_SHARE;
-    const isGap = (span) =>
-      span.state === "UP" && (Number(span.end) - Number(span.start)) / window < FLAP_GAP_SHARE;
-    const pieces = [];
-    let index = 0;
-    while (index < spans.length) {
-      const span = spans[index];
-      if (!isShort(span)) {
-        pieces.push({span});
-        index += 1;
-        continue;
-      }
-      let last = index;
-      while (true) {
-        let next = last + 1;
-        if (next < spans.length && isGap(spans[next])) next += 1;
-        if (next >= spans.length || !isShort(spans[next])) break;
-        last = next;
-      }
-      const run = spans.slice(index, last + 1);
-      const outages = run.filter((item) => item.state !== "UP");
-      if (outages.length < 2) {
-        pieces.push({span});
-        index += 1;
-        continue;
-      }
-      pieces.push({
-        flapping: true,
-        start: Number(run[0].start),
-        end: Number(run[run.length - 1].end),
-        outages: outages.length,
-        down: outages.reduce((sum, item) => sum + Number(item.end) - Number(item.start), 0),
-      });
-      index = last + 1;
-    }
-    return pieces;
   }
 
   function renderTimeline(payload) {
@@ -665,17 +490,15 @@
 
       const track = document.createElement("div");
       track.className = "mon-timeline-track";
-      timelinePieces(entry.spans || [], window).forEach((part) => {
+      // A run of short outages is one piece, drawn to scale and striped in
+      // proportion to the time it was down (see timelinePieces).
+      core.timelinePieces(entry.spans || [], window).forEach((part) => {
         if (part.flapping) {
           const length = part.end - part.start;
           const piece = document.createElement("i");
           piece.className = "mon-span-flap";
           piece.style.flex = `0 0 ${(length / window) * 100}%`;
-          const stripe = Math.round((part.down / length) * FLAP_STRIPE_PX);
-          piece.style.setProperty(
-            "--down",
-            `${Math.min(FLAP_STRIPE_PX - 1, Math.max(1, stripe))}px`
-          );
+          piece.style.setProperty("--down", `${core.flapStripe(part)}px`);
           piece.title = [
             t("Unstable"),
             spanPeriod(part, window),
@@ -763,21 +586,6 @@
     }
   }
 
-  function sortedBackends(backends) {
-    const items = backends.slice();
-    if (backendsSort === "name") {
-      items.sort((a, b) => String(a.label).localeCompare(String(b.label)));
-    } else {
-      const direction = backendsSort === "asc" ? 1 : -1;
-      items.sort(
-        (a, b) =>
-          direction * (Number(a.bytes_total) - Number(b.bytes_total)) ||
-          String(a.label).localeCompare(String(b.label))
-      );
-    }
-    return items;
-  }
-
   function renderBackendTraffic(payload) {
     const host = byId("mon-backend-traffic");
     if (!host) return;
@@ -798,7 +606,7 @@
     // against the total, everything below the first row is a sliver.
     const busiest = Math.max(1, ...backends.map((entry) => Number(entry.bytes_total) || 0));
 
-    sortedBackends(backends).forEach((entry) => {
+    core.sortedBackends(backends, backendsSort).forEach((entry) => {
       const row = document.createElement("div");
       row.className = "mon-timeline-row";
 
@@ -939,10 +747,7 @@
     if (notice) notice.hidden = !visible;
   }
 
-  function rangeSeconds(key) {
-    const table = { "1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800, "30d": 2592000, "90d": 7776000, "1y": 31536000 };
-    return table[key] || 86400;
-  }
+  const rangeSeconds = core.rangeSeconds;
 
   function renderSummary(data) {
     const totals = data.totals || {};
@@ -1548,7 +1353,6 @@
   // if it had been typed into "Period...". Each zoom remembers what was shown
   // before it, so "Zoom out" -- or a double-click on a chart -- steps back
   // one level at a time, and a preset or "Back to presets" starts afresh.
-  const MIN_ZOOM_SECONDS = 300;
   const zoomHistory = [];
   let zoomDragging = false;
 
@@ -1582,28 +1386,9 @@
     loadAll();
   }
 
-  // The x axis is spaced by sample, not by clock, so a position maps to a
-  // time through the samples either side of it -- which is also what the
-  // operator saw under the pointer.
-  function timeAtX(geometry, x) {
-    const points = geometry.points;
-    if (points.length === 1) return Number(points[0]);
-    const fraction = Math.min(Math.max((x - geometry.left) / geometry.plotWidth, 0), 1);
-    const position = fraction * (points.length - 1);
-    const lower = Math.floor(position);
-    const upper = Math.min(lower + 1, points.length - 1);
-    return Number(points[lower]) +
-      (Number(points[upper]) - Number(points[lower])) * (position - lower);
-  }
-
   function zoomTo(since, until) {
-    if (until - since < MIN_ZOOM_SECONDS) {
-      const middle = (since + until) / 2;
-      since = middle - MIN_ZOOM_SECONDS / 2;
-      until = middle + MIN_ZOOM_SECONDS / 2;
-    }
     zoomHistory.push(customWindow ? Object.assign({}, customWindow) : null);
-    showWindow({ since: Math.floor(since), until: Math.ceil(until) });
+    showWindow(core.zoomWindow(since, until));
   }
 
   function zoomOut() {
@@ -1667,7 +1452,8 @@
       stop();
       // A click or a twitch is not a selection.
       if (right - left < 6) return;
-      zoomTo(timeAtX(geometry, left), timeAtX(geometry, right) + geometry.step);
+      // The axis is spaced by sample, not by clock (see timeAtX).
+      zoomTo(core.timeAtX(geometry, left), core.timeAtX(geometry, right) + geometry.step);
     });
     svg.addEventListener("pointercancel", stop);
     svg.addEventListener("dblclick", zoomOut);
