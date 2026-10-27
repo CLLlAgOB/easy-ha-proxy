@@ -23,8 +23,9 @@ HAProxy и Let's Encrypt.
 from __future__ import annotations
 
 import base64
-import cgi
 import contextlib
+import email.parser
+import email.policy
 import io
 import json
 import logging
@@ -3475,28 +3476,76 @@ def handle_internal_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
     return 200, {"ok": True, "message": "Internal certificate authority deleted."}
 
 
-def _uploaded_file(form: "cgi.FieldStorage", field: str) -> Any:
-    """Return the attached file for ``field``, or None.
+class UploadedFile:
+    """One file from a multipart form: the name it was sent under and its bytes."""
 
-    A cgi.FieldStorage part that holds a file answers neither ``bool()`` nor
-    ``in`` -- both raise TypeError, because its ``list`` is None. So the
-    obvious way to ask whether the operator attached anything is the one way
-    that cannot be used, and asking it crashed the request handler instead of
-    returning an error.
+    def __init__(self, filename: str, content: bytes) -> None:
+        self.filename = filename
+        self.file = io.BytesIO(content)
+
+
+class MultipartForm:
+    """The fields and files of a multipart/form-data request body.
+
+    The cgi module that used to parse these uploads is gone from Python 3.13,
+    which Debian 13 ships; the email parser reads the same format. The
+    handlers ask for two things only: the first value of a field, and the
+    file attached under a name.
     """
-    try:
-        item = form[field]
-    except (KeyError, TypeError):
-        return None
-    if isinstance(item, list):
-        item = item[0] if item else None
-    if item is None or not getattr(item, "filename", ""):
-        return None
-    return item
+
+    def __init__(
+        self,
+        fields: Optional[Dict[str, List[str]]] = None,
+        files: Optional[Dict[str, UploadedFile]] = None,
+    ) -> None:
+        self.fields = fields or {}
+        self.files = files or {}
+
+    @staticmethod
+    def boundary(content_type: str) -> Tuple[str, Optional[str]]:
+        """The media type of a Content-Type header and its boundary, if any."""
+        header = email.parser.HeaderParser(policy=email.policy.HTTP).parsestr(
+            f"Content-Type: {content_type}\r\n\r\n"
+        )
+        return header.get_content_type(), header.get_param("boundary")
+
+    @classmethod
+    def parse(cls, content_type: str, body: bytes) -> "MultipartForm":
+        media_type, boundary = cls.boundary(content_type)
+        if media_type != "multipart/form-data" or not boundary:
+            raise ValueError("not a multipart/form-data body")
+        message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+            f"Content-Type: {content_type}\r\n\r\n".encode("latin-1") + body
+        )
+        if not message.is_multipart():
+            raise ValueError("the multipart body could not be read")
+        fields: Dict[str, List[str]] = {}
+        files: Dict[str, UploadedFile] = {}
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            if not name:
+                continue
+            content = part.get_payload(decode=True) or b""
+            filename = part.get_filename()
+            if filename is None:
+                fields.setdefault(name, []).append(content.decode("utf-8", "replace"))
+            elif filename and name not in files:
+                # An empty filename is the browser saying no file was chosen.
+                files[name] = UploadedFile(filename, content)
+        return cls(fields, files)
+
+    def getfirst(self, name: str, default: Optional[str] = None) -> Optional[str]:
+        values = self.fields.get(name)
+        return values[0] if values else default
+
+
+def _uploaded_file(form: MultipartForm, field: str) -> Optional[UploadedFile]:
+    """Return the attached file for ``field``, or None."""
+    return form.files.get(field)
 
 
 def handle_external_ca_upload_form(
-    form: "cgi.FieldStorage",
+    form: MultipartForm,
 ) -> Tuple[int, Dict[str, Any]]:
     file_item = _uploaded_file(form, "ca_file")
     if file_item is None:
@@ -3820,7 +3869,7 @@ def _import_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def handle_certs_inspect_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+def handle_certs_inspect_form(form: MultipartForm) -> Tuple[int, Dict[str, Any]]:
     """Say what a file is, and change nothing."""
     file_item = _uploaded_file(form, "file")
     if file_item is None:
@@ -3840,7 +3889,7 @@ def handle_certs_inspect_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, 
     return 200, {"ok": True, **_import_summary(plan)}
 
 
-def handle_certs_import_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+def handle_certs_import_form(form: MultipartForm) -> Tuple[int, Dict[str, Any]]:
     """Do what the inspection described."""
     file_item = _uploaded_file(form, "file")
     if file_item is None:
@@ -4193,7 +4242,7 @@ def get_latest_account_id(accounts_dir: Path) -> Optional[str]:
 
     return latest_account
 
-def handle_certs_upload_form(form: "cgi.FieldStorage") -> Tuple[int, Dict[str, Any]]:
+def handle_certs_upload_form(form: MultipartForm) -> Tuple[int, Dict[str, Any]]:
     """
     Обработка загрузки PEM через multipart/form-data.
     Ожидает поля:
@@ -4470,30 +4519,25 @@ class CertdHandler(BaseHTTPRequestHandler):
             "/api/v1/certs/inspect",
             "/api/v1/certs/import",
         ):
-            ctype, pdict = cgi.parse_header(
-                self.headers.get("Content-Type", ""))
-            if ctype != "multipart/form-data":
+            content_type = self.headers.get("Content-Type", "")
+            media_type, boundary = MultipartForm.boundary(content_type)
+            if media_type != "multipart/form-data":
                 return self._send_json(
                     200,
                     {"ok": False, "error": "Content-Type must be multipart/form-data"},
                 )
 
-            if "boundary" not in pdict:
+            if not boundary:
                 return self._send_json(
                     200,
                     {"ok": False, "error": "multipart boundary missing"},
                 )
 
-            pdict["boundary"] = pdict["boundary"].encode("utf-8")
-            length_str = self.headers.get("Content-Length") or "0"
             try:
-                pdict["CONTENT-LENGTH"] = int(length_str)
+                length = int(self.headers.get("Content-Length") or "0")
             except ValueError:
-                pdict["CONTENT-LENGTH"] = 0
-            if (
-                pdict["CONTENT-LENGTH"] <= 0
-                or pdict["CONTENT-LENGTH"] > MAX_REQUEST_BYTES
-            ):
+                length = 0
+            if length <= 0 or length > MAX_REQUEST_BYTES:
                 return self._send_json(
                     413, {"ok": False, "error": "upload is too large"}
                 )
@@ -4504,15 +4548,12 @@ class CertdHandler(BaseHTTPRequestHandler):
             # the connection closes unanswered, so the browser is told only
             # that the remote end hung up. An upload that fails must say why.
             try:
-                form = cgi.FieldStorage(  # type: ignore[arg-type]
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        "REQUEST_METHOD": "POST",
-                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                    },
-                    keep_blank_values=True,
-                )
+                body = self.rfile.read(length)
+                if len(body) < length:
+                    return self._send_json(
+                        400, {"ok": False, "error": "the upload was cut short"}
+                    )
+                form = MultipartForm.parse(content_type, body)
 
                 if path == "/api/v1/certs/ca/upload":
                     status, resp = handle_external_ca_upload_form(form)

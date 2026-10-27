@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import importlib.util
 from pathlib import Path
 import stat
@@ -30,17 +29,14 @@ class Upload:
 
 
 def Form(fields: dict[str, str], files: dict[str, Upload]):
-    """Build the cgi.FieldStorage the daemon will really be handed.
+    """Build the form the daemon will really be handed.
 
     This used to be a dict subclass, and that is exactly how an upload could
-    crash the daemon while the tests stayed green: a real FieldStorage part
-    holding a file raises TypeError from ``bool()`` and from ``in``, and a
-    dict does neither. A stand-in that is easier to satisfy than the real
-    thing tests nothing about the real thing, so the multipart body is
-    assembled here for real and parsed by cgi itself.
+    crash the daemon while the tests stayed green: the real parsed form
+    behaved differently from a dict. A stand-in that is easier to satisfy
+    than the real thing tests nothing about the real thing, so the multipart
+    body is assembled here for real and parsed by the daemon's own parser.
     """
-    import cgi
-
     boundary = "----easyhaproxytestboundary"
     parts: list[bytes] = []
     for name, value in fields.items():
@@ -58,18 +54,7 @@ def Form(fields: dict[str, str], files: dict[str, Upload]):
     parts.append(f"--{boundary}--\r\n".encode("utf-8"))
     body = b"".join(parts)
 
-    return cgi.FieldStorage(
-        fp=io.BytesIO(body),
-        headers={
-            "content-type": f"multipart/form-data; boundary={boundary}",
-            "content-length": str(len(body)),
-        },
-        environ={
-            "REQUEST_METHOD": "POST",
-            "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
-        },
-        keep_blank_values=True,
-    )
+    return CERTD.MultipartForm.parse(f"multipart/form-data; boundary={boundary}", body)
 
 
 class CertificateAuthorityTests(unittest.TestCase):

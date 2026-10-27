@@ -19,7 +19,7 @@ import hashlib
 import ipaddress
 import re
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from .i18n import translate
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
@@ -1917,7 +1917,7 @@ def haproxy_certs_backup():
             mimetype="text/plain",
         )
 
-    filename = f"haproxy_certs_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
+    filename = f"haproxy_certs_backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.zip"
 
     resp = Response(binary, mimetype="application/zip")
     resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'

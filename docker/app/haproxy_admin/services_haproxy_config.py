@@ -15,7 +15,7 @@ import hashlib
 import ipaddress
 import secrets
 import difflib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 
@@ -827,7 +827,7 @@ def _persist_applied_state_bundle(cfg_text: str, bundle: Dict[str, bytes]) -> No
     spec = _spec_from_source_bundle(bundle)
     cfg_raw = cfg_text.encode("utf-8")
     state = {
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "haproxy_cfg_sha256": hashlib.sha256(cfg_raw).hexdigest(),
         "haproxy_cfg_len": len(cfg_raw),
         "source_sha256": _source_bundle_sha256(bundle),

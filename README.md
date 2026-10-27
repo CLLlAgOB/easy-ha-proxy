@@ -1204,7 +1204,8 @@ public repository.
 
 Every test lives in `.tests/`, which is outside the Docker build context, so
 none of it reaches the runtime image. `.github/workflows/ci.yml` runs exactly
-the commands below on Python 3.10, 3.11 and 3.12.
+the commands below on Python 3.10 to 3.14 -- every interpreter a supported
+host ships, from Ubuntu 22.04 to Ubuntu 26.04 and Debian 13.
 
 ```bash
 python3 -m py_compile installer/easy_ha_proxy.py
