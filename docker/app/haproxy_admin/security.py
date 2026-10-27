@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import os
 from typing import FrozenSet
+from urllib.parse import urlsplit, urlunsplit
 
 from flask import abort, g, jsonify, request
 
@@ -154,4 +155,27 @@ def apply_security_headers(response):
         f"script-src {script_src}; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'",
     )
+    return response
+
+
+def keep_redirects_on_this_origin(response):
+    """Send the panel's redirects to its own pages as a path, not a full URL.
+
+    Flask answers /system/updates with a redirect to /system/updates/ and
+    writes it as an absolute URL from what it sees: plain http, because TLS
+    ends at HAProxy. The browser then leaves https for an address the gateway
+    does not serve. A path keeps the scheme and host the browser came with.
+    Telling Flask the request was https would do it too, but would also switch
+    on the CSRF check's strict Referer rules for every form.
+    """
+
+    location = response.headers.get("Location")
+    if not location or not 300 <= response.status_code < 400:
+        return response
+    parts = urlsplit(location)
+    if parts.scheme not in ("http", "https") or parts.netloc != request.host:
+        return response
+    # One leading slash: "//elsewhere/x" would be read as another host.
+    path = "/" + parts.path.lstrip("/")
+    response.headers["Location"] = urlunsplit(("", "", path, parts.query, parts.fragment))
     return response

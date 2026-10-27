@@ -33,6 +33,7 @@ from .security import (
     STATIC_CACHE_SECONDS,
     apply_security_headers,
     enforce_proxy_and_role,
+    keep_redirects_on_this_origin,
 )
 
 # Import routes so they register themselves on their blueprints.
@@ -218,6 +219,7 @@ def create_app() -> Flask:
     app.before_request(init_request_language)
     app.before_request(enforce_proxy_and_role)
     app.after_request(apply_security_headers)
+    app.after_request(keep_redirects_on_this_origin)
     app.after_request(localize_json_response)
 
     @app.context_processor
