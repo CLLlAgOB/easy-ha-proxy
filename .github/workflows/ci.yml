@@ -151,7 +151,7 @@ jobs:
           echo "Galaxy is not answering; installing from the GitHub tags instead"
           ansible-galaxy collection install --no-deps --force \
             "git+https://github.com/ansible-collections/ansible.posix.git,2.2.2" \
-            "git+https://github.com/ansible-collections/community.docker.git,5.2.2"
+            "git+https://github.com/ansible-collections/community.docker.git,5.4.0"
 
       # vars.yml, the inventories and group_vars are deliberately untracked, so
       # the playbook is parsed against a throwaway inventory. This validates
