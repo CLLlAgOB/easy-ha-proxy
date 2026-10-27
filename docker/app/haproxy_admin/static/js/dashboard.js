@@ -1,13 +1,13 @@
-/* dashboard.js – logic главной страницы */
+/* dashboard.js -- the main page's logic */
 
 const Dashboard = (() => {
-  /* ─────────── внутренние переменные ─────────── */
+  /* ─────────── internal state ─────────── */
   let auto = false, tblTimer = null, connTimer = null;
 
-  // Причины банов by кодам from HAProxy (var(txn.ban_code) / gpt0)
-  // 10 → ERR_LIMIT_SITE
-  // 20 → ERR_LIMIT_OTHER
-  // 30 → RATE_LIMIT_SITE
+  // Ban reasons by HAProxy's codes (var(txn.ban_code) / gpt0)
+  // 10 -> ERR_LIMIT_SITE
+  // 20 -> ERR_LIMIT_OTHER
+  // 30 -> RATE_LIMIT_SITE
   const BAN_REASON_LABELS = {
     10: 'Too many 4xx errors for the site (ERR_LIMIT_SITE)',
     20: 'Too many 4xx errors for other requests without SNI (ERR_LIMIT_OTHER)',
@@ -20,7 +20,7 @@ const Dashboard = (() => {
   };
 
 
-  /* ──────────── утилиты ──────────── */
+  /* ──────────── utilities ──────────── */
   function formatDuration(sec) {
     sec = +sec || 0;
     if (sec < 60) return `${sec} sec`;
@@ -47,12 +47,12 @@ const Dashboard = (() => {
 
     const headers = Array.isArray(data.headers) ? data.headers : [];
 
-    // Определяем индекс TTL/Expires by name заголовка, and not жёстко i === 2
+    // Find the TTL/Expires index by the header's name, rather than hard-coding i === 2
     const ttlIdx = headers.findIndex(h =>
       typeof h === 'string' && /ttl|expire|expires/i.test(h)
     );
 
-    // For "Blocked IPs": сортируем by TTL-колонке (if нашли)
+    // For "Blocked IPs": sort by the TTL column (if found)
     if (containerId === 'ban' && Array.isArray(data?.rows) && ttlIdx >= 0) {
       data = Object.assign({}, data, {
         rows: data.rows.slice().sort((a, b) => {
@@ -66,7 +66,7 @@ const Dashboard = (() => {
       });
     }
 
-    // Метаданые (used / размер)
+    // Metadata (used / size)
     if (metaId && data.meta && document.getElementById(metaId)) {
       const { used = 0, size = 0 } = data.meta;
       const pct = size ? Math.round((used / size) * 100) : 0;
@@ -83,18 +83,18 @@ const Dashboard = (() => {
       r.forEach((cell, i) => {
         let v = cell;
 
-        // 1) Первая колонка — IP → ссылка
+        // 1) The first column is an IP -> a link
         if (i === 0) {
           const ip = String(cell || '');
           v = `<a href="/ip/${encodeURIComponent(ip)}" target="_blank" rel="noopener" class="ip-cell">${escapeHtml(ip)}</a>`;
         }
 
-        // 2) Status in таблице ban — рисуем бейдж
+        // 2) Status in the ban table: draw a badge
         else if (containerId === 'ban' && i === 1) {
           v = badge(cell, cell === 'Blocked' ? 'status-blocked' : 'status-normal');
         }
 
-        // 3) Колонка errors in общей таблице err
+        // 3) The errors column in the common err table
         else if (containerId === 'err' && i === 1) {
           const n = +cell || 0;
           v = badge(
@@ -103,7 +103,7 @@ const Dashboard = (() => {
           );
         }
 
-        // 4) Колонка TTL/Expires — форматируем in человекочитаемый вид
+        // 4) The TTL/Expires column, made human-readable
         else if (ttlIdx >= 0 && i === ttlIdx) {
           // Say where the number comes from. For an adaptive ban it is the
           // engine's schedule; for everything else it is the stick table's
@@ -120,13 +120,13 @@ const Dashboard = (() => {
           v = `<span${title}>${formatDuration(cell)}</span>`;
         }
 
-        // 5) Причина ban (if добавишь колонку "Причина" / "Reason")
+        // 5) The ban reason (should a "Reason" column be added)
         else if (
           containerId === 'ban' &&
           typeof headers[i] === 'string' &&
           /reason/i.test(headers[i])
         ) {
-          // if пришёл числовой code — попробуем расшифровать
+          // a numeric code: try to decode it
           const num = Number(cell);
           if (!isNaN(num) && BAN_REASON_LABELS[num]) {
             v = BAN_REASON_LABELS[num];
@@ -147,7 +147,7 @@ const Dashboard = (() => {
     html += '</tbody></table>';
     el.innerHTML = html;
 
-    // For table ban and прочих — подрисуем флаги by IP батч-запросом
+    // For the ban table and the others: add flags by IP with one batch request
     if (Array.isArray(data?.rows) && typeof window.decorateFlags === 'function') {
       window.decorateFlags(containerId, data.rows, 0);
     }
@@ -169,7 +169,7 @@ const Dashboard = (() => {
       const table = document.querySelector(`#${containerId} table tbody`);
       if (!table) return;
 
-      // пройдёмся by строкам and добавим флажок in первую ячейку
+      // go over the rows and put a flag in the first cell
       Array.from(table.querySelectorAll('tr')).forEach((tr, idx) => {
         const td = tr.querySelector('td');
         if (!td) return;
@@ -177,7 +177,7 @@ const Dashboard = (() => {
         const rawCc = String(map[ip] || '').toLowerCase();
         const cc = /^[a-z]{2}$/.test(rawCc) ? rawCc : '';
         const flag = window.countryFlagMarkup(cc);
-        // if ещё no флажка — добавим перед ссылкой
+        // no flag yet: add it before the link
         if (!td.querySelector('.country-flag')) {
           td.innerHTML = `${flag} ${td.innerHTML}`;
         }
@@ -187,10 +187,10 @@ const Dashboard = (() => {
     }
   }
 
-  // Универсально добавляет флаги to первому столбцу with IP for ЛЮБОЙ table
+  // Adds flags to the IP column of ANY table
   window.decorateFlags = async function (containerId, rows, ipIndex = 0) {
     try {
-      // Соберём IP from указанной колонки
+      // Collect the addresses from the given column
       const ips = Array.from(new Set(
         rows.map(r => String(r?.[ipIndex] || '').trim())
       )).filter(Boolean);
@@ -210,22 +210,22 @@ const Dashboard = (() => {
         const td = tr.children[ipIndex];
         if (!td) return;
 
-        // найдём IP as текст у ссылки/ячейки
+        // find the IP as the link's or the cell's text
         const link = td.querySelector('a.ip-cell');
         const ip = link ? link.textContent.trim() : (rows[idx]?.[ipIndex] || '').toString().trim();
         if (!ip) return;
 
-        // уже есть флаг? not дублируем
+        // a flag already? do not add another
         if (td.querySelector('.country-flag')) return;
 
         const rawCc = String(map[ip] || '').toLowerCase();
         const cc = /^[a-z]{2}$/.test(rawCc) ? rawCc : '';
         const flag = window.countryFlagMarkup(cc);
 
-        // Вставляем флаг перед содержимым ячейки.
-        // insertAdjacentHTML не пересоздаёт остальные узлы: перезапись
-        // innerHTML отменяла ещё не завершившиеся загрузки флагов
-        // (NS_BINDING_ABORTED) при обновлении таблиц.
+        // Put the flag before the cell's content.
+        // insertAdjacentHTML does not recreate the other nodes: rewriting
+        // innerHTML cancelled flag images still loading
+        // (NS_BINDING_ABORTED) when the tables refreshed.
         td.insertAdjacentHTML('afterbegin', flag);
       });
     } catch (e) {
@@ -234,7 +234,7 @@ const Dashboard = (() => {
   };
 
 
-  // ПОДКЛЮЧЕНИЯ: показываем просто IP, Country, Кол-во
+  // CONNECTIONS: just the IP, the country and the count
   function renderConnectionsAggregated(containerId, list, metaId, total) {
     const el = document.getElementById(containerId);
     if (!el) return;
@@ -293,11 +293,11 @@ const Dashboard = (() => {
 
   function prettifyErrTableName(name) {
     const n = String(name || '');
-    // Безымянные/ошибочные имена (nosni/other)
+    // Unnamed or broken names (nosni/other)
     if (n === 'tbl_err_nosni' || n === 'tbl_err_other') return 'No SNI / invalid name';
-    // Убираем общий prefix
+    // Remove the common prefix
     let s = n.replace(/^tbl_err_/, '');
-    // Точки вместо подчёркиваний for доменов form rdg_example_com
+    // Dots instead of underscores, for domains in the form rdg_example_com
     s = s.replace(/_/g, '.');
     return s;
   }
@@ -504,14 +504,14 @@ const Dashboard = (() => {
       const r = await fetch('/api/tables');
       const j = await r.json();
 
-      // as and раньше: одна сводная таблица errors
+      // as before: one combined errors table
       renderTable('ban', j.ban, 'ban-meta');
       renderTable('err', j.err, 'err-meta');
 
-      // НОВОЕ: отдельные table errors by all stick-таблицам
+      // NEW: a separate errors table for every stick table
       const errHost = document.getElementById('err');
       if (errHost) {
-        // контейнер under подтаблицы
+        // the container for the sub-tables
         let sub = document.getElementById('err-subtables');
         if (!sub) {
           sub = document.createElement('div');
@@ -521,12 +521,12 @@ const Dashboard = (() => {
         }
         sub.innerHTML = '';
 
-        // ЧИТАЕМ ФИЛЬТР САЙТА ИЗ URL: ?site=rdg.domain.local
+        // READ THE SITE FILTER FROM THE URL: ?site=rdg.domain.local
         const siteFilter = (new URLSearchParams(location.search).get('site') || '').trim();
         const toTblName = (d) => 'tbl_err_' + d.replace(/[^A-Za-z0-9_]/g, '_'); // as in backend
 
         if (Array.isArray(j.err_multi) && j.err_multi.length) {
-          // If указан site — вычислим имя нужной stick-table
+          // If a site is given, work out the name of its stick table
           const onlyName = siteFilter ? toTblName(siteFilter) : null;
 
           let rendered = 0;
@@ -534,20 +534,20 @@ const Dashboard = (() => {
             const name = String(item.name || '');
             const rows = item?.table?.rows || [];
 
-            // If фильтр by site включён — скрываем (not рендерим) СЕКЦИЮ ЭТОГО САЙТА, когда она пуста
+            // With the site filter on, an empty section of THIS SITE is hidden (not rendered)
             if (onlyName && name === onlyName && rows.length === 0) {
-              // nothing not добавляем — секция скрыта
+              // nothing is added: the section is hidden
               return;
             }
 
-            // If фильтр включён — показываем only совпадающий site (and only if там есть данные)
+            // With the filter on, show only the matching site (and only if it has data)
             if (onlyName && name !== onlyName) {
               return;
             }
 
-            // Без фильтра — показываем all непустые (and пустые можно опционально allow)
+            // Without a filter, show every non-empty one (empty ones could be allowed too)
             if (!onlyName && rows.length === 0) {
-              // хотите — просто пропустите пустые, чтобы not засорять UI
+              // empty ones are skipped, so they do not clutter the UI
               return;
             }
 
@@ -562,7 +562,7 @@ const Dashboard = (() => {
             rendered++;
           });
 
-          // If by выбранному site nothing not отрисовали — покажем аккуратный плейсхолдер
+          // If nothing was drawn for the chosen site, show a tidy placeholder
           if (rendered === 0) {
             const p = document.createElement('div');
             p.className = 'no-data';
@@ -644,7 +644,7 @@ const Dashboard = (() => {
       const meta = j.meta || {};
       const headers = j.headers || ['IP', 'Flag', 'TTL (sec)'];
 
-      // if table no or функционал отключён
+      // no table, or the feature is off
       if (meta.error === 'table_missing') {
         box.innerHTML = '<div class="no-data">The tbl_ip_auth table is missing or the feature is disabled.</div>';
         const metaEl = document.getElementById(metaId);
@@ -659,7 +659,7 @@ const Dashboard = (() => {
         return;
       }
 
-      // мета-инфо сверху
+      // meta information at the top
       const metaEl = document.getElementById(metaId);
       if (metaEl) {
         const used = meta.used || rows.length;
@@ -668,7 +668,7 @@ const Dashboard = (() => {
         metaEl.textContent = `${used} from ${size} (${pct} %)`;
       }
 
-      // рендерим таблицу руками (чтобы not зависеть от renderTable)
+      // render the table by hand (so it does not depend on renderTable)
       let html = '<table class="data-table"><thead><tr>';
       headers.forEach(h => { html += `<th>${escapeHtml(h)}</th>`; });
       html += '</tr></thead><tbody>';
@@ -680,11 +680,11 @@ const Dashboard = (() => {
 
         html += '<tr>';
 
-        // IP — as ссылка /ip/<ip>
+        // the IP as a link to /ip/<ip>
         html += `<td><a href="/ip/${encodeURIComponent(ip)}" target="_blank" rel="noopener" class="ip-cell">${escapeHtml(ip)}</a></td>`;
         // Flag (gpc0)
         html += `<td>${escapeHtml(flag)}</td>`;
-        // TTL – красивый format through formatDuration (sec → min/hr/days)
+        // TTL in a readable form through formatDuration (sec -> min/hr/days)
         html += `<td><span>${formatDuration(ttl)}</span></td>`;
 
         html += '</tr>';
@@ -693,7 +693,7 @@ const Dashboard = (() => {
       html += '</tbody></table>';
       box.innerHTML = html;
 
-      // after рендера добавляем флаги by IP, if доступна функция
+      // after rendering, add flags by IP if the function is available
       if (typeof window.decorateFlags === 'function') {
         window.decorateFlags(containerId, rows, 0);
       }
@@ -705,7 +705,7 @@ const Dashboard = (() => {
     }
   }
 
-  /* ─────────── формы ─────────── */
+  /* ─────────── forms ─────────── */
   function initForms() {
     const getEl = id => document.getElementById(id);
 
@@ -757,7 +757,7 @@ const Dashboard = (() => {
       });
     }
 
-    // Глобальный whitelist (toggle)
+    // The global allow-list (toggle)
     const wlGlobalForm = getEl('whitelist-global-form');
     if (wlGlobalForm) {
       wlGlobalForm.addEventListener('submit', async ev => {
@@ -796,7 +796,7 @@ const Dashboard = (() => {
     }
   }
 
-  /* ─────────── auto-обновление ─────────── */
+  /* ─────────── auto-refresh ─────────── */
   function startAuto() {
     if (!tblTimer) tblTimer = setInterval(() => loadTables(false), 5000);
     if (!connTimer) connTimer = setInterval(fetchConnections, 10000);
@@ -806,12 +806,12 @@ const Dashboard = (() => {
     clearInterval(connTimer); connTimer = null;
   }
 
-  /* ─────────── инициализация ─────────── */
+  /* ─────────── start-up ─────────── */
   function init() {
     loadTables();
     fetchAttackers();
     fetchConnections();
-    loadIpAuth();   // ← подгружаем авторизованные IP when старте
+    loadIpAuth();   // <- load the authorised addresses at start
     loadWhitelists();
     initForms();
 

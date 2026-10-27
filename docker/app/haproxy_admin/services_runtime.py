@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Runtime-операции над серверами HAProxy.
+"""Runtime operations on HAProxy's servers.
 
-Временные операции: Ready / Drain / Maintenance и вес. Ничего не пишется в
-конфигурацию, поэтому любой reload или перезапуск HAProxy возвращает серверы
-к тому, что записано в haproxy.cfg — в конфиге нет `server-state-file`.
+Temporary operations: Ready / Drain / Maintenance and the weight. Nothing is
+written to the configuration, so any reload or restart of HAProxy returns the
+servers to what haproxy.cfg says -- the configuration has no `server-state-file`.
 
-Имя backend и сервера никогда не приходит из формы как текст: оно сверяется со
-списком того, что HAProxy сейчас действительно отдаёт в `show stat`.
+The backend and server names never come from the form as free text: they are
+checked against what HAProxy actually reports in `show stat` right now.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ PROTECTED_BACKENDS: frozenset[str] = frozenset(
 
 
 class RuntimeError_(RuntimeError):
-    """Ожидаемая ошибка, безопасная для показа в интерфейсе."""
+    """An expected error, safe to show in the interface."""
 
 
 def _is_operable(pxname: str) -> bool:
@@ -51,7 +51,7 @@ def _is_operable(pxname: str) -> bool:
 
 
 def _admin_state(status: str) -> str:
-    """Свести status из show stat к состоянию, которым мы управляем."""
+    """Reduce a show stat status to the state that is managed here."""
 
     value = (status or "").strip().upper()
     if value.startswith("MAINT"):
@@ -62,7 +62,7 @@ def _admin_state(status: str) -> str:
 
 
 def list_backends() -> List[Dict[str, Any]]:
-    """Backends и их серверы в том виде, в каком их сейчас видит HAProxy."""
+    """The backends and their servers, as HAProxy sees them now."""
 
     rows = _parse_show_stat(_show_stat(SOCKET))
     names = _load_display_map_from_cfg(HAPROXY_CFG)
@@ -108,7 +108,7 @@ def _to_int(value: Any) -> int:
 
 
 def _resolve(backend: Any, server: Any) -> Tuple[str, str]:
-    """Сверить пару backend/server с тем, что реально существует."""
+    """Check a backend/server pair against what really exists."""
 
     wanted_backend = str(backend or "").strip()
     wanted_server = str(server or "").strip()

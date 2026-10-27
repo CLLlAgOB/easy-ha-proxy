@@ -338,14 +338,14 @@
             {% endif %}
           </td>
 
-          {# Path to файлу #}
+          {# Path to the file #}
           <td>
             <div class="mono" style="word-break: break-all;">
               <code>{{ item.path }}</code>
             </div>
           </td>
 
-          {# Срок действия #}
+          {# Validity #}
           <td>
             {% if item.not_after %}
             <div>{{ item.not_after }}</div>
@@ -366,7 +366,7 @@
             {% endif %}
           </td>
 
-          {# Status (without повторения даты) #}
+          {# Status (without repeating the date) #}
           <td>
             {% if item.state %}
             <div>{{ item.state }}</div>
@@ -645,7 +645,7 @@
             </div>
           </td>
 
-          {# Срок действия #}
+          {# Validity #}
           <td>
             {% if item.not_after %}
             <div>{{ item.not_after }}</div>
@@ -666,7 +666,7 @@
             {% endif %}
           </td>
 
-          {# Status (коротко, without даты) #}
+          {# Status (short, without the date) #}
           <td>
             {% if item.state %}
             <div>{{ item.state }}</div>
@@ -699,7 +699,7 @@
   </div>
 </div>
 
-{# ─────────────────── Бэкап / восстановление ─────────────────── #}
+{# ─────────────────── Backup / restore ─────────────────── #}
 <div class="card" style="margin-top: 20px;">
   <div class="card-header">
     <h2>Certificate backup / restore</h2>

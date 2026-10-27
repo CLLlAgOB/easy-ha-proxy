@@ -1,4 +1,4 @@
-// UI for переключения групп правил by доменам + трекинг активного domain
+// The UI for switching the rule groups by domain, and tracking the active domain
 (function () {
   function showGroup(targetId) {
     var groups = document.querySelectorAll(".domain-group-wrapper");
@@ -23,7 +23,7 @@
       }
     });
 
-    // Обновляем hidden-field, чтобы server знал активный domain
+    // Update the hidden field, so the server knows the active domain
     var hidden = document.getElementById("active_group_domain");
     if (hidden) {
       hidden.value = activeDomain;
@@ -38,7 +38,7 @@
       return;
     }
 
-    // Навешиваем обработчики on табы
+    // Attach the handlers to the tabs
     pills.forEach(function (btn) {
       btn.addEventListener("click", function (ev) {
         ev.preventDefault();
@@ -49,18 +49,18 @@
       });
     });
 
-    // Выбираем стартовую группу.
+    // Choose the starting group.
     // desiredDomain may be:
-    //   - конкретный domain "ha.example.com"
-    //   - пустая line "" → группа "New / without a domain"
-    //   - null → domain not defined → берём первую видимую / первую by порядку
+    //   - a specific domain "ha.example.com"
+    //   - an empty string "" -> the group "New / without a domain"
+    //   - null -> no domain given -> the first visible one / the first in order
     var hidden = document.getElementById("active_group_domain");
     var desiredDomain = hidden ? hidden.value : null;
 
     var initialId = null;
 
-    // If hidden есть (in том числе, if там пустая line) —
-    // сначала пытаемся найти именно эту группу by data-domain.
+    // If the hidden field exists (even holding an empty string),
+    // look for exactly that group by data-domain first.
     if (desiredDomain !== null) {
       Array.prototype.forEach.call(groups, function (el) {
         if (initialId) {
@@ -73,7 +73,7 @@
       });
     }
 
-    // If not нашли конкретную группу — берём первую видимую
+    // If that group was not found, take the first visible one
     if (!initialId) {
       Array.prototype.forEach.call(groups, function (el) {
         if (!initialId && el.style.display !== "none") {
@@ -82,7 +82,7 @@
       });
     }
 
-    // If and видимых no (or all были hidden) — просто первую by списку
+    // If none is visible (or all were hidden), just the first in the list
     if (!initialId && groups.length) {
       initialId = groups[0].id;
     }
@@ -92,7 +92,7 @@
     }
   }
 
-  // На всякий случай экспортируем in глобал
+  // Exported globally, just in case
   window.AutheliaAclUI = {
     showGroup: showGroup,
   };

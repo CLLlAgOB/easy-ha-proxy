@@ -66,14 +66,14 @@
             <div class="form-row">
                 <div class="form-label" style="margin-bottom:4px;">Groups</div>
 
-                {# List всех доступных групп #}
+                {# The list of every available group #}
                 {% if all_groups is defined and all_groups %}
                 {% set groups_list = all_groups %}
                 {% else %}
                 {% set groups_list = [] %}
                 {% endif %}
 
-                {# Уже выбранные группы #}
+                {# The groups already chosen #}
                 {% set selected_groups = user.groups or [] %}
 
                 {% if groups_list %}
@@ -135,7 +135,7 @@
                 <button type="submit" class="btn">
                     Save changes
                 </button>
-                {# Кнопку удаления отсюда убрали, удаление делаем from списка users #}
+                {# The delete button was removed from here; users are deleted from the list #}
             </div>
         </form>
     </div>

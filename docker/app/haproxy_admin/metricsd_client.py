@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Клиент к root-сервису easy-ha-proxy-metricsd через Unix-socket.
+"""Client of the root service easy-ha-proxy-metricsd over a Unix socket.
 
-Демон отдаёт только чтение и только по сокету; тайм-ауты держим короткими,
-чтобы страница мониторинга не подвешивала воркер, если сборщик занят.
+The daemon is read-only and reachable only over its socket; the timeouts are
+short, so the monitoring page does not hang a worker while the collector is busy.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ DEFAULT_TIMEOUT = 10
 
 
 class MetricsdUnavailable(RuntimeError):
-    """Сборщик не отвечает: страница должна деградировать, а не падать."""
+    """The collector does not answer: the page must degrade, not fail."""
 
 
 def _session() -> requests.Session:

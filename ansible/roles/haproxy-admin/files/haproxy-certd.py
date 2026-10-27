@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-haproxy-certd.py — автономный root-сервис для работы с сертификатами
-HAProxy и Let's Encrypt.
+haproxy-certd.py -- a standalone root service for the HAProxy and
+Let's Encrypt certificates.
 
-Отвечает по HTTP через Unix-сокет
-и реализует API:
+Answers HTTP over a Unix socket and implements the API:
 
   POST /api/v1/certs/status
   POST /api/v1/certs/issue
@@ -17,7 +16,7 @@ HAProxy и Let's Encrypt.
   POST /api/v1/certs/delete-le
   GET  /api/v1/certs/list
 
-Форматы запросов/ответов совместимы с прежним Flask-приложением.
+The request and response formats are compatible with the former Flask application.
 """
 
 from __future__ import annotations
@@ -54,38 +53,38 @@ from cryptography.hazmat.primitives import hashes, serialization  # type: ignore
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa  # type: ignore
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID  # type: ignore
 
-# ───────────────────── конфигурация ─────────────────────
+# ───────────────────── configuration ─────────────────────
 
 LOG = logging.getLogger("haproxy-certd")
 
-# Путь к Unix-сокету управления
+# Path to the control Unix socket
 SOCKET_PATH = os.environ.get(
     "HAPROXY_CERTD_SOCKET", "/run/easy-ha-proxy/haproxy-certd.sock"
 )
 GROUP_NAME = os.environ.get("HAPROXY_CERTD_SOCKET_GROUP", "hadmin")
 
-# Путь к vars.yml (читаем certbot_email, haproxy_certs_dir и пр.)
+# Path to vars.yml (certbot_email, haproxy_certs_dir and the rest are read from it)
 CONFIG_YAML = Path(
     os.environ.get("HAPROXY_VARS_YAML", "/opt/haproxy-admin/config/vars.yml")
 )
 
-# Где лежит certbot
+# Where certbot is
 CERTBOT_BIN = Path(os.environ.get("CERTBOT_BIN", "/snap/bin/certbot"))
 
-# HTTP–challenge от certbot
+# certbot's HTTP challenge
 CERTBOT_HTTP_PORT = 8000
 CERTBOT_HTTP_ADDR = "0.0.0.0"
 
 # --- DNS-01 -----------------------------------------------------------------
 #
-# Certbot здесь ставится snap'ом, поэтому и плагины — тоже snap'ы, версия в
-# версию с самим certbot: `snap install certbot-dns-<provider>`,
+# Certbot is installed here as a snap, so its plugins are snaps too, version
+# for version with certbot itself: `snap install certbot-dns-<provider>`,
 # `snap set certbot trust-plugin-with-root=ok`,
-# `snap connect certbot:plugin certbot-dns-<provider>`. Пакетов apt тут нет.
+# `snap connect certbot:plugin certbot-dns-<provider>`. There are no apt packages.
 #
-# Провайдер и имена его ключей — фиксированный набор. Из браузера приходит
-# только имя профиля и значения; ни имя плагина, ни аргументы certbot из
-# запроса не берутся никогда.
+# The providers and the names of their keys are a fixed set. The browser sends
+# only the profile name and the values; neither the plugin's name nor certbot's
+# arguments are ever taken from the request.
 DNS_PROVIDERS: Dict[str, Dict[str, Any]] = {
     "cloudflare": {
         "plugin": "dns-cloudflare",
@@ -124,7 +123,7 @@ DNS_PROPAGATION_MIN = 10
 DNS_PROPAGATION_MAX = 1800
 DNS_PROPAGATION_DEFAULT = 60
 
-# Скрипт, который пересобирает PEM для HAProxy и делает reload
+# The script that rebuilds the PEM for HAProxy and reloads it
 HAPROXY_PEMS_SCRIPT = Path(
     os.environ.get(
         "HAPROXY_PEMS_SCRIPT",
@@ -132,7 +131,7 @@ HAPROXY_PEMS_SCRIPT = Path(
     )
 )
 
-# Дефолтные пути
+# Default paths
 DEFAULT_HAPROXY_CERTS_DIR = Path("/etc/haproxy/certs")
 DEFAULT_LETSENCRYPT_ROOT_DIR = Path("/etc/letsencrypt")
 DEFAULT_CA_ROOT_DIR = Path("/etc/haproxy/certificate-authorities")
@@ -208,7 +207,7 @@ def report_alert_level(
     except Exception:  # pylint: disable=broad-except
         LOG.debug("alert reporting failed", exc_info=True)
 
-# Dry-run: не трогаем файлы, certbot запускаем с --dry-run
+# Dry run: files are not touched, certbot runs with --dry-run
 CERTD_DRY_RUN = os.environ.get("HAPROXY_CERTD_DRY_RUN", "0") == "1"
 HAPROXY_CERTS_DIR = Path(
     os.environ.get("HAPROXY_CERTS_DIR", str(DEFAULT_HAPROXY_CERTS_DIR))
@@ -254,12 +253,12 @@ MTLS_MAX_REVOKED = 2000
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-# ───────────────────── утилиты работы с YAML ─────────────────────
+# ───────────────────── YAML helpers ─────────────────────
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
     """
-    Безопасно читаем YAML-файл. Если файла нет — {}.
+    Reads a YAML file safely. A missing file gives {}.
     """
     try:
         if not path.exists():
@@ -270,7 +269,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
             return {}
         if isinstance(data, dict):
             return data
-        # если в корне не dict — оборачиваем
+        # if the root is not a dict, wrap it
         return {"_": data}
     except Exception as exc:  # noqa: BLE001
         LOG.warning("Failed to load YAML %s: %s", path, exc)
@@ -419,10 +418,10 @@ def _get_certbot_settings() -> Tuple[str, str, int, str]:
 
 
 def _dns_profile_path(name: str) -> Path:
-    """Путь к файлу учётных данных профиля.
+    """Path to a profile's credentials file.
 
-    Имя сверяется с шаблоном, а не склеивается с путём как есть: этот файл
-    отдаётся certbot от root.
+    The name is checked against a pattern rather than joined to the path as
+    it is: certbot reads this file as root.
     """
 
     if not DNS_PROFILE_RE.match(str(name or "")):
@@ -431,7 +430,7 @@ def _dns_profile_path(name: str) -> Path:
 
 
 def _installed_dns_plugins() -> set[str]:
-    """Какие DNS-плагины certbot реально видит прямо сейчас."""
+    """Which certbot DNS plugins are actually visible right now."""
 
     try:
         proc = subprocess.run(
@@ -451,7 +450,7 @@ def _installed_dns_plugins() -> set[str]:
 
 
 def list_dns_providers() -> Dict[str, Any]:
-    """Профили и доступность плагинов. Секреты не возвращаются никогда."""
+    """Profiles and plugin availability. Secrets are never returned."""
 
     available = _installed_dns_plugins()
     profiles: List[Dict[str, Any]] = []
@@ -493,7 +492,7 @@ def list_dns_providers() -> Dict[str, Any]:
 
 
 def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Записать учётные данные профиля с правами 0600."""
+    """Write a profile's credentials with mode 0600."""
 
     name = str(payload.get("name") or "").strip().lower()
     provider = str(payload.get("provider") or "").strip().lower()
@@ -574,7 +573,7 @@ def _dns_provider_of(name: str) -> str:
 
 
 def _dns_challenge_flags(profile: str, propagation: Any = None) -> List[str]:
-    """Аргументы certbot для DNS-01. Всё берётся из таблицы, не из запроса."""
+    """certbot's arguments for DNS-01. Everything comes from the table, nothing from the request."""
 
     provider = _dns_provider_of(profile)
     spec = DNS_PROVIDERS[provider]
@@ -689,13 +688,13 @@ def _run_certbot_for_lineage(
     }
 
 
-# ───────────────────── работа с X.509 ─────────────────────
+# ───────────────────── X.509 ─────────────────────
 
 
 def _parse_not_after(not_after: str) -> Optional[datetime]:
     """
-    Парсит поле notAfter из ssl._ssl._test_decode_cert.
-    Пример строки: 'Jan 15 12:00:00 2026 GMT'
+    Parses notAfter from ssl._ssl._test_decode_cert.
+    Example: 'Jan 15 12:00:00 2026 GMT'
     """
     if not not_after:
         return None
@@ -708,7 +707,7 @@ def _parse_not_after(not_after: str) -> Optional[datetime]:
 
 def _load_cert_info(path: Path) -> Optional[Dict[str, Any]]:
     """
-    Читает сертификат и возвращает dict:
+    Reads a certificate and returns a dict:
       - path
       - not_after (datetime)
       - days_left (int)
@@ -749,20 +748,20 @@ def _fmt_date(dt: Optional[datetime]) -> Optional[str]:
 
 def _load_first_cert_from_pem(path: Path) -> Optional[x509.Certificate]:
     """
-    Читает первый сертификат из PEM-файла.
+    Reads the first certificate of a PEM file.
     """
     try:
         data = path.read_bytes()
     except OSError:
         return None
 
-    # простой случай — один сертификат
+    # the simple case: one certificate
     try:
         return x509.load_pem_x509_certificate(data, default_backend())
     except Exception:
         pass
 
-    # несколько PEM-блоков — берём первый BEGIN CERTIFICATE
+    # several PEM blocks: take the first BEGIN CERTIFICATE
     try:
         blocks: List[bytes] = []
         current: List[bytes] = []
@@ -788,7 +787,7 @@ def _load_first_cert_from_pem(path: Path) -> Optional[x509.Certificate]:
 
 def _get_cert_dns_names(cert: x509.Certificate) -> List[str]:
     """
-    Возвращает все DNS-имена из сертификата: SAN + CN.
+    Returns every DNS name in the certificate: the SANs and the CN.
     """
     names: set[str] = set()
 
@@ -1148,12 +1147,12 @@ def _verify_external_chain(
     return result.returncode == 0, details
 
 
-# ───────────────────── поиск файлов сертификатов ─────────────────────
+# ───────────────────── finding certificate files ─────────────────────
 
 
 def _find_cert_file_by_domain_in_dir(base_dir: Path, domain: str) -> Optional[Path]:
     """
-    Ищет подходящий PEM в каталоге base_dir.
+    Finds a matching PEM in base_dir.
     """
     domain = (domain or "").strip().lower()
     if not domain:
@@ -1173,11 +1172,11 @@ def _find_cert_file_by_domain_in_dir(base_dir: Path, domain: str) -> Optional[Pa
 
 def _find_le_fullchain_for_domain(domain: str) -> Optional[Path]:
     """
-    fullchain.pem для домена в live:
+    The domain's fullchain.pem under live:
       1) <domain>/fullchain.pem
       2) <domain>-ecdsa/fullchain.pem
       3) <domain>-rsa/fullchain.pem
-      4) fallback по содержимому.
+      4) a fallback by content.
     """
     domain = (domain or "").strip().lower()
     if not domain:
@@ -1211,12 +1210,12 @@ def _find_le_fullchain_for_domain(domain: str) -> Optional[Path]:
     return None
 
 
-# ───────────────────── статус сертификата по домену ─────────────────────
+# ───────────────────── certificate state by domain ─────────────────────
 
 
 def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
     """
-    Статус сертификата по домену.
+    The state of a domain's certificate.
     """
     domain = (domain or "").strip()
     if not domain:
@@ -1258,7 +1257,7 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
         "le_days_left": le_info["days_left"] if has_le else None,
     }
 
-    # нет ничего
+    # there is nothing
     if not has_hap and not has_le:
         result["state"] = "missing"
         result["short"] = "No certificate"
@@ -1268,7 +1267,7 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
         )
         return result
 
-    # есть LE, но нет HAProxy
+    # there is LE, but no HAProxy file
     if has_le and not has_hap:
         result["state"] = "letsencrypt_only"
         if le_info["days_left"] < 0:
@@ -1281,7 +1280,7 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
         )
         return result
 
-    # есть HAProxy, но нет LE
+    # there is a HAProxy file, but no LE
     if has_hap and not has_le:
         days = hap_info["days_left"]
         if days < 0:
@@ -1302,7 +1301,7 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
         )
         return result
 
-    # есть оба — берём минимальный срок
+    # there are both: take the earlier expiry
     days_left = min(hap_info["days_left"], le_info["days_left"])
     result["haproxy_days_left"] = hap_info["days_left"]
     result["le_days_left"] = le_info["days_left"]
@@ -1327,12 +1326,12 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
     return result
 
 
-# ───────────────────── helper для списка ─────────────────────
+# ───────────────────── helper for the list ─────────────────────
 
 
 def _build_cert_item_for_list(path: Path) -> Optional[Dict[str, Any]]:
     """
-    Структура для UI по одному PEM-файлу.
+    The UI's structure for one PEM file.
     """
     cert = _load_first_cert_from_pem(path)
     if not cert:
@@ -1371,7 +1370,7 @@ def _build_cert_item_for_list(path: Path) -> Optional[Dict[str, Any]]:
     }
 
 
-# ───────────────────── реализация эндпоинтов ─────────────────────
+# ───────────────────── the endpoints ─────────────────────
 
 
 def handle_dns_providers_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -4244,11 +4243,11 @@ def get_latest_account_id(accounts_dir: Path) -> Optional[str]:
 
 def handle_certs_upload_form(form: MultipartForm) -> Tuple[int, Dict[str, Any]]:
     """
-    Обработка загрузки PEM через multipart/form-data.
-    Ожидает поля:
-      - cert_file (файл .pem)
-      - site_name (опц.)
-      - domain    (опц.)
+    Handles a PEM upload over multipart/form-data.
+    Expects the fields:
+      - cert_file (a .pem file)
+      - site_name (optional)
+      - domain    (optional)
     """
     file_item = _uploaded_file(form, "cert_file")
     if file_item is None:
@@ -4465,7 +4464,7 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     }
 
 
-# ───────────────────── HTTP-сервер поверх Unix-сокета ─────────────────────
+# ───────────────────── an HTTP server over a Unix socket ─────────────────────
 
 
 class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -4477,10 +4476,10 @@ class CertdHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
-        """Переопределяем, чтобы писать в логгер, а не в stderr."""
+        """Overridden to write to the logger rather than stderr."""
         LOG.info("%s - %s", self.client_address, fmt % args)
 
-    # служебные методы
+    # helpers
 
     def _read_json_body(self) -> Dict[str, Any]:
         length_str = self.headers.get("Content-Length") or "0"
@@ -4507,7 +4506,7 @@ class CertdHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    # обработчики HTTP
+    # HTTP handlers
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path
@@ -4755,17 +4754,17 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         LOG.error("cannot prepare client authentication material: %s", exc)
 
-    # удаляем старый сокет, если остался
+    # remove an old socket left behind
     try:
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
     except OSError as exc:
         LOG.error("Failed to unlink old socket %s: %s", SOCKET_PATH, exc)
 
-    # создаём сервер
+    # create the server
     server = UnixHTTPServer(SOCKET_PATH, CertdHandler)
 
-    # права на сокет: root:haproxy, 660
+    # socket permissions: root:haproxy, 660
     try:
         import pwd
         import grp

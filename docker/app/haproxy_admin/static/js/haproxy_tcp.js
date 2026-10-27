@@ -1,8 +1,8 @@
 // static/js/haproxy_tcp.js
-// JS for страницы редактирования TCP proxies HAProxy:
-// - показ/скрытие блока удаления
-// - динамический list backend-servers
-// - сохранение TCP proxies through /haproxy/tcp/save (JSON API)
+// The HAProxy TCP proxy edit page:
+// - showing and hiding the delete block
+// - the dynamic list of backend servers
+// - saving the TCP proxy through /haproxy/tcp/save (JSON API)
 
 (function () {
   try {
@@ -21,7 +21,7 @@
       saveStatus.style.color = isError ? "#c0392b" : "";
     }
 
-    // -------- Блок удаления TCP proxies --------
+    // -------- The TCP proxy delete block --------
     var btnShowDel = document.getElementById("btn-show-delete");
     var deleteBox = document.getElementById("delete-confirm");
     var btnCancelDel = document.getElementById("btn-delete-cancel");
@@ -35,7 +35,7 @@
       });
     }
 
-    // -------- Backend servers (таблица) --------
+    // -------- Backend servers (the table) --------
     var backendsBody = document.getElementById("tcp-backends-body");
     var btnAddBackend = document.getElementById("btn-add-backend");
 
@@ -73,11 +73,11 @@
       });
     }
 
-    // If no ни одной строки backend'ов, добавим пустую by default
+    // With no backend rows at all, add an empty one by default
     if (backendsBody && backendsBody.querySelectorAll("tr").length === 0) {
       addBackendRow();
     } else if (backendsBody) {
-      // Привязываем обработчики удаления to уже существующим строкам
+      // Attach the delete handlers to the rows already there
       backendsBody.querySelectorAll(".btn-backend-remove").forEach(function (btn) {
         btn.addEventListener("click", function () {
           var tr = btn.closest("tr");
@@ -86,7 +86,7 @@
       });
     }
 
-    // -------- Сбор данных формы in JSON --------
+    // -------- Collecting the form into JSON --------
     function buildTcpPayloadFromForm(form) {
       var tcp = {};
 
@@ -165,7 +165,7 @@
           var portStr = portInput && portInput.value.trim();
 
           if (!host && !portStr) {
-            return; // пустая line
+            return; // an empty line
           }
 
           var port = parseInt(portStr, 10);
@@ -200,7 +200,7 @@
       return payload;
     }
 
-    // -------- Сабмит формы: POST /haproxy/tcp/save --------
+    // -------- Form submit: POST /haproxy/tcp/save --------
     editForm.addEventListener("submit", function (ev) {
       ev.preventDefault();
 
@@ -249,7 +249,7 @@
               new CustomEvent("easy-ha-proxy:config-state-changed")
             );
 
-            // If имя поменялось — обновляем URL
+            // If the name changed, update the URL
             var newName = payload.tcp.name;
             var oldName = payload.original_name || newName;
             if (newName && oldName && newName !== oldName) {

@@ -1,6 +1,6 @@
 ---
 # roles/authelia/tasks/daemons.yml
-# Установка всех вспомогательных демонов Authelia одним стейджем
+# Installing all of Authelia's helper daemons in one stage
 
 - import_tasks: usersd.yml
 - import_tasks: bansd.yml

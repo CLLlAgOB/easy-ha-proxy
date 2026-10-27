@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Экспорт состояния шлюза в формате Prometheus.
+"""The gateway's state exported in the Prometheus format.
 
-Собирает то, что уже знают демоны, и не опрашивает ничего сам. Каждый
-источник опционален: остановленный демон стоит нескольких метрик, а не всего
-ответа, и это видно по `easy_ha_proxy_source_up`.
+Collects what the daemons already know and polls nothing itself. Every
+source is optional: a stopped daemon costs a few metrics, not the whole
+answer, and `easy_ha_proxy_source_up` shows it.
 
-Ярлыки намеренно ограничены по кардинальности. Здесь нет ни одного адреса
-посетителя: репутация отдаётся счётчиками по состояниям, а не по адресам.
+The labels' cardinality is limited on purpose. There is not a single visitor
+address here: reputation is exported as counts per state, not per address.
 """
 
 from __future__ import annotations

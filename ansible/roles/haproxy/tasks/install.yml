@@ -7,7 +7,7 @@
     system: true
     state: present
 
-# 1) Установка пакета — вне условий
+# 1) Install the package -- unconditionally
 - name: Install HAProxy
   apt:
     name: haproxy
@@ -17,7 +17,7 @@
     - install
     - restore-network
 
-# 2) Проверяем, делали ли уже «первый запуск»
+# 2) Check whether the "first start" has been done
 - name: Check if HAProxy was initialized before
   stat:
     path: /var/lib/haproxy/.first_start_done
@@ -25,14 +25,14 @@
   
 - import_tasks: fs.yml
 
-# 4) Валидируем конфиг перед любыми стартами (если файл уже есть)
+# 4) Validate the configuration before any start (if the file is already there)
 - name: Validate HAProxy config if present
   command: haproxy -c -f /etc/haproxy/haproxy.cfg
   changed_when: false
-  failed_when: false   # на «самом первом» прогоне конфиг может ещё не быть
+  failed_when: false   # on the very first run the configuration may not exist yet
   tags: install
 
-# 5) Одноразовый прогрев рантайма: start -> stop, и маркируем успех
+# 5) A one-off warm-up of the runtime: start -> stop, and mark the success
 - block:
     - name: Start HAProxy (bootstrap)
       service:
@@ -58,7 +58,7 @@
         msg: "HAProxy bootstrap failed; not marking initialized."
   tags: install
 
-# 6) Остальное — как у вас, но уже без риска «не установлен пакет / не выполнен bootstrap»
+# 6) The rest, now without the risk of a missing package or a skipped bootstrap
 - block:
     - name: Deploy maintenance error page
       template:

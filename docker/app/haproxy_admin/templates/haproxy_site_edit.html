@@ -34,7 +34,7 @@
 </div>
 {% endif %}
 
-{# ───── Блок подтверждения удаления ────────────────────────────── #}
+{# ───── Delete confirmation ────────────────────────────── #}
 <div id="delete-confirm" class="card" style="display: none; border-left: 4px solid var(--error); margin-bottom: 20px;">
     <div class="card-header">
         <h2>Delete site {{ site.name }}?</h2>
@@ -59,7 +59,7 @@
     </div>
 </div>
 
-{# ───── Основная форма редактирования ──────────────────────────── #}
+{# ───── The main edit form ──────────────────────────── #}
 <div class="card">
     <div class="card-header">
         <h2>Site parameters</h2>
@@ -74,7 +74,7 @@
 
         <div class="flex-container" style="gap: 20px; align-items: flex-start; padding: 0 16px 16px;">
 
-            {# ───── Левая колонка: базовые, backend, certificate, load balancing ───── #}
+            {# ───── Left column: basics, backend, certificate, load balancing ───── #}
             <div style="flex: 1 1 360px; min-width: 320px;">
 
                 <h3 style="margin-top: 16px;">Basic parameters</h3>
@@ -224,7 +224,7 @@
                         </tr>
                         {% endfor %}
                         {% else %}
-                        {# If servers not заданы – one primary backend from backend_ip/backend_port #}
+                        {# If no servers are set, one primary backend from backend_ip/backend_port #}
                         <tr class="backend-row">
                             <td>
                                 <input type="text" class="form-input backend-name" placeholder="srv1" value="srv1">
@@ -262,7 +262,7 @@
                     + Add backend server
                 </button>
 
-                {# ───── HTTP-only: SAN + сертификаты + load balancing/sticky ───── #}
+                {# ───── HTTP-only: SAN + certificates + load balancing/sticky ───── #}
                 <div id="block-http-left">
 
                     <div id="block-alt-names">
@@ -449,7 +449,7 @@
                         </div>
                     </div>
 
-                    {# ───── Load balancing / sticky / sessions (внизу левой колонки) ───── #}
+                    {# ───── Load balancing / sticky / sessions (at the bottom of the left column) ───── #}
                     <div id="block-http-balance">
                         <h3 style="margin-top: 24px;">Load balancing / sticky / sessions</h3>
 
@@ -552,10 +552,10 @@
                 </div>
             </div>
 
-            {# ───── Правая колонка: флаги, защита, health, geo ───── #}
+            {# ───── Right column: flags, protection, health, geo ───── #}
             <div style="flex: 1 1 360px; min-width: 320px;">
 
-                {# ───── HTTP-only: флаги/защита + errors + err_exclude + geo ───── #}
+                {# ───── HTTP-only: flags/protection + errors + err_exclude + geo ───── #}
                 <div id="block-http-right">
 
                     <h3 style="margin-top: 16px;">Flags / protection</h3>
@@ -952,13 +952,13 @@
 
                 </div>
 
-                {# ───── Health check / HSTS / WAF (частично is used and for TCP) ───── #}
+                {# ───── Health check / HSTS / WAF (partly used for TCP too) ───── #}
                 <h3 style="margin-top: 20px;">Health check / HSTS / WAF</h3>
 
-                {# --- выбор типа check backend (L7 vs L4) --- #}
+                {# --- choosing the backend check type (L7 vs L4) --- #}
 {# tcp_check:
-   - in HTTP mode: tri-state bool (L4 TCP connect vs L7 HTTP-check)
-   - in TCP passthrough mode: line "tcp"/"ssl" (выбор типа check for backend)
+   - in HTTP mode: a tri-state bool (L4 TCP connect vs L7 HTTP check)
+   - in TCP passthrough mode: the string "tcp"/"ssl" (the backend's check type)
 #}
 {% if site.tcp_check is sameas true %}
 {% set raw_tcp_check = true %}

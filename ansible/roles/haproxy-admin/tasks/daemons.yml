@@ -1,5 +1,5 @@
 ---
-# Установка всех вспомогательных демонов haproxy-admin одним стейджем
+# Installing all of haproxy-admin's helper daemons in one stage
 
 - import_tasks: certd.yml
 - import_tasks: controld.yml

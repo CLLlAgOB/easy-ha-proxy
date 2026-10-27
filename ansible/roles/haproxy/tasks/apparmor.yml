@@ -32,7 +32,7 @@
       {{ haproxy_chroot }}/dev/log rwk,
   notify: apparmor rsyslogd reload
 
-# Ничего не делаем, но безопасно подсветим ситуацию, если AppArmor выключен
+# Nothing is done, but the situation is pointed out safely if AppArmor is off
 - name: AppArmor | info if disabled
   when:
     - haproxy_enable_rsyslog_apparmor | bool

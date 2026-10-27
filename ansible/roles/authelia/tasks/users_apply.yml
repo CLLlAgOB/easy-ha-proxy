@@ -4,9 +4,9 @@
   assert:
     that:
       - authelia_users_ops_file | length > 0
-    fail_msg: "Не указан authelia_users_ops_file (файл с операциями)."
+    fail_msg: "authelia_users_ops_file (the file of operations) is not set."
 
-# --- грузим операции с контроллера ---
+# --- load the operations from the controller ---
 
 - name: Authelia | users_apply | load ops from controller
   include_vars:
@@ -24,9 +24,9 @@
   assert:
     that:
       - authelia_users_ops | length > 0
-    fail_msg: "В authelia_users_ops нет ни одной операции."
+    fail_msg: "authelia_users_ops holds no operations."
 
-# --- забираем текущий users_database.yml с целевого хоста ---
+# --- fetch the current users_database.yml from the target host ---
 
 - name: Authelia | users_apply | check users file exists
   stat:
@@ -35,7 +35,7 @@
 
 - name: Authelia | users_apply | fail if users file missing
   fail:
-    msg: "Файл {{ authelia_users_host_path }} не найден. Сначала запусти обычный deploy (config)."
+    msg: "{{ authelia_users_host_path }} not found. Run the ordinary deploy (config) first."
   when: not authelia_users_file_stat.stat.exists
 
 - name: Authelia | users_apply | slurp current users file
@@ -43,7 +43,7 @@
     path: "{{ authelia_users_host_path }}"
   register: authelia_users_slurp
 
-# --- делаем бэкап на контроллере ---
+# --- back it up on the controller ---
 
 - name: Authelia | users_apply | ensure local backup dir
   delegate_to: localhost
@@ -60,7 +60,7 @@
     dest: "{{ authelia_cache_dir | default(playbook_dir + '/cache/authelia-users') }}/{{ inventory_hostname }}-users_database.before.yml"
     flat: true
 
-# --- парсим YAML в структуру ---
+# --- parse the YAML into a structure ---
 
 - name: Authelia | users_apply | parse current users yaml
   set_fact:
@@ -70,13 +70,13 @@
   set_fact:
     authelia_users_current: "{{ authelia_users_parsed.users | default({}) }}"
 
-# --- рабочая копия словаря пользователей ---
+# --- a working copy of the users dict ---
 
 - name: Authelia | users_apply | init working dict
   set_fact:
     authelia_users_new: "{{ authelia_users_current }}"
 
-# --- сначала удаляем пользователей с user_action: delete ---
+# --- first delete the users with user_action: delete ---
 
 - name: Authelia | users_apply | delete users by ops
   set_fact:
@@ -94,7 +94,7 @@
   when:
     - item.value.user_action | default('add') == 'delete'
 
-# --- потом add/replace ---
+# --- then add/replace ---
 
 - name: Authelia | users_apply | add/replace users by ops
   set_fact:
@@ -105,7 +105,7 @@
     user_action: "{{ op.user_action | default('add') }}"
     user_exists: "{{ username in authelia_users_new }}"
 
-    # Текущий пользователь (если есть)
+    # The current user (if any)
     existing_user: "{{ authelia_users_new[username] | default({}) }}"
     existing_groups: "{{ existing_user.groups | default([]) }}"
     op_groups: "{{ op.groups | default([]) }}"
@@ -119,7 +119,7 @@
       if user_exists
       else op.displayname | default(username))) }}"
 
-    # --- password (уже готовый hash) ---
+    # --- password (an already computed hash) ---
     new_password: "{{ (op.password_hash
       if (op.password_action | default('') == 'replace' and (op.password_hash is defined))
       else (existing_user.password
@@ -133,7 +133,7 @@
       if user_exists
       else op.email | default(''))) }}"
 
-    # --- groups как НОРМАЛЬНЫЙ список ---
+    # --- groups as a PROPER list ---
     new_groups: "{{ op_groups
       if op.groups_action | default('') == 'replace'
       else (existing_groups + op_groups) | unique | list
@@ -142,8 +142,8 @@
       if op.groups_action | default('') == 'delete'
       else existing_groups }}"
 
-    # Собираем финальный словарь пользователя.
-    # Здесь groups остаётся списком, а строки обрезаем по краям.
+    # Build the user's final dict.
+    # groups stays a list here, and strings are trimmed at the ends.
     user_updated: "{{ {
       'displayname': (new_displayname | trim),
       'password': (new_password | trim),
@@ -156,7 +156,7 @@
   when:
     - user_action in ['add', 'replace']
 
-# --- собираем новый YAML и сохраняем на хосте ---
+# --- build the new YAML and save it on the host ---
 
 - name: Authelia | users_apply | build new yaml content
   set_fact:
@@ -172,7 +172,7 @@
     content: "{{ authelia_users_new_yaml }}"
   register: authelia_users_write
 
-# --- сохраняем "после" и рестартуем Authelia ---
+# --- save the "after" copy and restart Authelia ---
 
 - name: Authelia | users_apply | fetch updated file to controller
   when: authelia_users_write.changed

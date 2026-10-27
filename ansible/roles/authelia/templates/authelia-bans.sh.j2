@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Имя контейнера Authelia (по умолчанию то, что в docker-compose: container_name: authelia)
+# The Authelia container's name (by default the one in docker-compose: container_name: authelia)
 CONTAINER="${AUTHELIA_CONTAINER:-{{ authelia_container_name | default('authelia') }}}"
 
-# Путь до configuration.yml внутри контейнера (если нужно указать явно).
-# По умолчанию Authelia ищет конфиг в /config, так что можно оставить пустым.
+# Path to configuration.yml inside the container (if it must be given explicitly).
+# Authelia looks for its configuration in /config by default, so it can stay empty.
 CONFIG_PATH="${AUTHELIA_CONFIG_PATH:-{{ authelia_cli_config_path | default('') }}}"
 
 CONFIG_ARGS=()
@@ -13,20 +13,20 @@ if [[ -n "$CONFIG_PATH" ]]; then
   CONFIG_ARGS=(--config "$CONFIG_PATH")
 fi
 
-# Базовая команда: authelia storage bans ...
+# The base command: authelia storage bans ...
 BASE_CMD=(docker exec -i "$CONTAINER" authelia "${CONFIG_ARGS[@]}" storage bans)
 
 usage() {
   cat >&2 <<EOF
 Usage:
-  $0 list-users           # показать баны по пользователям
-  $0 list-ips             # показать баны по IP
-  $0 revoke-user USER     # разбанить пользователя (по имени)
-  $0 revoke-ip IP         # разбанить IP (IPv4/IPv6/CIDR)
+  $0 list-users           # list the user bans
+  $0 list-ips             # list the IP bans
+  $0 revoke-user USER     # unban a user (by name)
+  $0 revoke-ip IP         # unban an IP (IPv4/IPv6/CIDR)
 
-Переменные окружения:
-  AUTHELIA_CONTAINER    - имя контейнера (по умолчанию '{{ authelia_container_name | default("authelia") }}')
-  AUTHELIA_CONFIG_PATH  - путь до configuration.yml внутри контейнера
+Environment variables:
+  AUTHELIA_CONTAINER    - the container's name (default '{{ authelia_container_name | default("authelia") }}')
+  AUTHELIA_CONFIG_PATH  - path to configuration.yml inside the container
 EOF
   exit 1
 }
@@ -46,12 +46,12 @@ case "$cmd" in
   revoke-user)
     user="${2:-}"
     if [[ -z "$user" ]]; then
-      echo "ERROR: Не указан USER" >&2
+      echo "ERROR: USER is missing" >&2
       usage
     fi
-    # Простая валидация имени пользователя
+    # A simple check of the user name
     if [[ ! "$user" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
-      echo "ERROR: недопустимые символы в имени пользователя '$user'" >&2
+      echo "ERROR: the user name '$user' has characters that are not allowed" >&2
       exit 1
     fi
     "${BASE_CMD[@]}" user revoke "$user"
@@ -60,19 +60,19 @@ case "$cmd" in
   revoke-ip)
     ip="${2:-}"
     if [[ -z "$ip" ]]; then
-      echo "ERROR: Не указан IP" >&2
+      echo "ERROR: IP is missing" >&2
       usage
     fi
-    # Разрешаем IPv4/IPv6/CIDR
+    # IPv4/IPv6/CIDR are allowed
     if [[ ! "$ip" =~ ^[0-9a-fA-F:./]+$ ]]; then
-      echo "ERROR: недопустимый IP/CIDR '$ip'" >&2
+      echo "ERROR: not a valid IP/CIDR '$ip'" >&2
       exit 1
     fi
     "${BASE_CMD[@]}" ip revoke "$ip"
     ;;
 
   *)
-    echo "ERROR: неизвестная команда '$cmd'" >&2
+    echo "ERROR: unknown command '$cmd'" >&2
     usage
     ;;
 esac

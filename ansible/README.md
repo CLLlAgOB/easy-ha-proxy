@@ -1,51 +1,51 @@
-# Ручное развёртывание easy-ha-proxy
+# Deploying easy-ha-proxy by hand
 
-Главный плейбук `easy-ha-proxy.yml` устанавливает и настраивает HAProxy, Certbot, GeoIP ACL, Authelia, Docker-версию `haproxy-admin` и вспомогательные systemd-демоны.
+The main playbook `easy-ha-proxy.yml` installs and configures HAProxy, Certbot, the GeoIP ACL, Authelia, the Docker build of `haproxy-admin` and the helper systemd daemons.
 
-Для одного сервера рекомендуется команда `easy-ha-proxy`, которая устанавливает локальный Ansible в venv и вызывает этот же playbook. Этот документ описывает ручной удалённый режим.
+For a single server the `easy-ha-proxy` command is the recommended way: it installs a local Ansible in a venv and runs this same playbook. This document describes the manual remote mode. [Русская версия](README.ru.md).
 
-## Требования
+## Requirements
 
-- управляющая машина с Ansible;
-- целевой Debian/Ubuntu-хост с SSH и `sudo`;
-- коллекции `ansible.posix` и `community.docker`;
-- Docker Compose v2 на целевом хосте для контейнерных сервисов;
-- Ansible Vault password для файлов `group_vars/all/*.yml`.
+- a control machine with Ansible;
+- a Debian/Ubuntu target host with SSH and `sudo`;
+- the `ansible.posix` and `community.docker` collections;
+- Docker Compose v2 on the target host for the container services;
+- the Ansible Vault password for the `group_vars/all/*.yml` files.
 
-Установка коллекций:
+Installing the collections:
 
 ```bash
 cd ansible
 ansible-galaxy collection install -r requirements.yml
 ```
 
-## Локальная конфигурация
+## Local configuration
 
-`easy-ha-proxy.yml` по умолчанию ожидает группу `easy_ha_proxy` в ручном `inventory.ini` и загружает:
+By default `easy-ha-proxy.yml` expects the group `easy_ha_proxy` in a manual `inventory.ini` and loads:
 
-- `vars.yml` — домены, HAProxy, Certbot, SMTP и общие параметры;
-- `authelia.yml` — несекретные параметры Authelia;
-- `authelia_users_initial.yml` — начальные пользователи;
-- `websites.yml` — HTTP/HTTPS-сайты;
-- `tcp.yml` — TCP-прокси.
+- `vars.yml` -- domains, HAProxy, Certbot, SMTP and general settings;
+- `authelia.yml` -- Authelia's non-secret settings;
+- `authelia_users_initial.yml` -- the initial users;
+- `websites.yml` -- the HTTP/HTTPS sites;
+- `tcp.yml` -- the TCP proxies.
 
 `inventory.ini`, `vars.yml`, `websites.yml`, `tcp.yml`,
-`authelia_users_initial.yml` и весь `group_vars/` считаются локальными файлами
-и исключены из Git. Даже зашифрованные Vault-файлы не публикуются: пароль Vault
-может быть раскрыт или подобран отдельно.
+`authelia_users_initial.yml` and the whole of `group_vars/` are local files
+and are kept out of Git. Not even Vault-encrypted files are published: a Vault
+password can leak or be guessed separately.
 
-Минимальный inventory:
+A minimal inventory:
 
 ```ini
 [easy_ha_proxy]
 proxy01 ansible_host=203.0.113.10 ansible_user=ansible
 ```
 
-Перед первым запуском обязательно замените начальных пользователей и Argon2-хеши в `authelia_users_initial.yml`. Не храните рядом комментарии с исходными паролями.
+Before the first run, replace the initial users and the Argon2 hashes in `authelia_users_initial.yml`. Do not keep comments with the original passwords next to them.
 
-## Проверка и запуск
+## Checking and running
 
-Из каталога `ansible/`:
+From the `ansible/` directory:
 
 ```bash
 ansible-playbook --syntax-check -i inventory.ini easy-ha-proxy.yml
@@ -53,36 +53,36 @@ ansible-playbook -i inventory.ini easy-ha-proxy.yml --list-tags
 ansible-playbook -i inventory.ini easy-ha-proxy.yml
 ```
 
-Полный прогон обновляет пакеты, выпускает сертификаты и меняет системную
-конфигурацию. При `ansible_connection=local` reboot всегда откладывается до решения
-помощника или администратора. Автоматический reboot для узла, управляемого по SSH,
-включается только явно: `-e easy_ha_proxy_reboot_after_upgrade=true`. Для точечных операций
-используйте теги:
+A full run updates packages, issues certificates and changes the system
+configuration. With `ansible_connection=local` a reboot is always left to the
+helper or the administrator to decide. An automatic reboot of a host managed
+over SSH is switched on only explicitly: `-e easy_ha_proxy_reboot_after_upgrade=true`.
+For targeted operations use the tags:
 
-| Назначение | Тег |
+| Purpose | Tag |
 | --- | --- |
-| Обновление ОС | `upgrade` |
-| Установка Certbot и выпуск сертификатов | `cert` |
-| Установка Certbot | `crt-install` |
+| OS update | `upgrade` |
+| Installing Certbot and issuing certificates | `cert` |
+| Installing Certbot | `crt-install` |
 | Certbot hooks | `crt-hooks` |
-| Продление/выпуск | `crt-renew` |
-| Установка HAProxy | `ha-install` |
-| Конфигурация HAProxy | `ha-cfg` |
+| Renewing/issuing | `crt-renew` |
+| Installing HAProxy | `ha-install` |
+| HAProxy configuration | `ha-cfg` |
 | AppArmor | `apparmor` |
 | GeoIP ACL | `geo` |
-| Установка Docker Engine/Compose | `docker` |
-| Установка Authelia | `aut-install` или `authelia` |
-| Установка UI и демонов | `ha-adm-install` |
-| Конфигурация UI | `ha-adm-cfg` |
-| Запуск UI | `ha-adm-start` |
+| Installing Docker Engine/Compose | `docker` |
+| Installing Authelia | `aut-install` or `authelia` |
+| Installing the UI and the daemons | `ha-adm-install` |
+| UI configuration | `ha-adm-cfg` |
+| Starting the UI | `ha-adm-start` |
 | Health daemon | `ha-adm-healthd` |
 | Control daemon | `ha-adm-controld` |
-| Все helper-демоны (точечное обновление) | `ha-adm-daemons,aut-daemons` |
-| Весь host-side service-контур | CLI: `update --component services` |
-| Проверка состояния | `status` |
-| Добавление сайта | `addsite` |
+| Every helper daemon (a targeted update) | `ha-adm-daemons,aut-daemons` |
+| The whole host-side service layer | CLI: `update --component services` |
+| State check | `status` |
+| Adding a site | `addsite` |
 
-Примеры:
+Examples:
 
 ```bash
 ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-install,ha-cfg
@@ -93,50 +93,49 @@ ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-adm-daemons,aut-daemon
 ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
 ```
 
-Точечный daemon-stage копирует все шесть управляемых скриптов идемпотентно:
-неизменившиеся службы не перезапускаются. Полный status дополнительно
-проверяет iptables loader, systemd timers, journald, Certbot, cron/logrotate,
-версии APT/Snap и контрольные суммы остальных управляемых scripts/hooks/Lua.
+The targeted daemon stage copies every managed daemon script idempotently:
+services whose files did not change are not restarted. The full status check
+also covers the iptables loader, the systemd timers, journald, Certbot,
+cron/logrotate, the APT/Snap versions and the checksums of the other managed
+scripts, hooks and Lua files.
 
-Опасные или редкие сценарии имеют тег `never` и запускаются явно: `remove_site`, `aut-remove`, `aut-cfg`, `aut-users`, `ha-adm-update`, `ha-add-adm-ip`, `crt-rdg`, `crt-test`.
+Dangerous or rare scenarios carry the `never` tag and run only when named: `remove_site`, `aut-remove`, `aut-cfg`, `aut-users`, `ha-adm-update`, `ha-add-adm-ip`, `crt-rdg`, `crt-test`.
 
-## Компоненты
+## Components
 
 ### HAProxy
 
-Роль `haproxy` устанавливает сервис, runtime socket, ACL, GeoIP-фильтрацию, rate/error limits и рендерит `/etc/haproxy/haproxy.cfg`. Конфигурация валидируется через `haproxy -c` перед применением.
+The `haproxy` role installs the service, the runtime socket, the ACLs, the GeoIP filtering and the rate/error limits, and renders `/etc/haproxy/haproxy.cfg`. The configuration is validated with `haproxy -c` before it is applied.
 
-### Сертификаты
+### Certificates
 
-Роль `cert` использует snap-версию Certbot, собирает `fullchain.pem + privkey.pem` для HAProxy и перезагружает сервис. Собранные PEM содержат приватный ключ и должны иметь режим не шире `0640`.
+The `cert` role uses the snap build of Certbot, joins `fullchain.pem + privkey.pem` for HAProxy and reloads the service. The joined PEMs hold the private key and must have a mode no wider than `0640`.
 
 ### Authelia
 
-Authelia и Redis запускаются через Compose в `/opt/authelia`. Конфигурация, пользователи и SMTP `.env` создаются Ansible. Секреты должны приходить из Vault.
+Authelia and Redis run through Compose in `/opt/authelia`. Ansible creates the configuration, the users and the SMTP `.env`. Secrets must come from the Vault.
 
 ### haproxy-admin
 
-UI слушает только `127.0.0.1:5000` и публикуется через HAProxy. Контейнер взаимодействует с root-демонами через UNIX-сокеты:
+The UI listens only on `127.0.0.1:5000` and is published through HAProxy. The container talks to root daemons over UNIX sockets, among them:
 
-- `haproxy-controld`;
-- `haproxy-certd`;
-- `haproxy-healthd`;
-- `authelia-configd`;
-- `authelia-usersd`;
-- `authelia-bansd`.
+- `haproxy-controld`, `haproxy-certd`, `haproxy-healthd`;
+- `easy-ha-proxy-guardd`, `easy-ha-proxy-metricsd`, `easy-ha-proxy-alertd`,
+  `easy-ha-proxy-backupd`, `easy-ha-proxy-updated`;
+- `authelia-configd`, `authelia-usersd`, `authelia-bansd`.
 
-Маршруты `/debug/` и `/debug/headers` по умолчанию выключены, а кнопка
-диагностики скрыта. При прямом открытии `/debug/` UI показывает инструкцию.
-Для временного включения добавьте в управляемый `vars.yml`:
+The `/debug/` and `/debug/headers` routes are off by default and the
+diagnostics button is hidden. Opening `/debug/` directly shows instructions.
+To switch them on for a while, add to the managed `vars.yml`:
 
 ```yaml
 haproxy_admin_debug_routes: true
 ```
 
-Затем выполните `sudo easy-ha-proxy update --no-fetch`. После диагностики
-верните значение `false` и повторно примените конфигурацию.
+Then run `sudo easy-ha-proxy update --no-fetch`. After the diagnostics, set it
+back to `false` and apply the configuration again.
 
-## Диагностика
+## Diagnostics
 
 ```bash
 haproxy -c -f /etc/haproxy/haproxy.cfg
@@ -146,16 +145,16 @@ docker compose -f /opt/authelia/docker-compose.yml ps
 docker compose -f /opt/haproxy-admin/docker-compose.yml ps
 ```
 
-Основные пути:
+The main paths:
 
 - HAProxy: `/etc/haproxy/haproxy.cfg`;
-- сертификаты HAProxy: `/etc/haproxy/certs/`;
+- HAProxy certificates: `/etc/haproxy/certs/`;
 - Authelia: `/opt/authelia/`;
 - UI: `/opt/haproxy-admin/`;
 - HAProxy runtime socket: `/run/haproxy/admin.sock`.
 
-## Безопасность
+## Security
 
-- Не публикуйте порты `5000` и `9091` наружу: авторизация рассчитана на вход через HAProxy/Authelia.
-- После утечки приватного ключа недостаточно удалить PEM из Git — сертификат нужно перевыпустить, а старый ключ считать скомпрометированным.
-- Изменяющие запросы UI защищены CSRF-токенами; независимо от этого доступ к UI должен быть ограничен доверенными пользователями и доменом.
+- Do not expose ports `5000` and `9091`: authorisation is designed around coming in through HAProxy/Authelia.
+- After a private key leaks, deleting the PEM from Git is not enough -- reissue the certificate and treat the old key as compromised.
+- The UI's state-changing requests are protected by CSRF tokens; independently of that, access to the UI must be limited to trusted users and a trusted domain.

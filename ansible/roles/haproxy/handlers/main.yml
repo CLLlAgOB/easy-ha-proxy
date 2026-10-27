@@ -1,8 +1,8 @@
 #############################################################################
-# handlers/main.yml  —  выводим ошибку красиво
+# handlers/main.yml  --  errors shown readably
 #############################################################################
 
-# 1. Проверяем синтаксис ----------------------------------------------------
+# 1. Check the syntax ----------------------------------------------------
 - name: run haproxy -c syntax-check
   listen: validate haproxy
   ansible.builtin.command:
@@ -13,16 +13,16 @@
       - /etc/haproxy/haproxy.cfg
   register: haproxy_cfg_test
   changed_when: false
-  failed_when: false     # анализируем rc сами
+  failed_when: false     # the rc is judged here
   environment:
     HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
 
-# 2. Фильтруем и показываем только ALERT/WARNING ----------------------------
+# 2. Filter and show only ALERT/WARNING ----------------------------
 - name: show pretty syntax error
   listen: validate haproxy
   when: haproxy_cfg_test.rc != 0
   vars:
-    # берём stdout+stderr, делим на строки, оставляем ALERT/WARNING
+    # take stdout+stderr, split into lines, keep ALERT/WARNING
     bad_lines: >-
       {{
         (haproxy_cfg_test.stdout + '\n' + haproxy_cfg_test.stderr).splitlines()
@@ -38,7 +38,7 @@
       {% endfor %}
       ───────────────────────────────────────────────
 
-# 3. Останавливаем play, если проверка не прошла ----------------------------
+# 3. Stop the play if the check failed ----------------------------
 - name: stop play on invalid config
   listen: validate haproxy
   when: haproxy_cfg_test.rc != 0
@@ -46,7 +46,7 @@
     msg: "HAProxy syntax check failed — see details above."
 
 #############################################################################
-# 4. Применяем конфиг только если OK ----------------------------------------
+# 4. Apply the configuration only if it is OK ----------------------------------------
 #############################################################################
 
 - name: apply validated HAProxy configuration
@@ -72,7 +72,7 @@
         else 'reloaded'
       }}
   register: reload_res
-  ignore_errors: true      # reload может не поддерживаться
+  ignore_errors: true      # reload may not be supported
 
 - name: hard restart haproxy if reload failed
   listen: apply haproxy
@@ -84,7 +84,7 @@
     name: haproxy
     state: restarted
 
-# 4.a Перечитать профиль rsyslogd через apparmor_parser (предпочтительно)
+# 4.a Reload rsyslogd's profile with apparmor_parser (preferred)
 - name: apparmor | reload rsyslogd profile
   listen: apparmor rsyslogd reload
   command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
@@ -92,11 +92,11 @@
   failed_when: false
   changed_when: apparmor_reload_res.rc == 0
   notify:
-    - rsyslog | restart              # после перезагрузки профиля — рестарт rsyslog
-    - wait | haproxy devlog socket   # затем подождём сокет
-    - haproxy | restart for logging  # и перезапустим HAProxy
+    - rsyslog | restart              # after the profile reload, restart rsyslog
+    - wait | haproxy devlog socket   # then wait for the socket
+    - haproxy | restart for logging  # and restart HAProxy
 
-# 4.b Фолбэк: если parser не сработал — просто перегрузим AppArmor
+# 4.b Fallback: if the parser did not work, just reload AppArmor
 - name: apparmor | systemd reload
   listen: apparmor rsyslogd reload
   when: apparmor_reload_res.rc != 0
@@ -108,14 +108,14 @@
     - wait | haproxy devlog socket
     - haproxy | restart for logging
 
-# 4.c Перезапуск rsyslog (чтобы точно пересоздал /dev/log в chroot при нужде)
+# 4.c Restart rsyslog (so it recreates /dev/log in the chroot when needed)
 - name: rsyslog | restart
   listen: rsyslog | restart
   service:
     name: rsyslog
     state: restarted
 
-# 4.d Подождать появления сокета внутри chroot
+# 4.d Wait for the socket to appear inside the chroot
 - name: wait | haproxy devlog socket
   listen: wait | haproxy devlog socket
   wait_for:
@@ -123,7 +123,7 @@
     state: present
     timeout: 5
 
-# 4.e Перезапуск HAProxy, чтобы он заново открыл сокет логгера
+# 4.e Restart HAProxy, so it opens the logger's socket again
 - name: haproxy | restart for logging
   listen: haproxy | restart for logging
   service:

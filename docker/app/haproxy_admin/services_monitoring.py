@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Сервисный слой страницы мониторинга.
+"""The service layer of the monitoring page.
 
-Разбирает и валидирует параметры запроса, ходит в metricsd и приводит ответ к
-виду, удобному для UI. Демон валидирует те же значения повторно — здесь это
-защита от опечаток в UI, а не единственная граница доверия.
+Parses and validates the request's parameters, asks metricsd and shapes its
+answer for the UI. The daemon validates the same values again -- here it is
+a guard against typos in the UI, not the only trust boundary.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .services import _load_display_map_from_cfg, HAPROXY_CFG
 
 LOG = logging.getLogger("haproxy-admin")
 
-# Держим синхронно с RANGES/CHART_SERIES в easy-ha-proxy-metricsd.py.
+# Kept in step with RANGES/CHART_SERIES in easy-ha-proxy-metricsd.py.
 RANGES: Tuple[str, ...] = ("1h", "6h", "24h", "7d", "30d", "90d", "1y")
 DEFAULT_RANGE = "24h"
 CHARTS: Tuple[str, ...] = (
@@ -64,7 +64,7 @@ def normalize_chart(value: Any) -> str:
 
 
 def display_name(proxy: str) -> str:
-    """Человекочитаемое имя backend, как на остальных страницах."""
+    """A backend's readable name, as on the other pages."""
 
     mapping = _load_display_map_from_cfg(HAPROXY_CFG)
     tagged = mapping.get(proxy)
@@ -87,7 +87,7 @@ def list_sites() -> List[Dict[str, str]]:
 
 
 def normalize_site(value: Any, sites: List[Dict[str, str]]) -> str:
-    """Пустая строка означает суммарный трафик по всем frontend."""
+    """An empty string means the total traffic of every frontend."""
 
     candidate = str(value or "").strip()
     if not candidate or candidate.lower() == "all":
@@ -388,10 +388,10 @@ def save_channel_labels(labels: Any, hidden: Any = None) -> Dict[str, Any]:
 
 
 def unavailable_payload(exc: MetricsdUnavailable) -> Dict[str, Any]:
-    """Единый ответ, когда сборщик недоступен.
+    """The one answer when the collector is unavailable.
 
-    Мониторинг — не критичный путь: страница должна сказать, что данных нет,
-    и не притворяться, что нулевые значения — это измерение.
+    Monitoring is not a critical path: the page must say there is no data,
+    not pretend that zeros are a measurement.
     """
 
     LOG.warning("metricsd unavailable: %s", exc)

@@ -1,6 +1,6 @@
 # services_haproxy_config.py
-# Логика генерации/проверки/применения haproxy.cfg
-# + базовые операции с YAML (без логики сайтов)
+# Rendering, checking and applying haproxy.cfg
+# + basic operations on the YAML files (no site logic)
 
 import os
 import base64
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 
 from jinja2 import Environment, FileSystemLoader
-import yaml  # можно заменить на ruamel.yaml при необходимости
+import yaml  # could be replaced with ruamel.yaml if needed
 from .validation import (
     control_plane_domains,
     validate_config_data,
@@ -29,7 +29,7 @@ from .validation import (
 from .i18n import translate
 
 
-# Пути относительно рабочего каталога приложения (/opt/haproxy-admin)
+# Paths relative to the application's working directory (/opt/haproxy-admin)
 HAP_TEMPLATE = Path("./config/haproxy.cfg.j2")
 HAPROXY_CFG_PATH = Path("/etc/haproxy/haproxy.cfg")
 
@@ -40,8 +40,7 @@ CONFIG_YAML = Path("./config/vars.yml")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 HAPROXY_BACKUP_DIR = BASE_DIR / "backups" / "haproxy"
-# --- снимки состояний и бэкапы YAML ---  ⬇⬇⬇
-# добавь рядом с другими путями (где BASE_DIR / HAPROXY_BACKUP_DIR и т.д.)
+# --- state snapshots and YAML backups ---
 YAML_BACKUP_DIR = BASE_DIR / "backups" / "haproxy" / "yaml"
 HAPROXY_STATE_PATH = HAPROXY_BACKUP_DIR / "last_applied_state.json"
 HAPROXY_STATE_WEBSITES = HAPROXY_BACKUP_DIR / "last_applied_websites.yml"
@@ -64,7 +63,7 @@ MAX_YAML_BACKUPS = 14
 
 HAPROXY_CONTROL_SOCKET = (
     os.environ.get("HAPROXY_CONTROL_SOCKET")
-    or os.environ.get("HAPROXY_RELOAD_SOCKET")  # на всякий случай
+    or os.environ.get("HAPROXY_RELOAD_SOCKET")  # just in case
     or "/run/easy-ha-proxy/haproxy-controld.sock"
 )
 HAPROXY_CONTROL_TIMEOUT = int(os.environ.get("HAPROXY_CONTROL_TIMEOUT", "10"))
@@ -244,17 +243,17 @@ def candidate_request_reachable(
 
 def check_cfg_via_controld(cfg_text: str) -> Optional[Tuple[int, str, str]]:
     """
-    Пытается проверить конфиг через root-демон haproxy-controld
-    по Unix-сокету HAPROXY_CONTROL_SOCKET.
+    Tries to check the configuration through the root daemon haproxy-controld
+    over the Unix socket HAPROXY_CONTROL_SOCKET.
 
-    Протокол:
-      → "check-config <base64(cfg_text)>\\n"
-      ← первая строка: "OK <rc>" или "ERROR ..."
-         вторая: base64(stdout)
-         третья: base64(stderr)
+    Protocol:
+      -> "check-config <base64(cfg_text)>\\n"
+      <- first line: "OK <rc>" or "ERROR ..."
+         second: base64(stdout)
+         third: base64(stderr)
 
-    Если сокет недоступен / ошибка протокола — возвращает None,
-    чтобы вызвать локальный haproxy -c как фолбэк.
+    If the socket is unavailable or the protocol fails, returns None,
+    so that a local haproxy -c runs as the fallback.
     """
     sock_path = HAPROXY_CONTROL_SOCKET
     if not sock_path or not os.path.exists(sock_path):
@@ -284,7 +283,7 @@ def check_cfg_via_controld(cfg_text: str) -> Optional[Tuple[int, str, str]]:
 
         first = lines[0].strip()
         if not first.startswith("OK "):
-            # демон вернул ошибку — считаем, что проверка не удалась
+            # the daemon answered with an error: the check failed
             stderr = "\n".join(lines)
             return 1, "", stderr
 
@@ -314,23 +313,23 @@ def check_cfg_via_controld(cfg_text: str) -> Optional[Tuple[int, str, str]]:
         return rc, stdout, stderr
 
     except Exception:  # noqa: BLE001
-        # Логически здесь лучше залогировать, но не ломать UI —
-        # пусть дальше отработает локальный haproxy -c
+        # This would be worth logging, but must not break the UI:
+        # the local haproxy -c runs next
         return None
 
 
 def write_cfg_via_controld(cfg_text: str) -> Optional[Tuple[bool, str, str]]:
     """
-    Пытается записать /etc/haproxy/haproxy.cfg через root-демон haproxy-controld.
+    Tries to write /etc/haproxy/haproxy.cfg through the root daemon haproxy-controld.
 
-    Протокол:
-      → "write-config <base64(cfg_text)>\\n"
-      ← "OK ..." или "ERROR ..."
+    Protocol:
+      -> "write-config <base64(cfg_text)>\\n"
+      <- "OK ..." or "ERROR ..."
 
-    Возвращает:
-      * (True, stdout, stderr)  – запись успешна
-      * (False, stdout, stderr) – запись не удалась
-      * None                    – сокет недоступен (используем локальный режим)
+    Returns:
+      * (True, stdout, stderr)  - written
+      * (False, stdout, stderr) - not written
+      * None                    - the socket is unavailable (use the local mode)
     """
     sock_path = HAPROXY_CONTROL_SOCKET
     if not sock_path or not os.path.exists(sock_path):
@@ -362,10 +361,10 @@ def write_cfg_via_controld(cfg_text: str) -> Optional[Tuple[bool, str, str]]:
         rest = "\n".join(lines[1:]).strip()
 
         if first.startswith("OK"):
-            # stdout/ stderr тут по сути не нужны, но оставим интерфейс единым
+            # stdout/stderr are not really needed here, but the interface stays the same
             return True, rest, ""
 
-        # ошибка
+        # error
         err_msg = first
         if rest:
             err_msg = f"{first}\n{rest}"
@@ -1217,14 +1216,14 @@ def get_udp_runtime_status() -> Dict[str, Any]:
 
 def reload_haproxy() -> tuple[bool, str, str]:
     """
-    Перезагрузка HAProxy.
+    Reloads HAProxy.
 
-    1) Пытаемся через Unix-сокет HAPROXY_CONTROL_SOCKET → команда "reload".
-    2) Если сокета нет → пробуем systemctl reload haproxy (для bare-metal).
+    1) Through the Unix socket HAPROXY_CONTROL_SOCKET, with the command "reload".
+    2) Without the socket, systemctl reload haproxy (bare metal).
     """
     sock_path = HAPROXY_CONTROL_SOCKET
 
-    # 1. Через сокет haproxy-controld
+    # 1. Through the haproxy-controld socket
     if sock_path and os.path.exists(sock_path):
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -1247,7 +1246,7 @@ def reload_haproxy() -> tuple[bool, str, str]:
         except Exception as exc:  # noqa: BLE001
             return False, "", f"reload via socket error: {exc!r}"
 
-    # 2. Фолбэк: systemctl (для старого режима без Docker)
+    # 2. Fallback: systemctl (the old mode without Docker)
     try:
         proc = subprocess.run(
             ["systemctl", "reload", "haproxy"],
@@ -1267,7 +1266,7 @@ def reload_haproxy() -> tuple[bool, str, str]:
 
 def jinja_regex_replace(value: Any, pattern: str, replacement: str) -> str:
     """
-    Аналог ansible-фильтра regex_replace.
+    The equivalent of Ansible's regex_replace filter.
     """
     if value is None:
         return ""
@@ -1276,7 +1275,7 @@ def jinja_regex_replace(value: Any, pattern: str, replacement: str) -> str:
 
 def jinja_combine(value: Any, other: Any, recursive: bool = False) -> Dict[str, Any]:
     """
-    Простейший аналог ansible-фильтра combine.
+    A minimal equivalent of Ansible's combine filter.
     """
     if value is None:
         base: Dict[str, Any] = {}
@@ -1302,7 +1301,7 @@ def jinja_combine(value: Any, other: Any, recursive: bool = False) -> Dict[str, 
     return base
 
 
-# Jinja2-окружение для haproxy.cfg
+# The Jinja2 environment for haproxy.cfg
 JINJA_ENV = Environment(
     loader=FileSystemLoader(str(HAP_TEMPLATE.parent)),
     trim_blocks=True,
@@ -1314,7 +1313,7 @@ JINJA_ENV.filters["combine"] = jinja_combine
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
     """
-    Безопасно грузим YAML: если файла нет или он пустой — возвращаем {}.
+    Loads YAML safely: a missing or empty file gives {}.
     """
     if not path.exists():
         return {}
@@ -1324,7 +1323,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
             return {}
         if isinstance(data, dict):
             return data
-        # если вдруг в корне не dict (например, список) — оборачиваем
+        # if the root is not a dict (a list, say), wrap it
         return {"_": data}
 
 
@@ -1422,12 +1421,12 @@ def _render_haproxy_cfg_from_source_bundle(
 
 def render_haproxy_cfg(extra_context: Optional[Dict[str, Any]] = None) -> str:
     """
-    Рендерит haproxy.cfg из шаблона и трёх YAML-файлов.
+    Renders haproxy.cfg from the template and the three YAML files.
 
-    Поддерживаются оба варианта структуры tcp.yml:
+    Both shapes of tcp.yml are accepted:
       - tcp_proxies: [...]
       - tcp: [...]
-    В контекст шаблона передаём переменную tcp_proxies.
+    The template receives the variable tcp_proxies.
     """
     bundle = _read_config_source_bundle(
         _current_config_source_paths(), label="current"
@@ -1437,8 +1436,8 @@ def render_haproxy_cfg(extra_context: Optional[Dict[str, Any]] = None) -> str:
 
 def _read_file_text(path: Path) -> str:
     """
-    Безопасно читаем текстовый файл.
-    Если файла нет или ошибка чтения — возвращаем пустую строку.
+    Reads a text file safely.
+    A missing file or a read error gives an empty string.
     """
     try:
         return path.read_text(encoding="utf-8")
@@ -1450,10 +1449,10 @@ def _read_file_text(path: Path) -> str:
 
 def _get_current_spec() -> Dict[str, Any]:
     """
-    Текущее состояние из YAML:
-      - список sites (websites.yml)
-      - список tcp (tcp.yml)
-      - все переменные vars.yml
+    The current state from the YAML files:
+      - the list of sites (websites.yml)
+      - the list of tcp proxies (tcp.yml)
+      - every variable of vars.yml
     """
     data_sites = _load_yaml(WEBSITES_YAML)
     data_tcp = _load_yaml(TCP_YAML)
@@ -1539,7 +1538,7 @@ def ensure_applied_state_baseline(cfg_text: str) -> bool:
 
 def _load_applied_state() -> Optional[Dict[str, Any]]:
     """
-    Читает JSON со снимком последнего успешно применённого состояния.
+    Reads the JSON snapshot of the last successfully applied state.
     """
     try:
         text = HAPROXY_STATE_PATH.read_text(encoding="utf-8")
@@ -1556,13 +1555,13 @@ def _load_applied_state() -> Optional[Dict[str, Any]]:
 
 def check_cfg(cfg_text: str) -> Tuple[int, str, str]:
     """
-    Проверка конфига.
+    Checks the configuration.
 
-    1) Если есть root-демон haproxy-controld и его сокет доступен —
-       шлём текст конфига ему (check-config ...) и используем
-       его haproxy (на хосте).
-    2) Если сокета нет / ошибка — фолбэк: локальный haproxy -c -f <tmpfile>
-       внутри процесса (старый режим без Docker).
+    1) If the root daemon haproxy-controld is there and its socket answers,
+       the configuration text is sent to it (check-config ...) and its
+       haproxy (on the host) is used.
+    2) Without the socket, or on an error, the fallback is a local
+       haproxy -c -f <tmpfile> in this process (the old mode without Docker).
     """
     active_cfg = _read_file_text(HAPROXY_CFG_PATH)
     if active_cfg:
@@ -1571,12 +1570,12 @@ def check_cfg(cfg_text: str) -> Tuple[int, str, str]:
         except ValueError as exc:
             return 1, "", str(exc)
 
-    # 1. Пытаемся через haproxy-controld
+    # 1. Through haproxy-controld
     res = check_cfg_via_controld(cfg_text)
     if res is not None:
         return res
 
-    # 2. Фолбэк: локальный haproxy -c (как было раньше)
+    # 2. Fallback: a local haproxy -c (as before)
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1599,32 +1598,32 @@ def check_cfg(cfg_text: str) -> Tuple[int, str, str]:
 
 def apply_cfg(cfg_text: str) -> Tuple[bool, str, str]:
     """
-    1) haproxy -c (валидация, по возможности через haproxy-controld на хосте)
-    2) запись нового конфига:
-       - если есть root-демон → write-config через Unix-сокет
-       - иначе локально в /etc/haproxy/haproxy.cfg + бэкап
-    3) reload HAProxy (через haproxy-controld или systemctl)
+    1) haproxy -c (validation, through haproxy-controld on the host when possible)
+    2) write the new configuration:
+       - with the root daemon: write-config over the Unix socket
+       - otherwise locally to /etc/haproxy/haproxy.cfg, with a backup
+    3) reload HAProxy (through haproxy-controld or systemctl)
     """
-    # 1. Валидация (через демон или локальный haproxy -c)
+    # 1. Validation (through the daemon or a local haproxy -c)
     rc, stdout, stderr = check_cfg(cfg_text)
     if rc != 0:
-        # Конфиг не валиден — ничего не трогаем
+        # The configuration is invalid: touch nothing
         return False, stdout, stderr
 
-    # 2a. Пытаемся записать конфиг через haproxy-controld
+    # 2a. Try to write the configuration through haproxy-controld
     res = write_cfg_via_controld(cfg_text)
     if res is not None:
         ok_write, w_stdout, w_stderr = res
         if not ok_write:
-            # запись на хост не удалась — не перезагружаем
+            # writing to the host failed: do not reload
             return False, w_stdout, w_stderr
 
-        # запись успешна → перезагружаем HAProxy как обычно
+        # written: reload HAProxy as usual
         ok, reload_stdout, reload_stderr = reload_haproxy()
         return ok, reload_stdout, reload_stderr
 
-    # 2b. Фолбэк: локальный режим (старое поведение, без root-демона)
-    # 2. Каталог бэкапов
+    # 2b. Fallback: the local mode (the old behaviour, without the root daemon)
+    # 2. The backup directory
     try:
         HAPROXY_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -1632,7 +1631,7 @@ def apply_cfg(cfg_text: str) -> Tuple[bool, str, str]:
             f"\n[apply_cfg] Failed to create backup directory {HAPROXY_BACKUP_DIR}: {e}"
         return False, stdout, stderr
 
-    # 3. Бэкап текущего /etc/haproxy/haproxy.cfg
+    # 3. Back up the current /etc/haproxy/haproxy.cfg
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
     backup_path = HAPROXY_BACKUP_DIR / f"haproxy.cfg.bak.{ts}"
 
@@ -1649,7 +1648,7 @@ def apply_cfg(cfg_text: str) -> Tuple[bool, str, str]:
             f"\n[apply_cfg] Failed to save backup {backup_path}: {e}"
         return False, stdout, stderr
 
-    # 4. Записываем новый конфиг локально
+    # 4. Write the new configuration locally
     try:
         HAPROXY_CFG_PATH.write_text(cfg_text, encoding="utf-8")
     except OSError as e:
@@ -1657,19 +1656,19 @@ def apply_cfg(cfg_text: str) -> Tuple[bool, str, str]:
             f"\n[apply_cfg] Failed to write {HAPROXY_CFG_PATH}: {e}"
         return False, stdout, stderr
 
-    # 5. Релоад сервиса (через haproxy-controld или systemctl)
+    # 5. Reload the service (through haproxy-controld or systemctl)
     ok, reload_stdout, reload_stderr = reload_haproxy()
     return ok, reload_stdout, reload_stderr
 
 
-# добавь рядом с BASE_DIR / HAPROXY_BACKUP_DIR / MAX_YAML_BACKUPS
+# next to BASE_DIR / HAPROXY_BACKUP_DIR / MAX_YAML_BACKUPS
 YAML_BACKUP_DIR = BASE_DIR / "backups" / "haproxy" / "yaml"
 
 
 def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:
     """
-    Обновляет один из YAML-файлов (websites/tcp/vars) целиком.
-    Делает бэкап в ./backups/ (относительно BASE_DIR) и валидацию синтаксиса.
+    Replaces one of the YAML files (websites/tcp/vars) as a whole.
+    Backs it up to ./backups/ (relative to BASE_DIR) and checks the syntax.
     """
     pending, pending_message = config_transaction_is_pending()
     if pending:
@@ -1686,7 +1685,7 @@ def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:
     if len(content.encode("utf-8")) > 2 * 1024 * 1024:
         return False, 'YAML file exceeds the 2 MB size limit'
 
-    # Валидация YAML
+    # YAML validation
     try:
         data = yaml.safe_load(content) or {}
         if not isinstance(data, dict):
@@ -1695,14 +1694,14 @@ def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"YAML validation error: {e}"
 
-    # Каталог бэкапов: ./backups/ (от BASE_DIR)
+    # The backup directory: ./backups/ (under BASE_DIR)
     backup_dir = BASE_DIR / "backups"
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return False, f"Failed to create backup directory {backup_dir}: {e}"
 
-    # Бэкап -> в ./backups/
+    # Back up into ./backups/
     if path.exists():
         ts = time.strftime("%Y%m%d%H%M%S")
         backup = backup_dir / f"{path.name}.bak.{ts}"
@@ -1711,7 +1710,7 @@ def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:
         except OSError as e:
             return False, f"Failed to save backup {backup}: {e}"
 
-        # Ротация: оставляем только N последних бэкапов для этого файла
+        # Rotation: keep only the last N backups of this file
         _rotate_backups(backup_dir, f"{path.name}.bak.*", MAX_YAML_BACKUPS)
 
     # Atomic replacement prevents two Gunicorn workers from exposing a
@@ -1734,11 +1733,11 @@ def add_site_minimal(
     extra: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
-    Добавляет сайт:
-      - обязательные поля: name, domain, backend_ip, backend_port
-      - extra: доп. поля (backend_host, backend_ssl и т.п.), если заданы
+    Adds a site:
+      - required fields: name, domain, backend_ip, backend_port
+      - extra: further fields (backend_host, backend_ssl and so on), if given
 
-    Остальные параметры тянутся из site_defaults в шаблоне.
+    Everything else comes from site_defaults in the template.
     """
     try:
         port_int = int(backend_port)
@@ -1753,7 +1752,7 @@ def add_site_minimal(
     if not isinstance(sites, list):
         sites = []
 
-    # Проверка на дубликаты по name
+    # Reject a duplicate name
     for s in sites:
         if s.get("name") == name:
             return False, f"A site named {name!r} already exists"
@@ -1765,7 +1764,7 @@ def add_site_minimal(
         "backend_port": port_int,
     }
 
-    # Добиваем доп. ключи, если переданы
+    # Add the extra keys, if given
     if extra:
         for k, v in extra.items():
             if v is not None:
@@ -1786,8 +1785,8 @@ def add_site_minimal(
 
 def _rotate_backups(directory: Path, pattern: str, keep: int) -> None:
     """
-    Удаляет старые backup-файлы в каталоге `directory`,
-    соответствующие glob-шаблону `pattern`, оставляя только `keep` самых новых.
+    Deletes old backup files in `directory` that match the glob `pattern`,
+    keeping only the `keep` newest.
     """
     try:
         files = sorted(
@@ -1798,19 +1797,19 @@ def _rotate_backups(directory: Path, pattern: str, keep: int) -> None:
     except OSError:
         return
 
-    # Оставляем только первые `keep`, остальные удаляем
+    # Keep the first `keep`, delete the rest
     for old in files[keep:]:
         try:
             old.unlink()
         except OSError:
-            # не критично, просто пропускаем
+            # not critical, just skip it
             pass
 
 
 def _list_to_dict_by_name(items: Any) -> Dict[str, Dict[str, Any]]:
     """
-    Утилита: список объектов с полем name -> dict[name] = объект.
-    Игнорируем элементы без name.
+    Helper: a list of objects with a name field -> dict[name] = object.
+    Items without a name are ignored.
     """
     result: Dict[str, Dict[str, Any]] = {}
     if not items:
@@ -1827,17 +1826,17 @@ def _list_to_dict_by_name(items: Any) -> Dict[str, Dict[str, Any]]:
 
 def get_config_diff_summary(rendered_cfg: Optional[str] = None) -> Dict[str, Any]:
     """
-    Сводка:
-      - server_differs: отличается ли /etc/haproxy/haproxy.cfg от текущего рендера
-      - has_applied_state: есть ли сохранённый снимок последнего apply
-      - has_changes: есть ли изменения в sites/tcp/vars относительно снимка
-      - списки добавленных/удалённых/изменённых sites/tcp
-      - список изменённых ключей vars.yml
+    Summary:
+      - server_differs: whether /etc/haproxy/haproxy.cfg differs from the current render
+      - has_applied_state: whether a snapshot of the last apply is saved
+      - has_changes: whether sites/tcp/vars changed since that snapshot
+      - the lists of added/removed/changed sites and tcp proxies
+      - the list of changed vars.yml keys
     """
     if rendered_cfg is None:
         rendered_cfg = render_haproxy_cfg()
 
-    # 1. Сравниваем живой /etc/haproxy/haproxy.cfg с текущим рендером.
+    # 1. Compare the live /etc/haproxy/haproxy.cfg with the current render.
     # The exact source-byte generation is a confirmation-channel marker, not
     # an operational HAProxy setting. Installer migrations may rewrite YAML
     # without changing its meaning, which legitimately changes that marker.
@@ -1846,7 +1845,7 @@ def get_config_diff_summary(rendered_cfg: Optional[str] = None) -> Dict[str, Any
     server_cfg = _read_file_text(HAPROXY_CFG_PATH)
     server_differs = not configs_operationally_equal(server_cfg, rendered_cfg)
 
-    # 2. Смотрим, есть ли вообще сохранённое состояние
+    # 2. Is there a saved state at all
     applied_state = _load_applied_state()
     spec = _get_current_spec()
 
@@ -1865,7 +1864,7 @@ def get_config_diff_summary(rendered_cfg: Optional[str] = None) -> Dict[str, Any
     }
 
     if not applied_state:
-        # история ещё не велась — показываем только факт server_differs
+        # no history yet: report only server_differs
         return summary
 
     # --- sites ---
@@ -2067,18 +2066,18 @@ def get_haproxy_configuration_state() -> Dict[str, Any]:
 
 def revert_to_last_applied_state() -> Tuple[bool, str]:
     """
-    Откатывает websites.yml/tcp.yml/vars.yml к последнему успешно
-    применённому состоянию (копии из backups/haproxy/last_applied_*.yml).
+    Rolls websites.yml/tcp.yml/vars.yml back to the last successfully
+    applied state (the copies in backups/haproxy/last_applied_*.yml).
 
-    Сам /etc/haproxy/haproxy.cfg не трогаем — он уже соответствует
-    последнему apply. Откат нужен именно для "я наковырялся в сайтах,
-    но передумал применять".
+    /etc/haproxy/haproxy.cfg itself is left alone: it already matches the
+    last apply. The rollback is for "I changed the sites but decided not to
+    apply".
     """
     pending, pending_message = config_transaction_is_pending()
     if pending:
         return False, pending_message
 
-    # Если вообще ещё ни разу не применяли — откатывать нечего
+    # Nothing was ever applied: nothing to roll back
     if not HAPROXY_STATE_PATH.exists():
         return False, 'No saved applied state; there is nothing to revert'
 
@@ -2093,7 +2092,7 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
 
     for src, dst, label in mapping:
         if not src.exists():
-            # конкретный файл не бэкапили — пропускаем
+            # this file was not backed up: skip it
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -2113,7 +2112,7 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
 
 def get_server_cfg_text() -> str:
     """
-    Возвращает текст текущего /etc/haproxy/haproxy.cfg (или "" если файла нет).
+    Returns the text of the current /etc/haproxy/haproxy.cfg (or "" if there is none).
     """
     return _read_file_text(HAPROXY_CFG_PATH)
 
@@ -2138,8 +2137,8 @@ def configs_operationally_equal(server_cfg: str, rendered_cfg: str) -> bool:
 
 def make_cfg_html_diff(server_cfg: str, rendered_cfg: str) -> str:
     """
-    Строит HTML-таблицу diff (side-by-side) между живым конфигом и рендером.
-    Используем стандартный difflib.HtmlDiff.
+    Builds a side-by-side HTML diff table of the live configuration and the render,
+    with the standard difflib.HtmlDiff.
     """
     # Present the same operational comparison used by the status indicator.
     # The private exact generation still participates in guarded apply and

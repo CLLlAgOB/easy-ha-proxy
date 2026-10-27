@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Клиент для общения с root-сервисом authelia-configd через UNIX-сокет.
+Client of the root service authelia-configd over a UNIX socket.
 """
 
 import json
@@ -75,13 +75,13 @@ def get_config_without_rules() -> Dict[str, Any]:
 
 
 def restart_authelia() -> Dict[str, Any]:
-    """Перезапустить Authelia (docker restart + ожидание порта)."""
+    """Restart Authelia (docker restart, then wait for its port)."""
     return _send_request({"action": "restart"}, timeout=60.0)
 
 def update_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Передать фрагмент конфигурации (без rules и без секретов)
-    демону для обновления настроек.
+    Hand a configuration fragment (without the rules and the secrets) to the
+    daemon to update the settings.
     """
     return _send_request({"action": "settings_update", "config": config})
 

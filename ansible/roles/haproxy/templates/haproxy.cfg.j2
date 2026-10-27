@@ -1,5 +1,5 @@
 {# ============================================================================
-  HAProxy – универсальный шаблон (Ansible/Jinja2)
+  HAProxy -- the general template (Ansible/Jinja2)
   ============================================================================ #}
 {# -------------------------------
    GLOBAL JINJA VARS / UTILS
@@ -31,13 +31,13 @@
 {% set export_prometheus = runtime_vars.get('export_prometheus', export_prometheus | default(false)) %}
 {% set prometheus_port = runtime_vars.get('prometheus_port', prometheus_port | default(8404)) %}
 {% set sd = site_defaults %}
-{# гарантируем списки #}
+{# make sure these are lists #}
 {# A paused site keeps its configuration but is not published: nothing below
    sees it, so it has no routing, no certificate name in the SNI list and no
    backend. Only an explicit true pauses; anything else publishes. #}
 {% set sites = (runtime_websites.get('sites', sites | default([], true))) | list | rejectattr('paused', 'sameas', true) | list %}
 {% set tcp_proxies = (runtime_tcp.get('tcp_proxies', runtime_tcp.get('tcp', tcp_proxies | default([], true)))) | list %}
-{# утилиты #}
+{# helpers #}
 {% macro san(v) -%}{{ (v | default('')) | regex_replace('[^A-Za-z0-9_]', '_') }}{%- endmacro %}
 {% macro sanitize(v) -%}{{ (v | default('')) | regex_replace('[^A-Za-z0-9_]', '_') }}{%- endmacro %}
 {# defaults paths #}
@@ -148,7 +148,7 @@ defaults
     unique-id-header X-Request-ID
 {% endif %}
 
-    # Важно: txn.ban_log может быть пустой
+    # Note: txn.ban_log may be empty
     # host= is the site the client asked for. A request this gateway refuses
     # itself is logged against <NOSRV>, so without it a 451 or a 401 could not
     # be traced to a site at all. Like the identifier it is a labelled field
@@ -169,14 +169,14 @@ defaults
 
 {% if peers_enabled %}
 #################################
-# PEERS (репликация только бан-таблицы)
+# PEERS (only the ban table is replicated)
 #################################
 peers {{ peers_name }}
     peer {{ localpeer }} {{ peers_bind }}
 {% endif %}
 
 #################################
-# STICK-TABLES (глобальные)
+# STICK-TABLES (global)
 #################################
 backend tbl_ban
     stick-table type ip size 200k expire {{ sd.ban_expire | default('168h') }} store gpc0,gpt0{% if peers_enabled %} peers {{ peers_name }}{% endif %}
@@ -216,7 +216,7 @@ backend tbl_nosni_tcp
 
 {% if has_passthru %}
 #################################
-# TCP SNI router (:443) для passthrough доменов
+# TCP SNI router (:443) for passthrough domains
 #################################
 frontend fe_tls_router
     mode tcp
@@ -255,7 +255,7 @@ frontend fe_tls_router
 {% endif %}
 
 #################################
-# FRONTEND HTTPS (:443) с TLS-терминацией
+# FRONTEND HTTPS (:443) with TLS termination
 #################################
 frontend fe_https
 {# ---- Client certificates (mTLS) ------------------------------------------
@@ -308,7 +308,7 @@ frontend fe_https
     acl ip_auth_ok src_get_gpc0(tbl_ip_auth) gt 0
 {% endif %}
 
-    # Conn-flood limits (таблица прямо в fe_https)
+    # Conn-flood limits (the table lives right in fe_https)
 {% set conn_expire = sd.conn_table_expire | default('30s') %}
 {% set conn_rate_window = sd.conn_rate_window | default('10s') %}
 {# New connections per window and open connections per address. 40 and 100
@@ -409,7 +409,7 @@ frontend fe_https
 {% endfor %}
     acl valid_host hdr(host) -i {{ all_hosts | unique | join(' ') }}
 
-    # ---- Исключения из учёта ошибок (txn-флаги) ----
+    # ---- What the error counters leave out (txn flags) ----
     # A miss on a static asset is a broken page, never an attack. The
     # adaptive engine has always known that -- is_asset() is its single
     # largest false-positive guard -- but this counter did not, and it is
@@ -429,8 +429,8 @@ frontend fe_https
     http-request set-var(txn.other_excl) bool(false)
     http-request set-var(txn.other_excl) bool(true) if err_asset_path
 
-    # ---- Исключения из учёта OTHER-ошибок (tbl_err_other) для запросов БЕЗ SNI ----
-    # Управляется через site_defaults:
+    # ---- What the OTHER error counter (tbl_err_other) leaves out for requests WITHOUT SNI ----
+    # Set through site_defaults:
     #   other_err_exclude_enabled: true
     #   other_err_exclude_exact:
     #     - { path: "/", methods: ["GET"] }
@@ -493,7 +493,7 @@ frontend fe_https
 {% endfor %}
 {% endfor %}
 
-    # ---- GEO (опционально) ----
+    # ---- GEO (optional) ----
 {% if enable_geoip | default(false) %}
     # Country networks derived locally from the active DB-IP MMDB release.
     acl geo_allowed   src -f /etc/haproxy/geoip/current/allowed.geo
@@ -503,7 +503,7 @@ frontend fe_https
     # Successful Authelia authorization also bypasses the GeoIP deny rules.
 {% endif %}
 
-    {# домены, где GEO выключен (совместимость со старым и новым стилем) #}
+    {# domains with GEO switched off (old and new style alike) #}
     {% set geo_bypass = [] %}
     {% for site in sites %}
       {% set s = sd | combine(site, recursive=True) %}
@@ -532,7 +532,7 @@ frontend fe_https
     acl geo_bypass hdr(host) -i {{ geo_bypass | unique | join(' ') }}
     {% endif %}
 
-    {# домены, где GEO применяется #}
+    {# domains where GEO applies #}
     {% set geo_names = [] %}
     {% for site in sites %}
       {% set s = sd | combine(site, recursive=True) %}
@@ -610,7 +610,7 @@ frontend fe_https
 {% endif %}
 
 
-    # ---- Zero-trust (опционально) ----
+    # ---- Zero-trust (optional) ----
 {% if authelia_enabled %}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
@@ -631,7 +631,7 @@ frontend fe_https
 {% endfor %}
 {% endif %}
 
-    # ---- Трекинг ошибок (всё через sc1, но с защитой от множественных матчей) ----
+    # ---- Error tracking (all through sc1, guarded against matching more than once) ----
     http-request set-var(txn._err_tracked) bool(false)
 
 {% for site in sites %}
@@ -646,7 +646,7 @@ frontend fe_https
 {% endif %}
 {% endfor %}
 
-    # всё, что “мимо” валидного SNI/Host — в tbl_err_other (ровно один раз)
+    # anything that "misses" a valid SNI/Host goes to tbl_err_other (exactly once)
     http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
 
@@ -656,16 +656,16 @@ frontend fe_https
     http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
 
-    # ---- Инициализация переменных бана на каждый запрос ----
+    # ---- Ban variables, initialised on every request ----
     http-request unset-var(txn.ban_code)
     http-request unset-var(txn.ban_reason)
     http-request unset-var(txn.ban_log)
     http-request set-var(txn.is_new_ban) bool(false)
 
-    # Уже забаненный IP
+    # An address already banned
     acl already_banned src_get_gpc0(tbl_ban) gt 0
 
-    # ---- Пороговые значения (ошибки 4xx) ----
+    # ---- Thresholds (4xx errors) ----
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
@@ -685,7 +685,7 @@ frontend fe_https
 
     http-request set-var(txn.ban_reason) str("ERR_LIMIT_OTHER limit={{ other_err_limit }}") if too_many_errs_other !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
-    # ---- Rate-limit (опционально) ----
+    # ---- Rate limit (optional) ----
     http-request set-var(txn._rate_tracked) bool(false)
 
 {% for site in sites %}
@@ -711,28 +711,28 @@ frontend fe_https
 {% endif %}
 {% endfor %}
 
-    # --- Итоговый триггер бана ---
+    # --- The final ban trigger ---
     acl ban_trigger var(txn.ban_code) -m int gt 0
 
-    # 1) Уже забаненный IP — режем сразу
+    # 1) An address already banned is cut off at once
     http-request set-var-fmt(txn.ban_log) " ban_val=1 ban_code=%[src_get_gpt0(tbl_ban)] ban_reason=\"ALREADY_BANNED\"" if already_banned !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request deny status 423 if already_banned !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
-    # 2) Новый бан — фиксируем флаг ДО изменения таблицы
+    # 2) A new ban: set the flag BEFORE the table changes
     http-request set-var(txn.is_new_ban) bool(true) if ban_trigger !already_banned !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
-    # Новый бан: пишем в tbl_ban
+    # A new ban: write it to tbl_ban
     http-request track-sc2 src table tbl_ban if { var(txn.is_new_ban) -m bool }
     http-request set-var(txn._incban) src_inc_gpc0(tbl_ban) if { var(txn.is_new_ban) -m bool }
     http-request sc-set-gpt0(2) var(txn.ban_code) if { var(txn.is_new_ban) -m bool }
 
-    # лог только на событии бана
+    # log only on the ban event
     http-request set-var-fmt(txn.ban_log) " ban_val=1 ban_code=%[var(txn.ban_code)] ban_reason=\"%[var(txn.ban_reason)]\"" if { var(txn.is_new_ban) -m bool }
 
     http-request deny status 423 if { var(txn.is_new_ban) -m bool }
 
-    # ---- Admin-домен / защита ----
+    # ---- Admin domain / protection ----
 {% if admin_domain is defined %}
 {% if admin_ips_enabled %}
     http-request deny status 403 if host_admin !allowed_admin !admin_control_plane_probe{% if metrics_export_enabled | default(false) %} !admin_metrics_scrape{% endif %}
@@ -746,7 +746,7 @@ frontend fe_https
 {% endif %}
 {% endif %}
 
-    # ---- Лимиты запросов (429) если rate_ban выключен ----
+    # ---- Request limits (429) when rate_ban is off ----
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
@@ -757,7 +757,7 @@ frontend fe_https
 {% endif %}
 {% endfor %}
 
-    # ---- Сайты, доступные только с перечисленных адресов ----
+    # ---- Sites open only to the listed addresses ----
     # Naming the addresses is the whole access policy for these sites. The
     # gates that exist to sort strangers out -- GeoIP, Authelia, zero-trust,
     # the adaptive error and rate counters -- are not emitted for them at all,
@@ -777,13 +777,13 @@ frontend fe_https
 {% endif %}
 {% endfor %}
 
-    # ---- Валидация SNI/Host (400) ----
+    # ---- SNI/Host validation (400) ----
     http-request deny status 400 if !sni_found
     http-request deny status 400 if sni_found !valid_sni
     http-request deny status 400 if !valid_host
 
 {% if mtls_sites %}
-    # ---- Клиентские сертификаты ----
+    # ---- Client certificates ----
     # This gate runs before Authelia on purpose. The two are independent
     # layers: a site may ask for a certificate, a login, both, or neither,
     # and a request that fails here never reaches the identity provider.
@@ -812,7 +812,7 @@ frontend fe_https
 {% endfor %}
 {% endif %}
 
-    # ---- Доверенная proxy-граница для admin UI ----
+    # ---- The trusted proxy boundary for the admin UI ----
     http-request del-header Remote-User
     http-request del-header Remote-Groups
     http-request del-header Remote-Name
@@ -848,7 +848,7 @@ frontend fe_https
     http-request del-header X-Request-ID
 {% endif %}
 {% if authelia_enabled %}
-    # ---- Заголовки для Authelia ForwardAuth ----
+    # ---- Headers for Authelia ForwardAuth ----
     http-request set-var(req.scheme) str(https) if { ssl_fc }
     http-request set-var(req.scheme) str(http)  if !{ ssl_fc }
     http-request set-var(req.questionmark) str(?) if { query -m found }
@@ -858,7 +858,7 @@ frontend fe_https
     http-request set-header X-Forwarded-Host   %[req.hdr(Host)]
     http-request set-header X-Forwarded-URI    %[path]%[var(req.questionmark)]%[query]
 
-    # ---- Authelia forward-auth для выбранных доменов ----
+    # ---- Authelia forward-auth for the chosen domains ----
 {% set authelia_hosts = [] %}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
@@ -896,10 +896,10 @@ frontend fe_https
 {% endif %}
 {% endif %}
 
-    # Добавляем внутренний маркер только после успешного ForwardAuth.
+    # The internal marker is added only after a successful ForwardAuth.
 {% if admin_domain is defined %}
-    # Runtime sample fetch сохраняет конфиг валидным и при ручном `haproxy -c`,
-    # когда закрытый systemd EnvironmentFile намеренно не загружен.
+    # A runtime sample fetch keeps the configuration valid for a manual `haproxy -c`
+    # too, when the private systemd EnvironmentFile is deliberately not loaded.
     http-request set-header X-Easy-HA-Proxy-Secret %[env(HAPROXY_ADMIN_PROXY_SECRET)] if host_admin
     http-request set-header X-Easy-HAProxy-Config-Generation {{ config_generation }} if host_admin
     http-request set-header Remote-User easy-ha-proxy-healthcheck if host_admin admin_control_plane_probe
@@ -923,7 +923,7 @@ frontend fe_https
     http-response set-header X-Request-ID %[unique-id]
 {% endif %}
 
-    # ---- Маршрутизация ----
+    # ---- Routing ----
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {# An access gate without any configured upstream serves the static page and
@@ -1090,7 +1090,7 @@ backend be_http_challenge
 
 {% if has_passthru %}
 #################################
-# TLS terminator для «остальных» (когда есть passthrough)
+# TLS terminator for "the rest" (when there is passthrough)
 #################################
 backend be_tls_terminator
     mode tcp
@@ -1151,7 +1151,7 @@ backend be_{{ id }}_tcp
 {% set uri = s.health_uri | default('/') %}
 {% set code = s.health_status | default(200) %}
 
-{# --- вычисляем имена для HTTP Host и TLS SNI/verify --- #}
+{# --- work out the names for the HTTP Host and TLS SNI/verify --- #}
 {% set be_http_host = s.backend_host | default('') %}
 {% set be_tls_name  = s.backend_sni | default(s.backend_host | default(s.domain)) %}
 {% set be_verify    = s.verify_host | default(be_tls_name) %}
@@ -1162,7 +1162,7 @@ backend be_{{ id }}
     balance {{ s.balance | default('roundrobin') }}
 
 {% if s.authelia_enabled | default(false) %}
-    # Пробрасываем Set-Cookie из ответа forward-auth к клиенту (если есть)
+    # Pass Set-Cookie from the forward-auth answer on to the client (if any)
     acl authelia_set_cookie var(req.auth_response_header.set_cookie) -m found
     http-response set-header Set-Cookie %[var(req.auth_response_header.set_cookie)] if authelia_set_cookie
 {% endif %}
@@ -1177,7 +1177,7 @@ backend be_{{ id }}
     timeout http-keep-alive {{ s.http_keepalive_timeout }}
 {% endif %}
 
-    # Бан в бэкенде не действует на whitelist/admin
+    # A ban in the backend does not apply to the allow-list or admin
     acl ip_whitelist src -f {{ whitelist_global_file }}
 {% if admin_ips_enabled %}
     acl allowed_admin src -f {{ admin_ips_file }}
@@ -1199,10 +1199,10 @@ backend be_{{ id }}
     http-response return status 200 content-type "image/x-icon" file /etc/haproxy/errors/default-favicon.ico hdr Cache-Control "public, max-age=86400" if { var(txn.favicon_req) -m bool } { status 404 }
 {% endif %}
 
-    # Реальный IP и Host
+    # The real IP and Host
     http-request set-header X-Client-IP %[src]
 
-{# Если задан backend_host — жёстко ставим Host на него, иначе прокидываем исходный Host клиента #}
+{# With backend_host set, Host is forced to it; otherwise the client's own Host is passed on #}
 {% if be_http_host %}
     http-request set-header Host {{ be_http_host }}
 {% else %}
@@ -1222,7 +1222,7 @@ backend be_{{ id }}
 {% endif %}
 
     option httpchk
-{# Host для health-check: если backend_host задан — используем его, иначе домен сайта #}
+{# The health check's Host: backend_host if set, otherwise the site's domain #}
 {% if be_http_host %}
     http-check send meth GET uri {{ uri }} ver HTTP/1.1 hdr Host {{ be_http_host }}
 {% else %}
@@ -1231,7 +1231,7 @@ backend be_{{ id }}
     http-check expect status {{ code }}
 {% endif %}
 
-{# ВАЖНО: всё в одну строку! #}
+{# IMPORTANT: all on one line! #}
     default-server inter 3s rise 2 fall 3{% if use_ssl %} ssl sni str({{ be_tls_name }}) alpn {{ s.backend_alpn | default('http/1.1') }}{% if ssl_verify %} verify required ca-file {{ (ssl_ca | default('', true)) or backend_ssl_verify_ca_file }} verifyhost {{ be_verify }} check-ssl check-sni {{ be_tls_name }}{% else %} verify none check-ssl check-sni {{ be_tls_name }}{% endif %}{% endif %}
 
 {% for srv in (s.servers | default([{'name':'app1','host':s.backend_ip,'port':s.backend_port}])) %}

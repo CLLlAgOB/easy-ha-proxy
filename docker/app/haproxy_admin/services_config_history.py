@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""История конфигурации: список версий и осмысленное сравнение.
+"""Configuration history: the list of versions and a meaningful comparison.
 
-Версии пишет controld в момент подтверждения транзакции; здесь только чтение.
-Сравнение делается по управляемой модели — сайтам, TCP-прокси и переменным, —
-а не по сгенерированному haproxy.cfg: diff из тысячи строк не отвечает на
-вопрос «что я поменял».
+controld writes the versions when a transaction is confirmed; this module
+only reads. The comparison is made on the managed model -- the sites, the
+TCP proxies and the variables -- rather than on the rendered haproxy.cfg: a
+diff of a thousand lines does not answer "what did I change".
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ MAX_VERSIONS = 200
 
 
 class HistoryUnavailable(RuntimeError):
-    """controld не отвечает или история недоступна."""
+    """controld does not answer, or the history is unavailable."""
 
 
 def _request(command: str) -> Dict[str, Any]:
@@ -63,18 +63,18 @@ def _decode(sources: Dict[str, Any]) -> Dict[str, str]:
 
 
 def version_sources(version_id: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
-    """Метаданные и содержимое одной версии."""
+    """The metadata and contents of one version."""
 
     payload = _request(f"config-version {version_id}").get("version") or {}
     return payload, _decode(payload.get("sources") or {})
 
 
 def current_sources() -> Dict[str, str]:
-    """То, что лежит в управляемой конфигурации прямо сейчас.
+    """What the managed configuration holds right now.
 
-    Именно рабочие файлы, а не `backups/haproxy/last_applied_*.yml`: те —
-    снимок последнего применённого состояния, точка отката, и писать в них
-    нельзя.
+    The working files, not `backups/haproxy/last_applied_*.yml`: those are
+    the snapshot of the last applied state, the rollback point, and must not
+    be written to.
     """
 
     bundle = _read_config_source_bundle(
@@ -97,10 +97,10 @@ def _load(text: str) -> Dict[str, Any]:
 
 
 def _entries(data: Dict[str, Any], keys: Tuple[str, ...]) -> Dict[str, Dict[str, Any]]:
-    """Список записей → отображение по имени, чтобы сравнивать по существу.
+    """A list of entries -> a mapping by name, so the comparison is about substance.
 
-    Порядок в файле значения не имеет: переставленные местами сайты — это не
-    изменение, и показывать их как изменение было бы шумом.
+    The order in the file does not matter: sites that merely swapped places
+    are not a change, and showing them as one would be noise.
     """
 
     items: List[Any] = []
@@ -175,7 +175,7 @@ def _compare_mapping(before_text: str, after_text: str) -> List[Dict[str, Any]]:
 
 
 def compare(before: Dict[str, str], after: Dict[str, str]) -> Dict[str, Any]:
-    """Сравнить два набора источников по смыслу."""
+    """Compare two sets of sources by meaning."""
 
     changes: List[Dict[str, Any]] = []
     changes.extend(
@@ -209,7 +209,7 @@ def compare(before: Dict[str, str], after: Dict[str, str]) -> Dict[str, Any]:
 
 
 def diff(left: str, right: str) -> Dict[str, Any]:
-    """Сравнить две версии; `current` означает то, что применено сейчас."""
+    """Compare two versions; `current` means what is applied now."""
 
     def load(identifier: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
         if identifier == CURRENT:
@@ -230,7 +230,7 @@ def diff(left: str, right: str) -> Dict[str, Any]:
 
 
 class RestoreError(RuntimeError):
-    """Восстановление не начато; управляемая конфигурация не изменена."""
+    """The restore did not start; the managed configuration is unchanged."""
 
     def __init__(self, message: str, *, error_code: str = "restore_failed") -> None:
         super().__init__(message)
@@ -238,7 +238,7 @@ class RestoreError(RuntimeError):
 
 
 def _write_sources(sources: Dict[str, str]) -> None:
-    """Записать управляемые YAML на место, каждый — атомарной заменой."""
+    """Put the managed YAML files in place, each by an atomic replacement."""
 
     paths = _current_config_source_paths()
     for name in CONFIG_SOURCE_ORDER:
@@ -255,12 +255,12 @@ def _write_sources(sources: Dict[str, str]) -> None:
 
 
 def restore(version_id: str, *, client_ip: str = "") -> Dict[str, Any]:
-    """Поставить сохранённую версию на место и применить обычным путём.
+    """Put a saved version in place and apply it the usual way.
 
-    Никаких собственных проверок: рендер, `haproxy -c`, защита от блокировки
-    админского доступа, окно подтверждения и автооткат — те же, что у обычного
-    сохранения. Здесь только подмена источников и возврат их назад, если
-    транзакцию не удалось даже начать.
+    No checks of its own: the rendering, `haproxy -c`, the guard against
+    locking out the admin, the confirmation window and the automatic
+    rollback are those of an ordinary save. Here the sources are only
+    swapped in, and swapped back if the transaction could not even start.
     """
 
     from .services_haproxy_config import (  # local import: heavy module

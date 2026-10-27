@@ -109,14 +109,14 @@
   when: ansible_os_family == "Debian"
 
 
-# ---- 2. Тест доступа к Docker Hub ----
+# ---- 2. Test access to Docker Hub ----
 
 - name: Test connectivity to Docker Hub with hello-world image
   ansible.builtin.command:
     cmd: timeout 20 docker pull hello-world:latest
   register: docker_hub_pull
-  changed_when: false      # это просто тест
-  failed_when: false       # не роняем play при ошибке
+  changed_when: false      # only a test
+  failed_when: false       # an error does not fail the play
   tags: restore-network
 
 - name: Include mirror configuration tasks if Docker Hub is not reachable

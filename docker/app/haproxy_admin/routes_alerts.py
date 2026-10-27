@@ -1,7 +1,7 @@
 # routes_alerts.py
 #
-# Раздел «Оповещения». Условия и политика уведомлений живут в
-# easy-ha-proxy-alertd; здесь только чтение его состояния и запись настроек.
+# The "Alerts" section. The conditions and the notification policy live in
+# easy-ha-proxy-alertd; here its state is only read and its settings written.
 
 from __future__ import annotations
 

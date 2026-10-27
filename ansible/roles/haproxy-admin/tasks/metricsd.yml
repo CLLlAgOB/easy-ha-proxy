@@ -1,6 +1,6 @@
 ---
 # roles/haproxy-admin/tasks/metricsd.yml
-# Установка root-демона easy-ha-proxy-metricsd (историческая статистика HAProxy)
+# Installing the root daemon easy-ha-proxy-metricsd (HAProxy's historical statistics)
 
 - name: "easy-ha-proxy-metricsd | Install script"
   ansible.builtin.copy:

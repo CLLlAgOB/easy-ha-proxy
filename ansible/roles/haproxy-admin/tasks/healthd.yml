@@ -1,6 +1,6 @@
 ---
 # roles/haproxy-admin/tasks/healthd.yml
-# Установка root-демона haproxy-healthd
+# Installing the root daemon haproxy-healthd
 
 - name: "haproxy-healthd | Install script"
   ansible.builtin.copy:

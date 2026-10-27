@@ -4,12 +4,12 @@ set -euo pipefail
 CERTS_DIR="{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
 CERTS_AVAILABLE="{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}"
 HAPROXY_SERVICE="haproxy"
-HAPROXY_GROUP="haproxy"      # группа, под которой работает haproxy
+HAPROXY_GROUP="haproxy"      # the group haproxy runs under
 LIVE_DIR="/etc/letsencrypt/live"
 
-# Certbot-переменные
+# Certbot's variables
 RENEWED_LINEAGE="${RENEWED_LINEAGE:-}"     # /etc/letsencrypt/live/domain.local-ecdsa
-FORCE_ALL="${HAPROXY_PEMS_FORCE_ALL:-1}"   # если =1 — всегда пересобирать все
+FORCE_ALL="${HAPROXY_PEMS_FORCE_ALL:-1}"   # if =1, always rebuild everything
 
 mkdir -p "$CERTS_DIR"
 
@@ -28,7 +28,7 @@ is_pinned() {
 }
 
 build_pem() {
-  local lineage="$1"   # имя lineage (domain.local, domain.local-ecdsa ...)
+  local lineage="$1"   # the lineage name (domain.local, domain.local-ecdsa ...)
   local dest="$2"      # /etc/haproxy/certs/domain.local-ecdsa.pem
 
   local stem
@@ -50,11 +50,11 @@ build_pem() {
   umask 077
   cat "$fc" "$pk" > "$tmp"
 
-  # Права: root:haproxy, 0640
+  # Permissions: root:haproxy, 0640
   if getent group "$HAPROXY_GROUP" >/dev/null 2>&1; then
     chown root:"$HAPROXY_GROUP" "$tmp"
   else
-    # на всякий случай fallback, если группы нет
+    # a fallback, just in case the group does not exist
     chown root:root "$tmp"
   fi
   chmod 0640 "$tmp"
@@ -66,16 +66,16 @@ build_pem() {
 MANIFEST="$CERTS_DIR/manifest.json"
 
 #
-# Режим 1: certbot вызвал deploy-hook с RENEWED_LINEAGE → работаем точечно
+# Mode 1: certbot ran the deploy hook with RENEWED_LINEAGE -> work on that one only
 #
 if [[ -n "$RENEWED_LINEAGE" && "$FORCE_ALL" != "1" ]]; then
   echo "haproxy-pems: single-lineage mode (RENEWED_LINEAGE=$RENEWED_LINEAGE)"
 
-  # Приводим к имени каталога внутри LIVE_DIR
+  # Reduce it to the directory name inside LIVE_DIR
   # /etc/letsencrypt/live/domain.local-ecdsa -> domain.local-ecdsa
   lineage_name="$(basename "$RENEWED_LINEAGE")"
 
-  # 1) Если есть manifest.json — пробуем взять путь из него
+  # 1) If there is a manifest.json, try to take the path from it
   if [[ -f "$MANIFEST" ]]; then
     dest_from_manifest="$(jq -r --arg k "$lineage_name" '.[$k] // empty' "$MANIFEST" 2>/dev/null || echo "")"
     if [[ -n "$dest_from_manifest" ]]; then
@@ -88,7 +88,7 @@ if [[ -n "$RENEWED_LINEAGE" && "$FORCE_ALL" != "1" ]]; then
     dest_from_manifest=""
   fi
 
-  # 2) Если manifest не дал dest — используем стандартную схему имён
+  # 2) If the manifest gave no dest, use the standard naming scheme
   if [[ -z "$dest_from_manifest" ]]; then
     if [[ "$lineage_name" =~ ^(.+)-(ecdsa|rsa)$ ]]; then
       base="${BASH_REMATCH[1]}"
@@ -103,7 +103,7 @@ if [[ -n "$RENEWED_LINEAGE" && "$FORCE_ALL" != "1" ]]; then
   fi
 
 #
-# Режим 2: ручной запуск или FORCE_ALL=1 → пересобираем всё (как раньше)
+# Mode 2: a manual run or FORCE_ALL=1 -> rebuild everything (as before)
 #
 else
   echo "haproxy-pems: full rebuild mode"
@@ -111,7 +111,7 @@ else
   shopt -s nullglob
   declare -A has_type
 
-  # Строим карту: base,ecdsa / base,rsa / base,single
+  # Build the map: base,ecdsa / base,rsa / base,single
   for d in "$LIVE_DIR"/*; do
     [[ -d "$d" ]] || continue
     name="$(basename "$d")"
@@ -157,7 +157,7 @@ else
   fi
 fi
 
-# Перезагрузка HAProxy.
+# Reload HAProxy.
 #
 # The check here used to be
 #

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Откуда экспортёр берёт цифры.
+"""Where the exporter gets its numbers.
 
-Отдельный модуль, потому что сборка экспозиции должна тестироваться без
-сокетов: `services_prometheus.collect()` принимает этот словарь и не знает,
-настоящие за ним демоны или подстановка.
+A module of its own, because building the exposition must be testable
+without sockets: `services_prometheus.collect()` takes this dict and does not
+know whether real daemons or stand-ins are behind it.
 """
 
 from __future__ import annotations

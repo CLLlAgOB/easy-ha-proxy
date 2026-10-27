@@ -1,6 +1,6 @@
 ---
 # roles/haproxy-admin/tasks/guardd.yml
-# Установка root-демона easy-ha-proxy-guardd (adaptive protection, monitor)
+# Installing the root daemon easy-ha-proxy-guardd (adaptive protection, monitor)
 
 - name: "easy-ha-proxy-guardd | Install script"
   ansible.builtin.copy:

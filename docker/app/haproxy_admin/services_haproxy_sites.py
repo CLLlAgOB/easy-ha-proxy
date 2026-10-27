@@ -1,9 +1,9 @@
 # services_haproxy_sites.py
-# Вспомогательные функции для работы с websites.yml:
-# - список сайтов
-# - добавление/удаление
-# - получение effective-настроек с учётом site_defaults
-# - сохранение изменений одного сайта
+# Helpers for websites.yml:
+# - the list of sites
+# - adding and removing
+# - the effective settings, with site_defaults applied
+# - saving the changes to one site
 from .certd_client import (
     get_cert_status_for_domain,
     issue_cert_for_domain,
@@ -41,7 +41,7 @@ ISO_ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 # is a file name in a root-owned directory on the other side.
 DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 #LE_LIVE_DIR = Path("/etc/letsencrypt/live")
-#CERT_WARN_DAYS = 30  # за сколько дней до истечения показывать предупреждение
+#CERT_WARN_DAYS = 30  # how many days before expiry to show a warning
 
 
 def _normalize_allow_ips(value: Any) -> List[str]:
@@ -87,8 +87,8 @@ def client_auth_ca_ids() -> Optional[set]:
 
 def _get_haproxy_certs_dir() -> Path:
     """
-    Берём haproxy_certs_dir из vars.yml (CONFIG_YAML),
-    по умолчанию /etc/haproxy/certs.
+    haproxy_certs_dir from vars.yml (CONFIG_YAML),
+    /etc/haproxy/certs by default.
     """
     cfg = _load_yaml(CONFIG_YAML)
     path_str = cfg.get("haproxy_certs_dir") or str(DEFAULT_HAPROXY_CERTS_DIR)
@@ -100,8 +100,8 @@ def _get_haproxy_certs_dir() -> Path:
 
 def _parse_not_after(not_after: str) -> Optional[datetime]:
     """
-    Парсим строку notAfter из сертификата OpenSSL.
-    Обычно формат: 'Nov 30 12:00:00 2025 GMT'
+    Parses an OpenSSL notAfter string.
+    Usually in the form 'Nov 30 12:00:00 2025 GMT'.
     """
     if not not_after:
         return None
@@ -116,20 +116,20 @@ def _parse_not_after(not_after: str) -> Optional[datetime]:
 
 def _load_cert_info(path: Path) -> Optional[Dict[str, Any]]:
     """
-    Читает сертификат с диска и возвращает:
+    Reads a certificate from disk and returns:
       - not_after (datetime)
       - days_left (int)
-    Если файл not found, нет прав или не удаётся прочитать — None.
+    None if the file is missing, unreadable or cannot be parsed.
     """
     try:
-        # path.exists() внутри себя делает stat() и может выбросить PermissionError
+        # path.exists() calls stat() and may raise PermissionError
         if not path.exists():
             return None
 
-        # _test_decode_cert тоже может упасть с PermissionError / OSError / др. ошибкой
+        # _test_decode_cert may fail too, with PermissionError, OSError or another error
         info = ssl._ssl._test_decode_cert(str(path))
     except Exception:
-        # Любая ошибка чтения сертификата = "сертификат для нас недоступен"
+        # Any error reading the certificate means "this certificate is not available to us"
         return None
 
     not_after_str = info.get("notAfter")
@@ -149,8 +149,8 @@ def _load_cert_info(path: Path) -> Optional[Dict[str, Any]]:
 
 def get_cert_status_for_site(eff: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Теперь этот код не трогает файловую систему.
-    Вся работа с сертификатами вынесена в root-сервис haproxy-certd.
+    This code no longer touches the filesystem: all certificate work is
+    done by the root service haproxy-certd.
     """
     domain = eff.get("domain") or eff.get("name")
     domain = (domain or "").strip()
@@ -172,7 +172,7 @@ def get_cert_status_for_site(eff: Dict[str, Any]) -> Dict[str, Any]:
 
     status = get_cert_status_for_domain(domain)
 
-    # Если сервис недоступен / вернул пусто — не ломаем UI
+    # If the service is unavailable or answers empty, do not break the UI
     if not status:
         return {
             "state": "unknown",
@@ -194,13 +194,13 @@ def get_cert_status_for_site(eff: Dict[str, Any]) -> Dict[str, Any]:
 def _fmt_date(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
         return None
-    # Можно поменять формат отображения при желании
+    # The display format can be changed here if wanted
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
 def get_websites_list() -> List[Dict[str, Any]]:
     """
-    Возвращает список сайтов из websites.yml (как есть).
+    Returns the list of sites from websites.yml, as it is.
     """
     data = _load_yaml(WEBSITES_YAML)
     sites = data.get("sites") or []
@@ -369,13 +369,13 @@ def add_site_minimal(
     backend_port: str,
 ) -> Tuple[bool, str]:
     """
-    Добавляет минимальный сайт:
+    Adds a minimal site:
       - name, domain, backend_ip, backend_port
-    Остальные параметры тянутся из site_defaults в шаблоне.
+    Everything else comes from site_defaults in the template.
 
-    Пустые backend_ip и backend_port создают шлюз доступа (access_gate):
-    сайт без бекенда, который после входа через Authelia отдаёт статичную
-    страницу и авторизует IP посетителя.
+    An empty backend_ip and backend_port make an access gate (access_gate):
+    a site without a backend that, after an Authelia sign-in, serves a static
+    page and authorises the visitor's IP.
     """
     backend_ip = (backend_ip or "").strip()
     backend_port = str(backend_port or "").strip()
@@ -425,7 +425,7 @@ def add_site_minimal(
     if not isinstance(sites, list):
         sites = []
 
-    # Проверка на дубликаты по name
+    # Reject a duplicate name
     for s in sites:
         if s.get("name") == name:
             return False, f"A site named {name!r} already exists"
@@ -451,7 +451,7 @@ def add_site_minimal(
 
 def delete_site_by_name(name: str) -> Tuple[bool, str]:
     """
-    Удаляет сайт по name из websites.yml.
+    Deletes the site with this name from websites.yml.
     """
     data = _load_yaml(WEBSITES_YAML)
     sites = data.get("sites") or []
@@ -482,21 +482,21 @@ def delete_site_by_name(name: str) -> Tuple[bool, str]:
 
 def delete_site(name: str) -> Tuple[bool, str]:
     """
-    Совместимость для routes_haproxy_sites:
-    просто вызывает delete_site_by_name(name).
+    Compatibility for routes_haproxy_sites:
+    simply calls delete_site_by_name(name).
     """
     return delete_site_by_name(name)
 
 
 def get_sites_and_defaults_for_ui() -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
-    Для страницы списка:
-      - возвращает site_defaults из vars.yml
-      - и список сайтов вида:
+    For the list page:
+      - returns site_defaults from vars.yml
+      - and the list of sites, each as:
           {
-            "raw": {...},        # как в websites.yml
-            "effective": {...},  # site_defaults + site (как в шаблоне)
-            "cert": {...},       # статус сертификата
+            "raw": {...},        # as in websites.yml
+            "effective": {...},  # site_defaults + site (as the template sees it)
+            "cert": {...},       # the certificate's state
           }
     """
     config_vars = _load_yaml(CONFIG_YAML)
@@ -508,10 +508,10 @@ def get_sites_and_defaults_for_ui() -> Tuple[Dict[str, Any], List[Dict[str, Any]
     sites_ui: List[Dict[str, Any]] = []
 
     for s in sites_raw:
-        # effective-настройки сайта (как использует шаблон)
+        # the site's effective settings (as the template uses them)
         eff = jinja_combine(site_defaults, s, recursive=True)
 
-        # статус сертификата (может быть только HAProxy, LE, оба или ничего)
+        # the certificate's state (HAProxy only, LE only, both or none)
         cert = get_cert_status_for_site(eff)
 
         sites_ui.append(
@@ -529,10 +529,10 @@ def get_site_raw_and_effective(
     name: str,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
-    Для страницы редактирования:
-      - возвращает site_defaults
-      - сайт в "сыром" виде (как в websites.yml)
-      - сайт в виде effective (site_defaults + site)
+    For the edit page:
+      - returns site_defaults
+      - the site as it is (as in websites.yml)
+      - the site as effective (site_defaults + site)
     """
     config_vars = _load_yaml(CONFIG_YAML)
     site_defaults = config_vars.get("site_defaults") or {}
@@ -553,17 +553,17 @@ def get_site_raw_and_effective(
 
 def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = None) -> Tuple[bool, str]:
     """
-    Сохранение сайта из JSON (форма редактирования/создания).
+    Saves a site from JSON (the edit or create form).
 
-    site — то, что пришло с фронта (как есть).
+    site is what the front end sent, as it is.
     original_name:
-      - пусто/None  -> создаём новый сайт
-      - непустая    -> редактируем существующий (под этим name), можно переименовать
+      - empty/None  -> create a new site
+      - non-empty   -> edit the existing site of this name; it may be renamed
     """
     if not isinstance(site, dict):
         return False, 'Invalid site format (expected a JSON object)'
 
-    # --- базовые поля name / domain -----------------------------------------
+    # --- the basic fields name / domain -----------------------------------------
     try:
         name = validate_identifier(
             site.get("name") or site.get("domain"), "name"
@@ -572,7 +572,7 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
     except ValueError as exc:
         return False, str(exc)
 
-    # Работаем с копией, чтобы не портить исходный словарь
+    # Work on a copy so the original dict is not spoiled
     site_out: Dict[str, Any] = dict(site)
     site_out["name"] = name
     site_out["domain"] = domain
@@ -713,7 +713,7 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
             port = srv.get("port")
 
             if not host:
-                # backend без host нам не нужен
+                # a backend without a host is of no use
                 continue
 
             try:
@@ -724,10 +724,10 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
 
             srv_out: Dict[str, Any] = {}
 
-            # backup-флаг
+            # the backup flag
             backup_flag = bool(srv.get("backup"))
 
-            # Гарантируем имя бэкенда
+            # Make sure the backend has a name
             name_srv = str(srv.get("name") or "").strip()
             if not name_srv:
                 name_srv = f"backup{idx}" if backup_flag else f"srv{idx}"
@@ -743,12 +743,12 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
             if backup_flag:
                 srv_out["backup"] = True
 
-            # Вес (опционально)
+            # Weight (optional)
             if "weight" in srv and srv["weight"] not in (None, ""):
                 try:
                     srv_out["weight"] = int(srv["weight"])
                 except (TypeError, ValueError):
-                    # если не получилось преобразовать — просто не пишем
+                    # if it cannot be converted, simply leave it out
                     pass
 
             cleaned_servers.append(srv_out)
@@ -756,13 +756,13 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
     if cleaned_servers:
         site_out["servers"] = cleaned_servers
 
-        # ВАЖНО: если backend'ов больше одного — backend_ip/backend_port считаем
-        # устаревшими и убираем их, чтобы не было противоречивой информации.
+        # IMPORTANT: with more than one backend, backend_ip/backend_port are
+        # obsolete and removed, so the information cannot contradict itself.
         if len(cleaned_servers) > 1:
             site_out.pop("backend_ip", None)
             site_out.pop("backend_port", None)
 
-    # --- backend_ip / backend_port для одиночного бэкенда -------------------
+    # --- backend_ip / backend_port for a single backend -------------------
     backend_ip = str(site_out.get("backend_ip") or "").strip()
     backend_port = site_out.get("backend_port")
 
@@ -776,17 +776,17 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
             site_out["backend_ip"] = backend_ip
             site_out["backend_port"] = backend_port_int
     else:
-        # Если один из них пустой — убираем оба, чтобы не хранить мусор
+        # If one of them is empty, drop both, so no junk is kept
         site_out.pop("backend_ip", None)
         site_out.pop("backend_port", None)
 
-    # --- читаем текущий websites.yml ----------------------------------------
+    # --- read the current websites.yml ----------------------------------------
     data = _load_yaml(WEBSITES_YAML)
     sites = data.get("sites") or []
     if not isinstance(sites, list):
         return False, 'Invalid websites.yml structure (expected a sites list)'
 
-    # --- создаём новый или обновляем существующий ---------------------------
+    # --- create a new site or update the existing one ---------------------------
     name_norm = name
     orig_norm = (original_name or "").strip() or None
 
@@ -808,14 +808,14 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
             site_out.pop(key, None)
 
     if orig_norm is None:
-        # Создание нового сайта
+        # Creating a new site
         for s in sites:
             if (s.get("name") or "").strip() == name_norm:
                 return False, f"A site named {name_norm!r} already exists"
 
         sites.append(site_out)
     else:
-        # Редактирование существующего (возможен rename)
+        # Editing an existing one (it may be renamed)
         replaced = False
         for idx, s in enumerate(sites):
             if (s.get("name") or "").strip() == orig_norm:
@@ -828,7 +828,7 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
 
     data["sites"] = sites
 
-    # --- сохраняем YAML ------------------------------------------------------
+    # --- save the YAML ------------------------------------------------------
     content = yaml.safe_dump(
         data,
         allow_unicode=True,
@@ -925,10 +925,10 @@ def _ensure_access_gate_authelia_rule(domains: List[str]) -> Tuple[bool, str]:
 
 def save_site_raw(name: str, new_site: Dict[str, Any]) -> Tuple[bool, str]:
     """
-    Заменяет сайт с данным name на new_site в websites.yml.
-    new_site — это уже "сырой" объект (только те ключи, которые должны быть
-    в YAML). Не добавляем сюда site_defaults, чтобы дефолты продолжали
-    работать централизованно.
+    Replaces the site of this name with new_site in websites.yml.
+    new_site is the raw object (only the keys that belong in the YAML).
+    site_defaults are not added here, so the defaults keep working from
+    one place.
     """
     data = _load_yaml(WEBSITES_YAML)
     sites = data.get("sites") or []
@@ -1018,61 +1018,3 @@ def ensure_certs_before_apply() -> Dict[str, Any]:
                 return {"ok": False, "actions": actions}
 
     return {"ok": True, "actions": actions}
-
-
-# def create_empty_site() -> Tuple[Dict[str, Any], Dict[str, Any]]:
-#     """
-#     Возвращает заготовку пустого сайта и site_defaults для формы createdия.
-
-#     Возвращаем кортеж:
-#       (site, site_defaults)
-
-#     site — то, что попадает в шаблон как `site`:
-#       - поля либо пустые, либо с безопасными дефолтами
-#       - все остальные значения будут подхватываться через site_defaults
-#         в шаблоне HAProxy.
-#     """
-#     # Тянем site_defaults из vars.yml (CONFIG_YAML)
-#     config_vars = _load_yaml(CONFIG_YAML)
-#     site_defaults = config_vars.get("site_defaults") or {}
-#     if not isinstance(site_defaults, dict):
-#         site_defaults = {}
-
-#     # Базовая заготовка сайта для формы
-#     site: Dict[str, Any] = {
-#         "name": "",
-#         "domain": "",
-#         "maintenance": False,
-
-#         # HTTP backend по умолчанию (как в примерах)
-#         "backend_ip": "",
-#         "backend_port": site_defaults.get("backend_port") or 80,
-#         "backend_host": "",
-
-#         # SSL к бэкенду: по умолчанию как в site_defaults, если есть
-#         "backend_ssl": site_defaults.get("backend_ssl", False),
-#         "backend_ssl_verify": site_defaults.get("backend_ssl_verify", True),
-#         "backend_alpn": site_defaults.get("backend_alpn", "http/1.1"),
-
-#         # Дополнительные фичи
-#         "authelia_enabled": False,
-#         "zero_trust": False,
-#         "redirect_to_https": True,
-#         "tcp_passthrough": False,
-
-#         # Сертификаты
-#         "key_types": site_defaults.get("key_types", ["rsa"]),
-#         "alt_names": [],
-
-#         # Backend-серверы: изначально пустой список
-#         # (форма сама добавит main/backup по необходимости)
-#         "servers": [],
-
-#         # Логические штуки, которые часто нужны на форме:
-#         "max_req_rate": None,
-#         "rate_ban": None,
-#         "rate_errors": None,
-#         "err_ignore_rules": None,
-#     }
-
-#     return site, site_defaults

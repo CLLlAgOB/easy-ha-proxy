@@ -1,11 +1,11 @@
 ---
-# 15 — проверка готовности DNS для целей выпуска
+# 15 -- checking that the DNS is ready for the issuance targets
 
 - name: Defaults for DNS check
   set_fact:
     acme_resolvers: "{{ acme_resolvers | default(['1.1.1.1','8.8.8.8']) }}"
 
-# Все запланированные цели из предыдущего шага (строки-линейки)
+# All the targets planned by the previous step (lineage strings)
 - name: Aggregate planned targets
   set_fact:
     _all_planned_lineages: "{{ (targets_explicit | default([])) + (targets_single | default([])) }}"
@@ -42,7 +42,7 @@
       HAProxy configuration to issue them.
   when: (_dns01_lineages | default([]) | length) > 0
 
-# Нормализуем: из линейки → base + SAN из описания сайта
+# Normalise: lineage -> base + the SANs from the site's description
 - name: Normalize planned targets into uniform objects
   set_fact:
     planned_items: "{{ _planned_items_json | from_json }}"
@@ -57,7 +57,7 @@
       {%- endfor -%}
       {{ out | to_json }}
 
-# Проверяем: у каждого имени есть A или AAAA у всех заданных резолверов
+# Check: every name has an A or AAAA record at every given resolver
 - name: DNS readiness per target
   vars:
     names: "{{ item.names }}"
@@ -80,13 +80,13 @@
   loop_control:
     label: "{{ item.lineage }} → {{ item.names | join(',') }}"
 
-# Разделяем готовые/неготовые
+# Split into ready and not ready
 - name: Compute ready/not-ready lineages
   set_fact:
     ready_lineages:     "{{ _dns_checks.results | selectattr('stdout','equalto','1') | map(attribute='item.lineage') | list }}"
     not_ready_lineages: "{{ _dns_checks.results | rejectattr('stdout','equalto','1') | map(attribute='item.lineage') | list }}"
 
-# Строим списки для выпуска (в исходном формате — строки)
+# Build the lists to issue (in the original format -- strings)
 - name: Build issue target lists in the original shape
   set_fact:
     issue_targets_explicit: "{{ targets_explicit | default([]) | select('in', ready_lineages) | list }}"

@@ -1,7 +1,7 @@
 # routes_config_history.py
 #
-# Просмотр истории конфигурации. Только чтение: версии создаёт подтверждение
-# транзакции, а не запрос из интерфейса.
+# Browsing the configuration history. Read-only: versions are created by
+# confirming a transaction, not by a request from the interface.
 
 from __future__ import annotations
 

@@ -2,36 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-haproxy-controld — единый root-демон управления HAProxy:
+haproxy-controld -- the single root daemon that manages HAProxy:
 
-1) Фоновая синхронизация банов:
-   stick-table tbl_ban (HAProxy) → ipset haproxy_ban (iptables HP_BAN).
+1) Background ban synchronisation:
+   stick-table tbl_ban (HAProxy) -> ipset haproxy_ban (iptables HP_BAN).
 
-2) Команды по Unix-сокету:
-   - "reload"              → systemctl reload haproxy
-   - "sync-bans"           → одноразовая синхронизация tbl_ban → ipset
-   - "ping"                → проверка связи
-   - "certs-backup"        → backup сертификатов
-   - "certs-restore <b64>" → restore сертификатов
-   - "check-config <b64>"  → haproxy -c -f (tmp)
-   - "write-config <b64>"  → запись haproxy.cfg
-   - "apply-config <cfg-b64> <checks-b64>" → guarded apply + HTTPS checks + rollback
+2) Commands over a Unix socket:
+   - "reload"              -> systemctl reload haproxy
+   - "sync-bans"           -> one synchronisation of tbl_ban -> ipset
+   - "ping"                -> connectivity check
+   - "certs-backup"        -> certificate backup
+   - "certs-restore <b64>" -> certificate restore
+   - "check-config <b64>"  -> haproxy -c -f (tmp)
+   - "write-config <b64>"  -> write haproxy.cfg
+   - "apply-config <cfg-b64> <checks-b64>" -> guarded apply + HTTPS checks + rollback
    - "begin-config-transaction <cfg-b64> <checks-b64> <sources-b64> <timeout>"
-                              → guarded apply awaiting browser confirmation
-   - "config-transaction-status [id]" → persisted transaction status
-   - "confirm-config-transaction <id> <sha256>" → commit pending config
-   - "rollback-config-transaction <id>" → restore previous config and YAML
-   - "geoip-status" → local DB-IP release, selection, timer, and journal state
-   - "geoip-update <b64-json>" → run the fixed GeoIP updater now
-   - "geoip-configure <b64-json>" → transactionally replace selected countries
-   - "geoip-schedule <b64-json>" → set update cadence (daily/weekly/monthly)
-   - "udp-apply-json" → synchronously install udp.yml and return runtime state
-   - "udp-status" → return the last successfully installed UDP ruleset state
-   - "udp-port-check <start> <end>" → inspect host UDP listener conflicts
-   - "logs-ip <ip> <n>"    → поиск логов по IP (journalctl/файл) + фикc времени через epoch
+                              -> guarded apply awaiting browser confirmation
+   - "config-transaction-status [id]" -> persisted transaction status
+   - "confirm-config-transaction <id> <sha256>" -> commit pending config
+   - "rollback-config-transaction <id>" -> restore previous config and YAML
+   - "geoip-status" -> local DB-IP release, selection, timer, and journal state
+   - "geoip-update <b64-json>" -> run the fixed GeoIP updater now
+   - "geoip-configure <b64-json>" -> transactionally replace selected countries
+   - "geoip-schedule <b64-json>" -> set update cadence (daily/weekly/monthly)
+   - "udp-apply-json" -> synchronously install udp.yml and return runtime state
+   - "udp-status" -> return the last successfully installed UDP ruleset state
+   - "udp-port-check <start> <end>" -> inspect host UDP listener conflicts
+   - "logs-ip <ip> <n>"    -> log lines for an IP (journalctl or the file), times taken from the epoch
 
-Не зависит от haproxy_admin/Flask, работает только с:
-- admin-сокетом HAProxy;
+Independent of haproxy_admin and Flask; it works only with:
+- HAProxy's admin socket;
 - ipset;
 - systemctl;
 - journald/journalctl.
@@ -60,9 +60,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 
-# ───── конфигурация через ENV (с дефолтами) ─────
+# ───── configuration from the environment (with defaults) ─────
 
-# admin-сокет HAProxy (для show table)
+# HAProxy's admin socket (for show table)
 SOCKET_PATH = os.environ.get("SOCKET_PATH", "/run/haproxy/admin.sock")
 BAN_TABLE = os.environ.get("HAPADM_BAN_TABLE", "tbl_ban")
 IPSET_NAME = os.environ.get("HAPADM_IPSET_NAME", "haproxy_ban")
@@ -77,35 +77,35 @@ HAPROXY_CFG_PATH = os.environ.get(
 HAPADM_LOG_TIME_ORDER = os.environ.get(
     "HAPADM_LOG_TIME_ORDER", "asc").lower()  # asc|desc
 
-# логи (для logs-ip)
+# logs (for logs-ip)
 LOG_FILE = os.environ.get("LOG_FILE", "/var/log/haproxy.log").strip()
 LOG_LIMIT = int(os.getenv("HAPADM_LOG_LIMIT", "30"))
 BAN_DELTA_SECONDS = int(os.getenv("HAPADM_BAN_DELTA_SECONDS", "120"))
 DEBUG_ON_EMPTY = os.getenv("HAPADM_DEBUG_ON_EMPTY",
                            "1") not in ("0", "false", "False", "")
 
-# список источников для journalctl (в порядке приоритета)
+# journalctl sources, in order of preference
 JOURNAL_SOURCES = [s.strip() for s in os.getenv(
     "HAPADM_JOURNAL_SOURCES",
     "-u haproxy, SYSLOG_IDENTIFIER=haproxy, -u haproxy.service, -u rsyslog.service, *"
 ).split(",") if s.strip()]
 
-# таймауты и ограничения для journalctl (ускоряет logs-ip при бане)
+# journalctl timeouts and limits (they keep logs-ip fast for a banned address)
 JOURNAL_PER_SOURCE_TIMEOUT = float(os.getenv("HAPADM_JOURNAL_TIMEOUT", "3"))
 JOURNAL_TOTAL_TIMEOUT = float(os.getenv("HAPADM_JOURNAL_TOTAL_TIMEOUT", "8"))
 JOURNAL_USE_GREP = os.getenv("HAPADM_JOURNAL_USE_GREP", "1") not in ("0", "false", "False", "no", "")
 JOURNAL_LINES_MULT = int(os.getenv("HAPADM_JOURNAL_LINES_MULT", "4"))
 
-# TTL ban-таблицы (ускорение: можно задать явно или закэшировать)
+# the ban table's TTL (to save time: set it explicitly, or it is cached)
 BAN_TTL_OVERRIDE_SECONDS = int(os.getenv("HAPADM_BAN_TTL_SECONDS", "0"))
 BAN_TTL_CACHE_SECONDS = int(os.getenv("HAPADM_BAN_TTL_CACHE_SECONDS", "300"))
 
-# короткий кэш ответа logs-ip (чтобы повторный запрос не делал тяжёлые вызовы)
+# a short cache of the logs-ip answer (so a repeated request does not run the heavy calls again)
 LOGS_IP_CACHE_SECONDS = float(os.getenv("HAPADM_LOGS_IP_CACHE_SECONDS", "2"))
 
-# чтение хвоста LOG_FILE из Python (без tac|grep); параметры чтения
+# reading the tail of LOG_FILE in Python (no tac|grep); how it is read
 LOG_FILE_TAIL_CHUNK = int(os.getenv("HAPADM_LOG_FILE_TAIL_CHUNK", "65536"))   # bytes
-LOG_FILE_TAIL_MAX_BYTES = int(os.getenv("HAPADM_LOG_FILE_TAIL_MAX_BYTES", "0"))  # 0 = без лимита
+LOG_FILE_TAIL_MAX_BYTES = int(os.getenv("HAPADM_LOG_FILE_TAIL_MAX_BYTES", "0"))  # 0 = no limit
 MAX_COMMAND_BYTES = int(os.getenv("HAPADM_MAX_COMMAND_BYTES", str(32 * 1024 * 1024)))
 MAX_CONFIG_BYTES = int(os.getenv("HAPADM_MAX_CONFIG_BYTES", str(4 * 1024 * 1024)))
 CONFIG_BACKUP_DIR = Path(os.getenv(
@@ -222,19 +222,19 @@ MAX_ARCHIVE_EXPANDED_BYTES = int(
 MAX_COMPRESSION_RATIO = int(os.getenv("HAPADM_MAX_COMPRESSION_RATIO", "100"))
 
 
-# интервал фоновой синхры
+# the background synchronisation interval
 try:
     INTERVAL = int(os.environ.get("HAPADM_BAN_SYNC_INTERVAL", "10"))
 except ValueError:
     INTERVAL = 10
 
-# сокет управления (для reload/sync-bans/логов/backup/restore/etc)
+# the control socket (for reload, sync-bans, logs, backup, restore and the rest)
 CONTROL_SOCKET = os.environ.get(
     "HAPROXY_CONTROL_SOCKET",
     "/run/easy-ha-proxy/haproxy-controld.sock",
 )
 
-# команда перезапуска HAProxy
+# the command that reloads HAProxy
 SYSTEMCTL_CMD = os.environ.get(
     "HAPROXY_SYSTEMCTL_CMD",
     "systemctl reload haproxy",
@@ -242,7 +242,7 @@ SYSTEMCTL_CMD = os.environ.get(
 
 LOG = logging.getLogger("haproxy-controld")
 
-# ───── маленькие кэши, чтобы не дёргать тяжёлые команды слишком часто ─────
+# ───── small caches, so heavy commands are not run too often ─────
 _BAN_TTL_CACHE_LOCK = threading.Lock()
 _BAN_TTL_CACHE_VALUE: int | None = None
 _BAN_TTL_CACHE_TS: float = 0.0
@@ -255,11 +255,11 @@ _GEOIP_OPERATION_LOCK = threading.Lock()
 
 
 
-# ───── вспомогательные функции ─────
+# ───── helpers ─────
 
 def run_cmd(args, input_data: str | None = None, timeout: int | None = None) -> subprocess.CompletedProcess:
     """
-    Обёртка над subprocess.run с логированием ошибок.
+    subprocess.run with its errors logged.
     """
     proc = subprocess.run(
         args,
@@ -352,7 +352,7 @@ def _send_control_json(conn: socket.socket, result: dict[str, object]) -> None:
     conn.sendall(f"{prefix} {payload}\n".encode("ascii"))
 
 
-# ───── сертификаты ─────
+# ───── certificates ─────
 
 def _ensure_within(root: Path, candidate: Path) -> Path:
     root_resolved = root.resolve()
@@ -390,8 +390,8 @@ def _validate_zip(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
 
 def certs_backup_b64() -> str:
     """
-    Собирает ZIP из каталогов CERTS_HAP_DIR и CERTS_LE_DIR
-    и возвращает его в виде base64-строки.
+    Builds a ZIP of CERTS_HAP_DIR and CERTS_LE_DIR
+    and returns it as a base64 string.
     """
     buf = io.BytesIO()
     total_files = 0
@@ -418,7 +418,7 @@ def certs_backup_b64() -> str:
                 arcname = str(Path("haproxy_certs") / rel)
                 zf.write(p, arcname)
 
-        # 2) /etc/letsencrypt (если задан)
+        # 2) /etc/letsencrypt (if set)
         le_root = Path(CERTS_LE_DIR) if CERTS_LE_DIR else None
         if le_root and le_root.is_dir():
             for p in le_root.rglob("*"):
@@ -449,8 +449,8 @@ def certs_backup_b64() -> str:
 
 def certs_restore_b64(b64: str) -> str:
     """
-    Принимает base64 ZIP, раскладывает файлы в CERTS_HAP_DIR и CERTS_LE_DIR.
-    Возвращает текстовое сообщение для лога/ответа.
+    Takes a base64 ZIP and unpacks its files into CERTS_HAP_DIR and CERTS_LE_DIR.
+    Returns a text message for the log or the answer.
     """
     raw = base64.b64decode(b64, validate=True)
     if len(raw) > MAX_ARCHIVE_BYTES:
@@ -474,7 +474,7 @@ def certs_restore_b64(b64: str) -> str:
                 rel = Path(name).relative_to("letsencrypt")
                 dst = _ensure_within(le_root, le_root / rel)
             else:
-                # неизвестный префикс — игнорируем
+                # an unknown prefix is ignored
                 continue
 
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -498,7 +498,7 @@ def certs_restore_b64(b64: str) -> str:
 
 def ensure_ipset() -> None:
     """
-    Гарантируем, что IPSET_NAME существует.
+    Makes sure IPSET_NAME exists.
     """
     try:
         subprocess.run(
@@ -515,8 +515,8 @@ def ensure_ipset() -> None:
 
 def get_banned_ips_from_haproxy() -> Set[str]:
     """
-    Читает stick-таблицу BAN_TABLE через admin-сокет HAProxy
-    и возвращает множество IP, для которых gpc0 > 0.
+    Reads the stick table BAN_TABLE through HAProxy's admin socket
+    and returns the set of addresses whose gpc0 > 0.
     """
     try:
         proc = run_cmd(
@@ -530,7 +530,7 @@ def get_banned_ips_from_haproxy() -> Set[str]:
 
     banned_ips: Set[str] = set()
 
-    # Пример строк:
+    # Example lines:
     # 0x7e27...: key=192.0.2.83 use=0 exp=... gpt0=20 gpc0=1
     line_re = re.compile(
         r"key=(?P<ip>\d+\.\d+\.\d+\.\d+).*?\bgpc0=(?P<gpc0>\d+)"
@@ -554,12 +554,12 @@ def get_banned_ips_from_haproxy() -> Set[str]:
 
 
 def _parse_short_iso_ts(line: str) -> datetime | None:
-    # ожидаем: "2025-12-15T01:15:56+07:00 ..."
+    # expected: "2025-12-15T01:15:56+07:00 ..."
     ts = line.split(" ", 1)[0].strip()
     if not ts:
         return None
     try:
-        # journalctl может печатать Z — нормализуем
+        # journalctl may print Z; normalise it
         if ts.endswith("Z"):
             ts = ts[:-1] + "+00:00"
         return datetime.fromisoformat(ts)
@@ -582,7 +582,7 @@ def _sort_log_lines_by_time(lines: list[str]) -> list[str]:
             with_ts.append((dt, i, ln))
 
     with_ts.sort(key=lambda x: x[0], reverse=(HAPADM_LOG_TIME_ORDER == "desc"))
-    # сохраняем исходный порядок для строк без ts
+    # lines without a timestamp keep their original order
     no_ts.sort(key=lambda x: x[0])
 
     return [ln for _, _, ln in with_ts] + [ln for _, ln in no_ts]
@@ -590,7 +590,7 @@ def _sort_log_lines_by_time(lines: list[str]) -> list[str]:
 
 def get_ipset_members() -> Set[str]:
     """
-    Возвращает множество IP, которые сейчас лежат в ipset IPSET_NAME.
+    Returns the set of addresses currently in the ipset IPSET_NAME.
     """
     try:
         proc = run_cmd(["ipset", "list", IPSET_NAME], timeout=5)
@@ -623,7 +623,7 @@ def get_ipset_members() -> Set[str]:
 
 def sync_bans_once() -> None:
     """
-    Одна итерация синхронизации tbl_ban → ipset.
+    One synchronisation pass of tbl_ban -> ipset.
     """
     haproxy_banned = get_banned_ips_from_haproxy()
     ipset_members = get_ipset_members()
@@ -756,7 +756,7 @@ def sync_auth_once() -> None:
 
 def bans_loop() -> None:
     """
-    Фоновый цикл синхронизации банов и авторизованных IP (zero-trust).
+    The background loop that synchronises bans and authorised addresses (zero trust).
     """
     LOG.info("Ban-sync loop started: table=%s, ipset=%s, interval=%ss",
              BAN_TABLE, IPSET_NAME, INTERVAL)
@@ -782,10 +782,10 @@ def bans_loop() -> None:
         time.sleep(INTERVAL)
 
 
-# ───── logs-ip (перенесено из utils; фикс времени через epoch) ─────
+# ───── logs-ip (moved here from utils; times taken from the epoch) ─────
 
 def _is_selfcheck_line(line: str, ip: str) -> bool:
-    # исключаем сам запрос к /ip/<ip> чтобы не ловить текущий вызов
+    # leave out the request to /ip/<ip> itself, so the current call is not caught
     return "GET /ip/" in line or f"/ip/{ip}" in line
 
 
@@ -808,12 +808,12 @@ def _fmt_sec(v: int | None) -> str:
 
 def _get_ban_table_ttl_seconds(table: str = BAN_TABLE) -> int:
     """
-    TTL таблицы (expire) из «show table <table>». Возвращает секунды; fallback 7 дней.
+    The table's TTL (expire) from "show table <table>", in seconds; 7 days if unknown.
 
-    Оптимизация:
-      1) можно задать TTL явно через HAPADM_BAN_TTL_SECONDS;
-      2) иначе TTL кэшируется на BAN_TTL_CACHE_SECONDS;
-      3) сначала пытаемся лёгкий запрос «show table <table> key 0.0.0.0», чтобы избежать дампа всей таблицы.
+    To keep it cheap:
+      1) the TTL can be set explicitly with HAPADM_BAN_TTL_SECONDS;
+      2) otherwise it is cached for BAN_TTL_CACHE_SECONDS;
+      3) a light "show table <table> key 0.0.0.0" is tried first, to avoid dumping the whole table.
     """
     if BAN_TTL_OVERRIDE_SECONDS > 0:
         return BAN_TTL_OVERRIDE_SECONDS
@@ -832,7 +832,7 @@ def _get_ban_table_ttl_seconds(table: str = BAN_TABLE) -> int:
             return None
         val = int(m.group(1))
         unit = (m.group(2) or "").lower()
-        # expire без суффикса обычно секунды
+        # expire without a suffix is usually seconds
         if unit in ("ms", "msec"):
             return max(1, val // 1000)
         if unit in ("", "s", "sec"):
@@ -847,10 +847,10 @@ def _get_ban_table_ttl_seconds(table: str = BAN_TABLE) -> int:
 
     ttl: int | None = None
     try:
-        # 1) Лёгкий запрос: header + (в идеале) ничего больше
+        # 1) The light request: the header and, ideally, nothing more
         for cmd in (
             f"show table {table} key 0.0.0.0\n",
-            f"show table {table}\n",  # fallback: может быть тяжёлым
+            f"show table {table}\n",  # fallback: may be heavy
         ):
             proc = run_cmd(
                 ["socat", SOCKET_PATH, "stdio"],
@@ -873,7 +873,7 @@ def _get_ban_table_ttl_seconds(table: str = BAN_TABLE) -> int:
 
 
 def _get_ban_remaining_seconds(ip: str, table: str = BAN_TABLE) -> int | None:
-    """Остаток TTL ключа (ip) из «show table <table> key <ip>» в секундах, либо None, если нет записи."""
+    """The remaining TTL of a key (ip) from "show table <table> key <ip>", in seconds, or None if there is no entry."""
     try:
         proc = run_cmd(
             ["socat", SOCKET_PATH, "stdio"],
@@ -884,7 +884,7 @@ def _get_ban_remaining_seconds(ip: str, table: str = BAN_TABLE) -> int | None:
         if not out:
             return None
 
-        # exp/expire: exp БЕЗ суффикса → миллисекунды (ВАЖНО)
+        # exp/expire: exp WITHOUT a suffix is milliseconds (IMPORTANT)
         m = re.search(r'\bexp(?:ire)?\s*[:=]?\s*(\d+)\s*([a-zA-Z]+)?\b', out)
         if not m:
             m = re.search(r'\bexpires?\s+in\s+(\d+)\s*([a-zA-Z]+)\b', out)
@@ -911,14 +911,14 @@ def _get_ban_remaining_seconds(ip: str, table: str = BAN_TABLE) -> int | None:
 
 def _normalize_remaining_seconds(rem: int, ttl: int) -> int:
     """
-    Приводим ban_remaining к секундам:
-    - если rem >> ttl (в 10+ раз), считаем, что rem в миллисекундах → делим на 1000
-    - если после деления всё ещё rem > ttl*2, подрезаем до ttl
-    - не даём уйти в отрицательные/некорректные значения
+    Brings ban_remaining to seconds:
+    - if rem >> ttl (10 times or more), rem is taken to be milliseconds and divided by 1000
+    - if after that rem is still > ttl*2, it is cut down to ttl
+    - negative or nonsensical values are not let through
     """
     if rem <= 0:
         return 0
-    # эвристика: exp почти всегда в мс, а ttl — в секундах.
+    # heuristic: exp is almost always in ms, and ttl in seconds.
     if ttl > 0 and rem > ttl * 10:
         rem = rem // 1000
     if ttl > 0 and rem > ttl * 2:
@@ -928,8 +928,8 @@ def _normalize_remaining_seconds(rem: int, ttl: int) -> int:
 
 def _parse_source_to_args(source_flag: str) -> tuple[list[str], list[str]]:
     """
-    Возвращает (opt_args, match_args) для journalctl.
-    source_flag поддерживает старые строки:
+    Returns (opt_args, match_args) for journalctl.
+    source_flag accepts the old forms:
       - "-u haproxy"
       - "SYSLOG_IDENTIFIER=haproxy"
       - "-u haproxy.service"
@@ -942,18 +942,18 @@ def _parse_source_to_args(source_flag: str) -> tuple[list[str], list[str]]:
     if not src or src == "*":
         return opt_args, match_args
 
-    # если это FIELD=VALUE — это match-аргумент journalctl
+    # FIELD=VALUE is a journalctl match argument
     if "=" in src and not src.lstrip().startswith("-"):
         match_args.append(src)
         return opt_args, match_args
 
-    # голое слово ("haproxy") journalctl не принимает как match; исторические
-    # конфигурации с таким значением трактуем как syslog identifier
+    # journalctl does not take a bare word ("haproxy") as a match; old
+    # configurations with such a value are read as a syslog identifier
     if not src.lstrip().startswith("-") and " " not in src:
         opt_args.extend(["-t", src])
         return opt_args, match_args
 
-    # иначе опции вида "-u haproxy"
+    # otherwise options such as "-u haproxy"
     parts = src.split()
     if parts:
         opt_args.extend(parts)
@@ -968,12 +968,12 @@ def _journal_window_for_ip(
     collect_debug: bool = False,
 ):
     """
-    Поиск в journald в заданном окне с фильтром по IP и отсевом самозапросов.
+    Searches journald in the given window, filtered by IP, leaving out our own requests.
 
-    Оптимизации:
-      • ограничиваем вывод journalctl через -n (после фильтрации);
-      • (если возможно) используем --grep=<ip>, чтобы journalctl сам отфильтровал сообщения;
-      • вводим общий бюджет времени на все источники (JOURNAL_TOTAL_TIMEOUT).
+    To keep it fast:
+      • journalctl's output is limited with -n (after filtering);
+      • where possible --grep=<ip> is used, so journalctl filters the messages itself;
+      • all sources share one time budget (JOURNAL_TOTAL_TIMEOUT).
     """
     started = time.monotonic()
     debug = {
@@ -1030,7 +1030,7 @@ def _journal_window_for_ip(
 
         dt = time.monotonic() - t0
 
-        # фильтрация и сортировка (тут уже мало строк)
+        # filter and sort (there are few lines by now)
         raw_lines = out.splitlines()
         filtered: list[str] = []
         for ln in raw_lines:
@@ -1055,7 +1055,7 @@ def _journal_window_for_ip(
         if (time.monotonic() - started) >= JOURNAL_TOTAL_TIMEOUT:
             break
 
-        # 1) пробуем с --grep (быстрее и меньше вывода), 2) если не получилось — без него
+        # 1) try with --grep (faster, less output); 2) if that fails, without it
         lines1, info1 = _run_one(src, use_grep=JOURNAL_USE_GREP)
         debug["sources"].append(info1)
         if lines1:
@@ -1072,10 +1072,10 @@ def _journal_window_for_ip(
 
 def _file_tail_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     """
-    Быстрый поиск последних совпадений по IP в LOG_FILE.
+    Quickly finds the last lines for an IP in LOG_FILE.
 
-    Было: tac|grep|tac (несколько процессов + shell).
-    Теперь: читаем файл с конца блоками и останавливаемся, как только нашли нужное число строк.
+    It used to be tac|grep|tac (several processes and a shell). Now the file
+    is read backwards in blocks, stopping as soon as enough lines are found.
     """
     if not LOG_FILE:
         return []
@@ -1105,7 +1105,7 @@ def _file_tail_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
                 buf = chunk + buf
                 parts = buf.split(b"\n")
-                buf = parts[0]  # неполная строка в начале буфера
+                buf = parts[0]  # an incomplete line at the start of the buffer
 
                 for raw in reversed(parts[1:]):
                     if len(found) >= limit:
@@ -1119,7 +1119,7 @@ def _file_tail_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
                 if ip in ln and not _is_selfcheck_line(ln, ip):
                     found.append(ln)
 
-        found.reverse()  # вернуть в естественном порядке
+        found.reverse()  # back into natural order
         return found
     except Exception as exc:  # pylint: disable=broad-except
         LOG.warning("_file_tail_for_ip: %s", exc)
@@ -1128,15 +1128,15 @@ def _file_tail_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
 def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     """
-    Логика:
-      • сначала быстрый кэш (LOGS_IP_CACHE_SECONDS);
-      • пробуем хвост LOG_FILE (дёшево);
-      • если IP в ban-таблице → считаем ban_start и берём journald в окне [ban_start ± DELTA];
-      • иначе → результат хвоста LOG_FILE.
+    How it works:
+      • first a short cache (LOGS_IP_CACHE_SECONDS);
+      • then the tail of LOG_FILE (cheap);
+      • if the address is in the ban table, ban_start is worked out and journald is read in [ban_start ± DELTA];
+      • otherwise, the result from the tail of LOG_FILE.
 
-    При отсутствии совпадений (и DEBUG_ON_EMPTY=1) возвращаем диагностический блок.
+    When nothing matches (and DEBUG_ON_EMPTY=1), a diagnostic block is returned.
     """
-    # 0) короткий кэш (полезно, если UI/клиент повторяет запрос после таймаута)
+    # 0) a short cache (useful when the UI or a client repeats the request after a timeout)
     if LOGS_IP_CACHE_SECONDS > 0:
         key = (ip, int(limit))
         now = time.time()
@@ -1145,7 +1145,7 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
             if item and item[0] > now:
                 return item[1]
 
-    # 1) быстрый хвост по файлу (часто это всё, что нужно, даже если IP уже в бане)
+    # 1) a quick look at the file's tail (often all that is needed, even for a banned address)
     file_lines = _file_tail_for_ip(ip, limit=limit)
     if file_lines:
         if LOGS_IP_CACHE_SECONDS > 0:
@@ -1153,7 +1153,7 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
                 _LOGS_IP_CACHE[(ip, int(limit))] = (time.time() + LOGS_IP_CACHE_SECONDS, file_lines)
         return file_lines
 
-    # 2) проверяем бан
+    # 2) check the ban
     ban_remaining_raw = _get_ban_remaining_seconds(ip)
     if ban_remaining_raw is not None:
         ban_ttl = _get_ban_table_ttl_seconds()
@@ -1164,7 +1164,7 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
         since_epoch = max(0, ban_start - BAN_DELTA_SECONDS)
         until_epoch = max(0, ban_start + BAN_DELTA_SECONDS)
 
-        # journald (может быть относительно тяжёлым)
+        # journald (can be fairly heavy)
         if DEBUG_ON_EMPTY:
             j_lines, dbg = _journal_window_for_ip(
                 ip=ip,
@@ -1223,7 +1223,7 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
         return []
 
-    # 3) не в бане → но по файлу тоже ничего не нашли
+    # 3) not banned, and nothing in the file either
     if DEBUG_ON_EMPTY:
         try:
             exists = os.path.exists(LOG_FILE)
@@ -1249,14 +1249,14 @@ _IP_RE = re.compile(r'(\d{1,3}(?:\.\d{1,3}){3})')
 
 def logs_attackers() -> dict:
     """
-    Агрегация для «Аналитика угроз»:
-    - топ IP по HTTP 400
-    - топ IP по HTTP 451 (гео-блокировка)
-    Логика поиска кодов такая же, как у вас была в приложении: ищем подстроки ' 400 ' и ' 451 '.
+    Totals for "Threat analytics":
+    - the top addresses by HTTP 400
+    - the top addresses by HTTP 451 (geo-blocking)
+    The codes are found the way the application always did: by the substrings ' 400 ' and ' 451 '.
     """
     if not os.path.exists(LOG_FILE):
         return {
-            "error": "Файл логов не найден",
+            "error": "Log file not found",
             "diagnostic": {"log_path": LOG_FILE},
         }
 
@@ -1272,7 +1272,7 @@ def logs_attackers() -> dict:
     a400 = defaultdict(int)
     a451 = defaultdict(int)
 
-    # читаем потоково, чтобы не грузить память
+    # read as a stream, to keep memory down
     with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
         for ln in f:
             diag["total_lines"] += 1
@@ -1309,20 +1309,20 @@ def logs_attackers() -> dict:
     }
 
 
-# ───── обработка команд по сокету ─────
+# ───── handling socket commands ─────
 
 
 STATE_DUMP_CMD = "/usr/local/sbin/haproxy-state-dump"
 
 
 def dump_server_state() -> None:
-    """Сохранить административное состояние серверов перед reload.
+    """Save the servers' administrative state before a reload.
 
-    Ready/Drain/Maintenance и runtime-вес живут только в работающем процессе.
-    Без дампа сохранение любого сайта возвращало бы сервер, выведенный на
-    обслуживание, обратно под нагрузку. Ошибка дампа не должна мешать reload:
-    таймер обновляет тот же файл, и в худшем случае состояние будет чуть
-    старее.
+    Ready/Drain/Maintenance and the runtime weight live only in the running
+    process. Without the dump, saving any site would put a server taken out
+    for maintenance back under load. A failed dump must not stop the reload:
+    a timer refreshes the same file, so at worst the state is a little
+    older.
     """
 
     if not os.path.exists(STATE_DUMP_CMD):
@@ -1347,7 +1347,7 @@ def dump_server_state() -> None:
 
 def cmd_reload() -> tuple[bool, str]:
     """
-    Выполнить systemctl reload haproxy.
+    Run systemctl reload haproxy.
     """
     dump_server_state()
     try:
@@ -1369,10 +1369,10 @@ def cmd_reload() -> tuple[bool, str]:
 
 def haproxy_check_config_from_b64(b64: str) -> tuple[int, str, str]:
     """
-    Принимает base64(cfg_text), пишет во временный файл
-    и запускает `haproxy -c -f <tmpfile>` на хосте.
+    Takes base64(cfg_text), writes it to a temporary file
+    and runs `haproxy -c -f <tmpfile>` on the host.
 
-    Возвращает (rc, stdout, stderr).
+    Returns (rc, stdout, stderr).
     """
     raw = base64.b64decode(b64, validate=True)
     if len(raw) > MAX_CONFIG_BYTES:
@@ -3870,7 +3870,7 @@ def geoip_configure(countries: object, expected_revision: object) -> dict[str, o
 def handle_client(conn: socket.socket) -> None:
     try:
         conn.settimeout(30)
-        # читаем ОДНУ строку команды целиком (важно для больших base64)
+        # read the WHOLE command line (it matters for large base64)
         chunks: list[bytes] = []
         received = 0
         while True:
@@ -3924,7 +3924,7 @@ def handle_client(conn: socket.socket) -> None:
                 conn.sendall(f"ERROR {msg}\n".encode("utf-8", "replace"))
             return
 
-        # ---- одноразовая sync-bans ----
+        # ---- a one-off sync-bans ----
         if cmd == "sync-bans":
             try:
                 sync_bans_once()
@@ -3997,7 +3997,7 @@ def handle_client(conn: socket.socket) -> None:
                 conn.sendall(f"OK free {start}-{end}\n".encode("ascii"))
             return
 
-        # ---- backup сертификатов ----
+        # ---- certificate backup ----
         if cmd == "certs-backup":
             try:
                 b64 = certs_backup_b64()
@@ -4009,7 +4009,7 @@ def handle_client(conn: socket.socket) -> None:
                 )
             return
 
-        # ---- restore сертификатов ----
+        # ---- certificate restore ----
         if cmd.startswith("certs-restore "):
             try:
                 _, b64 = cmd.split(" ", 1)
@@ -4022,7 +4022,7 @@ def handle_client(conn: socket.socket) -> None:
                 )
             return
 
-        # ---- проверка конфига haproxy -c ----
+        # ---- configuration check, haproxy -c ----
         if cmd.startswith("check-config "):
             try:
                 _, cfg_b64 = cmd.split(" ", 1)
@@ -4042,7 +4042,7 @@ def handle_client(conn: socket.socket) -> None:
                 conn.sendall(msg.encode("utf-8", "replace"))
             return
 
-        # ---- запись конфига /etc/haproxy/haproxy.cfg ----
+        # ---- write the configuration /etc/haproxy/haproxy.cfg ----
         if cmd.startswith("write-config "):
             try:
                 _, cfg_b64 = cmd.split(" ", 1)
@@ -4308,7 +4308,7 @@ def handle_client(conn: socket.socket) -> None:
                 ip = parts[0].strip()
                 n = int(parts[1]) if len(parts) >= 2 else LOG_LIMIT
 
-                # валидация IP
+                # validate the IP
                 ipaddress.ip_address(ip)
 
                 lines = grep_last_logs_for_ip(ip, limit=n)
@@ -4350,15 +4350,15 @@ def handle_client(conn: socket.socket) -> None:
 
 def control_socket_loop() -> None:
     """
-    Основной цикл: слушаем Unix-сокет и принимаем команды.
+    The main loop: listen on the Unix socket and take commands.
 
-    Оптимизация: каждый клиент обрабатывается в отдельном потоке, чтобы тяжёлые команды
-    (например logs-ip) не блокировали принятие следующих подключений.
+    Each client is served in its own thread, so heavy commands (logs-ip, for
+    example) do not hold up the next connections.
     """
     sock_path = CONTROL_SOCKET
     sock_dir = os.path.dirname(sock_path) or "/run"
 
-    # удаляем старый сокет, если остался
+    # remove an old socket left behind
     try:
         if os.path.exists(sock_path):
             os.unlink(sock_path)
@@ -4423,11 +4423,11 @@ def main() -> None:
         # retry a rollback through the control socket.
         LOG.exception("Could not recover the persisted HAProxy config transaction")
 
-    # Запускаем фоновый поток бан-синхронизации
+    # Start the background ban synchronisation thread
     t = threading.Thread(target=bans_loop, daemon=True, name="ban-sync-loop")
     t.start()
 
-    # В главном потоке — loop по сокету управления
+    # The main thread loops over the control socket
     control_socket_loop()
 
 

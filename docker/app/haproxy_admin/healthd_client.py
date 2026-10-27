@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Клиент для общения с root-сервисом haproxy-healthd через Unix-socket.
+Client of the root service haproxy-healthd over a Unix socket.
 
-Использует requests-unixsocket и схему http+unix://.
+Uses requests-unixsocket and the http+unix:// scheme.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ HEALTHD_TOKEN = os.environ.get("HEALTHD_TOKEN", "").strip()
 
 
 def _headers() -> Dict[str, str]:
-    """Заголовки для запросов к healthd.
+    """Headers for requests to healthd.
 
-    Токен используется только для управляющих действий, но передача его
-    на безопасные GET-запросы не вредит и упрощает логику.
+    The token is needed only for control actions, but sending it with the
+    safe GET requests does no harm and keeps the logic simple.
     """
     h: Dict[str, str] = {}
     if HEALTHD_TOKEN:

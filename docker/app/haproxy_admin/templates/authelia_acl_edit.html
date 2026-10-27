@@ -26,7 +26,7 @@
   <input type="hidden" name="total_rules" value="{{ total_rules }}">
   <input type="hidden" name="active_group_domain" id="active_group_domain" value="{{ active_group_domain or '' }}">
 
-  <!-- Панель со списком доменов -->
+  <!-- The panel with the list of domains -->
   <div class="card" style="margin-bottom: 15px;">
     <div class="card-header">
       <strong>Domains</strong>
@@ -58,7 +58,7 @@
     </div>
   </div>
 
-  <!-- Groups правил by доменам -->
+  <!-- Rule groups by domain -->
   {% for group in groups %}
   <div class="domain-group-wrapper" id="domain-group-{{ loop.index0 }}" data-domain="{{ group.domain or '' }}" {% if not
     loop.first %}style="display: none;" {% endif %}>
@@ -147,7 +147,7 @@
           </div>
         </div>
 
-        <!-- Субъекты -->
+        <!-- Subjects -->
         <div class="flex-container" style="margin-bottom: 10px;">
           <div>
             <label class="form-label" for="rule-{{ idx }}-groups">
@@ -193,7 +193,7 @@
           </div>
         </div>
 
-        <!-- Ресурсы -->
+        <!-- Resources -->
         <div style="margin-bottom: 10px;">
           <label class="form-label" for="rule-{{ idx }}-resources">
             Resources
@@ -219,12 +219,12 @@
       + Add rule
     </button>
 
-    <!-- Просто сохранить rules (валидация+запись, without рестарта Authelia) -->
+    <!-- Just save the rules (validate and write, without restarting Authelia) -->
     <button type="submit" name="submit_action" value="save" class="btn">
       💾 Save rules
     </button>
 
-    <!-- Save and применить: сохранить rules and перезапустить Authelia -->
+    <!-- Save and apply: save the rules and restart Authelia -->
     <button type="submit" name="submit_action" value="apply" class="btn btn-secondary">
       💾 Save and apply (restart Authelia)
     </button>
@@ -236,7 +236,7 @@
 </form>
 {% endif %}
 
-<!-- JS for переключения доменов on одной page -->
+<!-- JS that switches the domains on one page -->
 <script src="{{ url_for('static', filename='js/authelia_acl.js') }}"></script>
 
 {% endblock %}

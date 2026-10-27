@@ -1,42 +1,42 @@
 ---
-# Кому Let’s Encrypt будет слать письма об истекающих/ошибочных сертификатах
+# Who Let's Encrypt sends mail to about expiring or broken certificates
 certbot_email: admin@example.com
 
-# ОПИСАНИЕ САЙТОВ (SAN): один сайт → много имён
-# - domain: основной CN/lineage (имя каталога в /etc/letsencrypt/live)
-# - alt_names: SAN-алиасы (www и т.п.)
-# - key_types: какие ключи выпускать: [ecdsa] или [ecdsa, rsa]
-# - cert_path: куда склеивать fullchain+privkey для HAProxy (если 2 ключа — добавим -ecdsa/-rsa)
+# THE SITES (SAN): one site -> many names
+# - domain: the main CN/lineage (the directory name under /etc/letsencrypt/live)
+# - alt_names: SAN aliases (www and the like)
+# - key_types: which keys to issue: [ecdsa] or [ecdsa, rsa]
+# - cert_path: where fullchain+privkey are joined for HAProxy (with two keys, -ecdsa/-rsa are added)
 sites:
   - domain: site.com
     alt_names: [www.site.com]
-    key_types: [rsa]               # можно [ecdsa, rsa]
+    key_types: [rsa]               # can be [ecdsa, rsa]
     cert_path: "/etc/haproxy/certs/site.com.pem"
 
-# Глобальные дефолты для ключей (используются, если у сайта не задан key_types)
-cert_key_type: ecdsa                 # rsa | ecdsa (по-умолчанию ecdsa)
+# Global key defaults (used when a site has no key_types)
+cert_key_type: ecdsa                 # rsa | ecdsa (ecdsa by default)
 rsa_key_size: 3072
-ecdsa_curve: secp256r1               # p-256 (совместимость лучше всего)
+ecdsa_curve: secp256r1               # p-256 (the best compatibility)
 
-# RDG параметры (используются в post-hook)
-rdg_domain:   "example.com"          # CN/SAN сертификата
-rdg_host:     "example.com"          # FQDN или IP Windows-сервера
-rdg_ssh_user: "certbot"              # учётка для SFTP-чрута
-rdg_ssh_key:  "/root/.ssh/id_cert"   # приватный ключ на HAProxy
-rdg_ssh_port: 22                     # порт SSH
-rdg_pfx_password: ""                 # пустой пароль допустим
+# RDG settings (used in the post-hook)
+rdg_domain:   "example.com"          # the certificate's CN/SAN
+rdg_host:     "example.com"          # the Windows server's FQDN or IP
+rdg_ssh_user: "certbot"              # the account for the SFTP chroot
+rdg_ssh_key:  "/root/.ssh/id_cert"   # the private key on the HAProxy host
+rdg_ssh_port: 22                     # SSH port
+rdg_pfx_password: ""                 # an empty password is allowed
 rdg_remote_path: "C:/SFTP/upload/rdg_cert.pfx"
 
-# Bootstrap-режим: временно DNAT 80→8000 для standalone-сервера Certbot
+# Bootstrap mode: a temporary DNAT 80->8000 for Certbot's standalone server
 haproxy_autoreload: true
 haproxy_certs_dir: /etc/haproxy/certs
 haproxy_certs_available_dir: /etc/haproxy/certs-available
-acme_bootstrap: null   # null → авто; true/false → принудительно
+acme_bootstrap: null   # null -> automatic; true/false -> forced
 acme_ipv6: false
-# === Уведомления по e-mail о выпуске/продлении сертификатов ===
+# === E-mail notifications about issued and renewed certificates ===
 mail_notify_enabled: false
 
-# Кому слать
+# Who to send them to
 mail_notify_to: "admin@example.invalid"
 mail_notify_from: "relay@example.invalid"
 
@@ -49,16 +49,16 @@ mail_smtp_auth: "on"          # on/off
 mail_smtp_ssl_mode: "starttls" # smtps | starttls
 mail_smtp_tls_trust_file: "/etc/ssl/certs/ca-certificates.crt"
 
-# (опционально) ограничить уведомления только определёнными доменами
-mail_notify_only_for: []      # например: ["rdg.domain.local", "ha.domain.local"]
+# (optional) limit the notifications to certain domains
+mail_notify_only_for: []      # for example: ["rdg.domain.local", "ha.domain.local"]
 
-# Режим выпуска: all — все цели; new — только отсутствующие линеки (для addsite)
+# Issue mode: all -- every target; new -- only the missing lineages (for addsite)
 cert_issue_mode: all
 
-# (опц.) фильтровать запуск по списку доменов (базовые имена, без -rsa/-ecdsa)
+# (optional) limit the run to these domains (base names, without -rsa/-ecdsa)
 sites_include: []
 
-# (опц.) список публичных резолверов для проверки готовности DNS
+# (optional) public resolvers used to check that the DNS is ready
 acme_resolvers:
   - 1.1.1.1
   - 8.8.8.8

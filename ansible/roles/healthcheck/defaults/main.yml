@@ -1,28 +1,27 @@
 ---
 # roles/healthcheck/defaults/main.yml
 #
-# Глобальные настройки роли healthcheck.
-# Здесь описываем:
-#   - какие systemd-сервисы проверять
-#   - какие Docker-контейнеры проверять
-#   - как вести себя при ошибках
-#   - сколько строк логов показывать и откуда брать docker compose logs
+# Global settings of the healthcheck role:
+#   - which systemd services to check
+#   - which Docker containers to check
+#   - how to behave on errors
+#   - how many log lines to show, and where docker compose logs come from
 
 #################################################################
-# SYSTEMD-СЕРВИСЫ ДЛЯ ПРОВЕРКИ
+# SYSTEMD SERVICES TO CHECK
 #################################################################
-# Каждый элемент:
-#   name   — реальное имя unit’а в systemd
-#   label  — человекочитаемое имя в отчёте
-#   enabled — проверять ли этот сервис (можно завязать на переменные Ansible)
+# Each item:
+#   name   -- the unit's real name in systemd
+#   label  -- a readable name for the report
+#   enabled -- whether to check it (can depend on Ansible variables)
 
 status_check_systemd_units:
-  # Основной HAProxy (reverse proxy с сайтами)
+  # The main HAProxy (the reverse proxy with the sites)
   - name: "haproxy.service"
     label: "HAProxy (reverse proxy)"
     enabled: true
 
-  # Root-демон управления сертификатами для HAProxy
+  # The root daemon that manages HAProxy's certificates
   - name: "haproxy-certd.service"
     label: "HAProxy certificate daemon"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
@@ -53,24 +52,24 @@ status_check_systemd_units:
     version_file: "/usr/local/sbin/easy-ha-proxy-updated.py"
     version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
 
-  # Демон банов Authelia (regulation helper)
+  # The Authelia bans daemon (regulation helper)
   - name: "authelia-bansd.service"
     label: "Authelia regulation bans daemon"
-    # Проверяем только если вообще включена Authelia и включён bans-демон
+    # Checked only when Authelia and the bans daemon are both enabled
     enabled: >-
       {{ authelia_enabled | default(false) | bool
          and authelia_bans_daemon_enabled | default(true) | bool }}
     version_file: "/usr/local/sbin/authelia-bansd.py"
     version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-bansd.py"
 
-  # Демон управления пользователями Authelia (watcher)
+  # The Authelia user management daemon (watcher)
   - name: "authelia-usersd.service"
     label: "Authelia users management daemon"
     enabled: "{{ authelia_enabled | default(false) | bool }}"
     version_file: "/usr/local/sbin/authelia-usersd.py"
     version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-usersd.py"
 
-  # Демон управления configuration.yml Authelia (authelia-configd.py)
+  # The daemon that manages Authelia's configuration.yml (authelia-configd.py)
   - name: "authelia-configd.service"
     label: "Authelia config daemon (authelia-configd)"
     enabled: >-
@@ -95,7 +94,7 @@ status_check_systemd_units:
     label: "Journal vacuum timer"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
-  # Docker Engine — нужен для контейнеров Authelia и прочих сервисов
+  # Docker Engine -- needed for the Authelia containers and the other services
   - name: "docker.service"
     label: "Docker Engine"
     enabled: true
@@ -146,21 +145,21 @@ status_check_systemd_units:
   #   enabled: "{{ my_extra_service_enabled | default(false) | bool }}"
 
 #################################################################
-# DOCKER-КОНТЕЙНЕРЫ ДЛЯ ПРОВЕРКИ
+# DOCKER CONTAINERS TO CHECK
 #################################################################
-# Каждый элемент:
-#   name   — имя контейнера (как видно в docker ps)
-#   label  — человекочитаемое имя в отчёте
-#   enabled — проверять ли этот контейнер
+# Each item:
+#   name   -- the container's name (as docker ps shows it)
+#   label  -- a readable name for the report
+#   enabled -- whether to check this container
 
 status_check_docker_containers:
-  # Веб-интерфейс HAProxy-admin (Flask-приложение)
+  # The HAProxy-admin web interface (the Flask application)
   - name: "haproxy-admin"
     label: "HAProxy Admin UI"
-    # Если переменная haproxy_admin_enabled не определена — считаем, что сервис должен быть
+    # If haproxy_admin_enabled is not defined, the service is expected to be there
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
-  # Основной контейнер Authelia
+  # The main Authelia container
   - name: "{{ authelia_container_name | default('authelia') }}"
     label: "Authelia"
     enabled: "{{ authelia_enabled | default(false) | bool }}"
@@ -188,7 +187,7 @@ status_check_docker_containers:
   #   enabled: "{{ some_other_container_enabled | default(false) | bool }}"
 
 #################################################################
-# ONESHOT-СЛУЖБЫ, СВЯЗАННЫЕ С TIMER
+# ONESHOT SERVICES TIED TO A TIMER
 #################################################################
 
 status_check_systemd_jobs:
@@ -208,7 +207,7 @@ status_check_systemd_jobs:
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
 #################################################################
-# ИСПОЛНЯЕМЫЕ ФАЙЛЫ И UNIT-ФАЙЛЫ, УПРАВЛЯЕМЫЕ PLAYBOOK
+# EXECUTABLES AND UNIT FILES THE PLAYBOOK MANAGES
 #################################################################
 
 status_check_managed_artifacts:
@@ -374,7 +373,7 @@ status_check_managed_artifacts:
     enabled: "{{ authelia_enabled | default(false) | bool }}"
 
 #################################################################
-# ПАКЕТЫ И SNAP, ОПРЕДЕЛЯЮЩИЕ ВЕРСИИ ОСНОВНЫХ СЛУЖБ
+# PACKAGES AND SNAPS THAT SET THE VERSIONS OF THE MAIN SERVICES
 #################################################################
 
 status_check_apt_packages: >-
@@ -410,28 +409,27 @@ status_check_snap_packages:
   - certbot
 
 #################################################################
-# ОБЩЕЕ ПОВЕДЕНИЕ РОЛИ
+# THE ROLE'S GENERAL BEHAVIOUR
 #################################################################
 
-# Если true — при наличии проблем с сервисами/контейнерами play упадёт (fail).
-# Если false — только вывод отчёта + логи, без падения.
+# If true, the play fails when services or containers have problems.
+# If false, only the report and the logs are shown, without failing.
 status_check_fail_on_error: false
 
-# Сколько строк логов systemd показывать для проблемных сервисов
+# How many systemd log lines to show for a failing service
 status_check_journal_lines: 40
 
 #################################################################
-# ЛОГИ DOCKER COMPOSE ДЛЯ ПРОБЛЕМНЫХ КОНТЕЙНЕРОВ
+# DOCKER COMPOSE LOGS FOR FAILING CONTAINERS
 #################################################################
 
-# Включать ли показ docker compose logs для "плохих" контейнеров
+# Whether to show docker compose logs for "bad" containers
 status_check_docker_logs_enabled: true
 
-# Сколько строк логов docker compose выводить для каждого проблемного контейнера
+# How many docker compose log lines to show for each failing container
 status_check_docker_log_lines: 80
 
-# Каталог, где лежит docker-compose.yml для Authelia.
-# Тут будет выполняться команда:
+# The directory with Authelia's docker-compose.yml, where this runs:
 #   docker compose logs --tail N <container>
-# При необходимости можно переопределить в group_vars/host_vars.
+# Can be overridden in group_vars/host_vars if needed.
 status_check_docker_logs_compose_dir: "/opt/authelia"

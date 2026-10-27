@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-services.py — таблицы ban/err, лог-аналитика, ipset-FW, сессии, статусы бэкендов.
+services.py -- ban/err tables, log analytics, the ipset firewall, sessions, backend states.
 
-Все пути/настройки читаются из ENV, которые рендерятся Ansible:
-  SOCKET_PATH                 (по умолчанию /run/haproxy/admin.sock)
-  UI_EXCLUDE_EXACT           (comma-separated; по умолчанию: be_admin,be_http_challenge,be_tls_terminator,be_maintenance)
-  UI_EXCLUDE_PREFIX          (comma-separated; по умолчанию: tbl_)
-  LOG_FILE                   (по умолчанию /var/log/haproxy.log)
-  WHITELIST_GEO_FILE         (по умолчанию /etc/haproxy/geoip/whitelist.geo)
-  WHITELIST_GLOBAL_FILE      (по умолчанию /etc/haproxy/whitelist.ip)
-  AUTHELIA_BANS_CMD          (по умолчанию /usr/local/sbin/authelia-bans.sh)
+Every path and setting is read from environment variables that Ansible renders:
+  SOCKET_PATH                 (default /run/haproxy/admin.sock)
+  UI_EXCLUDE_EXACT           (comma-separated; default: be_admin,be_http_challenge,be_tls_terminator,be_maintenance)
+  UI_EXCLUDE_PREFIX          (comma-separated; default: tbl_)
+  LOG_FILE                   (default /var/log/haproxy.log)
+  WHITELIST_GEO_FILE         (default /etc/haproxy/geoip/whitelist.geo)
+  WHITELIST_GLOBAL_FILE      (default /etc/haproxy/whitelist.ip)
+  AUTHELIA_BANS_CMD          (default /usr/local/sbin/authelia-bans.sh)
 """
 from __future__ import annotations
 
@@ -42,14 +42,14 @@ from .utils import (
 )
 from .cache import get_country_code
 
-# ───────── Конфиг из ENV (заполняется Ansible через .env) ─────────
+# ───────── Configuration from the environment (Ansible fills it in through .env) ─────────
 
 SOCKET: str = os.environ.get("SOCKET_PATH", "/run/haproxy/admin.sock").strip()
 HAPROXY_CFG: str = os.environ.get(
     "HAPROXY_CFG", "/etc/haproxy/haproxy.cfg").strip()
 
 
-# списки исключений
+# exclusion lists
 EXCLUDE_EXACT: set[str] = set(
     s for s in os.environ.get(
         "UI_EXCLUDE_EXACT",
@@ -60,14 +60,14 @@ EXCLUDE_PREFIX: tuple[str, ...] = tuple(
     s for s in os.environ.get("UI_EXCLUDE_PREFIX", "tbl_").split(",") if s
 )
 
-# журналы и вайтлисты
+# logs and allow-lists
 LOG_FILE: str = os.environ.get("LOG_FILE", "/var/log/haproxy.log").strip()
 WHITELIST_FILE: str = os.environ.get(
     "WHITELIST_GEO_FILE", "/etc/haproxy/geoip/whitelist.geo").strip()
 WHITELIST_GLOBAL_FILE: str = os.environ.get(
     "WHITELIST_GLOBAL_FILE", "/etc/haproxy/whitelist.ip").strip()
 
-# helper для Authelia bans:
+# helper for Authelia bans:
 AUTHELIA_BANS_CMD: str = os.environ.get(
     "AUTHELIA_BANS_CMD", "/usr/local/sbin/authelia-bans.sh"
 ).strip()
@@ -91,7 +91,7 @@ AUTHELIA_BANS_MAX_RESPONSE_BYTES: int = _bounded_env_int(
     "AUTHELIA_BANS_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, 4096, 16 * 1024 * 1024
 )
 
-# Логи Authelia (JSON)
+# Authelia logs (JSON)
 AUTHELIA_LOG_FILE: str = os.environ.get(
     "AUTHELIA_LOG_FILE", ""
 ).strip()
@@ -114,12 +114,12 @@ AUTHELIA_USERS_MAX_RESPONSE_BYTES: int = _bounded_env_int(
 )
 
 
-# производные от SOCKET (для multi-process master-worker)
+# derived from SOCKET (for the multi-process master-worker mode)
 SOCKET_DIR: str = os.path.dirname(SOCKET) or "/run/haproxy"
 SOCKET_BASIS: str = os.path.basename(SOCKET) or "admin.sock"
 SOCKET_RE = re.compile(rf"^{re.escape(SOCKET_BASIS)}(\.\d+)?$")
 
-# кэши
+# caches
 table_cache: dict = {"ban": None, "err": None}
 cache_time: datetime = datetime.min
 
@@ -127,11 +127,11 @@ _cfg_disp_cache = {"mtime": -1.0, "map": {}}
 logger = logging.getLogger("haproxy-admin")
 
 
-# ───────── Helpers: динамический список stick-таблиц ─────────
+# ───────── Helpers: the dynamic list of stick tables ─────────
 
 def _list_all_tables() -> list[str]:
     """
-    Универсальный листинг: поддерживает 'show table' и оба формата ('table:' и 'table=').
+    Generic listing: understands 'show table' and both formats ('table:' and 'table=').
     """
     out = haproxy_runtime_command("show table", SOCKET, timeout=2)
     names: set[str] = set()
@@ -150,7 +150,7 @@ def _list_err_tables() -> list[str]:
     all_names = _list_all_tables()
     err = [n for n in all_names if n ==
            "tbl_err_nosni" or n.startswith("tbl_err_")]
-    if not err and "tbl_err" in all_names:  # совместимость со старой схемой
+    if not err and "tbl_err" in all_names:  # compatibility with the old layout
         err = ["tbl_err"]
     return sorted(err)
 
@@ -183,10 +183,10 @@ def _aggregate_err_tables(err_tables: list[dict]) -> dict:
 
 def get_ip_auth_table() -> dict:
     """
-    Возвращает структуру по tbl_ip_auth:
-      headers: список заголовков
+    Returns the contents of tbl_ip_auth:
+      headers: the column headers
       rows:    [ip, gpc0, ttl_seconds]
-      meta:    служебная инфа (name, used, size, error)
+      meta:    housekeeping (name, used, size, error)
     """
     try:
         raw = haproxy_runtime_command("show table tbl_ip_auth", SOCKET, timeout=2)
@@ -203,7 +203,7 @@ def get_ip_auth_table() -> dict:
             },
         }
 
-    # Если таблица missing или HAProxy вернул ошибку — считаем, что функционал отключён
+    # If the table is missing or HAProxy answered with an error, the feature is off.
     raw_strip = raw.strip()
     if not raw_strip or "Unknown table" in raw_strip or "No such table" in raw_strip:
         return {
@@ -226,8 +226,8 @@ def get_ip_auth_table() -> dict:
         if not line:
             continue
         if line.startswith("# table:"):
-            # строка вида: "# table: tbl_ip_auth, type: ip, size:204800, used:2"
-            # вытащим size/used по возможности
+            # a line such as: "# table: tbl_ip_auth, type: ip, size:204800, used:2"
+            # take size/used from it when possible
             parts = line.split(",")
             for p in parts:
                 p = p.strip()
@@ -243,7 +243,7 @@ def get_ip_auth_table() -> dict:
                         pass
             continue
 
-        # строки вида:
+        # lines such as:
         # 0x5e30978186c8: key=198.51.100.178 use=0 exp=32301965 shard=0 gpc0=106
         ip = ""
         flag = 0
@@ -260,7 +260,7 @@ def get_ip_auth_table() -> dict:
             elif token.startswith("exp="):
                 try:
                     exp_ms = int(token.split("=", 1)[1])
-                    ttl_sec = max(0, exp_ms // 1000)  # ms → секунды
+                    ttl_sec = max(0, exp_ms // 1000)  # ms -> seconds
                 except Exception:
                     ttl_sec = 0
 
@@ -330,7 +330,7 @@ def _apply_adaptive_expiry(ban: dict | None) -> None:
 
 def get_tables():
     """
-    Кэшированное чтение tbl_ban + агрегация всех tbl_err_*.
+    Cached read of tbl_ban plus the totals of every tbl_err_*.
     """
     global table_cache, cache_time
     if datetime.now() - cache_time <= timedelta(seconds=5):
@@ -356,13 +356,13 @@ def get_tables():
     return table_cache
 
 
-# ────── RAW таблицы (без обработки) ────────────────────────────
+# ────── RAW tables (unprocessed) ────────────────────────────
 def get_tables_raw() -> dict:
     """
-    Возвращает RAW:
-      - ban_raw: строка
-      - err_raw: dict{name -> raw_text} по всем err-таблицам (или строка для совместимости)
-        + сюда же добавляем tbl_ip_auth
+    Returns the raw output:
+      - ban_raw: a string
+      - err_raw: dict{name -> raw_text} for every err table (or a string, for compatibility)
+        + tbl_ip_auth is added there as well
     """
     def _safe(command: str) -> str:
         try:
@@ -371,27 +371,27 @@ def get_tables_raw() -> dict:
             logger.error("raw table error: %s", exc)
             return f"ERROR: {exc}"
 
-    # tbl_ban как и раньше
+    # tbl_ban, as before
     ban_raw = _safe("show table tbl_ban")
 
-    # RAW для tbl_ip_auth
+    # RAW output of tbl_ip_auth
     ip_auth_raw = _safe("show table tbl_ip_auth")
 
-    # err-таблицы
+    # err tables
     names = _list_err_tables()
     if not names:
-        # Старый режим совместимости: одна строка с tbl_err.
-        # Просто допишем к ней RAW от tbl_ip_auth, чтобы тип остался str.
+        # The old compatibility mode: a single string with tbl_err.
+        # Append the raw tbl_ip_auth output to it so the type stays str.
         base_err_raw = _safe("show table tbl_err")
-        # Если tbl_ip_auth есть, просто приклеим её вывод ниже.
+        # If tbl_ip_auth exists, its output is simply appended below.
         err_raw = base_err_raw + "\n\n" + ip_auth_raw
     else:
-        # Новый режим: err_raw — dict {name: raw_text}
+        # The new mode: err_raw is a dict {name: raw_text}
         err_raw: dict[str, str] = {}
         for n in names:
             err_raw[n] = _safe(f"show table {n}")
 
-        # Добавляем tbl_ip_auth как ещё одну "таблицу"
+        # Add tbl_ip_auth as one more "table"
         err_raw["tbl_ip_auth"] = ip_auth_raw
 
     return {"ban_raw": ban_raw, "err_raw": err_raw}
@@ -401,10 +401,10 @@ def get_tables_raw() -> dict:
 
 def _call_authelia_bansd(action: str, **params) -> dict:
     """
-    Низкоуровневый клиент к демону authelia-bansd по unix-сокету.
+    Low-level client of the authelia-bansd daemon over its unix socket.
 
-    Возвращает dict вида:
-      {"ok": True, ...}  или {"ok": False, "error": "..."}.
+    Returns a dict such as:
+      {"ok": True, ...}  or {"ok": False, "error": "..."}.
     """
     if not AUTHELIA_BANS_SOCKET:
         return {"ok": False, "error": "AUTHELIA_BANS_SOCKET not set"}
@@ -533,13 +533,13 @@ def _authelia_bans_result(users_output: object, ips_output: object) -> dict:
 
 def get_authelia_bans() -> dict:
     """
-    Возвращает текущие баны Authelia (regulation).
+    Returns the current Authelia bans (regulation).
 
-    Приоритет:
-      1) authelia-bansd через unix-сокет AUTHELIA_BANS_SOCKET;
-      2) fallback — прямой вызов AUTHELIA_BANS_CMD (CLI).
+    In order of preference:
+      1) authelia-bansd over the unix socket AUTHELIA_BANS_SOCKET;
+      2) fallback: running AUTHELIA_BANS_CMD (the CLI) directly.
     """
-    # 1) через демон
+    # 1) through the daemon
     if AUTHELIA_BANS_SOCKET:
         resp = _call_authelia_bansd("list")
         if not resp.get("ok"):
@@ -555,7 +555,7 @@ def get_authelia_bans() -> dict:
             resp.get("ips", ""),
         )
 
-    # 2) CLI fallback (если сокет не настроен)
+    # 2) the CLI fallback (when no socket is configured)
     if not AUTHELIA_BANS_CMD:
         return {
             "users": [],
@@ -597,7 +597,7 @@ def get_authelia_bans() -> dict:
 
 def authelia_unban_user(username: str):
     """
-    Разбан пользователя в regulation Authelia.
+    Lifts a user's ban in Authelia's regulation.
     """
     username = (username or "").strip()
     if not username:
@@ -605,7 +605,7 @@ def authelia_unban_user(username: str):
     if not USERNAME_RE.match(username):
         return 'Invalid characters in username', 400
 
-    # 1) через демон
+    # 1) through the daemon
     if AUTHELIA_BANS_SOCKET:
         resp = _call_authelia_bansd("revoke-user", username=username)
         if not resp.get("ok"):
@@ -628,7 +628,7 @@ def authelia_unban_user(username: str):
 
 def authelia_unban_ip(ip: str):
     """
-    Разбан IP в regulation Authelia.
+    Lifts an IP address's ban in Authelia's regulation.
     """
     ip = (ip or "").strip()
     if not ip:
@@ -640,7 +640,7 @@ def authelia_unban_ip(ip: str):
     except ValueError:
         return "Invalid IP/CIDR", 400
 
-    # 1) через демон
+    # 1) through the daemon
     if AUTHELIA_BANS_SOCKET:
         resp = _call_authelia_bansd("revoke-ip", ip=ip)
         if not resp.get("ok"):
@@ -662,13 +662,13 @@ def authelia_unban_ip(ip: str):
 
 def _call_authelia_usersd(payload: dict) -> dict:
     """
-    Низкоуровневый клиент к демону authelia-usersd по unix-сокету.
+    Low-level client of the authelia-usersd daemon over its unix socket.
 
-    payload — dict, например:
+    payload is a dict, for example:
       {"action": "update", "username": "...", "fields": {...}, "password_plain": "..."}
 
-    Возвращает dict вида:
-      {"ok": True, ...} или {"ok": False, "error": "..."}.
+    Returns a dict such as:
+      {"ok": True, ...} or {"ok": False, "error": "..."}.
     """
     if not AUTHELIA_USERS_SOCKET:
         return {"ok": False, "error": "AUTHELIA_USERS_SOCKET not set"}
@@ -714,9 +714,9 @@ def _call_authelia_usersd(payload: dict) -> dict:
 
 def _acl_dump_for(file_path: str) -> str:
     """
-    Возвращает текстовый дамп строк runtime-ACL, связанных с указанным файлом.
-    Делает `show acl`, ищет нужный ACL-id по скобкам (path), затем `show acl <id>`.
-    Если ACL not foundа — возвращает пояснение.
+    Returns a text dump of the runtime ACL entries loaded from the given file.
+    Runs `show acl`, finds the ACL id by the path in brackets, then `show acl <id>`.
+    If the ACL is not found, returns an explanation instead.
     """
     out = haproxy_runtime_command("show acl", SOCKET, timeout=2)
     acl_id = None
@@ -738,9 +738,9 @@ def _acl_dump_for(file_path: str) -> str:
 
 def get_whitelists() -> dict:
     """
-    Возвращает содержимое файлов whitelist'ов и их runtime-ACL.
+    Returns the contents of the allow-list files and their runtime ACLs.
     """
-    # GEO файл
+    # the GEO file
     try:
         if os.path.exists(WHITELIST_FILE):
             with open(WHITELIST_FILE, "r", encoding="utf-8") as f:
@@ -750,7 +750,7 @@ def get_whitelists() -> dict:
     except Exception as e:  # pylint: disable=broad-except
         geo_file = f"(read error: {e})"
 
-    # GLOBAL файл
+    # the GLOBAL file
     try:
         if os.path.exists(WHITELIST_GLOBAL_FILE):
             with open(WHITELIST_GLOBAL_FILE, "r", encoding="utf-8") as f:
@@ -781,7 +781,7 @@ def get_whitelists() -> dict:
     }
 
 
-# ───────── Бан/разбан ───────────────────────────────────────────
+# ───────── Ban / unban ───────────────────────────────────────────
 
 def unban_ip(ip: str):
     if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip):
@@ -811,10 +811,10 @@ def unban_ip(ip: str):
     return "OK", 200
 
 
-# ───── helpers для GEO whitelist ─────
+# ───── helpers for the GEO allow-list ─────
 
 def _get_acl_id_for_whitelist() -> str | None:
-    """Ищет runtime ACL-id, связанную с WHITELIST_FILE."""
+    """Finds the runtime ACL id loaded from WHITELIST_FILE."""
     out = haproxy_runtime_command("show acl", SOCKET, timeout=2)
     for line in out.splitlines():
         parts = line.strip().split(maxsplit=2)
@@ -827,7 +827,7 @@ def _get_acl_id_for_whitelist() -> str | None:
 
 
 def _add_acl_runtime(cidr: str) -> str:
-    """Добавляет CIDR в ACL whitelist прямо в памяти HAProxy."""
+    """Adds a CIDR to the allow-list ACL in HAProxy's memory."""
     acl_id = _get_acl_id_for_whitelist()
     if not acl_id:
         return "ACL-id not found; skipped runtime update"
@@ -837,7 +837,7 @@ def _add_acl_runtime(cidr: str) -> str:
 
 
 def _del_acl_runtime(cidr: str) -> str:
-    """Удаляет CIDR из ACL whitelist в памяти HAProxy."""
+    """Removes a CIDR from the allow-list ACL in HAProxy's memory."""
     acl_id = _get_acl_id_for_whitelist()
     if not acl_id:
         return "ACL-id not found; skipped runtime update"
@@ -847,7 +847,7 @@ def _del_acl_runtime(cidr: str) -> str:
 
 
 def _safe_runtime_acl(action: str, cidr: str, callback) -> str:
-    """Выполняет runtime ACL-операцию без падения пользовательского API."""
+    """Runs a runtime ACL operation without failing the user-facing API."""
     try:
         return callback(cidr)
     except Exception as exc:  # pylint: disable=broad-except
@@ -861,7 +861,7 @@ def _safe_runtime_acl(action: str, cidr: str, callback) -> str:
 
 
 def _safe_reload_haproxy() -> str:
-    """Перезагружает HAProxy без проброса исключений в Flask route."""
+    """Reloads HAProxy without letting an exception reach the Flask route."""
     try:
         return reload_haproxy()
     except Exception as exc:  # pylint: disable=broad-except
@@ -924,11 +924,11 @@ def _toggle_cidr_in_file(path: str, cidr: str) -> tuple[bool, str | None]:
 
 def add_to_whitelist(ip: str):
     """
-    ТЕПЕРЬ: toggle-поведение.
+    Toggles an entry.
 
-    • Принимает IP или сеть.
-    • Если ТАКОЙ CIDR уже есть в файле whitelist.geo — удаляем из файла и runtime ACL.
-    • Если нет — добавляем и подгружаем в runtime ACL.
+    • Takes an IP address or a network.
+    • If the CIDR is already in whitelist.geo, it is removed from the file and from the runtime ACL.
+    • Otherwise it is added and loaded into the runtime ACL.
     """
     cidr = _canonical_cidr(ip)
     if cidr is None:
@@ -955,10 +955,10 @@ def add_to_whitelist(ip: str):
     return f"Added: {cidr}", 200
 
 
-# ───── helpers для ГЛОБАЛЬНОГО файла ─────
+# ───── helpers for the GLOBAL file ─────
 
 def _get_acl_id_for_global_whitelist() -> str | None:
-    """Ищет runtime ACL-id, связанную с WHITELIST_GLOBAL_FILE."""
+    """Finds the runtime ACL id loaded from WHITELIST_GLOBAL_FILE."""
     out = haproxy_runtime_command("show acl", SOCKET, timeout=2)
     for line in out.splitlines():
         parts = line.strip().split(maxsplit=2)
@@ -971,7 +971,7 @@ def _get_acl_id_for_global_whitelist() -> str | None:
 
 
 def _add_acl_runtime_global(cidr: str) -> str:
-    """Добавляет CIDR в глобальную ACL whitelist прямо в памяти HAProxy."""
+    """Adds a CIDR to the global allow-list ACL in HAProxy's memory."""
     acl_id = _get_acl_id_for_global_whitelist()
     if not acl_id:
         return "ACL-id not found; skipped runtime update"
@@ -981,7 +981,7 @@ def _add_acl_runtime_global(cidr: str) -> str:
 
 
 def _del_acl_runtime_global(cidr: str) -> str:
-    """Удаляет CIDR из глобальной ACL whitelist в памяти HAProxy."""
+    """Removes a CIDR from the global allow-list ACL in HAProxy's memory."""
     acl_id = _get_acl_id_for_global_whitelist()
     if not acl_id:
         return "ACL-id not found; skipped runtime update"
@@ -992,10 +992,10 @@ def _del_acl_runtime_global(cidr: str) -> str:
 
 def add_to_global_whitelist(ip: str):
     """
-    ТЕПЕРЬ: toggle-поведение для глобального whitelist.ip.
+    Toggles an entry of the global whitelist.ip.
 
-    • Если такой CIDR уже есть в файле — удаляем и из файла, и из runtime ACL.
-    • Если нет — добавляем и подгружаем.
+    • If the CIDR is already in the file, it is removed from the file and from the runtime ACL.
+    • Otherwise it is added and loaded.
     """
     cidr = _canonical_cidr(ip)
     if cidr is None:
@@ -1077,12 +1077,12 @@ def remove_host_from_global_whitelist(ip: str) -> tuple[bool, str | None]:
     return bool(removed_forms), None
 
 
-# ───────── активные сессии (агрегация по IP) ─────────────────────
+# ───────── active sessions (grouped by IP) ─────────────────────
 
 def _all_admin_sockets() -> list[str]:
     """
-    Возвращает списком все runtime-сокеты текущего и draining-поколений.
-    Ищем в той же директории, что и SOCKET_PATH, по имени admin.sock(.N).
+    Returns every runtime socket of the current and the draining generations,
+    looked for next to SOCKET_PATH by the name admin.sock(.N).
     """
     try:
         sockets = sorted(
@@ -1097,13 +1097,13 @@ def _all_admin_sockets() -> list[str]:
 
 def get_connections() -> dict:
     """
-    Собирает все сессии со всех процессов HAProxy и возвращает агрегированный список по src_ip.
+    Collects the sessions of every HAProxy process and returns them grouped by src_ip.
     """
     sockets = _all_admin_sockets()
     all_conn = []
     for sock in sockets:
         raw = haproxy_runtime_command("show sess", sock, timeout=2)
-        if str(raw).startswith("Command"):  # нет доступа/не тот слой
+        if str(raw).startswith("Command"):  # no access, or the wrong layer
             continue
         parsed = parse_sessions(str(raw))
         parsed = [c for c in parsed
@@ -1130,10 +1130,10 @@ def get_connections() -> dict:
 
 def _load_display_map_from_cfg(path: str | None = None) -> dict[str, str]:
     """
-    Парсит haproxy.cfg и вытягивает пары:
+    Parses haproxy.cfg for pairs such as:
       backend <name>
         # display-name: example.com, www.example.com
-    Кэшируется по mtime.
+    Cached by mtime.
     """
     if not path:
         path = HAPROXY_CFG
@@ -1178,7 +1178,7 @@ def _admin_sockets() -> list[str]:
 
 
 def _show_stat(sock: str) -> str:
-    """CSV из 'show stat' для указанного сокета."""
+    """The 'show stat' CSV from the given socket."""
     try:
         return haproxy_runtime_command("show stat", sock, timeout=2) or ""
     except Exception as exc:
@@ -1187,7 +1187,7 @@ def _show_stat(sock: str) -> str:
 
 
 def _parse_show_stat(csv_text: str) -> list[dict]:
-    """Парсинг 'show stat' CSV -> список dict."""
+    """Parses the 'show stat' CSV into a list of dicts."""
     if not csv_text.strip():
         return []
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
@@ -1251,12 +1251,12 @@ def site_hosts(display: str) -> list[str]:
     return hosts
 
 
-# ───────── основная: статусы бэкендов для UI ─────────────────────
+# ───────── the main one: backend states for the UI ─────────────────────
 
 def get_backends_status() -> dict:
     """
-    Собирает 'show stat' со всех сокетов, исключает служебные бэкенды,
-    применяет display-map и возвращает агрегат по backend.
+    Collects 'show stat' from every socket, leaves out the system backends,
+    applies the display map and returns the totals per backend.
     """
     rows: list[dict] = []
     for sock in _admin_sockets():
@@ -1267,7 +1267,7 @@ def get_backends_status() -> dict:
         if parsed:
             rows.extend(parsed)
 
-    # дедуп
+    # de-duplicate
     seen: set[tuple[str | None, str | None]] = set()
     dedup: list[dict] = []
     for r in rows:
@@ -1278,11 +1278,11 @@ def get_backends_status() -> dict:
         dedup.append(r)
     rows = dedup
 
-    # только server-строки
+    # server rows only
     servers = [r for r in rows if (
         r.get("svname") not in ("FRONTEND", "BACKEND"))]
 
-    # исключаем служебные
+    # leave out the system backends
     by_be: dict[str, list[dict]] = {}
     for r in servers:
         be = (r.get("pxname") or "").strip()
@@ -1294,7 +1294,7 @@ def get_backends_status() -> dict:
         logger.warning("backends_status: no items; pxnames=%s",
                        sorted({(r.get('pxname') or '') for r in rows if r.get('pxname')}))
 
-    # читаем имена прямо из haproxy.cfg по тегам
+    # read the names straight from haproxy.cfg, by their tags
     name_map = _load_display_map_from_cfg(HAPROXY_CFG)
 
     def is_up(status: str | None) -> bool:
@@ -1455,9 +1455,9 @@ def _authelia_log_entry(data: dict, line: str) -> dict:
 
 def _read_authelia_users_from_file() -> tuple[list[dict], str | None]:
     """
-    Читает AUTHELIA_USERS_FILE (file backend) и возвращает (users, error).
+    Reads AUTHELIA_USERS_FILE (the file backend) and returns (users, error).
 
-    users — список словарей:
+    users is a list of dicts:
       {
         "username": ...,
         "displayname": ...,
@@ -1465,7 +1465,7 @@ def _read_authelia_users_from_file() -> tuple[list[dict], str | None]:
         "groups": [...],
         "disabled": bool,
       }
-    Остальные поля в YAML не трогаем и не возвращаем.
+    Other fields in the YAML are neither touched nor returned.
     """
     if not AUTHELIA_USERS_FILE:
         return [], 'AUTHELIA_USERS_FILE is not configured (no path to users_database.yml)'
@@ -1480,8 +1480,8 @@ def _read_authelia_users_from_file() -> tuple[list[dict], str | None]:
         logger.error("authelia users read error: %s", exc)
         return [], f"Authelia users file read error: {exc}"
 
-    # Вариант 1: структура с корнем "users:"
-    # Вариант 2: сразу словарь username -> attrs
+    # Shape 1: a structure with a "users:" root
+    # Shape 2: a dict of username -> attributes directly
     if isinstance(data, dict) and isinstance(data.get("users"), dict):
         users_node = data["users"]
     elif isinstance(data, dict):
@@ -1523,18 +1523,18 @@ def get_authelia_logs(
     limit: int | None = None,
 ) -> tuple[list[dict], str | None]:
     """
-    Возвращает (logs, error).
+    Returns (logs, error).
 
-    logs — список словарей:
+    logs is a list of dicts:
       {
         "time": ..., "level": ..., "remote_ip": ..., "method": ...,
         "path": ..., "username": ..., "msg": ..., "error": ..., "raw": ...
       }
 
-    Фильтры:
-      ip       — точное совпадение с remote_ip или вхождение в raw-строку;
-      username — совпадение с полем username или вхождение в msg;
-      level    — сравнение по lower() с полем level.
+    Filters:
+      ip       -- equal to remote_ip, or contained in the raw line;
+      username -- equal to the username field, or contained in msg;
+      level    -- compared with the level field, case-insensitively.
     """
     if not AUTHELIA_LOG_FILE:
         return [], 'AUTHELIA_LOG_FILE is not configured (no path to Authelia logs)'
@@ -1600,14 +1600,15 @@ def get_authelia_logs(
     return entries, None
 
 
-# ───────── Аналитика логов (топ ошибочных IP) ────────────────────
+# ───────── Log analytics (the addresses with the most errors) ────────────────────
 
 def get_attackers():
     """
-    Возвращает данные для «Аналитика угроз» (топ IP по 400 и 451).
+    Returns the data for "Threat analytics" (the top addresses by 400 and 451).
 
-    В текущей версии UI лог-файл читать не пытаемся — всё берём через root-демон
-    haproxy-controld, чтобы не раздавать права на LOG_FILE процессу веб-приложения.
+    The web application does not read the log file itself: everything comes
+    through the root daemon haproxy-controld, so the web process needs no
+    rights on LOG_FILE.
     """
     def _normalize(src):
         # dict{ip:count} → list[dict]
@@ -1635,7 +1636,7 @@ def get_attackers():
             # flags. The lookup is cached, so the ten-plus IPs cost little.
             country = item.get("country") or get_country_code(ip)
             out.append({"ip": ip, "count": cnt, "country": country})
-        # сортировка по убыванию на всякий случай
+        # sort in descending order, to be safe
         out.sort(key=lambda x: x.get("count", 0), reverse=True)
         return out[:10]
 
@@ -1656,18 +1657,18 @@ def get_attackers():
         logger.debug("guardd attackers unavailable; reading the log", exc_info=True)
     data = controld_get_attackers()
 
-    # ошибки демона пробрасываем как есть, чтобы было видно причину (сокет/команда/и т.д.)
+    # pass the daemon's errors through as they are, so the cause is visible (socket, command and so on)
     if not isinstance(data, dict):
         return {"error": "controld returned non-dict response", "diagnostic": {"source": "controld"}}
 
     if data.get("error"):
-        # гарантируем, что diagnostic есть
+        # make sure there is a diagnostic
         diag = data.get("diagnostic") or {}
         if isinstance(diag, dict):
             diag.setdefault("source", "controld")
         return {"error": data.get("error"), "diagnostic": diag}
 
-    # поддержим несколько форматов payload (на случай разных версий демона)
+    # accept several payload shapes (daemons of different versions)
     raw_400 = data.get("code_400") or data.get("a400") or data.get("400") or []
     raw_451 = data.get("code_451") or data.get("a451") or data.get("451") or []
     diag = data.get("diagnostic") or {}
@@ -1683,11 +1684,11 @@ def get_attackers():
 
 def get_authelia_users() -> tuple[list[dict], list[str], str | None]:
     """
-    Возвращает (users, all_groups, error).
+    Returns (users, all_groups, error).
 
-    users — список словарей с полями:
+    users is a list of dicts with the fields:
       username, displayname, email, groups (list[str]), disabled (bool)
-    all_groups — отсортированный список всех уникальных групп.
+    all_groups is the sorted list of every distinct group.
     """
     resp = _call_authelia_usersd({"action": "list"})
     if not resp.get("ok"):
@@ -1724,7 +1725,7 @@ def get_authelia_users() -> tuple[list[dict], list[str], str | None]:
 
 
 def get_authelia_user(username: str) -> tuple[dict | None, str | None]:
-    """Возвращает (user, error). user с теми же полями, что и в get_authelia_users."""
+    """Returns (user, error); user has the same fields as in get_authelia_users."""
     username = (username or "").strip()
     if not username:
         return None, "username is required"
@@ -1758,7 +1759,7 @@ def update_authelia_user(
     fields: dict,
     password_plain: str | None = None,
 ) -> tuple[dict | None, str | None]:
-    """Обновляет существующего пользователя. Возвращает (user, error)."""
+    """Updates an existing user. Returns (user, error)."""
     username = (username or "").strip()
     if not username:
         return None, "username is required"
@@ -1787,7 +1788,7 @@ def create_authelia_user(
     fields: dict,
     password_plain: str,
 ) -> tuple[dict | None, str | None]:
-    """Создаёт нового пользователя. Возвращает (user, error)."""
+    """Creates a new user. Returns (user, error)."""
     username = (username or "").strip()
     if not username:
         return None, "username is required"
@@ -1813,7 +1814,7 @@ def create_authelia_user(
 
 
 def delete_authelia_user(username: str) -> tuple[bool, str | None]:
-    """Удаляет пользователя. Возвращает (ok, error)."""
+    """Deletes a user. Returns (ok, error)."""
     username = (username or "").strip()
     if not username:
         return False, "username is required"

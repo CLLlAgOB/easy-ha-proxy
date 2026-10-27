@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-haproxy_admin.utils – вспомогательные функции/константы
+haproxy_admin.utils -- helper functions and constants
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import shlex
 
 logger = logging.getLogger('haproxy-admin')
 
-# ────────── общие константы (читаем из ENV, есть дефолты) ──────────
+# ────────── shared constants (read from the environment, with defaults) ──────────
 SOCKET = os.environ.get("SOCKET_PATH", "/run/haproxy/admin.sock").strip()
 WHITELIST_FILE = os.environ.get(
     "WHITELIST_GEO_FILE", "/etc/haproxy/geoip/whitelist.geo").strip()
@@ -28,35 +28,35 @@ LOG_FILE = os.environ.get("LOG_FILE", "/var/log/haproxy.log").strip()
 
 TIME_RX = re.compile(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?')
 
-# env/настройки для журналов и бан-таблицы
+# environment settings for the logs and the ban table
 JOURNAL_UNIT = os.getenv("HAPADM_JOURNAL_UNIT", "haproxy.service")
 BAN_TABLE = os.getenv("HAPADM_BAN_TABLE", "tbl_ban")
-# Окно вокруг точки бана: ±2 минуты по умолчанию (настраивается)
+# The window around the moment of a ban: ±2 minutes by default (configurable)
 BAN_DELTA_SECONDS = int(os.getenv("HAPADM_BAN_DELTA_SECONDS", "120"))
 LOG_LIMIT = int(os.getenv("HAPADM_LOG_LIMIT", "30"))
-# Включить принудительный возврат отладочной информации, если ничего не нашли
+# Always return debug information when nothing was found
 DEBUG_ON_EMPTY = os.getenv("HAPADM_DEBUG_ON_EMPTY",
                            "1") not in ("0", "false", "False", "")
 
-# список источников для journalctl (в порядке приоритета)
+# journalctl sources, in order of preference
 JOURNAL_SOURCES = [s.strip() for s in os.getenv(
     "HAPADM_JOURNAL_SOURCES",
     "-u haproxy, SYSLOG_IDENTIFIER=haproxy, -u haproxy.service, -u rsyslog.service, *"
 ).split(",") if s.strip()]
 
-# сокет root-демона (haproxy-controld)
+# the root daemon's socket (haproxy-controld)
 CONTROL_SOCKET = os.environ.get(
     "HAPROXY_CONTROL_SOCKET",
     "/run/easy-ha-proxy/haproxy-controld.sock",
 ).strip()
 
-# экспортируем get_country_code из cache.py, чтобы импортировать всегда из utils
+# get_country_code from cache.py is re-exported, so it is always imported from utils
 from .cache import get_country_code  # noqa: E402  pylint: disable=wrong-import-position
 
 __all__ = [
-    # константы
+    # constants
     'SOCKET', 'WHITELIST_FILE', 'WHITELIST_GLOBAL_FILE', 'LOG_FILE',
-    # функции
+    # functions
     'run_cmd', 'haproxy_runtime_command', 'parse_table_output', 'parse_sessions',
     'reload_haproxy',
     'ensure_whitelist_file', 'ensure_whitelist_global_file',
@@ -67,7 +67,7 @@ __all__ = [
     'controld_get_attackers',
 ]
 
-# ───────────────────────── Shell-команды ─────────────────────────────
+# ───────────────────────── Shell commands ─────────────────────────────
 
 
 def run_cmd(cmd: str | list[str]) -> str:
@@ -123,25 +123,25 @@ def haproxy_runtime_command(
         client.close()
     return b"".join(chunks).decode("utf-8", "replace")
 
-# ──────────────────────── Парсинг таблиц HAProxy ─────────────────────
+# ──────────────────────── Parsing HAProxy tables ─────────────────────
 
 
 def parse_table_output(output: str) -> dict | None:
     """
-    Разбирает вывод «show table …» и возвращает dict со структурой
+    Parses the output of "show table ..." and returns a dict
     {headers, rows, meta}.
 
-    • Для ban-таблицы (tbl_ban):
+    • For the ban table (tbl_ban):
         rows = [IP, Status, ReasonCode, ExpiresSec]
-        - Status: "Blocked" если int(gpc0) > 0, иначе "Not blocked"
-        - ReasonCode: gpt0 (куда мы пишем var(txn.ban_code) в HAProxy)
-        - ExpiresSec: exp из HAProxy, конвертированный из мс в секунды
+        - Status: "Blocked" if int(gpc0) > 0, otherwise "Not blocked"
+        - ReasonCode: gpt0 (where HAProxy stores var(txn.ban_code))
+        - ExpiresSec: HAProxy's exp, converted from ms to seconds
 
-    • Для err-таблиц (tbl_err_*):
+    • For the err tables (tbl_err_*):
         rows = [IP, ErrorCount, ExpiresSec]
-        берётся top-10 IP с наибольшим http_err_rate.
+        the top 10 addresses by http_err_rate.
 
-    • exp, приходящее от HAProxy в мс, конвертируется в секунды.
+    • exp comes from HAProxy in ms and is converted to seconds.
     """
     import re
 
@@ -179,24 +179,24 @@ def parse_table_output(output: str) -> dict | None:
 
         ip = data.get('key', '')
 
-        # exp в выводе HAProxy почти всегда в миллисекундах
+        # exp in HAProxy's output is almost always in milliseconds
         exp_raw = data.get('exp', '0')
         try:
-            exp_sec = str(int(int(exp_raw) / 1000))  # мс → с
+            exp_sec = str(int(int(exp_raw) / 1000))  # ms -> s
         except ValueError:
             exp_sec = exp_raw
 
-        # ───── BAN (tbl_ban: есть gpc0, опционально gpt0) ─────
+        # ───── BAN (tbl_ban: has gpc0, optionally gpt0) ─────
         if 'gpc0' in data:
             try:
                 blocked = int(data['gpc0']) > 0
             except ValueError:
                 blocked = False
 
-            # gpt0 мы используем как ban_code (см. шаблон HAProxy: sc-set-gpt0(2) var(txn.ban_code))
+            # gpt0 holds the ban_code (see the HAProxy template: sc-set-gpt0(2) var(txn.ban_code))
             ban_code = data.get('gpt0', '')
 
-            # теперь 4 колонки: IP, статус, код причины, TTL (сек)
+            # four columns: IP, status, reason code, TTL (s)
             rows.append([
                 ip,
                 "Blocked" if blocked else "Not blocked",
@@ -209,7 +209,7 @@ def parse_table_output(output: str) -> dict | None:
             err_key = next(k for k in data if 'http_err_rate' in k)
             rows.append([ip, data[err_key], exp_sec])
 
-    # ───── сортировка/обрезка для ERR ─────
+    # ───── sorting and trimming for ERR ─────
     if meta.get('name', '').startswith('tbl_err'):
         rows.sort(
             key=lambda r: int(r[1]) if str(r[1]).isdigit() else 0,
@@ -217,20 +217,20 @@ def parse_table_output(output: str) -> dict | None:
         )
         rows = rows[:10]
 
-    # ───── заголовки ─────
+    # ───── headers ─────
     if meta.get('name', '').startswith('tbl_ban'):
-        # 4 колонки: IP, статус, причина (код), TTL
+        # four columns: IP, status, reason (code), TTL
         headers = ["IP Address", "Status", "Reason", "Expires"]
     elif meta.get('name', '').startswith('tbl_err'):
         headers = ["IP Address", "Error Count", "Expires"]
     else:
-        # запасной вариант для любых других таблиц
+        # the fallback for any other table
         headers = ["IP Address", "Value", "Expires"]
 
     return {'headers': headers, 'rows': rows, 'meta': meta}
 
 
-# ───────────────────── Парсинг «show sess» ───────────────────────────
+# ───────────────────── Parsing "show sess" ───────────────────────────
 
 
 def _age_to_sec(txt: str) -> int:
@@ -243,9 +243,9 @@ def _age_to_sec(txt: str) -> int:
 
 def parse_sessions(output: str) -> list[dict]:
     """
-    Разбирает «show sess» и возвращает список сессий.
-    ВАЖНО: раньше отбрасывали строки, где в первом токене нет ':',
-    из-за этого на большинстве инсталляций список выходил пустым.
+    Parses "show sess" and returns the list of sessions.
+    IMPORTANT: lines whose first token had no ':' used to be dropped, which
+    left the list empty on most installations.
     """
     conns: list[dict] = []
     now = time.time()
@@ -259,7 +259,7 @@ def parse_sessions(output: str) -> list[dict]:
         if not parts:
             continue
 
-        # Идентификатор строки (может быть вида 0x..., иногда с ':')
+        # The line's identifier (such as 0x..., sometimes with ':')
         row_id = parts[0].rstrip(':')
 
         c = {
@@ -289,7 +289,7 @@ def parse_sessions(output: str) -> list[dict]:
             elif k == 'ctime' and v.isdigit():
                 c['duration'] = int(now - int(v))
 
-        # Достаточно наличия src_ip
+        # A src_ip is enough
         if c['src_ip']:
             conns.append(c)
 
@@ -300,11 +300,11 @@ def parse_sessions(output: str) -> list[dict]:
 
 def reload_haproxy() -> str:
     """
-    Универсальный graceful-reload:
-    1) если доступен haproxy-controld — просим его сделать reload от root;
-    2) иначе пробуем master socket;
-    3) иначе пробуем systemctl reload haproxy;
-    4) в случае неудачи возвращаем текст ошибки, не бросая исключение.
+    A graceful reload that works everywhere:
+    1) if haproxy-controld is available, ask it to reload as root;
+    2) otherwise try the master socket;
+    3) otherwise try systemctl reload haproxy;
+    4) on failure, return the error text instead of raising.
     """
     MASTER_SOCK = "/run/haproxy/master.sock"
     attempts: list[str] = []
@@ -344,12 +344,12 @@ def reload_haproxy() -> str:
 
 def ensure_whitelist_file() -> None:
     """
-    Гарантируем, что файл whitelist.geo существует.
+    Makes sure whitelist.geo exists.
 
-    ВАЖНО:
-    - Никакого chown здесь больше нет.
-    - Права/владельца выставляет Ansible на хосте.
-    - Если нет прав создать файл/каталог — просто пишем warning и продолжаем.
+    IMPORTANT:
+    - There is no chown here any more.
+    - Ansible sets the owner and mode on the host.
+    - Without the rights to create the file or directory, a warning is logged and that is all.
     """
     try:
         base_dir = os.path.dirname(WHITELIST_FILE) or "/"
@@ -366,7 +366,7 @@ def ensure_whitelist_file() -> None:
             try:
                 with open(WHITELIST_FILE, "w", encoding="utf-8") as f:
                     f.write("# HAProxy whitelist\n")
-                # chmod можно оставить — владелец файла тот, кто его создал
+                # chmod can stay: the file belongs to whoever created it
                 os.chmod(WHITELIST_FILE, 0o644)
                 logger.info("Created whitelist file %s", WHITELIST_FILE)
             except PermissionError as e:
@@ -381,11 +381,11 @@ def ensure_whitelist_file() -> None:
 
 def ensure_whitelist_global_file() -> None:
     """
-    Гарантируем, что файл whitelist.ip существует.
+    Makes sure whitelist.ip exists.
 
-    Аналогично ensure_whitelist_file:
-    - Без chown.
-    - Права/владельца выставляет Ansible.
+    Like ensure_whitelist_file:
+    - No chown.
+    - Ansible sets the owner and mode.
     """
     try:
         base = os.path.dirname(WHITELIST_GLOBAL_FILE) or "/etc/haproxy"
@@ -414,11 +414,11 @@ def ensure_whitelist_global_file() -> None:
         logger.error("ensure_whitelist_global_file unexpected error: %s", exc)
 
 
-# ─────────────── чтение журнала ───────────────
+# ─────────────── reading the log ───────────────
 
 
 def read_log_file() -> tuple[str, str, int]:
-    """Возвращает (лог, метод_чтения, кол-во_строк)."""
+    """Returns (log, how it was read, number of lines)."""
     try:
         with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as handle:
             log = handle.read()
@@ -428,13 +428,13 @@ def read_log_file() -> tuple[str, str, int]:
         return f"Error reading logs: {exc}", "error", 0
 
 
-# ────────────────────── logs helper (через root-демон) ─────────────────
+# ────────────────────── logs helper (through the root daemon) ─────────────────
 
 
 def _controld_request(cmd: str, timeout: float = 10.0) -> str:
     """
-    Отправляет команду в haproxy-controld по Unix-сокету и возвращает raw-ответ.
-    Протокол: одна строка команды + '\n', ответ текстом, сокет закрывается сервером.
+    Sends a command to haproxy-controld over the Unix socket and returns the raw answer.
+    Protocol: one command line + '\n', a text answer, the server closes the socket.
     """
     if not CONTROL_SOCKET:
         return "ERROR control socket is empty"
@@ -464,15 +464,15 @@ def _controld_request(cmd: str, timeout: float = 10.0) -> str:
 
 def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     """
-    Перенесено в root-демон (haproxy-controld).
+    Moved into the root daemon (haproxy-controld).
 
-    Здесь — только RPC-вызов:
+    Only the RPC call is here:
       logs-ip <ip> <limit>
-    Ответ:
+    Answer:
       OK <base64(text)>
       ERROR <message>
     """
-    # минимальная валидация, чтобы не слать мусор
+    # minimal validation, so no junk is sent
     try:
         ipaddress.ip_address(ip)
     except ValueError:
@@ -488,10 +488,10 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     if not resp.startswith("OK"):
         return [f"[ERROR] unexpected response: {resp[:200]}"]
 
-    # ожидаем формат: "OK <b64>"
+    # expected: "OK <b64>"
     parts = resp.split(" ", 1)
     if len(parts) == 1:
-        # "OK" без payload
+        # "OK" without a payload
         return []
     b64 = parts[1].strip()
     if not b64:
@@ -507,17 +507,17 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
 def controld_get_attackers(timeout: float = 10.0) -> dict:
     """
-    Запрашивает у root-демона haproxy-controld агрегированную статистику по логам
-    (для «Аналитика угроз»: топ IP по 400 и 451).
+    Asks the root daemon haproxy-controld for log statistics
+    (for "Threat analytics": the top addresses by 400 and 451).
 
-    RPC-команда:
+    RPC command:
       logs-attackers
 
-    Ожидаемый ответ демона:
+    Expected answer:
       OK <base64(json)>
       ERROR <message>
 
-    Возвращает dict (распарсенный JSON) либо dict с ключом 'error'.
+    Returns the parsed JSON as a dict, or a dict with the key 'error'.
     """
     resp = _controld_request("logs-attackers", timeout=timeout)
 
@@ -525,7 +525,7 @@ def controld_get_attackers(timeout: float = 10.0) -> dict:
         return {"error": "empty response from controld", "diagnostic": {"source": "controld"}}
 
     if resp.startswith("ERROR"):
-        # оставляем сообщение как есть, чтобы видеть текст демона
+        # keep the message as it is, so the daemon's text is visible
         return {"error": resp, "diagnostic": {"source": "controld"}}
 
     if not resp.startswith("OK"):
@@ -533,10 +533,10 @@ def controld_get_attackers(timeout: float = 10.0) -> dict:
 
     payload = resp.split(" ", 1)[1].strip() if " " in resp else ""
     if not payload:
-        # допустимо: OK без данных
+        # allowed: OK without data
         return {"code_400": [], "code_451": [], "diagnostic": {"source": "controld", "empty": True}}
 
-    # 1) основной вариант: base64(json)
+    # 1) the usual form: base64(json)
     try:
         raw = base64.b64decode(payload.encode("ascii"), validate=False)
         text = raw.decode("utf-8", "replace")
@@ -547,7 +547,7 @@ def controld_get_attackers(timeout: float = 10.0) -> dict:
     except Exception:
         pass
 
-    # 2) fallback: демону проще вернуть JSON напрямую без b64
+    # 2) fallback: the daemon may find it easier to return JSON without b64
     try:
         data = json.loads(payload)
         if isinstance(data, dict):

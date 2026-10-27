@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Клиент для общения с root-сервисом haproxy-certd.
+"""Client of the root service haproxy-certd.
 
-По умолчанию работает через выделенный Unix-сокет easy-ha-proxy.
-с использованием схемы http+unix:// (requests-unixsocket).
+By default it talks over easy-ha-proxy's own Unix socket, with the
+http+unix:// scheme (requests-unixsocket).
 
-Если:
-  - не установлен requests-unixsocket ИЛИ
-  - переменная окружения CERTD_SOCKET_PATH пустая,
+If:
+  - requests-unixsocket is not installed, OR
+  - the environment variable CERTD_SOCKET_PATH is empty,
 
-клиент откатывается на TCP (http://127.0.0.1:5001/api/v1), чтобы
-можно было временно поднимать certd через встроенный Flask.
+the client falls back to TCP (http://127.0.0.1:5001/api/v1), so certd can
+be run temporarily on the built-in Flask server.
 """
 
 import logging
@@ -23,27 +23,27 @@ import requests
 
 try:
     import requests_unixsocket  # type: ignore[import]
-except Exception:  # pragma: no cover - опциональная зависимость
+except Exception:  # pragma: no cover - optional dependency
     requests_unixsocket = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
-# ----- Транспорт: Unix-сокет по умолчанию -----
+# ----- Transport: a Unix socket by default -----
 
-# Путь к сокету certd. Можно переопределить через CERTD_SOCKET_PATH,
-# но по умолчанию он такой же, как в unit-файле haproxy-certd.service.
+# Path to certd's socket. CERTD_SOCKET_PATH overrides it; the default is
+# the same as in the haproxy-certd.service unit file.
 CERTD_SOCKET_PATH = os.environ.get(
     "CERTD_SOCKET_PATH", "/run/easy-ha-proxy/haproxy-certd.sock"
 )
 
 if requests_unixsocket is not None and CERTD_SOCKET_PATH:
-    # Основной режим: HTTP через Unix-сокет
+    # The usual mode: HTTP over a Unix socket
     encoded = quote_plus(CERTD_SOCKET_PATH)
     CERTD_API_BASE = f"http+unix://{encoded}/api/v1"
     _session: requests.Session = requests_unixsocket.Session()  # type: ignore[assignment]
     log.debug("haproxy-certd: using UNIX socket %s", CERTD_SOCKET_PATH)
 else:
-    # Fallback на TCP — только если нет requests-unixsocket или нет пути к сокету.
+    # TCP fallback, only without requests-unixsocket or a socket path.
     CERTD_API_BASE = os.environ.get(
         "CERTD_HTTP_BASE",
         "http://127.0.0.1:5001/api/v1",
@@ -62,23 +62,23 @@ else:
 
 
 def _post(url: str, **kwargs) -> requests.Response:
-    """Обёртка вокруг session.post для единообразия."""
+    """session.post, wrapped for uniformity."""
     return _session.post(url, **kwargs)
 
 
 def _get(url: str, **kwargs) -> requests.Response:
-    """Обёртка вокруг session.get для единообразия."""
+    """session.get, wrapped for uniformity."""
     return _session.get(url, **kwargs)
 
 
 class CertdUnavailable(RuntimeError):
-    """certd не отвечает."""
+    """certd does not answer."""
 
 
 def _dns_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Запрос к certd по разделу DNS-провайдеров.
+    """A request to certd's DNS provider section.
 
-    Ответ никогда не содержит сохранённых секретов: их не отдаёт сам демон.
+    The answer never contains stored secrets: the daemon does not hand them out.
     """
 
     url = f"{CERTD_API_BASE}/certs/{path}"
@@ -114,10 +114,10 @@ def dns_provider_delete(name: str) -> Dict[str, Any]:
 
 
 def _delivery_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Запрос к certd по разделу доставки сертификатов.
+    """A request to certd's certificate delivery section.
 
-    Тот же контракт, что и у DNS-провайдеров: секреты уходят к демону и
-    никогда не возвращаются -- он их не отдаёт.
+    The same contract as for the DNS providers: secrets go to the daemon and
+    never come back -- it does not hand them out.
     """
 
     url = f"{CERTD_API_BASE}/certs/{path}"
@@ -179,10 +179,10 @@ def cert_delivery_test(name: str) -> Dict[str, Any]:
 
 
 def get_certs_status_for_domains(domains: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Запрашивает статусы сертификатов для списка доменов.
+    """Asks for the certificate state of a list of domains.
 
-    Возвращает dict[domain] = status_dict.
-    При ошибке возвращает {}.
+    Returns dict[domain] = status_dict.
+    Returns {} on an error.
     """
     if not domains:
         return {}
@@ -222,7 +222,7 @@ def get_certs_status_for_domains(domains: List[str]) -> Dict[str, Dict[str, Any]
         )
         return {}
 
-    # !!! ВАЖНО: сохраняю твою семантику: certd возвращает {"items": {...}}
+    # IMPORTANT: the established semantics stay: certd returns {"items": {...}}
     items = data.get("items") or {}
     if not isinstance(items, dict):
         return {}
@@ -232,10 +232,10 @@ def get_certs_status_for_domains(domains: List[str]) -> Dict[str, Dict[str, Any]
 
 def _normalize_cert_issue_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Приводит ответ certd к виду, удобному для UI:
-      - гарантирует поля ok, status, message
-      - аккумулирует ошибки из results[*].stderr/stdout и pem_*
-      - отдельно вытаскивает строки Detail:/Hint: из вывода certbot
+    Shapes certd's answer for the UI:
+      - makes sure ok, status and message are there
+      - gathers errors from results[*].stderr/stdout and pem_*
+      - pulls the Detail:/Hint: lines out of certbot's output
     """
     res: Dict[str, Any] = dict(data or {})
 
@@ -245,11 +245,11 @@ def _normalize_cert_issue_response(data: Dict[str, Any]) -> Dict[str, Any]:
     if "status" not in res:
         res["status"] = "OK" if ok else "ERROR"
 
-    # Если уже есть message — не переопределяем
+    # If there is a message already, leave it
     if res.get("message"):
         return res
 
-    # Если есть error — поднимаем его в message
+    # If there is an error, lift it into message
     if res.get("error"):
         res["message"] = str(res["error"])
         return res
@@ -282,7 +282,7 @@ def _normalize_cert_issue_response(data: Dict[str, Any]) -> Dict[str, Any]:
 
         lines = combined.splitlines()
 
-        # Вытаскиваем человекочитаемые строки: Detail:/Hint:
+        # Pull out the readable lines: Detail:/Hint:
         detail_lines: list[str] = []
         hint_lines: list[str] = []
         for ln in lines:
@@ -298,8 +298,8 @@ def _normalize_cert_issue_response(data: Dict[str, Any]) -> Dict[str, Any]:
             block_lines.extend(hint_lines)
             detail_blocks.append("\n".join(block_lines))
 
-        # Полный вывод на случай, если нужно копнуть глубже
-        # (ограничим, чтобы не заливать весь UI)
+        # The full output, in case a closer look is needed
+        # (limited, so it does not flood the UI)
         trimmed = lines
         if len(trimmed) > 20:
             trimmed = trimmed[:20] + ["... (truncated)"]
@@ -308,7 +308,7 @@ def _normalize_cert_issue_response(data: Dict[str, Any]) -> Dict[str, Any]:
             f"{header} exit code {rc}\n" + "\n".join(trimmed)
         )
 
-    # Ошибки при сборке PEM / reload HAProxy
+    # Errors while building the PEM or reloading HAProxy
     pem_rc = res.get("pem_rc")
     if pem_rc not in (None, 0):
         pem_err = (res.get("pem_stderr") or res.get("pem_stdout") or "").strip()
@@ -356,10 +356,10 @@ def upload_cert_for_site(
     filename: str = "cert.pem",
     external_ca_id: str = "",
 ) -> Dict[str, Any]:
-    """Отправляет PEM-сертификат в haproxy-certd для сохранения от имени сайта.
+    """Sends a PEM certificate to haproxy-certd to be saved for a site.
 
-    Используется HTTP multipart/form-data:
-      - cert_file (файл)
+    Uses HTTP multipart/form-data:
+      - cert_file (the file)
       - site_name
       - domain
     """
@@ -408,7 +408,7 @@ def upload_cert_for_site(
             "error": f"unexpected JSON from certd: {data!r}",
         }
 
-    # Гарантируем флаг ok и человекочитаемое message для UI
+    # Make sure the UI gets an ok flag and a readable message
     res: Dict[str, Any] = dict(data)
     ok = bool(res.get("ok"))
     res["ok"] = ok
@@ -421,7 +421,7 @@ def upload_cert_for_site(
 
 
 def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
-    """Упрощённая обёртка: статус для одного домена."""
+    """A simpler wrapper: the state of one domain."""
     domain = (domain or "").strip()
     if not domain:
         return {}
@@ -432,11 +432,11 @@ def get_cert_status_for_domain(domain: str) -> Dict[str, Any]:
 
 def backup_certs() -> Dict[str, Any]:
     """
-    Просит haproxy-certd сделать ZIP-бэкап сертификатов и вернуть его в base64.
+    Asks haproxy-certd for a ZIP backup of the certificates, in base64.
 
-    Возвращает dict с полями:
+    Returns a dict with the fields:
       - ok: bool
-      - archive_b64: str (если ok)
+      - archive_b64: str (if ok)
       - message, error, ...
     """
     url = f"{CERTD_API_BASE}/certs/backup"
@@ -471,9 +471,9 @@ def backup_certs() -> Dict[str, Any]:
 
 def restore_certs_from_archive(archive_bytes: bytes) -> Dict[str, Any]:
     """
-    Отправляет ZIP-бэкап (bytes) в haproxy-certd для восстановления.
+    Sends a ZIP backup (bytes) to haproxy-certd to restore.
 
-    Возвращает dict с ok, message, error, pem_rc и т.п.
+    Returns a dict with ok, message, error, pem_rc and so on.
     """
     if not archive_bytes:
         res = {"ok": False, "error": "archive_bytes is empty"}
@@ -519,11 +519,11 @@ def issue_cert_for_domain(
     dns_profile: str = "",
     dns_propagation: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Просит haproxy-certd выпустить/обновить сертификат для домена.
+    """Asks haproxy-certd to issue or renew a domain's certificate.
 
-    Используется в routes_haproxy_sites (кнопка "Выпустить сертификат").
-    С профилем DNS-провайдера challenge будет DNS-01 — единственный способ
-    получить wildcard.
+    Used by routes_haproxy_sites (the "Issue certificate" button).
+    With a DNS provider profile the challenge is DNS-01 -- the only way to
+    get a wildcard.
     """
     domain = (domain or "").strip()
     if not domain:
@@ -546,7 +546,7 @@ def issue_cert_for_domain(
         resp = _post(
             url,
             json=payload,
-            timeout=600.0,  # certbot может работать довольно долго
+            timeout=600.0,  # certbot can take quite a while
         )
     except Exception as exc:  # pylint: disable=broad-except
         log.warning("haproxy-certd issue failed (%s): %s", url, exc)
@@ -858,7 +858,7 @@ def set_revoked_client_certificates(fingerprints: List[str]) -> Dict[str, Any]:
 
 
 def list_all_certs() -> Dict[str, Any]:
-    """Запрашивает у haproxy-certd полный список сертификатов."""
+    """Asks haproxy-certd for the full list of certificates."""
 
     url = f"{CERTD_API_BASE}/certs/list"
 
@@ -922,7 +922,7 @@ def list_all_certs() -> Dict[str, Any]:
 
 
 def delete_haproxy_cert(path: str) -> Dict[str, Any]:
-    """Удаляет PEM из каталога HAProxy через haproxy-certd."""
+    """Deletes a PEM from HAProxy's directory through haproxy-certd."""
     path = (path or "").strip()
     if not path:
         return {"ok": False, "error": "empty path"}
@@ -958,7 +958,7 @@ def delete_haproxy_cert(path: str) -> Dict[str, Any]:
 
 
 def delete_le_cert(lineage: str) -> Dict[str, Any]:
-    """Удаляет lineage Let's Encrypt через certbot delete."""
+    """Deletes a Let's Encrypt lineage with certbot delete."""
     lineage = (lineage or "").strip()
     if not lineage:
         return {"ok": False, "error": "empty lineage"}

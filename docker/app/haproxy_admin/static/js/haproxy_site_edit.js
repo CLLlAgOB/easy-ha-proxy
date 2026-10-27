@@ -1,20 +1,20 @@
-// JS for страницы редактирования site HAProxy
-// - показ/скрытие блока удаления
-// - динамический list backend-servers (main/backup)
-// - сохранение site through /haproxy/sites/save (JSON API)
-// - модалка for выпуска сертификата Let's Encrypt
-// - переключатель режима сертификата (LE / manual)
-// - загрузка своего сертификата through /haproxy/sites/<site>/upload-cert
-// - "красивый" выбор файла сертификата (file-picker)
-// - переключатель режима site: HTTP (TLS termination) vs TCP passthrough (SNI)
-//   and скрытие/отключение HTTP-only настроек
-// - переключение L4/L7 health-check and принудительный L4 for tcp_passthrough
+// The HAProxy site edit page:
+// - showing and hiding the delete block
+// - the dynamic list of backend servers (main/backup)
+// - saving the site through /haproxy/sites/save (JSON API)
+// - the Let's Encrypt issuance dialog
+// - the certificate mode switch (LE / manual)
+// - uploading an own certificate through /haproxy/sites/<site>/upload-cert
+// - a friendlier certificate file picker
+// - the site mode switch: HTTP (TLS termination) vs TCP passthrough (SNI),
+//   hiding and disabling the HTTP-only settings
+// - switching the health check between L4 and L7, and forcing L4 for tcp_passthrough
 
 (function () {
   try {
     console.log("[haproxy_site_edit] script loaded");
 
-    // -------- Блок удаления site --------
+    // -------- The delete block --------
     var btnShow = document.getElementById("btn-show-delete");
     var box = document.getElementById("delete-confirm");
     var btnCancel = document.getElementById("btn-delete-cancel");
@@ -44,7 +44,7 @@
     var errExcludeBody = document.getElementById("err-exclude-body");
     var btnAddErrRule = document.getElementById("btn-add-err-rule");
 
-    // Значения by default for плейсхолдеров host/port from верхних полей
+    // Default host/port placeholders from the fields above
     var backendIpInput = document.getElementById("field-backend-ip");
     var backendPortInput = document.getElementById("field-backend-port");
 
@@ -138,7 +138,7 @@
       tdWeight.appendChild(inpWeight);
       tr.appendChild(tdWeight);
 
-      // кнопка удаления
+      // the delete button
       var tdActions = makeCell();
       tdActions.style.textAlign = "center";
       var btnRemove = document.createElement("button");
@@ -211,7 +211,7 @@
       tdMethods.appendChild(inpMethods);
       tr.appendChild(tdMethods);
 
-      // Кнопка удаления
+      // The delete button
       var tdActions = makeCell();
       tdActions.style.textAlign = "center";
       var btnRemove = document.createElement("button");
@@ -226,7 +226,7 @@
     }
 
     // ------------------------------------------------------------------
-    // Вспомогательные функции for сохранения
+    // Helpers for saving
     // ------------------------------------------------------------------
     var editForm = document.getElementById("site-edit-form");
     var saveStatus = document.getElementById("site-save-status");
@@ -251,7 +251,7 @@
 
         var host = hostInput && hostInput.value.trim();
         var portStr = portInput && portInput.value.trim();
-        if (!host || !portStr) return; // пустые строки игнорируем
+        if (!host || !portStr) return; // empty lines are ignored
 
         var port = parseInt(portStr, 10);
         if (!port || port <= 0 || port > 65535) return;
@@ -287,7 +287,7 @@
       var el = document.getElementById(id);
       if (!el) return undefined;
       var v = el.value;
-      if (v === "") return undefined; // "by default" → not пишем key
+      if (v === "") return undefined; // "default" -> the key is not written
       if (v === "true") return true;
       if (v === "false") return false;
       return undefined;
@@ -295,7 +295,7 @@
 
     function effectiveSelectBool(el, fallbackStr) {
       // el.value: "", "true", "false"
-      // if "", берём el.dataset.effDefault (if есть), иначе fallbackStr
+      // for "", take el.dataset.effDefault (if any), otherwise fallbackStr
       if (!el) return fallbackStr === "true";
       var v = el.value;
       if (v === "true") return true;
@@ -318,9 +318,9 @@
       var el = document.getElementById(id);
       if (!el) return undefined;
       var v = el.value;
-      if (v === "") return undefined; // "by default" → not пишем key
-      if (v === "rules") return true;      // включить err_exclude
-      if (v === "ignore") return "ignore"; // полностью игнорировать errors
+      if (v === "") return undefined; // "default" -> the key is not written
+      if (v === "rules") return true;      // switch err_exclude on
+      if (v === "ignore") return "ignore"; // ignore errors entirely
       return undefined;
     }
 
@@ -349,7 +349,7 @@
         } else if (pathType === "path_reg") {
           rule.path_reg = pathVal;
         } else {
-          // неизвестный type — игнорируем
+          // an unknown type is ignored
           return;
         }
 
@@ -380,7 +380,7 @@
         return el ? el.value.trim() : "";
       }
 
-      // Обязательные fields
+      // Required fields
       site.name = text("field-name");
       site.domain = text("field-domain");
 
@@ -397,7 +397,7 @@
         site.tcp_passthrough = tcpPassVal;
       }
 
-      // Backend (single) — опциональный
+      // A single backend is optional
       var bip = text("field-backend-ip");
       if (bip) {
         site.backend_ip = bip;
@@ -426,7 +426,7 @@
         }
       }
 
-      // Тристейт-флаги (HTTP-fields + tcp_check)
+      // Three-state flags (the HTTP fields + tcp_check)
       [
         "redirect_to_https",
         "authelia_enabled",
@@ -716,7 +716,7 @@ if (effTcpPassForCheck === true) {
         }
       }
 
-      // Key types (for LE-режима)
+      // Key types (for the LE mode)
       var ktArr = [];
       var ecdsaEl = document.getElementById("key_type_ecdsa");
       if (ecdsaEl && ecdsaEl.checked) ktArr.push("ecdsa");
@@ -738,12 +738,12 @@ if (effTcpPassForCheck === true) {
         site.err_exclude = errRules;
       }
 
-      // --- TCP passthrough: вычищаем HTTP-only настройки ---
+      // --- TCP passthrough: clear the HTTP-only settings ---
       var selTcpPass = document.getElementById("tcp_passthrough");
       var effTcpPass = effectiveSelectBool(selTcpPass, "false");
       if (effTcpPass === true) {
-// Чистим HTTP-only fields, чтобы not путаться in YAML/генерации
-// (alt_names and balance оставляем: они используются and in tcp_passthrough)
+// Clear the HTTP-only fields, so the YAML and the rendering are not confused
+// (alt_names and balance stay: tcp_passthrough uses them as well)
 delete site.backend_host;
 
 delete site.le_managed;
@@ -777,7 +777,7 @@ delete site.err_size;
 delete site.err_ignore_rules;
 delete site.err_exclude;
 
-// L7 health-fields (for tcp_passthrough not используются)
+// The L7 health fields (tcp_passthrough does not use them)
 delete site.health_uri;
 delete site.health_status;
 
@@ -785,7 +785,7 @@ delete site.health_status;
 delete site.hsts;
 delete site.default_favicon;
 
-// Sticky/cookie/HTTP timeouts — not актуальны for TCP passthrough
+// Sticky/cookie/HTTP timeouts do not apply to TCP passthrough
 delete site.sticky;
 delete site.cookie_name;
 delete site.cookie_attrs;
@@ -794,7 +794,7 @@ delete site.session_timeout;
 delete site.http_keepalive_timeout;
 delete site.prefer_last_server;
 
-// Geo/ACL (in текущей реализации у тебя это HTTP-only)
+// Geo/ACL (HTTP-only in the current implementation)
 delete site.geo;
 delete site.geo_mode;
 delete site.geo_countries;
@@ -808,7 +808,7 @@ delete site.geo_countries;
     }
 
     // ------------------------------------------------------------------
-    // Обработка сабмита формы: валидация + POST /haproxy/sites/save
+    // Form submit: validation + POST /haproxy/sites/save
     // ------------------------------------------------------------------
     if (editForm) {
       editForm.addEventListener("submit", function (e) {
@@ -832,8 +832,8 @@ delete site.geo_countries;
           return;
         }
 
-        // Логика: либо есть хотя бы one backend in таблице,
-        // либо заполнена pair backend_ip + backend_port.
+        // Either the table has at least one backend,
+        // or the backend_ip + backend_port pair is filled in.
         var hasServers =
           Array.isArray(payload.site.servers) && payload.site.servers.length > 0;
 
@@ -908,7 +908,7 @@ delete site.geo_countries;
       console.warn("[haproxy_site_edit] edit form not found");
     }
 
-    // Делегирование клика by кнопке "✕" for удаления строки backend
+    // Delegated click on the "✕" button that removes a backend row
     if (backendBody) {
       backendBody.addEventListener("click", function (e) {
         var target = e.target;
@@ -922,7 +922,7 @@ delete site.geo_countries;
       });
     }
 
-    // Кнопка "+ Add backend server"
+    // The "+ Add backend server" button
     if (btnAddBackend && backendBody) {
       btnAddBackend.addEventListener("click", function () {
         var tr = createBackendRow({});
@@ -932,7 +932,7 @@ delete site.geo_countries;
       });
     }
 
-    // Делегирование клика by кнопке "✕" for удаления rules err_exclude
+    // Delegated click on the "✕" button that removes an err_exclude rule
     if (errExcludeBody) {
       errExcludeBody.addEventListener("click", function (e) {
         var target = e.target;
@@ -946,7 +946,7 @@ delete site.geo_countries;
       });
     }
 
-    // Кнопка "+ Add rule err_exclude"
+    // The "+ Add rule err_exclude" button
     if (btnAddErrRule && errExcludeBody) {
       btnAddErrRule.addEventListener("click", function () {
         var tr = createErrRuleRow({});
@@ -1004,13 +1004,13 @@ delete site.geo_countries;
     updateChallengeUI();
 
     // ------------------------------------------------------------------
-    // Модальное окно логов выпуска сертификата
+    // The certificate issuance log dialog
     // ------------------------------------------------------------------
     var modal = document.getElementById("issue-cert-modal");
     var modalLog = document.getElementById("issue-cert-log");
     var modalClose = document.getElementById("issue-cert-modal-close");
 
-    // Точка статуса in заголовке модалки
+    // The status dot in the dialog's title
     var issueDot = document.getElementById("issue-cert-status-dot");
     var issueDotTimer = null;
 
@@ -1252,7 +1252,7 @@ delete site.geo_countries;
           return;
         }
 
-        // Простая проверка расширения (можно ужесточить позже)
+        // A simple extension check (can be made stricter later)
         var fname = file.name.toLowerCase();
         if (!(fname.endsWith(".pem") || fname.endsWith(".crt") || fname.endsWith(".cer"))) {
           setUploadStatus("Unexpected file extension. Expected .pem, .crt, or .cer.", true);
@@ -1298,8 +1298,8 @@ delete site.geo_countries;
     }
 
     // ------------------------------------------------------------------
-    // Переключение видимости health_uri/health_status (L4 vs L7)
-    // + принудительный L4 for tcp_passthrough
+    // Showing health_uri/health_status (L4 vs L7)
+    // + forcing L4 for tcp_passthrough
     // ------------------------------------------------------------------
     function applyHealthVisibility() {
   var selTcpPass = document.getElementById("tcp_passthrough");
@@ -1317,7 +1317,7 @@ delete site.geo_countries;
   var inputUri = document.getElementById("health_uri");
   var inputStatus = document.getElementById("health_status");
 
-  // TCP passthrough: показываем выбор типа TCP/SSL-check, and HTTP L4/L7 — скрываем
+  // TCP passthrough: show the TCP/SSL check choice, hide HTTP L4/L7
   if (isTcpMode) {
     if (rowHttpTcpCheck) rowHttpTcpCheck.style.display = "none";
     if (selHttp) selHttp.disabled = true;
@@ -1333,7 +1333,7 @@ delete site.geo_countries;
     return;
   }
 
-  // HTTP mode: показываем L4/L7 selector and управляем health_uri/health_status
+  // HTTP mode: show the L4/L7 selector and drive health_uri/health_status
   if (rowHttpTcpCheck) rowHttpTcpCheck.style.display = "";
   if (selHttp) selHttp.disabled = false;
 
@@ -1342,7 +1342,7 @@ delete site.geo_countries;
 
   if (!selHttp) return;
 
-  // Value реально выбранное пользователем, либо "эффективный default"
+  // The value the user actually chose, or the "effective default"
   var effective = (selHttp.value && selHttp.value.length) ? selHttp.value : (selHttp.dataset.effDefault || "false");
   var isL4 = (effective === "true");
 
@@ -1354,7 +1354,7 @@ delete site.geo_countries;
 }
 
     // ------------------------------------------------------------------
-    // Переключение видимости/доступности HTTP-only блоков when tcp_passthrough
+    // Showing and enabling the HTTP-only blocks for tcp_passthrough
     // ------------------------------------------------------------------
     function setBlockVisible(block, visible) {
       if (!block) return;
@@ -1365,7 +1365,7 @@ delete site.geo_countries;
       if (!container) return;
       var els = container.querySelectorAll("input, select, textarea, button");
       els.forEach(function (el) {
-        // Кнопки "Close" in модалке and прочее not трогаем — это not внутри контейнеров
+        // The dialog's "Close" buttons and the like are left alone: they are not inside these containers
         el.disabled = !!disabled;
       });
     }
@@ -1374,7 +1374,7 @@ delete site.geo_countries;
   var selTcpPass = document.getElementById("tcp_passthrough");
   var isTcpMode = effectiveSelectBool(selTcpPass, "false");
 
-  // Блоки (часть — HTTP-only)
+  // The blocks (some of them HTTP-only)
   var blockBackendHost = document.getElementById("block-backend-host");
 
   var blockHttpLeft = document.getElementById("block-http-left");
@@ -1387,10 +1387,10 @@ delete site.geo_countries;
   var rowFavicon = document.getElementById("row-default-favicon");
 
   // In TCP passthrough:
-  // - скрываем backend_host (Host header not применим)
-  // - оставляем alt_names and balance, but скрываем cert + sticky/cookie/HTTP-only таймауты
-  // - скрываем HTTP-only правую колонку
-  // - скрываем hsts
+  // - hide backend_host (a Host header does not apply)
+  // - keep alt_names and balance, but hide the certificate and the sticky/cookie/HTTP-only timeouts
+  // - hide the HTTP-only right-hand column
+  // - hide hsts
   if (isTcpMode) {
     setBlockVisible(blockBackendHost, false);
     setInputsDisabled(blockBackendHost, true);
@@ -1435,7 +1435,7 @@ delete site.geo_countries;
 
   }
 
-  // Health-check зависит and от tcp_passthrough тоже
+  // The health check depends on tcp_passthrough too
   applyHealthVisibility();
 }
 
@@ -1476,7 +1476,7 @@ delete site.geo_countries;
       }
     }
 
-    // Инициализация: иногда DOMContentLoaded уже прошёл (if скрипт внизу)
+    // Start-up: DOMContentLoaded may have fired already (if the script is at the bottom)
     (function initNow() {
       applyTcpModeVisibility();
       applyAccessGateLock();

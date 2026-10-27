@@ -17,15 +17,15 @@ from .certd_client import upload_cert_for_site
 @bp.post("/haproxy/sites/save")
 def haproxy_site_save():
     """
-    Сохранение сайта (создание/редактирование) через JSON.
+    Saves a site (create or edit) from JSON.
 
-    Ожидает тело запроса:
+    Expects the request body:
       {
         "site": { ... },
-        "original_name": "старое_имя_или_пусто"
+        "original_name": "the old name, or empty"
       }
 
-    Возвращает JSON:
+    Returns JSON:
       { "ok": true,  "message": "..." }
       { "ok": false, "error": "..." }
     """
@@ -127,15 +127,15 @@ def haproxy_site_upload_cert(site_name):
         detail="" if res.get("ok") else str(res.get("error") or "")[:500],
     )
 
-    # upload_cert_for_site всегда возвращает dict с ok/message|error
+    # upload_cert_for_site always returns a dict with ok/message|error
     return jsonify(res), 200
 
 
 @bp.post("/haproxy/sites/<name>/delete")
 def haproxy_site_delete(name):
     """
-    Удаление сайта по имени (JSON-эндпоинт).
-    Пока фронт этим не пользуется, но можно будет подвязать delete по AJAX.
+    Deletes a site by name (a JSON endpoint).
+    The front end does not use it yet; a delete over AJAX could be wired to it.
     """
     ok, msg = delete_site(name)
     record_request(

@@ -35,7 +35,7 @@ function initSitesListPage(table) {
           document.dispatchEvent(
             new CustomEvent("easy-ha-proxy:config-state-changed")
           );
-          // Удаляем line from table
+          // Remove the row from the table
           const row = table.querySelector(`tr[data-site-name="${CSS.escape(name)}"]`);
           if (row && row.parentNode) {
             row.parentNode.removeChild(row);
@@ -95,7 +95,7 @@ function initSiteEditPage(form) {
               statusEl.textContent = data.message || "Saved";
               statusEl.classList.add("ok");
             }
-            // После успешного сохранения — назад to списку
+            // Saved: back to the list
             setTimeout(() => {
               window.location.href = "/haproxy/sites";
             }, 600);
@@ -143,7 +143,7 @@ function buildSitePayload(form) {
   const bp = num("field-backend-port");
   if (bp !== null) site.backend_port = bp;
 
-  // alt_names: by строкам
+  // alt_names: one per line
   const altEl = document.getElementById("field-alt-names");
   if (altEl) {
     const lines = altEl.value
@@ -155,7 +155,7 @@ function buildSitePayload(form) {
     }
   }
 
-  // Основные флаги
+  // The main flags
   site.redirect_to_https = checked("field-redirect-to-https");
   site.authelia_enabled = checked("field-authelia-enabled");
   site.zero_trust = checked("field-zero-trust");
@@ -197,7 +197,7 @@ function buildSitePayload(form) {
 
   site.prefer_last_server = checked("field-prefer-last-server");
 
-  // Баланс / sticky
+  // Balancing / sticky
   const balance = val("field-balance");
   if (balance) site.balance = balance;
 
@@ -210,7 +210,7 @@ function buildSitePayload(form) {
   const cookieAttrs = val("field-cookie-attrs");
   if (cookieAttrs) site.cookie_attrs = cookieAttrs;
 
-  // Ограничения
+  // Limits
   const mrr = num("field-max-req-rate");
   if (mrr !== null) site.max_req_rate = mrr;
 

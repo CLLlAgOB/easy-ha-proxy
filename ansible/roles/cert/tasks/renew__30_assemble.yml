@@ -1,5 +1,5 @@
 ---
-# 30 — сборка PEM и условный reload HAProxy
+# 30 -- building the PEMs and reloading HAProxy if needed
 - name: Trigger PEM assembly + HAProxy reload
   ansible.builtin.debug:
     msg: "Trigger PEM assembly & HAProxy reload (if present)"

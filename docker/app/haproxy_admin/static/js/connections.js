@@ -83,7 +83,7 @@ function toggleAutoRefresh() {
 document.addEventListener('DOMContentLoaded', () => {
   fetchConnections();
 
-  // Add кнопку автообновления
+  // Add the auto-refresh button
   const autoBtn = document.createElement('button');
   autoBtn.id = 'auto-btn';
   autoBtn.className = 'btn';

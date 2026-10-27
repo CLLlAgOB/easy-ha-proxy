@@ -72,14 +72,14 @@
     }
   }
 
-  // запуск when готовности DOM
+  // run once the DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', load);
   } else {
     load();
   }
 
-  // привязка to типовым кнопкам “renew”, if есть
+  // bind to the usual "renew" buttons, if any
   const attach = () => {
     const candidates = [
       '[data-action="refresh"]',
@@ -96,15 +96,15 @@
     attach();
   }
 
-  // on всякий — экспорт функции in глобал (можно дергать from консоли)
+  // just in case: the function is exported globally (it can be called from the console)
   window.fetchSitesStatus = load;
 })();
 
-// включаем compact by default (and помним выбор)
+// compact mode is on by default (and the choice is remembered)
 document.addEventListener('DOMContentLoaded', () => {
   const panel = document.getElementById('sites-panel');
   if (!panel) return;
-  // восстановить прошлый выбор or включить by default
+  // restore the previous choice, or switch it on by default
   const saved = localStorage.getItem('sites-compact');
   if (saved === '1' || saved === null) panel.classList.add('compact');
 

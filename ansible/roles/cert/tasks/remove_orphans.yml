@@ -1,7 +1,7 @@
 # roles/cert/tasks/remove_orphans.yml
 # DRY-RUN: ansible-playbook site.yml -t remove_site -e cleanup_dry_run=true
 # DELETE : ansible-playbook site.yml -t remove_site
-# Требуется: certbot_domains собран в pre_tasks. Опц.: haproxy_certs_dir.
+# Requires: certbot_domains collected in pre_tasks. Optional: haproxy_certs_dir.
 
 - name: "Validate that certbot_domains is defined"
   tags: [never, remove_site]
@@ -9,7 +9,7 @@
     that:
       - certbot_domains is defined
       - certbot_domains | length >= 1
-    fail_msg: "certbot_domains не определён или пуст. Собери его в pre_tasks."
+    fail_msg: "certbot_domains is undefined or empty. Collect it in pre_tasks."
 
 - name: "Normalize the target domain list from pre_tasks"
   tags: [never, remove_site]
@@ -17,7 +17,7 @@
     _target_domains: "{{ certbot_domains | unique | list }}"
     _certs_dir: "{{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
 
-# 1) Текущие линеки certbot
+# 1) certbot's current lineages
 - name: "Find current Certbot lineages (/etc/letsencrypt/renewal/*.conf)"
   tags: [never, remove_site]
   find:
@@ -36,7 +36,7 @@
                           | map('regex_replace','\\.conf$','')
                           | list }}"
 
-# 2) Осиротевшие линеки = те, чей root (без -rsa/-ecdsa) ∉ _target_domains
+# 2) Orphaned lineages = those whose root (without -rsa/-ecdsa) is not in _target_domains
 - name: "Calculate orphaned Certbot lineages by exact name"
   tags: [never, remove_site]
   set_fact:
@@ -54,7 +54,7 @@
         | sort
       }}
 
-# 3) Поиск *.pem и определение «осиротевших»
+# 3) Find the *.pem files and decide which are "orphaned"
 - name: "Find assembled HAProxy PEM files"
   tags: [never, remove_site]
   find:
@@ -64,7 +64,7 @@
   register: haproxy_pems
   failed_when: false
 
-# 3a) *.pem к удалению — по ТЕЧНОМУ соответствию orphan_lineages (если есть)
+# 3a) *.pem to delete -- by an EXACT match with orphan_lineages (if any)
 - name: "Calculate PEM files matching orphaned lineages"
   tags: [never, remove_site]
   set_fact:
@@ -76,7 +76,7 @@
         | list
       }}
 
-# 3b) *.pem к удалению — по КОРНЮ (если линейки уже нет, а файл остался)
+# 3b) *.pem to delete -- by the ROOT (the lineage is gone but the file stayed)
 - name: "Calculate orphaned PEM files by root domain"
   tags: [never, remove_site]
   set_fact:
@@ -102,13 +102,12 @@
         | list
       }}
 
-# 3b-bis) Имена, удерживаемые на запасном сертификате
+# 3b-bis) Names held on a standby certificate
 #
-# Такой PEM выглядит осиротевшим ровно тогда, когда он нужнее всего: линейки
-# Let's Encrypt для него может уже не быть — например, её удалили как раз
-# потому, что домен переведён на другой удостоверяющий центр. Снести его
-# означало бы положить сайт, и именно в тот момент, когда оператор считает,
-# что всё под контролем.
+# Such a PEM looks orphaned exactly when it is needed most: its Let's Encrypt
+# lineage may already be gone -- deleted, say, precisely because the domain
+# moved to another certificate authority. Removing it would take the site
+# down, at the very moment the operator thinks everything is under control.
 - name: "Find names held on a standby certificate"
   tags: [never, remove_site]
   find:
@@ -134,7 +133,7 @@
         | list
       }}
 
-# 3c) Итоговый список *.pem к удалению (и защита от коллизий с активными линейками)
+# 3c) The final list of *.pem to delete (guarded against clashing with active lineages)
 - name: "Build the final orphaned PEM removal list"
   tags: [never, remove_site]
   set_fact:
@@ -147,19 +146,19 @@
         | sort
       }}
 
-# 4) DRY-RUN отчёт
+# 4) The DRY-RUN report
 - name: "DRY-RUN | Show lineages and PEM files that would be removed"
   tags: [never, remove_site]
   debug:
     msg:
-      - "Целевые домены      : {{ _target_domains | sort }}"
-      - "Найденные линеки    : {{ current_lineages | sort }}"
-      - "Линеки к удалению   : {{ orphan_lineages }}"
-      - "*.pem   к удалению  : {{ orphan_pems }}"
-      - "удерживаются        : {{ pinned_pems | default([]) }}"
+      - "Target domains      : {{ _target_domains | sort }}"
+      - "Lineages found      : {{ current_lineages | sort }}"
+      - "Lineages to delete  : {{ orphan_lineages }}"
+      - "*.pem   to delete   : {{ orphan_pems }}"
+      - "held                : {{ pinned_pems | default([]) }}"
       - "cleanup_dry_run={{ cleanup_dry_run | default(false) | bool }}"
 
-# 5) Удаляем ТОЛЬКО если не dry-run
+# 5) Delete ONLY when it is not a dry run
 - name: "certbot delete orphaned lineages (non-interactive, quiet)"
   tags: [never, remove_site]
   command:

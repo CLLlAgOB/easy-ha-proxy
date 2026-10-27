@@ -183,6 +183,17 @@
     "sites must be a list of at most 500 items": "sites должен быть списком не более чем из 500 элементов",
     "tcp_proxies must be a list of at most 500 items": "tcp_proxies должен быть списком не более чем из 500 элементов",
     "unknown": "неизвестно",
-    "unknown error": "неизвестная ошибка"
+    "unknown error": "неизвестная ошибка",
+    "Could not run docker exec for Authelia: ": "Не удалось запустить docker exec для Authelia: ",
+    "Failed to save configuration.yml: ": "Ошибка сохранения configuration.yml: ",
+    "Could not read configuration.yml: ": "Не удалось прочитать configuration.yml: ",
+    "Could not build the rules YAML: ": "Не удалось сформировать YAML правил: ",
+    "Invalid YAML in rules_yaml: ": "Некорректный YAML в rules_yaml: ",
+    "rules_yaml must be a YAML list": "rules_yaml должен быть YAML-списком",
+    "At most 500 rules are allowed": "Допускается не более 500 правил",
+    "access_control rules updated": "Правила access_control обновлены",
+    "The password must be 8 to 1024 characters long": "Пароль должен содержать от 8 до 1024 символов",
+    "Could not hash the password: ": "Не удалось вычислить хэш пароля: ",
+    "Log file not found": "Файл логов не найден"
   }
 }

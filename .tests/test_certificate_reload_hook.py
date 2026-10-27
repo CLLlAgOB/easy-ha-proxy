@@ -44,7 +44,7 @@ RDG = CERT / "tasks" / "rdg.yml"
 class TheReloadRuns(unittest.TestCase):
     def setUp(self):
         self.source = HOOK.read_text(encoding="utf-8")
-        self.tail = self.source.split("# Перезагрузка HAProxy")[1]
+        self.tail = self.source.split("# Reload HAProxy.")[1]
 
     def test_the_script_still_uses_pipefail(self):
         # Not a thing to remove -- the rest of the script wants it. The

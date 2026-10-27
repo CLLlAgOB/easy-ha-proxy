@@ -1,5 +1,5 @@
 # roles/haproxy-admin/tasks/journald-retention.yml
-# Настройка удержания journald ~10 дней + ежедневная вакуум-очистка
+# journald retention of about 10 days + a daily vacuum
 
 - name: "journald | Ensure drop-in dir"
   ansible.builtin.file:

@@ -1,10 +1,10 @@
 ---
 # roles/haproxy-admin/tasks/dns-plugins.yml
-# Установка certbot-плагинов DNS-01.
+# Installing certbot's DNS-01 plugins.
 #
-# Certbot здесь — snap, поэтому плагины тоже snap'ы, и их версия должна
-# совпадать с версией самого certbot. Пакетов apt (python3-certbot-dns-*) на
-# этой платформе нет: они относятся к certbot из репозитория дистрибутива.
+# Certbot is a snap here, so the plugins are snaps too, and their version must
+# match certbot's own. There are no apt packages (python3-certbot-dns-*) on
+# this platform: those belong to the distribution's certbot.
 
 - name: "dns-plugins | Ensure the credentials directory"
   ansible.builtin.file:

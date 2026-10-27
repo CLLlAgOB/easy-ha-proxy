@@ -92,6 +92,7 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
+{% if (authelia_notification_language | default('en')) == 'ru' %}
 ✅ Сертификат выпущен/продлён
 
 Хост:          ${HOSTNAME}
@@ -106,6 +107,22 @@ Content-Transfer-Encoding: 8bit
 SHA256 FP:     ${FINGERPRINT}
 
 Источник: Certbot deploy-hook (910-mail-notify.sh)
+{% else %}
+✅ Certificate issued or renewed
+
+Host:          ${HOSTNAME}
+Lineage:       ${LINEAGE_DIR}
+Domains (SAN): ${DOMAINS}
+
+Validity:
+  notBefore:   ${START_DATE}
+  notAfter:    ${END_DATE}
+
+Serial:        ${SERIAL_HEX}
+SHA256 FP:     ${FINGERPRINT}
+
+Source: Certbot deploy hook (910-mail-notify.sh)
+{% endif %}
 EOF
 then
   # Certificate issuance/renewal must remain successful if the relay is not

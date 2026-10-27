@@ -1,7 +1,7 @@
 # routes_runtime.py
 #
-# Временные операции над серверами HAProxy. Меняющие маршруты требуют
-# superadmin и защищены CSRF, как остальные формы приложения.
+# Temporary operations on HAProxy's servers. The routes that change anything
+# need superadmin and are protected by CSRF, like the application's other forms.
 
 from __future__ import annotations
 

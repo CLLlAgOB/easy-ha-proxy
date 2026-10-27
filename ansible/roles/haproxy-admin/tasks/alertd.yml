@@ -1,6 +1,6 @@
 ---
 # roles/haproxy-admin/tasks/alertd.yml
-# Установка root-демона easy-ha-proxy-alertd (движок оповещений).
+# Installing the root daemon easy-ha-proxy-alertd (the alert engine).
 
 - name: "easy-ha-proxy-alertd | Install script"
   ansible.builtin.copy:

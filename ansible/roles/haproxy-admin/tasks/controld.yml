@@ -1,5 +1,5 @@
 ---
-# Установка и настройка root-демона haproxy-controld
+# Installing and configuring the root daemon haproxy-controld
 
 - name: "haproxy-controld | Install required packages (ipset, socat)"
   ansible.builtin.package:

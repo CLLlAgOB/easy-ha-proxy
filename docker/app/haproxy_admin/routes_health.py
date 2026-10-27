@@ -140,7 +140,7 @@ def api_health_logs_docker():
 
 @bp.get("/api/health/capabilities")
 def api_health_capabilities():
-    """Возвращает разрешённые управляющие действия (из healthd)."""
+    """Returns the control actions allowed (by healthd)."""
     try:
         data = healthd_capabilities()
         return jsonify(data)
@@ -151,13 +151,13 @@ def api_health_capabilities():
 
 @bp.post("/api/health/control")
 def api_health_control():
-    """Прокси к /api/v1/control в healthd.
+    """A proxy to healthd's /api/v1/control.
 
-    Дополнительно:
-    - Требуем superadmin (по Remote-Groups), чтобы управление не было доступно
-      обычным пользователям.
-    - Валидируем action относительно capabilities, чтобы нельзя было вызвать
-      произвольную команду даже если кто-то подделает запрос.
+    In addition:
+    - superadmin is required (by Remote-Groups), so ordinary users cannot
+      control anything.
+    - action is checked against the capabilities, so no arbitrary command
+      can be called even if someone forges the request.
     """
     payload = request.get_json(silent=True) or {}
     kind = (payload.get("kind") or "").strip().lower()
@@ -182,7 +182,7 @@ def api_health_control():
     if action not in {"start", "stop", "restart", "reload"}:
         return jsonify({"ok": False, "error": "action must be start|stop|restart|reload"}), 400
 
-    # проверяем, что action разрешён
+    # check that the action is allowed
     try:
         caps = healthd_capabilities()
         if caps.get("ok") is not True:
@@ -225,7 +225,7 @@ def api_health_control():
 
     try:
         data = healthd_control(kind=kind, name=name, action=action)
-        # нормализуем поле текста для UI
+        # normalise the text field for the UI
         if isinstance(data, dict) and "text" not in data:
             out = data.get("stdout") or ""
             err = data.get("stderr") or ""

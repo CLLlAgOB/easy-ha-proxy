@@ -26,20 +26,20 @@ bp_authelia_acl = Blueprint(
     "authelia_acl", __name__, url_prefix="/authelia/acl"
 )
 
-# Значение по умолчанию — как в authelia-configd
+# The default, the same as in authelia-configd
 DEFAULT_SOCKET_PATH = "/run/easy-ha-proxy/authelia-configd.sock"
 CONFIGD_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def _configd_socket_path() -> str:
-    """Путь к Unix-сокету authelia-configd (можно переопределить через Flask-конфиг)."""
+    """Path to authelia-configd's Unix socket (can be overridden in the Flask config)."""
     return current_app.config.get("AUTHELIA_CONFIG_SOCKET", DEFAULT_SOCKET_PATH)
 
 
 def _configd_request(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Отправляет один JSON-запрос демону authelia-configd и возвращает ответ.
-    Протокол — одна строка JSON -> одна строка JSON.
+    Sends one JSON request to the authelia-configd daemon and returns its answer.
+    The protocol is one JSON line in, one JSON line out.
     """
     sock_path = _configd_socket_path()
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -94,12 +94,12 @@ AUTHELIA_DEFAULT_HEALTH_URL = "http://127.0.0.1:9091/api/health"
 
 def _wait_for_authelia_healthy(timeout: float = 30.0, interval: float = 1.0) -> bool:
     """
-    Ждём, пока Authelia начнёт отвечать на health-check.
+    Waits until Authelia answers its health check.
 
-    Порядок приоритетов:
-      1) Переменная окружения AUTHELIA_HEALTHCHECK_URL (Docker/.env, systemd Environment)
-      2) Flask-конфиг AUTHELIA_HEALTHCHECK_URL (если где-то выставлен)
-      3) Константа AUTHELIA_DEFAULT_HEALTH_URL
+    In order of preference:
+      1) the environment variable AUTHELIA_HEALTHCHECK_URL (Docker/.env, systemd Environment)
+      2) the Flask config AUTHELIA_HEALTHCHECK_URL (if set anywhere)
+      3) the constant AUTHELIA_DEFAULT_HEALTH_URL
     """
     env_url = os.getenv("AUTHELIA_HEALTHCHECK_URL")
     if env_url:
@@ -124,23 +124,23 @@ def _wait_for_authelia_healthy(timeout: float = 30.0, interval: float = 1.0) -> 
 
 
 # ---------------------------------------------------------------------
-# Загрузка / сохранение правил через authelia-configd
+# Loading and saving the rules through authelia-configd
 # ---------------------------------------------------------------------
 
 
 def load_rules_yaml() -> str:
     """
-    Запрашивает у authelia-configd YAML-список access_control.rules.
+    Asks authelia-configd for access_control.rules as a YAML list.
 
-    Запрос:
+    Request:
       { "action": "rules_get" }
 
-    Ожидаемый ответ:
-      { "ok": true, "rules_yaml": "<yaml-список rules>" }
-      или (на всякий случай) { "ok": true, "rules": [ ... ] }
+    Expected answer:
+      { "ok": true, "rules_yaml": "<yaml list of rules>" }
+      or, just in case, { "ok": true, "rules": [ ... ] }
 
-    При ошибке выбрасываем исключение, чтобы интерфейс не подменял реальные
-    правила пустым редактируемым списком.
+    An error raises, so the interface never replaces the real rules with an
+    empty editable list.
     """
     resp = _configd_request({"action": "rules_get"})
 
@@ -178,15 +178,15 @@ def load_rules_yaml() -> str:
 
 def save_rules_from_yaml(rules_yaml: str) -> Tuple[bool, str]:
     """
-    Передаёт YAML-список rules в authelia-configd для сохранения:
+    Hands the YAML list of rules to authelia-configd to save:
 
-      { "action": "rules_set", "rules_yaml": "<yaml-список rules>" }
+      { "action": "rules_set", "rules_yaml": "<yaml list of rules>" }
 
-    Ожидаемый ответ:
+    Expected answer:
       { "ok": true, "message": "..." }
-      или { "ok": false, "error": "..." }
+      or { "ok": false, "error": "..." }
 
-    Возвращает (ok, message) для UI.
+    Returns (ok, message) for the UI.
     """
     resp = _configd_request(
         {
@@ -210,22 +210,22 @@ def save_rules_from_yaml(rules_yaml: str) -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------
-# Парсинг Authelia rules -> UI-структура
+# Parsing Authelia rules into the UI structure
 # ---------------------------------------------------------------------
 
 
 def _normalize_domain(rule: Dict[str, Any]) -> str:
     """
-    Приводим поле domain (или domain_regex, если нужно будет) в строку
-    вида 'example.com, foo.example.com'.
-    Сейчас опираемся только на domain.
+    Turns the domain field (or domain_regex, should it be needed) into a
+    string such as 'example.com, foo.example.com'.
+    Only domain is used for now.
     """
     dom = rule.get("domain")
     if isinstance(dom, str):
         return dom
     if isinstance(dom, list):
         return ", ".join(str(d) for d in dom if d)
-    # На всякий случай — если вдруг там что-то ещё
+    # Just in case there is something else there
     return ""
 
 
@@ -233,12 +233,12 @@ def _parse_subject_for_ui(
     subject: Any,
 ) -> Tuple[List[str], List[str], bool, bool]:
     """
-    Разбираем subject в формате Authelia в более простой вид для UI:
+    Breaks an Authelia subject down into a simpler shape for the UI:
 
-      groups: список имён групп (без 'group:')
-      users:  список имён пользователей (без 'user:')
-      flag_authenticated: есть ли 'group:authenticated'
-      flag_anonymous:     есть ли 'group:anonymous'
+      groups: group names (without 'group:')
+      users:  user names (without 'user:')
+      flag_authenticated: whether 'group:authenticated' is there
+      flag_anonymous:     whether 'group:anonymous' is there
     """
     groups: List[str] = []
     users: List[str] = []
@@ -323,8 +323,8 @@ def _parse_subject_for_ui(
 
 def _parse_resources_for_ui(resources: Any) -> str:
     """
-    Приводим resources в текстовое поле (textarea): по одному паттерну на строку.
-    Если ресурсов нет — возвращаем пустую строку.
+    Turns resources into a text field (textarea): one pattern per line.
+    No resources gives an empty string.
     """
     if resources is None:
         return ""
@@ -338,8 +338,8 @@ def _parse_resources_for_ui(resources: Any) -> str:
 
 def _backend_rule_to_ui(rule: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Преобразуем исходный rule из configuration.yml в структуру,
-    удобную для шаблона authelia_acl_edit.html.
+    Turns a rule from configuration.yml into the structure
+    the authelia_acl_edit.html template uses.
     """
     domains = _normalize_domain(rule)
     policy = str(rule.get("policy") or "").strip()
@@ -354,8 +354,8 @@ def _backend_rule_to_ui(rule: Dict[str, Any]) -> Dict[str, Any]:
         "policy": policy or "one_factor",
         "groups": ", ".join(groups),
         "users": ", ".join(users),
-        # флаг authenticated оставляем только для обратной совместимости;
-        # в шаблоне он больше не используется
+        # the authenticated flag is kept only for backward compatibility;
+        # the template no longer uses it
         "flag_authenticated": flag_auth,
         "flag_anonymous": flag_anon,
         "resources": resources_text,
@@ -376,8 +376,8 @@ def _empty_ui_rule() -> Dict[str, Any]:
 
 def _attach_indices(ui_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Проставляем каждому правилу стабильный индекс idx (0..N-1),
-    который используется в имени полей формы.
+    Gives each rule a stable index idx (0..N-1),
+    used in the names of the form's fields.
     """
     for idx, rule in enumerate(ui_rules):
         rule["idx"] = idx
@@ -386,12 +386,11 @@ def _attach_indices(ui_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _group_ui_rules_by_domain(ui_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Группируем UI-правила по доменам ТОЛЬКО для отображения.
+    Groups the UI rules by domain, ONLY for display.
 
-    ВАЖНО: порядок в итоговом YAML не меняется — он всегда определяется
-    порядком элементов в списке backend_rules / ui_rules.
-    Здесь мы просто раскладываем их по секциям "по доменам" для удобства
-    редактирования.
+    IMPORTANT: the order in the resulting YAML does not change -- it is always
+    the order of the items in backend_rules / ui_rules. They are only laid
+    out in per-domain sections here, to make editing easier.
     """
     groups_map: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 
@@ -411,10 +410,10 @@ def _group_ui_rules_by_domain(ui_rules: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 # ---------------------------------------------------------------------
-# Обратное преобразование: UI -> Authelia rule
+# The way back: UI -> Authelia rule
 # ---------------------------------------------------------------------
 def _parse_bool(form: Dict[str, Any], field: str) -> bool:
-    """Удобный парсер чекбоксов (on/true/1)."""
+    """A forgiving checkbox parser (on/true/1)."""
     val = form.get(field)
     if val is None:
         return False
@@ -423,9 +422,9 @@ def _parse_bool(form: Dict[str, Any], field: str) -> bool:
 
 def _collect_ui_rules_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Собираем все правила из формы.
+    Collects every rule from the form.
 
-    Ожидаем hidden-поле total_rules = N.
+    Expects the hidden field total_rules = N.
     """
     try:
         total = int(form.get("total_rules", "0"))
@@ -436,9 +435,9 @@ def _collect_ui_rules_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     for idx in range(total):
         prefix = f"rule-{idx}-"
-        # Считаем строку "пустой", если нет доменов / групп / пользователей / ресурсов
-        # и не отмечен флаг anonymous. Поле policy игнорируем, чтобы значение
-        # по умолчанию one_factor не делало строку "непустой".
+        # A row is "empty" if it has no domains, groups, users or resources
+        # and the anonymous flag is not set. policy is ignored, so that its
+        # default one_factor does not make the row "non-empty".
         has_any = False
         for key in ("domains", "groups", "users", "resources"):
             if form.get(prefix + key):
@@ -466,13 +465,13 @@ def _convert_form_to_backend_rules(
     form: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     """
-    Преобразуем данные формы в backend-правила Authelia.
+    Turns the form data into Authelia's backend rules.
 
-    Возвращаем (backend_rules, ui_rules, errors), где:
-      * backend_rules — список dict для записи в configuration.yml;
-      * ui_rules      — список dict для повторного отображения формы
-                        (все, включая "пустые" строки);
-      * errors        — список строк с сообщениями об ошибках валидации.
+    Returns (backend_rules, ui_rules, errors), where:
+      * backend_rules -- the dicts to write to configuration.yml;
+      * ui_rules      -- the dicts to show the form again
+                        (all of them, "empty" rows included);
+      * errors        -- the validation error messages.
     """
     ui_rules = _collect_ui_rules_from_form(form)
     backend_rules: List[Dict[str, Any]] = []
@@ -486,12 +485,12 @@ def _convert_form_to_backend_rules(
         resources_raw = (ui.get("resources") or "").strip()
         flag_anon = bool(ui.get("flag_anonymous"))
 
-        # Полностью пустая строка — игнорируем
+        # An entirely empty row is ignored
         if not (domains_raw or groups_raw or users_raw or resources_raw or flag_anon):
             continue
 
-        # Минимальная валидация: для Authelia в правиле должна быть
-        # хотя бы domain (или domain_regex, но мы его пока не поддерживаем) и policy.
+        # Minimal validation: an Authelia rule needs at least a domain
+        # (or domain_regex, which is not supported yet) and a policy.
         if not domains_raw:
             errors.append(f"Rule #{idx + 1}: the 'Domain(s)' field is empty.")
             continue
@@ -541,7 +540,7 @@ def _convert_form_to_backend_rules(
 
 
 def _move_rule(rules: List[Dict[str, Any]], index: int, direction: str) -> None:
-    """direction: 'up' или 'down'."""
+    """direction: 'up' or 'down'."""
     if direction == "up" and index > 0:
         rules[index - 1], rules[index] = rules[index], rules[index - 1]
     elif direction == "down" and index < len(rules) - 1:
@@ -555,13 +554,13 @@ def _render_acl_template(
     load_error: str | None = None,
 ):
     """
-    Единая точка отрисовки шаблона, чтобы везде одинаково считать
-    groups / total_rules / active_group_domain.
+    The one place that renders the template, so groups / total_rules /
+    active_group_domain are worked out the same way everywhere.
 
-    ВАЖНО:
-      - active_group_domain=None  → выбрать первый домен (поведение по умолчанию);
-      - active_group_domain=""    → явно хотим группу "без домена / новые";
-      - active_group_domain="foo" → явно хотим домен foo.
+    IMPORTANT:
+      - active_group_domain=None  -> pick the first domain (the default);
+      - active_group_domain=""    -> the group "without a domain / new" explicitly;
+      - active_group_domain="foo" -> the domain foo explicitly.
     """
     if not ui_rules and not load_error:
         ui_rules = [_empty_ui_rule()]
@@ -570,8 +569,8 @@ def _render_acl_template(
     groups = _group_ui_rules_by_domain(ui_rules)
     total_rules = len(ui_rules)
 
-    # Если домен НЕ передали (None) и группы есть — по умолчанию первый домен.
-    # Если передали "" или конкретный домен — не трогаем.
+    # If no domain was passed (None) and there are groups, the first domain is the default.
+    # "" or a specific domain is left as it is.
     if active_group_domain is None and groups:
         active_group_domain = str(groups[0].get("domain") or "")
 
@@ -586,13 +585,13 @@ def _render_acl_template(
 
 
 # ---------------------------------------------------------------------
-# Маршрут /authelia/acl/
+# The /authelia/acl/ route
 # ---------------------------------------------------------------------
 @bp_authelia_acl.route("/", methods=["GET", "POST"])
 def edit_rules():
     form = request.form
 
-    # --- GET: просто показываем правила ---
+    # --- GET: just show the rules ---
     if request.method == "GET":
         try:
             rules_yaml = load_rules_yaml()
@@ -611,24 +610,24 @@ def edit_rules():
         ui_rules = [_backend_rule_to_ui(r) for r in backend_rules]
         return _render_acl_template(ui_rules)
 
-    # --- POST: обрабатываем разные действия ---
+    # --- POST: the various actions ---
     active_group_domain = (form.get("active_group_domain") or "").strip()
 
-    # 1) Добавить правило
+    # 1) Add a rule
     if "add_rule" in form:
         ui_rules = _collect_ui_rules_from_form(form)
 
-        # Новое правило всегда без домена → попадает в группу "Новые / без домена"
+        # A new rule never has a domain, so it lands in the group "New / without a domain"
         new_rule = _empty_ui_rule()
         ui_rules.append(new_rule)
 
-        # Явно просим открыть группу без домена (active_group_domain == "")
+        # Ask for the group without a domain to be open (active_group_domain == "")
         return _render_acl_template(
             ui_rules,
             active_group_domain="",
         )
 
-    # 2) Удалить конкретное правило
+    # 2) Delete a rule
     if "delete_rule" in form:
         ui_rules = _collect_ui_rules_from_form(form)
         try:
@@ -641,7 +640,7 @@ def edit_rules():
 
         return _render_acl_template(ui_rules, active_group_domain=active_group_domain)
 
-    # 3) Переместить вверх/вниз
+    # 3) Move up or down
     if "move_rule_up" in form:
         ui_rules = _collect_ui_rules_from_form(form)
         try:
@@ -664,7 +663,7 @@ def edit_rules():
 
         return _render_acl_template(ui_rules, active_group_domain=active_group_domain)
 
-    # 4) Сохранить (submit_action = save / apply)
+    # 4) Save (submit_action = save / apply)
     submit_action = form.get("submit_action")
     if submit_action in ("save", "apply"):
         backend_rules, ui_rules, errors = _convert_form_to_backend_rules(form)
@@ -672,7 +671,7 @@ def edit_rules():
         if errors:
             for msg in errors:
                 flash(msg, "danger")
-            # Просто перерисовываем форму без сохранения
+            # Just render the form again, without saving
             return _render_acl_template(
                 ui_rules,
                 active_group_domain=active_group_domain,
@@ -701,8 +700,8 @@ def edit_rules():
         ok, msg = save_rules_from_yaml(rules_yaml)
         flash(msg, "success" if ok else "danger")
 
-        # Пересобираем ui_rules из backend_rules, чтобы отобразить уже то,
-        # что реально ушло в конфиг (линейный список без групп)
+        # Rebuild ui_rules from backend_rules, so what is shown is what
+        # actually went into the configuration (a flat list without groups)
         ui_rules = [_backend_rule_to_ui(r) for r in backend_rules]
 
         if not ok:
@@ -712,7 +711,7 @@ def edit_rules():
             )
 
         if submit_action == "apply":
-            # Сначала сохранили правила, теперь перезапускаем Authelia через configd
+            # The rules are saved; now restart Authelia through configd
             flash(
                 'Authelia rules saved successfully. Restarting Authelia...',
                 "success",
@@ -748,10 +747,10 @@ def edit_rules():
                             "success",
                         )
 
-        # PRG-паттерн: после успешного сохранения делаем redirect
+        # Post/Redirect/Get: redirect after a successful save
         return redirect(url_for("authelia_acl.edit_rules"))
 
-    # На всякий случай: просто перерисовать текущую форму
+    # Just in case: render the current form again
     ui_rules = _collect_ui_rules_from_form(form)
     return _render_acl_template(
         ui_rules,

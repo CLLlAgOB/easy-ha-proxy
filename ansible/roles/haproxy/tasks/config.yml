@@ -278,4 +278,4 @@
   environment:
     HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
 
-# «Ensure service running» больше НЕ трогаем — handlers сделают всё сами
+# "Ensure service running" is NOT done here any more -- the handlers do it all

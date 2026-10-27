@@ -4,7 +4,7 @@
 {% block header_title %}Edit TCP proxy {{ tcp.name }}{% endblock %}
 
 {% block header_buttons %}
-{# Оборачиваем навигацию and кнопку удаления in one flex-контейнер #}
+{# The navigation and the delete button share one flex container #}
 <div style="display:flex; align-items:center; flex-wrap:wrap; gap:8px; width:100%;">
   {% include "_haproxy_nav.html" %}
   <button type="button" class="btn btn-danger" id="btn-show-delete" style="margin-left:auto;">
@@ -37,7 +37,7 @@
 </div>
 {% endif %}
 
-{# ───── Основная форма редактирования TCP proxies ─────────────────────────── #}
+{# ───── The main TCP proxy edit form ─────────────────────────── #}
 <div class="card">
   <div class="card-header">
     <h2>TCP proxy parameters</h2>
@@ -192,7 +192,7 @@
         </tbody>
       </table>
 
-      {# Общая панель действий: слева +backend, справа Save #}
+      {# The shared action bar: +backend on the left, Save on the right #}
       <div style="
            display:flex;
            justify-content:space-between;
@@ -216,7 +216,7 @@
   </form>
 </div>
 
-{# ───── Блок подтверждения удаления TCP proxies ──────────────────────────── #}
+{# ───── TCP proxy delete confirmation ──────────────────────────── #}
 <div class="card" id="delete-confirm" style="display:none; border-left: 4px solid var(--error); margin-top:16px;">
   <div class="card-header">
     <strong>Delete TCP proxy {{ tcp.name }}?</strong>

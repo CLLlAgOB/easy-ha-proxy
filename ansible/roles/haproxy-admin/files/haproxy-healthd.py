@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-haproxy-healthd — root-демон мониторинга для haproxy-admin.
+haproxy-healthd -- the root monitoring daemon of haproxy-admin.
 
-HTTP API поверх Unix-socket:
+An HTTP API over a Unix socket:
 
-- статусы systemd unit'ов (allow-list + glob-паттерны);
-- статусы Docker контейнеров (allow-list);
-- журналы (journalctl / docker logs) для этих объектов;
-- лента событий (смена состояния между снимками).
+- the state of systemd units (an allow-list plus glob patterns);
+- the state of Docker containers (an allow-list);
+- the logs (journalctl / docker logs) of these objects;
+- an event feed (state changes between snapshots).
 
-Изменение "по лучшим практикам" для снижения CPU:
-- по умолчанию НЕТ фонового polling (status собирается только по запросу);
-- есть TTL-кэш статуса (cache_ttl_seconds), чтобы UI мог автообновляться без частых systemctl/docker;
-- раскрытие unit_globs (systemctl list-unit-files) кэшируется (units_rescan_seconds);
-- systemctl show ограничен --property=... (меньше вывода/парсинга).
-- docker inspect использует --format (меньше данных, без JSON парсинга).
+To keep the CPU use down:
+- there is NO background polling by default (the state is collected on request only);
+- the state is cached for cache_ttl_seconds, so the UI can refresh itself without frequent systemctl/docker calls;
+- expanding unit_globs (systemctl list-unit-files) is cached (units_rescan_seconds);
+- systemctl show is limited with --property=... (less output to parse);
+- docker inspect uses --format (less data, no JSON parsing).
 
-Фоновый polling можно включить, если нужно:
+Background polling can be switched on if needed:
   ENV HEALTHD_BACKGROUND_POLL=1
 """
 
@@ -56,7 +56,7 @@ CONFIG_PATH = os.environ.get(
     "HEALTHD_CONFIG", "/opt/haproxy-admin/healthd.json")
 SOCKET_GROUP = os.environ.get("HEALTHD_SOCKET_GROUP", "hadmin")
 
-# Каталог для journalctl --cursor-file (сервер хранит курсоры сам, чтобы UI не таскал cursor).
+# The directory for journalctl --cursor-file (the server keeps the cursors, so the UI does not carry them).
 CURSOR_DIR = os.environ.get(
     "HEALTHD_CURSOR_DIR", "/run/haproxy-healthd-cursors")
 
@@ -87,7 +87,7 @@ CONTROL_TOKEN = os.environ.get("HEALTHD_TOKEN", "").strip()
 HEALTHD_UNIT = os.environ.get(
     "HEALTHD_UNIT", "haproxy-healthd.service").strip()
 
-# По умолчанию: НЕТ фонового polling.
+# By default: NO background polling.
 BACKGROUND_POLL = (os.environ.get(
     "HEALTHD_BACKGROUND_POLL", "0").strip() == "1")
 
@@ -111,28 +111,28 @@ def _unit_base(unit: str) -> str:
 
 
 def _control_allowed_actions(kind: str, name: str) -> Tuple[str, ...]:
-    """Возвращает допустимые действия для ресурса согласно политике."""
+    """Returns the actions the policy allows for a resource."""
     kind = (kind or "").strip().lower()
     nm = (name or "").strip()
 
     if kind == "docker":
-        # Критические контейнеры — только restart
+        # Critical containers: restart only
         if nm in {"haproxy-admin", "authelia", "authelia-redis"}:
             return ("restart",)
         return ("start", "stop", "restart")
 
     if kind == "systemd":
         base = _unit_base(nm)
-        # HAProxy: разрешаем reload и restart
+        # HAProxy: reload and restart
         if base == "haproxy":
             return ("reload", "restart")
         # Authelia*: start/stop/restart
         if base.startswith("authelia"):
             return ("start", "stop", "restart")
-        # Сам healthd: только restart
+        # healthd itself: restart only
         if base == _unit_base(HEALTHD_UNIT):
             return ("restart",)
-        # Остальные демоны: start/stop/restart
+        # The other daemons: start/stop/restart
         return ("start", "stop", "restart")
 
     return tuple()
@@ -146,10 +146,10 @@ class HealthdConfig:
     poll_interval_seconds: int
     events_max: int
 
-    # TTL-кэш статуса (сек). 0 => всегда собирать заново по запросу.
+    # The state cache's TTL (s). 0 => always collect afresh on request.
     cache_ttl_seconds: int
 
-    # Как часто пересканировать systemctl list-unit-files для glob'ов (сек).
+    # How often to rescan systemctl list-unit-files for the globs (s).
     units_rescan_seconds: int
 
     # logs limits
@@ -164,7 +164,7 @@ def _utc_now_iso() -> str:
 
 
 def _run_cmd(argv: List[str], timeout: int = 10) -> Tuple[int, str, str]:
-    """Выполнить команду, вернуть (rc, stdout, stderr)."""
+    """Run a command and return (rc, stdout, stderr)."""
     try:
         p = subprocess.run(
             argv,
@@ -183,7 +183,7 @@ def _run_cmd(argv: List[str], timeout: int = 10) -> Tuple[int, str, str]:
         return 1, "", str(e)
 
 
-# ───── небольшой TTL/LRU кэш для /logs ─────
+# ───── a small TTL/LRU cache for /logs ─────
 
 class _TTLCache:
     def __init__(self, ttl_seconds: float, max_entries: int, max_value_bytes: int):
@@ -332,7 +332,7 @@ def _load_config(path: str) -> HealthdConfig:
     )
 
 
-# systemd status (минимальный набор свойств)
+# systemd state (a minimal set of properties)
 _SYSTEMCTL_PROPS = (
     "LoadState",
     "ActiveState",
@@ -411,7 +411,7 @@ def _systemd_display_sub_state(
 
 def _get_systemd_status(unit: str) -> Dict[str, Any]:
     cmd = ["systemctl", "show", unit, "--no-pager"]
-    # Ограничиваем вывод нужными property.
+    # Limit the output to the properties needed.
     for p in _SYSTEMCTL_PROPS:
         cmd += ["--property", p]
 
@@ -446,8 +446,8 @@ def _get_systemd_status(unit: str) -> Dict[str, Any]:
     }
 
 
-# docker status (через --format, без большого JSON)
-# --format использует Go templates.
+# docker state (through --format, without the big JSON)
+# --format takes Go templates.
 _DOCKER_INSPECT_TEMPLATE = "\n".join([
     "Status={{.State.Status}}",
     "Running={{.State.Running}}",
@@ -519,21 +519,21 @@ class _State:
 
         self.events: deque[Dict[str, Any]] = deque(maxlen=cfg.events_max)
 
-        # внутренние метрики кэша
+        # the cache's own metrics
         self._last_collect_mono: float = 0.0
         self._prev_sig: Dict[str, str] = {}
 
-        # кэш раскрытия glob'ов
+        # the glob expansion cache
         self._units_rescan_mono: float = 0.0
         self._units_expanded_cache: List[str] = []
 
-        # stampede lock: чтобы параллельные запросы не запускали сбор одновременно
+        # stampede lock: parallel requests do not start a collection at the same time
         self._collect_lock = threading.Lock()
 
         self._logs_cache = _TTLCache(
             LOGS_CACHE_TTL, LOGS_CACHE_MAX, LOGS_CACHE_MAX_VALUE_BYTES)
 
-        # cursor-file синхронизация для follow-режима логов
+        # cursor-file synchronisation for following the logs
         self._cursor_locks: Dict[str, threading.Lock] = {}
         self._cursor_locks_guard = threading.RLock()
         try:
@@ -568,9 +568,9 @@ class _State:
 
     def snapshot(self, refresh: bool = False) -> Dict[str, Any]:
         """
-        Возвращает кэш статуса.
-        Если refresh=True — принудительно собирает заново.
-        Если refresh=False — собирает только если TTL истёк или кэша ещё нет.
+        Returns the cached state.
+        refresh=True collects it afresh.
+        refresh=False collects only if the TTL has run out or there is no cache yet.
         """
         ttl = int(self.cfg.cache_ttl_seconds or 0)
 
@@ -588,7 +588,7 @@ class _State:
                 out["meta"]["cache_age_seconds"] = int(now - last)
                 return out
 
-        # TTL истёк — собираем
+        # The TTL ran out: collect
         return self.force_refresh()
 
     def force_refresh(self) -> Dict[str, Any]:
@@ -599,7 +599,7 @@ class _State:
             now_mono = time.monotonic()
 
             with self.lock:
-                # события: сравнить сигнатуры
+                # events: compare the signatures
                 for key, new_val in sig.items():
                     old_val = self._prev_sig.get(key)
                     if old_val is None:
@@ -618,7 +618,7 @@ class _State:
                 self.cache = new_cache
                 self._last_collect_mono = now_mono
 
-        # выдаём копию
+        # hand out a copy
         out = json.loads(json.dumps(self.cache))
         out["meta"]["cached"] = False
         out["meta"]["cache_age_seconds"] = 0
@@ -633,9 +633,9 @@ class _State:
 
     def _expand_units(self) -> List[str]:
         """
-        Возвращает список unit'ов для проверки:
-        - явные units из config
-        - glob'ы раскрываются через systemctl list-unit-files не чаще units_rescan_seconds
+        Returns the units to check:
+        - the units named in the config
+        - the globs, expanded with systemctl list-unit-files at most every units_rescan_seconds
         """
         base: List[str] = list(self.cfg.systemd_units)
         globs = list(self.cfg.systemd_unit_globs)
@@ -675,7 +675,7 @@ class _State:
         with self.lock:
             self._units_expanded_cache = sorted(set(expanded))
             self._units_rescan_mono = now
-            # ошибки list-unit-files запишем в cache при следующем collect (ниже)
+            # list-unit-files errors go into the cache at the next collect (below)
 
         return sorted(set(base + expanded))
 
@@ -689,7 +689,7 @@ class _State:
                 LOG.exception("poll refresh failed")
             self._stop.wait(self.cfg.poll_interval_seconds)
 
-    # ───────────── сбор статуса ─────────────
+    # ───────────── collecting the state ─────────────
 
     def _collect(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
         now = _utc_now_iso()
@@ -705,8 +705,8 @@ class _State:
         # systemd units (expanded)
         units_to_check = self._expand_units()
 
-        # если есть glob'ы и rescan мог дать ошибку — повторим list-unit-files только чтобы отразить ошибку
-        # (не влияет на expanded cache в этом месте)
+        # with globs and a failed rescan, run list-unit-files again only to report the error
+        # (it does not affect the expanded cache here)
         if self.cfg.systemd_unit_globs:
             rc, _, err = _run_cmd(
                 ["systemctl", "list-unit-files", "--type=service",
@@ -774,8 +774,8 @@ class _State:
     ) -> Dict[str, Any]:
         """
         mode:
-          - "tail": клиент хранит cursor сам (через --show-cursor / --after-cursor)
-          - "follow": сервер хранит cursor-file (journalctl --cursor-file).
+          - "tail": the client keeps the cursor (--show-cursor / --after-cursor)
+          - "follow": the server keeps a cursor file (journalctl --cursor-file).
         """
         if not self._allowed_unit(unit):
             return {"ok": False, "error": "unit is not allowed", "unit": unit}
@@ -1951,7 +1951,7 @@ def main() -> None:
         SOCKET_PATH, CONFIG_PATH, cfg.cache_ttl_seconds, "1" if BACKGROUND_POLL else "0",
     )
 
-    # Прогреваем кэш один раз при старте (по вашему запросу).
+    # Warm the cache once at start.
     try:
         state.force_refresh()
     except Exception:

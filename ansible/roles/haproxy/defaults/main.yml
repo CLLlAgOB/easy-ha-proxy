@@ -1,12 +1,12 @@
 ###############################################################################
-# Роль: ansible-haproxy-flex — defaults/main.yml
-# Все значения можно переопределить на уровне host- или group_vars.
+# Role: ansible-haproxy-flex -- defaults/main.yml
+# Every value can be overridden in host_vars or group_vars.
 ###############################################################################
 
-######## 1. Базовые пути ######################################################
-haproxy_certs_dir: "/etc/haproxy/certs"     # куда складываем fullchain+privkey *.pem
-haproxy_certs_available_dir: "/etc/haproxy/certs-available"  # запасные, HAProxy их не читает
-haproxy_mtls_dir: "/etc/haproxy/mtls"      # публичные CA клиентов, списки издателей и отзывов
+######## 1. Base paths ######################################################
+haproxy_certs_dir: "/etc/haproxy/certs"     # where the fullchain+privkey *.pem files go
+haproxy_certs_available_dir: "/etc/haproxy/certs-available"  # spares; HAProxy does not read them
+haproxy_mtls_dir: "/etc/haproxy/mtls"      # clients' public CAs, issuer lists and revocation lists
 haproxy_socket: "/run/haproxy/admin.sock"
 haproxy_socket_group: "hadmin"
 # The web UI owns these three runtime source files after the initial seed.
@@ -14,51 +14,51 @@ haproxy_socket_group: "hadmin"
 # imported wholesale as Ansible variables because vars.yml also contains
 # installer-owned values such as the selected container image.
 haproxy_runtime_config_dir: "/opt/haproxy-admin/config"
-# null = выбрать автоматически по числу доступных vCPU, но не больше max.
+# null = chosen from the number of vCPUs available, but not above max.
 haproxy_nbthread: null
 haproxy_nbthread_max: 2
-######## 2. Админ-панель /stats ###############################################
-admin_domain: null                          # пример: ha.example.com
-admin_allowed_ips: []                       # список IP; пустой ⇒ доступ всем
-admin_password: "changeme"                  # bcrypt/sha-256 hash либо plaintext
-admin_ips_file: "/etc/haproxy/admin.allow"  # Разрешенные к доступ ип
-admin_dyn_state: "/var/lib/haproxy/admin-dyn-ip.state" # нужно для хранения при использовании динамического днс
-admin_dyn_timer_interval: "5min"      # как часто проверять DNS
-admin_dyn_hostname: null    # откуда брать динамический IP
-admin_dyn_enabled: false    # вкл/выкл динамики через DNS  
+######## 2. The /stats admin page ###############################################
+admin_domain: null                          # for example: ha.example.com
+admin_allowed_ips: []                       # a list of IPs; empty => open to everyone
+admin_password: "changeme"                  # a bcrypt/sha-256 hash or plain text
+admin_ips_file: "/etc/haproxy/admin.allow"  # addresses allowed in
+admin_dyn_state: "/var/lib/haproxy/admin-dyn-ip.state" # kept for use with dynamic DNS
+admin_dyn_timer_interval: "5min"      # how often to check the DNS
+admin_dyn_hostname: null    # where the dynamic IP comes from
+admin_dyn_enabled: false    # dynamic DNS on/off
 
-######## 3. Служебные фронтенды ################################################
-enable_http80: false                        # true → создаётся frontend fe_http80
-export_prometheus: false                    # true → listen stats_prom с /metrics
+######## 3. Service frontends ################################################
+enable_http80: false                        # true -> the frontend fe_http80 is created
+export_prometheus: false                    # true -> listen stats_prom with /metrics
 prometheus_port: 8404
 
-######## 4. Глобальные дефолты сайтов #########################################
+######## 4. Global site defaults #########################################
 site_defaults:
   # — LB / sticky —
   balance: "roundrobin"                     # roundrobin | leastconn | source …
   sticky: "none"                            # cookie | ip | none
 
   # — backend connection —
-  backend_port: 80                          # если у сервера не указан свой порт
-  backend_ssl: false                        # TLS к бекенду
-  backend_ssl_verify: true                  # проверять сертификат бекенда
-  backend_ssl_ca: ""                        # кастомный CA для verify
-  backend_ssl_sni: ""                       # по-умолч. = domain
+  backend_port: 80                          # when a server has no port of its own
+  backend_ssl: false                        # TLS to the backend
+  backend_ssl_verify: true                  # verify the backend's certificate
+  backend_ssl_ca: ""                        # a custom CA for verify
+  backend_ssl_sni: ""                       # the default is the domain
 
   # — HTTPS redirect & maintenance —
-  redirect_to_https: true                   # 301 с 80-го порта
-  maintenance: false                        # трафик на be_maintenance
+  redirect_to_https: true                   # 301 from port 80
+  maintenance: false                        # traffic goes to be_maintenance
 
   # — Security & performance —
   hsts: 15552000                            # seconds; 180 days, 0 disables HSTS
   compress: false                           # gzip html/css/js
-  add_headers: {}                           # произвольные set-header пары
+  add_headers: {}                           # arbitrary set-header pairs
 
   # — Rate-limit & ban —
-  max_req_rate: 200                           # 0 ⇒ лимит выключен
+  max_req_rate: 200                           # 0 => no limit
   rate_window: "20s"
-  rate_ban: false                           # заносить IP в tbl_ban при превышении
-  rate_errors: 8                            # глобальный автобан >N 4xx / rate_window
+  rate_ban: false                           # put the IP in tbl_ban when the limit is exceeded
+  rate_errors: 8                            # global automatic ban above N 4xx per rate_window
 
   # — Geo filter —
   # The top-level enable_geoip remains the master switch. Individual sites may
@@ -66,42 +66,40 @@ site_defaults:
   # `geo_countries`.
   enable_geoip: true
 
-  # — WAF / SPOE —
-  # Усорение
-######## 5. Список сайтов (ПЕРЕОПРЕДЕЛЯЕМ в group_vars/host_vars) #############
+######## 5. The list of sites (OVERRIDE it in group_vars/host_vars) #############
 sites: []
-# пример структуры:
+# the shape:
 #   - name: blog
 #     domain: blog.example.com
 #     backend_ip: 10.0.0.10
 #     servers:
 #       - { name: app1, host: 10.0.0.10, port: 8881 }
 
-######## 6. GeoIP глобальные ###################################################
+######## 6. GeoIP, global ###################################################
 enable_geoip: false         # opt-in: old configs without this key stay unrestricted
-# Режим работы: allow (разрешить только из allowed) или deny (запретить из allowed)
+# Mode: allow (only the allowed countries) or deny (everyone but the allowed countries)
 geoip_mode: "allow"  # allow | deny
 
-######## 7. Certbot (читает внешняя роль) ######################################
+######## 7. Certbot (read by a separate role) ######################################
 certbot_email: "admin@example.com"
 
-######## 8. AppArmor для rsyslog → сокет в chroot HAProxy ########
+######## 8. AppArmor for rsyslog -> the socket in HAProxy's chroot ########
 haproxy_chroot: "/var/lib/haproxy"
 
-# Включить автоматическое разрешение для rsyslogd работать с /var/lib/haproxy/dev/log
+# Let rsyslogd use /var/lib/haproxy/dev/log automatically
 haproxy_enable_rsyslog_apparmor: true
 
-######## 9. Сохранение административного состояния серверов ########
-# Ready/Drain/Maintenance и runtime-вес живут только в работающем процессе.
-# Без этого файла сохранение любого сайта — а оно выполняет reload — молча
-# возвращало бы сервер с обслуживания под нагрузку.
+######## 9. Keeping the servers' administrative state ########
+# Ready/Drain/Maintenance and the runtime weight live only in the running
+# process. Without this file, saving any site -- which reloads -- would
+# silently put a server in maintenance back under load.
 #
-# Обратная сторона: состояние становится липким и после перезагрузки машины.
-# Забытый MAINT переживёт ребут; он виден на странице Backends.
+# The flip side: the state sticks across a reboot of the machine too.
+# A forgotten MAINT survives a reboot; it shows on the Backends page.
 haproxy_server_state_enabled: true
 haproxy_server_state_file: "{{ haproxy_chroot }}/server-state"
-# Таймер покрывает аварийные перезапуски и применения через Ansible; штатный
-# reload из UI дампит состояние сам, непосредственно перед перезагрузкой.
+# The timer covers crash restarts and applies through Ansible; a normal
+# reload from the UI dumps the state itself, right before it reloads.
 haproxy_server_state_interval: "60s"
 
 # --- Prometheus export ---

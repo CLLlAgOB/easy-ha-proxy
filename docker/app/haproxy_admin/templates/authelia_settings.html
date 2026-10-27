@@ -45,7 +45,7 @@
     <form method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="grid">
-        <!-- Левая колонка: session and cookie -->
+        <!-- Left column: session and cookie -->
         <div>
           <div class="form-section-title">Sessions</div>
 
@@ -151,7 +151,7 @@
           </div>
         </div>
 
-        <!-- Правая колонка: regulation and TOTP -->
+        <!-- Right column: regulation and TOTP -->
         <div>
           <div class="form-section-title">Regulation (bans)</div>
 
@@ -221,12 +221,12 @@
       </div>
 
       <div style="margin-top: 24px; display:flex; gap:10px; flex-wrap:wrap;">
-        <!-- Просто сохранить (валидировать and записать, without перезапуска) -->
+        <!-- Just save (validate and write, without a restart) -->
         <button type="submit" class="btn" name="submit_action" value="save">
           Save settings
         </button>
 
-        <!-- Save and сразу применить (перезапуск Authelia through демон) -->
+        <!-- Save and apply at once (Authelia restarted through the daemon) -->
         <button type="submit" class="btn btn-secondary" name="submit_action" value="apply">
           Save and apply (restart Authelia)
         </button>

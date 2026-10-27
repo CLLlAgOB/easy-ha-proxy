@@ -7,7 +7,7 @@
     group: root
     mode: "0755"
 
-# (опц.) для чтения manifest.json в hook-е
+# (optional) for reading manifest.json in the hook
 - name: Install jq (for manifest reading)
   apt:
     name: jq

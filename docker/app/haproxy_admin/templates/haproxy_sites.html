@@ -54,7 +54,7 @@
 </div>
 {% endif %}
 
-{# ───── Таблица существующих сайтов ────────────────────────────── #}
+{# ───── The table of existing sites ────────────────────────────── #}
 {% set global_geo_enabled = config_vars.enable_geoip|default(false) %}
 {% set global_geo_mode = config_vars.geoip_mode|default('allow') %}
 
@@ -93,7 +93,7 @@
         {% set primary_domain = eff.domain %}
         {% set alt_list = eff.alt_names or [] %}
 
-        {# флажки #}
+        {# flags #}
         {% set authelia_on = eff.authelia_enabled|default(site_defaults.authelia_enabled|default(false)) %}
         {% set zt_on = eff.zero_trust|default(site_defaults.zero_trust|default(false)) %}
 
@@ -147,12 +147,12 @@
             {% endif %}
           </td>
 
-          {# Backend: with поддержкой нескольких servers (main/backup) #}
+          {# Backend: several servers are supported (main/backup) #}
           <td class="mono">
             {% set servers = raw.servers or [] %}
 
             {% if servers %}
-            {# выбираем primary server: первый without backup=true, иначе первый #}
+            {# pick the primary server: the first without backup=true, otherwise the first #}
             {% set primary = None %}
             {% for srv in servers %}
             {% if not primary and not srv.backup %}
@@ -241,7 +241,7 @@
             {% endif %}
           </td>
 
-          {# Flags — отличия от site_defaults + (опционально) явно заданные ключи #}
+          {# Flags -- differences from site_defaults + (optionally) keys set explicitly #}
           <td>
             {% set ns = namespace(flags=[], overrides=[]) %}
 
@@ -400,22 +400,22 @@
             {% set eff_compress = eff.compress | default(def_compress) %}
             {{ diff_flag(ns, 'Compress', ('on' if eff_compress else 'off'), ('on' if def_compress else 'off')) }}
 
-            {# --- err_ignore_rules (if defined у site) --- #}
+            {# --- err_ignore_rules (if the site defines them) --- #}
             {% if eff.err_ignore_rules is defined %}
             {% set _ = ns.flags.append('err_ignore_rules: ' ~ eff.err_ignore_rules) %}
             {% endif %}
 
-            {# --- LE-managed (certificate этим сайтом управляется) --- #}
+            {# --- LE-managed (the certificate is managed by this site) --- #}
             {% set def_le = site_defaults.le_managed | default(false) %}
             {% set eff_le = eff.le_managed | default(def_le) %}
             {{ diff_flag(ns, 'LE managed', ('on' if eff_le else 'off'), ('on' if def_le else 'off')) }}
 
-            {# --- key_types (if отличается/or defined) --- #}
+            {# --- key_types (if different or defined) --- #}
             {% set def_key_types = site_defaults.key_types if site_defaults.key_types is defined else none %}
             {% set eff_key_types = eff.key_types if eff.key_types is defined else def_key_types %}
             {{ diff_flag(ns, 'key_types', eff_key_types, def_key_types) }}
 
-            {# --- list отличий --- #}
+            {# --- the list of differences --- #}
             {% if ns.flags %}
             <ul class="site-flags-list">
               {% for f in ns.flags %}
@@ -426,10 +426,10 @@
             <div class="site-flags-empty">All defaults</div>
             {% endif %}
 
-            {# --- Explicitly set in YAML (показываем ключи, присутствующие in raw) --- #}
+            {# --- Explicitly set in YAML (the keys present in raw) --- #}
             {% for k, v in raw|dictsort %}
             {% if k not in ['name','domain'] %}
-            {# servers/alt_names уже показываются in других местах, but оставим возможность видеть что они есть #}
+            {# servers/alt_names are shown elsewhere already, but it stays possible to see that they are there #}
             {% if k == 'servers' %}
             {% set _ = ns.overrides.append('servers: ' ~ (raw.servers|length) ~ ' item(s)') %}
             {% elif k == 'alt_names' %}
@@ -497,7 +497,7 @@
   </div>
 </div>
 
-{# ───── Упрощённая форма: добавить site ─────────────────────── #}
+{# ───── The short form: add a site ─────────────────────── #}
 <div class="card">
   <div class="card-header">
     <h2>Add site</h2>

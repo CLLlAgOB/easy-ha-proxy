@@ -1,8 +1,8 @@
 # routes_security.py
 #
-# Раздел Adaptive protection и страница правил обнаружения. Меняют состояние
-# только два маршрута: переключение режима и правила оператора; оба требуют
-# superadmin и CSRF, как любая другая форма в приложении.
+# The Adaptive protection section and the detection rules page. Only two
+# routes change state: switching the mode and the operator's rules; both need
+# superadmin and CSRF, like any other form in the application.
 
 from __future__ import annotations
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-authelia-usersd — маленький root-демон для управления users_database.yml Authelia.
+authelia-usersd -- a small root daemon that manages Authelia's users_database.yml.
 
-Протокол (одна строка JSON на запрос, одна строка JSON на ответ):
+Protocol (one JSON line per request, one JSON line per answer):
 
-Запрос:
+Request:
   {
     "action": "update",
     "username": "example-user",
@@ -15,26 +15,26 @@ authelia-usersd — маленький root-демон для управлени
       "groups": ["admins", "users"],
       "disabled": false
     },
-    "password_plain": "<new-password>"   # опционально
+    "password_plain": "<new-password>"   # optional
   }
 
-Ответ:
+Answer:
   {"ok": true, "message": "user updated"}
-или
-  {"ok": false, "error": "текст ошибки"}
+or
+  {"ok": false, "error": "error text"}
 
-Также поддерживает:
-  action = "list"   → вернуть список всех пользователей
-  action = "get"    → вернуть одного пользователя
-  action = "create" → создать нового пользователя
-  action = "delete" → удалить пользователя
+Also:
+  action = "list"   -> return every user
+  action = "get"    -> return one user
+  action = "create" -> create a new user
+  action = "delete" -> delete a user
 
-Переменные окружения:
-  AUTHELIA_USERS_FILE        — путь к users_database.yml
-  AUTHELIA_DOCKER_COMPOSE_FILE (необязательно, зарезервировано)
-  AUTHELIA_CONTAINER_NAME    — имя docker-контейнера Authelia
-  AUTHELIA_CONFIG_PATH       — путь до configuration.yml внутри контейнера
-  AUTHELIA_USERS_SOCKET      — unix-сокет демона
+Environment variables:
+  AUTHELIA_USERS_FILE        -- path to users_database.yml
+  AUTHELIA_DOCKER_COMPOSE_FILE (optional, reserved)
+  AUTHELIA_CONTAINER_NAME    -- the name of Authelia's docker container
+  AUTHELIA_CONFIG_PATH       -- path to configuration.yml inside the container
+  AUTHELIA_USERS_SOCKET      -- the daemon's unix socket
 """
 
 import json
@@ -52,7 +52,7 @@ from typing import Tuple, Dict, Any
 import yaml
 from argon2 import PasswordHasher
 
-# --- Конфиг из окружения ---
+# --- Configuration from the environment ---
 
 USERS_FILE = os.environ.get("AUTHELIA_USERS_FILE",
                             "/opt/authelia/users_database.yml")
@@ -75,11 +75,11 @@ LOG = logging.getLogger("authelia-usersd")
 
 
 def _backup_users_file() -> None:
-    """Создаёт бэкап users_database.yml с небольшой ротацией (оставляем максимум 14 файлов)."""
+    """Backs up users_database.yml with a small rotation (at most 14 files are kept)."""
     if not os.path.exists(USERS_FILE):
         return
 
-    # Создаём жёсткую ссылку текущего файла
+    # Hard-link the current file
     ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup_path = f"{USERS_FILE}.bak-{ts}"
     try:
@@ -88,7 +88,7 @@ def _backup_users_file() -> None:
     except Exception as exc:  # noqa: BLE001
         LOG.warning("Backup failed (%s): %s", backup_path, exc)
 
-    # Ротация: оставляем только 14 самых свежих
+    # Rotation: keep only the 14 newest
     dir_name = os.path.dirname(USERS_FILE) or "."
     base_name = os.path.basename(USERS_FILE)
     prefix = base_name + ".bak-"
@@ -120,16 +120,16 @@ def _backup_users_file() -> None:
 
 def _load_users_data() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Загружает YAML users_database.yml.
+    Loads users_database.yml.
 
-    Возвращает (root_data, users_node).
+    Returns (root_data, users_node).
 
-    root_data — весь YAML как dict.
-    users_node — dict username -> attrs.
+    root_data is the whole YAML as a dict.
+    users_node is a dict of username -> attributes.
 
-    Поддерживает:
-      - корень: { users: { user1: {...}, ... } }
-      - корень: { user1: {...}, user2: {...}, ... }
+    Accepts:
+      - the root { users: { user1: {...}, ... } }
+      - the root { user1: {...}, user2: {...}, ... }
     """
     if not os.path.exists(USERS_FILE):
         raise FileNotFoundError(f"users file not found: {USERS_FILE}")
@@ -143,18 +143,18 @@ def _load_users_data() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if "users" in data and isinstance(data["users"], dict):
         return data, data["users"]
 
-    # вариант без "users:"
+    # the form without "users:"
     return data, data
 
 
 def _save_users_data(root_data: Dict[str, Any]) -> None:
     """
-    Атомарно сохраняет YAML обратно в USERS_FILE с предварительным бэкапом.
+    Saves the YAML back to USERS_FILE atomically, after a backup.
 
-    ВАЖНО: не меняем владельца и права файла — они остаются такими,
-    какими были до сохранения (Ansible рулит owner/group/mode).
+    IMPORTANT: the file's owner and mode are not changed -- they stay what
+    they were before the save (Ansible manages owner/group/mode).
     """
-    # Запоминаем текущие права/владельца, если файл уже есть.
+    # Remember the current mode and owner, if the file exists.
     prev_stat = None
     try:
         prev_stat = os.stat(USERS_FILE)
@@ -193,7 +193,7 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
                 f,
                 allow_unicode=True,
                 default_flow_style=False,
-                sort_keys=True,  # как у тебя было
+                sort_keys=True,  # as it always was
             )
             f.flush()
             os.fsync(f.fileno())
@@ -208,7 +208,7 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
         except OSError as exc:  # noqa: BLE001
             LOG.warning("Failed to set mode on temp users file: %s", exc)
 
-        # Атомарная замена: боевой путь всегда указывает на читаемый файл.
+        # Atomic replacement: the live path always points at a readable file.
         os.replace(tmp_path, USERS_FILE)
         tmp_path = None
     finally:
@@ -223,11 +223,11 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
 
 def _hash_password(plain: str) -> str:
     """
-    Считает совместимый с Authelia argon2id-хэш локально.
-    Пароль не попадает в argv процесса и список процессов.
+    Computes an Authelia-compatible argon2id hash locally.
+    The password never appears in a process's argv or in the process list.
     """
     if not 8 <= len(plain) <= 1024:
-        raise ValueError("Пароль должен содержать от 8 до 1024 символов")
+        raise ValueError("The password must be 8 to 1024 characters long")
     return PasswordHasher(
         time_cost=3,
         memory_cost=65536,
@@ -238,7 +238,7 @@ def _hash_password(plain: str) -> str:
 
 
 def _safe_user_view(username: str, raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Оставляем только безопасные поля для UI/ответов (без password)."""
+    """Keeps only the fields that are safe for the UI and answers (no password)."""
     raw_groups = raw.get("groups") or []
     groups = (
         [str(group) for group in raw_groups]
@@ -360,7 +360,7 @@ def _handle_update(req: Dict[str, Any]) -> Dict[str, Any]:
     root, users_node = _load_users_data()
     user = users_node.get(username)
     if not isinstance(user, dict):
-        # В режиме update не создаём нового, только изменяем существующего
+        # update never creates a user, it only changes an existing one
         return {"ok": False, "error": f"user '{username}' not found"}
 
     prospective_user = dict(user)
@@ -375,7 +375,7 @@ def _handle_update(req: Dict[str, Any]) -> Dict[str, Any]:
 
     user.setdefault("groups", [])
 
-    # обновляем редактируемые поля
+    # update the editable fields
     for key in ("displayname", "email", "disabled", "groups"):
         if key in fields:
             user[key] = fields[key]
@@ -387,7 +387,7 @@ def _handle_update(req: Dict[str, Any]) -> Dict[str, Any]:
             LOG.error("hash password failed", exc_info=exc)
             return {
                 "ok": False,
-                "error": f"Ошибка генерации пароля через Authelia: {exc}",
+                "error": f"Could not hash the password: {exc}",
             }
         user["password"] = pwd_hash
 
@@ -415,7 +415,7 @@ def _handle_create(req: Dict[str, Any]) -> Dict[str, Any]:
         LOG.error("hash password failed", exc_info=exc)
         return {
             "ok": False,
-            "error": f"Ошибка генерации пароля через Authelia: {exc}",
+            "error": f"Could not hash the password: {exc}",
         }
 
     user: Dict[str, Any] = {
@@ -470,7 +470,7 @@ def _dispatch_request(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
-    """Маршрутизация по action с безопасным ответом на ошибки валидации."""
+    """Dispatches on action, answering validation errors safely."""
     if not isinstance(req, dict):
         return {"ok": False, "error": "request must be a JSON object"}
     try:
@@ -480,8 +480,8 @@ def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def serve() -> None:
-    """Основной цикл сервера."""
-    # убираем старый сокет, если остался
+    """The server's main loop."""
+    # remove an old socket left behind
     try:
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
@@ -490,7 +490,7 @@ def serve() -> None:
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(SOCKET_PATH)
-    # права на сокет: rw для owner+group; group задаётся в unit-файле
+    # socket permissions: rw for owner and group; the unit file sets the group
     os.chmod(SOCKET_PATH, 0o660)
     srv.listen(10)
 
@@ -522,7 +522,7 @@ def serve() -> None:
             try:
                 conn.settimeout(15)
                 data = b""
-                # читаем до \n (одна строка JSON)
+                # read up to \n (one JSON line)
                 while b"\n" not in data:
                     chunk = conn.recv(4096)
                     if not chunk:
@@ -564,8 +564,8 @@ def serve() -> None:
 
 
 def main() -> None:
-    # Настраиваем root-логгер только при запуске демона: делать это на импорте
-    # значит менять логирование любого процесса, который просто импортирует модуль.
+    # Configure the root logger only when the daemon runs: doing it on import
+    # would change the logging of any process that merely imports the module.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",

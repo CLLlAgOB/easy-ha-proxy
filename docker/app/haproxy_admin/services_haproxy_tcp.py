@@ -1,8 +1,8 @@
 # services_haproxy_tcp.py
-# Вспомогательные функции для работы с tcp.yml (TCP-прокси):
-# - список TCP-прокси
-# - добавление/удаление
-# - сохранение одной записи из JSON (страница редактирования)
+# Helpers for tcp.yml (the TCP proxies):
+# - the list of TCP proxies
+# - adding and removing
+# - saving one entry from JSON (the edit page)
 
 from typing import Any, Dict, List, Tuple, Optional
 import yaml
@@ -23,13 +23,12 @@ from .validation import (
 
 def get_tcp_proxies_list() -> List[Dict[str, Any]]:
     """
-    Возвращает список TCP-прокси из tcp.yml (как есть).
+    Returns the list of TCP proxies from tcp.yml, as it is.
 
-    Поддерживает оба варианта корня:
+    Both root keys are accepted:
       - tcp_proxies: [...]
       - tcp: [...]
-    При сохранении мы всегда пишем ключ tcp_proxies,
-    чтобы не плодить варианты.
+    Saving always writes the key tcp_proxies, so the variants do not multiply.
     """
     data = _load_yaml(TCP_YAML)
     proxies = data.get("tcp_proxies")
@@ -42,19 +41,19 @@ def get_tcp_proxies_list() -> List[Dict[str, Any]]:
 
 def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
-    Приводит одну запись TCP-прокси к нормализованному виду.
+    Normalises one TCP proxy entry.
 
-    Проверяет:
-      - name (обязателен)
-      - bind_port (1–65535)
-      - backend_host/backend_port ИЛИ список servers[{host,port}]
+    Checks:
+      - name (required)
+      - bind_port (1-65535)
+      - backend_host/backend_port OR a list of servers[{host,port}]
     """
     if not isinstance(raw, dict):
         return False, 'Invalid TCP proxy format (expected a JSON object)', None
 
     out: Dict[str, Any] = dict(raw)
 
-    # --- базовые поля name / bind_ip / bind_port -----------------------------
+    # --- the basic fields name / bind_ip / bind_port -----------------------------
     try:
         name = validate_identifier(out.get("name"), "name")
     except ValueError as exc:
@@ -74,12 +73,12 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
         return False, str(exc), None
     out["bind_port"] = bind_port_int
 
-    # --- флаги безопасности --------------------------------------------------
+    # --- security flags --------------------------------------------------
     out["zero_trust"] = bool(out.get("zero_trust", False))
-    # По умолчанию ban_check включён
+    # ban_check is on by default
     out["ban_check"] = bool(out.get("ban_check", True))
 
-    # --- балансировка и health-check интервал -------------------------------
+    # --- balancing and the health check interval -------------------------------
     balance = str(out.get("balance") or "").strip() or "source"
     if balance not in BALANCE_VALUES:
         return False, 'Unsupported balance algorithm', None
@@ -109,7 +108,7 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
             port = srv.get("port")
 
             if not host:
-                # пустой backend пропускаем
+                # an empty backend is skipped
                 continue
 
             try:
@@ -120,7 +119,7 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
 
             srv_out: Dict[str, Any] = {}
 
-            # Имя backend-сервера
+            # The backend server's name
             name_srv = str(srv.get("name") or "").strip()
             if not name_srv:
                 name_srv = f"srv{idx}"
@@ -133,13 +132,13 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
             srv_out["host"] = host
             srv_out["port"] = port_int
 
-            # флаг backup можно сохранить "про запас", даже если шаблон его не использует
+            # the backup flag can be kept "for later", even if the template does not use it
             if bool(srv.get("backup")):
                 srv_out["backup"] = True
 
             cleaned_servers.append(srv_out)
 
-    # Если есть нормальные servers — записываем их
+    # Proper servers are written as they are
     if cleaned_servers:
         out["servers"] = cleaned_servers
     else:
@@ -158,13 +157,13 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
         out["backend_host"] = backend_host
         out["backend_port"] = backend_port_int
     else:
-        # Если один из них пустой — убираем оба
+        # If one of them is empty, drop both
         out.pop("backend_host", None)
         out.pop("backend_port", None)
 
-    # ВАЖНО:
-    # Если backend'ов в списке servers больше одного — backend_host/backend_port
-    # считаем устаревшими и убираем, чтобы не было противоречий.
+    # IMPORTANT:
+    # With more than one backend in servers, backend_host/backend_port are
+    # obsolete and removed, so nothing contradicts.
     if out.get("servers") and isinstance(out["servers"], list) and len(out["servers"]) > 1:
         out.pop("backend_host", None)
         out.pop("backend_port", None)
@@ -174,12 +173,12 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
 
 def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None) -> Tuple[bool, str]:
     """
-    Сохранение TCP-прокси из JSON (форма редактирования/создания).
+    Saves a TCP proxy from JSON (the edit or create form).
 
-    tcp — то, что пришло с фронта (как есть).
+    tcp is what the front end sent, as it is.
     original_name:
-      - пусто/None  -> создаём новый
-      - непустая    -> редактируем существующий (под этим name), можно переименовать
+      - empty/None  -> create a new one
+      - non-empty   -> edit the existing one of this name; it may be renamed
     """
     ok, msg, tcp_out = _normalize_tcp_entry(tcp)
     if not ok or tcp_out is None:
@@ -194,7 +193,7 @@ def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None)
     if not isinstance(proxies, list):
         proxies = []
 
-    # Режим редактирования
+    # Editing
     if original_name:
         idx = None
         for i, t in enumerate(proxies):
@@ -204,7 +203,7 @@ def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None)
         if idx is None:
             return False, f"TCP proxy with name={original_name!r} not found"
 
-        # Проверка на конфликт имени (если переименовали)
+        # Reject a name that clashes (after a rename)
         if name != original_name:
             for t in proxies:
                 if t.get("name") == name:
@@ -212,14 +211,14 @@ def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None)
 
         proxies[idx] = tcp_out
 
-    # Режим createdия
+    # Creating
     else:
         for t in proxies:
             if t.get("name") == name:
                 return False, f"TCP proxy with name={name!r} already exists"
         proxies.append(tcp_out)
 
-    # Сохраняем под ключом tcp_proxies
+    # Saved under the key tcp_proxies
     data["tcp_proxies"] = proxies
 
     content = yaml.safe_dump(
@@ -234,7 +233,7 @@ def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None)
 
 def delete_tcp_proxy(name: str) -> Tuple[bool, str]:
     """
-    Удаляет TCP-прокси по name из tcp.yml.
+    Deletes the TCP proxy with this name from tcp.yml.
     """
     data = _load_yaml(TCP_YAML)
     proxies = data.get("tcp_proxies")

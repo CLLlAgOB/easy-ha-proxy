@@ -1,9 +1,9 @@
 # routes_prometheus.py
 #
-# Необязательный эндпоинт /metrics. Prometheus не может пройти вход через
-# Authelia, поэтому HAProxy пропускает этот путь для адресов из отдельного
-# списка и помечает запрос собственной ограниченной личностью. Здесь стоит
-# второй, независимый замок: bearer-токен.
+# The optional /metrics endpoint. Prometheus cannot get through the Authelia
+# sign-in, so HAProxy lets this path through for addresses on a separate list
+# and marks the request with its own limited identity. A second, independent
+# lock sits here: a bearer token.
 
 from __future__ import annotations
 

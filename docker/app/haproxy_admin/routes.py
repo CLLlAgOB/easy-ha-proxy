@@ -56,7 +56,7 @@ def _debug_routes_enabled() -> bool:
     }
 
 
-# ───────── страницы ──────────────────────────────────────────────
+# ───────── pages ──────────────────────────────────────────────
 
 
 @bp.route("/")
@@ -227,13 +227,13 @@ def view_ip_logs(ip: str):
     return render_template("ip_logs.html", ip=ip, lines=lines, status=status)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Authelia users (управление users_database.yml)
+# Authelia users (managing users_database.yml)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @bp.route("/authelia/users")
 def authelia_users():
-    """Список пользователей Authelia."""
+    """The list of Authelia users."""
     message = request.args.get("msg") or ""
     users, all_groups, error = get_authelia_users()
     return render_template(
@@ -247,13 +247,13 @@ def authelia_users():
 
 @bp.route("/authelia/users/new", methods=["GET", "POST"])
 def authelia_user_new():
-    # Берём все группы так же, как в списке/редактировании
-    # get_authelia_users уже возвращает (users, all_groups, error)
+    # Take all the groups the same way as the list and the edit page do;
+    # get_authelia_users already returns (users, all_groups, error)
     _, all_groups, users_error = get_authelia_users()
 
     if request.method == "GET":
-        # ВАЖНО: передаём именно all_groups, потому что шаблон
-        # authelia_user_new.html смотрит на all_groups
+        # IMPORTANT: pass all_groups itself, because the template
+        # authelia_user_new.html reads all_groups
         return render_template(
             "authelia_user_new.html",
             all_groups=all_groups,
@@ -265,15 +265,15 @@ def authelia_user_new():
     displayname_raw = (request.form.get("displayname") or "").strip()
     email_raw = (request.form.get("email") or "").strip()
 
-    # отмеченные чекбоксы
+    # the ticked checkboxes
     selected_groups = request.form.getlist("groups")
 
-    # доп. группы через запятую — ИМЯ ПОЛЯ ДОЛЖНО СОВПАДАТЬ с name="groups_extra" в HTML
+    # extra groups, comma-separated -- THE FIELD NAME MUST MATCH name="groups_extra" in the HTML
     groups_extra_raw = (request.form.get("groups_extra") or "").strip()
     extra_groups = [g.strip()
                     for g in groups_extra_raw.split(",") if g.strip()]
 
-    # итоговый список групп
+    # the resulting list of groups
     groups = sorted(set(selected_groups + extra_groups))
 
     password = request.form.get("password") or ""
@@ -287,7 +287,7 @@ def authelia_user_new():
         "groups_extra": groups_extra_raw,
     }
 
-    # ---- валидация обязательных полей ----
+    # ---- validating the required fields ----
     if not username:
         return render_template(
             "authelia_user_new.html",
@@ -328,7 +328,7 @@ def authelia_user_new():
             all_groups=all_groups,
         )
 
-    # ---- подготовка полей для usersd ----
+    # ---- preparing the fields for usersd ----
     displayname = displayname_raw or None
     email = email_raw or None
 
@@ -362,7 +362,7 @@ def authelia_user_new():
         )
 
     if error:
-        # логика, как при редактировании: просто показать ошибку и форму
+        # as when editing: just show the error and the form
         record_request(
             "user.create",
             object_type="user",
@@ -385,8 +385,8 @@ def authelia_user_new():
         summary=summarize({}, {**fields, "password": "set"}),
     )
 
-    # В списке пользователей message читается из ?msg=
-    # поэтому нужно слать msg=..., а не message=...
+    # The user list reads its message from ?msg=,
+    # so msg=... must be sent, not message=...
     return redirect(
         url_for("routes.authelia_users", msg=f"User {username} created"),
         code=303,
@@ -395,7 +395,7 @@ def authelia_user_new():
 
 @bp.route("/authelia/users/<username>", methods=["GET", "POST"])
 def authelia_user_edit(username: str):
-    """Редактирование существующего пользователя."""
+    """Editing an existing user."""
     username = (username or "").strip()
     if not username:
         return redirect(url_for("routes.authelia_users", msg="Empty username"))
@@ -420,7 +420,7 @@ def authelia_user_edit(username: str):
         password_confirmation = request.form.get("password2") or ""
         password_plain = password_raw or None
 
-        # ---- валидация обязательных полей ----
+        # ---- validating the required fields ----
         required_errors = []
         if not displayname:
             required_errors.append("Enter the user display name.")
@@ -430,7 +430,7 @@ def authelia_user_edit(username: str):
             required_errors.append("Password and confirmation do not match")
 
         if required_errors:
-            # нужно снова собрать all_groups, чтобы форма отрисовалась корректно
+            # all_groups must be collected again, so the form renders correctly
             _, all_groups, _ = get_authelia_users()
             for g in groups:
                 if g not in all_groups:
@@ -528,15 +528,15 @@ def authelia_user_edit(username: str):
 @bp.route("/haproxy/stats")
 def haproxy_stats_page():
     """
-    Страница-обёртка для HAProxy stats, чтобы шапка UI оставалась.
-    Внутри просто iframe на /stats, который отдаёт сам HAProxy.
+    A wrapper page for HAProxy's stats, so the UI's header stays.
+    Inside it is just an iframe on /stats, which HAProxy serves itself.
     """
     return render_template("haproxy_stats.html")
 
 
 @bp.route("/authelia/users/<username>/delete", methods=["POST"])
 def authelia_user_delete(username: str):
-    """Удаление пользователя."""
+    """Deleting a user."""
     username = (username or "").strip()
     if not username:
         return redirect(url_for("routes.authelia_users", msg="Empty username"))
@@ -571,7 +571,7 @@ def authelia_user_delete(username: str):
 @bp.route("/authelia/bans", methods=["GET", "POST"])
 def authelia_bans():
     """
-    Страница банов Authelia + формы разбана + логи Authelia.
+    The Authelia bans page: unban forms and Authelia's logs.
     """
     log_ip = request.args.get("log_ip", "").strip()[:256]
     log_user = request.args.get("log_user", "").strip()[:256]
@@ -620,7 +620,7 @@ def authelia_bans():
             code=303,
         )
 
-    # --- баны ---
+    # --- bans ---
     bans = get_authelia_bans()
     bans_error = bans.get("error")
 

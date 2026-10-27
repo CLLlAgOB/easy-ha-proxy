@@ -20,7 +20,7 @@ Environment="AUTHELIA_BANS_MAX_REQUEST_BYTES={{ authelia_bans_max_request_bytes 
 Environment="AUTHELIA_BANS_MAX_WORKERS={{ authelia_bans_max_workers | default(4) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-bansd.py', rstrip=false) | hash('sha256') }}"
 
-# Немного hardening, но процесс root, docker ему не мешаем
+# Some hardening, but the process is root and docker must not be hindered
 NoNewPrivileges=true
 PrivateTmp=yes
 ProtectSystem=full

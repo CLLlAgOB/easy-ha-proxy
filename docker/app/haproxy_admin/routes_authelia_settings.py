@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Маршруты для интерактивной страницы настроек Authelia (без access_control.rules).
+Routes of the interactive Authelia settings page (without access_control.rules).
 """
 
 from flask import (
@@ -210,16 +210,16 @@ def update_current_local_notification_status():
 
 @bp_authelia_settings.route("/", methods=["GET", "POST"])
 def edit_settings():
-    """Страница общих настроек Authelia (configuration.yml без access_control.rules)."""
+    """The general Authelia settings page (configuration.yml without access_control.rules)."""
     msg: str | None = None
     msg_category: str = "info"
     settings_load_error: str | None = None
 
     if request.method == "POST":
-        # Какая кнопка нажата: сохранить или сохранить+применить
+        # Which button was pressed: save, or save and apply
         submit_action = request.form.get("submit_action", "save")
 
-        # Сохраняем настройки через сервисный слой (он ходит в authelia-configd)
+        # Save the settings through the service layer (it talks to authelia-configd)
         ok, msg = save_settings_from_form(request.form)
         msg_category = "success" if ok else "danger"
         record_request(
@@ -231,10 +231,10 @@ def edit_settings():
             detail="" if ok else str(msg or "")[:500],
         )
 
-        # Если всё OK и нажали «Сохранить и применить» — просим демон перезапустить Authelia
+        # If all is well and "Save and apply" was pressed, ask the daemon to restart Authelia
         if ok and submit_action == "apply":
             try:
-                # Локальный импорт, чтобы избежать циклических импортов модулей
+                # A local import, to avoid circular imports between the modules
                 from .authelia_acl import (  # type: ignore[attr-defined]
                     _configd_request,
                     _wait_for_authelia_healthy,
@@ -255,8 +255,8 @@ def edit_settings():
                     msg = f"{base} But Authelia did not restart: {extra}"
                     msg_category = "warning"
                 else:
-                    # Здесь Authelia уже перезапущена демоном, но мы дополнительно
-                    # ждём health-check, чтобы при обновлении страницы не словить белый экран.
+                    # Authelia has been restarted by the daemon by now, but its health
+                    # check is awaited as well, so a page refresh does not hit a blank screen.
                     if not _wait_for_authelia_healthy():
                         base = msg or 'Settings saved.'
                         msg = (
@@ -274,7 +274,7 @@ def edit_settings():
         # Post/Redirect/Get prevents F5 from repeating a save or restart.
         return redirect(url_for("authelia_settings.edit_settings"), code=303)
 
-    # Всегда пробуем перечитать актуальные настройки из демона
+    # Always try to read the current settings from the daemon again
     try:
         form_data = load_settings_form_data()
     except Exception as exc:  # noqa: BLE001

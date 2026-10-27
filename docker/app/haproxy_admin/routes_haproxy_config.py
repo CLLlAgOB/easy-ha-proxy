@@ -278,8 +278,8 @@ def _trusted_client_ip() -> str:
 @bp.get("/haproxy/config/preview")
 def haproxy_config_preview():
     """
-    Старый эндпоинт — оставляем как есть:
-    возвращает сгенерированный haproxy.cfg в plain-text.
+    The old endpoint, kept as it is:
+    returns the rendered haproxy.cfg as plain text.
     """
     cfg_text = render_haproxy_cfg()
     return Response(cfg_text, mimetype="text/plain")
@@ -288,9 +288,9 @@ def haproxy_config_preview():
 @bp.get("/haproxy/config/download-cfg/<source>")
 def haproxy_download_cfg(source):
     """
-    Скачать haproxy.cfg:
-      - source="rendered" — рендер из шаблонов (то, что сейчас будет применено)
-      - source="server"   — живой /etc/haproxy/haproxy.cfg
+    Download haproxy.cfg:
+      - source="rendered" -- rendered from the templates (what would be applied now)
+      - source="server"   -- the live /etc/haproxy/haproxy.cfg
     """
     if source == "rendered":
         try:
@@ -334,11 +334,11 @@ def haproxy_download_cfg(source):
 @bp.get("/haproxy/config/download-all")
 def haproxy_download_all_configs():
     """
-    Архивирует основные файлы конфигурации HAProxy и отдаёт zip:
+    Zips up the main HAProxy configuration files:
       - /etc/haproxy/haproxy.cfg
-      - шаблон haproxy.cfg.j2
+      - the haproxy.cfg.j2 template
       - websites.yml / tcp.yml / vars.yml
-      - снимки последнего apply, если есть
+      - the snapshots of the last apply, if any
     """
     buf = io.BytesIO()
 
@@ -349,10 +349,10 @@ def haproxy_download_all_configs():
                 if path.exists():
                     zf.write(path, arcname)
             except OSError:
-                # если не получилось прочитать один файл — остальные все равно отдадим
+                # if one file cannot be read, the rest are still sent
                 pass
 
-        # Основные конфиги
+        # The main configuration files
         add(HAPROXY_CFG_PATH, "haproxy/haproxy.cfg")
         add(HAP_TEMPLATE, "haproxy/haproxy.cfg.j2")
 
@@ -360,7 +360,7 @@ def haproxy_download_all_configs():
         add(TCP_YAML, "haproxy/tcp.yml")
         add(CONFIG_YAML, "haproxy/vars.yml")
 
-        # Снимки последнего применённого состояния
+        # Snapshots of the last applied state
         add(HAPROXY_STATE_PATH, "haproxy/last_applied_state.json")
         add(HAPROXY_STATE_WEBSITES, "haproxy/last_applied_websites.yml")
         add(HAPROXY_STATE_TCP, "haproxy/last_applied_tcp.yml")
@@ -382,11 +382,11 @@ def haproxy_download_all_configs():
 @bp.get("/haproxy/config/diff")
 def haproxy_config_diff():
     """
-    JSON с diff:
-      - rendered_cfg: текущий рендер из шаблонов
-      - server_cfg: реальный /etc/haproxy/haproxy.cfg
-      - html_diff: HTML-таблица diff (side-by-side)
-      - diff_summary: сводка изменений (для полоски статуса)
+    JSON with the diff:
+      - rendered_cfg: the current render from the templates
+      - server_cfg: the real /etc/haproxy/haproxy.cfg
+      - html_diff: the side-by-side HTML diff table
+      - diff_summary: a summary of the changes (for the status strip)
     """
     try:
         rendered = render_haproxy_cfg()
@@ -442,12 +442,12 @@ def haproxy_configuration_state():
 @bp.route("/haproxy/config", methods=["GET"])
 def haproxy_config_page():
     """
-    Страница:
-      - статус "конфиг на сервере совпадает / отличается"
-      - сводка изменений sites/tcp/vars относительно последнего apply
-      - превью/diff haproxy.cfg (по кнопке, скрыто по умолчанию)
-      - кнопки "Проверить" / "Применить"
-      - формы загрузки YAML
+    The page:
+      - whether the configuration on the server matches or differs
+      - a summary of the sites/tcp/vars changes since the last apply
+      - the haproxy.cfg preview/diff (behind a button, hidden by default)
+      - the "Check" / "Apply" buttons
+      - the YAML upload forms
     """
     error = None
     cfg_text = ""
@@ -497,8 +497,8 @@ def haproxy_config_page():
 @bp.route("/haproxy/config/check", methods=["POST"])
 def haproxy_config_check():
     """
-    Проверка текущей сгенерированной конфигурации через haproxy -c.
-    Возвращает JSON.
+    Checks the current rendered configuration with haproxy -c.
+    Returns JSON.
     """
     try:
         cfg_text = render_haproxy_cfg()
@@ -863,12 +863,12 @@ def haproxy_config_rollback_pending():
 @bp.route("/haproxy/config/upload", methods=["POST"])
 def haproxy_config_upload():
     """
-    Загрузка одного из YAML-файлов:
-      kind ∈ {websites, tcp, vars}
-      file — .yml/.yaml
+    Uploads one of the YAML files:
+      kind in {websites, tcp, vars}
+      file -- .yml/.yaml
 
-    Ответ: JSON {ok: bool, message|error: str}
-    (всегда 200, чтобы HAProxy не подменял тело ответа)
+    Answer: JSON {ok: bool, message|error: str}
+    (always 200, so HAProxy does not replace the body)
     """
     kind = request.form.get("kind")
     file = request.files.get("file")
@@ -970,8 +970,8 @@ def haproxy_config_save_vars_raw():
 @bp.post("/haproxy/config/revert")
 def haproxy_config_revert():
     """
-    Откатывает websites.yml/tcp.yml/vars.yml к последнему применённому состоянию.
-    Использует файлы last_applied_*.yml, которые сохраняет save_applied_state.
+    Rolls websites.yml/tcp.yml/vars.yml back to the last applied state,
+    using the last_applied_*.yml files that save_applied_state keeps.
     """
     try:
         ok, msg = revert_to_last_applied_state()
@@ -1015,9 +1015,9 @@ def haproxy_config_revert():
 @bp.get("/haproxy/config/download/<kind>")
 def haproxy_config_download(kind):
     """
-    Скачать один из YAML-файлов:
+    Downloads one of the YAML files:
       kind: websites | tcp | vars
-    Берём пути из services_haproxy_config, чтобы не дублировать логику.
+    The paths come from services_haproxy_config, so the logic is not repeated.
     """
     mapping = {
         "websites": WEBSITES_YAML,
@@ -1032,7 +1032,7 @@ def haproxy_config_download(kind):
     path = path.resolve()
 
     if not path.exists():
-        # Лучше понятная ошибка, чем 500 с трейсбеком
+        # A clear error is better than a 500 with a traceback
         return Response(
             f"File {path} was not found on the server",
             status=404,
@@ -1048,15 +1048,15 @@ def haproxy_config_download(kind):
     )
 
 
-# ───── Страница со списком сайтов (HTTP) ─────────────────────────────
+# ───── The list of sites (HTTP) ─────────────────────────────
 @bp.route("/haproxy/sites", methods=["GET", "POST"])
 def haproxy_sites_page():
     """
-    Список HTTP-сайтов + простая форма добавления:
+    The list of HTTP sites and a simple form to add one:
 
-    - только поля: domain, backend_ip, backend_port;
-    - после успешного добавления сразу редирект на /haproxy/sites/<domain>/edit.
-    - support action=delete для старых форм (если где-то ещё используется).
+    - only the fields domain, backend_ip, backend_port;
+    - after a successful add, straight to /haproxy/sites/<domain>/edit;
+    - action=delete is supported for old forms (if anything still uses it).
     """
     error = None
     message = None
@@ -1105,7 +1105,7 @@ def haproxy_sites_page():
                         " is nothing for certbot to skip."
                     )
 
-        # ─── Удаление сайта (если откуда-то ещё прилетает) ───────────────────
+        # ─── Deleting a site (should a request still come from somewhere) ───────────────────
         elif action == "delete":
             name = (request.form.get("name") or "").strip()
             if not name:
@@ -1124,7 +1124,7 @@ def haproxy_sites_page():
                 else:
                     error = msg
 
-        # ─── Добавление сайта (упрощённая форма) ─────────────────────────────
+        # ─── Adding a site (the short form) ─────────────────────────────
         else:
             domain = (request.form.get("domain") or "").strip()
             site_type = (request.form.get("site_type") or "normal").strip()
@@ -1146,7 +1146,7 @@ def haproxy_sites_page():
             elif not backend_ip or not backend_port_str:
                 error = 'Provide both backend_ip and Port, or choose the access-gate site type'
             else:
-                # Валидируем порт тут, чтобы сообщение было человеческое
+                # Validate the port here, so the message is a human one
                 try:
                     backend_port = int(backend_port_str)
                 except ValueError:
@@ -1156,13 +1156,13 @@ def haproxy_sites_page():
                         error = 'Port must be between 1 and 65535'
 
             if not error:
-                # ВАЖНО: add_site_minimal ожидает (name, domain, backend_ip, backend_port)
+                # IMPORTANT: add_site_minimal expects (name, domain, backend_ip, backend_port)
                 # name = domain
                 ok, msg = add_site_minimal(
                     domain,           # name
                     domain,           # domain
                     backend_ip,
-                    backend_port_str  # строка, как и ожидает add_site_minimal
+                    backend_port_str  # a string, as add_site_minimal expects
                 )
                 record_request(
                     "site.create",
@@ -1177,12 +1177,12 @@ def haproxy_sites_page():
                     detail="" if ok else str(msg)[:500],
                 )
                 if ok:
-                    # сразу переходим на редактирование этого сайта
+                    # go straight to editing this site
                     return redirect(url_for("routes.haproxy_site_edit", name=domain))
                 else:
                     error = msg
 
-    # GET или ошибка на POST — показать список и форму
+    # GET, or an error on POST: show the list and the form
     config_vars = _load_yaml(CONFIG_YAML)
     if not isinstance(config_vars, dict):
         config_vars = {}
@@ -1260,10 +1260,10 @@ def acme_email_save():
 @bp.route("/haproxy/certs", methods=["GET", "POST"])
 def haproxy_certs_page():
     """
-    HTML-страница со списком сертификатов и кнопками удаления.
+    The HTML page with the list of certificates and their delete buttons.
 
-    Все операции (чтение каталогов, удаление файлов, certbot delete)
-    выполняет root-сервис haproxy-certd.
+    Every operation (reading directories, deleting files, certbot delete)
+    is done by the root service haproxy-certd.
     """
     from .certd_client import (
         list_all_certs,
@@ -1675,20 +1675,20 @@ def haproxy_ca_download(ca_id):
         max_age=0,
     )
 
-# ───── Редактирование одного сайта ───────────────────────────────────
+# ───── Editing one site ───────────────────────────────────
 
 
 @bp.route("/haproxy/sites/<name>/edit", methods=["GET", "POST"])
 def haproxy_site_edit(name):
     """
-    Страница редактирования одного сайта:
-      - отображаем текущие значения (raw + effective)
-      - даём править поля
-      - с этой же страницы можно удалить сайт (action=delete)
+    The page for editing one site:
+      - shows the current values (raw + effective)
+      - lets the fields be edited
+      - the site can be deleted from the same page (action=delete)
 
-    ВАЖНО:
-      * Сохранение параметров теперь идёт через JS (fetch на /haproxy/sites/save),
-        поэтому POST здесь нужен только для action=delete (старый HTML-ф low).
+    IMPORTANT:
+      * Settings are saved by JS (a fetch to /haproxy/sites/save), so POST
+        here is needed only for action=delete (the old HTML flow).
     """
     error = None
     message = None
@@ -1700,17 +1700,17 @@ def haproxy_site_edit(name):
     if request.method == "POST":
         action = request.form.get("action", "save")
 
-        # ─── Удаление сайта ──────────────────────────────────────
+        # ─── Deleting the site ──────────────────────────────────────
         if action == "delete":
             ok, msg = delete_site_by_name(name)
             if ok:
-                # после успешного удаления → назад к списку сайтов
+                # deleted: back to the list of sites
                 return redirect(url_for("routes.haproxy_sites_page"))
             else:
                 error = msg
 
-        # Сохранение через классическую HTML-форму мы оставляем на всякий случай,
-        # но в нормальном сценарии его перехватывает JS и шлёт JSON на /haproxy/sites/save.
+        # Saving through a classic HTML form is kept just in case, but
+        # normally JS intercepts it and sends JSON to /haproxy/sites/save.
         elif action == "save":
             new_site, error = merge_site_from_edit_form(
                 name, site_raw, request.form
@@ -1736,14 +1736,14 @@ def haproxy_site_edit(name):
                         "certificate source, key types and error-exclusion "
                         "rules were kept as they were."
                     )
-                    # перечитаем сайт после сохранения
+                    # read the site again after saving
                     site_defaults, site_raw, site_effective = get_site_raw_and_effective(
                         name
                     )
                 else:
                     error = msg
 
-    # ВАЖНО: передаём original_name и is_new, чтобы JS знал, что редактируем существующий сайт
+    # IMPORTANT: original_name and is_new tell the JS that an existing site is being edited
     from .certd_client import list_all_certs
 
     cert_data = list_all_certs()
@@ -1867,8 +1867,8 @@ def haproxy_site_issue_cert(name):
 @bp.route("/haproxy/certs/backup", methods=["GET"])
 def haproxy_certs_backup():
     """
-    Скачивание ZIP-архива с сертификатами (HAProxy + Let's Encrypt)
-    через haproxy-certd.
+    Downloads a ZIP of the certificates (HAProxy + Let's Encrypt)
+    through haproxy-certd.
     """
     import base64
     from datetime import datetime
@@ -1927,15 +1927,15 @@ def haproxy_certs_backup():
 @bp.route("/haproxy/certs/restore", methods=["POST"])
 def haproxy_certs_restore():
     """
-    Восстановление сертификатов из загруженного ZIP-архива через haproxy-certd.
+    Restores certificates from an uploaded ZIP through haproxy-certd.
 
-    Форма на /haproxy/certs должна выглядеть примерно так:
+    The form on /haproxy/certs looks roughly like this:
 
       <form action="{{ url_for('routes.haproxy_certs_restore') }}"
             method="post"
             enctype="multipart/form-data">
         <input type="file" name="archive" accept=".zip" required>
-        <button type="submit" class="btn">Восстановить из бэкапа</button>
+        <button type="submit" class="btn">Restore from backup</button>
       </form>
     """
     from flask import current_app, request, redirect, url_for
@@ -1981,16 +1981,16 @@ def haproxy_certs_restore():
         detail="" if res.get("ok") else (res.get("message") or res.get("error") or "")[:500],
     )
 
-    # Пока без flash-сообщений — просто возвращаемся на страницу сертификатов.
+    # No flash messages yet: just go back to the certificates page.
     return redirect(url_for("routes.haproxy_certs_page"))
 
 
 @bp.route("/haproxy/tcp", methods=["GET", "POST"])
 def haproxy_tcp_page():
     """
-    Список TCP-прокси + упрощённая форма добавления.
+    The list of TCP proxies and a short form to add one.
 
-    Данные берутся из config/tcp.yml (ключ tcp_proxies).
+    The data comes from config/tcp.yml (the tcp_proxies key).
     """
     error = None
     message = None
@@ -1998,7 +1998,7 @@ def haproxy_tcp_page():
     if request.method == "POST":
         action = (request.form.get("action") or "add").strip()
 
-        # ─── Удаление TCP-прокси (классический POST) ────────────────────────
+        # ─── Deleting a TCP proxy (a classic POST) ────────────────────────
         if action == "delete":
             name = (request.form.get("name") or "").strip()
             if not name:
@@ -2017,7 +2017,7 @@ def haproxy_tcp_page():
                 else:
                     error = msg
 
-        # ─── Добавление TCP-прокси (упрощённая форма) ──────────────────────
+        # ─── Adding a TCP proxy (the short form) ──────────────────────
         else:
             name = (request.form.get("name") or "").strip()
             bind_ip = (request.form.get("bind_ip") or "").strip() or "0.0.0.0"
@@ -2065,7 +2065,7 @@ def haproxy_tcp_page():
                     detail="" if ok else str(msg)[:500],
                 )
                 if ok:
-                    # после успешного добавления → сразу на страницу редактирования
+                    # added: straight to its edit page
                     return redirect(url_for("routes.haproxy_tcp_edit", name=name))
                 else:
                     error = msg
@@ -2082,10 +2082,10 @@ def haproxy_tcp_page():
 @bp.route("/haproxy/tcp/<name>/edit", methods=["GET", "POST"])
 def haproxy_tcp_edit(name):
     """
-    Страница редактирования одного TCP-прокси.
+    The page for editing one TCP proxy.
 
-    Сохранение параметров происходит через JS (fetch на /haproxy/tcp/save),
-    поэтому POST здесь нужен только для action=delete в fallback-режиме.
+    Settings are saved by JS (a fetch to /haproxy/tcp/save), so POST here is
+    needed only for action=delete in the fallback mode.
     """
     error = None
     message = None

@@ -1,10 +1,10 @@
 ---
 - name: Mail cert issued
   debug:
-    msg: "Сертификат для {{ item.name }} успешно получен/обновлён"
+    msg: "The certificate for {{ item.name }} was issued or renewed"
   listen: mail_cert_issued
 
-# Каталог под PEM
+# The PEM directory
 - name: Ensure HAProxy certs dir exists
   file:
     path: "{{ haproxy_certs_dir }}"
@@ -14,7 +14,7 @@
     mode: "0755"
   listen: build_pems_and_reload
 
-# === Склейка PEM для сайтов с явным key_types (в т.ч. [ecdsa, rsa]) ===
+# === Joining the PEMs of sites with explicit key_types (including [ecdsa, rsa]) ===
 - name: Build PEMs (sites with explicit key_types)
   vars:
     site: "{{ pair.0 }}"
@@ -37,8 +37,8 @@
     full="/etc/letsencrypt/live/{{ lineage }}/fullchain.pem"
     key="/etc/letsencrypt/live/{{ lineage }}/privkey.pem"
 
-    # Если сертификат ещё не выпущен — просто пропускаем,
-    # временный файл НЕ создаём
+    # If the certificate has not been issued yet, just skip it;
+    # NO temporary file is created
     if [ ! -r "$full" ] || [ ! -r "$key" ]; then
       echo "Skip {{ lineage }}: certificate files not ready" >&2
       exit 0
@@ -67,7 +67,7 @@
     label: "{{ pair.0.domain }} / {{ pair.1 }}"
   listen: build_pems_and_reload
 
-# === Склейка PEM для сайтов БЕЗ key_types (берём cert_key_type, единственный файл) ===
+# === Joining the PEMs of sites WITHOUT key_types (cert_key_type, a single file) ===
 - name: Build PEMs (sites without key_types → default key type)
   vars:
     site: "{{ s }}"
@@ -108,7 +108,7 @@
     label: "{{ s.domain }}"
   listen: build_pems_and_reload
 
-# Перезагрузка HAProxy — только если он есть и разрешено
+# Reload HAProxy -- only if it is there and allowed
 - name: Reload HAProxy (only if present)
   service:
     name: haproxy

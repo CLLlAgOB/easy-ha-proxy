@@ -1,7 +1,7 @@
 ---
-# 20 — выпуск ТОЛЬКО по уже отфильтрованным и DNS-готовым спискам: issue_targets_explicit / issue_targets_single
+# 20 -- issue ONLY from the lists already filtered and DNS-ready: issue_targets_explicit / issue_targets_single
 
-# EXPlicit (lineages: base-ecdsa/base-rsa либо base, если единственный тип был задан)
+# EXPLICIT (lineages: base-ecdsa/base-rsa, or base if a single type was given)
 - name: Issue/renew (explicit key_types, filtered)
   vars:
     lineage: "{{ item }}"
@@ -33,7 +33,7 @@
   when: (issue_targets_explicit | default([]) | length) > 0
   register: _issue_explicit
 
-# SINGLE (cert_sites без key_types) → берём дефолтный тип ключа
+# SINGLE (cert_sites without key_types) -> the default key type
 - name: Issue/renew (single → default key type, filtered)
   vars:
     lineage: "{{ item }}"

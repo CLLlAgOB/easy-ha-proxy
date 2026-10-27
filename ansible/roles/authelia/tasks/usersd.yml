@@ -1,6 +1,6 @@
 ---
 # roles/authelia/tasks/usersd.yml
-# Установка и запуск root-демона authelia-usersd
+# Installing and starting the root daemon authelia-usersd
 
 - name: "Authelia | usersd | install & start users daemon"
   when: authelia_enabled | default(false) | bool

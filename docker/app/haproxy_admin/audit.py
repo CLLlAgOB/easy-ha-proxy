@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Журнал административных изменений.
+"""The log of administrative changes.
 
-Отвечает на пять вопросов: кто, что, когда, из чего во что и получилось ли.
+It answers five questions: who, what, when, from what to what, and whether it worked.
 
-Две вещи здесь важнее удобства. Первая: секреты не попадают в журнал никогда —
-значения по «чувствительным» ключам заменяются до записи, и рекурсивно, потому
-что пароль обычно лежит во вложенной структуре. Вторая: сбой записи в журнал
-не отменяет саму операцию. Аудит — не путь трафика, и падение SQLite не должно
-мешать продлить сертификат; вместо этого счётчик ошибок виден в состоянии.
+Two things matter more than convenience here. First: secrets never reach the
+log -- the values of "sensitive" keys are replaced before writing, and
+recursively, because a password usually sits in a nested structure. Second: a
+failure to write the log does not undo the operation itself. Auditing is not
+in the traffic path, and a SQLite failure must not stop a certificate from
+being renewed; the error count shows in the state instead.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ _REDACTED = "***"
 
 
 def redact(value: Any, _depth: int = 0) -> Any:
-    """Заменить значения по чувствительным ключам, сохранив структуру."""
+    """Replace the values of sensitive keys, keeping the structure."""
 
     if _depth > 6:
         return "..."
@@ -89,7 +90,7 @@ def _dump(value: Any) -> str:
 
 
 def summarize(before: Any, after: Any) -> str:
-    """Короткое человекочитаемое описание того, что поменялось."""
+    """A short readable description of what changed."""
 
     if not isinstance(before, dict) or not isinstance(after, dict):
         return ""
@@ -149,7 +150,7 @@ _SCHEMA: tuple[str, ...] = (
 
 
 class AuditLog:
-    """Хранилище журнала. Потокобезопасно, ошибки не пробрасываются наружу."""
+    """The log's store. Thread-safe; errors are not raised to the caller."""
 
     def __init__(self, path: str = "") -> None:
         self.path = Path(path or AUDIT_DATABASE)
@@ -211,7 +212,7 @@ class AuditLog:
         detail: str = "",
         ts: Optional[int] = None,
     ) -> bool:
-        """Записать событие. Никогда не бросает исключений."""
+        """Record an event. Never raises."""
 
         import time
 
@@ -307,7 +308,7 @@ class AuditLog:
         return {"total": int(total), "events": [dict(row) for row in rows]}
 
     def distinct(self, column: str, limit: int = 100) -> List[str]:
-        """Значения для выпадающих фильтров. Колонка — из фиксированного набора."""
+        """Values for the filter drop-downs. The column comes from a fixed set."""
 
         if column not in ("actor", "action", "object_type"):
             return []
@@ -363,7 +364,7 @@ class AuditLog:
     def apply_retention(
         self, now: int, days: int = DEFAULT_RETENTION_DAYS, max_rows: int = MAX_ROWS
     ) -> int:
-        """Удалить записи старше срока и, отдельно, сверх жёсткого лимита."""
+        """Delete the entries past their age and, separately, those above the hard limit."""
 
         with self._lock:
             conn = self._connect()
@@ -401,9 +402,9 @@ def audit_log() -> AuditLog:
 
 
 def record_request(action: str, **kwargs: Any) -> bool:
-    """Записать событие, взяв актора и адрес из текущего запроса.
+    """Record an event, with the actor and the address from the current request.
 
-    Вызывается из маршрутов; вне запроса просто пишет системного актора.
+    Called from routes; outside a request it simply records the system actor.
     """
 
     try:

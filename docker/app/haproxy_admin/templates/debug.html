@@ -25,7 +25,7 @@
 </div>
 
 
-<!-- ───────── Allow lists (файлы and runtime) ───────── -->
+<!-- ───────── Allow lists (files and runtime) ───────── -->
 <div class="card" style="margin-top:30px">
   <div class="card-header">
     <h2>Allow lists (files and runtime ACL)</h2>
@@ -50,7 +50,7 @@
   </div>
 </div>
 
-<!-- ───────── прочая диагностика ───────── -->
+<!-- ───────── other diagnostics ───────── -->
 <div class="card" style="margin-top:30px">
   <div class="card-header">
     <h2>Log analytics (diagnostic)</h2>
@@ -72,7 +72,7 @@
       if (el) el.textContent = 'Loading…';
     });
 
-    // простая экранизация for RAW (on будущее, if понадобится)
+    // simple escaping for RAW (for later, should it be needed)
     const esc = (s) => String(s)
       .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
@@ -84,7 +84,7 @@
         banPre.textContent = j.ban_raw ?? '—';
       }
 
-      // tbl_ip_auth: новое field auth_raw
+      // tbl_ip_auth: the newer field auth_raw
       if (authPre) {
         if ('auth_raw' in j) {
           authPre.textContent = j.auth_raw ?? '—';
@@ -93,7 +93,7 @@
         }
       }
 
-      // Совместимость: раньше err_raw была строкой
+      // Compatibility: err_raw used to be a string
       if (typeof j.err_raw === 'string' || j.err_raw == null) {
         if (errPre) {
           errPre.textContent = j.err_raw ?? '—';

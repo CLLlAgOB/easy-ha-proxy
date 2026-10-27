@@ -1,5 +1,5 @@
 ---
-# Загрузка iptables правил для ipset haproxy_ban (oneshot unit)
+# Loading the iptables rules for the ipset haproxy_ban (a oneshot unit)
 
 - name: "iptables-ban | Install required packages"
   ansible.builtin.package:

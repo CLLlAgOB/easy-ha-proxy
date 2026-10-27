@@ -1,8 +1,8 @@
 # routes_monitoring.py
 #
-# Страница исторического мониторинга. Читающие маршруты — все, кроме одного:
-# подписи каналов задаёт оператор, и этот маршрут защищён как любая другая
-# форма (superadmin + CSRF).
+# The historical monitoring page. Every route only reads, except one: the
+# operator names the channels, and that route is protected like any other
+# form (superadmin + CSRF).
 
 from __future__ import annotations
 

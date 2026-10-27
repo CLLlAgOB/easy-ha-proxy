@@ -3,7 +3,7 @@
 document.addEventListener("DOMContentLoaded", function () {
   try {
     // -------------------------------
-    // Подтверждение удаления HAProxy-сертификата
+    // Confirming the deletion of a HAProxy certificate
     // -------------------------------
     var hapForms = document.querySelectorAll("form.cert-delete-haproxy");
     hapForms.forEach(function (form) {
@@ -19,7 +19,7 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
     // -------------------------------
-    // Подтверждение удаления LE-lineage
+    // Confirming the deletion of an LE lineage
     // -------------------------------
     var leForms = document.querySelectorAll("form.cert-delete-le");
     leForms.forEach(function (form) {
@@ -35,7 +35,7 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
     // -------------------------------
-    // Восстановление from backup: file-picker + блокировка кнопки
+    // Restoring from a backup: the file picker and the button lock
     // -------------------------------
     var backupFileInput  = document.getElementById("backup_file");
     var backupChooseBtn  = document.getElementById("backup_choose_btn");
@@ -43,12 +43,12 @@ document.addEventListener("DOMContentLoaded", function () {
     var backupRestoreBtn = document.getElementById("backup_restore_btn");
 
     if (backupFileInput && backupChooseBtn && backupFileName && backupRestoreBtn) {
-      // Открываем системный диалог выбора файла
+      // Open the system's file dialog
       backupChooseBtn.addEventListener("click", function () {
         backupFileInput.click();
       });
 
-      // При выборе файла обновляем подпись and включаем/отключаем кнопку
+      // When a file is chosen, update the caption and enable or disable the button
       backupFileInput.addEventListener("change", function () {
         var file = backupFileInput.files && backupFileInput.files[0];
         var name = file ? file.name : "";

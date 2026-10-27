@@ -1180,7 +1180,7 @@ separate password manager.
 
 The supported assistant is the preferred interface. After creating the ignored
 local inventory and configuration files described in
-[ansible/README.md](ansible/README.md) (Russian), direct remote Ansible use
+[ansible/README.md](ansible/README.md), direct remote Ansible use
 remains available:
 
 ```bash

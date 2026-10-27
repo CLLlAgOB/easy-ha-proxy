@@ -8,17 +8,17 @@
 {% endblock %}
 
 {% block content %}
-{# Локальные стили only for this страницы #}
+{# Styles for this page only #}
 <style>
-  /* На this page отключаем прокрутку у внешнего документа,
-     чтобы not было второго скроллбара справа */
+  /* On this page the outer document does not scroll,
+     so there is no second scrollbar on the right */
   html,
   body {
     overflow: hidden;
   }
 
   .stats-page-fullscreen {
-    /* Растягиваем блок on всю ширину окна, игнорируя max-width контейнера */
+    /* Stretch the block to the window's full width, past the container's max-width */
     position: relative;
     left: 50%;
     right: 50%;
@@ -28,7 +28,7 @@
 
     margin-top: 10px;
 
-    /* Всё оставшееся место by высоте отдаём under iframe */
+    /* All the remaining height goes to the iframe */
     height: calc(100vh - 120px);
 
     background: #000;

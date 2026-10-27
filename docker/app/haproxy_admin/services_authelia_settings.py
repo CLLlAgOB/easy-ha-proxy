@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Сервисный слой для страницы интерактивных настроек Authelia (без access_control.rules).
+The service layer of the interactive Authelia settings page (without access_control.rules).
 """
 
 from typing import Dict, Any, Tuple
@@ -84,11 +84,11 @@ def _get_nested(d: Dict[str, Any], path, default=None):
 
 def load_settings_form_data() -> Dict[str, Any]:
     """
-    Загружает конфиг (без rules и без секретов) и преобразует его
-    в плоский dict для HTML-формы.
+    Loads the configuration (without the rules and the secrets) and flattens
+    it into a dict for the HTML form.
 
-    ВНИМАНИЕ: параметры Redis и notifier.smtp здесь не редактируются
-    через веб-интерфейс.
+    NOTE: the Redis and notifier.smtp settings are not edited in the web
+    interface here.
     """
     resp = get_config_without_rules()
     if not resp.get("ok"):
@@ -479,16 +479,16 @@ def _parse_int(form, name: str, default=None) -> int | None:
 
 def save_settings_from_form(form_data) -> Tuple[bool, str]:
     """
-    Принимает request.form, формирует ФРАГМЕНТ конфигурации Authelia
-    и отправляет его демону settings_update.
+    Takes request.form, builds a FRAGMENT of Authelia's configuration and
+    sends it to the daemon as settings_update.
 
-    ВАЖНО: обновляем только "человеческие" поля:
+    IMPORTANT: only the "human" fields are updated:
       - log.level
-      - session.* (кроме redis и secret)
+      - session.* (except redis and secret)
       - regulation.*
       - totp.*
-    Всё остальное (server, redis, storage, auth_backend.file, notifier.smtp)
-    не трогаем.
+    Everything else (server, redis, storage, auth_backend.file, notifier.smtp)
+    is left alone.
     """
     try:
         cfg: Dict[str, Any] = {}
@@ -497,7 +497,7 @@ def save_settings_from_form(form_data) -> Tuple[bool, str]:
         log: Dict[str, Any] = {}
         level = (form_data.get("log_level") or "").strip() or "warn"
         log["level"] = level
-        # формат/файл/stdout не трогаем → не отправляем
+        # format/file/stdout are left alone, so they are not sent
         cfg["log"] = log
 
         # ---------------- SESSION ----------------
@@ -527,7 +527,7 @@ def save_settings_from_form(form_data) -> Tuple[bool, str]:
         }
         session["cookies"] = [cookie]
 
-        # ВАЖНО: redis сюда НЕ добавляем → не трогаем существующий блок session.redis
+        # IMPORTANT: redis is NOT added here, so the existing session.redis block is left alone
         cfg["session"] = session
 
         # ---------------- REGULATION ----------------
@@ -549,10 +549,10 @@ def save_settings_from_form(form_data) -> Tuple[bool, str]:
         cfg["totp"] = totp
 
     except ValueError as exc:
-        # Ошибка парсинга чисел
+        # A number failed to parse
         return False, str(exc)
 
-    # Отправляем во второй план (root-демон)
+    # Hand it to the root daemon
     resp = update_settings(cfg)
     if not resp.get("ok"):
         return (

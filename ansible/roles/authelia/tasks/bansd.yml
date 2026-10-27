@@ -1,11 +1,11 @@
 ---
 # roles/authelia/tasks/bansd.yml
-# Helper + (опционально) root-демон authelia-bansd
+# The helper + (optionally) the root daemon authelia-bansd
 
 - name: "Authelia | bansd | install helper and (optional) bans daemon"
   when: authelia_enabled | default(false) | bool
   block:
-    # CLI helper для банов — в текущей версии deploy без условия
+    # The CLI helper for bans -- deployed unconditionally in the current version
     - name: "authelia-bans | Deploy helper script"
       become: true
       ansible.builtin.template:

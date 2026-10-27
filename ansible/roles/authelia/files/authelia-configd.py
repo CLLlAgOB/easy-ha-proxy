@@ -1,77 +1,77 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-authelia-configd — root-демон для управления Authelia configuration.yml.
+authelia-configd -- the root daemon that manages Authelia's configuration.yml.
 
-Умеет:
+Actions:
 
   action = "rules_list"
-    → вернуть список access_control.rules (list[dict]) — старый JSON-API
+    -> return access_control.rules as list[dict] (the old JSON API)
 
   action = "rules_save"
-    → сохранить новый список access_control.rules (через JSON-API)
-       * бэкапит configuration.yml
-       * пишет configuration.yml.tmp
-       * (опционально) валидирует через authelia config validate
+    -> save a new access_control.rules list (through the JSON API)
+       * backs up configuration.yml
+       * writes configuration.yml.tmp
+       * (optionally) validates with authelia config validate
        * os.replace(.tmp, configuration.yml)
 
   action = "rules_get"
-    → вернуть access_control.rules как YAML-список (строка rules_yaml)
+    -> return access_control.rules as a YAML list (the string rules_yaml)
 
   action = "rules_set"
-    → принять YAML-список правил (rules_yaml), подставить в
-      access_control.rules, провалидировать и сохранить
+    -> take a YAML list of rules (rules_yaml), put it in
+      access_control.rules, validate and save
 
   action = "config_view"
-    → вернуть ВЕСЬ configuration.yml, но:
-       - без access_control.rules
-       - с замазанными:
+    -> return the WHOLE configuration.yml, but:
+       - without access_control.rules
+       - with these masked:
            session.secret
            storage.encryption_key
            identity_validation.reset_password.jwt_secret
 
   action = "settings_update"
-    → принять фрагмент конфигурации (без rules и без секретов) и смержить
-      его поверх текущего configuration.yml, с валидацией и сохранением
+    -> take a configuration fragment (no rules, no secrets) and merge it
+      over the current configuration.yml, validating and saving
 
   action = "mail_view" / "mail_update"
-    → безопасно читать и транзакционно изменять notifier, SMTP relay,
-      runtime .env и managed easy-ha-proxy configuration. Пароль никогда
-      не возвращается клиенту
+    -> read safely, and change transactionally, the notifier, the SMTP relay,
+      the runtime .env and the managed easy-ha-proxy configuration. The
+      password is never returned to the client
 
   action = "mail_test"
-    → отправить одно тестовое сообщение с текущими сохранёнными параметрами;
-      сообщение принимается внутренним Postfix relay через sendmail, после
-      чего демон ограниченное время ждёт обезличенный результат внешней
-      SMTP-доставки по уникальному Message-ID
+    -> send one test message with the saved settings; the internal Postfix
+      relay accepts it through sendmail, after which the daemon waits a
+      bounded time for the anonymised result of the outside SMTP delivery,
+      found by its unique Message-ID
 
   action = "notification_latest" / "notification_reveal" /
            "notification_handle"
-    → безопасно показать метаданные, однократно раскрыть или отметить
-      обработанным только текущее filesystem-уведомление. Это не история:
-      Authelia сама заменяет файл при следующем уведомлении
+    -> safely show the metadata of, reveal once, or mark as handled only the
+      current filesystem notification. It is not a history: Authelia
+      replaces the file with the next notification
 
   action = "restart"
-    → перезапустить Authelia (docker restart контейнера) и дождаться,
-      пока HTTP health-check и ForwardAuth backend HAProxy снова
-      станут доступны
+    -> restart Authelia (docker restart of the container) and wait until
+      the HTTP health check and HAProxy's ForwardAuth backend are
+      available again
 
-Переменные окружения:
+Environment variables:
 
-  AUTHELIA_CONFIG_FILE       — путь к configuration.yml на хосте
-                               (по умолчанию /opt/authelia/configuration.yml)
-  AUTHELIA_CONFIG_SOCKET     — unix-сокет демона
-                               (по умолчанию /run/easy-ha-proxy/authelia-configd.sock)
-  AUTHELIA_CONTAINER_NAME    — имя docker-контейнера Authelia
-                               (по умолчанию authelia)
-  AUTHELIA_CONFIG_PATH       — путь до configuration.yml ВНУТРИ контейнера
-                               (по умолчанию /config/configuration.yml)
+  AUTHELIA_CONFIG_FILE       -- path to configuration.yml on the host
+                               (default /opt/authelia/configuration.yml)
+  AUTHELIA_CONFIG_SOCKET     -- the daemon's unix socket
+                               (default /run/easy-ha-proxy/authelia-configd.sock)
+  AUTHELIA_CONTAINER_NAME    -- the name of Authelia's docker container
+                               (default authelia)
+  AUTHELIA_CONFIG_PATH       -- path to configuration.yml INSIDE the container
+                               (default /config/configuration.yml)
 
-  AUTHELIA_VALIDATE_CONFIG   — "true"/"1" чтобы включить authelia config validate
-  AUTHELIA_RESTART_HOST      — адрес для проверки порта (по умолчанию 127.0.0.1)
-  AUTHELIA_RESTART_PORT      — порт Authelia (по умолчанию 9091)
-  AUTHELIA_RESTART_TIMEOUT   — таймаут ожидания, сек (по умолчанию 30)
-  AUTHELIA_HAPROXY_SOCKET    — HAProxy runtime socket used to verify that
+  AUTHELIA_VALIDATE_CONFIG   -- "true"/"1" to run authelia config validate
+  AUTHELIA_RESTART_HOST      -- address whose port is checked (default 127.0.0.1)
+  AUTHELIA_RESTART_PORT      -- Authelia's port (default 9091)
+  AUTHELIA_RESTART_TIMEOUT   -- how long to wait, seconds (default 30)
+  AUTHELIA_HAPROXY_SOCKET    -- HAProxy runtime socket used to verify that
                                ForwardAuth routing has recovered
 """
 
@@ -228,11 +228,11 @@ NOTIFICATION_REVEALED_AT: Dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
-# Работа с файлом configuration.yml
+# The configuration.yml file
 # ---------------------------------------------------------------------------
 
 def _backup_config_file() -> None:
-    """Создаёт бэкап CONFIG_FILE с небольшой ротацией (оставляем максимум 14 файлов)."""
+    """Backs up CONFIG_FILE with a small rotation (at most 14 files are kept)."""
     if not os.path.exists(CONFIG_FILE):
         return
 
@@ -280,12 +280,12 @@ def _backup_config_file() -> None:
 
 def _load_config_data() -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
-    Загружает configuration.yml.
+    Loads configuration.yml.
 
-    Возвращает (root_data, rules_list).
+    Returns (root_data, rules_list).
 
-    root_data — полный YAML как dict.
-    rules_list — список правил access_control.rules (list[dict]).
+    root_data is the whole YAML as a dict.
+    rules_list is the access_control.rules list (list[dict]).
     """
     if not os.path.exists(CONFIG_FILE):
         raise FileNotFoundError(
@@ -321,11 +321,11 @@ def _load_config_data() -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
 
 def _deep_update(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
     """
-    Рекурсивное обновление dst значениями из src:
-      - если и dst[k], и src[k] словари → идём внутрь
-      - иначе dst[k] просто перезаписывается
+    Updates dst recursively with the values from src:
+      - if dst[k] and src[k] are both dicts, go inside
+      - otherwise dst[k] is simply overwritten
 
-    Поля, которых нет в src, в dst не трогаем.
+    Fields that src does not have are left alone in dst.
     """
     for key, value in src.items():
         if isinstance(value, dict) and isinstance(dst.get(key), dict):
@@ -399,14 +399,14 @@ def _reject_unsafe_values(
 
 def _validate_config_via_authelia(tmp_host_path: str) -> None:
     """
-    Валидирует конфиг через `authelia config validate` внутри контейнера.
+    Validates the configuration with `authelia config validate` inside the container.
 
-    tmp_host_path — путь к .tmp на хосте (например /opt/authelia/configuration.yml.tmp).
-    В контейнере предполагаем, что каталог CONFIG_FILE смонтирован в AUTHELIA_CONFIG_PATH.
+    tmp_host_path is the path to the .tmp file on the host (for example /opt/authelia/configuration.yml.tmp).
+    The directory of CONFIG_FILE is assumed to be mounted at AUTHELIA_CONFIG_PATH in the container.
     """
     if not VALIDATE_CONFIG:
         LOG.info(
-            "AUTHELIA_VALIDATE_CONFIG=false, пропускаем authelia config validate"
+            "AUTHELIA_VALIDATE_CONFIG=false, skipping authelia config validate"
         )
         return
 
@@ -454,7 +454,7 @@ def _validate_config_via_authelia(tmp_host_path: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"Не удалось запустить docker exec для Authelia: {exc}"
+            f"Could not run docker exec for Authelia: {exc}"
         ) from exc
 
     if proc.returncode != 0:
@@ -471,13 +471,13 @@ def _validate_config_via_authelia(tmp_host_path: str) -> None:
 
 def _save_config_data(root_data: Dict[str, Any]) -> None:
     """
-    Атомарно сохраняет YAML обратно в CONFIG_FILE с предварительным бэкапом
-    и (опциональной) валидацией через Authelia.
+    Saves the YAML back to CONFIG_FILE atomically, after a backup
+    and an (optional) validation by Authelia.
 
-    ВАЖНО: не меняем владельца и права файла — они сохраняются такими,
-    какими были до вызова (чтобы Ansible управлял ими).
+    IMPORTANT: the file's owner and mode are not changed -- they stay what
+    they were before the call (Ansible manages them).
     """
-    # Запоминаем текущие права/владельца, если файл уже есть.
+    # Remember the current mode and owner, if the file exists.
     prev_stat = None
     try:
         prev_stat = os.stat(CONFIG_FILE)
@@ -537,15 +537,15 @@ def _save_config_data(root_data: Dict[str, Any]) -> None:
             pass
         raise
 
-    # Атомарная замена: боевой путь всегда указывает на читаемый файл.
+    # Atomic replacement: the live path always points at a readable file.
     os.replace(tmp_path, CONFIG_FILE)
     LOG.info("Config file updated: %s", CONFIG_FILE)
 
-    # Владелец/права уже выставлены на temp до rename; этот блок оставлен как
-    # подстраховка на случай нестандартных default-ACL каталога.
+    # The owner and mode are already set on the temp file before the rename;
+    # this block stays as a safety net for unusual default ACLs on the directory.
     if prev_stat is not None:
         try:
-            # Владелец/группа
+            # Owner/group
             os.chown(CONFIG_FILE, prev_stat.st_uid, prev_stat.st_gid)
         except PermissionError as exc:  # noqa: BLE001
             LOG.warning(
@@ -561,7 +561,7 @@ def _save_config_data(root_data: Dict[str, Any]) -> None:
             )
 
         try:
-            # Права (маска с обрезкой до 0777)
+            # Mode (masked down to 0777)
             os.chmod(CONFIG_FILE, 0o640)
         except OSError as exc:  # noqa: BLE001
             LOG.warning(
@@ -1812,7 +1812,7 @@ def _claim_mail_test_slot() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Рестарт Authelia и ожидание порта
+# Restarting Authelia and waiting for its port
 # ---------------------------------------------------------------------------
 
 def _authelia_health_ready() -> bool:
@@ -1947,17 +1947,17 @@ def _handle_restart(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Обработчики действий (rules/config/settings)
+# Action handlers (rules/config/settings)
 # ---------------------------------------------------------------------------
 
 def _handle_rules_list(req: Dict[str, Any]) -> Dict[str, Any]:
-    """Старый JSON-API: вернуть rules как list[dict]."""
+    """The old JSON API: return the rules as list[dict]."""
     _root, rules = _load_config_data()
     return {"ok": True, "rules": rules}
 
 
 def _handle_rules_save(req: Dict[str, Any]) -> Dict[str, Any]:
-    """Старый JSON-API: принять list[dict] и сохранить в access_control.rules."""
+    """The old JSON API: take a list[dict] and save it to access_control.rules."""
     new_rules = req.get("rules")
 
     if not isinstance(new_rules, list):
@@ -1989,7 +1989,7 @@ def _handle_rules_save(req: Dict[str, Any]) -> Dict[str, Any]:
         LOG.exception("Failed to save configuration")
         return {
             "ok": False,
-            "error": f"Ошибка сохранения configuration.yml: {exc}",
+            "error": f"Failed to save configuration.yml: {exc}",
         }
 
     return {"ok": True, "rules": new_rules}
@@ -1997,16 +1997,16 @@ def _handle_rules_save(req: Dict[str, Any]) -> Dict[str, Any]:
 
 def _handle_rules_get(req: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Новый API для UI: вернуть rules как YAML-список.
+    The UI's API: return the rules as a YAML list.
 
-    Ответ:
+    Answer:
       { "ok": true, "rules_yaml": "<yaml>" }
     """
     try:
         _root, rules = _load_config_data()
     except Exception as exc:  # noqa: BLE001
         LOG.exception("rules_get: failed to load config")
-        return {"ok": False, "error": f"Не удалось прочитать configuration.yml: {exc}"}
+        return {"ok": False, "error": f"Could not read configuration.yml: {exc}"}
 
     try:
         rules_yaml = yaml.safe_dump(
@@ -2017,7 +2017,7 @@ def _handle_rules_get(req: Dict[str, Any]) -> Dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         LOG.exception("rules_get: failed to dump rules YAML")
-        return {"ok": False, "error": f"Не удалось сформировать YAML правил: {exc}"}
+        return {"ok": False, "error": f"Could not build the rules YAML: {exc}"}
 
     return {"ok": True, "rules_yaml": rules_yaml}
 
@@ -2064,10 +2064,10 @@ def _reject_unprotected_control_plane(rules: List[Any]) -> None:
 
 def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Новый API для UI: принять YAML-список правил и сохранить его в access_control.rules.
+    The UI's API: take a YAML list of rules and save it to access_control.rules.
 
-    Ожидаем:
-      { "action": "rules_set", "rules_yaml": "<yaml-список>" }
+    Expects:
+      { "action": "rules_set", "rules_yaml": "<yaml list>" }
     """
     rules_yaml = req.get("rules_yaml")
     if not isinstance(rules_yaml, str):
@@ -2076,12 +2076,12 @@ def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
     try:
         parsed = yaml.safe_load(rules_yaml) or []
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"Некорректный YAML rules_yaml: {exc}"}
+        return {"ok": False, "error": f"Invalid YAML in rules_yaml: {exc}"}
 
     if not isinstance(parsed, list):
-        return {"ok": False, "error": "rules_yaml должен быть YAML-списком"}
+        return {"ok": False, "error": "rules_yaml must be a YAML list"}
     if len(parsed) > 500:
-        return {"ok": False, "error": "Допускается не более 500 правил"}
+        return {"ok": False, "error": "At most 500 rules are allowed"}
 
     try:
         _reject_unsafe_values(parsed)
@@ -2098,7 +2098,7 @@ def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
         root, _old_rules = _load_config_data()
     except Exception as exc:  # noqa: BLE001
         LOG.exception("rules_set: failed to load config")
-        return {"ok": False, "error": f"Не удалось прочитать configuration.yml: {exc}"}
+        return {"ok": False, "error": f"Could not read configuration.yml: {exc}"}
 
     ac = root.get("access_control")
     if ac is None or not isinstance(ac, dict):
@@ -2113,17 +2113,17 @@ def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
         LOG.exception("rules_set: failed to save configuration")
         return {
             "ok": False,
-            "error": f"Ошибка сохранения configuration.yml: {exc}",
+            "error": f"Failed to save configuration.yml: {exc}",
         }
 
-    return {"ok": True, "message": "Правила access_control успешно обновлены"}
+    return {"ok": True, "message": "access_control rules updated"}
 
 
 def _handle_config_view(req: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Вернуть полный конфиг для UI-настроек, но:
-      - без access_control.rules
-      - с замазанными секретами.
+    Return the whole configuration for the settings UI, but:
+      - without access_control.rules
+      - with the secrets masked.
     """
     root, _rules = _load_config_data()
     data = deepcopy(root)
@@ -3008,13 +3008,13 @@ def _handle_mail_update(req: Dict[str, Any]) -> Dict[str, Any]:
 
 def _handle_settings_update(req: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Обновление общих настроек конфигурации (server/log/session/etc.)
-    без трогания access_control.rules и секретов.
+    Updates the general settings (server/log/session/etc.) without touching
+    access_control.rules or the secrets.
 
-    Ожидаем:
+    Expects:
       {
         "action": "settings_update",
-        "config": { ... }   # фрагмент конфигурации
+        "config": { ... }   # a configuration fragment
       }
     """
     cfg_in = req.get("config")
@@ -3034,7 +3034,7 @@ def _handle_settings_update(req: Dict[str, Any]) -> Dict[str, Any]:
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
-    # На всякий случай защищаемся от попытки передать секреты:
+    # Guard against an attempt to pass secrets, just in case:
     try:
         ses = cfg.get("session")
         if isinstance(ses, dict):
@@ -3058,15 +3058,15 @@ def _handle_settings_update(req: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Не даём случайно затереть rules
+    # Do not let the rules be overwritten by accident
     ac_in = cfg.get("access_control")
     if isinstance(ac_in, dict):
         ac_in.pop("rules", None)
 
-    # Загружаем полный конфиг с rules и секретами
+    # Load the whole configuration, rules and secrets included
     root, _rules = _load_config_data()
 
-    # Мерджим фрагмент поверх
+    # Merge the fragment over it
     _deep_update(root, cfg)
 
     try:
@@ -3075,7 +3075,7 @@ def _handle_settings_update(req: Dict[str, Any]) -> Dict[str, Any]:
         LOG.exception("Failed to save configuration (settings_update)")
         return {
             "ok": False,
-            "error": f"Ошибка сохранения configuration.yml: {exc}",
+            "error": f"Failed to save configuration.yml: {exc}",
         }
 
     return {"ok": True}
@@ -3128,13 +3128,13 @@ def handle_request(
             "error": "the local notification action is not available to this client",
         }
 
-    # Новый YAML-API для ACL-UI
+    # The YAML API of the ACL UI
     if action == "rules_get":
         return _handle_rules_get(req)
     if action == "rules_set":
         return _handle_rules_set(req)
 
-    # Старый JSON-API
+    # The old JSON API
     if action == "rules_list":
         return _handle_rules_list(req)
     if action == "rules_save":
@@ -3163,11 +3163,11 @@ def handle_request(
 
 
 # ---------------------------------------------------------------------------
-# Серверный цикл
+# The server loop
 # ---------------------------------------------------------------------------
 
 def serve() -> None:
-    """Основной цикл сервера (UNIX-сокет)."""
+    """The server's main loop (UNIX socket)."""
     try:
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
@@ -3247,8 +3247,8 @@ def serve() -> None:
 
 
 def main() -> None:
-    # Настраиваем root-логгер только при запуске демона: делать это на импорте
-    # значит менять логирование любого процесса, который просто импортирует модуль.
+    # Configure the root logger only when the daemon runs: doing it on import
+    # would change the logging of any process that merely imports the module.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",

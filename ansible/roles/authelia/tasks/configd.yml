@@ -1,6 +1,6 @@
 ---
 # roles/authelia/tasks/configd.yml
-# (Опционально) root-демон authelia-configd
+# (Optional) the root daemon authelia-configd
 
 - name: "Authelia | configd | install & start config daemon"
   when: authelia_enabled | default(false) | bool

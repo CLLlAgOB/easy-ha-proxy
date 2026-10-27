@@ -11,7 +11,7 @@
         group: "{{ authelia_log_reader_group }}"
         mode: "0750"
 
-    # -------- СЕРВИСНЫЕ ПОЛЬЗОВАТЕЛИ ДЛЯ КОНТЕЙНЕРОВ --------
+    # -------- SERVICE USERS FOR THE CONTAINERS --------
     - name: Ensure groups for Authelia stack exist
       become: true
       ansible.builtin.group:
@@ -35,7 +35,7 @@
         - { name: "authelia",       uid: "{{ authelia_uid }}",       group: "authelia" }
         - { name: "authelia_redis", uid: "{{ authelia_redis_uid }}", group: "authelia_redis" }
 
-    # -------- ДИРЕКТОРИИ / ПРАВА НА ХОСТЕ --------
+    # -------- DIRECTORIES / PERMISSIONS ON THE HOST --------
     - name: Ensure Authelia base dir exists and has correct permissions
       become: true
       ansible.builtin.file:
@@ -66,7 +66,7 @@
         group: authelia_redis
         mode: "0750"
 
-    # КАТАЛОГ ЛОГОВ AUTHELIA (пишет authelia, читает haproxy)
+    # THE AUTHELIA LOG DIRECTORY (authelia writes, haproxy reads)
     - name: Ensure Authelia logs dir exists
       become: true
       ansible.builtin.file:
@@ -111,7 +111,7 @@
         mode: "0640"
       when: authelia_log_stat.stat.exists
 
-    # ACL (для чтения логов haproxy/haproxyadmin)
+    # ACLs (so haproxy/haproxyadmin can read the logs)
     - name: Ensure ACL support is installed
       become: true
       ansible.builtin.apt:
@@ -162,7 +162,7 @@
         permissions: rx
         state: present
 
-    # EMAIL templates dir (сами шаблоны остаются в config/install)
+    # The e-mail templates directory (the templates themselves stay in config/install)
     - name: Ensure Authelia email templates dir exists
       become: true
       ansible.builtin.file:
@@ -172,7 +172,7 @@
         group: authelia
         mode: "0750"
 
-    # LUA dirs для haproxy (поскольку Authelia роль кладёт туда файлы)
+    # LUA directories for haproxy (the Authelia role puts files there)
     - name: Ensure HAProxy lua dir exists
       become: true
       ansible.builtin.file:

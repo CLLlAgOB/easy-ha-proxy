@@ -1,7 +1,7 @@
 # routes_dns_providers.py
 #
-# Профили DNS-провайдеров для DNS-01. Сохранённые учётные данные лежат у root
-# и обратно в браузер не возвращаются никогда: их не отдаёт даже сам демон.
+# DNS provider profiles for DNS-01. The stored credentials are kept by root
+# and never come back to the browser: not even the daemon hands them out.
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .routes import bp
 
 LOG = logging.getLogger("haproxy-admin")
 
-# Держим синхронно с DNS_PROVIDERS в haproxy-certd.py.
+# Kept in step with DNS_PROVIDERS in haproxy-certd.py.
 PROVIDERS = ("cloudflare", "digitalocean", "route53", "rfc2136")
 PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 MAX_CREDENTIAL_LENGTH = 4096

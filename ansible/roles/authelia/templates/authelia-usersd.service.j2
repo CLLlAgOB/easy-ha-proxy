@@ -11,7 +11,7 @@ ExecStart=/usr/local/sbin/authelia-usersd.py
 Restart=always
 RestartSec=2
 
-# ENV для демона
+# The daemon's environment
 Environment="AUTHELIA_USERS_FILE={{ authelia_users_file }}"
 Environment="AUTHELIA_USERS_SOCKET={{ authelia_users_socket }}"
 Environment="AUTHELIA_DOCKER_COMPOSE_FILE={{ authelia_docker_compose_file }}"
@@ -19,7 +19,7 @@ Environment="AUTHELIA_CONTAINER_NAME={{ authelia_container_name }}"
 Environment="AUTHELIA_CONFIG_PATH={{ authelia_config_path }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-usersd.py', rstrip=false) | hash('sha256') }}"
 
-# Немного hardening, но без NoNewPrivileges (root+docker)
+# Some hardening, but without NoNewPrivileges (root+docker)
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes

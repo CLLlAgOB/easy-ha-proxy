@@ -31,13 +31,13 @@
     }
   }
 
-  // навигация by клику on line (кроме кнопок/форм)
+  // navigate on a click on the row (except on buttons and forms)
   rows.forEach(row => {
     const href = row.getAttribute('data-edit-url');
     if (!href) return;
 
     row.addEventListener('click', function (e) {
-      // not реагируем, if клик by кнопке/ссылке/форме
+      // ignore a click on a button, link or form
       if (e.target.closest('button, a, form, input, select, textarea')) {
         return;
       }
@@ -49,6 +49,6 @@
     searchInput.addEventListener('input', applyFilter);
   }
 
-  // начальное состояние метки
+  // the label's initial state
   applyFilter();
 })();

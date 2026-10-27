@@ -1,7 +1,7 @@
 # routes_audit.py
 #
-# Просмотр журнала изменений. Только чтение: запись в журнал делают сами
-# операции, а править историю нельзя вообще.
+# Browsing the change log. Read-only: the operations write the log
+# themselves, and the history cannot be edited at all.
 
 from __future__ import annotations
 

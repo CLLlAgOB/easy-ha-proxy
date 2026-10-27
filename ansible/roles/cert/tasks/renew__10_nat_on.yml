@@ -1,5 +1,5 @@
 ---
-# 10 — включить NAT при необходимости (и только если есть готовые цели)
+# 10 -- switch NAT on if needed (and only if there are ready targets)
 
 - name: Collect service facts
   service_facts:
@@ -8,7 +8,7 @@
   set_fact:
     haproxy_present: "{{ 'haproxy.service' in ansible_facts.services }}"
 
-# acme_bootstrap: null → авто: DNAT нужен, если HAProxy нет; true/false → вручную
+# acme_bootstrap: null -> automatic: DNAT is needed if there is no HAProxy; true/false -> by hand
 - name: Decide if DNAT bootstrap is needed
   set_fact:
     _enable_bootstrap_dnat: true
@@ -22,7 +22,7 @@
 
 - name: Fail if 8000 is BUSY
   fail:
-    msg: "Порт 8000 занят — standalone Certbot не сможет слушать :8000."
+    msg: "Port 8000 is in use -- standalone Certbot cannot listen on :8000."
   when:
     - (issue_targets_count | default(0) | int) > 0
     - _p8000.stdout == 'BUSY'
@@ -42,7 +42,7 @@
     - (issue_targets_count | default(0) | int) > 0
     - ipt4_chk.rc == 1
 
-# IPv6 (если доступен и разрешён)
+# IPv6 (if available and allowed)
 - name: Check ip6tables available
   command: bash -lc 'command -v ip6tables >/dev/null && echo yes || echo no'
   register: ip6_avail

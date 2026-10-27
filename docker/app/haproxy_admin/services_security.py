@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Сервисный слой раздела Adaptive protection.
+"""The service layer of the Adaptive protection section.
 
-Валидирует параметры симулятора весов и обогащает адреса страной из локальной
-базы GeoIP. Демон валидирует те же значения повторно.
+Validates the weight simulator's parameters and adds each address's country
+from the local GeoIP database. The daemon validates the same values again.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ MODES: tuple[str, ...] = ("off", "monitor", "enforce")
 
 LOG = logging.getLogger("haproxy-admin")
 
-# Держим синхронно с DEFAULT_WEIGHTS в easy-ha-proxy-guardd.py.
+# Kept in step with DEFAULT_WEIGHTS in easy-ha-proxy-guardd.py.
 EVENT_TYPES: tuple[str, ...] = (
     "SCANNER_PATH",
     "SCANNER_MULTI_CATEGORY",
@@ -53,7 +53,7 @@ EVENT_TYPES: tuple[str, ...] = (
 
 
 def simulator_params(args: Dict[str, str]) -> Dict[str, Any]:
-    """Собрать параметры what-if из запроса, отбросив всё лишнее."""
+    """Collect the what-if parameters from the request, dropping everything else."""
 
     params: Dict[str, Any] = {}
     for event_type in EVENT_TYPES:

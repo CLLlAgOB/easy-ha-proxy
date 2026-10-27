@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Клиент к root-сервису easy-ha-proxy-guardd через Unix-socket.
+"""Client of the root service easy-ha-proxy-guardd over a Unix socket.
 
-Демон отдаёт только чтение: он ничего не банит в этом релизе, поэтому и
-изменяющих вызовов здесь нет.
+Reads the engine's state and changes its settings (the mode, ban durations,
+signatures, traps, the request log). The daemon validates every change again.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ DEFAULT_TIMEOUT = 15
 
 
 class GuarddUnavailable(RuntimeError):
-    """Движок не отвечает: страница деградирует, а не падает."""
+    """The engine does not answer: the page degrades rather than fails."""
 
 
 def _session() -> requests.Session:

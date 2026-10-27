@@ -1,5 +1,5 @@
 ---
-# Оркестратор стадий выпуска/продления
+# Orchestrates the issue/renew stages
 
 - include_tasks: renew__00_targets.yml
   tags: [cert, cert-renew, addsite]

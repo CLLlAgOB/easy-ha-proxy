@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Клиент к root-сервису easy-ha-proxy-alertd через Unix-socket.
+"""Client of the root service easy-ha-proxy-alertd over a Unix socket.
 
-Демон никогда не возвращает ни URL webhook целиком, ни значение секретного
-заголовка: он отдаёт их уже сокращёнными. Здесь ничего не расшифровывается и
-не восстанавливается — страница видит ровно то, что отдал демон.
+The daemon never returns a whole webhook URL or the value of the secret
+header: it hands them out already shortened. Nothing is decoded or restored
+here -- the page sees exactly what the daemon gave.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ TEST_TIMEOUT = 60
 
 
 class AlertdUnavailable(RuntimeError):
-    """Движок не отвечает: страница деградирует, а не падает."""
+    """The engine does not answer: the page degrades rather than fails."""
 
 
 def _session() -> requests.Session:

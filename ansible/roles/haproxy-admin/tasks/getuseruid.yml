@@ -1,24 +1,24 @@
 # ─────────────────────────────────────────────────────────────
-# 0. Пользователь и группа на хосте для Docker-контейнера
+# 0. The host user and group for the Docker container
 # ─────────────────────────────────────────────────────────────
 
 - name: "hadmin | Ensure group exists"
   ansible.builtin.group:
-    name: "{{ app_group }}"        # обычно 'hadmin'
+    name: "{{ app_group }}"        # usually 'hadmin'
     system: true
     state: present
   when: haproxy_admin_use_docker | bool
 
 - name: "haproxyadmin | Ensure user exists"
   ansible.builtin.user:
-    name: "{{ app_user }}"         # обычно 'haproxyadmin'
+    name: "{{ app_user }}"         # usually 'haproxyadmin'
     system: true
     create_home: false
     shell: /usr/sbin/nologin
     group: "{{ app_group }}"
   when: haproxy_admin_use_docker | bool
 
-# ---- GID группы hadmin (по имени app_group) ----
+# ---- The GID of the hadmin group (by the name in app_group) ----
 - name: "hadmin | Get group GID via getent"
   ansible.builtin.command:
     argv:
@@ -35,11 +35,11 @@
 
 - name: "hadmin | Set hadmin_gid fact"
   ansible.builtin.set_fact:
-    # пример строки: "hadmin:x:987:\n"
+    # an example line: "hadmin:x:987:\n"
     hadmin_gid: "{{ hadmin_group_cmd.stdout.split(':')[2] | trim }}"
   when: haproxy_admin_use_docker | bool
 
-# ---- UID/GID пользователя haproxyadmin ----
+# ---- The UID/GID of the haproxyadmin user ----
 - name: "haproxyadmin | Get UID via id -u"
   ansible.builtin.command:
     argv:

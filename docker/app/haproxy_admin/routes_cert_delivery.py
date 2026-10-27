@@ -1,10 +1,10 @@
 # routes_cert_delivery.py
 #
-# Доставка сертификата на другие машины, которым нужен тот же самый.
+# Delivering a certificate to other machines that need the same one.
 #
-# Приватный ключ и закреплённый ключ хоста уходят к certd и обратно не
-# возвращаются никогда: демон их не отдаёт, страница видит только «задан» или
-# «не задан». Тот же контракт, что у DNS-провайдеров и у назначений бэкапа.
+# The private key and the pinned host key go to certd and never come back:
+# the daemon does not hand them out, and the page sees only "set" or "not
+# set". The same contract as for the DNS providers and the backup destinations.
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .routes import bp
 
 LOG = logging.getLogger("haproxy-admin")
 
-# Держим синхронно с haproxy-certd.py и easy-ha-proxy-cert-deliver.py.
+# Kept in step with haproxy-certd.py and easy-ha-proxy-cert-deliver.py.
 FORMATS = ("pfx", "pem-pair", "pem-combined")
 TRANSPORTS = ("sftp", "scp")
 MAX_KEY_LENGTH = 16384

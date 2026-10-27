@@ -1,5 +1,5 @@
 # routes_haproxy_tcp.py
-# JSON-эндпоинты для TCP-прокси (страница редактирования).
+# JSON endpoints for the TCP proxies (the edit page).
 
 import traceback
 from flask import jsonify, request
@@ -26,11 +26,11 @@ def _stored_tcp(name):
 @bp.post("/haproxy/tcp/save")
 def haproxy_tcp_save():
     """
-    Сохранение TCP-прокси (создание/редактирование) через JSON.
-    Формат тела:
+    Saves a TCP proxy (create or edit) from JSON.
+    Body:
       {
-        "tcp": { ... },           # объект TCP-прокси
-        "original_name": "old"    # опционально, если редактируем и переименовываем
+        "tcp": { ... },           # the TCP proxy object
+        "original_name": "old"    # optional, when editing and renaming
       }
     """
     try:
@@ -77,7 +77,7 @@ def haproxy_tcp_save():
 @bp.post("/haproxy/tcp/<name>/delete")
 def haproxy_tcp_delete(name):
     """
-    Удаление TCP-прокси по имени (JSON-эндпоинт).
+    Deletes a TCP proxy by name (a JSON endpoint).
     """
     try:
         ok, msg = delete_tcp_proxy(name)

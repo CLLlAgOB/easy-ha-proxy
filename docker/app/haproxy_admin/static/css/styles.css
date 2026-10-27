@@ -2,14 +2,12 @@
   --border-radius: 16px;
   --transition-speed: 0.3s;
 
-  /* Тёмная тема (по умолчанию) */
+  /* Dark theme (the default) */
   --bg-primary: #0f0f15;
   --bg-secondary: #1a1a25;
   --bg-tertiary: #252535;
   --surface-1: #252535;
-  /* добавлено */
   --surface-2: #2d2d42;
-  /* добавлено */
 
   --text-primary: #e0e0f0;
   --text-secondary: #8a8aaf;
@@ -34,9 +32,7 @@
   --bg-secondary: #ffffff;
   --bg-tertiary: #f0f2f5;
   --surface-1: #f7f8fc;
-  /* добавлено */
   --surface-2: #eef1f7;
-  /* добавлено */
 
   --text-primary: #333344;
   --text-secondary: #666677;
@@ -140,7 +136,7 @@ h1 {
   margin: 0;
 }
 
-/* Controls (верхняя шапка) */
+/* Controls (the top bar) */
 .controls {
   display: flex;
   align-items: center;
@@ -184,7 +180,7 @@ header .controls {
   align-items: center
 }
 
-/* Тема */
+/* Theme */
 .theme-toggle {
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -880,8 +876,8 @@ footer {
   }
 }
 
-/* убираем нижний отступ у card-header, когда он используется в <header> */
-/* ===== Forms (восстановлено) ===== */
+/* no bottom margin on card-header when it is used in a <header> */
+/* ===== Forms (restored) ===== */
 .form-label {
   display: block;
   margin: 0 0 6px;
@@ -985,14 +981,14 @@ footer {
   font-size: 12px;
 }
 
-/* выравнивание высоты инпутов во всех формах */
+/* the same input height in every form */
 #unban-form .form-input,
 #whitelist-form .form-input,
 #whitelist-global-form .form-input {
   height: 38px;
 }
 
-/* чтобы кнопки в формах не «скакали» по высоте */
+/* so buttons in forms do not "jump" in height */
 #unban-form .btn,
 #whitelist-form .btn,
 #whitelist-global-form .btn {
@@ -1018,7 +1014,7 @@ footer {
   color: #ffb347;
 }
 
-/* Бейджи групп пользователей Authelia */
+/* Authelia user group badges */
 .user-group-pill {
   display: inline-flex;
   align-items: center;
@@ -1036,7 +1032,7 @@ footer {
   font-size: 13px;
 }
 
-/* Сетка для выбора групп на форме пользователя */
+/* The group picker grid on the user form */
 .group-grid {
   display: flex;
   flex-wrap: wrap;
@@ -1044,7 +1040,7 @@ footer {
   margin-top: 4px;
 }
 
-/* Чекбокс-пилюля для групп */
+/* A pill checkbox for groups */
 .checkbox-pill {
   display: inline-flex;
   align-items: center;
@@ -1065,14 +1061,14 @@ footer {
   white-space: nowrap;
 }
 
-/* Уже выбранные группы можно чуть подсветить */
+/* Groups already chosen can be highlighted a little */
 .checkbox-pill input[type="checkbox"]:checked+span {
   font-weight: 500;
 }
 
-/* ===== Code blocks для конфигов ===== */
+/* ===== Code blocks for configurations ===== */
 
-/* ===== Формы загрузки YAML ===== */
+/* ===== YAML upload forms ===== */
 
 .file-input-hidden {
   display: none;
@@ -1105,7 +1101,7 @@ footer {
   table-layout: fixed;
 }
 
-/* 1: Домен */
+/* 1: Domain */
 .site-table col:nth-child(1) {
   width: 24%;
 }
@@ -1115,17 +1111,17 @@ footer {
   width: 24%;
 }
 
-/* 3: Сертификат */
+/* 3: Certificate */
 .site-table col:nth-child(3) {
   width: 20%;
 }
 
-/* 4: Флаги */
+/* 4: Flags */
 .site-table col:nth-child(4) {
   width: 20%;
 }
 
-/* 5: Действия */
+/* 5: Actions */
 .site-table col:nth-child(5) {
   width: 12%;
 }
@@ -1142,7 +1138,7 @@ footer {
   border-bottom: 1px solid var(--border);
 }
 
-/* зебра через строку */
+/* zebra stripes on every other row */
 .site-table tbody tr:nth-child(odd) {
   background: rgba(255, 255, 255, 0.02);
 }
@@ -1151,7 +1147,7 @@ footer {
   background: rgba(0, 0, 0, 0.12);
 }
 
-/* лёгкий hover */
+/* a light hover */
 .site-table tbody tr:hover {
   background: rgba(120, 90, 230, 0.25);
 }
@@ -1290,7 +1286,7 @@ footer {
   box-shadow: var(--shadow);
 }
 
-/* difflib.HtmlDiff отдаёт <table class="diff"> ... */
+/* difflib.HtmlDiff produces <table class="diff"> ... */
 
 table.diff {
   width: 100%;
@@ -1316,21 +1312,21 @@ table.diff thead th {
 }
 
 table.diff .diff_add {
-  /* добавленные строки */
+  /* added lines */
   background-color: rgba(56, 161, 105, 0.25);
 }
 
 table.diff .diff_chg {
-  /* изменённые строки */
+  /* changed lines */
   background-color: rgba(246, 224, 94, 0.25);
 }
 
 table.diff .diff_sub {
-  /* удалённые строки */
+  /* removed lines */
   background-color: rgba(229, 62, 62, 0.25);
 }
 
-/* ---- Сертификаты сайтов в таблице ---- */
+/* ---- Site certificates in the table ---- */
 
 .site-cert-status {
   font-size: 12px;
@@ -1345,24 +1341,24 @@ table.diff .diff_sub {
 
 .site-cert-ok {
   color: #38a169;
-  /* зелёный */
+  /* green */
 }
 
 .site-cert-warning {
   color: #d69e2e;
-  /* жёлтый */
+  /* yellow */
 }
 
 .site-cert-expired {
   color: #e53e3e;
-  /* красный */
+  /* red */
 }
 
 .site-cert-missing,
 .site-cert-letsencrypt_only,
 .site-cert-haproxy_only {
   color: #dd6b20;
-  /* оранжевый */
+  /* orange */
 }
 
 .site-cert-unknown,
@@ -1370,29 +1366,29 @@ table.diff .diff_sub {
   color: var(--text-secondary);
 }
 
-/* Приводим к одному виду <a class="btn"> и <button class="btn"> */
+/* Make <a class="btn"> and <button class="btn"> look alike */
 a.btn,
 button.btn,
 input[type="button"].btn,
 input[type="submit"].btn {
   appearance: none;
   -webkit-appearance: none;
-  /* для Chrome/Safari */
+  /* for Chrome/Safari */
 
   /* A link styled as a button still carried the browser's underline, so a
      row mixing <a class="btn"> and <button class="btn"> looked like two
      different kinds of control. */
   text-decoration: none;
   height: 38px;
-  /* общая высота кнопок */
+  /* the common button height */
   line-height: 1;
-  /* чтобы текст не "плавал" по вертикали */
+  /* so the text does not "float" vertically */
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-/* Подсказка "Текущий файл: скачать" в блоках загрузки YAML */
+/* The "Current file: download" hint in the YAML upload blocks */
 
 /* ===== Guided HAProxy vars.yml editor and transactional apply ===== */
 .config-error-card {
@@ -2294,7 +2290,7 @@ input[type="submit"].btn {
   text-decoration: none;
 }
 
-/* базовая кнопка */
+/* the base button */
 .icon-btn {
   width: 34px;
   height: 34px;
@@ -2304,16 +2300,16 @@ input[type="submit"].btn {
   justify-content: center;
   line-height: 1;
   font-size: 16px;
-  /* для emoji */
+  /* for emoji */
 }
 
-/* logs остаётся svg */
+/* logs stays an svg */
 .icon-btn.logs svg {
   width: 18px;
   height: 18px;
 }
 
-/* цвета для emoji-кнопок */
+/* colours for the emoji buttons */
 .icon-btn.start {
   color: #4caf50;
 }

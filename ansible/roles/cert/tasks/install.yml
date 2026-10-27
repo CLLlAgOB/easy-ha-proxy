@@ -1,6 +1,6 @@
 ---
 # ------------------------------------------------------------
-# 0. Подготовка: пакеты / snapd / certbot
+# 0. Preparation: packages / snapd / certbot
 # ------------------------------------------------------------
 - name: Install snapd for the current Certbot release
   apt:
@@ -28,12 +28,12 @@
     state: link
 
 # ------------------------------------------------------------
-# 1. Проверяем, установлен ли HAProxy
+# 1. Check whether HAProxy is installed
 # ------------------------------------------------------------
 - name: Gather service facts
   service_facts:
 
-# true / false → удобно переиспользовать дальше
+# true / false -> convenient to reuse further on
 - name: Record whether haproxy.service is installed
   set_fact:
     haproxy_present: "{{ 'haproxy.service' in ansible_facts.services }}"
