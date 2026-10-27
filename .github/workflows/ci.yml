@@ -164,7 +164,7 @@ jobs:
   # that will not install shows up here, before it is merged, rather than in
   # the publish job afterwards. One platform is enough for that.
   image-check:
-    name: Build the web application image
+    name: Build the web application image (pull requests)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -257,6 +257,15 @@ jobs:
             echo "Promoting ${alpha_image}"
             docker buildx imagetools create --tag "${key_image}" --tag "${channel_image}" "${alpha_image}"
           else
+            # Tried on each platform before anything is pushed. A push straight
+            # to alpha or main never went through the pull-request build, and
+            # an image whose packages disagree, or that cannot even import the
+            # application, would have reached the gateways as it was.
+            for platform in linux/amd64 linux/arm64; do
+              docker buildx build --platform "${platform}" --load --tag haproxy-admin-ui:check . || exit 1
+              docker run --rm --platform "${platform}" haproxy-admin-ui:check \
+                sh -c 'pip check && python -c "import app"' || exit 1
+            done
             docker buildx build \
               --platform linux/amd64,linux/arm64 \
               --label "org.opencontainers.image.version=${CHANNEL}" \

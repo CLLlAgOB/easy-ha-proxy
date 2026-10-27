@@ -34,6 +34,9 @@ def step(job: str, name: str) -> dict:
 
 FAKE_DOCKER = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1" = "run" ] && [ -n "$FAKE_BROKEN" ]; then
+  exit 1
+fi
 if [ "$1 $2 $3" = "buildx imagetools inspect" ]; then
   case " $FAKE_EXISTING " in
     *" $4 "*) exit 0 ;;
@@ -63,6 +66,9 @@ class TheLinters(unittest.TestCase):
     def test_a_pull_request_builds_the_image_without_publishing_it(self):
         job = JOBS["image-check"]
         self.assertEqual(job["if"], "github.event_name == 'pull_request'")
+        # Skipped on every push; the name says so, or a grey mark next to
+        # "Publish" reads as "published without building".
+        self.assertIn("pull requests", job["name"])
         build = step("image-check", "Build")["run"]
         self.assertIn("docker build", build)
         self.assertNotIn("push", build)
@@ -104,7 +110,7 @@ class ThePublishing(unittest.TestCase):
         self.assertEqual(values["key"], f"alpha-{expected}")
         self.assertEqual(values["channel"], "alpha")
 
-    def run_publish(self, channel, existing):
+    def run_publish(self, channel, existing, broken=False):
         tree = "a" * 64
         key = f"source-{tree}" if channel == "latest" else f"alpha-{tree}"
         with tempfile.TemporaryDirectory() as temporary:
@@ -123,10 +129,36 @@ class ThePublishing(unittest.TestCase):
                 "REPOSITORY": "example/ui", "TREE": tree, "KEY": key, "CHANNEL": channel,
                 "GITHUB_SHA": "f" * 40, "GITHUB_SERVER_URL": "https://github.example.test",
                 "GITHUB_REPOSITORY": "owner/repo", "GITHUB_STEP_SUMMARY": str(summary),
+                "FAKE_BROKEN": "1" if broken else "",
             }
-            subprocess.run(["bash", "-c", step("image", "Publish")["run"]], cwd=root,
-                           check=True, capture_output=True, env=environment)
+            result = subprocess.run(["bash", "-c", step("image", "Publish")["run"]], cwd=root,
+                                    check=not broken, capture_output=True, env=environment)
+            if broken:
+                self.assertNotEqual(result.returncode, 0)
             return log.read_text(encoding="utf-8"), tree
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_a_fresh_build_is_tried_on_each_platform_before_it_is_pushed(self):
+        # A push straight to alpha or main never had the pull-request build.
+        log, _ = self.run_publish("alpha", existing=[])
+        lines = log.splitlines()
+        pushed = next(index for index, line in enumerate(lines) if "--push" in line)
+        for platform in ("linux/amd64", "linux/arm64"):
+            tried = next(
+                index for index, line in enumerate(lines)
+                if line.startswith(f"run --rm --platform {platform} ")
+            )
+            self.assertLess(tried, pushed, platform)
+            self.assertIn("pip check", lines[tried])
+            self.assertIn("import app", lines[tried])
+            self.assertIn(f"buildx build --platform {platform} --load", log)
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_an_image_that_does_not_start_is_never_pushed(self):
+        log, _ = self.run_publish("alpha", existing=[], broken=True)
+        self.assertIn("run --rm --platform linux/amd64", log)
+        self.assertNotIn("--push", log)
+        self.assertNotIn("imagetools create", log)
 
     @unittest.skipUnless(shutil.which("bash"), "needs bash")
     def test_a_fresh_build_carries_the_pairing_labels(self):
