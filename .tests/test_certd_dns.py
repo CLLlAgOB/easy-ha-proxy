@@ -192,8 +192,9 @@ class IssuanceTests(CredentialsTestCase):
     def run_certbot(self, **kwargs):
         captured = {}
 
-        def fake_run(cmd, **_kwargs):
+        def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
+            captured["timeout"] = kwargs.get("timeout")
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         arguments = {
@@ -207,13 +208,28 @@ class IssuanceTests(CredentialsTestCase):
         }
         arguments.update(kwargs)
         with (
-            mock.patch.object(certd.subprocess, "run", side_effect=fake_run),
+            mock.patch.object(certd, "_run_bounded", side_effect=fake_run),
             mock.patch.object(
                 certd, "_installed_dns_plugins", return_value={"dns-cloudflare"}
             ),
         ):
             certd._run_certbot_for_lineage(**arguments)
+        self.last_timeout = captured["timeout"]
         return captured["cmd"]
+
+    def test_certbot_is_given_its_dns_wait_on_top_of_its_own_time(self):
+        self.run_certbot()
+        self.assertEqual(self.last_timeout, certd.CERTBOT_TIMEOUT_SECONDS)
+        self.save()
+        self.run_certbot(dns_profile="my-cloudflare", dns_propagation=1800)
+        self.assertEqual(self.last_timeout, certd.CERTBOT_TIMEOUT_SECONDS + 1800)
+        # Asked for longer than allowed: certbot is told the maximum, and
+        # gets exactly that much more time.
+        cmd = self.run_certbot(dns_profile="my-cloudflare", dns_propagation=99999)
+        self.assertIn(str(certd.DNS_PROPAGATION_MAX), cmd)
+        self.assertEqual(
+            self.last_timeout, certd.CERTBOT_TIMEOUT_SECONDS + certd.DNS_PROPAGATION_MAX
+        )
 
     def test_without_a_profile_the_existing_http_path_is_unchanged(self):
         cmd = self.run_certbot()

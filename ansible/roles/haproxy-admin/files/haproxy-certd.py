@@ -32,6 +32,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socketserver
 import ssl
 import stat
@@ -122,6 +123,21 @@ DNS_VALUE_MAX = 4096
 DNS_PROPAGATION_MIN = 10
 DNS_PROPAGATION_MAX = 1800
 DNS_PROPAGATION_DEFAULT = 60
+
+# How long each command certd runs may take before it is stopped. Nothing
+# used to bound them: a certbot that hung kept its request thread and its own
+# lock for good, so every later issuance -- and the snap's renewal timer --
+# failed with "another instance is already running" until certd restarted.
+# certbot's own work around a challenge; a DNS-01 wait is added on top.
+CERTBOT_TIMEOUT_SECONDS = 600
+# certbot without a challenge: plugins, delete. The snap starts slowly on ARM.
+CERTBOT_QUICK_TIMEOUT_SECONDS = 300
+HAPROXY_CHECK_TIMEOUT_SECONDS = 60
+HAPROXY_RELOAD_TIMEOUT_SECONDS = 120
+OPENSSL_TIMEOUT_SECONDS = 30
+PEM_REBUILD_TIMEOUT_SECONDS = 300
+DELIVERY_TIMEOUT_SECONDS = 180
+TIMED_OUT_RC = 124
 
 # The script that rebuilds the PEM for HAProxy and reloads it
 HAPROXY_PEMS_SCRIPT = Path(
@@ -429,15 +445,83 @@ def _dns_profile_path(name: str) -> Path:
     return DNS_CREDENTIALS_DIR / f"{name}.ini"
 
 
+def _run_bounded(
+    argv: Sequence[str], *, timeout: float, text: bool = True
+) -> subprocess.CompletedProcess:
+    """Run a command; past ``timeout``, stop it and everything it started.
+
+    certbot comes from a snap, and the process a plain subprocess timeout
+    kills is `snap run`: the certbot under it lived on, holding its lock. The
+    command gets a process group of its own and the whole group is killed. A
+    timeout returns TIMED_OUT_RC with what the command printed so far and a
+    line saying that it was stopped.
+    """
+
+    empty: Any = "" if text else b""
+    process = subprocess.Popen(
+        list(argv),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=text,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Something that left the group still holds the pipes: stop
+            # reading rather than wait on it too.
+            for stream in (process.stdout, process.stderr):
+                with contextlib.suppress(Exception):
+                    stream.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
+            stdout, stderr = empty, empty
+        note = (
+            f"{Path(str(argv[0])).name} did not finish within {int(timeout)} seconds "
+            "and was stopped"
+        )
+        LOG.error("%s: %s", note, " ".join(str(part) for part in argv))
+        stdout = stdout or empty
+        stderr = stderr or empty
+        if text:
+            stderr = f"{stderr}\n{note}" if stderr else note
+        else:
+            stderr = stderr + b"\n" + note.encode() if stderr else note.encode()
+        return subprocess.CompletedProcess(process.args, TIMED_OUT_RC, stdout, stderr)
+
+
+def _propagation_seconds(propagation: Any) -> int:
+    """The DNS-01 wait a request asked for, within the allowed range."""
+
+    try:
+        seconds = int(propagation) if propagation is not None else DNS_PROPAGATION_DEFAULT
+    except (TypeError, ValueError):
+        seconds = DNS_PROPAGATION_DEFAULT
+    return max(DNS_PROPAGATION_MIN, min(seconds, DNS_PROPAGATION_MAX))
+
+
+def _certbot_timeout(dns_profile: str, propagation: Any) -> int:
+    """certbot's own work, plus the DNS-01 wait it was told to sit out."""
+
+    if not dns_profile:
+        return CERTBOT_TIMEOUT_SECONDS
+    return CERTBOT_TIMEOUT_SECONDS + _propagation_seconds(propagation)
+
+
 def _installed_dns_plugins() -> set[str]:
     """Which certbot DNS plugins are actually visible right now."""
 
     try:
-        proc = subprocess.run(
+        proc = _run_bounded(
             [str(CERTBOT_BIN), "plugins", "--non-interactive"],
-            text=True,
-            capture_output=True,
-            timeout=60,
+            timeout=CERTBOT_QUICK_TIMEOUT_SECONDS,
         )
     except Exception:  # noqa: BLE001
         return set()
@@ -583,11 +667,7 @@ def _dns_challenge_flags(profile: str, propagation: Any = None) -> List[str]:
             f"the {plugin} certbot plugin is not installed; "
             f"install and connect the {spec['snap']} snap first"
         )
-    try:
-        seconds = int(propagation) if propagation is not None else DNS_PROPAGATION_DEFAULT
-    except (TypeError, ValueError):
-        seconds = DNS_PROPAGATION_DEFAULT
-    seconds = max(DNS_PROPAGATION_MIN, min(seconds, DNS_PROPAGATION_MAX))
+    seconds = _propagation_seconds(propagation)
 
     flags = [f"--{plugin}", "--preferred-challenges", "dns-01"]
     if provider != "route53":
@@ -673,11 +753,7 @@ def _run_certbot_for_lineage(
 
     LOG.info("Running certbot for lineage %s: %s", lineage, " ".join(cmd))
 
-    proc = subprocess.run(
-        cmd,
-        text=True,
-        capture_output=True,
-    )
+    proc = _run_bounded(cmd, timeout=_certbot_timeout(dns_profile, dns_propagation))
 
     return {
         "lineage": lineage,
@@ -981,18 +1057,16 @@ def _reload_haproxy() -> Tuple[Optional[int], str, str]:
     if CERTD_DRY_RUN:
         return None, "", ""
     if HAPROXY_BIN.is_file() and HAPROXY_CFG.is_file():
-        check = subprocess.run(
+        check = _run_bounded(
             [str(HAPROXY_BIN), "-c", "-f", str(HAPROXY_CFG)],
-            text=True,
-            capture_output=True,
+            timeout=HAPROXY_CHECK_TIMEOUT_SECONDS,
         )
         if check.returncode != 0:
             return check.returncode, check.stdout, check.stderr
     try:
-        reload_result = subprocess.run(
+        reload_result = _run_bounded(
             ["systemctl", "reload", "haproxy"],
-            text=True,
-            capture_output=True,
+            timeout=HAPROXY_RELOAD_TIMEOUT_SECONDS,
         )
         return reload_result.returncode, reload_result.stdout, reload_result.stderr
     except Exception as exc:  # noqa: BLE001
@@ -1142,7 +1216,7 @@ def _verify_external_chain(
             )
             command.extend(["-untrusted", str(chain_path)])
         command.append(str(leaf_path))
-        result = subprocess.run(command, text=True, capture_output=True)
+        result = _run_bounded(command, timeout=OPENSSL_TIMEOUT_SECONDS)
     details = (result.stderr or result.stdout or "certificate chain verification failed").strip()
     return result.returncode == 0, details
 
@@ -1627,13 +1701,15 @@ def test_cert_delivery(name: Any) -> Dict[str, Any]:
             f"there is no issued certificate for {domains[0]} to send yet"
         )
 
-    result = subprocess.run(
+    # The worker copies over SSH: a hung ssh under it is stopped with it.
+    result = _run_bounded(
         [
             DELIVERY_WORKER,
             "--lineage", str(lineage),
             "--domains", " ".join(domains),
         ],
-        capture_output=True, timeout=180, check=False,
+        timeout=DELIVERY_TIMEOUT_SECONDS,
+        text=False,
     )
     output = (result.stdout + result.stderr).decode("utf-8", "replace").strip()
     outcome = {
@@ -1966,10 +2042,8 @@ def handle_certs_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
     if any_ok and HAPROXY_PEMS_SCRIPT.exists() and not CERTD_DRY_RUN:
         LOG.info("Running PEM rebuild script: %s", HAPROXY_PEMS_SCRIPT)
-        proc = subprocess.run(
-            [str(HAPROXY_PEMS_SCRIPT)],
-            text=True,
-            capture_output=True,
+        proc = _run_bounded(
+            [str(HAPROXY_PEMS_SCRIPT)], timeout=PEM_REBUILD_TIMEOUT_SECONDS
         )
         pem_rc = proc.returncode
         pem_stdout = proc.stdout
@@ -4187,10 +4261,8 @@ def handle_certs_restore(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     if HAPROXY_PEMS_SCRIPT.exists() and not CERTD_DRY_RUN:
         LOG.info("Running PEM rebuild script after restore: %s",
                  HAPROXY_PEMS_SCRIPT)
-        proc = subprocess.run(
-            [str(HAPROXY_PEMS_SCRIPT)],
-            text=True,
-            capture_output=True,
+        proc = _run_bounded(
+            [str(HAPROXY_PEMS_SCRIPT)], timeout=PEM_REBUILD_TIMEOUT_SECONDS
         )
         pem_rc = proc.returncode
         pem_stdout = proc.stdout
@@ -4446,11 +4518,7 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
     LOG.info("Running certbot delete: %s", " ".join(cmd))
 
-    proc = subprocess.run(
-        cmd,
-        text=True,
-        capture_output=True,
-    )
+    proc = _run_bounded(cmd, timeout=CERTBOT_QUICK_TIMEOUT_SECONDS)
 
     rc = proc.returncode
     ok = rc == 0
