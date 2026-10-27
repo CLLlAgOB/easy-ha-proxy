@@ -187,7 +187,7 @@ def load_forwards(path: str) -> list[dict]:
     except FileNotFoundError:
         return []
     except OSError as exc:
-        raise SystemExit(f"cannot read {path}: {exc}")
+        raise SystemExit(f"cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise SystemExit(f"{path}: root must be a mapping")
     entries = data.get("udp_forwards")

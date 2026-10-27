@@ -106,7 +106,7 @@ class StoreTestCase(unittest.TestCase):
         self.now = 1786600800
 
     def ingest(self, count=1, **overrides):
-        for index in range(count):
+        for _ in range(count):
             record = guardd.parse_access_line(line(**overrides))
             self.assertIsNotNone(record)
             self.store.add(record)

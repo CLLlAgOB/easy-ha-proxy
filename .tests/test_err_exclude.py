@@ -79,7 +79,7 @@ class RenderTests(unittest.TestCase):
         try:
             self.baseline = self.render(None)
         except Exception as exc:  # pragma: no cover - template needs more vars
-            raise unittest.SkipTest(f"cannot render the template alone: {exc}")
+            raise unittest.SkipTest(f"cannot render the template alone: {exc}") from exc
 
     def test_a_site_without_exclusions_declares_none(self):
         self.assertIn("set-var(txn.site_mail_example_com_excl) bool(false)", self.baseline)

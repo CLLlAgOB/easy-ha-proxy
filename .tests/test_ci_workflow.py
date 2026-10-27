@@ -52,12 +52,20 @@ class TheLinters(unittest.TestCase):
         self.assertIn("ruff check", step("lint", "Ruff")["run"])
         self.assertIn("shellcheck -S warning", step("shell", "ShellCheck")["run"])
         config = (ROOT / "ruff.toml").read_text(encoding="utf-8")
-        self.assertIn('select = ["F", "E9"]', config)
+        self.assertIn('select = ["F", "E9", "B"]', config)
 
     def test_every_script_is_parsed_and_the_js_tests_run(self):
         self.assertIn("node --check", step("javascript", "Parse every script")["run"])
         self.assertIn("node --test .tests/js/", step("javascript", "Behaviour tests")["run"])
         self.assertTrue(list((ROOT / ".tests/js").glob("*.test.js")))
+
+    def test_eslint_runs_pinned_over_the_panel_and_its_tests(self):
+        run = step("javascript", "ESLint")["run"]
+        for pin in ("eslint@9.39.1", "@eslint/js@9.39.1", "globals@16.4.0"):
+            self.assertIn(pin, run)
+        self.assertIn("--no-save", run)
+        self.assertIn("eslint docker/app/haproxy_admin/static/js .tests/js", run)
+        self.assertTrue((ROOT / "eslint.config.mjs").is_file())
 
     def test_the_python_matrix_covers_every_supported_host(self):
         versions = JOBS["python"]["strategy"]["matrix"]["python-version"]

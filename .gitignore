@@ -140,3 +140,6 @@ Thumbs.db
 # Transient marker generated while packaging the source tarball (install-remote.sh)
 .easy-ha-proxy-source-revision
 /.claude/
+
+# ESLint, installed by CI and by hand, never committed
+node_modules/

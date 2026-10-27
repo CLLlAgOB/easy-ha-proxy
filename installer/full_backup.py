@@ -249,7 +249,7 @@ def _posix_pattern_matches(path: str, pattern: str) -> bool:
     pattern_parts = PurePosixPath(pattern).parts
     return len(candidate_parts) == len(pattern_parts) and all(
         fnmatch.fnmatchcase(candidate, expected)
-        for candidate, expected in zip(candidate_parts, pattern_parts)
+        for candidate, expected in zip(candidate_parts, pattern_parts, strict=True)
     )
 
 
@@ -997,7 +997,7 @@ def validate_rollback_payload(path: Path, *, include_ssh: bool) -> None:
                 _ssh_member_policy(member, name)
                 return
             except BackupError:
-                raise core_error
+                raise core_error from None
 
     _validate_archive_members(
         path,

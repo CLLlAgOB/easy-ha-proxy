@@ -147,7 +147,7 @@ class AdviceTests(unittest.TestCase):
         try:
             from haproxy_admin import services_security
         except Exception as exc:  # pragma: no cover - dependencies absent
-            raise unittest.SkipTest(f"cannot import the service layer: {exc}")
+            raise unittest.SkipTest(f"cannot import the service layer: {exc}") from exc
         return services_security
 
     def setUp(self):

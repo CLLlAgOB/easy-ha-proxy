@@ -42,7 +42,7 @@ def translate_source(value: str, messages: dict[str, str]) -> str:
         if re.fullmatch(r"[\w-]+", source):
             translated = re.sub(
                 rf"(?<![\w=-]){re.escape(source)}(?![\w=-])",
-                lambda _match: target,
+                lambda _match, target=target: target,
                 translated,
             )
         else:

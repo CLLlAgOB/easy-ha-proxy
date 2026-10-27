@@ -8,6 +8,7 @@ from the local GeoIP database. The daemon validates the same values again.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import logging
 import re
 from typing import Any, Dict, List
@@ -300,14 +301,14 @@ def set_ban_durations(value: Any) -> Dict[str, Any]:
         try:
             seconds = int(entry)
         except (TypeError, ValueError):
-            raise ValueError("each step must be a whole number of seconds")
+            raise ValueError("each step must be a whole number of seconds") from None
         if seconds < MIN_BAN_SECONDS or seconds > MAX_BAN_SECONDS:
             raise ValueError(
                 f"each step must be between {MIN_BAN_SECONDS} seconds and "
                 f"{MAX_BAN_SECONDS // 86400} days"
             )
         steps.append(seconds)
-    for earlier, later in zip(steps, steps[1:]):
+    for earlier, later in itertools.pairwise(steps):
         if later < earlier:
             raise ValueError(
                 "each step must be at least as long as the one before"

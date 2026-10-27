@@ -176,14 +176,12 @@ class WritingTests(AuditLogTestCase):
 class QueryTests(AuditLogTestCase):
     def setUp(self):
         super().setUp()
-        for index, (actor, action, kind, result, ts) in enumerate(
-            [
-                ("alice", "site.update", "site", "success", 1000),
-                ("bob", "site.delete", "site", "denied", 2000),
-                ("alice", "backend.state", "server", "success", 3000),
-                ("system", "cert.renew", "certificate", "failure", 4000),
-            ]
-        ):
+        for actor, action, kind, result, ts in [
+            ("alice", "site.update", "site", "success", 1000),
+            ("bob", "site.delete", "site", "denied", 2000),
+            ("alice", "backend.state", "server", "success", 3000),
+            ("system", "cert.renew", "certificate", "failure", 4000),
+        ]:
             self.log.record(
                 action, actor=actor, object_type=kind, result=result, ts=ts
             )

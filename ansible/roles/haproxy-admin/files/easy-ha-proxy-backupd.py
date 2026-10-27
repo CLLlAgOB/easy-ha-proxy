@@ -1910,7 +1910,7 @@ def backup_worker(
             )
             if inspect_returncode != 0:
                 returncode = inspect_returncode
-                raise BackupdError("new full backup failed its manifest inspection")
+                raise BackupdError("new full backup failed its manifest inspection") from None
             manifest = manifest_from_output(inspect_raw_stdout)
         artifact = store_backup_artifact(job_id, raw_stdout, manifest, work_dir)
         update_job(

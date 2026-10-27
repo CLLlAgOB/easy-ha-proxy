@@ -28,6 +28,7 @@ import contextlib
 import grp
 import hmac
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -144,7 +145,7 @@ def validate_ban_durations(data: Any) -> Tuple[int, ...]:
 
     # A later strike earning a shorter ban is never what anyone meant, and it
     # would quietly reward persistence.
-    for earlier, later in zip(steps, steps[1:]):
+    for earlier, later in itertools.pairwise(steps):
         if later < earlier:
             raise ValueError("each step must be at least as long as the one before")
     return tuple(steps)
@@ -3562,7 +3563,7 @@ class LiveBuffer:
         try:
             window = int(raw.get("window") or 60)
         except (TypeError, ValueError):
-            raise ValueError("window must be a number of seconds")
+            raise ValueError("window must be a number of seconds") from None
         window = max(5, min(self.max_seconds, window))
         filters = live_filters(raw)
         key = json.dumps([window, filters], sort_keys=True)

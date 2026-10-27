@@ -144,7 +144,7 @@
     const values = settings && typeof settings === "object" ? settings : {};
     relayAvailable = Boolean(capabilities?.relay_available);
     if (elements.legacyDirect) {
-      elements.legacyDirect.hidden = !Boolean(capabilities?.legacy_direct);
+      elements.legacyDirect.hidden = !capabilities?.legacy_direct;
     }
     if (typeof revision === "string" && revision) settingsRevision = revision;
     settingsDirty = false;

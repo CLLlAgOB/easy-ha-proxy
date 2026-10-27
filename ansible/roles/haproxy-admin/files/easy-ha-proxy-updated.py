@@ -505,8 +505,8 @@ def parse_progress(text: str) -> dict[str, Any] | None:
 
     section = text.rsplit(COMPONENT_HEADING, 1)[-1]
     last = None
-    for last in PROGRESS_RE.finditer(section):
-        pass
+    for match in PROGRESS_RE.finditer(section):
+        last = match
     if last is None:
         return None
     if last.group("phase"):

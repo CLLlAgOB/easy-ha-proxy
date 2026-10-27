@@ -87,7 +87,7 @@
     }
 
     // -------- Collecting the form into JSON --------
-    function buildTcpPayloadFromForm(form) {
+    function buildTcpPayloadFromForm() {
       var tcp = {};
 
       function textById(id) {
@@ -211,7 +211,7 @@
 
       var payload;
       try {
-        payload = buildTcpPayloadFromForm(editForm);
+        payload = buildTcpPayloadFromForm();
       } catch (e) {
         console.error("Failed to prepare TCP proxy data:", e);
         setSaveStatus(e.message || String(e), true);

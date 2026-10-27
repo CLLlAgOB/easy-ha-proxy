@@ -1,7 +1,10 @@
 # Ruff checks for what is certainly a mistake -- undefined names, unused
-# imports and variables, repeated dictionary keys, syntax errors -- and leaves
-# style alone. It runs in CI (the "Lint" job).
+# imports and variables, repeated dictionary keys, syntax errors -- and the
+# likely ones bugbear knows: a mutable default argument, a loop variable a
+# closure binds late, a zip that silently drops the longer side, an exception
+# raised in a handler without saying what it comes from. It leaves style
+# alone. It runs in CI (the "Lint" job).
 target-version = "py310"
 
 [lint]
-select = ["F", "E9"]
+select = ["F", "E9", "B"]

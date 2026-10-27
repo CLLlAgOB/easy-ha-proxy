@@ -846,6 +846,18 @@ class Bucket:
         }
 
 
+def _close_span(spans: List[Dict[str, Any]], start: int, end: int, state_name: str) -> None:
+    """End the bar that began at start, in state_name, at end."""
+    if end <= start:
+        return
+    # A restart re-observes the state it left behind, which would otherwise
+    # draw as two touching bars of the same colour.
+    if spans and spans[-1]["state"] == state_name:
+        spans[-1]["end"] = end
+    else:
+        spans.append({"state": state_name, "start": start, "end": end})
+
+
 class MetricsDatabase:
     """SQLite storage. Every public method is safe to call from any thread."""
 
@@ -1598,25 +1610,13 @@ class MetricsDatabase:
             cursor = since
             current = state or changes[0][1]
 
-            def close(end: int, state_name: str) -> None:
-                if end <= cursor:
-                    return
-                # A restart re-observes the state it left behind, which would
-                # otherwise draw as two touching bars of the same colour.
-                if spans and spans[-1]["state"] == state_name:
-                    spans[-1]["end"] = end
-                else:
-                    spans.append(
-                        {"state": state_name, "start": cursor, "end": end}
-                    )
-
             for ts, next_state in changes[:MAX_TIMELINE_SPANS]:
-                close(ts, current)
+                _close_span(spans, cursor, ts, current)
                 cursor = max(cursor, ts)
                 current = next_state
             if len(changes) > MAX_TIMELINE_SPANS:
                 truncated = True
-            close(until, current)
+            _close_span(spans, cursor, until, current)
 
             downtime = sum(
                 span["end"] - span["start"]

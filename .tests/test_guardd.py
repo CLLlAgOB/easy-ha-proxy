@@ -1248,9 +1248,7 @@ class EnforcementTestCase(EngineTestCase):
     def make_hostile(self, ip, now=1000):
         """Give an address enough findings to cross the ban threshold."""
 
-        for index, category in enumerate(
-            ("secrets", "vcs", "wordpress", "database-admin")
-        ):
+        for category in ("secrets", "vcs", "wordpress", "database-admin"):
             self.database.observe_ip(ip, now, guardd.Verdict(False, ""))
             self.database.record_events(
                 [

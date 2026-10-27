@@ -519,7 +519,6 @@ class DeploymentAssertions(unittest.TestCase):
             for path in [
                 ROOT / "docker/app/haproxy_admin/cache.py",
                 ROOT / "docker/app/haproxy_admin/static/js/dashboard.js",
-                ROOT / "docker/app/haproxy_admin/static/js/connections.js",
                 ROOT / "docker/app/haproxy_admin/security.py",
             ]
         )

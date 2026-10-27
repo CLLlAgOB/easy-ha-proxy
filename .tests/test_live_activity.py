@@ -239,7 +239,7 @@ class TheEngine(unittest.TestCase):
     def test_a_read_is_held_to_its_byte_allowance(self):
         now = time.time()
         with self.log.open("a", encoding="utf-8") as handle:
-            for i in range(200):
+            for _ in range(200):
                 handle.write(line("203.0.113.9", 200, at=now - 1) + "\n")
         self.engine.ingest_log(int(now), max_bytes=4096)
         self.assertLessEqual(self.engine._cycle_bytes, 4096)

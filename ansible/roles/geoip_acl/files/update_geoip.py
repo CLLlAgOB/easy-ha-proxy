@@ -465,7 +465,7 @@ def active_release(directory: Path) -> Path | None:
     try:
         resolved.relative_to(releases)
     except ValueError:
-        raise GeoIPUpdateError("current GeoIP release points outside releases/")
+        raise GeoIPUpdateError("current GeoIP release points outside releases/") from None
     return resolved
 
 

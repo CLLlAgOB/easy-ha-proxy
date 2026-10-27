@@ -118,6 +118,13 @@ jobs:
       - name: Behaviour tests
         run: node --test .tests/js/*.test.js
 
+      # The recommended rules (see eslint.config.mjs): a name nothing defines,
+      # a variable nothing reads. Versions pinned, nothing saved to the tree.
+      - name: ESLint
+        run: |
+          npm install --no-save --no-package-lock eslint@9.39.1 @eslint/js@9.39.1 globals@16.4.0
+          npx --no-install eslint docker/app/haproxy_admin/static/js .tests/js
+
   ansible:
     name: Ansible syntax
     runs-on: ubuntu-latest

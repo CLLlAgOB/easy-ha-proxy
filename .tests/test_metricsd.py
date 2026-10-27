@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 import re
@@ -1320,7 +1321,7 @@ class StateTimelineTests(CollectorTestCase):
         spans = timeline["objects"][0]["spans"]
         self.assertEqual(spans[0]["start"], 10000)
         self.assertEqual(spans[-1]["end"], 20000)
-        for previous, following in zip(spans, spans[1:]):
+        for previous, following in itertools.pairwise(spans):
             self.assertEqual(previous["end"], following["start"])
 
     def test_repeating_the_same_state_does_not_split_the_bar(self):
