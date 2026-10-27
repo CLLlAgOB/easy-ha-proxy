@@ -2774,8 +2774,16 @@ class Collector:
 # ---------------------------------------------------------------------------
 
 
+# How long one connection may keep a handler thread waiting on it: for the
+# request, or for the caller to take the answer. Callers are local and send a
+# whole request at once; one that connected and went quiet used to hold its
+# thread for good. Processing time is not limited by this.
+REQUEST_TIMEOUT_SECONDS = 30
+
+
 class MetricsHandler(BaseHTTPRequestHandler):
     server_version = "easy-ha-proxy-metricsd/1.0"
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def _peer(self) -> str:
         address = getattr(self, "client_address", None)

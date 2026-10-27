@@ -4540,8 +4540,16 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
     daemon_threads = True
 
 
+# How long one connection may keep a handler thread waiting on it: for the
+# request, or for the caller to take the answer. Callers are local and send a
+# whole request at once; one that connected and went quiet used to hold its
+# thread for good. Processing time is not limited by this.
+REQUEST_TIMEOUT_SECONDS = 30
+
+
 class CertdHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
         """Overridden to write to the logger rather than stderr."""
