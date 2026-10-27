@@ -40,6 +40,12 @@
       ansible.builtin.include_tasks: db_backup.yml
       when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
 
+    - name: Make sure the Redis about to run can read the sessions
+      ansible.builtin.include_tasks: redis_dump_guard.yml
+      when:
+        - authelia_configs_changed | default(false) or authelia_force_restart | default(false)
+        - authelia_session_redis_enabled | default(true) | bool
+
     - name: Reconcile the Authelia stack with migration recovery
       when: authelia_configs_changed | default(false) or authelia_force_restart | default(false)
       block:

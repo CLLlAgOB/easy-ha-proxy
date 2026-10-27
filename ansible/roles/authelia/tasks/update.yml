@@ -56,6 +56,10 @@
     - name: Copy the Authelia database if the image is about to change
       ansible.builtin.include_tasks: db_backup.yml
 
+    - name: Make sure the Redis about to run can read the sessions
+      ansible.builtin.include_tasks: redis_dump_guard.yml
+      when: authelia_session_redis_enabled | default(true) | bool
+
     - name: Reconcile the updated Authelia stack with migration recovery
       block:
         - name: Reconcile Authelia stack after image pull

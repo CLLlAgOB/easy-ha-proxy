@@ -1,0 +1,78 @@
+# roles/authelia/tasks/redis_dump_guard.yml
+#
+# Redis holds only Authelia's sessions, but a Redis that cannot read its dump
+# does not start, and the sign-in page goes with it. A newer Redis reads an
+# older dump; an older one does not (7.4 refuses what 8 wrote), so going back
+# to an older image -- another channel, a revert -- would leave the gateway
+# without a login. Before the stack is recreated, the Redis image it is about
+# to run checks the dump. If that image cannot read it, the dump is set aside
+# and everyone signs in again.
+# Included right before each reconcile that can change the image.
+
+- name: Look for the Redis session dump
+  ansible.builtin.stat:
+    path: "{{ authelia_redis_data_dir }}/dump.rdb"
+  register: authelia_redis_dump
+
+# The image is pulled before this runs; --pull never keeps the check from
+# fetching anything. Docker's own failures exit 125-127, redis-check-rdb's
+# verdict on an unreadable dump is 1, so only a 1 counts.
+- name: Let the Redis image about to run check the session dump
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --pull
+      - never
+      - --network
+      - none
+      - --read-only
+      - --cap-drop
+      - ALL
+      - --security-opt
+      - no-new-privileges:true
+      - --user
+      - "{{ authelia_redis_uid }}:{{ authelia_redis_gid }}"
+      - --volume
+      - "{{ authelia_redis_data_dir }}:/data:ro"
+      - --entrypoint
+      - redis-check-rdb
+      - "{{ authelia_redis_image }}"
+      - /data/dump.rdb
+  register: authelia_redis_dump_check
+  changed_when: false
+  failed_when: false
+  # Read-only; check mode would skip it and decide nothing.
+  check_mode: false
+  when: authelia_redis_dump.stat.exists
+
+- name: Set aside a session dump the new Redis cannot read
+  when: (authelia_redis_dump_check.rc | default(0)) == 1
+  block:
+    # Stopped first: Redis writes its dump again on the way down, and the
+    # running one would write the very format the new one cannot read.
+    - name: Stop the Redis that wrote the dump
+      ansible.builtin.command:
+        argv:
+          - docker
+          - stop
+          - authelia-redis
+      changed_when: true
+      failed_when: false
+
+    - name: Move the unreadable dump out of the way
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-clobber
+          - "{{ authelia_redis_data_dir }}/dump.rdb"
+          - "{{ authelia_redis_data_dir }}/dump.rdb.unreadable-{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+      changed_when: true
+
+    - name: Say why everyone has to sign in again
+      ansible.builtin.debug:
+        msg: >-
+          {{ authelia_redis_image }} cannot read the session dump an earlier
+          Redis wrote, so it was moved aside in {{ authelia_redis_data_dir }}
+          and Redis starts empty. Signed-in users have to sign in again.

@@ -92,7 +92,7 @@ authelia_notification_language: "en"
 
 # Relay image.
 mail_relay_image: "juanluisbaptiste/postfix:1.11.0"
-authelia_redis_image: "redis:7.4.12-alpine"
+authelia_redis_image: "redis:8.10.3-alpine"
 
 # Docker network for Authelia and related services.
 authelia_docker_network: "hadmin_net"
