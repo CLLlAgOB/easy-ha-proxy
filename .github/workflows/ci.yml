@@ -28,9 +28,9 @@ jobs:
         # in 3.13).
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -57,7 +57,7 @@ jobs:
     name: Shell syntax and ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Parse the installer and helper scripts
         run: >-
@@ -83,9 +83,9 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -100,9 +100,9 @@ jobs:
     name: Ansible syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
@@ -114,7 +114,7 @@ jobs:
       # Galaxy does not answer they are built from the same tagged versions on
       # GitHub. --no-deps there because community.docker's dependency comes
       # from Galaxy again, and a syntax check does not need it.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.ansible/collections
           key: ansible-collections-${{ hashFiles('ansible/requirements.yml') }}
@@ -129,14 +129,34 @@ jobs:
           done
           echo "Galaxy is not answering; installing from the GitHub tags instead"
           ansible-galaxy collection install --no-deps --force \
-            "git+https://github.com/ansible-collections/ansible.posix.git,1.6.2" \
-            "git+https://github.com/ansible-collections/community.docker.git,5.2.1"
+            "git+https://github.com/ansible-collections/ansible.posix.git,2.2.2" \
+            "git+https://github.com/ansible-collections/community.docker.git,5.2.2"
 
       # vars.yml, the inventories and group_vars are deliberately untracked, so
       # the playbook is parsed against a throwaway inventory. This validates
       # task and role structure, not host-specific variable resolution.
       - name: Syntax-check the playbook
         run: ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
+
+  # A pull request is built, not published: a new base image or a new pin
+  # that will not install shows up here, before it is merged, rather than in
+  # the publish job afterwards. One platform is enough for that.
+  image-check:
+    name: Build the web application image
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: docker build --tag haproxy-admin-ui:check .
+
+      # The packages must agree with each other and the application must
+      # start; the warnings about host paths it cannot see are expected.
+      - name: Smoke test
+        run: >-
+          docker run --rm haproxy-admin-ui:check
+          sh -c 'pip check && python -c "import app"'
 
   # The web application image, published from the commit CI has just tested.
   # Each image is labelled with the fingerprint of its build inputs (the
@@ -154,7 +174,7 @@ jobs:
     env:
       REPOSITORY: clllagob/haproxy-admin-ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fingerprint the web application
         id: tree
@@ -183,16 +203,16 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: steps.credentials.outputs.ready == 'true'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         if: steps.credentials.outputs.ready == 'true'
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
         if: steps.credentials.outputs.ready == 'true'
 
       # An image built from these exact web files is reused, not rebuilt: the

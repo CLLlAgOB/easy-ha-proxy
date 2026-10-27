@@ -3,11 +3,15 @@
 
 Dependabot reads requirements files, Dockerfiles and workflows, but not the
 images and packages pinned as Ansible variables (Authelia, Redis, the mail
-relay, the GeoIP packages). This compares each pin with its registry:
+relay, the GeoIP packages), nor the Galaxy collections. This compares each
+pin with its registry:
 
 - the newest release in the same series (same major.minor, same suffix such
   as "-alpine") -- the update to take without much thought;
 - the newest release overall -- worth a look, may need care.
+
+A collection counts only releases that declare support for the ansible-core
+the installer pins: a newer one that needs a newer core is not an update.
 
 Prints a Markdown report; with --github it also writes the job summary and
 keeps one issue open while anything is behind (closed when nothing is).
@@ -38,7 +42,10 @@ PINS = (
     ("ansible/roles/authelia/defaults/main.yml", "mail_relay_image", "dockerhub", None),
     ("ansible/roles/geoip_acl/defaults/main.yml", "geoip_maxminddb_version", "pypi", "maxminddb"),
     ("ansible/roles/geoip_acl/defaults/main.yml", "geoip_pyyaml_version", "pypi", "PyYAML"),
+    ("ansible/requirements.yml", "ansible.posix", "galaxy", "ansible.posix"),
+    ("ansible/requirements.yml", "community.docker", "galaxy", "community.docker"),
 )
+GALAXY = "https://galaxy.ansible.com"
 
 _VERSION_RE = re.compile(r"^v?(?P<numbers>\d+(?:\.\d+)*)(?P<suffix>-[A-Za-z0-9.]+)?$")
 _PRERELEASE_RE = re.compile(r"(?i)(alpha|beta|rc|dev|pre|preview)")
@@ -80,6 +87,41 @@ def read_pin(text: str, variable: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def read_collection(text: str, name: str) -> Optional[str]:
+    """The version a Galaxy requirements file pins for a collection."""
+    match = re.search(
+        rf"-\s*name:\s*['\"]?{re.escape(name)}['\"]?\s*\n\s*version:\s*['\"]?([^'\"\s#]+)", text
+    )
+    return match.group(1) if match else None
+
+
+def ansible_core_series(root: Path = ROOT) -> tuple[int, ...]:
+    """The ansible-core release series the installer pins (~=2.17.0 is 2.17)."""
+    text = (root / "installer/requirements.txt").read_text(encoding="utf-8")
+    match = re.search(r"^ansible-core\s*~=\s*(\d+)\.(\d+)", text, re.MULTILINE)
+    return (int(match.group(1)), int(match.group(2))) if match else ()
+
+
+def allows(requirement: Optional[str], series: tuple[int, ...]) -> bool:
+    """Whether a collection's requires_ansible admits any release of a series."""
+    if not series:
+        return True
+    newest = series + (9999,)
+    oldest = series + (0,)
+    for clause in (part.strip() for part in (requirement or "").split(",")):
+        match = re.match(r"(>=|<=|==|!=|>|<)\s*(\d+(?:\.\d+)*)", clause)
+        if not match:
+            continue
+        operator, bound = match.group(1), tuple(int(part) for part in match.group(2).split("."))
+        if operator in (">=", ">") and not (newest >= bound if operator == ">=" else newest > bound):
+            return False
+        if operator in ("<", "<=") and not (oldest < bound if operator == "<" else oldest <= bound):
+            return False
+        if operator == "==" and bound[:2] != series:
+            return False
+    return True
+
+
 def split_image(reference: str) -> tuple[str, str]:
     name, _, tag = reference.rpartition(":")
     return name, tag
@@ -111,11 +153,31 @@ def pypi_versions(package: str, fetch: Callable[[str], dict] = _get_json) -> lis
     return list((data.get("releases") or {}).keys())
 
 
+def galaxy_versions(collection: str, series: tuple[int, ...] = (),
+                    fetch: Callable[[str], dict] = _get_json, pages: int = 5) -> list[str]:
+    """Releases of a collection that support the given ansible-core series."""
+    namespace, _, name = collection.partition(".")
+    url = (f"{GALAXY}/api/v3/plugin/ansible/content/published/collections/index/"
+           f"{namespace}/{name}/versions/?limit=100")
+    versions: list[str] = []
+    for _ in range(pages):
+        data = fetch(url)
+        for item in data.get("data") or []:
+            if allows(item.get("requires_ansible"), series):
+                versions.append(str(item.get("version")))
+        following = (data.get("links") or {}).get("next")
+        if not following:
+            break
+        url = following if following.startswith("http") else GALAXY + following
+    return versions
+
+
 def check(root: Path = ROOT, fetch: Callable[[str], dict] = _get_json) -> list[dict]:
     rows = []
+    series = ansible_core_series(root)
     for relative, variable, source, name in PINS:
         text = (root / relative).read_text(encoding="utf-8")
-        value = read_pin(text, variable)
+        value = read_collection(text, variable) if source == "galaxy" else read_pin(text, variable)
         row = {"variable": variable, "file": relative, "pinned": value, "error": ""}
         if not value:
             row["error"] = "not found"
@@ -126,6 +188,9 @@ def check(root: Path = ROOT, fetch: Callable[[str], dict] = _get_json) -> list[d
                 image, pinned = (name, value) if name else split_image(value)
                 row.update(name=image, pinned=pinned)
                 row.update(newer_releases(pinned, dockerhub_tags(image, fetch)))
+            elif source == "galaxy":
+                row.update(name=name)
+                row.update(newer_releases(value, galaxy_versions(name, series, fetch)))
             else:
                 row.update(name=name)
                 row.update(newer_releases(value, pypi_versions(name, fetch)))
@@ -138,7 +203,8 @@ def check(root: Path = ROOT, fetch: Callable[[str], dict] = _get_json) -> list[d
 def report(rows: list[dict]) -> str:
     lines = ["| Pinned | Version | Same series | Newest |", "|---|---|---|---|"]
     for row in rows:
-        label = f"`{row['variable']}` ({row.get('name') or '?'})"
+        name = row.get("name") or "?"
+        label = f"`{row['variable']}`" if name == row["variable"] else f"`{row['variable']}` ({name})"
         if row["error"]:
             lines.append(f"| {label} | {row.get('pinned') or '-'} | error: {row['error']} | |")
             continue

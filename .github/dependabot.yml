@@ -1,8 +1,8 @@
 # Weekly update pull requests for what Dependabot can read. They target
 # alpha: main is moved to alpha after testing, so a pull request against
 # main would be overwritten. Versions pinned as Ansible variables (Authelia,
-# Redis, the mail relay, the GeoIP packages) are not readable here; the
-# "Dependencies" workflow watches those.
+# Redis, the mail relay, the GeoIP packages, the Galaxy collections) are not
+# readable here; the "Dependencies" workflow watches those.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -14,11 +14,22 @@ updates:
       web-application:
         update-types: [minor, patch]
 
+  # Ranges, installed into the gateway's own Python: a release the range
+  # already allows needs no pull request, so the range only moves when a
+  # release falls outside it.
   - package-ecosystem: pip
     directory: /installer
     target-branch: alpha
     schedule:
       interval: weekly
+    versioning-strategy: increase-if-necessary
+    ignore:
+      # The installer runs on the platform interpreter, and Ubuntu 22.04 has
+      # Python 3.10: ansible-core 2.18 needs 3.11 and 2.20 needs 3.12. 2.17
+      # also runs on 3.13 and 3.14 (Debian 13, Ubuntu 26.04). Moving on means
+      # dropping 22.04 and testing the playbooks against 2.19's templating.
+      - dependency-name: ansible-core
+        update-types: [version-update:semver-major, version-update:semver-minor]
     groups:
       installer:
         update-types: [minor, patch]
@@ -28,7 +39,16 @@ updates:
     target-branch: alpha
     schedule:
       interval: weekly
+    ignore:
+      # Patch releases of the base image come by themselves. A new Python for
+      # the web application is a decision, made once the CI matrix passes on
+      # it; Dependabot would offer the newest one the day it is released.
+      - dependency-name: python
+        update-types: [version-update:semver-major, version-update:semver-minor]
 
+  # Every action in one pull request, major versions included: the publish
+  # job does not run on pull requests, so a green check says little about
+  # them one by one, and their release notes are read together anyway.
   - package-ecosystem: github-actions
     directory: /
     target-branch: alpha
@@ -36,4 +56,4 @@ updates:
       interval: weekly
     groups:
       actions:
-        update-types: [minor, patch]
+        patterns: ["*"]

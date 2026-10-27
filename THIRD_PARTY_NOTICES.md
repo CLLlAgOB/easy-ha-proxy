@@ -43,7 +43,7 @@ or any geolocation API at runtime.
 
 ## Runtime dependency note
 
-The current Authelia Compose template references `redis:7.4.9-alpine`. Redis's
+The current Authelia Compose template references `redis:7.4.12-alpine`. Redis's
 [official license table](https://redis.io/legal/licenses/) lists Redis Community
 Edition 7.4 under the RSALv2 or SSPLv1 terms. The image is fetched separately at
 deployment time and is not relicensed by easy-ha-proxy. Review the upstream

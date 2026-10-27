@@ -1229,13 +1229,18 @@ application image from that commit (`alpha`, or `latest`), labelled with the
 fingerprint of its build inputs that gateways use to pair it with its source.
 An image built from the same web files is reused; `main` promotes the alpha
 build. This needs the repository secrets `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN`; without them the job publishes nothing and says so.
+`DOCKERHUB_TOKEN`; without them the job publishes nothing and says so. A pull
+request builds the image without publishing it and checks that it starts.
 
 Dependabot proposes updates for the requirements files, the Dockerfile and the
-workflows against `alpha`. The weekly **Dependencies** workflow reports known
-vulnerabilities (pip-audit) and keeps one issue open while a version pinned in
-an Ansible role (Authelia, Redis, the mail relay, the GeoIP packages) has a
-newer release.
+workflows against `alpha`. It does not offer what cannot be taken: ansible-core
+stays on 2.17, the last series that runs on Ubuntu 22.04's Python 3.10; the
+image's Python moves only by patch releases; the installer's ranges move only
+when a release falls outside them. The weekly **Dependencies** workflow reports
+known vulnerabilities (pip-audit) and keeps one issue open while a version
+pinned in an Ansible role (Authelia, Redis, the mail relay, the GeoIP packages)
+or a Galaxy collection has a newer release; for a collection, only releases
+that support the pinned ansible-core count.
 
 UI translations are JSON catalogs under
 [`docker/app/haproxy_admin/translations/`](docker/app/haproxy_admin/translations/README.md).
