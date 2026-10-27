@@ -174,6 +174,9 @@ class APlanFromAnotherChannelIsRefused(unittest.TestCase):
         self.assertIn("validate_selection(plan, components)", worker)
         recheck = worker.split("fresh = execute_checker(")[1].split(")\n")[0]
         self.assertIn('plan["branch"]', recheck)
+        # And the check after it: the same branch on both sides of the update.
+        after = worker.split("refreshed_payload = execute_checker(")[1].split(")\n")[0]
+        self.assertIn('plan["branch"]', after)
         body = source.split("def validate_selection(")[1].split("\ndef ")[0]
         self.assertIn("validate_plan_channel(plan)", body)
 

@@ -1852,6 +1852,9 @@ def apply_worker(
                 job_id,
                 image_channel=image_channel,
                 source_channel=source_channel,
+                # The branch that was reviewed and installed, like the check
+                # before the update; not whatever the metadata says.
+                branch=(str(plan["branch"]) if plan.get("branch") else None),
             )
             validate_applied_container_digests(plan, refreshed_payload, components)
             refreshed = store_plan(refreshed_payload)

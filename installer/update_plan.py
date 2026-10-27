@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import sys
@@ -45,7 +46,13 @@ GIT_TIMEOUT = 20.0
 APT_TIMEOUT = 45.0
 COMPOSE_TIMEOUT = 15.0
 REGISTRY_TIMEOUT = 30.0
+# The changelog: optional, so it gives up early.
 CLONE_TIMEOUT = 60.0
+# The candidate source: without it the plan cannot say what the complete
+# update installs, so it gets longer. A gateway with a slow route to GitHub
+# took more than a minute for a full clone, and every such check produced a
+# plan that did not know the update re-pinned an image.
+CANDIDATE_TIMEOUT = 180.0
 # "What's new": the commit subjects between the installed and the candidate
 # revision, read from a history-only clone (no files, no trees).
 CHANGELOG_DEPTH = 200
@@ -669,6 +676,75 @@ def _remote_web_tree(image: str, runner: Runner) -> str | None:
         return None
 
 
+def _borrowed_candidate(
+    *,
+    source_dir: Path,
+    origin: str,
+    branch: str,
+    destination: Path,
+    runner: Runner,
+) -> str | None:
+    """Fetch the candidate into a scratch repository that borrows the
+    installed objects. None when it is checked out at ``destination``.
+
+    The installed checkout already holds almost every file of the next
+    revision, and Git sends only what the receiver lacks when it can say what
+    it has. Measured on this repository: 53 objects instead of 828 for a full
+    clone. The installed checkout is only read -- its objects are listed as
+    an alternate and its shallow boundary copied -- so a check never moves
+    what is installed. Anything else that goes wrong here is answered with
+    the full clone; a timeout is not, because the clone is larger.
+    """
+
+    objects = source_dir / ".git" / "objects"
+    if not objects.is_dir():
+        return "no-installed-objects"
+    objects_path = str(objects.resolve())
+    if any(character in objects_path for character in "\r\n\x00"):
+        return "installed-objects-unusable"
+    init = runner.run(("git", "init", "--quiet", "--", str(destination)), timeout=GIT_TIMEOUT)
+    if init.returncode != 0:
+        return f"candidate-init-failed: {_short_error(init)}"
+    git_dir = destination / ".git"
+    try:
+        info = git_dir / "objects" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "alternates").write_text(objects_path + "\n", encoding="utf-8")
+        shallow = source_dir / ".git" / "shallow"
+        if shallow.is_file():
+            # Without the boundary Git walks past the installed commit to
+            # parents the shallow checkout never had, and gives up.
+            shutil.copyfile(shallow, git_dir / "shallow")
+    except OSError as exc:
+        return f"candidate-scratch-failed: {exc}"[:200]
+    fetch = runner.run(
+        (
+            "git",
+            "-C",
+            str(destination),
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            "--no-tags",
+            "--",
+            origin,
+            f"refs/heads/{branch}",
+        ),
+        timeout=CANDIDATE_TIMEOUT,
+    )
+    if fetch.returncode != 0:
+        if fetch.error == "timeout":
+            return f"candidate-fetch-timed-out: {_short_error(fetch)}"
+        return f"candidate-fetch-failed: {_short_error(fetch)}"
+    checkout = runner.run(
+        ("git", "-C", str(destination), "checkout", "--quiet", "--detach", "FETCH_HEAD"),
+        timeout=GIT_TIMEOUT,
+    )
+    if checkout.returncode != 0:
+        return f"candidate-checkout-failed: {_short_error(checkout)}"
+    return None
+
+
 def _remote_candidate(
     *,
     source_dir: Path,
@@ -681,23 +757,36 @@ def _remote_candidate(
     origin = _source_origin(source_dir, repository, runner)
     if not origin:
         return None, "repository-missing"
-    clone_result = runner.run(
-        (
-            "git",
-            "clone",
-            "--quiet",
-            "--depth=1",
-            "--single-branch",
-            "--branch",
-            branch,
-            "--",
-            origin,
-            str(destination),
-        ),
-        timeout=CLONE_TIMEOUT,
+    borrowed = _borrowed_candidate(
+        source_dir=source_dir,
+        origin=origin,
+        branch=branch,
+        destination=destination,
+        runner=runner,
     )
-    if clone_result.returncode != 0:
-        return None, f"candidate-clone-failed: {_short_error(clone_result)}"
+    if borrowed is not None and borrowed.startswith("candidate-fetch-timed-out"):
+        # A full clone moves more than the fetch that just ran out of time.
+        return None, borrowed
+    if borrowed is not None:
+        shutil.rmtree(destination, ignore_errors=True)
+        clone_result = runner.run(
+            (
+                "git",
+                "clone",
+                "--quiet",
+                "--depth=1",
+                "--single-branch",
+                "--branch",
+                branch,
+                "--",
+                origin,
+                str(destination),
+            ),
+            timeout=CANDIDATE_TIMEOUT,
+        )
+        if clone_result.returncode != 0:
+            reason = "timed-out" if clone_result.error == "timeout" else "failed"
+            return None, f"candidate-clone-{reason}: {_short_error(clone_result)}"
     revision_result = runner.run(
         ("git", "-C", str(destination), "rev-parse", "HEAD"),
         timeout=GIT_TIMEOUT,
@@ -1801,6 +1890,30 @@ def build_update_plan(
             **(components[0].get("details") or {}),
             "image_changes": retargeted,
         }
+
+    if components[0].get("state") == "available" and candidate_source is None:
+        # Only the candidate says what the complete update installs: which
+        # services and daemons it changes, which images it re-pins. Without
+        # it the update used to be offered anyway; it installed, and then
+        # the check after it failed on an image the plan had never named
+        # (Redis, re-pinned by the source). Two checks a few minutes apart
+        # also disagreed whenever one of them got the candidate and the
+        # other did not, and the apply refused with "the update candidate
+        # changed". Say it could not be read, and offer nothing to install.
+        checked_source = components[0]
+        components[0] = _component(
+            "all",
+            "blocked",
+            "The new version could not be downloaded to compare it with the "
+            "installed one. Check for updates again.",
+            current_version=checked_source.get("current_version"),
+            available_version=checked_source.get("available_version"),
+            details={
+                **(checked_source.get("details") or {}),
+                "reason": "candidate-unavailable",
+                "candidate_error": _redact_sensitive_text(candidate_error or ""),
+            },
+        )
 
     if components[0].get("actionable") is True:
         unavailable_containers = [

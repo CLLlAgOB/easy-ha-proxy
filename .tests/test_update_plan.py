@@ -157,9 +157,11 @@ class UpdatePlanTests(unittest.TestCase):
 
         components = {item["id"]: item for item in plan["components"]}
         self.assertEqual(components["all"]["state"], "blocked")
+        # git_handler refuses the candidate, and that is named first: without
+        # it nothing can say what the complete update would install.
         self.assertEqual(
             components["all"]["details"]["reason"],
-            "container-candidate-unavailable",
+            "candidate-unavailable",
         )
         self.assertEqual(components["all"]["available_version"], REMOTE_REVISION)
         status_commands = [
