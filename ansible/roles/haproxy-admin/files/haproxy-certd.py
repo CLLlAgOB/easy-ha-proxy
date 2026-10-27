@@ -2440,13 +2440,6 @@ def _certs_available_root() -> Path:
     return CERTS_AVAILABLE_DIR
 
 
-def _get_certs_available_dir() -> Path:
-    """The same directory, made ready. Only for paths that are about to write."""
-
-    CERTS_AVAILABLE_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
-    return CERTS_AVAILABLE_DIR
-
-
 _PEM_LABELS = (
     b"PRIVATE KEY", b"RSA PRIVATE KEY", b"EC PRIVATE KEY", b"CERTIFICATE",
 )

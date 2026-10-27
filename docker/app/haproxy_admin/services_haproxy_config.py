@@ -40,8 +40,7 @@ CONFIG_YAML = Path("./config/vars.yml")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 HAPROXY_BACKUP_DIR = BASE_DIR / "backups" / "haproxy"
-# --- state snapshots and YAML backups ---
-YAML_BACKUP_DIR = BASE_DIR / "backups" / "haproxy" / "yaml"
+# --- state snapshots ---
 HAPROXY_STATE_PATH = HAPROXY_BACKUP_DIR / "last_applied_state.json"
 HAPROXY_STATE_WEBSITES = HAPROXY_BACKUP_DIR / "last_applied_websites.yml"
 HAPROXY_STATE_TCP = HAPROXY_BACKUP_DIR / "last_applied_tcp.yml"
@@ -58,7 +57,6 @@ CONFIG_GENERATION_DIRECTIVE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 CONFIG_SOURCE_ORDER = ("vars.yml", "websites.yml", "tcp.yml")
-MAX_HAPROXY_CFG_BACKUPS = 14
 MAX_YAML_BACKUPS = 14
 
 HAPROXY_CONTROL_SOCKET = (
@@ -75,10 +73,9 @@ HAPROXY_CONFIG_CONFIRM_TIMEOUT = int(
 )
 
 HAP_CHECK_CMD = ["/usr/sbin/haproxy", "-c", "-f"]
-# The same limits haproxy-controld keeps; these only apply where the panel
-# runs the command itself, without the control socket.
+# The limit haproxy-controld keeps; it only applies where the panel runs the
+# check itself, without the control socket.
 HAPROXY_CHECK_TIMEOUT_SECONDS = 30
-HAPROXY_RELOAD_TIMEOUT_SECONDS = 120
 
 
 class ConfigApplyPreparationError(ValueError):
@@ -322,62 +319,6 @@ def check_cfg_via_controld(cfg_text: str) -> Optional[Tuple[int, str, str]]:
         return None
 
 
-def write_cfg_via_controld(cfg_text: str) -> Optional[Tuple[bool, str, str]]:
-    """
-    Tries to write /etc/haproxy/haproxy.cfg through the root daemon haproxy-controld.
-
-    Protocol:
-      -> "write-config <base64(cfg_text)>\\n"
-      <- "OK ..." or "ERROR ..."
-
-    Returns:
-      * (True, stdout, stderr)  - written
-      * (False, stdout, stderr) - not written
-      * None                    - the socket is unavailable (use the local mode)
-    """
-    sock_path = HAPROXY_CONTROL_SOCKET
-    if not sock_path or not os.path.exists(sock_path):
-        return None
-
-    try:
-        payload_b64 = base64.b64encode(
-            cfg_text.encode("utf-8")
-        ).decode("ascii")
-
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(HAPROXY_CONTROL_TIMEOUT)
-            s.connect(sock_path)
-            s.sendall(f"write-config {payload_b64}\n".encode("utf-8"))
-
-            chunks: list[bytes] = []
-            while True:
-                data = s.recv(4096)
-                if not data:
-                    break
-                chunks.append(data)
-
-        raw = b"".join(chunks).decode("utf-8", "replace")
-        if not raw:
-            return False, "", "empty response from haproxy-controld"
-
-        lines = raw.splitlines()
-        first = lines[0].strip()
-        rest = "\n".join(lines[1:]).strip()
-
-        if first.startswith("OK"):
-            # stdout/stderr are not really needed here, but the interface stays the same
-            return True, rest, ""
-
-        # error
-        err_msg = first
-        if rest:
-            err_msg = f"{first}\n{rest}"
-        return False, "", err_msg
-
-    except Exception as exc:  # noqa: BLE001
-        return False, "", f"write-config via socket error: {exc!r}"
-
-
 def _critical_control_plane_checks(cfg_text: str) -> list[dict[str, str]]:
     """Build the strict admin/Authelia check set from the rendered config."""
     domains = control_plane_domains(cfg_text)
@@ -434,125 +375,6 @@ def _format_guard_diagnostics(result: Dict[str, Any]) -> str:
                 f"{outcome} — {suffix}"
             )
     return "\n".join(lines)
-
-
-def apply_cfg_guarded(cfg_text: str) -> Dict[str, Any]:
-    """Apply through controld and require critical services to remain reachable."""
-    rc, check_stdout, check_stderr = check_cfg(cfg_text)
-    if rc != 0:
-        return {
-            "ok": False,
-            "error": "HAProxy configuration validation failed",
-            "stdout": check_stdout,
-            "stderr": check_stderr,
-            "safety": None,
-        }
-
-    try:
-        checks = _critical_control_plane_checks(cfg_text)
-    except ValueError as exc:
-        return {
-            "ok": False,
-            "error": str(exc),
-            "stdout": "",
-            "stderr": str(exc),
-            "safety": None,
-        }
-
-    sock_path = HAPROXY_CONTROL_SOCKET
-    if not sock_path or not os.path.exists(sock_path):
-        error = (
-            "Guarded HAProxy apply requires the haproxy-controld service; "
-            "the configuration was not changed"
-        )
-        return {
-            "ok": False,
-            "error": error,
-            "stdout": "",
-            "stderr": error,
-            "safety": None,
-        }
-
-    cfg_b64 = base64.b64encode(cfg_text.encode("utf-8")).decode("ascii")
-    checks_b64 = base64.b64encode(
-        json.dumps(checks, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
-
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(HAPROXY_GUARDED_APPLY_TIMEOUT)
-            connection.connect(sock_path)
-            connection.sendall(
-                f"apply-config {cfg_b64} {checks_b64}\n".encode("ascii")
-            )
-            chunks: list[bytes] = []
-            while True:
-                data = connection.recv(65536)
-                if not data:
-                    break
-                chunks.append(data)
-    except Exception as exc:  # noqa: BLE001
-        error = f"Guarded apply request failed: {exc}"
-        return {
-            "ok": False,
-            "error": error,
-            "stdout": "",
-            "stderr": error,
-            "safety": None,
-        }
-
-    response = b"".join(chunks).decode("utf-8", "replace").strip()
-    try:
-        prefix, payload_b64 = response.split(" ", 1)
-        if prefix not in {"OK", "ERROR"}:
-            raise ValueError("unexpected response prefix")
-        safety = json.loads(
-            base64.b64decode(payload_b64, validate=True).decode("utf-8")
-        )
-        if not isinstance(safety, dict):
-            raise ValueError("response payload is not an object")
-    except Exception as exc:  # noqa: BLE001
-        error = f"Invalid guarded apply response: {response[:300] or 'empty'} ({exc})"
-        return {
-            "ok": False,
-            "error": error,
-            "stdout": "",
-            "stderr": error,
-            "safety": None,
-        }
-
-    ok = prefix == "OK" and safety.get("ok") is True
-    diagnostics = _format_guard_diagnostics(safety)
-    if ok:
-        error = ""
-        stdout = diagnostics
-        stderr = ""
-    elif safety.get("rolled_back") and safety.get("rollback_ok"):
-        error = (
-            "Critical service check failed; the previous HAProxy "
-            "configuration was restored automatically"
-        )
-        stdout = ""
-        stderr = diagnostics
-    elif safety.get("rolled_back"):
-        error = (
-            "Critical service check failed and automatic HAProxy rollback "
-            "could not be verified"
-        )
-        stdout = ""
-        stderr = diagnostics
-    else:
-        error = "Guarded HAProxy configuration apply failed before completion"
-        stdout = ""
-        stderr = diagnostics
-
-    return {
-        "ok": ok,
-        "error": error,
-        "stdout": stdout,
-        "stderr": stderr,
-        "safety": safety,
-    }
 
 
 def get_config_transaction_status(
@@ -1218,62 +1040,6 @@ def get_udp_runtime_status() -> Dict[str, Any]:
     }
 
 
-def reload_haproxy() -> tuple[bool, str, str]:
-    """
-    Reloads HAProxy.
-
-    1) Through the Unix socket HAPROXY_CONTROL_SOCKET, with the command "reload".
-    2) Without the socket, systemctl reload haproxy (bare metal).
-    """
-    sock_path = HAPROXY_CONTROL_SOCKET
-
-    # 1. Through the haproxy-controld socket
-    if sock_path and os.path.exists(sock_path):
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(HAPROXY_CONTROL_TIMEOUT)
-                s.connect(sock_path)
-                s.sendall(b"reload\n")
-
-                chunks: list[bytes] = []
-                while True:
-                    data = s.recv(4096)
-                    if not data:
-                        break
-                    chunks.append(data)
-
-            resp = b"".join(chunks).decode("utf-8", "replace").strip()
-
-            if resp.startswith("OK"):
-                return True, resp, ""
-            return False, "", resp or "reload via socket failed"
-        except Exception as exc:  # noqa: BLE001
-            return False, "", f"reload via socket error: {exc!r}"
-
-    # 2. Fallback: systemctl (the old mode without Docker)
-    try:
-        proc = subprocess.run(
-            ["systemctl", "reload", "haproxy"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=HAPROXY_RELOAD_TIMEOUT_SECONDS,
-        )
-        ok = (proc.returncode == 0)
-        return ok, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired:
-        return False, "", (
-            f"the reload did not finish within {HAPROXY_RELOAD_TIMEOUT_SECONDS} "
-            "seconds and was stopped"
-        )
-    except FileNotFoundError:
-        return False, "", (
-            f"systemctl not found and control socket {sock_path!r} "
-            "is not available"
-        )
-
-
 def jinja_regex_replace(value: Any, pattern: str, replacement: str) -> str:
     """
     The equivalent of Ansible's regex_replace filter.
@@ -1506,11 +1272,6 @@ def save_applied_state_strict(cfg_text: str) -> None:
     _persist_applied_state_bundle(cfg_text, bundle)
 
 
-def save_applied_state(cfg_text: str) -> None:
-    """Compatibility wrapper used by older callers."""
-    save_applied_state_strict(cfg_text)
-
-
 def ensure_applied_state_baseline(cfg_text: str) -> bool:
     """Seed or safely reconcile a baseline when current sources equal live cfg.
 
@@ -1613,73 +1374,7 @@ def check_cfg(cfg_text: str) -> Tuple[int, str, str]:
             os.unlink(tmp_path)
 
 
-def apply_cfg(cfg_text: str) -> Tuple[bool, str, str]:
-    """
-    1) haproxy -c (validation, through haproxy-controld on the host when possible)
-    2) write the new configuration:
-       - with the root daemon: write-config over the Unix socket
-       - otherwise locally to /etc/haproxy/haproxy.cfg, with a backup
-    3) reload HAProxy (through haproxy-controld or systemctl)
-    """
-    # 1. Validation (through the daemon or a local haproxy -c)
-    rc, stdout, stderr = check_cfg(cfg_text)
-    if rc != 0:
-        # The configuration is invalid: touch nothing
-        return False, stdout, stderr
-
-    # 2a. Try to write the configuration through haproxy-controld
-    res = write_cfg_via_controld(cfg_text)
-    if res is not None:
-        ok_write, w_stdout, w_stderr = res
-        if not ok_write:
-            # writing to the host failed: do not reload
-            return False, w_stdout, w_stderr
-
-        # written: reload HAProxy as usual
-        ok, reload_stdout, reload_stderr = reload_haproxy()
-        return ok, reload_stdout, reload_stderr
-
-    # 2b. Fallback: the local mode (the old behaviour, without the root daemon)
-    # 2. The backup directory
-    try:
-        HAPROXY_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        stderr = (stderr or "") +\
-            f"\n[apply_cfg] Failed to create backup directory {HAPROXY_BACKUP_DIR}: {e}"
-        return False, stdout, stderr
-
-    # 3. Back up the current /etc/haproxy/haproxy.cfg
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    backup_path = HAPROXY_BACKUP_DIR / f"haproxy.cfg.bak.{ts}"
-
-    try:
-        if HAPROXY_CFG_PATH.exists():
-            shutil.copy2(HAPROXY_CFG_PATH, backup_path)
-            _rotate_backups(
-                HAPROXY_BACKUP_DIR,
-                "haproxy.cfg.bak.*",
-                MAX_HAPROXY_CFG_BACKUPS,
-            )
-    except OSError as e:
-        stderr = (stderr or "") +\
-            f"\n[apply_cfg] Failed to save backup {backup_path}: {e}"
-        return False, stdout, stderr
-
-    # 4. Write the new configuration locally
-    try:
-        HAPROXY_CFG_PATH.write_text(cfg_text, encoding="utf-8")
-    except OSError as e:
-        stderr = (stderr or "") +\
-            f"\n[apply_cfg] Failed to write {HAPROXY_CFG_PATH}: {e}"
-        return False, stdout, stderr
-
-    # 5. Reload the service (through haproxy-controld or systemctl)
-    ok, reload_stdout, reload_stderr = reload_haproxy()
-    return ok, reload_stdout, reload_stderr
-
-
 # next to BASE_DIR / HAPROXY_BACKUP_DIR / MAX_YAML_BACKUPS
-YAML_BACKUP_DIR = BASE_DIR / "backups" / "haproxy" / "yaml"
 
 
 def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:

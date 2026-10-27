@@ -18,7 +18,6 @@ import fcntl
 import os
 import socket
 import json
-import yaml
 import re
 import ipaddress
 import logging
@@ -99,10 +98,6 @@ AUTHELIA_LOG_LIMIT: int = _bounded_env_int("AUTHELIA_LOG_LIMIT", 200, 1, 1000)
 AUTHELIA_LOG_MAX_SCAN_BYTES: int = _bounded_env_int(
     "AUTHELIA_LOG_MAX_SCAN_BYTES", 16 * 1024 * 1024, 64 * 1024, 128 * 1024 * 1024
 )
-
-AUTHELIA_USERS_FILE: str = os.environ.get(
-    "AUTHELIA_USERS_FILE", ""
-).strip()
 
 AUTHELIA_USERS_SOCKET: str = os.environ.get(
     "AUTHELIA_USERS_SOCKET", "/run/easy-ha-proxy/authelia-usersd.sock").strip()
@@ -1359,19 +1354,6 @@ def _iter_authelia_log_lines_reverse(max_bytes: int | None = None):
             yield pending.decode("utf-8", errors="replace").rstrip("\r")
 
 
-def _tail_authelia_log_lines(limit: int) -> list[str]:
-    """Return up to ``limit`` newest lines in their on-disk order."""
-    if limit <= 0 or not AUTHELIA_LOG_FILE:
-        return []
-    newest_first: list[str] = []
-    for line in _iter_authelia_log_lines_reverse():
-        newest_first.append(line)
-        if len(newest_first) >= limit:
-            break
-    newest_first.reverse()
-    return newest_first
-
-
 def _parse_authelia_text_log_line(line: str) -> dict:
     """Best-effort parser for Authelia's supported logfmt/text format."""
     if "=" not in line:
@@ -1451,69 +1433,6 @@ def _authelia_log_entry(data: dict, line: str) -> dict:
         "details": details,
         "raw": line,
     }
-
-
-def _read_authelia_users_from_file() -> tuple[list[dict], str | None]:
-    """
-    Reads AUTHELIA_USERS_FILE (the file backend) and returns (users, error).
-
-    users is a list of dicts:
-      {
-        "username": ...,
-        "displayname": ...,
-        "email": ...,
-        "groups": [...],
-        "disabled": bool,
-      }
-    Other fields in the YAML are neither touched nor returned.
-    """
-    if not AUTHELIA_USERS_FILE:
-        return [], 'AUTHELIA_USERS_FILE is not configured (no path to users_database.yml)'
-
-    if not os.path.exists(AUTHELIA_USERS_FILE):
-        return [], f"Authelia users file not found: {AUTHELIA_USERS_FILE}"
-
-    try:
-        with open(AUTHELIA_USERS_FILE, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception as exc:  # noqa: BLE001
-        logger.error("authelia users read error: %s", exc)
-        return [], f"Authelia users file read error: {exc}"
-
-    # Shape 1: a structure with a "users:" root
-    # Shape 2: a dict of username -> attributes directly
-    if isinstance(data, dict) and isinstance(data.get("users"), dict):
-        users_node = data["users"]
-    elif isinstance(data, dict):
-        users_node = data
-    else:
-        return [], "Unexpected Authelia users file structure"
-
-    result: list[dict] = []
-    for username, info in users_node.items():
-        if not isinstance(info, dict):
-            continue
-
-        displayname = info.get("displayname", "")
-        email = info.get("email", "")
-        groups = info.get("groups") or []
-        disabled = bool(info.get("disabled", False))
-
-        if not isinstance(groups, (list, tuple)):
-            groups = [str(groups)]
-
-        result.append(
-            {
-                "username": str(username),
-                "displayname": str(displayname),
-                "email": str(email),
-                "groups": [str(g) for g in groups],
-                "disabled": disabled,
-            }
-        )
-
-    result.sort(key=lambda u: u["username"].lower())
-    return result, None
 
 
 def get_authelia_logs(

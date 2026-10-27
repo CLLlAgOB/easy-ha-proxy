@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import socket
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 LOG = logging.getLogger(__name__)
 
@@ -62,21 +62,9 @@ def _send_request(payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, An
     return resp
 
 
-def get_rules() -> Dict[str, Any]:
-    return _send_request({"action": "rules_list"})
-
-
-def save_rules(rules: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return _send_request({"action": "rules_save", "rules": rules})
-
-
 def get_config_without_rules() -> Dict[str, Any]:
     return _send_request({"action": "config_view"})
 
-
-def restart_authelia() -> Dict[str, Any]:
-    """Restart Authelia (docker restart, then wait for its port)."""
-    return _send_request({"action": "restart"}, timeout=60.0)
 
 def update_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     """

@@ -971,7 +971,7 @@ def haproxy_config_save_vars_raw():
 def haproxy_config_revert():
     """
     Rolls websites.yml/tcp.yml/vars.yml back to the last applied state,
-    using the last_applied_*.yml files that save_applied_state keeps.
+    using the last_applied_*.yml files that save_applied_state_strict keeps.
     """
     try:
         ok, msg = revert_to_last_applied_state()

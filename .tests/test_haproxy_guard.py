@@ -215,10 +215,7 @@ class GuardedConfigApplyTests(unittest.TestCase):
             template,
         )
         self.assertIn('@bp.get("/api/control-plane-health")', routes)
-        self.assertTrue(
-            "apply_result = apply_cfg_guarded(cfg_text)" in config_routes
-            or "apply_result = begin_cfg_confirmation(" in config_routes
-        )
+        self.assertIn("apply_result = begin_cfg_confirmation(", config_routes)
 
 
 class ConfirmableConfigTransactionTests(unittest.TestCase):

@@ -1638,12 +1638,6 @@ def generate_internal_certificate(directory: Path) -> Path:
     return ca_cert
 
 
-def generate_test_certificate(directory: Path) -> Path:
-    """Backward-compatible alias for callers using the old test-mode name."""
-
-    return generate_internal_certificate(directory)
-
-
 def print_internal_ca_instructions(directory: Path) -> None:
     metadata = load_metadata(directory)
     server_ip = str(metadata.get("test_server_ip") or "").strip()
@@ -1678,12 +1672,6 @@ def print_internal_ca_instructions(directory: Path) -> None:
             f"Copy {exported_ca} to your workstation and import it "
             "as a trusted root CA. Never copy the CA private key."
         )
-
-
-def print_test_access_instructions(directory: Path) -> None:
-    """Backward-compatible alias for the old test-mode instruction function."""
-
-    print_internal_ca_instructions(directory)
 
 
 def dns_preflight(directory: Path) -> bool:

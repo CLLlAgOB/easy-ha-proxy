@@ -1,10 +1,9 @@
 """The panel's own commands are bounded, and a failed port check is not "free".
 
-Where the control socket is missing, the panel runs `systemctl reload
-haproxy` and `haproxy -c` itself, with no time limit. run_cmd killed a
-command that ran out of time but never reaped it. And the certificate
-role's check that port 8000 is free piped ss into grep with "|| echo FREE":
-an ss that failed read as a free port.
+Where the control socket is missing, the panel runs `haproxy -c` itself,
+with no time limit. run_cmd killed a command that ran out of time but never
+reaped it. And the certificate role's check that port 8000 is free piped ss
+into grep with "|| echo FREE": an ss that failed read as a free port.
 """
 
 from __future__ import annotations
@@ -72,23 +71,6 @@ class TheFallbacksAreBounded(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + textwrap.dedent(body), encoding="utf-8")
         path.chmod(0o755)
         return path
-
-    def test_a_reload_that_hangs_is_a_failed_reload(self):
-        self.script("systemctl", "exec sleep 60\n")
-        started = time.monotonic()
-        with (
-            mock.patch.object(config_service, "HAPROXY_CONTROL_SOCKET", str(self.root / "absent.sock")),
-            mock.patch.object(config_service, "HAPROXY_RELOAD_TIMEOUT_SECONDS", 1),
-        ):
-            ok, _stdout, stderr = config_service.reload_haproxy()
-        self.assertLess(time.monotonic() - started, 10)
-        self.assertFalse(ok)
-        self.assertIn("did not finish within 1 seconds", stderr)
-
-    def test_a_reload_that_finishes_is_answered_as_before(self):
-        self.script("systemctl", 'echo "$@"\n')
-        with mock.patch.object(config_service, "HAPROXY_CONTROL_SOCKET", str(self.root / "absent.sock")):
-            self.assertEqual(config_service.reload_haproxy(), (True, "reload haproxy\n", ""))
 
     def check(self, haproxy):
         with (

@@ -195,7 +195,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_CERT}/templates/_san_flags.j2", ()),
     (f"{_CERT}/tasks/rdg.yml", ()),
     (f"{_CERT}/tasks/test.yml", ()),
-    (f"{_CERT}/tasks/backup.yml", ()),
     (f"{_CERT}/tasks/remove_orphans.yml", ()),
 
     # Authelia's host daemons. Its configuration and container are not

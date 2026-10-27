@@ -1,5 +1,4 @@
 /* app/haproxy_admin/static/js/health.js */
-/* global HA_IS_SUPERADMIN */
 
 (function () {
   "use strict";
@@ -59,16 +58,6 @@
     "haproxy-healthd.service",
   ]);
   let recentExcludedUnits = new Set(RECENT_DEFAULT_EXCLUDED);
-
-  function esc(s) {
-    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    }[c]));
-  }
 
   async function apiGet(url) {
     const r = await fetch(url, { cache: "no-store", credentials: "same-origin" });
@@ -487,7 +476,6 @@
 
     for (const name of names) {
       const c = containers[name] || {};
-      const st = c.status || "?";
       const health = c.health || c.health_status || "";
 
       addRow(tbody, [

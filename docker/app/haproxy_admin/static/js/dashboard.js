@@ -154,39 +154,6 @@ const Dashboard = (() => {
   }
 
 
-  async function decorateBanFlags(containerId, rows) {
-    try {
-      const ips = Array.from(new Set(rows.map(r => String(r[0])))).filter(Boolean);
-      if (!ips.length) return;
-
-      const resp = await fetch('/api/country-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ips })
-      });
-      const map = await resp.json();
-
-      const table = document.querySelector(`#${containerId} table tbody`);
-      if (!table) return;
-
-      // go over the rows and put a flag in the first cell
-      Array.from(table.querySelectorAll('tr')).forEach((tr, idx) => {
-        const td = tr.querySelector('td');
-        if (!td) return;
-        const ip = String(rows[idx]?.[0] || '');
-        const rawCc = String(map[ip] || '').toLowerCase();
-        const cc = /^[a-z]{2}$/.test(rawCc) ? rawCc : '';
-        const flag = window.countryFlagMarkup(cc);
-        // no flag yet: add it before the link
-        if (!td.querySelector('.country-flag')) {
-          td.innerHTML = `${flag} ${td.innerHTML}`;
-        }
-      });
-    } catch (e) {
-      console.warn('decorateBanFlags:', e);
-    }
-  }
-
   // Adds flags to the IP column of ANY table
   window.decorateFlags = async function (containerId, rows, ipIndex = 0) {
     try {

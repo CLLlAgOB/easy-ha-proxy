@@ -5,16 +5,6 @@ authelia-configd -- the root daemon that manages Authelia's configuration.yml.
 
 Actions:
 
-  action = "rules_list"
-    -> return access_control.rules as list[dict] (the old JSON API)
-
-  action = "rules_save"
-    -> save a new access_control.rules list (through the JSON API)
-       * backs up configuration.yml
-       * writes configuration.yml.tmp
-       * (optionally) validates with authelia config validate
-       * os.replace(.tmp, configuration.yml)
-
   action = "rules_get"
     -> return access_control.rules as a YAML list (the string rules_yaml)
 
@@ -577,10 +567,6 @@ def _save_config_data(root_data: Dict[str, Any]) -> None:
 
 class MailSettingsError(ValueError):
     """Invalid or unsafe mail configuration."""
-
-
-class RelayUnavailableError(MailSettingsError):
-    """The installed Compose stack has no mail_relay service."""
 
 
 class MailSettingsConflictError(MailSettingsError):
@@ -1950,50 +1936,6 @@ def _handle_restart(req: Dict[str, Any]) -> Dict[str, Any]:
 # Action handlers (rules/config/settings)
 # ---------------------------------------------------------------------------
 
-def _handle_rules_list(req: Dict[str, Any]) -> Dict[str, Any]:
-    """The old JSON API: return the rules as list[dict]."""
-    _root, rules = _load_config_data()
-    return {"ok": True, "rules": rules}
-
-
-def _handle_rules_save(req: Dict[str, Any]) -> Dict[str, Any]:
-    """The old JSON API: take a list[dict] and save it to access_control.rules."""
-    new_rules = req.get("rules")
-
-    if not isinstance(new_rules, list):
-        return {"ok": False, "error": "field 'rules' must be a list"}
-    if len(new_rules) > 500:
-        return {"ok": False, "error": "no more than 500 rules are allowed"}
-
-    try:
-        _reject_unsafe_values(new_rules)
-        for i, r in enumerate(new_rules):
-            if not isinstance(r, dict):
-                raise ValueError(
-                    f"rules[{i}] must be a dict, got {type(r).__name__}"
-                )
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
-
-    root, _old_rules = _load_config_data()
-    ac = root.get("access_control")
-    if ac is None or not isinstance(ac, dict):
-        ac = {}
-        root["access_control"] = ac
-
-    ac["rules"] = new_rules
-
-    try:
-        _save_config_data(root)
-    except Exception as exc:  # noqa: BLE001
-        LOG.exception("Failed to save configuration")
-        return {
-            "ok": False,
-            "error": f"Failed to save configuration.yml: {exc}",
-        }
-
-    return {"ok": True, "rules": new_rules}
-
 
 def _handle_rules_get(req: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -3133,12 +3075,6 @@ def handle_request(
         return _handle_rules_get(req)
     if action == "rules_set":
         return _handle_rules_set(req)
-
-    # The old JSON API
-    if action == "rules_list":
-        return _handle_rules_list(req)
-    if action == "rules_save":
-        return _handle_rules_save(req)
 
     if action == "config_view":
         return _handle_config_view(req)

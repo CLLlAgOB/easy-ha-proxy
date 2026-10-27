@@ -119,12 +119,6 @@
         - crt-test
         - never
 
-    # - role: cert
-    #   task_stage: backup
-    #   tags:
-    #     - crt-backup
-    #     - never
-
     - role: haproxy
       task_stage: install
       tags: ha-install
