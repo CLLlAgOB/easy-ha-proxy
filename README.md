@@ -1231,8 +1231,11 @@ Page logic that decides something lives in a script without the DOM that the
 page and Node load alike, and is tested by behaviour in `.tests/js/`:
 `updates_core.js` (what an update installs together, how far a job is and how
 long it has left), `monitoring_core.js` (chart scales, legend readings, the
-availability bar, zoom) and the translator's rules in `i18n.js`, which are
-also run against the real Russian catalogue. New page logic of that kind
+availability bar, zoom), `live_activity_core.js` (saved choices, filters,
+sorting, badges, which ban control a row gets), `adaptive_core.js` (the weight
+simulator, the ban ladder, what a mode switch will do, score bands) and the
+translator's rules in `i18n.js`, which are also run against the real Russian
+catalogue. New page logic of that kind
 belongs there too, rather than in a test that searches the source for a line.
 
 After the checks pass, a push to `alpha` or `main` publishes the web

@@ -3,18 +3,21 @@
  *
  * The only thing here that changes anything is the mode switch, and it asks
  * before it does. Everything else reads.
+ *
+ * The decisions -- simulator query, ban ladder, mode confirmation, score
+ * bands, how a finding is explained -- live in adaptive_core.js, where the
+ * tests in .tests/js/ reach them.
  */
 (function () {
   "use strict";
 
+  const core = window.EasyHaProxyAdaptive;
   const t = window.t || ((value) => String(value));
   const numberFormat = new Intl.NumberFormat(document.documentElement.lang || undefined);
   const dateTimeFormat = new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
     dateStyle: "short",
     timeStyle: "medium"
   });
-
-  const STATES = ["HOSTILE", "HIGH_RISK", "SUSPICIOUS", "WATCH", "NORMAL"];
 
   let configuredPolicy = null;
   let selectedAddress = "";
@@ -55,21 +58,17 @@
   }
 
   function simulatorParams() {
-    const params = new URLSearchParams();
+    const weights = {};
     document.querySelectorAll("input[data-weight]").forEach((input) => {
-      const value = input.value.trim();
-      if (value !== "") params.set(`w.${input.dataset.weight}`, value);
+      weights[input.dataset.weight] = input.value;
     });
     const cap = byId("ap-cap");
-    if (cap && cap.value.trim() !== "") params.set("cap", cap.value.trim());
     const decay = byId("ap-decay");
-    if (decay && decay.value.trim() !== "") {
-      // The field is in hours because that is how an operator thinks about how
-      // long a finding should still count.
-      const hours = Number(decay.value.trim());
-      if (Number.isFinite(hours)) params.set("decay", String(Math.round(hours * 3600)));
-    }
-    return params;
+    return new URLSearchParams(core.simulatorParams({
+      weights: weights,
+      cap: cap ? cap.value : "",
+      decayHours: decay ? decay.value : ""
+    }));
   }
 
   async function getJson(path, params) {
@@ -139,43 +138,20 @@
     );
   }
 
+  // A step reads in the unit the editor shows it in (see ladderText):
+  // "36 hr", not "2 days".
   function formatDuration(seconds) {
-    const total = Number(seconds) || 0;
-    // Days matter now that a step can be months long: "2160h" is a number
-    // nobody reads as ninety days.
-    if (total >= 86400) return `${Math.round(total / 86400)} ${unitLabel("days")}`;
-    if (total >= 3600) return `${Math.round(total / 3600)} ${unitLabel("hr")}`;
-    return `${Math.round(total / 60)} ${unitLabel("min")}`;
+    return core.ladderText(seconds, unitLabel);
   }
 
   /* ---------- how long a ban lasts ---------- */
 
-  // The abbreviations the rest of the application already uses, rather than
-  // single letters of my own. A one-letter catalogue key would be a trap:
-  // the DOM translator substitutes catalogue words inside strings it did
-  // not match whole, so "d" would sit waiting for the first page that
-  // prints a lone "d" in some other sense. Abbreviations also sidestep
-  // Russian numeral agreement, which is why these are not "7 days".
-  const UNITS = [
-    { key: "min", seconds: 60 },
-    { key: "hr", seconds: 3600 },
-    { key: "days", seconds: 86400 }
-  ];
+  // "min", "hr", "days": abbreviations, never single letters (see UNITS in
+  // adaptive_core.js).
+  const UNITS = core.UNITS;
 
   function unitLabel(key) {
     return uiText(key);
-  }
-
-  function splitDuration(seconds) {
-    // Show it in the largest unit that divides exactly, so a stored 604800
-    // comes back as "7 d" rather than "10080 m".
-    const total = Number(seconds) || 0;
-    for (const unit of [...UNITS].reverse()) {
-      if (total >= unit.seconds && total % unit.seconds === 0) {
-        return { value: total / unit.seconds, unit: unit.key };
-      }
-    }
-    return { value: Math.max(1, Math.round(total / 60)), unit: "min" };
   }
 
   function renderLadder() {
@@ -197,7 +173,7 @@
     if (!host) return;
     host.textContent = "";
     draft.forEach((seconds, index) => {
-      const parts = splitDuration(seconds);
+      const parts = core.splitDuration(seconds);
       const row = document.createElement("div");
       row.className = "ap-ladder-row";
 
@@ -226,13 +202,12 @@
       row.appendChild(unit);
 
       function update() {
-        const chosen = UNITS.find((entry) => entry.key === unit.value) || UNITS[0];
-        draft[index] = Math.max(1, Number(number.value) || 1) * chosen.seconds;
+        draft[index] = core.stepSeconds(number.value, unit.value);
       }
       number.addEventListener("input", update);
       unit.addEventListener("change", update);
 
-      if (draft.length > 1) {
+      if (core.canRemoveStep(draft)) {
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "btn-small";
@@ -248,7 +223,7 @@
     });
 
     const add = byId("ap-ladder-add");
-    if (add) add.disabled = draft.length >= 6;
+    if (add) add.disabled = !core.canAddStep(draft);
   }
 
   function openLadderEditor(open) {
@@ -266,14 +241,12 @@
     setText("ap-ladder-result", "");
     // Checked here so an obvious mistake is named before it becomes a
     // request; the daemon checks again and its answer is the one that holds.
-    for (let i = 1; i < draft.length; i += 1) {
-      if (draft[i] < draft[i - 1]) {
-        setText(
-          "ap-ladder-result",
-          uiText("Each step must be at least as long as the one before")
-        );
-        return;
-      }
+    if (core.ladderProblem(draft) !== -1) {
+      setText(
+        "ap-ladder-result",
+        uiText("Each step must be at least as long as the one before")
+      );
+      return;
     }
     try {
       const response = await fetch("/api/security/adaptive/durations", {
@@ -304,18 +277,17 @@
     const confirm = byId("ap-confirm");
     const text = byId("ap-confirm-text");
     if (!confirm || !text) return;
-    if (mode === "enforce") {
-      const would = Number((lastSummary || {}).would_ban) || 0;
-      const suspects = Number((lastSummary || {}).likely_false_positive) || 0;
+    const said = core.modeConfirmation(mode, currentMode, lastSummary);
+    if (said.kind === "enforce") {
       text.textContent =
-        `${uiText("Enabling enforcement will ban")} ${formatCount(would)} ` +
+        `${uiText("Enabling enforcement will ban")} ${formatCount(said.wouldBan)} ` +
         `${uiText("address(es) on the next cycle.")} ` +
-        (suspects
-          ? `${formatCount(suspects)} ${uiText(
+        (said.suspects
+          ? `${formatCount(said.suspects)} ${uiText(
               "scored address(es) later authenticated — review them first."
             )}`
           : uiText("No scored address has authenticated since."));
-    } else if (currentMode === "enforce") {
+    } else if (said.kind === "lift") {
       text.textContent = uiText(
         "Every ban this engine applied will be lifted."
       );
@@ -393,14 +365,12 @@
     const bands = policy.bands || [];
     if (!bands.length) return;
     host.textContent = "";
-    const ordered = bands.slice().sort((a, b) => b.from - a.from);
-    ordered.forEach((band, index) => {
-      const upper = index === 0 ? "" : ordered[index - 1].from - 1;
+    core.bandRanges(bands).forEach((band) => {
       const item = document.createElement("div");
       item.className = "ap-band" + (band.bans ? " bans" : "");
       const range = document.createElement("span");
       range.className = "ap-band-range";
-      range.textContent = upper === "" ? `${band.from}+` : `${band.from}–${upper}`;
+      range.textContent = band.upTo === null ? `${band.from}+` : `${band.from}–${band.upTo}`;
       const name = document.createElement("span");
       name.className = `ap-state ap-${band.state}`;
       name.textContent = band.state;
@@ -417,18 +387,7 @@
   }
 
   function formatLeft(seconds) {
-    const total = Math.max(0, Number(seconds) || 0);
-    if (total >= 86400) {
-      const days = Math.floor(total / 86400);
-      const hours = Math.round((total % 86400) / 3600);
-      return `${days}${unitLabel("days")} ${hours}${unitLabel("hr")}`;
-    }
-    if (total >= 3600) {
-      const hours = Math.floor(total / 3600);
-      const minutes = Math.round((total % 3600) / 60);
-      return `${hours}${unitLabel("hr")} ${minutes}${unitLabel("min")}`;
-    }
-    return `${Math.max(1, Math.round(total / 60))}${unitLabel("min")}`;
+    return core.formatLeft(seconds, unitLabel);
   }
 
   function renderBans(bans) {
@@ -510,10 +469,7 @@
     const host = byId("ap-states");
     if (!host) return;
     host.textContent = "";
-    const byState = summary.by_state || {};
-    STATES.forEach((state) => {
-      const count = byState[state];
-      if (!count) return;
+    core.statesPresent(summary.by_state).forEach(([state, count]) => {
       const item = document.createElement("span");
       const pill = document.createElement("b");
       pill.className = `ap-pill ap-${state}`;
@@ -631,9 +587,7 @@
       timeline.appendChild(empty);
       return;
     }
-    contributions
-      .slice()
-      .sort((a, b) => Number(b.ts) - Number(a.ts))
+    core.newestFirst(contributions)
       .forEach((item) => {
         const entry = document.createElement("div");
         entry.className = Number(item.points) > 0 ? "ap-entry" : "ap-entry zero";
@@ -648,29 +602,9 @@
           : item.event_type;
         entry.appendChild(what);
 
-        // What was measured, against what, and which setting moves it. Without
-        // this the page can say a limit was hit but not which one or by how
-        // much, which is exactly what an operator needs to decide whether the
-        // limit is wrong.
-        const bits = [];
-        if (item.site_domain || item.site_name) {
-          bits.push(item.site_domain || item.site_name);
-        }
-        if (item.observed != null && item.limit != null) {
-          bits.push(
-            `${item.observed} ${uiText(item.unit || "")} / ${uiText("limit")} ` +
-            `${item.limit}${item.window ? " / " + item.window : ""}`
-          );
-          if (item.over_by > 0) bits.push(`+${item.over_by} ${uiText("over")}`);
-        } else if (item.detail) {
-          bits.push(item.detail);
-        }
-        if (item.setting) {
-          bits.push(
-            `${uiText("raise")} ${item.setting}` +
-            (item.suggested ? ` → ${item.suggested}` : "")
-          );
-        }
+        // What was measured, against what, and which setting moves it
+        // (see findingContext).
+        const bits = core.findingContext(item, uiText);
         if (bits.length) {
           const context = document.createElement("span");
           context.className = "ap-context";
@@ -681,8 +615,7 @@
 
         const points = document.createElement("span");
         points.className = "ap-points";
-        points.textContent =
-          Number(item.points) > 0 ? `+${item.points}` : `0 · ${uiText(item.reason)}`;
+        points.textContent = core.findingPoints(item, uiText);
         entry.appendChild(points);
 
         timeline.appendChild(entry);
@@ -733,9 +666,8 @@
     const add = byId("ap-ladder-add");
     if (add) {
       add.addEventListener("click", () => {
-        // A new step starts at the last one, which is the only value that
-        // cannot break the "never shorter than the step before" rule.
-        draft.push(draft.length ? draft[draft.length - 1] : 3600);
+        // A new step starts at the last one (see nextStep).
+        draft.push(core.nextStep(draft));
         renderLadderRows();
       });
     }

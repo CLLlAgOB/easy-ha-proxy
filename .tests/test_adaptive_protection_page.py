@@ -182,6 +182,22 @@ class PageAssetTests(unittest.TestCase):
             "url_for('static', filename='js/adaptive_protection.js')", self.template
         )
 
+    def test_the_decisions_are_loaded_before_the_page_that_uses_them(self):
+        # The simulator query, the ban ladder, the mode confirmation and the
+        # bands are tested by behaviour in .tests/js/adaptive_core.test.js.
+        core = "url_for('static', filename='js/adaptive_core.js')"
+        self.assertIn(core, self.template)
+        self.assertLess(
+            self.template.index(core),
+            self.template.index("filename='js/adaptive_protection.js'"),
+        )
+        self.assertIn("const core = window.EasyHaProxyAdaptive;", self.javascript)
+        core_script = (APP_DIR / "static" / "js" / "adaptive_core.js").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in ("/api/security/adaptive/ban", "/api/security/adaptive/unban"):
+            self.assertNotIn(forbidden, core_script)
+
 
 class CatalogCoverageTests(unittest.TestCase):
     def test_every_translated_string_resolves_in_russian(self):
