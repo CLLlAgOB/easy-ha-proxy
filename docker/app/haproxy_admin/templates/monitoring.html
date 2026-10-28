@@ -789,6 +789,46 @@ body.mon-overlay-open { overflow: hidden; }
       <svg class="mon-plot" id="mon-plot-memory" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-memory"></div>
     </div>
+
+    <div class="mon-chart" data-chart="disk">
+      <div class="mon-chart-head">
+        <h3>Disk space</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Root filesystem</div>
+      <svg class="mon-plot" id="mon-plot-disk" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-disk"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="diskio">
+      <div class="mon-chart-head">
+        <h3>Disk activity</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Read and written per second</div>
+      <svg class="mon-plot" id="mon-plot-diskio" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-diskio"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="network">
+      <div class="mon-chart-head">
+        <h3>Network</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Network cards of the machine, per second</div>
+      <svg class="mon-plot" id="mon-plot-network" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-network"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="temperature">
+      <div class="mon-chart-head">
+        <h3>Temperature</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Warmest sensor of the machine</div>
+      <svg class="mon-plot" id="mon-plot-temperature" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-temperature"></div>
+    </div>
   </div>
 </div>
 
@@ -902,6 +942,12 @@ body.mon-overlay-open { overflow: hidden; }
   <div class="mon-monitors">
     <label><input type="checkbox" data-monitor="machine"> Processor and memory of the machine</label>
     <label><input type="checkbox" data-monitor="components"> Usage per component: services and containers</label>
+    <label><input type="checkbox" data-monitor="disk"> Disk: space and activity</label>
+    <label><input type="checkbox" data-monitor="network"> Network cards of the machine</label>
+    <label>
+      <input type="checkbox" data-monitor="temperature"> Temperature
+      <small class="mon-sub" id="mon-temperature-note" hidden>No sensor on this machine</small>
+    </label>
   </div>
 
   <p class="mon-sub">

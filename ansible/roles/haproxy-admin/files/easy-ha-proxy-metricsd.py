@@ -198,6 +198,14 @@ _AGGREGATIONS: Dict[str, str] = {
     "cpu_max": "max",
     "haproxy_busy_avg": "wavg",
     "haproxy_busy_max": "max",
+    "disk_used_avg": "wavg",
+    "disk_total": "max",
+    "disk_read": "sum",
+    "disk_write": "sum",
+    "net_rx": "sum",
+    "net_tx": "sum",
+    "temp_avg": "wavg",
+    "temp_max": "max",
     "memory_avg": "wavg",
     "memory_max": "max",
     "memory_total": "max",
@@ -215,12 +223,30 @@ CHART_SERIES: Dict[str, Tuple[str, ...]] = {
     # difference is the whole diagnosis.
     "cpu": ("cpu_avg", "cpu_max", "haproxy_busy_avg"),
     "memory": ("memory_avg", "memory_max", "memory_total"),
+    # The rest of the machine: how full its disk is and how busy, what goes
+    # over its network cards, and how warm it runs -- on a fanless board in
+    # a cupboard, the reason it slows down.
+    "disk": ("disk_used_avg", "disk_total"),
+    "diskio": ("disk_read", "disk_write"),
+    "network": ("net_rx", "net_tx"),
+    "temperature": ("temp_avg", "temp_max"),
 }
 
 # Charts about the machine rather than about a proxy object. They select the
 # synthetic 'host' row and ignore any site: one machine's CPU is not
 # divisible among the sites it serves.
-HOST_CHARTS = frozenset({"cpu", "memory"})
+HOST_CHARTS = frozenset({"cpu", "memory", "disk", "diskio", "network", "temperature"})
+# Where the machine is read from; attributes of the collector so a test can
+# point them at a directory of its own.
+DISK_PATH = "/"
+DISKSTATS_PATH = "/proc/diskstats"
+SYS_BLOCK_ROOT = "/sys/block"
+SYS_NET_ROOT = "/sys/class/net"
+THERMAL_ROOT = "/sys/class/thermal"
+# /proc/diskstats counts sectors of 512 bytes whatever the device's own size.
+DISKSTATS_SECTOR = 512
+# A thermal zone reading outside this is a broken sensor, not a temperature.
+TEMPERATURE_RANGE_MILLI = (-40_000, 150_000)
 HOST_KIND = "host"
 
 # What each part of the gateway uses: HAProxy, every helper service, the
@@ -315,6 +341,14 @@ def _from_storage(chart: str, value: Any) -> Any:
 
     if chart == "memory":
         return int(value or 0) * MEMORY_UNIT
+    if chart == "disk":
+        # A disk is never empty: 0 is a minute it was not read.
+        return int(value) * MEMORY_UNIT if value else None
+    if chart in ("diskio", "network"):
+        return int(value or 0)
+    if chart == "temperature":
+        # Nothing was read: a gap, never a machine at 0 degrees.
+        return round(int(value) / CPU_SCALE, 1) if value else None
     return round(int(value or 0) / CPU_SCALE, 1)
 
 
@@ -424,6 +458,16 @@ METRIC_COLUMNS: Tuple[str, ...] = (
     "memory_avg",
     "memory_max",
     "memory_total",
+    # The host row only. Disk space in KiB like memory, I/O and network in
+    # bytes per bucket, temperature in tenths of a degree.
+    "disk_used_avg",
+    "disk_total",
+    "disk_read",
+    "disk_write",
+    "net_rx",
+    "net_tx",
+    "temp_avg",
+    "temp_max",
 )
 # Columns summed when rolling minutes up into hours; the rest are averaged
 # (weighted by sample count) or maxed, see _ROLLUP_MAX.
@@ -782,7 +826,9 @@ CHANNEL_HIDDEN_KEY = "channel_hidden"
 # part of a poll. The rest are drawn from the one `show stat` every poll
 # reads anyway, so for them off means not shown.
 MONITORS_KEY = "monitors"
-GATHERED_MONITORS = ("machine", "components")
+GATHERED_MONITORS = ("machine", "components", "disk", "network", "temperature")
+# Read with the machine's row; any of them on means the row is written.
+HOST_MONITORS = ("machine", "disk", "network", "temperature")
 SHOWN_MONITORS = (
     "requests", "traffic", "responses", "latency", "connections",
     "uplinks", "availability",
@@ -870,7 +916,111 @@ class Bucket:
             "memory_avg": average("memory"),
             "memory_max": self.gauge_maxima.get("memory", 0),
             "memory_total": self.gauge_maxima.get("memory_total", 0),
+            "disk_used_avg": average("disk_used"),
+            "disk_total": self.gauge_maxima.get("disk_total", 0),
+            "disk_read": self.counters.get("disk_read", 0),
+            "disk_write": self.counters.get("disk_write", 0),
+            "net_rx": self.counters.get("net_rx", 0),
+            "net_tx": self.counters.get("net_tx", 0),
+            "temp_avg": average("temp"),
+            "temp_max": self.gauge_maxima.get("temp", 0),
         }
+
+
+def read_disk_space(path: str) -> Optional[Tuple[int, int]]:
+    """(used, total) KiB of the filesystem holding path, counted as df does."""
+
+    try:
+        stat = os.statvfs(path)
+    except OSError:
+        return None
+    total = stat.f_blocks * stat.f_frsize
+    if total <= 0:
+        return None
+    used = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+    return used // MEMORY_UNIT, total // MEMORY_UNIT
+
+
+def read_disk_counters(diskstats_path: str, sys_block_root: str) -> Optional[Dict[str, Tuple[int, int]]]:
+    """Bytes read and written so far, per disk.
+
+    The disks are the entries of /sys/block backed by a device: partitions
+    would count their disk twice, and loop, ram, zram and device-mapper
+    entries are views of something already counted or of nothing at all.
+    """
+
+    try:
+        disks = {
+            name for name in os.listdir(sys_block_root)
+            if os.path.exists(os.path.join(sys_block_root, name, "device"))
+        }
+        with open(diskstats_path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    counters: Dict[str, Tuple[int, int]] = {}
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10 or fields[2] not in disks:
+            continue
+        try:
+            counters[fields[2]] = (
+                int(fields[5]) * DISKSTATS_SECTOR,
+                int(fields[9]) * DISKSTATS_SECTOR,
+            )
+        except ValueError:
+            continue
+    return counters or None
+
+
+def read_network_counters(sys_net_root: str) -> Optional[Dict[str, Tuple[int, int]]]:
+    """Bytes received and sent so far, per network card.
+
+    Only interfaces backed by a device: loopback, Docker's bridges and veth
+    pairs, and tunnels carry traffic the card already counted once.
+    """
+
+    try:
+        names = sorted(os.listdir(sys_net_root))
+    except OSError:
+        return None
+    counters: Dict[str, Tuple[int, int]] = {}
+    for name in names:
+        base = os.path.join(sys_net_root, name)
+        if not os.path.exists(os.path.join(base, "device")):
+            continue
+        try:
+            with open(os.path.join(base, "statistics", "rx_bytes"), "r", encoding="utf-8") as handle:
+                received = int(handle.read().strip())
+            with open(os.path.join(base, "statistics", "tx_bytes"), "r", encoding="utf-8") as handle:
+                sent = int(handle.read().strip())
+        except (OSError, ValueError):
+            continue
+        counters[name] = (received, sent)
+    return counters or None
+
+
+def read_temperature(thermal_root: str) -> Optional[int]:
+    """The warmest thermal zone, in tenths of a degree; None without one."""
+
+    warmest: Optional[int] = None
+    try:
+        zones = [name for name in os.listdir(thermal_root) if name.startswith("thermal_zone")]
+    except OSError:
+        return None
+    low, high = TEMPERATURE_RANGE_MILLI
+    for zone in zones:
+        try:
+            with open(os.path.join(thermal_root, zone, "temp"), "r", encoding="utf-8") as handle:
+                milli = int(handle.read().strip())
+        except (OSError, ValueError):
+            continue
+        if not low < milli < high:
+            continue
+        value = milli // 100
+        if warmest is None or value > warmest:
+            warmest = value
+    return warmest
 
 
 def _close_span(spans: List[Dict[str, Any]], start: int, end: int, state_name: str) -> None:
@@ -2340,6 +2490,14 @@ class Collector:
         self._component_previous: Dict[str, Tuple[int, float]] = {}
         self._container_names: Dict[str, str] = {}
         self.monitors: Dict[str, bool] = dict(MONITOR_DEFAULTS)
+        # The machine beyond processor and memory.
+        self.disk_path = DISK_PATH
+        self.diskstats_path = DISKSTATS_PATH
+        self.sys_block_root = SYS_BLOCK_ROOT
+        self.sys_net_root = SYS_NET_ROOT
+        self.thermal_root = THERMAL_ROOT
+        # Per counter set, per device: the reading at the previous poll.
+        self._counter_previous: Dict[str, Dict[str, Tuple[int, int]]] = {}
 
         self.last_poll_ts: Optional[int] = None
         self.last_flush_ts: Optional[int] = None
@@ -2371,6 +2529,11 @@ class Collector:
                 self._component_previous.clear()
             if not monitors["machine"]:
                 self._cpu_previous = None
+            # A counter read again after a pause must not be measured
+            # against one from before it: the pause would land in one bucket.
+            for name in ("disk", "network"):
+                if not monitors[name]:
+                    self._counter_previous.pop(name, None)
         return monitors
 
     def start(self) -> None:
@@ -2454,7 +2617,7 @@ class Collector:
                 self._observe(kind, proxy, server, row, now)
                 observed += 1
 
-            if self.monitors["machine"]:
+            if any(self.monitors[name] for name in HOST_MONITORS):
                 self._observe_host(now)
 
         self._report_authelia(rows)
@@ -2566,10 +2729,22 @@ class Collector:
         into a traffic total.
         """
 
-        cpu = self._read_host_cpu()
-        busy = self._read_haproxy_busy()
-        memory = self._read_host_memory()
-        if cpu is None and busy is None and memory is None:
+        machine = self.monitors["machine"]
+        cpu = self._read_host_cpu() if machine else None
+        busy = self._read_haproxy_busy() if machine else None
+        memory = self._read_host_memory() if machine else None
+        disk = read_disk_space(self.disk_path) if self.monitors["disk"] else None
+        disk_io = (
+            self._counter_delta("disk", read_disk_counters(self.diskstats_path, self.sys_block_root))
+            if self.monitors["disk"] else None
+        )
+        network = (
+            self._counter_delta("network", read_network_counters(self.sys_net_root))
+            if self.monitors["network"] else None
+        )
+        temperature = read_temperature(self.thermal_root) if self.monitors["temperature"] else None
+        readings = (cpu, busy, memory, disk, disk_io, network, temperature)
+        if all(reading is None for reading in readings):
             return
 
         bucket = self._machine_bucket(HOST_KIND, "", "", now)
@@ -2581,14 +2756,58 @@ class Collector:
         if memory is not None:
             bucket.add_gauge("memory", memory[0])
             bucket.add_gauge("memory_total", memory[1])
+        if disk is not None:
+            bucket.add_gauge("disk_used", disk[0])
+            bucket.add_gauge("disk_total", disk[1])
+        if disk_io is not None:
+            bucket.add_counter("disk_read", disk_io[0])
+            bucket.add_counter("disk_write", disk_io[1])
+        if network is not None:
+            bucket.add_counter("net_rx", network[0])
+            bucket.add_counter("net_tx", network[1])
+        if temperature is not None:
+            bucket.add_gauge("temp", temperature)
 
-        if not self.monitors["components"]:
+        if not machine or not self.monitors["components"]:
             return
         try:
             self._observe_components(now)
         except Exception as exc:  # pylint: disable=broad-except
             # Supplementary, like the host load: never worth a poll.
             LOG.debug("component usage unavailable: %s", exc)
+
+    def _counter_delta(
+        self, name: str, current: Optional[Dict[str, Tuple[int, int]]]
+    ) -> Optional[Tuple[int, int]]:
+        """What a set of per-device counters grew by since the previous poll.
+
+        Device by device, so a disk or card that appears adds nothing until
+        its second reading and one whose counter went back (a driver reload)
+        is left out of that one sum, instead of turning a whole reading into
+        a spike or a guess. None on the first reading.
+        """
+
+        previous = self._counter_previous.get(name)
+        if current is None:
+            self._counter_previous.pop(name, None)
+            return None
+        self._counter_previous[name] = current
+        if previous is None:
+            return None
+        first = second = 0
+        for device, (now_a, now_b) in current.items():
+            before = previous.get(device)
+            if before is None or now_a < before[0] or now_b < before[1]:
+                continue
+            first += now_a - before[0]
+            second += now_b - before[1]
+        return first, second
+
+    def sensors(self) -> Dict[str, bool]:
+        """What this machine can be asked about at all: a virtual machine
+        has no temperature, and the page should say so rather than draw 0."""
+
+        return {"temperature": read_temperature(self.thermal_root) is not None}
 
     def _machine_bucket(self, kind: str, proxy: str, server: str, now: int) -> Bucket:
         key = (kind, proxy, server)
@@ -3280,6 +3499,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     "collector": collector.health(),
                     "storage": collector.storage.report(until),
                     "monitors": dict(collector.monitors),
+                    "sensors": collector.sensors(),
                 }
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})

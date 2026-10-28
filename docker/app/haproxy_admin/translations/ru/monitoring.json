@@ -152,6 +152,20 @@
     "Critical": "Критично",
     "Info": "Информация",
     "Alerts in this period": "Оповещения за период",
-    "No alerts in this period": "За этот период оповещений нет"
+    "No alerts in this period": "За этот период оповещений нет",
+    "Disk space": "Место на диске",
+    "Root filesystem": "Корневая файловая система",
+    "Disk activity": "Работа диска",
+    "Read and written per second": "Прочитано и записано в секунду",
+    "Network": "Сеть",
+    "Network cards of the machine, per second": "Сетевые карты машины, в секунду",
+    "Temperature": "Температура",
+    "Warmest sensor of the machine": "Самый горячий датчик машины",
+    "Read": "Чтение",
+    "Written": "Запись",
+    "Sent": "Отправлено",
+    "Disk: space and activity": "Диск: место и работа",
+    "Network cards of the machine": "Сетевые карты машины",
+    "No sensor on this machine": "на этой машине нет датчика"
   }
 }

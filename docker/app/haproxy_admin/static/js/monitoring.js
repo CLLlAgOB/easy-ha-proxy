@@ -98,6 +98,37 @@
         { key: "containers", label: "Containers", color: "#d0743c", bytes: true, summary: "mean" },
         { key: "other", label: "Other processes", color: "#9e9e9e", bytes: true, summary: "mean", hidden: true }
       ]
+    },
+    {
+      // The root filesystem, counted as df counts it.
+      name: "disk",
+      series: [
+        { key: "disk_used_avg", label: "Used", color: "#4a86c8", bytes: true, summary: "last" },
+        { key: "disk_total", label: "Total", color: "#6b6b6b", bytes: true, summary: "last", dash: true }
+      ]
+    },
+    {
+      name: "diskio",
+      series: [
+        { key: "disk_read", label: "Read", color: "#4a86c8", rate: true, bytes: true },
+        { key: "disk_write", label: "Written", color: "#d0743c", rate: true, bytes: true }
+      ]
+    },
+    {
+      // The machine's network cards: everything it sends and receives,
+      // not only what HAProxy proxies.
+      name: "network",
+      series: [
+        { key: "net_rx", label: "Received", color: "#4a86c8", rate: true, bytes: true },
+        { key: "net_tx", label: "Sent", color: "#2e9e5b", rate: true, bytes: true }
+      ]
+    },
+    {
+      name: "temperature",
+      series: [
+        { key: "temp_avg", label: "Average", color: "#4a86c8", unit: "°C", summary: "mean" },
+        { key: "temp_max", label: "Peak", color: "#cc4b4b", unit: "°C", summary: "max" }
+      ]
     }
   ];
 
@@ -126,8 +157,15 @@
     latency: "latency",
     connections: "connections",
     cpu: "machine",
-    memory: "machine"
+    memory: "machine",
+    disk: "disk",
+    diskio: "disk",
+    network: "network",
+    temperature: "temperature"
   };
+  // What this machine can be asked about at all (from the summary): a
+  // virtual machine has no temperature sensor.
+  let sensors = null;
   const GROUP_LINES = ["helpers", "containers", "other"];
 
   function monitorOn(name) {
@@ -135,6 +173,7 @@
   }
 
   function chartOn(name) {
+    if (name === "temperature" && sensors && sensors.temperature === false) return false;
     return monitorOn(CHART_MONITORS[name]);
   }
 
@@ -159,12 +198,16 @@
     setOff("mon-card-memory", !monitorOn("machine"));
     setOff("mon-channels-card", !monitorOn("uplinks"));
     setOff("mon-backends-card", !monitorOn("availability"));
+    const noSensor = Boolean(sensors) && sensors.temperature === false;
+    const note = byId("mon-temperature-note");
+    if (note) note.hidden = !noSensor;
     document.querySelectorAll("#mon-monitors-card input[data-monitor]").forEach((input) => {
       input.checked = monitorOn(input.dataset.monitor);
       // The split per component is read while the machine is: without it
-      // there is nothing to split.
+      // there is nothing to split. A sensor the machine lacks cannot be read.
       input.disabled = !monitorsEditable ||
-        (input.dataset.monitor === "components" && !monitorOn("machine"));
+        (input.dataset.monitor === "components" && !monitorOn("machine")) ||
+        (input.dataset.monitor === "temperature" && noSensor);
     });
   }
 
@@ -260,6 +303,7 @@
 
   function axisLabel(spec, value) {
     if (spec.percent) return `${decimalFormat.format(value)}%`;
+    if (spec.unit) return `${decimalFormat.format(value)} ${spec.unit}`;
     if (spec.bytes) return formatBytes(value);
     if (value >= 1000) return formatCount(Math.round(value));
     return decimalFormat.format(value);
@@ -650,6 +694,7 @@
 
   function legendValue(spec, value) {
     if (spec.percent) return `${decimalFormat.format(value)}%`;
+    if (spec.unit) return `${decimalFormat.format(value)} ${spec.unit}`;
     if (spec.bytes) return spec.rate ? `${formatBytes(value)}/s` : formatBytes(value);
     return formatRate(value);
   }
@@ -1933,6 +1978,7 @@
         // note says which period it belongs to.
         customWindow = null;
       }
+      if (summary.sensors && typeof summary.sensors === "object") sensors = summary.sensors;
       applyMonitors(summary.monitors);
       renderSummary(summary);
       renderStorage(summary.storage);

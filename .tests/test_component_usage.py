@@ -565,7 +565,8 @@ class ThePanel(unittest.TestCase):
         cards = re.findall(r'<div class="mon-chart" data-chart="([a-z]+)">', self.page)
         self.assertEqual(
             sorted(cards),
-            sorted(["requests", "traffic", "responses", "latency", "connections", "cpu", "memory"]),
+            sorted(["requests", "traffic", "responses", "latency", "connections", "cpu", "memory",
+                    "disk", "diskio", "network", "temperature"]),
         )
         self.assertEqual(self.page.count("{{ expand_button() }}"), len(cards))
         self.assertIn('id="mon-overlay" hidden', self.page)
