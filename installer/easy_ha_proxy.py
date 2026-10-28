@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+import fcntl
 import getpass
 import ipaddress
 import os
@@ -84,6 +85,20 @@ WEB_REBOOT_SCHEDULE_MARKER = Path(
 REBOOT_DELAY_SECONDS = 30
 REBOOT_SYSTEMD_UNIT_PREFIX = "easy-ha-proxy-reboot"
 UPDATE_SOURCE_REFRESHED_ENV = "EASY_HA_PROXY_UPDATE_SOURCE_REFRESHED"
+# One maintenance operation at a time: the update broker and the backup
+# daemon take this lock for every update, backup, inspection and restore. An
+# update typed on the command line takes it as well, or it runs over one
+# started from the panel -- and each sees the other's restarts as failures.
+MAINTENANCE_LOCK_PATH = Path(
+    os.environ.get(
+        "EASY_HA_PROXY_MAINTENANCE_LOCK",
+        "/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock",
+    )
+)
+MAINTENANCE_LOCK_HELD_ENV = "EASY_HA_PROXY_MAINTENANCE_LOCK_HELD"
+# The broker runs each job in a unit of its own, holding the lock for it.
+UPDATED_JOB_UNIT_PREFIX = "easy-ha-proxy-updated-job-"
+_maintenance_lock_descriptor = -1
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 RUNTIME_HAPROXY_CONFIG_DIR = Path("/opt/haproxy-admin/config")
 # The configuration Authelia actually runs with. The panel's access-rule
@@ -2133,6 +2148,10 @@ def reexec_after_source_update() -> None:
         )
     environment = os.environ.copy()
     environment[UPDATE_SOURCE_REFRESHED_ENV] = "1"
+    # The lock stays held by the refreshed installer, which is told so in
+    # the environment and must not take it a second time.
+    if _maintenance_lock_descriptor >= 0:
+        os.set_inheritable(_maintenance_lock_descriptor, True)
     print("Restarting the updater with the refreshed installer source.", flush=True)
     os.execve(
         str(entrypoint),
@@ -3250,8 +3269,60 @@ def update_tags_for_args(args: argparse.Namespace, *, check_mode: bool = False) 
         raise SystemExit(f"Unsupported {mode} component: {component}") from exc
 
 
+def started_by_update_broker(cgroup_path: Path = Path("/proc/self/cgroup")) -> bool:
+    """Whether this process runs in a job unit of the update broker.
+
+    The broker holds the maintenance lock while its job runs, so the job must
+    not wait for it. The unit is how a job is recognised -- a broker from
+    before the lock was shared does not say so in the environment.
+    """
+
+    try:
+        text = cgroup_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(
+        part.startswith(UPDATED_JOB_UNIT_PREFIX) and part.endswith(".service")
+        for line in text.splitlines()
+        for part in line.rsplit(":", 1)[-1].split("/")
+    )
+
+
+def hold_maintenance_lock(path: Path | None = None) -> None:
+    """Take the maintenance lock for this update, or refuse to start.
+
+    Not waited for: an update that queues silently behind a restore is worse
+    than one that says why it cannot start. Held until the process exits,
+    across the restart into the refreshed installer.
+    """
+
+    global _maintenance_lock_descriptor  # noqa: PLW0603
+    if os.environ.get(MAINTENANCE_LOCK_HELD_ENV) or started_by_update_broker():
+        return
+    target = path or MAINTENANCE_LOCK_PATH
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            target, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
+    except OSError as exc:
+        raise InstallerError(f"Cannot open the maintenance lock {target}: {exc}") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(descriptor)
+        raise InstallerError(
+            "Another maintenance operation -- an update, a backup or a restore, "
+            "possibly started from the panel -- is running. Wait for it to "
+            "finish and try again."
+        ) from exc
+    _maintenance_lock_descriptor = descriptor
+    os.environ[MAINTENANCE_LOCK_HELD_ENV] = "cli"
+
+
 def command_update(args: argparse.Namespace) -> None:
     require_root()
+    hold_maintenance_lock()
     component = "ui" if args.ui_only else args.component
     expected_source_revision = normalize_source_revision(
         getattr(args, "expected_source_revision", None)

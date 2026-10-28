@@ -299,6 +299,7 @@ class TheInstaller(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {easy_ha_proxy.UPDATE_SOURCE_REFRESHED_ENV: "1"}),
                 mock.patch("easy_ha_proxy.require_root"),
+                mock.patch("easy_ha_proxy.hold_maintenance_lock"),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
                 mock.patch("easy_ha_proxy.ensure_security_secrets"),
                 mock.patch("easy_ha_proxy.persist_deployment_channels"),

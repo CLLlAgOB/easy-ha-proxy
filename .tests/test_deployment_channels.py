@@ -262,6 +262,7 @@ class DeploymentChannelTests(unittest.TestCase):
         )
         with (
             mock.patch("easy_ha_proxy.require_root"),
+            mock.patch("easy_ha_proxy.hold_maintenance_lock"),
             mock.patch("easy_ha_proxy.update_managed_source", return_value=True),
             mock.patch(
                 "easy_ha_proxy.reexec_after_source_update",
@@ -288,6 +289,7 @@ class DeploymentChannelTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {UPDATE_SOURCE_REFRESHED_ENV: "1"}),
                 mock.patch("easy_ha_proxy.require_root"),
+                mock.patch("easy_ha_proxy.hold_maintenance_lock"),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
                 mock.patch("easy_ha_proxy.update_managed_source") as update_source,
                 mock.patch("easy_ha_proxy.ensure_security_secrets") as migrate,
@@ -319,6 +321,7 @@ class DeploymentChannelTests(unittest.TestCase):
             directory = Path(temporary)
             with (
                 mock.patch("easy_ha_proxy.require_root"),
+                mock.patch("easy_ha_proxy.hold_maintenance_lock"),
                 mock.patch("easy_ha_proxy.load_metadata", return_value={"source_channel": "github"}),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
                 mock.patch("easy_ha_proxy.ensure_security_secrets"),

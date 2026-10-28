@@ -709,6 +709,8 @@ def child_environment() -> dict[str, str]:
         "EASY_HA_PROXY_PROGRESS": "1",
         # A web update reports a required reboot; it never schedules one.
         "EASY_HA_PROXY_REBOOT_DECISION": "no",
+        # The broker holds the maintenance lock for the job it starts.
+        "EASY_HA_PROXY_MAINTENANCE_LOCK_HELD": "updated",
     }
 
 
