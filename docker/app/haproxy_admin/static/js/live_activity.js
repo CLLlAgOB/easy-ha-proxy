@@ -92,6 +92,16 @@
     return value === null || value === undefined ? "—" : `${number(value)} ${esc(t("ms"))}`;
   }
 
+  // The request log for the same minutes, which reaches back further than
+  // this page's hour when it is switched on.
+  function requestLogLink(filter) {
+    const data = state.data || {};
+    const until = Math.ceil(Number(data.now) || Date.now() / 1000);
+    const since = Math.floor(until - (Number(data.window) || state.window));
+    const query = new URLSearchParams(Object.assign({}, filter, { since: String(since), until: String(until) }));
+    return `/security/requests?${query.toString()}`;
+  }
+
   function refusalLabel(name) {
     const labels = (state.data && state.data.refusal_labels) || {};
     return t(labels[name] || name);
@@ -113,7 +123,8 @@
     });
   }
 
-  async function refresh() {
+  // force: drawn even while someone reads the tables -- for what they asked for.
+  async function refresh(force) {
     if (state.inFlight) return;
     state.inFlight = true;
     try {
@@ -128,7 +139,7 @@
         return;
       }
       state.data = payload;
-      render();
+      render(force);
     } catch (error) {
       byId("la-note").textContent = String(error);
     } finally {
@@ -330,6 +341,7 @@
         <td class="la-actions"><div class="la-actions-stack">
           ${banButton(row.ip, Boolean(row.ban), core.allowEntryOf(row))}
           <a class="la-link" href="/ip/${encodeURIComponent(row.ip)}" target="_blank" rel="noopener">${esc(t("Log lines"))}</a>
+          <a class="la-link" href="${esc(requestLogLink({ client: row.ip }))}" target="_blank" rel="noopener">${esc(t("Request log"))}</a>
         </div></td>
       </tr>`).join("");
   }
@@ -348,7 +360,9 @@
         <td class="la-num">${number(row.addresses)}</td>
         <td class="la-num">${msOrDash(row.p50_ms)}</td>
         <td class="la-num">${msOrDash(row.p95_ms)}</td>
-        <td class="la-mono">${esc(row.backend || "—")}</td>
+        <td class="la-mono">${row.backend
+          ? `<a class="la-link la-mono" href="/monitoring?site=${encodeURIComponent(row.backend)}" title="${esc(t("Charts of this site"))}">${esc(row.backend)}</a>`
+          : "—"}</td>
       </tr>`).join("");
   }
 
@@ -356,8 +370,11 @@
     const body = byId("la-events-body");
     const rows = data.events || [];
     byId("la-events-empty").hidden = rows.length > 0;
-    body.innerHTML = rows.map((row) => `
-      <tr class="${row.refusal ? "la-row-blocked" : ""}">
+    body.innerHTML = rows.map((row) => {
+      const key = core.eventKey(row);
+      const open = state.expanded === key;
+      return `
+      <tr class="la-event-row ${row.refusal ? "la-row-blocked" : ""} ${open ? "la-open" : ""}" data-event="${esc(key)}">
         <td class="la-mono">${esc(clock(row.ts))}</td>
         <td>${ipLink(row.ip)} ${flag(row.country)}</td>
         <td>${hostLink(row.host)}</td>
@@ -365,7 +382,36 @@
         <td>${statusBadge(row.status)}</td>
         <td class="la-num" title="${esc(t("The whole request"))}: ${esc(number(row.duration_ms))} ${esc(t("ms"))}">${msOrDash(row.response_ms)}</td>
         <td>${row.refusal ? `<span class="la-badge la-refused" title="${esc(row.ban_reason || "")}">${esc(refusalLabel(row.refusal))}</span>${row.ban_reason ? `<div class="la-sub">${esc(row.ban_reason)}</div>` : ""}` : ""}</td>
-      </tr>`).join("");
+      </tr>${open ? detailsRow(row) : ""}`;
+    }).join("");
+  }
+
+  // One request, opened: where its time went, how it ended, and the way to
+  // it in the request log.
+  function detailsRow(row) {
+    const ending = core.termination(row.term);
+    const said = ending.normal
+      ? t("Ended normally")
+      : [ending.cause, ending.phase].filter(Boolean).map((part) => t(part)).join(", ") || t("Unknown");
+    const timers = core.timers(row.times).map((timer) =>
+      `<span>${esc(t(timer.label))}: <b>${timer.ms === null ? "—" : `${number(timer.ms)} ${esc(t("ms"))}`}</b></span>`
+    ).join("");
+    const items = [
+      ["Request", `<span class="la-mono">${esc(row.method)} ${esc(row.path)}</span>`],
+      ["Site", esc(row.host || "—")],
+      ["Server", `<span class="la-mono">${esc(row.backend || "—")}</span>`],
+      ["Status", `${statusBadge(row.status)} · ${esc(bytes(row.bytes))}`],
+      ["How it ended", `${esc(said)} <span class="la-sub la-mono">${esc(row.term || "")}</span>`],
+      ["Where the time went", timers ? `<div class="la-timers">${timers}</div>` : "—"],
+      ["Client", `<span class="la-mono">${esc(row.user_agent || "—")}</span>`],
+    ];
+    if (row.ban_reason) items.push(["Ban rule", `<span class="la-mono">${esc(row.ban_reason)}</span>`]);
+    if (row.request_id) {
+      items.push(["Request id", `<span class="la-mono">${esc(row.request_id)}</span> ` +
+        `<a class="la-link" href="${esc(requestLogLink({ request_id: row.request_id }))}" target="_blank" rel="noopener">${esc(t("Find in the request log"))}</a>`]);
+    }
+    const list = items.map(([label, value]) => `<dt>${esc(t(label))}</dt><dd>${value}</dd>`).join("");
+    return `<tr class="la-details"><td colspan="7"><dl class="la-details-grid">${list}</dl></td></tr>`;
   }
 
   function renderBanned(data) {
@@ -415,18 +461,97 @@
     });
   }
 
-  function render() {
-    const data = state.data;
-    if (!data) return;
-    renderSummary(data);
-    renderTimeline(data);
+  // Someone is reading the tables: the pointer is on them, or text in them
+  // is selected. Rebuilding them every few seconds lost the selection, the
+  // tooltip and the row being looked at.
+  function reading() {
+    if (state.hovering) return true;
+    const selection = window.getSelection ? window.getSelection() : null;
+    if (!selection || selection.isCollapsed || !selection.anchorNode) return false;
+    const card = byId("la-tables-card");
+    return Boolean(card && card.contains(selection.anchorNode));
+  }
+
+  function renderTables(data) {
     renderAddresses(data);
     renderSites(data);
     renderEvents(data);
     renderBanned(data);
     renderSorting();
+    state.held = false;
+    byId("la-held").hidden = true;
+  }
+
+  function render(force) {
+    const data = state.data;
+    if (!data) return;
+    renderSummary(data);
+    renderTimeline(data);
     fillSelect("la-host", (data.sites || []).map((row) => row.host).filter(Boolean).sort(), "All sites");
     fillSelect("la-country", data.countries || [], "All countries");
+    if (!force && reading()) {
+      state.held = true;
+      byId("la-held").hidden = false;
+      return;
+    }
+    renderTables(data);
+  }
+
+  // The answer that waited is drawn as soon as the reading stops.
+  function catchUp() {
+    if (state.held && state.data && !reading()) renderTables(state.data);
+  }
+
+  function bindReading() {
+    const card = byId("la-tables-card");
+    if (!card) return;
+    card.addEventListener("pointerenter", (event) => {
+      if (event.pointerType === "mouse") state.hovering = true;
+    });
+    card.addEventListener("pointerleave", () => {
+      state.hovering = false;
+      catchUp();
+    });
+    document.addEventListener("selectionchange", catchUp);
+  }
+
+  // The view in the address, so a link opens the same filters and window.
+  function writeAddress() {
+    try {
+      const url = new URL(window.location.href);
+      ["window", "ip", "host", "country", "status", "q", "blocked", "banned", "tab", "admin"]
+        .forEach((name) => url.searchParams.delete(name));
+      const query = core.viewQuery(Object.assign({}, filters(), {
+        window: state.window, tab: state.tab, admin: state.admin,
+        ip: byId("la-ip").value, q: byId("la-q").value,
+        blocked: byId("la-blocked").checked, banned: byId("la-banned-only").checked,
+      }));
+      Object.keys(query).forEach((name) => url.searchParams.set(name, query[name]));
+      if (url.toString() !== window.location.href) window.history.replaceState(null, "", url.toString());
+    } catch (error) {
+      /* the address stays as it was */
+    }
+  }
+
+  function readAddress() {
+    const view = core.viewFromQuery(window.location.search);
+    if (view.window) state.window = view.window;
+    if (view.tab) state.tab = view.tab;
+    if (view.admin) state.admin = true;
+    if (view.ip) byId("la-ip").value = view.ip;
+    if (view.q) byId("la-q").value = view.q;
+    if (view.status) byId("la-status").value = view.status;
+    if (view.blocked) byId("la-blocked").checked = true;
+    if (view.banned) byId("la-banned-only").checked = true;
+    // A site or a country the data has not offered yet stays selectable.
+    if (view.host) {
+      fillSelect("la-host", [view.host], "All sites");
+      byId("la-host").value = view.host;
+    }
+    if (view.country) {
+      fillSelect("la-country", [view.country], "All countries");
+      byId("la-country").value = view.country;
+    }
   }
 
   /* ---------- actions ---------- */
@@ -444,7 +569,7 @@
       window.alert(t(payload.error || "The ban was not placed"));
       return;
     }
-    refresh();
+    refresh(true);
   }
 
   async function forceBan(ip) {
@@ -461,7 +586,7 @@
       window.alert(t(payload.error || "The ban was not placed"));
       return;
     }
-    refresh();
+    refresh(true);
   }
 
   async function unban(ip) {
@@ -473,12 +598,13 @@
       body: `ip=${encodeURIComponent(ip)}`,
     });
     if (!response.ok) window.alert(await response.text());
-    refresh();
+    refresh(true);
   }
 
   function applyNow() {
     save();
-    refresh();
+    writeAddress();
+    refresh(true);
     schedule();
   }
 
@@ -523,6 +649,7 @@
       });
     }
     bindTimeline();
+    bindReading();
     ["la-ip", "la-q"].forEach((id) => {
       let pending = null;
       byId(id).addEventListener("input", () => {
@@ -543,13 +670,16 @@
       state.tab = button.dataset.tab;
       markTab();
       save();
+      writeAddress();
+      if (state.held && state.data) renderTables(state.data);
     });
     document.querySelectorAll("th[data-sort]").forEach((th) => {
       th.addEventListener("click", () => {
         const table = th.closest("[data-panel]").dataset.panel;
         state.sort[table] = core.sortAfterClick(state.sort[table], th.dataset.sort);
         save();
-        render();
+        // Asked for: drawn now, reading or not.
+        render(true);
       });
     });
     document.addEventListener("click", (event) => {
@@ -577,7 +707,17 @@
         return;
       }
       const unbanTarget = event.target.closest("[data-unban]");
-      if (unbanTarget) unban(unbanTarget.dataset.unban);
+      if (unbanTarget) {
+        unban(unbanTarget.dataset.unban);
+        return;
+      }
+      // A request row opens its details; a link or button inside it does
+      // what it says instead.
+      const eventRow = event.target.closest("tr[data-event]");
+      if (eventRow && !event.target.closest("a, button")) {
+        state.expanded = state.expanded === eventRow.dataset.event ? null : eventRow.dataset.event;
+        if (state.data) renderEvents(state.data);
+      }
     });
   }
 
@@ -601,8 +741,9 @@
     byId("la-refresh").value = String(state.refresh);
     if (!core.isPresetWindow(state.window)) byId("la-window-custom").value = String(state.window);
     // An address in the address bar (?ip=...) is where the operator came from.
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("ip")) byId("la-ip").value = params.get("ip");
+    // A link brings its own view: it wins over what this browser remembered.
+    readAddress();
+    if (!core.isPresetWindow(state.window)) byId("la-window-custom").value = String(state.window);
     markWindow();
     markTab();
     bind();

@@ -452,8 +452,9 @@ class ThePage(unittest.TestCase):
         self.assertIn('said.kind === "behind"', script)
         sort_handler = script.split('document.querySelectorAll("th[data-sort]").forEach')[1].split("});\n    });")[0]
         self.assertIn("core.sortAfterClick(", sort_handler)
-        self.assertIn("render();", sort_handler)
-        self.assertNotIn("refresh()", sort_handler)
+        # Drawn at once, even while the tables wait for a reader: it was asked for.
+        self.assertIn("render(true);", sort_handler)
+        self.assertNotIn("refresh(", sort_handler)
 
     def test_two_filters_say_what_they_are(self):
         page = (APP / "templates/live_activity.html").read_text(encoding="utf-8")

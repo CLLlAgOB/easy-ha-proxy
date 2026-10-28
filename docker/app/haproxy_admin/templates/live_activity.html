@@ -128,6 +128,15 @@
 .la-s4 { background: rgba(200,161,58,.18); color: #c8a13a; }
 .la-s5 { background: rgba(204,75,75,.15); color: #cc4b4b; }
 .la-row-blocked { background: rgba(204,75,75,.06); }
+.la-event-row { cursor: pointer; }
+.la-event-row.la-open td { border-bottom-color: transparent; }
+.la-details td { background: var(--bg-tertiary, rgba(255,255,255,.03)); }
+.la-details-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 12px; padding: 4px 2px; }
+.la-details-grid dt { color: var(--text-secondary); }
+.la-details-grid dd { margin: 0; word-break: break-all; }
+.la-timers { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.la-held { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
+.la-held[hidden] { display: none; }
 .la-actions { white-space: nowrap; }
 .la-actions-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .la-actions .btn { padding: 4px 10px; font-size: 12px; box-shadow: none; }
@@ -238,12 +247,13 @@
   <div class="la-note" id="la-note" data-i18n-skip translate="no"></div>
 </div>
 
-<div class="card" style="margin-top:25px;">
+<div class="card" style="margin-top:25px;" id="la-tables-card">
   <div class="la-tabs" id="la-tabs" role="tablist">
     <button type="button" class="la-chip" data-tab="addresses" aria-pressed="true">Addresses</button>
     <button type="button" class="la-chip" data-tab="sites" aria-pressed="false">Sites</button>
     <button type="button" class="la-chip" data-tab="events" aria-pressed="false">Requests</button>
     <button type="button" class="la-chip" data-tab="banned" aria-pressed="false">Banned and limited</button>
+    <span class="la-held" id="la-held" hidden>Updates wait while you read the table</span>
   </div>
 
   <div data-panel="addresses" class="la-table-wrap">

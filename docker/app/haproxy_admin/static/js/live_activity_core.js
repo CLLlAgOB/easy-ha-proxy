@@ -234,6 +234,117 @@
     return rects;
   }
 
+  /* ---------- the view in the address ---------- */
+
+  const STATUS_CLASSES = ["1xx", "2xx", "3xx", "4xx", "5xx"];
+
+  // What the address carries: only what differs from the defaults, so a
+  // plain visit keeps a plain address.
+  function viewQuery(values) {
+    const query = {};
+    if (Number(values.window) !== 60) query.window = String(values.window);
+    const ip = String(values.ip || "").trim();
+    if (ip) query.ip = ip;
+    if (values.host) query.host = values.host;
+    if (values.country) query.country = values.country;
+    if (values.status) query.status = values.status;
+    const q = String(values.q || "").trim();
+    if (q) query.q = q;
+    if (values.blocked) query.blocked = "1";
+    if (values.banned) query.banned = "1";
+    if (values.tab && values.tab !== "addresses") query.tab = values.tab;
+    if (values.admin) query.admin = "1";
+    return query;
+  }
+
+  // An address read back, checked rather than trusted: it may have come in
+  // a link from anywhere.
+  function viewFromQuery(search) {
+    const params = new URLSearchParams(search || "");
+    const view = {};
+    const window = customWindow(params.get("window"));
+    if (window !== null) view.window = window;
+    const ip = String(params.get("ip") || "").trim();
+    if (/^[0-9A-Fa-f:.]{1,45}$/.test(ip)) view.ip = ip;
+    const host = String(params.get("host") || "").trim().toLowerCase();
+    if (/^[a-z0-9.-]{1,253}$/.test(host)) view.host = host;
+    const country = String(params.get("country") || "").trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(country)) view.country = country;
+    const status = String(params.get("status") || "");
+    if (STATUS_CLASSES.includes(status)) view.status = status;
+    const q = String(params.get("q") || "").trim();
+    if (q) view.q = q.slice(0, 120);
+    if (params.get("blocked") === "1") view.blocked = true;
+    if (params.get("banned") === "1") view.banned = true;
+    if (TABS.includes(params.get("tab"))) view.tab = params.get("tab");
+    if (params.get("admin") === "1") view.admin = true;
+    return view;
+  }
+
+  /* ---------- one request ---------- */
+
+  // HAProxy's termination state: the first letter says what ended the
+  // session, the second what it was doing then. "--" is a normal end.
+  const TERM_CAUSES = {
+    C: "The client closed the connection",
+    S: "The server closed the connection or failed",
+    P: "The gateway ended it (a rule refused or redirected the request)",
+    L: "The gateway answered it itself",
+    R: "The gateway ran out of a resource",
+    I: "An internal error in the gateway",
+    D: "The server was marked down",
+    U: "The server came back and took the session",
+    K: "An administrator killed the session",
+    c: "The client did not send in time",
+    s: "The server did not answer in time"
+  };
+  const TERM_PHASES = {
+    R: "while receiving the request",
+    Q: "while waiting in the queue",
+    C: "while connecting to the server",
+    H: "while waiting for the response headers",
+    D: "while sending the data",
+    L: "while sending the last data",
+    T: "while the request was held back"
+  };
+
+  function termination(term) {
+    const code = String(term || "");
+    const cause = code.charAt(0);
+    const phase = code.charAt(1);
+    if (!code || (cause === "-" && phase === "-")) return {normal: true, cause: "", phase: ""};
+    return {
+      normal: false,
+      cause: TERM_CAUSES[cause] || "",
+      phase: TERM_PHASES[phase] || ""
+    };
+  }
+
+  // Where one request's time went: %TR/%Tw/%Tc/%Tr/%Ta. -1 means that step
+  // never happened -- no server, no answer -- and reads as such.
+  const TIMER_NAMES = [
+    ["received", "Request received"],
+    ["queued", "Waiting in the queue"],
+    ["connect", "Connecting to the server"],
+    ["answer", "Server answer"],
+    ["total", "The whole request"]
+  ];
+
+  function timers(times) {
+    const parts = String(times || "").split("/");
+    if (parts.length !== TIMER_NAMES.length) return [];
+    return TIMER_NAMES.map(([key, label], index) => {
+      const value = Number(parts[index]);
+      return {key: key, label: label, ms: Number.isFinite(value) && value >= 0 ? value : null};
+    });
+  }
+
+  // One request among the latest, across refreshes: the same request keeps
+  // its details open while newer ones arrive above it.
+  function eventKey(event) {
+    return [event.ts, event.ip, event.request_id || "", event.path || ""].join("|");
+  }
+
   /* ---------- formats ---------- */
 
   // Rounded to the unit before the unit is chosen, so 59.5 minutes reads
@@ -285,6 +396,11 @@
     timelineRects,
     timelineIndex,
     timelineSpan,
+    viewQuery,
+    viewFromQuery,
+    termination,
+    timers,
+    eventKey,
     duration,
     bytes
   };

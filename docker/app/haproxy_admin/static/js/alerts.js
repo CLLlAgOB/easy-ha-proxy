@@ -207,6 +207,7 @@
       .map((row) => ({ ...row, kind: "firing" }))
       .concat((pending || []).map((row) => ({ ...row, kind: "pending" })));
     const now = Date.now() / 1000;
+    const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/;
     rows.forEach((entry) => {
       const tr = document.createElement("tr");
       // Acknowledged or muted: still true, so still listed, but quiet.
@@ -214,7 +215,16 @@
       const acknowledged = Number(entry.acknowledged_ts) > 0 && !Number(entry.muted_until);
       if (entry.kind === "firing" && (muted || acknowledged)) tr.className = "al-quiet";
       cell(tr, entry.rule);
-      cell(tr, entry.subject);
+      // An address is a way into what it is doing right now.
+      if (IPV4.test(String(entry.subject || ""))) {
+        const link = document.createElement("a");
+        link.href = `/monitoring/live?ip=${encodeURIComponent(entry.subject)}&window=3600`;
+        link.textContent = entry.subject;
+        link.title = t("What this address is doing now");
+        cell(tr, link);
+      } else {
+        cell(tr, entry.subject);
+      }
       cell(tr, badge(entry.severity || "info", entry.severity || "info"));
       cell(
         tr,

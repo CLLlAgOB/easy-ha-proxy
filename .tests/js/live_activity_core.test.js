@@ -287,3 +287,50 @@ test("a point on the timeline is a bar, and a bar is a span of seconds", () => {
   // The last bar ends now, not a bucket later.
   assert.deepEqual(core.timelineSpan(59, {now: 1002, window: 300, bucket_seconds: 5}), {from: 997, to: 1002});
 });
+
+test("the view goes into the address only where it differs, and comes back checked", () => {
+  assert.deepEqual(core.viewQuery({window: 60, tab: "addresses"}), {});
+  const query = core.viewQuery({
+    window: 900, ip: " 192.0.2.7 ", host: "shop.example", country: "NL", status: "4xx",
+    q: " wp-login ", blocked: true, banned: false, tab: "events", admin: true
+  });
+  assert.deepEqual(query, {window: "900", ip: "192.0.2.7", host: "shop.example", country: "NL",
+    status: "4xx", q: "wp-login", blocked: "1", tab: "events", admin: "1"});
+  const back = core.viewFromQuery("?" + new URLSearchParams(query).toString());
+  assert.deepEqual(back, {window: 900, ip: "192.0.2.7", host: "shop.example", country: "NL",
+    status: "4xx", q: "wp-login", blocked: true, tab: "events", admin: true});
+});
+
+test("an address the page did not write is checked, not trusted", () => {
+  assert.deepEqual(core.viewFromQuery("?window=99999&ip=<script>&host=a b&country=NLD&status=6xx&tab=x&blocked=yes"), {});
+  assert.deepEqual(core.viewFromQuery(""), {});
+  assert.equal(core.viewFromQuery("?q=" + "x".repeat(500)).q.length, 120);
+});
+
+test("how a request ended is said in words", () => {
+  assert.deepEqual(core.termination("----"), {normal: true, cause: "", phase: ""});
+  assert.deepEqual(core.termination(""), {normal: true, cause: "", phase: ""});
+  const aborted = core.termination("CD--");
+  assert.equal(aborted.normal, false);
+  assert.equal(aborted.cause, "The client closed the connection");
+  assert.equal(aborted.phase, "while sending the data");
+  assert.equal(core.termination("sH--").cause, "The server did not answer in time");
+  assert.equal(core.termination("PR--").phase, "while receiving the request");
+  // An unknown letter is left unsaid rather than guessed.
+  assert.deepEqual(core.termination("Z?--"), {normal: false, cause: "", phase: ""});
+});
+
+test("where a request's time went", () => {
+  assert.deepEqual(core.timers("11/0/0/30/47").map((timer) => [timer.key, timer.ms]),
+    [["received", 11], ["queued", 0], ["connect", 0], ["answer", 30], ["total", 47]]);
+  // A step that never happened -- no server, no answer -- is no time at all.
+  assert.deepEqual(core.timers("0/-1/-1/-1/6").map((timer) => timer.ms), [0, null, null, null, 6]);
+  assert.deepEqual(core.timers("1/2/3"), []);
+  assert.deepEqual(core.timers(undefined), []);
+});
+
+test("a request keeps its key across refreshes", () => {
+  const event = {ts: 100.5, ip: "192.0.2.7", request_id: "abc", path: "/x"};
+  assert.equal(core.eventKey(event), core.eventKey(Object.assign({}, event, {status: 200})));
+  assert.notEqual(core.eventKey(event), core.eventKey(Object.assign({}, event, {request_id: "abd"})));
+});

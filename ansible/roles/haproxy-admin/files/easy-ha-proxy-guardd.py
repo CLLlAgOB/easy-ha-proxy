@@ -1060,6 +1060,9 @@ class ParsedRequest:
     # %Tr: from sending the request to the server to its response headers;
     # -1 when there was none. The figure HAProxy averages as rtime.
     response_ms: int = -1
+    # The five timers as logged (%TR/%Tw/%Tc/%Tr/%Ta), for the live page's
+    # details of one request.
+    times: str = ""
     # HAProxy's termination state and the ban fragment's reason, for the live
     # activity page: what the gateway did with the request, and why.
     term: str = ""
@@ -1323,6 +1326,7 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         bytes_out=bytes_out,
         duration_ms=_total_time(head.group("times")),
         response_ms=_response_time(head.group("times")),
+        times=head.group("times")[:40],
         term=term,
         ban_reason=ban_reason,
         user_agent=user_agent,
@@ -3257,7 +3261,8 @@ LIVE_ADMIN_BACKEND = "be_admin"
 LIVE_REFILL_BYTES = 16 * 1024 * 1024
 # Index of each field in a live record.
 (L_TS, L_IP, L_STATUS, L_HOST, L_PATH, L_METHOD, L_BACKEND, L_BYTES,
- L_DURATION, L_TERM, L_REASON, L_REFUSAL, L_RESPONSE) = range(13)
+ L_DURATION, L_TERM, L_REASON, L_REFUSAL, L_RESPONSE, L_TIMES, L_REQUEST_ID,
+ L_AGENT) = range(16)
 
 _INTERN: Dict[str, str] = {}
 
@@ -3413,6 +3418,11 @@ def live_record(request: "ParsedRequest", ts: float) -> tuple:
         # %Tr: how soon the server answered; -1 when it did not. The total
         # (L_DURATION) also holds downloads and long polls.
         request.response_ms,
+        # For the details of one request: where its time went, the id that
+        # finds it in the request log, and the client's own name for itself.
+        request.times,
+        request.request_id,
+        _interned(request.user_agent[:200]),
     )
 
 
@@ -3661,6 +3671,9 @@ def live_aggregate(
                 "status": r[2], "duration_ms": r[8], "bytes": r[7], "backend": r[6],
                 "term": r[9], "refusal": r[11], "ban_reason": r[10],
                 "response_ms": r[12] if len(r) > 12 and r[12] >= 0 else None,
+                "times": r[13] if len(r) > 13 else "",
+                "request_id": r[14] if len(r) > 14 else "",
+                "user_agent": r[15] if len(r) > 15 else "",
             }
             for r in reversed(events)
         ],

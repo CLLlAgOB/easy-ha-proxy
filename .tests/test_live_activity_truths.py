@@ -160,5 +160,54 @@ class AfterARestart(unittest.TestCase):
         self.assertIn("self.refill_live(time.time())", run)
 
 
+class OneRequestOpened(unittest.TestCase):
+    def test_the_record_carries_its_timers_id_and_client(self):
+        now = time.time()
+        r = record(line("203.0.113.9", 200, at=now, times="11/0/2/30/47"))
+        self.assertEqual(r[guardd.L_TIMES], "11/0/2/30/47")
+        self.assertEqual(r[guardd.L_REQUEST_ID], "11111111-2222")
+        event = guardd.live_aggregate([r], now=now + 1, window=60, filters={})["events"][0]
+        self.assertEqual(event["times"], "11/0/2/30/47")
+        self.assertEqual(event["request_id"], "11111111-2222")
+        self.assertIn("user_agent", event)
+
+
+class ThePageReadsQuietly(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        app = ROOT / "docker/app/haproxy_admin"
+        cls.script = (app / "static/js/live_activity.js").read_text(encoding="utf-8")
+        cls.template = (app / "templates/live_activity.html").read_text(encoding="utf-8")
+        cls.monitoring = (app / "templates/monitoring.html").read_text(encoding="utf-8")
+        cls.alerts = (app / "static/js/alerts.js").read_text(encoding="utf-8")
+
+    def test_the_tables_wait_while_someone_reads_them(self):
+        render = self.script.split("  function render(force) {")[1].split("\n  }\n")[0]
+        self.assertIn("if (!force && reading())", render)
+        # The summary and the strip keep moving; only the tables wait.
+        self.assertLess(render.index("renderSummary(data)"), render.index("reading()"))
+        reading = self.script.split("  function reading() {")[1].split("\n  }\n")[0]
+        self.assertIn("state.hovering", reading)
+        self.assertIn("selection.isCollapsed", reading)
+        self.assertIn('id="la-held"', self.template)
+
+    def test_what_the_operator_asked_for_is_drawn_at_once(self):
+        apply = self.script.split("  function applyNow() {")[1].split("\n  }\n")[0]
+        self.assertIn("refresh(true)", apply)
+        self.assertIn("writeAddress()", apply)
+        self.assertIn("render(true)", self.script)
+
+    def test_links_in_and_out(self):
+        self.assertIn("/monitoring/live?blocked=1&amp;window=900", self.monitoring)
+        self.assertIn("/monitoring/live?ip=${encodeURIComponent(entry.subject)}&window=3600", self.alerts)
+        self.assertIn('requestLogLink({ client: row.ip })', self.script)
+        self.assertIn('requestLogLink({ request_id: row.request_id })', self.script)
+        self.assertIn("/monitoring?site=${encodeURIComponent(row.backend)}", self.script)
+
+    def test_a_link_wins_over_what_the_browser_remembered(self):
+        start = self.script.split('document.addEventListener("DOMContentLoaded"')[1]
+        self.assertLess(start.index("load();"), start.index("readAddress();"))
+
+
 if __name__ == "__main__":
     unittest.main()
