@@ -520,44 +520,46 @@ def ensure_ipset() -> None:
         raise
 
 
-def get_banned_ips_from_haproxy() -> Set[str]:
-    """
-    Reads the stick table BAN_TABLE through HAProxy's admin socket
-    and returns the set of addresses whose gpc0 > 0.
+# 0x7e27...: key=192.0.2.83 use=0 exp=... gpt0=20 gpc0=1
+_TABLE_ROW_RE = re.compile(r"key=(?P<ip>\d+\.\d+\.\d+\.\d+).*?\bgpc0=(?P<gpc0>\d+)")
+
+
+def _read_flagged_addresses(table: str) -> "Set[str] | None":
+    """Addresses whose gpc0 > 0 in a stick table, or None when it was not read.
+
+    None is not "nobody". HAProxy answers a table it does not have with "No
+    such table" and a socket that worked; taken for an empty table, that --
+    like a read that failed -- would lift every ban, or every authorisation,
+    until the next pass. Only an answer that opens with the table's own
+    header says who is in it.
     """
     try:
         proc = run_cmd(
             ["socat", SOCKET_PATH, "stdio"],
-            input_data=f"show table {BAN_TABLE}\n",
+            input_data=f"show table {table}\n",
             timeout=5,
         )
     except Exception as e:
-        LOG.error("Failed to fetch table %s from HAProxy: %s", BAN_TABLE, e)
-        return set()
+        LOG.warning("Failed to fetch table %s from HAProxy: %s", table, e)
+        return None
+    lines = (proc.stdout or "").splitlines()
+    if not lines or not lines[0].startswith(f"# table: {table},"):
+        LOG.warning(
+            "HAProxy did not return table %s: %r",
+            table, (lines[0] if lines else "")[:120],
+        )
+        return None
+    flagged: Set[str] = set()
+    for line in lines[1:]:
+        m = _TABLE_ROW_RE.search(line)
+        if m and int(m.group("gpc0")) > 0:
+            flagged.add(m.group("ip"))
+    return flagged
 
-    banned_ips: Set[str] = set()
 
-    # Example lines:
-    # 0x7e27...: key=192.0.2.83 use=0 exp=... gpt0=20 gpc0=1
-    line_re = re.compile(
-        r"key=(?P<ip>\d+\.\d+\.\d+\.\d+).*?\bgpc0=(?P<gpc0>\d+)"
-    )
-
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        m = line_re.search(line)
-        if not m:
-            continue
-
-        ip = m.group("ip")
-        gpc0 = int(m.group("gpc0"))
-        if gpc0 > 0:
-            banned_ips.add(ip)
-
-    return banned_ips
+def get_banned_ips_from_haproxy() -> "Set[str] | None":
+    """Banned addresses (gpc0 > 0) in BAN_TABLE, or None when not read."""
+    return _read_flagged_addresses(BAN_TABLE)
 
 
 def _parse_short_iso_ts(line: str) -> datetime | None:
@@ -671,6 +673,8 @@ def sync_bans_once() -> None:
     One synchronisation pass of tbl_ban -> ipset.
     """
     haproxy_banned = get_banned_ips_from_haproxy()
+    if haproxy_banned is None:
+        return  # not read; the bans in force stay until a pass that reads it
     ipset_members = get_ipset_members()
 
     if not haproxy_banned and not ipset_members:
@@ -699,31 +703,8 @@ def ensure_auth_ipset() -> None:
 
 
 def get_authorized_ips_from_haproxy() -> "Set[str] | None":
-    """Authorized IPs (gpc0>0) from AUTH_TABLE.
-
-    Returns None if the fetch fails so a transient error never wipes the
-    authorized set (unlike bans, an empty result must not clear it).
-    """
-    try:
-        proc = run_cmd(
-            ["socat", SOCKET_PATH, "stdio"],
-            input_data=f"show table {AUTH_TABLE}\n",
-            timeout=5,
-        )
-    except Exception as e:
-        LOG.warning("Failed to fetch table %s from HAProxy: %s", AUTH_TABLE, e)
-        return None
-
-    authorized: Set[str] = set()
-    line_re = re.compile(r"key=(?P<ip>\d+\.\d+\.\d+\.\d+).*?\bgpc0=(?P<gpc0>\d+)")
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = line_re.search(line)
-        if m and int(m.group("gpc0")) > 0:
-            authorized.add(m.group("ip"))
-    return authorized
+    """Authorized addresses (gpc0 > 0) in AUTH_TABLE, or None when not read."""
+    return _read_flagged_addresses(AUTH_TABLE)
 
 
 def get_auth_ipset_members() -> Set[str]:

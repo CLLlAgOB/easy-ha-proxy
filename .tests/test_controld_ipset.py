@@ -94,7 +94,7 @@ with open(state_path, "w", encoding="utf-8") as fh:
 
 
 @unittest.skipUnless(POSIX, "runs a fake ipset as a real process")
-class IpsetSync(unittest.TestCase):
+class FakeIpsetCase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -133,6 +133,9 @@ class IpsetSync(unittest.TestCase):
     def authorized(self, addresses):
         return mock.patch.object(controld, "get_authorized_ips_from_haproxy", return_value=addresses)
 
+
+@unittest.skipUnless(POSIX, "runs a fake ipset as a real process")
+class IpsetSync(FakeIpsetCase):
     def test_the_whole_difference_goes_in_one_restore(self):
         ban = controld.IPSET_NAME
         self.sets({ban: ["192.0.2.3", "192.0.2.4"]})
@@ -212,6 +215,63 @@ class IpsetSync(unittest.TestCase):
             with self.assertRaises(controld.subprocess.TimeoutExpired):
                 controld.ensure_auth_ipset()
         self.assertLess(time.monotonic() - started, 10)
+
+
+FAKE_SOCAT = """\
+import os, sys
+request = sys.stdin.read().split()
+table = request[2] if len(request) > 2 else ""
+mode = os.environ.get("FAKE_SOCAT_MODE", "ok")
+if mode == "fail":
+    print("socat: connect: No such file or directory", file=sys.stderr)
+    sys.exit(1)
+if mode == "missing":
+    print("No such table")
+    print()
+    sys.exit(0)
+print(f"# table: {table}, type: ip, size:204800, used:3")
+if mode == "ok":
+    print("0x1: key=192.0.2.1 use=0 exp=1000 shard=0 gpt0=40 gpc0=1")
+    print("0x2: key=192.0.2.2 use=0 exp=1000 shard=0 gpt0=0 gpc0=0")
+    print("0x3: key=192.0.2.3 use=0 exp=1000 shard=0 gpt0=40 gpc0=2")
+"""
+
+
+class AnUnreadTableIsNotAnEmptyOne(FakeIpsetCase):
+    """HAProxy's answer decides the sets only when it is the table itself."""
+
+    def setUp(self):
+        super().setUp()
+        socat = Path(os.environ["PATH"].split(os.pathsep)[0]) / "socat"
+        socat.write_text(f"#!{sys.executable}\n" + FAKE_SOCAT, encoding="utf-8")
+        socat.chmod(0o755)
+
+    def sync(self, mode):
+        with mock.patch.dict(os.environ, {"FAKE_SOCAT_MODE": mode}):
+            controld.sync_bans_once()
+            controld.sync_auth_once()
+
+    def test_the_table_decides_both_sets(self):
+        self.sets({controld.IPSET_NAME: ["192.0.2.9"], controld.AUTH_IPSET: ["192.0.2.9"]})
+        self.sync("ok")
+        wanted = {"192.0.2.1", "192.0.2.3"}
+        self.assertEqual(self.sets(), {controld.IPSET_NAME: wanted, controld.AUTH_IPSET: wanted})
+
+    def test_an_empty_table_empties_the_sets(self):
+        self.sets({controld.IPSET_NAME: ["192.0.2.9"], controld.AUTH_IPSET: ["192.0.2.9"]})
+        self.sync("empty")
+        self.assertEqual(self.sets(), {controld.IPSET_NAME: set(), controld.AUTH_IPSET: set()})
+
+    def test_no_such_table_or_a_failed_read_changes_nothing(self):
+        for mode in ("missing", "fail"):
+            with self.subTest(mode=mode):
+                before = {controld.IPSET_NAME: ["192.0.2.9"], controld.AUTH_IPSET: ["192.0.2.8"]}
+                self.sets(before)
+                self.log.write_text("", encoding="utf-8")
+                with self.assertLogs("haproxy-controld", "WARNING"):
+                    self.sync(mode)
+                self.assertEqual(self.sets(), {name: set(v) for name, v in before.items()})
+                self.assertEqual(self.calls(), [])
 
 
 @unittest.skipUnless(POSIX, "runs fake commands as real processes")
