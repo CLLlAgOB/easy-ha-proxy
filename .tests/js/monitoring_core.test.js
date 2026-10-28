@@ -10,6 +10,44 @@ const path = require("node:path");
 
 const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/monitoring_core.js"));
 
+test("a missing value stays missing instead of becoming zero", () => {
+  assert.equal(core.reading(null), null);
+  assert.equal(core.reading(undefined), null);
+  assert.equal(core.reading("12"), 12);
+  assert.equal(core.reading(0), 0);
+  const latency = {
+    name: "latency",
+    series: [
+      {key: "response_ms_avg", label: "Average", summary: "mean"},
+      {key: "response_ms_max", label: "Peak", summary: "max"}
+    ]
+  };
+  const view = core.chartData(latency, {
+    resolution_seconds: 60,
+    points: [0, 60, 120],
+    series: {response_ms_avg: [300, null, 100], response_ms_max: [400, null, 200]}
+  });
+  assert.deepEqual(view.datasets[0].values, [300, null, 100]);
+  assert.equal(view.top, 500);
+  // The gap counts toward neither the mean nor the peak.
+  assert.deepEqual(core.legendReading({summary: "mean"}, [300, null, 100]), {value: 200, index: null});
+  assert.deepEqual(core.legendReading({summary: "max"}, [null, 7, null]), {value: 7, index: 1});
+  assert.deepEqual(core.legendReading({summary: "last"}, [5, null]), {value: 5, index: null});
+});
+
+test("a rate keeps its gaps", () => {
+  const chart = {name: "requests", series: [{key: "requests", label: "Requests", rate: true}]};
+  const view = core.chartData(chart, {resolution_seconds: 60, points: [0, 60], series: {requests: [120, null]}});
+  assert.deepEqual(view.datasets[0].values, [2, null]);
+});
+
+test("a line is drawn in runs between its gaps", () => {
+  assert.deepEqual(core.segments([1, 2, null, 3, null, null, 4, 5]), [[0, 1], [3, 3], [6, 7]]);
+  assert.deepEqual(core.segments([null, null]), []);
+  assert.deepEqual(core.segments([0, 0]), [[0, 1]]);
+  assert.deepEqual(core.segments([]), []);
+});
+
 const KiB = 1024;
 const MiB = 1024 * KiB;
 const GiB = 1024 * MiB;

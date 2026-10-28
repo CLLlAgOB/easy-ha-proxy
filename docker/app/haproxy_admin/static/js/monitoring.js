@@ -285,14 +285,23 @@
     });
 
     datasets.forEach((dataset) => {
-      const path = dataset.values
-        .map((value, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(value).toFixed(1)}`)
-        .join(" ");
+      // A gap (no value, e.g. no requests to time) breaks the line and its
+      // area rather than dropping them to zero.
+      const runs = core.segments(dataset.values);
+      const pieces = runs.map(([first, last]) => {
+        const points = [];
+        for (let index = first; index <= last; index += 1) {
+          points.push(`${index === first ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(dataset.values[index]).toFixed(1)}`);
+        }
+        return { first: first, last: last, d: points.join(" ") };
+      });
+      const path = pieces.map((piece) => piece.d).join(" ");
       if (!path) return;
       if (datasets.length <= 2 && !dataset.spec.dash) {
-        const area =
-          `${path} L${xFor(dataset.values.length - 1).toFixed(1)},${(padding.top + plotHeight).toFixed(1)}` +
-          ` L${xFor(0).toFixed(1)},${(padding.top + plotHeight).toFixed(1)} Z`;
+        const floor = (padding.top + plotHeight).toFixed(1);
+        const area = pieces
+          .map((piece) => `${piece.d} L${xFor(piece.last).toFixed(1)},${floor} L${xFor(piece.first).toFixed(1)},${floor} Z`)
+          .join(" ");
         svg.appendChild(element("path", { class: "mon-area", d: area, fill: dataset.spec.color }));
       }
       const line = { class: "mon-line", d: path, stroke: dataset.spec.color };

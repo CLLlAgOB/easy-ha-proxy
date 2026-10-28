@@ -1236,6 +1236,10 @@ class MetricsDatabase:
     ) -> Dict[str, Any]:
         columns = CHART_SERIES[chart]
         table, step = choose_resolution(max(1, until - since))
+        if chart == "latency":
+            return self._latency_series(
+                site=site, table=table, step=step, since=since, until=until
+            )
         if chart in HOST_CHARTS:
             # The machine's own row, and never scoped by site: picking a site
             # must not appear to filter a number that has nothing to do with
@@ -1284,6 +1288,45 @@ class MetricsDatabase:
                 since=since, until=until, host=[row[1] for row in rows],
             )
         return payload
+
+    def _latency_series(
+        self, *, site: str, table: str, step: int, since: int, until: int
+    ) -> Dict[str, Any]:
+        """Response time over the backends that answered in each slot.
+
+        HAProxy measures response time on backends only; a frontend's is
+        empty, so "all sites" read from the frontends drew a flat zero. Each
+        backend's average counts as often as it answered requests, the peak
+        is the highest of those that answered, and a slot in which nothing
+        answered has no response time at all: it comes back as null, a gap,
+        rather than as an instant 0 ms.
+        """
+
+        predicate, parameters = "o.kind = 'backend'", []
+        if site:
+            predicate, parameters = "o.kind = 'backend' AND o.proxy = ?", [site]
+        query = (
+            f"SELECT (m.bucket_ts / {step}) * {step} AS slot, "
+            "CAST(ROUND(SUM(m.response_ms_avg * m.requests) * 1.0 "
+            "/ NULLIF(SUM(m.requests), 0)) AS INTEGER), "
+            "MAX(CASE WHEN m.requests > 0 THEN m.response_ms_max END) "
+            f"FROM {table} m JOIN objects o ON o.id = m.object_id "
+            f"WHERE {predicate} AND m.bucket_ts >= ? AND m.bucket_ts < ? "
+            "GROUP BY slot ORDER BY slot"
+        )
+        with self._lock:
+            rows = self._conn.execute(query, [*parameters, since, until]).fetchall()
+        rows = rows[:MAX_CHART_POINTS]
+        return {
+            "chart": "latency",
+            "resolution_seconds": step,
+            "source": table,
+            "points": [int(row[0]) for row in rows],
+            "series": {
+                "response_ms_avg": [row[1] for row in rows],
+                "response_ms_max": [row[2] for row in rows],
+            },
+        }
 
     def _add_components(
         self,

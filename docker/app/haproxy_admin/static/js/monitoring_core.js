@@ -130,6 +130,31 @@
   // comparable value once the server changes resolution between ranges.
   // Hidden lines are left out of the scale too, so hiding the big ones lets
   // the small ones fill it.
+  // A missing value is a gap, not a zero: Number(null) is 0, which drew a
+  // slot with no requests as an instant response.
+  function reading(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  // The runs of values a line can be drawn through, as [first, last] index
+  // pairs; a gap ends one run and the next value starts another.
+  function segments(values) {
+    const runs = [];
+    let start = null;
+    values.forEach((value, index) => {
+      if (value === null) {
+        if (start !== null) runs.push([start, index - 1]);
+        start = null;
+      } else if (start === null) {
+        start = index;
+      }
+    });
+    if (start !== null) runs.push([start, values.length - 1]);
+    return runs;
+  }
+
   function chartData(chart, payload, isVisible) {
     const step = Number(payload && payload.resolution_seconds) || 60;
     const shown = isVisible || ((spec) => !spec.hidden);
@@ -137,7 +162,10 @@
       .filter((spec) => shown(spec))
       .map((spec) => {
         const raw = spec.values || (payload && payload.series && payload.series[spec.key]) || [];
-        const values = raw.map((value) => (spec.rate ? Number(value) / step : Number(value)));
+        const values = raw.map((value) => {
+          const number = reading(value);
+          return number !== null && spec.rate ? number / step : number;
+        });
         return {spec: spec, values: values};
       });
     let maximum = 0;
@@ -177,19 +205,20 @@
     let index = null;
     if (spec.summary === "max") {
       raw.forEach((item, position) => {
-        const number = Number(item);
-        if (Number.isFinite(number) && (index === null || number > value)) {
+        const number = reading(item);
+        if (number !== null && (index === null || number > value)) {
           value = number;
           index = position;
         }
       });
     } else if (spec.summary === "mean") {
-      const numbers = raw.map(Number).filter(Number.isFinite);
+      const numbers = raw.map(reading).filter((number) => number !== null);
       value = numbers.length ? numbers.reduce((sum, item) => sum + item, 0) / numbers.length : 0;
     } else {
       for (let position = raw.length - 1; position >= 0; position -= 1) {
-        if (Number.isFinite(Number(raw[position]))) {
-          value = Number(raw[position]);
+        const number = reading(raw[position]);
+        if (number !== null) {
+          value = number;
           break;
         }
       }
@@ -351,6 +380,8 @@
     lineVisible,
     lineChoicesAfter,
     niceCeiling,
+    reading,
+    segments,
     chartData,
     timeLabelIndexes,
     legendReading,

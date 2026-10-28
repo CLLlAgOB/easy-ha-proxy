@@ -1169,6 +1169,9 @@ class ReadApiTests(CollectorTestCase):
             response_ms_avg=8, response_ms_max=9,
             conn_cur_avg=10, conn_cur_max=11,
         )
+        # Response time is measured on backends only.
+        self.seed("backend", "be_shop", "", [600], requests=1,
+                  response_ms_avg=8, response_ms_max=9)
         # The machine's own row, on the same bucket: the cpu chart reads a
         # different object entirely, and without it this loop would pass
         # every chart and quietly skip the only one that is scoped
@@ -1186,6 +1189,47 @@ class ReadApiTests(CollectorTestCase):
             self.assertEqual(sorted(payload["series"]), sorted([*columns, *extra]), chart)
             for column in columns:
                 self.assertEqual(len(payload["series"][column]), 1, chart)
+
+    def test_all_sites_response_time_comes_from_the_backends_that_answered(self):
+        # A frontend has no response time: HAProxy leaves rtime empty there,
+        # which the collector stores as 0. "All sites" drew that flat zero.
+        self.seed("frontend", "fe_https", "", [600], requests=110)
+        self.seed("backend", "be_shop", "", [600], requests=100,
+                  response_ms_avg=300, response_ms_max=900)
+        self.seed("backend", "be_blog", "", [600], requests=10,
+                  response_ms_avg=30, response_ms_max=50)
+        # Answered nothing: its stale average must not count.
+        self.seed("backend", "be_idle", "", [600], requests=0,
+                  response_ms_avg=5000, response_ms_max=5000)
+        payload = self.database.series(chart="latency", site="", since=0, until=1200)
+        # Weighted by requests: (300 * 100 + 30 * 10) / 110 = 275.45...
+        self.assertEqual(payload["series"]["response_ms_avg"], [275])
+        self.assertEqual(payload["series"]["response_ms_max"], [900])
+
+    def test_a_slot_without_requests_has_no_response_time(self):
+        self.seed("backend", "be_shop", "", [600], requests=5, response_ms_avg=40, response_ms_max=60)
+        self.seed("backend", "be_shop", "", [660], requests=0, response_ms_avg=40, response_ms_max=60)
+        for site in ("", "be_shop"):
+            with self.subTest(site=site):
+                payload = self.database.series(chart="latency", site=site, since=0, until=1200)
+                self.assertEqual(payload["points"], [600, 660])
+                self.assertEqual(payload["series"]["response_ms_avg"], [40, None])
+                self.assertEqual(payload["series"]["response_ms_max"], [60, None])
+
+    def test_a_site_has_its_own_response_time(self):
+        self.seed("backend", "be_shop", "", [600], requests=4, response_ms_avg=300, response_ms_max=400)
+        self.seed("backend", "be_blog", "", [600], requests=4, response_ms_avg=20, response_ms_max=30)
+        payload = self.database.series(chart="latency", site="be_blog", since=0, until=1200)
+        self.assertEqual(payload["series"]["response_ms_avg"], [20])
+        self.assertEqual(payload["series"]["response_ms_max"], [30])
+
+    def test_response_time_over_long_ranges_reads_the_hourly_rows(self):
+        self.seed("backend", "be_shop", "", [0, 60], requests=10, response_ms_avg=100, response_ms_max=150)
+        self.database.rollup_hours(metricsd.HOUR_SECONDS)
+        payload = self.database.series(chart="latency", site="", since=0, until=30 * 86400)
+        self.assertEqual(payload["source"], "metric_1h")
+        self.assertEqual(payload["series"]["response_ms_avg"], [100])
+        self.assertEqual(payload["series"]["response_ms_max"], [150])
 
     def test_maxima_stay_maxima_when_buckets_are_grouped(self):
         # A 7-day range reads hourly rows; the peak must survive the grouping.
