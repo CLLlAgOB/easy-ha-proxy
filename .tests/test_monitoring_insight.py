@@ -211,6 +211,21 @@ class Events(unittest.TestCase):
         self.assertEqual(change["label"], "Site changed")
         self.assertEqual((change["object"], change["actor"]), ("shop", "anna"))
 
+    def test_an_alert_carries_its_rule_and_the_engines_name_for_it(self):
+        alerts = [{"ts": 200, "transition": "fired", "rule": "response.slow", "subject": "be_shop",
+                   "summary": "slow", "severity": "warning"}]
+        state = {"catalogue": [{"name": "response.slow", "title": "Response time above the threshold"}]}
+        with self.changes([]), self.alerts(alerts), \
+                mock.patch.object(monitoring, "alertd_state", return_value=state):
+            event = monitoring.events("24h", {"since": 100, "until": 1000})["events"][0]
+        self.assertEqual(event["rule"], "response.slow")
+        self.assertEqual(event["title"], "Response time above the threshold")
+        # Without the catalogue the rule names itself.
+        with self.changes([]), self.alerts(alerts), \
+                mock.patch.object(monitoring, "alertd_state", side_effect=AlertdUnavailable("x")):
+            event = monitoring.events("24h", {"since": 100, "until": 1000})["events"][0]
+        self.assertEqual(event["title"], "response.slow")
+
     def test_an_older_engine_that_ignores_the_end_is_held_to_the_period(self):
         alerts = [{"ts": 5000, "transition": "fired", "subject": "x", "summary": "", "severity": "warning"}]
         with self.changes([]), self.alerts(alerts):
@@ -333,6 +348,17 @@ class ThePage(unittest.TestCase):
                        'id="mon-backend-requests" class="mon-requests-wrap" hidden'):
             self.assertIn(marker, self.template)
 
+    def test_events_are_off_until_a_viewer_turns_them_on(self):
+        self.assertIn('<input type="checkbox" id="mon-events">', self.template)
+        self.assertIn('remembered("mon-events", ["on", "off"], "off")', self.script)
+        for marker in ('data-event-kind="change"', 'data-event-kind="alert"', 'data-event-kind="recovered"',
+                       'data-event-severity="critical"', 'data-event-severity="warning"',
+                       'data-event-severity="info"', 'id="mon-events-rules"'):
+            self.assertIn(marker, self.template)
+        # The marks are the filtered events, never the whole answer.
+        draw = self.script.split("function drawChart(")[1].split("\n  }\n")[0]
+        self.assertIn("core.eventMarks(points, step, shownEvents())", draw)
+
     def test_every_sort_order_is_offered(self):
         core = (APP / "static/js/monitoring_core.js").read_text(encoding="utf-8")
         orders = core.split("const REQUEST_SORTS = [")[1].split("]")[0]
@@ -353,6 +379,8 @@ class ThePage(unittest.TestCase):
             "Most server errors first", "Most client errors first", "Slowest first",
             "Client errors", "Show on charts", "Needs attention", "All alerts",
             "The alert engine is not answering", "ms", "waiting",
+            "Filter", "Show", "Changes", "Alerts", "Recoveries", "Importance", "Critical",
+            "Warning", "Info", "Alerts in this period", "No alerts in this period",
         }
         missing = sorted(word for word in words if word not in self.catalog)
         self.assertEqual(missing, [])

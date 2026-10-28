@@ -505,6 +505,20 @@ def _event_period(range_key: str, window: Dict[str, int] | None,
     return now - RANGE_SECONDS.get(range_key, RANGE_SECONDS[DEFAULT_RANGE]), now
 
 
+def _rule_titles() -> Dict[str, str]:
+    """The alert engine's names for its rules; {} when it cannot say."""
+
+    try:
+        catalogue = alertd_state(limit=1).get("catalogue") or []
+    except AlertdUnavailable:
+        return {}
+    return {
+        str(rule.get("name") or ""): str(rule.get("title") or "")
+        for rule in catalogue
+        if isinstance(rule, dict) and rule.get("name")
+    }
+
+
 def events(range_key: str, window: Dict[str, int] | None = None,
            now: int | None = None) -> Dict[str, Any]:
     """The changes and alerts of a period, oldest first.
@@ -536,11 +550,14 @@ def events(range_key: str, window: Dict[str, int] | None = None,
         })
 
     alerts_available = True
+    titles: Dict[str, str] = {}
     try:
         history = alertd_history({"since": since, "until": until, "limit": 500})
     except AlertdUnavailable:
         history = {}
         alerts_available = False
+    if alerts_available:
+        titles = _rule_titles()
     alert_rows = []
     for row in history.get("events") or []:
         kind = EVENT_TRANSITIONS.get(str(row.get("transition") or ""))
@@ -548,6 +565,7 @@ def events(range_key: str, window: Dict[str, int] | None = None,
         # An engine older than the `until` filter answers with everything
         # after `since`; the period is kept here as well.
         if kind and since <= ts <= until:
+            rule = str(row.get("rule") or "")[:80]
             alert_rows.append({
                 "ts": ts,
                 "kind": kind,
@@ -556,6 +574,10 @@ def events(range_key: str, window: Dict[str, int] | None = None,
                 "actor": "",
                 "summary": str(row.get("summary") or "")[:160],
                 "severity": str(row.get("severity") or ""),
+                # What the page filters by: a flapping rule can be put away
+                # without hiding the rest.
+                "rule": rule,
+                "title": titles.get(rule) or rule,
             })
     alert_rows.sort(key=lambda item: item["ts"])
     if len(alert_rows) > MAX_EVENTS:

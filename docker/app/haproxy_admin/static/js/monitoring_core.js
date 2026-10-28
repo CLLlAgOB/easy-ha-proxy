@@ -512,6 +512,69 @@
     return found.sort((a, b) => Number(a.ts) - Number(b.ts));
   }
 
+  // What a viewer chose to see. Changes and alerts by default; recoveries
+  // and information-only alerts double the marks without saying much.
+  const EVENT_SEVERITIES = ["critical", "warning", "info"];
+
+  function defaultEventFilter() {
+    return {change: true, alert: true, recovered: false, severities: ["critical", "warning"], hidden: []};
+  }
+
+  // A stored choice is read back checked, never trusted: anything unknown
+  // falls back to the default.
+  function eventFilterFrom(raw) {
+    const filter = defaultEventFilter();
+    let value = raw;
+    if (typeof value === "string") {
+      try {
+        value = JSON.parse(value);
+      } catch (error) {
+        return filter;
+      }
+    }
+    if (!value || typeof value !== "object") return filter;
+    ["change", "alert", "recovered"].forEach((kind) => {
+      if (typeof value[kind] === "boolean") filter[kind] = value[kind];
+    });
+    if (Array.isArray(value.severities)) {
+      filter.severities = EVENT_SEVERITIES.filter((severity) => value.severities.includes(severity));
+    }
+    if (Array.isArray(value.hidden)) {
+      filter.hidden = value.hidden
+        .filter((rule) => typeof rule === "string" && rule.length <= 80)
+        .slice(0, 100);
+    }
+    return filter;
+  }
+
+  function filterEvents(events, filter) {
+    const chosen = filter || defaultEventFilter();
+    return (events || []).filter((event) => {
+      if (event.kind === "change") return chosen.change;
+      if (event.kind !== "alert" && event.kind !== "recovered") return false;
+      if (!chosen[event.kind]) return false;
+      const severity = EVENT_SEVERITIES.includes(event.severity) ? event.severity : "warning";
+      if (!chosen.severities.includes(severity)) return false;
+      return !chosen.hidden.includes(event.rule);
+    });
+  }
+
+  // The alert rules of a period, the busiest first, for switching one off.
+  function eventRules(events) {
+    const rules = new Map();
+    (events || []).forEach((event) => {
+      if (event.kind !== "alert" && event.kind !== "recovered") return;
+      const key = String(event.rule || "");
+      if (!key) return;
+      const entry = rules.get(key) || {rule: key, title: event.title || key, count: 0};
+      entry.count += 1;
+      rules.set(key, entry);
+    });
+    return Array.from(rules.values()).sort(
+      (a, b) => b.count - a.count || String(a.title).localeCompare(String(b.title))
+    );
+  }
+
   /* ---------- requests per backend ---------- */
 
   // The orders the list is read in: the busiest, the failing, the slow.
@@ -582,6 +645,11 @@
     eventMarks,
     eventReach,
     eventsNear,
+    EVENT_SEVERITIES,
+    defaultEventFilter,
+    eventFilterFrom,
+    filterEvents,
+    eventRules,
     REQUEST_SORTS,
     sortedBackendRequests,
     zoomWindow

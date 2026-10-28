@@ -569,3 +569,60 @@ test("the requests list sorts for the busiest, the failing and the slow", () => 
   assert.deepEqual(items.map((item) => item.label), ["b", "a", "c", "d"]);
   for (const sort of core.REQUEST_SORTS) assert.equal(order(sort).length, 4);
 });
+
+test("events are off until asked for, and a stored filter is checked, not trusted", () => {
+  const fallback = core.defaultEventFilter();
+  assert.deepEqual(fallback, {change: true, alert: true, recovered: false, severities: ["critical", "warning"], hidden: []});
+  assert.deepEqual(core.eventFilterFrom(null), fallback);
+  assert.deepEqual(core.eventFilterFrom("{not json"), fallback);
+  assert.deepEqual(core.eventFilterFrom("[1,2]").severities, fallback.severities);
+  const stored = core.eventFilterFrom(JSON.stringify({
+    change: false, alert: "yes", recovered: true,
+    severities: ["info", "bogus", "critical"],
+    hidden: ["response.slow", 7, "x".repeat(81)]
+  }));
+  assert.equal(stored.change, false);
+  // Not a boolean: the default stays.
+  assert.equal(stored.alert, true);
+  assert.equal(stored.recovered, true);
+  // Known severities only, in their own order.
+  assert.deepEqual(stored.severities, ["critical", "info"]);
+  assert.deepEqual(stored.hidden, ["response.slow"]);
+});
+
+test("the filter keeps what the viewer chose to see", () => {
+  const events = [
+    {ts: 1, kind: "change"},
+    {ts: 2, kind: "alert", severity: "critical", rule: "site.down"},
+    {ts: 3, kind: "alert", severity: "warning", rule: "response.slow"},
+    {ts: 4, kind: "recovered", severity: "warning", rule: "response.slow"},
+    {ts: 5, kind: "alert", severity: "info", rule: "update.available"},
+    {ts: 6, kind: "alert", rule: "unrated"},
+    {ts: 7, kind: "other"}
+  ];
+  const shown = (filter) => core.filterEvents(events, filter).map((event) => event.ts);
+  // By default: changes and alerts above information, no recoveries. An
+  // alert without a severity counts as a warning; an unknown kind never shows.
+  assert.deepEqual(shown(core.defaultEventFilter()), [1, 2, 3, 6]);
+  assert.deepEqual(shown(undefined), [1, 2, 3, 6]);
+  const quiet = core.defaultEventFilter();
+  quiet.hidden = ["response.slow"];
+  assert.deepEqual(shown(quiet), [1, 2, 6]);
+  const everything = {change: true, alert: true, recovered: true, severities: ["critical", "warning", "info"], hidden: []};
+  assert.deepEqual(shown(everything), [1, 2, 3, 4, 5, 6]);
+  const criticalOnly = {change: false, alert: true, recovered: true, severities: ["critical"], hidden: []};
+  assert.deepEqual(shown(criticalOnly), [2]);
+});
+
+test("the rules of a period are listed busiest first", () => {
+  const rules = core.eventRules([
+    {kind: "change", rule: ""},
+    {kind: "alert", rule: "site.down", title: "Site is down"},
+    {kind: "alert", rule: "response.slow", title: "Response time above the threshold"},
+    {kind: "recovered", rule: "response.slow", title: "Response time above the threshold"},
+    {kind: "alert", rule: "", title: "nameless"}
+  ]);
+  assert.deepEqual(rules.map((entry) => [entry.rule, entry.count]), [["response.slow", 2], ["site.down", 1]]);
+  assert.equal(rules[1].title, "Site is down");
+  assert.deepEqual(core.eventRules(undefined), []);
+});

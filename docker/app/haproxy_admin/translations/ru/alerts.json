@@ -50,6 +50,21 @@
     "not sent": "не отправлено",
     "The settings were not saved": "Настройки не сохранены",
     "Sent through": "Отправлено через",
-    "Nothing was delivered": "Ничего не доставлено"
+    "Nothing was delivered": "Ничего не доставлено",
+    "Site is down": "Сайт недоступен",
+    "HTTP 5xx ratio above the threshold": "Доля ответов 5xx выше порога",
+    "Response time above the threshold": "Время ответа выше порога",
+    "Authelia is not answering": "Authelia не отвечает",
+    "Monitoring storage is under pressure": "Хранилищу мониторинга не хватает места",
+    "Historical monitoring is paused": "Исторический мониторинг приостановлен",
+    "Certificate expires soon": "Сертификат скоро истекает",
+    "Certificate renewal failed": "Не удалось продлить сертификат",
+    "Burst of hostile requests": "Всплеск враждебных запросов",
+    "Adaptive protection acted on an address": "Адаптивная защита сработала на адрес",
+    "Backup job failed": "Резервное копирование не удалось",
+    "Backup storage is running out of space": "В хранилище резервных копий заканчивается место",
+    "Restore job failed": "Восстановление не удалось",
+    "Software update failed": "Обновление ПО не удалось",
+    "HAProxy apply or reload failed": "Не удалось применить конфигурацию или перезагрузить HAProxy"
   }
 }

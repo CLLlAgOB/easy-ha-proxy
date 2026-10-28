@@ -413,8 +413,8 @@
     });
 
     // The changes and alerts of the period, over the lines so a busy chart
-    // does not hide them.
-    const marks = showEvents && eventsState ? core.eventMarks(points, step, eventsState.events) : [];
+    // does not hide them -- those the viewer chose to see.
+    const marks = showEvents && eventsState ? core.eventMarks(points, step, shownEvents()) : [];
     svg.__geometry.marks = marks;
     marks.forEach((mark) => {
       const x = xFor(mark.index);
@@ -441,9 +441,82 @@
 
   /* ---------- events ---------- */
 
-  // Remembered per browser; on unless this viewer turned them off.
-  let showEvents = true;
+  // Remembered per browser; off until this viewer turns them on.
+  let showEvents = false;
   let eventsState = null;
+  let eventFilter = core.defaultEventFilter();
+
+  function shownEvents() {
+    return core.filterEvents((eventsState && eventsState.events) || [], eventFilter);
+  }
+
+  function saveEventFilter() {
+    remember("mon-events-filter", JSON.stringify(eventFilter));
+  }
+
+  // The rules of the period, each with its own switch: a flapping alert can
+  // be put away without losing the rest.
+  function renderEventRules() {
+    const host = byId("mon-events-rules");
+    if (!host) return;
+    host.textContent = "";
+    const rules = core.eventRules((eventsState && eventsState.events) || []);
+    if (!rules.length) {
+      const empty = document.createElement("span");
+      empty.className = "mon-sub";
+      empty.textContent = uiText("No alerts in this period");
+      host.appendChild(empty);
+      return;
+    }
+    rules.forEach((entry) => {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = !eventFilter.hidden.includes(entry.rule);
+      box.addEventListener("change", () => {
+        eventFilter.hidden = eventFilter.hidden.filter((rule) => rule !== entry.rule);
+        if (!box.checked) eventFilter.hidden.push(entry.rule);
+        saveEventFilter();
+        redrawCharts();
+      });
+      label.appendChild(box);
+      const text = document.createElement("span");
+      text.textContent = `${uiText(entry.title)} (${formatCount(entry.count)})`;
+      label.appendChild(text);
+      host.appendChild(label);
+    });
+  }
+
+  function bindEventFilter() {
+    eventFilter = core.eventFilterFrom(readStored("mon-events-filter"));
+    const panel = byId("mon-events-filter");
+    const toggle = byId("mon-events-filter-toggle");
+    if (toggle && panel) {
+      toggle.addEventListener("click", () => {
+        panel.hidden = !panel.hidden;
+        toggle.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
+      });
+    }
+    document.querySelectorAll("input[data-event-kind]").forEach((box) => {
+      box.checked = Boolean(eventFilter[box.dataset.eventKind]);
+      box.addEventListener("change", () => {
+        eventFilter[box.dataset.eventKind] = box.checked;
+        saveEventFilter();
+        redrawCharts();
+      });
+    });
+    document.querySelectorAll("input[data-event-severity]").forEach((box) => {
+      box.checked = eventFilter.severities.includes(box.dataset.eventSeverity);
+      box.addEventListener("change", () => {
+        const severity = box.dataset.eventSeverity;
+        eventFilter.severities = core.EVENT_SEVERITIES.filter((item) =>
+          item === severity ? box.checked : eventFilter.severities.includes(item)
+        );
+        saveEventFilter();
+        redrawCharts();
+      });
+    });
+  }
 
   function eventText(event) {
     const label = uiText(event.label || "");
@@ -455,10 +528,24 @@
   }
 
   function renderEventsCount() {
-    const events = (showEvents && eventsState && eventsState.events) || [];
+    const all = (eventsState && eventsState.events) || [];
+    const shown = shownEvents();
     const count = byId("mon-events-count");
+    const toggle = byId("mon-events-filter-toggle");
+    const panel = byId("mon-events-filter");
+    if (toggle) toggle.hidden = !showEvents;
+    if (panel && !showEvents) {
+      panel.hidden = true;
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    }
+    renderEventRules();
     if (!count) return;
-    count.textContent = showEvents && eventsState ? `(${formatCount(events.length)})` : "";
+    // Shown of all, when the filter hides some.
+    count.textContent = showEvents && eventsState
+      ? shown.length === all.length
+        ? `(${formatCount(all.length)})`
+        : `(${formatCount(shown.length)} / ${formatCount(all.length)})`
+      : "";
     count.title = eventsState && eventsState.truncated
       ? uiText("Not all events of this period are shown")
       : "";
@@ -481,7 +568,8 @@
   }
 
   function bindEvents() {
-    showEvents = remembered("mon-events", ["on", "off"], "on") === "on";
+    bindEventFilter();
+    showEvents = remembered("mon-events", ["on", "off"], "off") === "on";
     const box = byId("mon-events");
     if (!box) return;
     box.checked = showEvents;
@@ -492,6 +580,7 @@
       if (showEvents) await loadEvents();
       redrawCharts();
     });
+    renderEventsCount();
   }
 
   /* ---------- needs attention ---------- */
@@ -868,6 +957,15 @@
       return allowed.includes(value) ? value : fallback;
     } catch (error) {
       return fallback;
+    }
+  }
+
+  // A stored value as it is, for the choices that are not one of a list.
+  function readStored(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (error) {
+      return null;
     }
   }
 

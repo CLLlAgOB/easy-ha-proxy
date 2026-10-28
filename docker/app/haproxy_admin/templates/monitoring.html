@@ -559,6 +559,22 @@ body.mon-overlay-open { overflow: hidden; }
 .mon-requests-table small { color: var(--text-secondary); }
 </style>
 
+<style>
+.mon-events-filter {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.mon-events-filter[hidden] { display: none; }
+.mon-events-filter .mon-filter-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+.mon-events-filter .mon-filter-row > b { min-width: 110px; color: var(--text-secondary); font-weight: 500; }
+.mon-events-filter label { display: inline-flex; align-items: center; gap: 6px; }
+</style>
+
 <div class="mon-attention" id="mon-attention" hidden>
   <div class="mon-attention-head">
     <b>Needs attention</b>
@@ -668,13 +684,35 @@ body.mon-overlay-open { overflow: hidden; }
     <h2>Graphs</h2>
     <span class="mon-sub">Drag across a chart to zoom in, double-click to zoom out</span>
     <a class="mon-sub" id="mon-log-link" href="/security/requests">Requests of this period in the Request log</a>
-    {# Changes and alerts of the period, as marks across every chart. #}
+    {# Changes and alerts of the period, as marks across every chart. Off
+       until a viewer turns them on: a flapping alert can fill a chart. #}
     <label class="mon-sub mon-events-toggle" for="mon-events">
-      <input type="checkbox" id="mon-events" checked>
+      <input type="checkbox" id="mon-events">
       Events on charts
       <span id="mon-events-count" data-i18n-skip translate="no"></span>
     </label>
+    <button type="button" class="mon-link-button" id="mon-events-filter-toggle"
+            aria-controls="mon-events-filter" aria-expanded="false" hidden>Filter</button>
     <span class="mon-sub" id="mon-resolution"></span>
+  </div>
+
+  <div class="mon-events-filter" id="mon-events-filter" hidden>
+    <div class="mon-filter-row">
+      <b>Show</b>
+      <label><input type="checkbox" data-event-kind="change"> Changes</label>
+      <label><input type="checkbox" data-event-kind="alert"> Alerts</label>
+      <label><input type="checkbox" data-event-kind="recovered"> Recoveries</label>
+    </div>
+    <div class="mon-filter-row">
+      <b>Importance</b>
+      <label><input type="checkbox" data-event-severity="critical"> Critical</label>
+      <label><input type="checkbox" data-event-severity="warning"> Warning</label>
+      <label><input type="checkbox" data-event-severity="info"> Info</label>
+    </div>
+    <div class="mon-filter-row">
+      <b>Alerts in this period</b>
+      <span id="mon-events-rules"><span class="mon-sub">No alerts in this period</span></span>
+    </div>
   </div>
 
   <div class="mon-charts">

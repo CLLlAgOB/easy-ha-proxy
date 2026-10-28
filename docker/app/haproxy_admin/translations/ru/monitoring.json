@@ -145,6 +145,13 @@
     "Needs attention": "Требует внимания",
     "All alerts": "Все оповещения",
     "The alert engine is not answering": "Служба оповещений не отвечает",
-    "ms": "мс"
+    "ms": "мс",
+    "Filter": "Фильтр",
+    "Recoveries": "Восстановления",
+    "Importance": "Важность",
+    "Critical": "Критично",
+    "Info": "Информация",
+    "Alerts in this period": "Оповещения за период",
+    "No alerts in this period": "За этот период оповещений нет"
   }
 }
