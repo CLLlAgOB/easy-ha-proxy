@@ -131,9 +131,9 @@
       ]
     },
     {
-      // From the access log: the time within which half, 95 and 99 of every
-      // hundred requests were answered. HAProxy's own figure is an average,
-      // which one slow request in a hundred barely moves.
+      // From the access log: how soon the server answered half, 95 and 99 of
+      // every hundred requests (%Tr, what HAProxy averages as rtime). The
+      // average barely moves for one slow request in a hundred; these do.
       name: "percentiles",
       series: [
         { key: "p50", label: "Median", color: "#4a86c8", unit: "ms", summary: "mean" },

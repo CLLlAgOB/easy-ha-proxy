@@ -1057,6 +1057,9 @@ class ParsedRequest:
     request_id: str = ""
     bytes_out: int = 0
     duration_ms: int = 0
+    # %Tr: from sending the request to the server to its response headers;
+    # -1 when there was none. The figure HAProxy averages as rtime.
+    response_ms: int = -1
     # HAProxy's termination state and the ban fragment's reason, for the live
     # activity page: what the gateway did with the request, and why.
     term: str = ""
@@ -1319,10 +1322,27 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         request_id=request_id,
         bytes_out=bytes_out,
         duration_ms=_total_time(head.group("times")),
+        response_ms=_response_time(head.group("times")),
         term=term,
         ban_reason=ban_reason,
         user_agent=user_agent,
     )
+
+
+def _response_time(times: str) -> int:
+    """The fourth field of %TR/%Tw/%Tc/%Tr/%Ta, or -1 when there was none.
+
+    Not the total: that also holds the client downloading the body and a
+    long poll waiting for news, which put a quiet site's median at eight
+    seconds while its server answered in a fraction of one.
+    """
+    fields = (times or "").split("/")
+    if len(fields) != 5:
+        return -1
+    try:
+        return int(fields[3])
+    except ValueError:
+        return -1
 
 
 def _total_time(times: str) -> int:
@@ -3325,6 +3345,7 @@ class MinuteDigests:
             not refusal
             and not request.bad_request
             and request.status > 0
+            and request.response_ms >= 0
             and backend
             and not request.backend.endswith("/<NOSRV>")
         )
@@ -3347,7 +3368,7 @@ class MinuteDigests:
                     return
                 histogram = [0] * (len(DIGEST_BOUNDS_MS) + 1)
                 digest["backends"][backend] = histogram
-            histogram[_digest_bucket(max(0, int(request.duration_ms)))] += 1
+            histogram[_digest_bucket(int(request.response_ms))] += 1
 
     def complete(self, since: int, now: int) -> List[Dict[str, Any]]:
         """The complete minutes after since, oldest first; forgets old ones."""

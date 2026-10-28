@@ -39,10 +39,13 @@ STAMP = "2026-08-11T07:00:30.000000+00:00"
 MINUTE = 1786431600  # 2026-08-11T07:00:00Z
 
 
-def line(backend="be_shop/srv1", status=200, total_ms=120, stamp=STAMP, extra=""):
+def line(backend="be_shop/srv1", status=200, total_ms=120, stamp=STAMP, extra="", whole_ms=None):
+    # %TR/%Tw/%Tc/%Tr/%Ta: total_ms is the server's answer (%Tr); the whole
+    # request (%Ta) is a little longer unless said otherwise.
+    whole = whole_ms if whole_ms is not None else max(0, total_ms) + 7
     return (
         f"{stamp} host haproxy[1]: 203.0.113.9:1234 [11/Aug/2026:09:00:30.000] "
-        f"fe_https~ {backend} 0/0/0/1/{total_ms} {status} 100 ---- {extra}1/1/0/0/0 0/0 "
+        f"fe_https~ {backend} 0/0/0/{total_ms}/{whole} {status} 100 ---- {extra}1/1/0/0/0 0/0 "
         "GET /index.html HTTP/1.1"
     )
 
@@ -71,6 +74,17 @@ class TheDigest(unittest.TestCase):
         self.assertEqual(shop[guardd._digest_bucket(120)], 2)
         # Past the last edge: the bucket above it.
         self.assertEqual(minutes[0]["backends"]["be_blog"][-1], 1)
+
+    def test_the_server_s_answer_is_timed_not_the_whole_request(self):
+        # A long download, or a long poll waiting for news: the server
+        # answered at once and the request took half a minute. On the test
+        # gateway timing the whole put a quiet site's median at 8 s.
+        self.add(line(total_ms=30, whole_ms=30000))
+        # No answer from the server at all: nothing to time.
+        self.add(line(total_ms=-1, whole_ms=5000, status=502))
+        shop = self.digests.complete(0, MINUTE + 120)[0]["backends"]["be_shop"]
+        self.assertEqual(sum(shop), 1)
+        self.assertEqual(shop[guardd._digest_bucket(30)], 1)
 
     def test_refusals_are_counted_by_reason_and_never_timed(self):
         self.add(line(backend="fe_https/<NOSRV>", status=451))
