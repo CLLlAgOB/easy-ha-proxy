@@ -96,6 +96,33 @@ jobs:
           pip install ruff==0.6.9
           ruff check --output-format=github .
 
+  # A public repository: no secret in any commit, and no name of a real
+  # installation in the tree or in the messages being pushed.
+  secrets:
+    name: Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The default rules over the whole history. The test fixtures it reports
+      # are acknowledged one by one in .gitleaksignore.
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD":/repo --entrypoint sh ghcr.io/gitleaks/gitleaks:v8.28.0 -c \
+            'git config --global --add safe.directory /repo &&
+             gitleaks git /repo --gitleaks-ignore-path /repo/.gitleaksignore --no-banner --redact --verbose'
+
+      # The names live in a repository secret, one per line, never in the
+      # repository; without it the step says so and passes.
+      - name: Names of installations
+        env:
+          NAME_GUARD_WORDS: ${{ secrets.NAME_GUARD_WORDS }}
+          NAME_GUARD_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+          NAME_GUARD_HEAD: ${{ github.sha }}
+        run: python3 .github/scripts/name_guard.py
+
   # The admin pages' scripts: every one must parse, and the logic kept apart
   # from the page (the *_core.js scripts, the rules in i18n.js)
   # is tested by behaviour.

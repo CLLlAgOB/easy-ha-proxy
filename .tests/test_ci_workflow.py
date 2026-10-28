@@ -67,6 +67,27 @@ class TheLinters(unittest.TestCase):
         self.assertIn("eslint docker/app/haproxy_admin/static/js .tests/js", run)
         self.assertTrue((ROOT / "eslint.config.mjs").is_file())
 
+    def test_the_whole_history_is_searched_for_secrets(self):
+        job = JOBS["secrets"]
+        checkout = job["steps"][0]
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
+        run = step("secrets", "gitleaks")["run"]
+        self.assertIn("ghcr.io/gitleaks/gitleaks:v8.28.0", run)
+        self.assertIn("gitleaks git /repo", run)
+        self.assertIn("--gitleaks-ignore-path /repo/.gitleaksignore", run)
+        self.assertIn("--redact", run)
+        acknowledged = [
+            line for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(len(acknowledged), 4)
+        self.assertTrue(all(line.split(":")[1].startswith(".tests/") for line in acknowledged))
+
+    def test_the_names_come_from_a_secret(self):
+        guard = step("secrets", "Names of installations")
+        self.assertEqual(guard["env"]["NAME_GUARD_WORDS"], "${{ secrets.NAME_GUARD_WORDS }}")
+        self.assertEqual(guard["run"], "python3 .github/scripts/name_guard.py")
+
     def test_the_python_matrix_covers_every_supported_host(self):
         versions = JOBS["python"]["strategy"]["matrix"]["python-version"]
         self.assertEqual(versions, ["3.10", "3.11", "3.12", "3.13", "3.14"])

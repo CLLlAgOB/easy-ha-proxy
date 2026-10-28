@@ -1,0 +1,13 @@
+# gitleaks runs over the whole history with its default rules (the "Secrets"
+# job in CI). These four findings are test fixtures, acknowledged one by one --
+# commit:file:rule:line -- so anything new, even in the same files, still fails.
+
+# PEM markers the standby-certificate tests split and join
+cb1530321d5f2bb78bdb40c4d87a7ae2a382d8ce:.tests/test_certd_standby.py:private-key:1114
+8f988bb6ca213f03f9a42f59e1447059cc1b7dd9:.tests/test_certd_standby.py:private-key:158
+
+# a made-up token in a query string the request filter must leave alone
+7c6d65603f316873001db82d2964c38abf5dedfd:.tests/test_query_injection.py:generic-api-key:63
+
+# a throwaway ed25519 key, used nowhere, whose line shape a backup test checks
+bd59647a46a4b7d32414ccd5f4969c57b29f0bc8:.tests/test_destination_key_material.py:private-key:47
