@@ -37,7 +37,7 @@
   const PLAIN_WORD = /(^|[^\p{L}\p{N}_=./[\]-])([A-Z]?[a-z]+)(?=$|\.(?![\p{L}\p{N}])|[^\p{L}\p{N}_=./[\]-])/gu;
   const PLACEHOLDER = /\{[A-Za-z0-9_]+\}/g;
   // A value quoted into a sentence is what someone typed, not a word of it.
-  const QUOTED = /(^|[\s(\[:=,])(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|«[^»\n]*»)/g;
+  const QUOTED = /(^|[\s([:=,])(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|«[^»\n]*»)/g;
 
   function createTranslator(catalogue) {
     const messages = catalogue || {};

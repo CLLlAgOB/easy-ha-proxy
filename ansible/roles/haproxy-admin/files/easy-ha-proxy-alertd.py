@@ -1215,6 +1215,11 @@ class AlertEngine:
             quiet = self._quiet_reason(rule, subject, transition, now)
             if quiet:
                 allowed, reason = False, quiet
+        # Information is news when it appears, not when it goes: "updates
+        # are available" followed by "resolved" once they were installed sent
+        # two messages for one thing the operator had already acted on.
+        if allowed and transition == TRANSITION_RECOVERED and severity == SEVERITY_INFO:
+            allowed, reason = False, "information: no message when it ends"
         if not allowed:
             self.database.add_event(
                 {
@@ -1307,6 +1312,10 @@ class AlertEngine:
             TRANSITION_ESCALATED: "WORSE",
             TRANSITION_RECOVERED: "RESOLVED",
         }.get(transition, "ALERT")
+        # Information is not an alarm: "updates are available" read as an
+        # ALERT made every new release look like an incident.
+        if severity == SEVERITY_INFO and transition in (TRANSITION_FIRED, TRANSITION_REPEATED):
+            verb = "INFO"
         head = f"[{self.hostname}] {verb} {severity}: {rule.title}"
         if subject and subject != "-":
             head += f" ({subject})"

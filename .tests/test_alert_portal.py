@@ -125,6 +125,36 @@ class SettingTheFloors(Engine):
             self.engine.update_config({"portal_min_severity": "loud"})
 
 
+class InformationByMail(Engine):
+    """Information is news when it appears: titled as information, and
+    nothing is sent when it ends. On a gateway mailing information, every
+    release sent "ALERT ... updates are available" and then "RESOLVED"."""
+
+    def setUp(self):
+        super().setUp()
+        self.engine.config.min_severity = "info"
+
+    def test_it_is_called_information_not_an_alert(self):
+        self.fire("update.available", "software")
+        self.assertEqual(len(self.channel.sent), 1)
+        self.assertIn(" INFO info: ", self.channel.sent[0])
+        self.assertNotIn("ALERT", self.channel.sent[0])
+
+    def test_its_end_sends_nothing_and_is_still_written_down(self):
+        self.fire("update.available", "software")
+        self.recover("update.available", "software")
+        self.assertEqual(len(self.channel.sent), 1)
+        self.assertEqual(self.transitions()[-1],
+                         ("recovered", "information: no message when it ends"))
+
+    def test_a_warning_still_announces_its_recovery(self):
+        self.fire("response.slow", "be_blog")
+        self.recover("response.slow", "be_blog")
+        self.assertEqual(len(self.channel.sent), 2)
+        self.assertIn("RESOLVED", self.channel.sent[1])
+        self.assertIn("ALERT", self.channel.sent[0])
+
+
 class TheHeader(Engine):
     def test_it_shows_what_fires_at_or_above_its_floor(self):
         self.fire("site.down", "shop")
