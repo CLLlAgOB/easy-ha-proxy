@@ -29,6 +29,7 @@ from .i18n import (
     translate,
 )
 from .utils import ensure_whitelist_file
+from .compression import compress_json_response
 from .security import (
     STATIC_CACHE_SECONDS,
     apply_security_headers,
@@ -219,6 +220,9 @@ def create_app() -> Flask:
 
     app.before_request(init_request_language)
     app.before_request(enforce_proxy_and_role)
+    # Flask calls after_request hooks in reverse: registered first, the
+    # compression runs last, on the body as the browser will read it.
+    app.after_request(compress_json_response)
     app.after_request(apply_security_headers)
     app.after_request(keep_redirects_on_this_origin)
     app.after_request(localize_json_response)
