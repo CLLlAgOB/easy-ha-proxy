@@ -49,10 +49,14 @@ services:
       - authelia_mail
     volumes:
       - mail_relay_spool:/var/spool/postfix
+      # Settings the image's variables cannot carry; see mail_relay.d.
+      - "{{ authelia_root_dir }}/mail_relay.d:/scripts.d:ro"
     env_file:
       - "{{ authelia_env_file }}"
     environment:
       - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+      # Read only at start: a changed script must recreate the container.
+      - EASY_HA_PROXY_RELAY_SCRIPTS={{ authelia_mail_relay_scripts_digest | default('') }}
     healthcheck:
       test: ["CMD-SHELL", "pidof master > /dev/null 2>&1"]
       interval: 10s

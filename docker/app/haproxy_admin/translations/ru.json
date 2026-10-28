@@ -1777,6 +1777,7 @@
     "It will be told on the next apply.": "Она будет уведомлена при следующем применении.",
     "No certificate of its own was found for it here, so there is nothing for certbot to skip.": "Собственного сертификата для него здесь не найдено, так что certbot пропускать нечего.",
     "The certificate service could not be told about the renewal pause yet": "Службу сертификатов пока не удалось уведомить о паузе продления",
-    "it will be told on the next apply.": "она будет уведомлена при следующем применении."
+    "it will be told on the next apply.": "она будет уведомлена при следующем применении.",
+    "The internal relay could not verify the certificate of the external SMTP server and keeps the message queued. Check the server name, its certificate, or the relay's trusted certificates.": "Внутренний relay не смог проверить сертификат внешнего SMTP-сервера и держит письмо в очереди. Проверьте имя сервера, его сертификат или доверенные сертификаты relay."
   }
 }

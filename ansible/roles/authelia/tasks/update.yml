@@ -20,6 +20,9 @@
       no_log: true
       diff: false
 
+    - name: Install the mail relay start-up scripts
+      ansible.builtin.include_tasks: mail_relay_scripts.yml
+
     - name: Render the current Authelia Compose definition before migration
       ansible.builtin.template:
         src: docker-compose.yml.j2

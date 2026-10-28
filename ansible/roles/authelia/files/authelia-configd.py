@@ -1311,7 +1311,6 @@ def _prepare_mail_updates(
             "POSTFIX_smtp_tls_security_level": relay_tls_security_level,
             "POSTFIX_smtp_tls_wrappermode": relay_tls_wrappermode,
             "POSTFIX_smtp_use_tls": relay_use_tls,
-            "POSTFIX_smtp_tls_CAfile": "/etc/ssl/certs/ca-certificates.crt",
             "POSTFIX_smtp_connect_timeout": settings["timeout"],
         }
 
@@ -1707,6 +1706,11 @@ def _parse_mail_test_delivery(
         if postfix_state in {"bounced", "expired"}:
             return queue_id, "rejected"
         if postfix_state == "deferred":
+            # Postfix's own words, not the remote server's: the relay could
+            # not verify the external server's certificate. Retrying will not
+            # change that, so it is not reported as a temporary failure.
+            if TLS_UNVERIFIED_DEFERRAL.search(line):
+                return queue_id, "tls_unverified"
             state = "deferred"
     return queue_id, state
 
@@ -1746,12 +1750,20 @@ def _wait_for_mail_test_delivery(
                 (proc.stdout or "") + "\n" + (proc.stderr or ""),
                 message_id,
             )
-            if state in {"relay_accepted", "rejected"}:
+            if state in {"relay_accepted", "rejected", "tls_unverified"}:
                 return state
             if state == "deferred":
                 last_state = state
         time.sleep(0.5)
     return last_state
+
+
+# A deferral Postfix writes itself when TLS verification of the next hop
+# fails: "tls=!verify, dsn=4.7.5, status=deferred (Server certificate not
+# verified)". Matched on Postfix's own text only, never on server replies.
+TLS_UNVERIFIED_DEFERRAL = re.compile(
+    r"\bdsn=4\.7\.5\b.*\bstatus=deferred \(Server certificate not verified\)"
+)
 
 
 def _send_relay_mail_test(settings: Dict[str, Any], recipient: str) -> str:
@@ -2719,6 +2731,22 @@ def _handle_mail_test(req: Dict[str, Any]) -> Dict[str, Any]:
                         "The internal relay accepted the test message, but the "
                         "configured external SMTP relay rejected it. Check the "
                         "SMTP credentials, sender policy, and mail_relay logs."
+                    ),
+                    "revision": current_revision,
+                }
+
+            if delivery_status == "tls_unverified":
+                return {
+                    "ok": False,
+                    "accepted": True,
+                    "tls_unverified": True,
+                    "delivery_status": delivery_status,
+                    "delivery_guaranteed": False,
+                    "error": (
+                        "The internal relay could not verify the certificate of "
+                        "the external SMTP server and keeps the message queued. "
+                        "Check the server name, its certificate, or the relay's "
+                        "trusted certificates."
                     ),
                     "revision": current_revision,
                 }

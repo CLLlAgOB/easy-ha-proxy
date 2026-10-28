@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -363,6 +364,50 @@ class MailDaemonTests(unittest.TestCase):
         )
         self.assertEqual(state, "rejected")
 
+    def test_a_certificate_that_does_not_verify_is_not_called_temporary(self) -> None:
+        # Postfix's own deferral when it cannot verify the next hop: retrying
+        # changes nothing, so the test says what is wrong instead of "will retry".
+        message_id = "<easy-ha-proxy-test-abc123@easy-ha-proxy.invalid>"
+        prefix = (
+            "2026-10-28T10:00:00Z postfix/cleanup[10]: 4ABC123: "
+            f"message-id={message_id}\n"
+        )
+        _queue_id, state = self.daemon._parse_mail_test_delivery(
+            prefix
+            + "2026-10-28T10:00:01Z postfix/smtp[11]: 4ABC123: "
+            "to=<private@example.com>, relay=smtp.example.com[192.0.2.1]:465, "
+            "delay=1, tls=!verify, dsn=4.7.5, status=deferred "
+            "(Server certificate not verified)\n",
+            message_id,
+        )
+        self.assertEqual(state, "tls_unverified")
+        # The same words in a remote server's reply are only a deferral.
+        _queue_id, state = self.daemon._parse_mail_test_delivery(
+            prefix
+            + "2026-10-28T10:00:01Z postfix/smtp[11]: 4ABC123: "
+            "to=<private@example.com>, dsn=4.4.2, status=deferred "
+            "(host said: Server certificate not verified)\n",
+            message_id,
+        )
+        self.assertEqual(state, "deferred")
+
+    def test_mail_test_names_an_unverified_certificate(self) -> None:
+        revision = self.view()["revision"]
+        with mock.patch.object(
+            self.daemon, "_send_relay_mail_test", return_value="tls_unverified"
+        ):
+            result = self.daemon._handle_mail_test(
+                {
+                    "action": "mail_test",
+                    "revision": revision,
+                    "recipient": "private@example.com",
+                }
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["tls_unverified"])
+        self.assertIn("could not verify the certificate", result["error"])
+        self.assertNotIn("private@example.com", json.dumps(result))
+
     def test_mail_log_result_does_not_guess_without_correlation(self) -> None:
         queue_id, state = self.daemon._parse_mail_test_delivery(
             "postfix/smtp[11]: OTHER: status=sent (250 accepted)",
@@ -520,6 +565,38 @@ class MailDeploymentContractTests(unittest.TestCase):
         self.assertIn("env_file:", relay)
         self.assertNotIn("env_file:", authelia)
         self.assertIn('profiles: ["mail-relay"]', relay)
+
+    def test_the_relay_is_given_its_trusted_certificates(self) -> None:
+        # The image lowercases POSTFIX_* names and Postfix names are
+        # case-sensitive: POSTFIX_smtp_tls_CAfile became smtp_tls_cafile,
+        # Postfix ignored it, and every message waited as "Server
+        # certificate not verified". A name with capitals cannot travel as
+        # a variable; the start-up script sets it.
+        env = self.read("ansible/roles/authelia/templates/authelia.env.j2")
+        daemon = self.read("ansible/roles/authelia/files/authelia-configd.py")
+        for source in (env, daemon):
+            for name in re.findall(r"POSTFIX_(\w+)", source):
+                self.assertEqual(name, name.lower(), name)
+        script = self.read("ansible/roles/authelia/files/mail_relay.d/10-trust.sh")
+        self.assertIn("postconf -e 'smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt'", script)
+
+        compose = self.read("ansible/roles/authelia/templates/docker-compose.yml.j2")
+        relay = compose[compose.index("  mail_relay:"):compose.index("  {{ authelia_container_name }}:")]
+        self.assertIn('"{{ authelia_root_dir }}/mail_relay.d:/scripts.d:ro"', relay)
+        # A script is read at start only: its checksum recreates the relay.
+        self.assertIn("EASY_HA_PROXY_RELAY_SCRIPTS={{ authelia_mail_relay_scripts_digest", relay)
+
+        tasks = self.read("ansible/roles/authelia/tasks/mail_relay_scripts.yml")
+        self.assertIn("src: mail_relay.d/10-trust.sh", tasks)
+        self.assertIn("authelia_mail_relay_trust.checksum", tasks)
+        # Installed before every rendering of the Compose file that uses it.
+        for flow in ("config.yml", "update.yml"):
+            text = self.read(f"ansible/roles/authelia/tasks/{flow}")
+            self.assertLess(
+                text.index("include_tasks: mail_relay_scripts.yml"),
+                text.index("docker-compose.yml.j2"),
+                flow,
+            )
 
     def test_templates_have_no_direct_application_smtp_path(self) -> None:
         config = self.read("ansible/roles/authelia/templates/configuration.yml.j2")
