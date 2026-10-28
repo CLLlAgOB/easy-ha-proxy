@@ -2,6 +2,22 @@
 # hour between attempts. After the relay is set up again -- an update that
 # fixes delivery, say -- it is sent now rather than by that timer. Best
 # effort: a relay still starting, or not used at all, changes nothing.
+#
+# Whether the relay runs is asked of Docker, not of the inventory: when mail
+# is managed from the panel the relay runs although mail_notify_enabled is
+# still false here.
+- name: See whether the mail relay is running
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - --format
+      - "{{ '{{' }}.State.Running{{ '}}' }}"
+      - mail_relay
+  register: authelia_mail_relay_running
+  changed_when: false
+  failed_when: false
+
 - name: Send the mail the relay holds back
   ansible.builtin.command:
     argv:
@@ -16,6 +32,4 @@
   retries: 3
   delay: 3
   until: authelia_mail_relay_flush.rc == 0
-  when: >-
-    mail_notify_enabled | default(false) | bool
-    or mail_relay_server | default(false) | bool
+  when: (authelia_mail_relay_running.stdout | default('') | trim) == 'true'

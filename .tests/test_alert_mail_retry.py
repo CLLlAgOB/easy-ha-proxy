@@ -82,6 +82,10 @@ class AfterAnUpdate(unittest.TestCase):
         flush = (ROOT / "ansible/roles/authelia/tasks/mail_relay_flush.yml").read_text(encoding="utf-8")
         self.assertIn("- postqueue\n      - -f", flush)
         self.assertIn("failed_when: false", flush)
+        # Asked of Docker: with mail managed from the panel, the relay runs
+        # while the inventory's mail_notify_enabled is still false.
+        self.assertIn("when: (authelia_mail_relay_running.stdout | default('') | trim) == 'true'", flush)
+        self.assertNotIn("mail_notify_enabled", flush.split("- name: Send the mail")[1])
         for flow, after in (("start.yml", "Reconcile"), ("update.yml", "Reconcile the updated Authelia stack")):
             text = (ROOT / "ansible/roles/authelia/tasks" / flow).read_text(encoding="utf-8")
             self.assertIn("include_tasks: mail_relay_flush.yml", text, flow)
