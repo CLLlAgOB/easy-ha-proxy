@@ -64,6 +64,23 @@ def alertd_history(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _get_json("/api/v1/alerts/history", params=params)
 
 
+def alertd_portal() -> Dict[str, Any]:
+    """The alerts every page's header shows; short, it is asked for often."""
+    return _get_json("/api/v1/alerts/portal", timeout=5)
+
+
+def alertd_quieten(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _post_json("/api/v1/alerts/quieten", payload)
+
+
+def alertd_dismiss(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _post_json("/api/v1/alerts/dismiss", payload)
+
+
+def alertd_delete_history(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _post_json("/api/v1/alerts/history/delete", payload)
+
+
 def alertd_save_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _post_json("/api/v1/alerts/config", payload)
 

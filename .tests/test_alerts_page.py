@@ -17,10 +17,17 @@ class RouteGuardTests(unittest.TestCase):
     def setUp(self):
         self.source = (APP_DIR / "routes_alerts.py").read_text(encoding="utf-8")
 
-    def test_both_mutating_routes_require_superadmin(self):
-        self.assertEqual(self.source.count("@bp.post"), 2)
-        # Once in the helper, once per mutating route.
-        self.assertEqual(self.source.count("_superadmin()"), 3)
+    def test_settings_tests_and_deleting_history_require_superadmin(self):
+        for route in ("def api_alerts_config", "def api_alerts_test", "def api_alerts_history_delete"):
+            block = self.source.split(route)[1].split("@bp.")[0]
+            self.assertIn("if not _superadmin():", block, route)
+        # Acknowledging, muting and dismissing are how the person on duty says
+        # "I have it": open to every operator, and written down.
+        for route in ("def api_alerts_quieten", "def api_alerts_dismiss"):
+            block = self.source.split(route)[1].split("@bp.")[0]
+            self.assertNotIn("_superadmin", block, route)
+            self.assertIn("record_request(", block, route)
+        self.assertEqual(self.source.count("@bp.post"), 5)
 
     def test_reads_stay_open_like_the_other_monitoring_pages(self):
         for route in ("/api/alerts/state", "/api/alerts/health", "/api/alerts/history"):

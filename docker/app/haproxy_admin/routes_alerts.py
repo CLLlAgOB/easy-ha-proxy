@@ -11,8 +11,12 @@ from flask import g, jsonify, render_template, request
 
 from .alertd_client import (
     AlertdUnavailable,
+    alertd_delete_history,
+    alertd_dismiss,
     alertd_health,
     alertd_history,
+    alertd_portal,
+    alertd_quieten,
     alertd_save_config,
     alertd_send_test,
     alertd_state,
@@ -119,6 +123,113 @@ def api_alerts_config():
         result=RESULT_SUCCESS if ok else RESULT_FAILURE,
         summary="fields: " + ", ".join(sorted(str(key) for key in payload)),
         detail="" if ok else str(result.get("error") or "")[:500],
+    )
+    return jsonify(result), 200 if ok else 400
+
+
+@bp.get("/api/alerts/portal")
+def api_alerts_portal():
+    """What the header of every page shows: open alerts above its floor."""
+    try:
+        return jsonify(alertd_portal())
+    except AlertdUnavailable as exc:
+        return _unavailable(exc)
+
+
+def _alert_key(payload) -> tuple:
+    rule = str(payload.get("rule") or "").strip()[:80]
+    subject = str(payload.get("subject") or "").strip()[:200]
+    return rule, subject
+
+
+@bp.post("/api/alerts/quieten")
+def api_alerts_quieten():
+    """Acknowledge an alert, mute it for a while, or undo either.
+
+    Any operator may: it is how a person on duty says "I have it". It changes
+    what is sent and shown, never whether the condition is watched.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    rule, subject = _alert_key(payload)
+    mode = str(payload.get("mode") or "")
+    body = {"rule": rule, "subject": subject, "mode": mode,
+            "by": getattr(g, "remote_user", "") or ""}
+    if "seconds" in payload:
+        body["seconds"] = payload.get("seconds")
+    try:
+        result = alertd_quieten(body)
+    except AlertdUnavailable as exc:
+        return _unavailable(exc)
+    ok = bool(result.get("ok"))
+    record_request(
+        "alerts.quieten",
+        object_type="alert",
+        object_id=f"{rule}:{subject}",
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        summary=f"mode: {mode}" + (f", seconds: {body['seconds']}" if "seconds" in body else ""),
+        detail="" if ok else str(result.get("error") or "")[:300],
+    )
+    return jsonify(result), 200 if ok else 400
+
+
+@bp.post("/api/alerts/dismiss")
+def api_alerts_dismiss():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    rule, subject = _alert_key(payload)
+    try:
+        result = alertd_dismiss({"rule": rule, "subject": subject,
+                                 "by": getattr(g, "remote_user", "") or ""})
+    except AlertdUnavailable as exc:
+        return _unavailable(exc)
+    ok = bool(result.get("ok"))
+    record_request(
+        "alerts.dismiss",
+        object_type="alert",
+        object_id=f"{rule}:{subject}",
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        detail="" if ok else str(result.get("error") or "")[:300],
+    )
+    return jsonify(result), 200 if ok else 400
+
+
+@bp.post("/api/alerts/history/delete")
+def api_alerts_history_delete():
+    """Remove alert history: chosen rows, or all of it. A superadmin's call,
+    like every other change that removes a record."""
+    payload = request.get_json(silent=True) or {}
+    if not _superadmin():
+        record_request(
+            "alerts.history_delete",
+            object_type="alerts",
+            object_id="history",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    body = {}
+    if payload.get("all") is True:
+        body["all"] = True
+    elif isinstance(payload.get("ids"), list):
+        body["ids"] = payload["ids"][:1000]
+    try:
+        result = alertd_delete_history(body)
+    except AlertdUnavailable as exc:
+        return _unavailable(exc)
+    ok = bool(result.get("ok"))
+    record_request(
+        "alerts.history_delete",
+        object_type="alerts",
+        object_id="history",
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        summary=("all" if body.get("all") else f"rows: {len(body.get('ids') or [])}")
+        + (f", deleted: {result.get('deleted')}" if ok else ""),
+        detail="" if ok else str(result.get("error") or "")[:300],
     )
     return jsonify(result), 200 if ok else 400
 

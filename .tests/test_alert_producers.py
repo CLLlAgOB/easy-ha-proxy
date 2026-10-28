@@ -51,6 +51,10 @@ class FakeAlerts:
 
 
 class EveryRuleHasAProducer(unittest.TestCase):
+    # Observed by the alert daemon itself: the relay's queue is read where
+    # the mail is sent from.
+    SELF_OBSERVED = {"mail.delivery_failed"}
+
     def test_no_rule_is_a_promise_nothing_keeps(self):
         sources = "\n".join(
             path.read_text(encoding="utf-8")
@@ -58,9 +62,13 @@ class EveryRuleHasAProducer(unittest.TestCase):
             for path in directory.rglob("*.py")
             if path.name != "easy-ha-proxy-alertd.py"
         )
+        daemon = (FILES / "easy-ha-proxy-alertd.py").read_text(encoding="utf-8")
         for rule in alertd.RULES:
             with self.subTest(rule=rule.name):
-                self.assertIn(f'"{rule.name}"', sources)
+                if rule.name in self.SELF_OBSERVED:
+                    self.assertIn(f'"rule": "{rule.name}"', daemon)
+                else:
+                    self.assertIn(f'"{rule.name}"', sources)
 
     def test_the_duplicate_of_site_down_is_gone(self):
         self.assertNotIn("backend.no_servers", alertd.RULES_BY_NAME)

@@ -83,6 +83,26 @@
 }
 
 .al-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+.al-row-actions { white-space: nowrap; }
+.al-row-actions .btn { padding: 3px 9px; font-size: 12px; margin-right: 4px; }
+.al-row-actions select {
+  padding: 3px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  margin-right: 4px;
+}
+.al-row-actions small { display: block; color: var(--text-secondary); margin-bottom: 3px; }
+.al-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+.al-filters select {
+  padding: 5px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
 </style>
 
 <div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
@@ -94,6 +114,8 @@
      style="border-color: rgba(204,75,75,.45); background: rgba(204,75,75,.08);">
   The alert daemon is not answering. HAProxy traffic is unaffected, but nothing is being sent right now.
 </div>
+
+<span id="al-role" data-superadmin="{{ 'true' if g.is_superadmin else 'false' }}" hidden></span>
 
 <div class="card">
   <div class="card-header">
@@ -126,6 +148,7 @@
           <th>State</th>
           <th>Since</th>
           <th>Summary</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody id="al-active-body" data-i18n-skip translate="no"></tbody>
@@ -137,11 +160,28 @@
 <div class="card">
   <div class="card-header">
     <h2>History</h2>
+    <span class="mon-sub" id="al-history-count" data-i18n-skip translate="no"></span>
+  </div>
+  <div class="al-filters">
+    <select id="al-history-severity" aria-label="Severity">
+      <option value="">All severities</option>
+      <option value="critical">critical</option>
+      <option value="warning">warning</option>
+      <option value="info">info</option>
+    </select>
+    <select id="al-history-rule" aria-label="Condition">
+      <option value="">All conditions</option>
+    </select>
+    {% if g.is_superadmin %}
+    <button class="btn" type="button" id="al-history-delete" disabled>Delete selected</button>
+    <button class="btn" type="button" id="al-history-clear">Clear history</button>
+    {% endif %}
   </div>
   <div style="overflow-x:auto;">
     <table class="data-table">
       <thead>
         <tr>
+          {% if g.is_superadmin %}<th><input type="checkbox" id="al-history-all" aria-label="Select all"></th>{% endif %}
           <th>When</th>
           <th>Condition</th>
           <th>Subject</th>
@@ -154,6 +194,9 @@
     </table>
   </div>
   <div class="al-empty" id="al-history-empty">Nothing has been recorded yet</div>
+  <div class="al-actions">
+    <button class="btn" type="button" id="al-history-more" hidden>Show more</button>
+  </div>
 </div>
 
 <div class="card" id="al-settings">
@@ -172,6 +215,14 @@
     <label>
       Minimum severity
       <select id="al-min-severity">
+        <option value="info">Everything</option>
+        <option value="warning">Warning and above</option>
+        <option value="critical">Critical only</option>
+      </select>
+    </label>
+    <label>
+      Show in the panel from
+      <select id="al-portal-min-severity">
         <option value="info">Everything</option>
         <option value="warning">Warning and above</option>
         <option value="critical">Critical only</option>

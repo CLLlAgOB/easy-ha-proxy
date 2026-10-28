@@ -81,8 +81,17 @@ MAIL_LOCK_PATH = os.environ.get(
 MAIL_RELAY_CONTAINER = os.environ.get("ALERTD_MAIL_CONTAINER", "mail_relay")
 DOCKER_BIN = os.environ.get("ALERTD_DOCKER_BIN", "/usr/bin/docker")
 MAIL_TIMEOUT_SECONDS = 30
+# The relay accepts a message at once and delivers it later, so a sendmail
+# that succeeds says nothing about the mail arriving. Its queue does: a
+# message still waiting after this long is not a hiccup.
+MAIL_QUEUE_CHECK_SECONDS = 300
+MAIL_STUCK_SECONDS = 15 * 60
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# An acknowledged alert stays quiet until it recovers; a muted one until a
+# time. Either way it leaves the panel's header and sends no reminders.
+MAX_MUTE_SECONDS = 30 * 86400
 
 STATE_OK = "ok"
 STATE_PENDING = "pending"
@@ -94,6 +103,7 @@ TRANSITION_REPEATED = "repeated"
 TRANSITION_ESCALATED = "escalated"
 TRANSITION_RECOVERED = "recovered"
 TRANSITION_SUPPRESSED = "suppressed"
+TRANSITION_DISMISSED = "dismissed"
 
 SEVERITY_INFO = "info"
 SEVERITY_WARNING = "warning"
@@ -223,6 +233,11 @@ RULES: Tuple[Rule, ...] = (
          repeat_after=7 * 86400, stale_after=8 * 86400),
     Rule("config.apply_failed", KIND_EVENT, SEVERITY_CRITICAL,
          "HAProxy apply or reload failed", auto_clear=3600),
+    # Observed by this daemon itself, from the relay's queue. Its own email
+    # will most likely wait in the same queue, which is why alerts are also
+    # shown in the panel.
+    Rule("mail.delivery_failed", KIND_LEVEL, SEVERITY_CRITICAL,
+         "Mail cannot be delivered", trigger_delay=0, stale_after=6 * 3600),
 )
 
 RULES_BY_NAME: Dict[str, Rule] = {rule.name: rule for rule in RULES}
@@ -254,7 +269,11 @@ class AlertConfig:
     enabled: bool = True
     email_enabled: bool = True
     recipient: str = ""
-    min_severity: str = SEVERITY_INFO
+    # What is sent: information-only alerts stay in the history and the
+    # panel unless the operator asks for them by mail too.
+    min_severity: str = SEVERITY_WARNING
+    # What the panel's header shows to everyone who opens it.
+    portal_min_severity: str = SEVERITY_WARNING
     webhook_url: str = ""
     webhook_header_name: str = ""
     webhook_header_value: str = ""
@@ -273,6 +292,8 @@ class AlertConfig:
             "email_enabled": self.email_enabled,
             "recipient": self.recipient,
             "min_severity": self.min_severity,
+            "portal_min_severity": self.portal_min_severity,
+            "config_version": CONFIG_VERSION,
             "webhook_url": self.webhook_url,
             "webhook_header_name": self.webhook_header_name,
             "webhook_header_value": self.webhook_header_value,
@@ -291,6 +312,12 @@ class AlertConfig:
         payload["webhook_url"] = _redact_url(self.webhook_url)
         payload["webhook_header_value"] = "***" if self.webhook_header_value else ""
         return payload
+
+
+# 2: information-only alerts are no longer mailed by default. A file written
+# before that kept "info" only because it was the default then, so it is read
+# as "warning" once; a choice saved afterwards is the operator's own.
+CONFIG_VERSION = 2
 
 
 def load_config(path: str) -> AlertConfig:
@@ -317,8 +344,14 @@ def load_config(path: str) -> AlertConfig:
     config.email_enabled = raw.get("email_enabled", True) is not False
     recipient = str(raw.get("recipient") or "").strip()
     config.recipient = recipient if _EMAIL_RE.fullmatch(recipient) else ""
-    severity = str(raw.get("min_severity") or SEVERITY_INFO).strip().lower()
-    config.min_severity = severity if severity in SEVERITIES else SEVERITY_INFO
+    severity = str(raw.get("min_severity") or SEVERITY_WARNING).strip().lower()
+    config.min_severity = severity if severity in SEVERITIES else SEVERITY_WARNING
+    version = raw.get("config_version")
+    if not isinstance(version, int) or version < 2:
+        if config.min_severity == SEVERITY_INFO:
+            config.min_severity = SEVERITY_WARNING
+    portal = str(raw.get("portal_min_severity") or SEVERITY_WARNING).strip().lower()
+    config.portal_min_severity = portal if portal in SEVERITIES else SEVERITY_WARNING
     config.webhook_url = str(raw.get("webhook_url") or "").strip()
     header_name = str(raw.get("webhook_header_name") or "").strip()
     config.webhook_header_name = (
@@ -437,12 +470,28 @@ class AlertDatabase:
             cursor = self._conn.cursor()
             for statement in _SCHEMA_STATEMENTS:
                 cursor.execute(statement)
+            # 2: an operator can acknowledge an alert or mute it for a while.
+            # Kept beside the state they quieten, never overwritten by an
+            # observation (see put_state).
+            columns = {
+                str(row[1])
+                for row in cursor.execute("PRAGMA table_info(alert_state)").fetchall()
+            }
+            for column, ddl in (
+                ("acknowledged_ts", "INTEGER NOT NULL DEFAULT 0"),
+                ("acknowledged_by", "TEXT NOT NULL DEFAULT ''"),
+                ("muted_until", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in columns:
+                    cursor.execute(f"ALTER TABLE alert_state ADD COLUMN {column} {ddl}")
             row = cursor.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
                 cursor.execute(
                     "INSERT INTO schema_version (version) VALUES (?)",
                     (SCHEMA_VERSION,),
                 )
+            elif int(row[0]) < SCHEMA_VERSION:
+                cursor.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
             cursor.close()
 
     def close(self) -> None:
@@ -484,6 +533,45 @@ class AlertDatabase:
                 """,
                 values,
             )
+
+    def set_quiet(self, rule: str, subject: str, *, acknowledged_ts: int,
+                  acknowledged_by: str, muted_until: int) -> bool:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE alert_state SET acknowledged_ts = ?, acknowledged_by = ?, "
+                "muted_until = ? WHERE rule = ? AND subject = ?",
+                (acknowledged_ts, acknowledged_by[:120], muted_until, rule, subject),
+            )
+            return bool(cursor.rowcount)
+
+    def clear_acknowledgement(self, rule: str, subject: str) -> None:
+        """An acknowledgement lasts until the alert recovers, not beyond."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE alert_state SET acknowledged_ts = 0, acknowledged_by = '' "
+                "WHERE rule = ? AND subject = ?",
+                (rule, subject),
+            )
+
+    def delete_events(self, *, ids: Optional[List[int]] = None, everything: bool = False,
+                      before: int = 0) -> int:
+        """Remove history the operator no longer wants. Returns the rows removed."""
+        with self._lock, self._conn:
+            if everything:
+                cursor = self._conn.execute("DELETE FROM alert_events")
+            elif before:
+                cursor = self._conn.execute(
+                    "DELETE FROM alert_events WHERE ts < ?", (int(before),)
+                )
+            else:
+                wanted = [int(value) for value in (ids or [])][:1000]
+                if not wanted:
+                    return 0
+                cursor = self._conn.execute(
+                    f"DELETE FROM alert_events WHERE id IN ({', '.join('?' for _ in wanted)})",
+                    wanted,
+                )
+            return int(cursor.rowcount or 0)
 
     def drop_state(self, rule: str, subject: str) -> None:
         with self._lock, self._conn:
@@ -860,6 +948,10 @@ def _severity_rank(value: str) -> int:
         return 0
 
 
+def _iso(seconds: int) -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(int(seconds)))
+
+
 class AlertEngine:
     """Turns a stream of observations into a small number of notifications."""
 
@@ -902,11 +994,19 @@ class AlertEngine:
             self._thread = None
 
     def _loop(self) -> None:
+        last_mail_check = 0
         while not self._stop.wait(EVALUATE_INTERVAL_SECONDS):
             try:
                 self.sweep()
             except Exception:  # pylint: disable=broad-except
                 LOG.exception("alert sweep failed")
+            now = _utc_now()
+            if now - last_mail_check >= MAIL_QUEUE_CHECK_SECONDS:
+                last_mail_check = now
+                try:
+                    self.check_mail_queue(now)
+                except Exception:  # pylint: disable=broad-except
+                    LOG.exception("mail queue check failed")
 
     # -- intake ---------------------------------------------------------
     def observe(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1033,6 +1133,17 @@ class AlertEngine:
             }
         )
 
+        # An acknowledgement covers one occurrence: once it is over, the next
+        # one is news again. Written only when there is one to clear, since
+        # producers report "still fine" every minute.
+        if (
+            state == STATE_OK
+            and row is not None
+            and "acknowledged_ts" in row.keys()
+            and int(row["acknowledged_ts"] or 0)
+        ):
+            self.database.clear_acknowledgement(rule.name, subject)
+
         result = {"rule": rule.name, "subject": subject, "state": state}
         if not transition:
             return result
@@ -1072,6 +1183,20 @@ class AlertEngine:
             return False, "below the configured minimum severity"
         return True, ""
 
+    def _quiet_reason(self, rule: Rule, subject: str, transition: str, now: int) -> str:
+        """Why an operator's acknowledgement or mute holds this message back."""
+        row = self.database.get_state(rule.name, subject)
+        if row is None:
+            return ""
+        keys = row.keys()
+        muted_until = int(row["muted_until"]) if "muted_until" in keys else 0
+        if muted_until > now and transition != TRANSITION_RECOVERED:
+            return f"muted until {_iso(muted_until)}"
+        acknowledged = int(row["acknowledged_ts"]) if "acknowledged_ts" in keys else 0
+        if acknowledged and transition == TRANSITION_REPEATED:
+            return "acknowledged"
+        return ""
+
     def _notify(
         self,
         rule: Rule,
@@ -1084,6 +1209,10 @@ class AlertEngine:
         recipient: str = "",
     ) -> bool:
         allowed, reason = self._should_notify(rule, severity)
+        if allowed:
+            quiet = self._quiet_reason(rule, subject, transition, now)
+            if quiet:
+                allowed, reason = False, quiet
         if not allowed:
             self.database.add_event(
                 {
@@ -1249,6 +1378,147 @@ class AlertEngine:
                     self.database.prune()
         return {"recovered": recovered, "cleared": cleared}
 
+    # -- the operator's hand --------------------------------------------
+    def quieten(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Acknowledge an alert, mute it for a while, or undo either."""
+        rule = RULES_BY_NAME.get(str(payload.get("rule") or ""))
+        if rule is None:
+            raise ValueError("unknown rule")
+        subject = str(payload.get("subject") or "")
+        mode = str(payload.get("mode") or "")
+        actor = _clean_text(payload.get("by") or "", 120)
+        now = _utc_now()
+        if mode == "acknowledge":
+            values = {"acknowledged_ts": now, "acknowledged_by": actor, "muted_until": 0}
+        elif mode == "mute":
+            seconds = _clamp_int(payload.get("seconds"), default=3600, min_v=300,
+                                 max_v=MAX_MUTE_SECONDS)
+            values = {"acknowledged_ts": now, "acknowledged_by": actor,
+                      "muted_until": now + seconds}
+        elif mode == "clear":
+            values = {"acknowledged_ts": 0, "acknowledged_by": "", "muted_until": 0}
+        else:
+            raise ValueError("mode must be acknowledge, mute or clear")
+        with self._lock:
+            if not self.database.set_quiet(rule.name, subject, **values):
+                raise LookupError("no such alert")
+        return {"rule": rule.name, "subject": subject, **values}
+
+    def dismiss(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Close an event before its timer does. A level cannot be: it holds
+        until its producer says otherwise, and dismissing it would only bring
+        it back at the next observation -- it is muted instead."""
+        rule = RULES_BY_NAME.get(str(payload.get("rule") or ""))
+        if rule is None:
+            raise ValueError("unknown rule")
+        if rule.kind != KIND_EVENT:
+            raise ValueError("a condition that still holds cannot be dismissed; mute it instead")
+        subject = str(payload.get("subject") or "")
+        actor = _clean_text(payload.get("by") or "", 120)
+        now = _utc_now()
+        with self._lock:
+            row = self.database.get_state(rule.name, subject)
+            if row is None:
+                raise LookupError("no such alert")
+            self.database.drop_state(rule.name, subject)
+            self.database.add_event({
+                "ts": now, "rule": rule.name, "subject": subject,
+                "transition": TRANSITION_DISMISSED, "severity": str(row["severity"]),
+                "summary": str(row["summary"]), "detail": f"dismissed by {actor}" if actor else "dismissed",
+                "delivered": "", "delivery_error": "",
+            })
+        return {"rule": rule.name, "subject": subject, "dismissed": True}
+
+    def delete_history(self, payload: Dict[str, Any]) -> int:
+        if payload.get("all") is True:
+            return self.database.delete_events(everything=True)
+        before = payload.get("before")
+        if before is not None:
+            return self.database.delete_events(
+                before=_clamp_int(before, default=0, min_v=1, max_v=2_000_000_000)
+            )
+        ids = payload.get("ids")
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("ids, before or all is required")
+        try:
+            wanted = [int(value) for value in ids]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ids must be numbers") from exc
+        return self.database.delete_events(ids=wanted)
+
+    def portal(self) -> Dict[str, Any]:
+        """What the panel's header shows: the alerts firing now at or above
+        the portal's severity that nobody has acknowledged or muted."""
+        now = _utc_now()
+        floor = _severity_rank(self.config.portal_min_severity)
+        items: List[Dict[str, Any]] = []
+        quiet = 0
+        for row in self.database.active_alerts():
+            severity = str(row["severity"])
+            if _severity_rank(severity) < floor:
+                continue
+            keys = row.keys()
+            acknowledged = int(row["acknowledged_ts"]) if "acknowledged_ts" in keys else 0
+            muted_until = int(row["muted_until"]) if "muted_until" in keys else 0
+            # A mute holds until its time, through recoveries; an
+            # acknowledgement only for the occurrence it was given for.
+            if muted_until > now or (acknowledged and muted_until == 0):
+                quiet += 1
+                continue
+            rule = RULES_BY_NAME.get(str(row["rule"]))
+            items.append({
+                "rule": str(row["rule"]),
+                "title": rule.title if rule else str(row["rule"]),
+                "subject": str(row["subject"]),
+                "severity": severity,
+                "since": int(row["since_ts"]),
+                "summary": str(row["summary"]),
+            })
+        items.sort(key=lambda item: (-_severity_rank(item["severity"]), -item["since"]))
+        return {
+            "items": items[:20],
+            "total": len(items),
+            "critical": sum(1 for item in items if item["severity"] == SEVERITY_CRITICAL),
+            "quiet": quiet,
+            "min_severity": self.config.portal_min_severity,
+        }
+
+    # -- the relay's queue -------------------------------------------------
+    def check_mail_queue(self, now: Optional[int] = None) -> Optional[bool]:
+        """Raise or clear mail.delivery_failed from what the relay still holds.
+
+        Only while mail delivery is on. A relay that cannot be asked is not
+        a verdict either way: nothing is observed, and a level nobody reports
+        goes stale on its own.
+        """
+        if not EmailChannel().available(self.config):
+            return None
+        now = int(now if now is not None else _utc_now())
+        try:
+            proc = subprocess.run(
+                [DOCKER_BIN, "exec", MAIL_RELAY_CONTAINER, "postqueue", "-j"],
+                capture_output=True, timeout=20, check=False,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return None
+        if proc.returncode != 0:
+            return None
+        stuck = mail_queue_stuck(proc.stdout.decode("utf-8", "replace"), now)
+        oldest = max((now - item["arrival"] for item in stuck), default=0)
+        reason = next((item["reason"] for item in stuck if item["reason"]), "")
+        self.observe({
+            "rule": "mail.delivery_failed",
+            "subject": "relay",
+            "active": bool(stuck),
+            "summary": (
+                f"Mail cannot be delivered: {len(stuck)} message(s) waiting, "
+                f"the oldest for {oldest // 60} min"
+                if stuck else "Mail is being delivered again"
+            ),
+            "detail": f"The relay's last reason: {reason}" if reason else "",
+        })
+        return bool(stuck)
+
     # -- read models ----------------------------------------------------
     def health(self) -> Dict[str, Any]:
         channels = {
@@ -1303,11 +1573,12 @@ class AlertEngine:
             if recipient and not _EMAIL_RE.fullmatch(recipient):
                 raise ValueError("the recipient is not a valid email address")
             merged["recipient"] = recipient
-        if "min_severity" in payload:
-            severity = str(payload.get("min_severity") or "").strip().lower()
-            if severity not in SEVERITIES:
-                raise ValueError("min_severity must be info, warning or critical")
-            merged["min_severity"] = severity
+        for key in ("min_severity", "portal_min_severity"):
+            if key in payload:
+                severity = str(payload.get(key) or "").strip().lower()
+                if severity not in SEVERITIES:
+                    raise ValueError(f"{key} must be info, warning or critical")
+                merged[key] = severity
         if "webhook_allow_private" in payload:
             merged["webhook_allow_private"] = (
                 payload["webhook_allow_private"] is True
@@ -1350,6 +1621,40 @@ class AlertEngine:
         with self._lock:
             self.config = config
         return config
+
+
+def mail_queue_stuck(output: str, now: int) -> List[Dict[str, Any]]:
+    """The messages `postqueue -j` lists as waiting past MAIL_STUCK_SECONDS.
+
+    One JSON object per line. Only the deferred and hold queues count: the
+    active and incoming ones are being worked on. The reason is Postfix's
+    note for the first recipient, cut short -- it can quote the remote server.
+    """
+    stuck: List[Dict[str, Any]] = []
+    for line in (output or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) or message.get("queue_name") not in ("deferred", "hold"):
+            continue
+        try:
+            arrival = int(message.get("arrival_time") or 0)
+        except (TypeError, ValueError):
+            continue
+        if arrival <= 0 or now - arrival < MAIL_STUCK_SECONDS:
+            continue
+        recipients = message.get("recipients") if isinstance(message.get("recipients"), list) else []
+        reason = ""
+        for recipient in recipients:
+            if isinstance(recipient, dict) and recipient.get("delay_reason"):
+                reason = _clean_text(recipient.get("delay_reason"), 300)
+                break
+        stuck.append({"arrival": arrival, "reason": reason})
+    return stuck
 
 
 def load_config_from_dict(raw: Dict[str, Any]) -> AlertConfig:
@@ -1419,6 +1724,13 @@ class AlertHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query or "")
 
+        if parsed.path == "/api/v1/alerts/portal":
+            try:
+                self._send_json(200, {"ok": True, "ts": _utc_now(), **engine.portal()})
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
         if parsed.path == "/api/v1/alerts/health":
             try:
                 self._send_json(200, {"ok": True, "ts": _utc_now(), **engine.health()})
@@ -1476,6 +1788,9 @@ class AlertHandler(BaseHTTPRequestHandler):
             "/api/v1/alerts/notify",
             "/api/v1/alerts/config",
             "/api/v1/alerts/test",
+            "/api/v1/alerts/quieten",
+            "/api/v1/alerts/dismiss",
+            "/api/v1/alerts/history/delete",
         ):
             self._send_json(404, {"ok": False, "error": "not found"})
             return
@@ -1485,6 +1800,27 @@ class AlertHandler(BaseHTTPRequestHandler):
             return
 
         payload = self._read_json()
+
+        actions = {
+            "/api/v1/alerts/quieten": lambda: engine.quieten(payload),
+            "/api/v1/alerts/dismiss": lambda: engine.dismiss(payload),
+            "/api/v1/alerts/history/delete": lambda: {"deleted": engine.delete_history(payload)},
+        }
+        if path in actions:
+            try:
+                result = actions[path]()
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            except LookupError as exc:
+                self._send_json(404, {"ok": False, "error": str(exc).strip("'")})
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("%s failed", path)
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, **result})
+            return
 
         if path == "/api/v1/alerts/notify":
             try:

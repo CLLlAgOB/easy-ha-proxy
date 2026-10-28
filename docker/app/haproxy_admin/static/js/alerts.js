@@ -15,7 +15,17 @@
 
   const REFRESH_MS = 20000;
   const MASK = "***";
+  const HISTORY_PAGE = 100;
+  const MUTE_CHOICES = [
+    [3600, "1 hour"],
+    [8 * 3600, "8 hours"],
+    [86400, "1 day"],
+    [7 * 86400, "7 days"]
+  ];
+  const SUPERADMIN = (document.getElementById("al-role") || { dataset: {} }).dataset.superadmin === "true";
   let catalogue = [];
+  let historyRows = [];
+  let historyTotal = 0;
 
   function byId(id) {
     return document.getElementById(id);
@@ -73,7 +83,7 @@
   function badge(kind, text) {
     const span = document.createElement("span");
     span.className = `al-badge al-${kind}`;
-    span.textContent = text;
+    span.textContent = t(text);
     span.setAttribute("data-i18n-skip", "");
     span.setAttribute("translate", "no");
     return span;
@@ -87,11 +97,84 @@
     return td;
   }
 
-  function renderActive(active, pending) {
+  // Tell the header of this page that what it shows has changed.
+  function announceChange() {
+    window.dispatchEvent(new CustomEvent("easy-ha-proxy:alerts-changed"));
+  }
+
+  async function act(path, body) {
+    const { ok, payload } = await postJson(path, body);
+    const status = byId("al-status");
+    if (!ok && status) status.textContent = payload.error || t("The action failed");
+    await refresh();
+    announceChange();
+    return ok;
+  }
+
+  function smallButton(label, handler) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn";
+    button.textContent = t(label);
+    button.addEventListener("click", handler);
+    return button;
+  }
+
+  // What an operator can do with an alert that fires: acknowledge it (quiet
+  // until it recovers), mute it for a while, or -- for an event, which no
+  // producer will ever report as over -- dismiss it.
+  function actionsCell(entry, kinds) {
+    const td = document.createElement("td");
+    td.className = "al-row-actions";
+    if (entry.kind !== "firing") {
+      td.textContent = "—";
+      return td;
+    }
+    const key = { rule: entry.rule, subject: entry.subject };
+    const now = Date.now() / 1000;
+    const mutedUntil = Number(entry.muted_until) || 0;
+    const acknowledged = Number(entry.acknowledged_ts) || 0;
+    const note = (text) => {
+      const small = document.createElement("small");
+      small.textContent = text;
+      td.appendChild(small);
+    };
+    if (mutedUntil > now) {
+      note(`${t("Muted until")} ${formatTime(mutedUntil)}`);
+      td.appendChild(smallButton("Unmute", () => act("/api/alerts/quieten", { ...key, mode: "clear" })));
+    } else if (acknowledged && !mutedUntil) {
+      note(`${t("Acknowledged")}${entry.acknowledged_by ? ` · ${entry.acknowledged_by}` : ""}`);
+      td.appendChild(smallButton("Undo", () => act("/api/alerts/quieten", { ...key, mode: "clear" })));
+    } else {
+      td.appendChild(smallButton("Acknowledge", () => act("/api/alerts/quieten", { ...key, mode: "acknowledge" })));
+      const choice = document.createElement("select");
+      choice.setAttribute("aria-label", t("Mute"));
+      MUTE_CHOICES.forEach(([seconds, label]) => {
+        const option = document.createElement("option");
+        option.value = String(seconds);
+        option.textContent = t(label);
+        choice.appendChild(option);
+      });
+      td.appendChild(choice);
+      td.appendChild(smallButton("Mute", () =>
+        act("/api/alerts/quieten", { ...key, mode: "mute", seconds: Number(choice.value) })
+      ));
+    }
+    if (kinds[entry.rule] === "event") {
+      td.appendChild(smallButton("Dismiss", () => act("/api/alerts/dismiss", key)));
+    }
+    return td;
+  }
+
+  function renderActive(active, pending, rules) {
     const body = byId("al-active-body");
     const empty = byId("al-active-empty");
     if (!body) return;
     body.textContent = "";
+    const kinds = {};
+    (rules || []).forEach((rule) => {
+      kinds[rule.name] = rule.kind;
+    });
     const rows = (active || [])
       .map((row) => ({ ...row, kind: "firing" }))
       .concat((pending || []).map((row) => ({ ...row, kind: "pending" })));
@@ -104,14 +187,26 @@
         tr,
         badge(
           entry.kind === "firing" ? "critical" : "warning",
-          entry.kind === "firing" ? t("firing") : t("waiting")
+          entry.kind === "firing" ? "firing" : "waiting"
         )
       );
       cell(tr, formatAge(entry.since_ts));
       cell(tr, entry.summary);
+      tr.appendChild(actionsCell(entry, kinds));
       body.appendChild(tr);
     });
     if (empty) empty.hidden = rows.length > 0;
+  }
+
+  function selectedHistory() {
+    return Array.from(document.querySelectorAll("#al-history-body input[data-id]:checked"))
+      .map((box) => Number(box.dataset.id))
+      .filter((id) => Number.isInteger(id));
+  }
+
+  function updateDeleteButton() {
+    const button = byId("al-history-delete");
+    if (button) button.disabled = selectedHistory().length === 0;
   }
 
   function renderHistory(events) {
@@ -121,10 +216,20 @@
     body.textContent = "";
     (events || []).forEach((event) => {
       const tr = document.createElement("tr");
+      if (SUPERADMIN) {
+        const pick = document.createElement("td");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.dataset.id = String(event.id);
+        box.setAttribute("aria-label", t("Select"));
+        box.addEventListener("change", updateDeleteButton);
+        pick.appendChild(box);
+        tr.appendChild(pick);
+      }
       cell(tr, formatTime(event.ts));
       cell(tr, event.rule);
       cell(tr, event.subject);
-      cell(tr, event.transition);
+      cell(tr, t(event.transition));
       cell(tr, badge(event.severity || "info", event.severity || "info"));
       const delivery = event.delivered
         ? badge("ok", event.delivered)
@@ -133,6 +238,42 @@
       body.appendChild(tr);
     });
     if (empty) empty.hidden = (events || []).length > 0;
+    const more = byId("al-history-more");
+    if (more) more.hidden = (events || []).length >= historyTotal;
+    const count = byId("al-history-count");
+    if (count) count.textContent = historyTotal ? `${(events || []).length} / ${historyTotal}` : "";
+    const all = byId("al-history-all");
+    if (all) all.checked = false;
+    updateDeleteButton();
+  }
+
+  // The history is read on its own, filtered and a page at a time, so a
+  // refresh does not throw away what the operator scrolled to or ticked.
+  async function loadHistory(append) {
+    const params = { limit: HISTORY_PAGE, offset: append ? historyRows.length : 0 };
+    const severity = (byId("al-history-severity") || {}).value;
+    const rule = (byId("al-history-rule") || {}).value;
+    if (severity) params.severity = severity;
+    if (rule) params.rule = rule;
+    const page = await getJson("/api/alerts/history", params);
+    historyTotal = Number(page.total) || 0;
+    historyRows = append ? historyRows.concat(page.events || []) : page.events || [];
+    renderHistory(historyRows);
+  }
+
+  function historyBusy() {
+    return historyRows.length > HISTORY_PAGE || selectedHistory().length > 0;
+  }
+
+  function renderRuleFilter(rules) {
+    const select = byId("al-history-rule");
+    if (!select || select.options.length > 1) return;
+    (rules || []).forEach((rule) => {
+      const option = document.createElement("option");
+      option.value = rule.name;
+      option.textContent = t(rule.title || rule.name);
+      select.appendChild(option);
+    });
   }
 
   function renderRules(rules) {
@@ -194,7 +335,8 @@
     };
     set("al-enabled", config.enabled === false ? "false" : "true");
     set("al-email-enabled", config.email_enabled === false ? "false" : "true");
-    set("al-min-severity", config.min_severity || "info");
+    set("al-min-severity", config.min_severity || "warning");
+    set("al-portal-min-severity", config.portal_min_severity || "warning");
     set("al-recipient", config.recipient || "");
     set("al-webhook-header-name", config.webhook_header_name || "");
     set(
@@ -231,10 +373,11 @@
   async function refresh() {
     const status = byId("al-status");
     try {
-      const state = await getJson("/api/alerts/state", { limit: 100 });
+      const state = await getJson("/api/alerts/state", { limit: 1 });
       setUnavailable(false);
-      renderActive(state.active, state.pending);
-      renderHistory(state.history);
+      renderActive(state.active, state.pending, state.catalogue);
+      renderRuleFilter(state.catalogue);
+      if (!historyBusy()) await loadHistory(false);
       renderRules(state.catalogue);
       renderConfig(state.config);
       const firing = (state.active || []).length;
@@ -259,6 +402,7 @@
       enabled: byId("al-enabled").value === "true",
       email_enabled: byId("al-email-enabled").value === "true",
       min_severity: byId("al-min-severity").value,
+      portal_min_severity: byId("al-portal-min-severity").value,
       recipient: byId("al-recipient").value.trim(),
       webhook_header_name: byId("al-webhook-header-name").value.trim(),
       webhook_allow_private: byId("al-webhook-allow-private").value === "true"
@@ -298,7 +442,43 @@
     if (ok) await refresh();
   }
 
+  function wireHistory() {
+    ["al-history-severity", "al-history-rule"].forEach((id) => {
+      const select = byId(id);
+      if (select) select.addEventListener("change", () => loadHistory(false));
+    });
+    const more = byId("al-history-more");
+    if (more) more.addEventListener("click", () => loadHistory(true));
+    const all = byId("al-history-all");
+    if (all) {
+      all.addEventListener("change", () => {
+        document.querySelectorAll("#al-history-body input[data-id]").forEach((box) => {
+          box.checked = all.checked;
+        });
+        updateDeleteButton();
+      });
+    }
+    const remove = byId("al-history-delete");
+    if (remove) {
+      remove.addEventListener("click", async () => {
+        const ids = selectedHistory();
+        if (!ids.length || !window.confirm(t("Delete the selected entries?"))) return;
+        await act("/api/alerts/history/delete", { ids: ids });
+        await loadHistory(false);
+      });
+    }
+    const clear = byId("al-history-clear");
+    if (clear) {
+      clear.addEventListener("click", async () => {
+        if (!window.confirm(t("Delete the whole alert history?"))) return;
+        await act("/api/alerts/history/delete", { all: true });
+        await loadHistory(false);
+      });
+    }
+  }
+
   function wire() {
+    wireHistory();
     const saveDelivery = byId("al-save");
     if (saveDelivery) {
       saveDelivery.addEventListener("click", () =>

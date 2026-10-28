@@ -20,6 +20,7 @@
   <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
   <script src="{{ url_for('static', filename='js/security.js') }}"></script>
   <script defer src="{{ url_for('static', filename='js/config_state.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/alerts_badge.js') }}"></script>
   <script defer src="{{ url_for('static', filename='js/nav.js') }}"></script>
 </head>
 
@@ -58,6 +59,24 @@
         </span>
       </a>
       {% endif %}
+      {# Open alerts above the floor set on the Alerts page, on every page:
+         when mail cannot leave, this is where the operator learns of it. #}
+      <a id="global-alerts"
+         class="global-alerts"
+         href="{{ url_for('routes.alerts_page') }}"
+         data-endpoint="{{ url_for('routes.api_alerts_portal') }}"
+         aria-label="Open alerts"
+         hidden>
+        <svg class="global-alerts-bell" width="15" height="15" viewBox="0 0 24 24" fill="none"
+             aria-hidden="true">
+          <path d="M6 9a6 6 0 1 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9Z" stroke="currentColor"
+                stroke-width="2" stroke-linejoin="round"/>
+          <path d="M10 20a2 2 0 0 0 4 0" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round"/>
+        </svg>
+        <span id="global-alerts-label" role="status" aria-live="polite"
+              data-i18n-skip translate="no"></span>
+      </a>
       <form class="language-switcher" method="post" action="{{ url_for('set_language') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="next" value="{{ request.full_path }}">

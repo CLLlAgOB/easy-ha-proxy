@@ -3485,6 +3485,72 @@ tr.job-row-selected > td:first-child {
   }
 }
 
+/* Open alerts in the page header: amber for warnings, red with a pulse
+   when something critical fires, grey while the alert service is silent. */
+.global-alerts {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  max-width: 340px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 170, 0, .42);
+  border-radius: 999px;
+  color: var(--text-primary);
+  background: rgba(255, 170, 0, .12);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-decoration: none;
+}
+
+.global-alerts[hidden] {
+  display: none;
+}
+
+.global-alerts > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-alerts:hover,
+.global-alerts:focus-visible {
+  border-color: var(--warning);
+  outline: none;
+}
+
+.global-alerts-bell {
+  flex: 0 0 auto;
+  color: var(--warning);
+}
+
+.global-alerts[data-level="critical"] {
+  border-color: rgba(255, 77, 109, .5);
+  background: rgba(255, 77, 109, .14);
+}
+
+.global-alerts[data-level="critical"] .global-alerts-bell {
+  color: var(--error);
+  animation: pulse 1.5s infinite;
+}
+
+.global-alerts[data-level="unknown"] {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.global-alerts[data-level="unknown"] .global-alerts-bell {
+  color: var(--text-secondary);
+}
+
+@media (max-width: 768px) {
+  .global-alerts {
+    max-width: 100%;
+  }
+}
+
 /* Authelia bans and raw diagnostic log output. */
 .authelia-ban-table {
   min-width: 720px;
