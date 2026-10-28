@@ -103,6 +103,7 @@
     "Usage per component: services and containers": "Нагрузка по компонентам: службы и контейнеры",
     "Drawn from the counters HAProxy keeps anyway, which are read either way: switched off, they are only hidden.": "Строятся по счётчикам, которые HAProxy ведёт в любом случае и которые читаются всё равно: выключенные только скрываются.",
     "Only a superadmin can switch monitors.": "Переключать мониторы может только суперадминистратор.",
-    "Not saved": "Не сохранено"
+    "Not saved": "Не сохранено",
+    "Requests of this period in the Request log": "Запросы этого периода в журнале запросов"
   }
 }

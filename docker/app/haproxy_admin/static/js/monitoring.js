@@ -222,6 +222,9 @@
 
   let currentRange = "24h";
   let currentSite = "";
+  let defaultRange = "24h";
+  // A site the address asked for, applied once the list of sites is known.
+  let askedSite = "";
   let refreshTimer = null;
   let inFlight = false;
 
@@ -333,8 +336,11 @@
       left: padding.left,
       top: padding.top,
       plotWidth: plotWidth,
-      plotHeight: plotHeight
+      plotHeight: plotHeight,
+      datasets: datasets,
+      spanSeconds: rangeSeconds
     };
+    hideReading(svg);
 
     for (let tick = 0; tick <= 2; tick += 1) {
       const value = (top / 2) * tick;
@@ -1044,6 +1050,14 @@
         select.appendChild(option);
       });
       if (previous) select.value = previous;
+      if (askedSite) {
+        // Only a site this gateway has: anything else leaves "All sites".
+        if (Array.from(select.options).some((option) => option.value === askedSite)) {
+          select.value = askedSite;
+          currentSite = askedSite;
+        }
+        askedSite = "";
+      }
     } catch (error) {
       if (error.unavailable) showUnavailable(true);
     }
@@ -1464,10 +1478,49 @@
     return { query: fresh, from: from };
   }
 
+  // The view in the address, so a reload -- or a link sent to a colleague
+  // during an incident -- opens the same period and site.
+  function writeAddress() {
+    try {
+      const url = new URL(window.location.href);
+      ["range", "site", "since", "until"].forEach((name) => url.searchParams.delete(name));
+      const query = core.viewQuery({
+        range: currentRange,
+        defaultRange: defaultRange,
+        window: customWindow,
+        site: currentSite
+      });
+      Object.keys(query).forEach((name) => url.searchParams.set(name, query[name]));
+      if (url.toString() !== window.location.href) {
+        window.history.replaceState(null, "", url.toString());
+      }
+    } catch (error) {
+      /* the address stays as it was */
+    }
+  }
+
+  // The request log for what the charts show: the same period -- fixed to
+  // its times when it is a preset, so the link still means the same minutes
+  // when opened later -- and the site as its backend.
+  function updateLogLinks() {
+    const until = customWindow ? customWindow.until : Math.floor(Date.now() / 1000);
+    const since = customWindow ? customWindow.since : until - rangeSeconds(currentRange);
+    const base = { since: String(since), until: String(until) };
+    if (currentSite) base.backend = currentSite;
+    const link = byId("mon-log-link");
+    if (link) link.href = `/security/requests?${new URLSearchParams(base).toString()}`;
+    document.querySelectorAll("a[data-log-status]").forEach((anchor) => {
+      const query = Object.assign({ status: anchor.dataset.logStatus }, base);
+      anchor.href = `/security/requests?${new URLSearchParams(query).toString()}`;
+    });
+  }
+
   async function loadAll(options) {
     // A refresh redraws the charts, which would drop a selection in progress.
     if (inFlight || zoomDragging) return;
     inFlight = true;
+    writeAddress();
+    updateLogLinks();
     const params = Object.assign({ range: currentRange }, windowParams());
     if (currentSite) params.site = currentSite;
     const seconds = customWindow
@@ -1612,6 +1665,86 @@
     showWindow(zoomHistory.pop());
   }
 
+  /* ---------- reading at the pointer ---------- */
+
+  // What every shown line was at one sample: a vertical rule on the chart
+  // and a box beside it, as the legend would print each value.
+  function readingBox(svg) {
+    const card = svg.closest(".mon-chart");
+    if (!card) return null;
+    let box = card.querySelector(".mon-reading");
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "mon-reading";
+      box.setAttribute("data-i18n-skip", "");
+      box.setAttribute("translate", "no");
+      box.hidden = true;
+      card.appendChild(box);
+    }
+    return box;
+  }
+
+  function hideReading(svg) {
+    const rule = svg.querySelector(".mon-reading-rule");
+    if (rule) rule.remove();
+    const card = svg.closest(".mon-chart");
+    const box = card && card.querySelector(".mon-reading");
+    if (box) box.hidden = true;
+  }
+
+  function showReading(svg, event) {
+    const geometry = svg.__geometry;
+    if (!geometry || !geometry.datasets || !geometry.points.length) return;
+    const bounds = svg.getBoundingClientRect();
+    const x = ((event.clientX - bounds.left) / Math.max(bounds.width, 1)) * geometry.width;
+    if (x < geometry.left || x > geometry.left + geometry.plotWidth) {
+      hideReading(svg);
+      return;
+    }
+    const index = core.indexAtX(geometry, x);
+    const at = core.xAtIndex(geometry, index);
+    let rule = svg.querySelector(".mon-reading-rule");
+    if (!rule) {
+      rule = element("line", { class: "mon-reading-rule" });
+      svg.appendChild(rule);
+    }
+    rule.setAttribute("x1", at);
+    rule.setAttribute("x2", at);
+    rule.setAttribute("y1", geometry.top);
+    rule.setAttribute("y2", geometry.top + geometry.plotHeight);
+
+    const box = readingBox(svg);
+    if (!box) return;
+    box.textContent = "";
+    const when = document.createElement("div");
+    when.className = "mon-reading-time";
+    const format = geometry.spanSeconds >= 86400 ? dateTimeFormat : timeFormat;
+    when.textContent = format.format(new Date(Number(geometry.points[index]) * 1000));
+    box.appendChild(when);
+    geometry.datasets.forEach((dataset) => {
+      const row = document.createElement("div");
+      const swatch = document.createElement("i");
+      swatch.style.background = dataset.spec.color;
+      row.appendChild(swatch);
+      const label = document.createElement("span");
+      label.textContent = `${dataset.spec.component ? dataset.spec.label : uiText(dataset.spec.label)}: `;
+      row.appendChild(label);
+      const value = document.createElement("b");
+      const reading = dataset.values[index];
+      value.textContent = reading === null || reading === undefined ? "—" : legendValue(dataset.spec, reading);
+      row.appendChild(value);
+      box.appendChild(row);
+    });
+    box.hidden = false;
+    // Beside the pointer, on whichever side has the room.
+    const card = svg.closest(".mon-chart");
+    const cardBounds = card.getBoundingClientRect();
+    const pointer = event.clientX - cardBounds.left;
+    const left = pointer > cardBounds.width / 2 ? pointer - box.offsetWidth - 12 : pointer + 12;
+    box.style.left = `${Math.max(4, Math.min(left, cardBounds.width - box.offsetWidth - 4))}px`;
+    box.style.top = `${Math.max(4, event.clientY - cardBounds.top - box.offsetHeight / 2)}px`;
+  }
+
   function bindZoom(svg) {
     let start = null;
     let band = null;
@@ -1651,7 +1784,9 @@
     });
     svg.addEventListener("pointermove", (event) => {
       const geometry = svg.__geometry;
+      if (start === null && event.pointerType === "mouse") showReading(svg, event);
       if (start === null || !geometry || !band) return;
+      hideReading(svg);
       const x = toX(event, geometry);
       band.setAttribute("x", Math.min(start, x));
       band.setAttribute("width", Math.abs(x - start));
@@ -1666,19 +1801,42 @@
       const left = Math.min(start, end);
       const right = Math.max(start, end);
       stop();
-      // A click or a twitch is not a selection.
-      if (right - left < 6) return;
+      // A click or a twitch is not a selection; on a touch screen it is how
+      // a reading is asked for.
+      if (right - left < 6) {
+        if (event.pointerType !== "mouse") showReading(svg, event);
+        return;
+      }
       // The axis is spaced by sample, not by clock (see timeAtX).
       zoomTo(core.timeAtX(geometry, left), core.timeAtX(geometry, right) + geometry.step);
     });
     svg.addEventListener("pointercancel", stop);
+    svg.addEventListener("pointerleave", (event) => {
+      if (event.pointerType === "mouse") hideReading(svg);
+    });
     svg.addEventListener("dblclick", zoomOut);
+  }
+
+  // Remembered per browser; on unless this viewer turned it off.
+  let autoRefresh = true;
+
+  function bindAutoRefresh() {
+    const box = byId("mon-auto-refresh");
+    autoRefresh = remembered("mon-auto-refresh", ["on", "off"], "on") === "on";
+    if (!box) return;
+    box.checked = autoRefresh;
+    box.addEventListener("change", () => {
+      autoRefresh = box.checked;
+      remember("mon-auto-refresh", autoRefresh ? "on" : "off");
+      // Back on: catch up at once rather than half a minute later.
+      if (autoRefresh) loadAll({ refresh: true });
+    });
   }
 
   function scheduleRefresh() {
     if (refreshTimer) window.clearInterval(refreshTimer);
     refreshTimer = window.setInterval(() => {
-      if (!document.hidden) loadAll({ refresh: true });
+      if (!document.hidden && autoRefresh) loadAll({ refresh: true });
     }, REFRESH_INTERVAL_MS);
   }
 
@@ -1796,12 +1954,33 @@
       });
       const active = ranges.querySelector('button[aria-pressed="true"]');
       if (active && active.dataset.range) currentRange = active.dataset.range;
+      defaultRange = currentRange;
+      const known = Array.from(ranges.querySelectorAll("button[data-range]")).map(
+        (item) => item.dataset.range
+      );
+      const asked = core.viewFromQuery(window.location.search, known);
+      if (asked.range) {
+        currentRange = asked.range;
+        ranges.querySelectorAll("button[data-range]").forEach((item) => {
+          item.setAttribute("aria-pressed", item.dataset.range === currentRange ? "true" : "false");
+        });
+      }
+      if (asked.window) {
+        customWindow = asked.window;
+        markCustomRange(true);
+        const from = byId("mon-window-from");
+        const to = byId("mon-window-to");
+        if (from) from.value = toLocalInput(asked.window.since);
+        if (to) to.value = toLocalInput(asked.window.until);
+      }
+      if (asked.site) askedSite = asked.site;
     }
 
     bindWindowControls();
     bindBackendsView();
     bindFullScreen();
     bindMonitors();
+    bindAutoRefresh();
 
     CHARTS.forEach((chart) => {
       const svg = byId(`mon-plot-${chart.name}`);

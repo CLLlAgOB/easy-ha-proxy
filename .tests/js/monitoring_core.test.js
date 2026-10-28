@@ -72,6 +72,46 @@ test("a refresh that brought nothing keeps the window, moved on", () => {
   assert.equal(merged.until, 200);
 });
 
+test("the view goes into the address and comes back out of it", () => {
+  const ranges = ["1h", "6h", "24h", "7d"];
+  assert.deepEqual(core.viewQuery({range: "24h", defaultRange: "24h", window: null, site: ""}), {});
+  assert.deepEqual(core.viewQuery({range: "7d", defaultRange: "24h", window: null, site: "be_shop"}),
+                   {range: "7d", site: "be_shop"});
+  // A period wins over the preset beside it.
+  assert.deepEqual(core.viewQuery({range: "7d", defaultRange: "24h", window: {since: 100, until: 7300}, site: ""}),
+                   {since: "100", until: "7300"});
+  const back = core.viewFromQuery("?range=7d&site=be_shop&since=100&until=7300", ranges);
+  assert.deepEqual(back, {range: "7d", window: {since: 100, until: 7300}, site: "be_shop"});
+});
+
+test("an address the page did not write is checked, not trusted", () => {
+  const ranges = ["1h", "24h"];
+  assert.deepEqual(core.viewFromQuery("?range=999d", ranges), {});
+  assert.deepEqual(core.viewFromQuery("?since=7300&until=100", ranges), {});
+  assert.deepEqual(core.viewFromQuery("?since=100&until=130", ranges), {});
+  assert.deepEqual(core.viewFromQuery("?since=abc&until=7300", ranges), {});
+  assert.deepEqual(core.viewFromQuery("?site=%20%20", ranges), {});
+  assert.deepEqual(core.viewFromQuery("?site=" + "x".repeat(201), ranges), {});
+  assert.deepEqual(core.viewFromQuery("", ranges), {});
+});
+
+test("the reading under the pointer is the nearest sample", () => {
+  const geometry = {points: [0, 60, 120, 180, 240], left: 50, plotWidth: 400};
+  assert.equal(core.indexAtX(geometry, 50), 0);
+  assert.equal(core.indexAtX(geometry, 450), 4);
+  // Samples 100 px apart: the halfway point decides.
+  assert.equal(core.indexAtX(geometry, 199), 1);
+  assert.equal(core.indexAtX(geometry, 201), 2);
+  // Outside the plot it holds to the edge.
+  assert.equal(core.indexAtX(geometry, 0), 0);
+  assert.equal(core.indexAtX(geometry, 999), 4);
+  // And the rule is drawn where the sample is.
+  assert.equal(core.xAtIndex(geometry, 2), 250);
+  const single = {points: [600], left: 50, plotWidth: 400};
+  assert.equal(core.indexAtX(single, 300), 0);
+  assert.equal(core.xAtIndex(single, 0), 250);
+});
+
 test("a line is drawn in runs between its gaps", () => {
   assert.deepEqual(core.segments([1, 2, null, 3, null, null, 4, 5]), [[0, 1], [3, 3], [6, 7]]);
   assert.deepEqual(core.segments([null, null]), []);

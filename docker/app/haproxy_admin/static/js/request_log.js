@@ -36,9 +36,59 @@
     return "rq-4xx";
   }
 
+  // A period a link brought (the monitoring page's charts link here): kept
+  // as an extra choice in the period list until the filters are reset.
+  let chosenPeriod = null;
+  const LINK_FILTERS = [
+    ["status", "rq-status"],
+    ["client", "rq-client"],
+    ["host", "rq-host"],
+    ["backend", "rq-backend"],
+    ["path", "rq-path"],
+    ["request_id", "rq-request-id"]
+  ];
+
+  function applyLink() {
+    const params = new URLSearchParams(window.location.search);
+    LINK_FILTERS.forEach(([name, id]) => {
+      const value = (params.get(name) || "").trim();
+      const element = byId(id);
+      if (element && value) element.value = value.slice(0, 200);
+    });
+    const since = Number(params.get("since"));
+    const until = Number(params.get("until"));
+    const select = byId("rq-range");
+    if (!select || !Number.isInteger(since) || !Number.isInteger(until) || since <= 0 || until - since < 60) {
+      return;
+    }
+    chosenPeriod = { since: since, until: until };
+    const option = document.createElement("option");
+    option.value = "chosen";
+    option.setAttribute("data-i18n-skip", "");
+    option.setAttribute("translate", "no");
+    option.textContent = `${t("Chosen period")}: ${formatTime(since)} – ${formatTime(until)}`;
+    select.insertBefore(option, select.firstChild);
+    select.value = "chosen";
+  }
+
+  function forgetLink() {
+    chosenPeriod = null;
+    const select = byId("rq-range");
+    const option = select && select.querySelector('option[value="chosen"]');
+    if (option) {
+      option.remove();
+      select.value = "86400";
+    }
+  }
+
   function filters() {
     const params = new URLSearchParams();
-    const range = Number(byId("rq-range").value || 0);
+    const choice = byId("rq-range").value;
+    if (choice === "chosen" && chosenPeriod) {
+      params.set("since", String(chosenPeriod.since));
+      params.set("until", String(chosenPeriod.until));
+    }
+    const range = Number(choice || 0);
     if (range > 0) {
       params.set("since", String(Math.floor(Date.now() / 1000) - range));
     }
@@ -200,6 +250,7 @@
             const element = byId(id);
             if (element) element.value = "";
           });
+        forgetLink();
         run();
       });
     }
@@ -220,6 +271,7 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     wire();
+    applyLink();
     search(false);
     refreshStore();
   });

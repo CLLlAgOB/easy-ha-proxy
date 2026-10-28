@@ -246,6 +246,39 @@
   vector-effect: non-scaling-stroke;
 }
 
+/* The reading at the pointer: a rule across the plot and a box beside it. */
+.mon-chart { position: relative; }
+.mon-plot .mon-reading-rule {
+  stroke: var(--text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.mon-reading {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  min-width: 140px;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.mon-reading[hidden] { display: none; }
+.mon-reading .mon-reading-time { color: var(--text-secondary); margin-bottom: 2px; }
+.mon-reading i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 6px;
+}
+
 .mon-legend {
   display: flex;
   gap: 4px 14px;
@@ -273,6 +306,8 @@
 .mon-components { flex-basis: 100%; margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
 .mon-components summary { cursor: pointer; user-select: none; }
 .mon-components .mon-legend { margin-top: 6px; }
+
+.mon-log-links { display: inline-flex; gap: 10px; margin-left: auto; margin-right: 8px; }
 
 .mon-chart-head {
   display: flex;
@@ -494,6 +529,12 @@ body.mon-overlay-open { overflow: hidden; }
         <option value="">All sites</option>
       </select>
     </label>
+
+    {# Off while reading a chart closely, or to keep a slow link quiet. #}
+    <label for="mon-auto-refresh">
+      <input type="checkbox" id="mon-auto-refresh" checked>
+      Auto-refresh
+    </label>
   </div>
 
   <div class="mon-cards">
@@ -539,6 +580,7 @@ body.mon-overlay-open { overflow: hidden; }
   <div class="card-header">
     <h2>Graphs</h2>
     <span class="mon-sub">Drag across a chart to zoom in, double-click to zoom out</span>
+    <a class="mon-sub" id="mon-log-link" href="/security/requests">Requests of this period in the Request log</a>
     <span class="mon-sub" id="mon-resolution"></span>
   </div>
 
@@ -566,6 +608,10 @@ body.mon-overlay-open { overflow: hidden; }
     <div class="mon-chart" data-chart="responses">
       <div class="mon-chart-head">
         <h3>Response classes</h3>
+        <span class="mon-log-links">
+          <a class="mon-sub" data-log-status="4xx" href="/security/requests?status=4xx">4xx</a>
+          <a class="mon-sub" data-log-status="5xx" href="/security/requests?status=5xx">5xx</a>
+        </span>
         {{ expand_button() }}
       </div>
       <div class="mon-sub">Responses per second</div>

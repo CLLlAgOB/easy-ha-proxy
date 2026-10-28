@@ -404,6 +404,54 @@
       (Number(points[upper]) - Number(points[lower])) * (position - lower);
   }
 
+  /* ---------- the view in the address ---------- */
+
+  // What the page shows, as query parameters: a link to it opens the same
+  // view. Only what differs from the defaults is written.
+  function viewQuery(view) {
+    const query = {};
+    if (view.window) {
+      query.since = String(view.window.since);
+      query.until = String(view.window.until);
+    } else if (view.range && view.range !== view.defaultRange) {
+      query.range = view.range;
+    }
+    if (view.site) query.site = view.site;
+    return query;
+  }
+
+  // The view a link asks for, checked: an unknown range, a malformed or
+  // backwards period and an empty site are dropped, never trusted.
+  function viewFromQuery(search, ranges) {
+    const params = new URLSearchParams(search || "");
+    const view = {};
+    const range = params.get("range");
+    if (range && ranges.includes(range)) view.range = range;
+    const since = Number(params.get("since"));
+    const until = Number(params.get("until"));
+    if (Number.isInteger(since) && Number.isInteger(until) && since > 0 && until - since >= 60) {
+      view.window = {since: since, until: until};
+    }
+    const site = (params.get("site") || "").trim();
+    if (site && site.length <= 200) view.site = site;
+    return view;
+  }
+
+  // The sample under a pointer: the nearest one, the axis being spaced by
+  // sample (see timeAtX).
+  function indexAtX(geometry, x) {
+    const count = geometry.points.length;
+    if (count <= 1) return 0;
+    const fraction = Math.min(Math.max((x - geometry.left) / geometry.plotWidth, 0), 1);
+    return Math.round(fraction * (count - 1));
+  }
+
+  function xAtIndex(geometry, index) {
+    const count = geometry.points.length;
+    if (count <= 1) return geometry.left + geometry.plotWidth / 2;
+    return geometry.left + (index / (count - 1)) * geometry.plotWidth;
+  }
+
   function zoomWindow(since, until) {
     if (until - since < MIN_ZOOM_SECONDS) {
       const middle = (since + until) / 2;
@@ -437,6 +485,10 @@
     outageFacts,
     sortedBackends,
     timeAtX,
+    viewQuery,
+    viewFromQuery,
+    indexAtX,
+    xAtIndex,
     zoomWindow
   };
 });

@@ -323,8 +323,20 @@ class DragAcrossAChartToZoom(unittest.TestCase):
         zoom = self.section("bindZoom")
         for event in ("pointerdown", "pointermove", "pointerup", "pointercancel", "dblclick"):
             self.assertIn(f'"{event}"', zoom)
-        # A click is not a selection.
-        self.assertIn("if (right - left < 6) return;", zoom)
+        # A click is not a selection; on a touch screen a tap asks for the
+        # reading at that point instead.
+        tap = zoom.split("if (right - left < 6) {")[1].split("}")[0]
+        self.assertIn("return;", tap)
+        self.assertIn("showReading(svg, event)", tap)
+        self.assertNotIn("zoomTo(", tap)
+
+    def test_the_pointer_reads_every_shown_line(self):
+        zoom = self.section("bindZoom")
+        self.assertIn('if (start === null && event.pointerType === "mouse") showReading(svg, event);', zoom)
+        self.assertIn('"pointerleave"', zoom)
+        reading = self.section("showReading")
+        self.assertIn("core.indexAtX(geometry, x)", reading)
+        self.assertIn("legendValue(dataset.spec, reading)", reading)
 
     def test_the_selection_becomes_the_shown_period_and_can_be_undone(self):
         self.assertIn("zoomHistory.push(", self.section("zoomTo"))
