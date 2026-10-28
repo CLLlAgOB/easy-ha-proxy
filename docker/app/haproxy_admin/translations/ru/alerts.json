@@ -96,6 +96,18 @@
     "repeated": "повтор",
     "suppressed": "сдержано",
     "escalated": "усилилось",
-    "dismissed": "закрыто вручную"
+    "dismissed": "закрыто вручную",
+    "alerting is switched off": "оповещения выключены",
+    "the rule is switched off": "условие выключено",
+    "below the configured minimum severity": "ниже выбранной важности",
+    "acknowledged": "подтверждено",
+    "email delivery is disabled": "отправка почты выключена",
+    "no channel is configured": "канал доставки не настроен",
+    "email": "почта",
+    "webhook": "webhook",
+    "more than {count} notifications in {minutes} minutes": "больше {count} оповещений за {minutes} мин",
+    "Retry sending now": "Повторить отправку сейчас",
+    "The relay is sending what it held; this alert is checked again in half a minute": "Relay отправляет то, что держал; оповещение будет проверено снова через полминуты",
+    "An acknowledged alert stays here while its condition holds -- it is still true -- but it leaves the panel's header and sends no reminders. It goes once the condition clears.": "Подтверждённое оповещение остаётся здесь, пока условие выполняется, — оно всё ещё верно, — но уходит из шапки панели и не шлёт напоминаний. Оно исчезнет, когда условие пройдёт."
   }
 }

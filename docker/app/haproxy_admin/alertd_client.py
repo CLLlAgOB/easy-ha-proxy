@@ -81,6 +81,10 @@ def alertd_delete_history(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _post_json("/api/v1/alerts/history/delete", payload)
 
 
+def alertd_retry_mail() -> Dict[str, Any]:
+    return _post_json("/api/v1/alerts/mail/retry", {})
+
+
 def alertd_save_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _post_json("/api/v1/alerts/config", payload)
 

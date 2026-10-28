@@ -113,6 +113,9 @@
               Docker Compose could not reconcile the updated Authelia stack. A
               best-effort Authelia restart was attempted after spool migration.
 
+    - name: Send the mail the relay holds back
+      ansible.builtin.include_tasks: mail_relay_flush.yml
+
     - name: Wait for Authelia after image update
       ansible.builtin.wait_for:
         host: "127.0.0.1"

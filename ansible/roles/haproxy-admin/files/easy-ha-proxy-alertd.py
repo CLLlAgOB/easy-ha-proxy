@@ -86,6 +86,8 @@ MAIL_TIMEOUT_SECONDS = 30
 # message still waiting after this long is not a hiccup.
 MAIL_QUEUE_CHECK_SECONDS = 300
 MAIL_STUCK_SECONDS = 15 * 60
+# After "retry now": long enough for a queue of a few dozen to go out.
+MAIL_RETRY_RECHECK_SECONDS = 30
 
 SCHEMA_VERSION = 2
 
@@ -1519,6 +1521,33 @@ class AlertEngine:
         })
         return bool(stuck)
 
+    def retry_mail(self) -> Dict[str, Any]:
+        """Ask the relay to try everything it holds now, then look again.
+
+        Mail that could not leave waits with a growing pause, up to about an
+        hour; once the cause is fixed, the operator should not have to wait
+        for that timer to see the alert clear.
+        """
+        try:
+            proc = subprocess.run(
+                [DOCKER_BIN, "exec", MAIL_RELAY_CONTAINER, "postqueue", "-f"],
+                capture_output=True, timeout=20, check=False,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            raise RuntimeError(f"the mail relay could not be asked: {exc}") from exc
+        if proc.returncode != 0:
+            raise RuntimeError("the mail relay could not be asked to retry")
+        timer = threading.Timer(MAIL_RETRY_RECHECK_SECONDS, self._recheck_mail)
+        timer.daemon = True
+        timer.start()
+        return {"retried": True, "recheck_in": MAIL_RETRY_RECHECK_SECONDS}
+
+    def _recheck_mail(self) -> None:
+        try:
+            self.check_mail_queue()
+        except Exception:  # pylint: disable=broad-except
+            LOG.exception("mail queue recheck failed")
+
     # -- read models ----------------------------------------------------
     def health(self) -> Dict[str, Any]:
         channels = {
@@ -1791,6 +1820,7 @@ class AlertHandler(BaseHTTPRequestHandler):
             "/api/v1/alerts/quieten",
             "/api/v1/alerts/dismiss",
             "/api/v1/alerts/history/delete",
+            "/api/v1/alerts/mail/retry",
         ):
             self._send_json(404, {"ok": False, "error": "not found"})
             return
@@ -1805,6 +1835,7 @@ class AlertHandler(BaseHTTPRequestHandler):
             "/api/v1/alerts/quieten": lambda: engine.quieten(payload),
             "/api/v1/alerts/dismiss": lambda: engine.dismiss(payload),
             "/api/v1/alerts/history/delete": lambda: {"deleted": engine.delete_history(payload)},
+            "/api/v1/alerts/mail/retry": engine.retry_mail,
         }
         if path in actions:
             try:

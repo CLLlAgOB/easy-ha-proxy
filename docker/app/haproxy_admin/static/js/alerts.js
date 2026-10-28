@@ -80,10 +80,29 @@
     return { ok: response.ok && payload.ok !== false, payload };
   }
 
+  // A phrase from the daemon is translated whole or not at all: the general
+  // translator replaces the words it knows one by one, which turned "the rule
+  // is switched off" into half a sentence in each language.
+  const STORM = /^more than (\d+) notifications in (\d+) minutes$/;
+
+  function known(text) {
+    const value = String(text == null ? "" : text);
+    const messages = (window.HAPROXY_ADMIN_I18N && window.HAPROXY_ADMIN_I18N.messages) || {};
+    if (Object.prototype.hasOwnProperty.call(messages, value)) return messages[value];
+    if (value.startsWith("muted until ")) {
+      return `${known("Muted until")} ${value.slice("muted until ".length)}`;
+    }
+    const storm = STORM.exec(value);
+    if (storm) {
+      return t("more than {count} notifications in {minutes} minutes", { count: storm[1], minutes: storm[2] });
+    }
+    return value;
+  }
+
   function badge(kind, text) {
     const span = document.createElement("span");
     span.className = `al-badge al-${kind}`;
-    span.textContent = t(text);
+    span.textContent = known(text);
     span.setAttribute("data-i18n-skip", "");
     span.setAttribute("translate", "no");
     return span;
@@ -163,6 +182,15 @@
     if (kinds[entry.rule] === "event") {
       td.appendChild(smallButton("Dismiss", () => act("/api/alerts/dismiss", key)));
     }
+    // Mail held back waits up to an hour between attempts; once the cause is
+    // fixed there is no reason to wait for that.
+    if (entry.rule === "mail.delivery_failed") {
+      td.appendChild(smallButton("Retry sending now", async () => {
+        const ok = await act("/api/alerts/mail/retry", {});
+        const status = byId("al-status");
+        if (ok && status) status.textContent = t("The relay is sending what it held; this alert is checked again in half a minute");
+      }));
+    }
     return td;
   }
 
@@ -178,8 +206,13 @@
     const rows = (active || [])
       .map((row) => ({ ...row, kind: "firing" }))
       .concat((pending || []).map((row) => ({ ...row, kind: "pending" })));
+    const now = Date.now() / 1000;
     rows.forEach((entry) => {
       const tr = document.createElement("tr");
+      // Acknowledged or muted: still true, so still listed, but quiet.
+      const muted = Number(entry.muted_until) > now;
+      const acknowledged = Number(entry.acknowledged_ts) > 0 && !Number(entry.muted_until);
+      if (entry.kind === "firing" && (muted || acknowledged)) tr.className = "al-quiet";
       cell(tr, entry.rule);
       cell(tr, entry.subject);
       cell(tr, badge(entry.severity || "info", entry.severity || "info"));
@@ -229,7 +262,7 @@
       cell(tr, formatTime(event.ts));
       cell(tr, event.rule);
       cell(tr, event.subject);
-      cell(tr, t(event.transition));
+      cell(tr, known(event.transition));
       cell(tr, badge(event.severity || "info", event.severity || "info"));
       const delivery = event.delivered
         ? badge("ok", event.delivered)

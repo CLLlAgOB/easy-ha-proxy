@@ -1,0 +1,21 @@
+# Mail the relay could not deliver waits with a growing pause, up to about an
+# hour between attempts. After the relay is set up again -- an update that
+# fixes delivery, say -- it is sent now rather than by that timer. Best
+# effort: a relay still starting, or not used at all, changes nothing.
+- name: Send the mail the relay holds back
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mail_relay
+      - postqueue
+      - -f
+  register: authelia_mail_relay_flush
+  changed_when: false
+  failed_when: false
+  retries: 3
+  delay: 3
+  until: authelia_mail_relay_flush.rc == 0
+  when: >-
+    mail_notify_enabled | default(false) | bool
+    or mail_relay_server | default(false) | bool

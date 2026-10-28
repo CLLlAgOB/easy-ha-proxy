@@ -105,6 +105,9 @@
               legacy spool migration stopped Authelia, a best-effort restart
               was attempted and the old relay spool was not deleted explicitly.
 
+    - name: Send the mail the relay holds back
+      ansible.builtin.include_tasks: mail_relay_flush.yml
+
     - name: Inspect Authelia container state after compose up
       ansible.builtin.command:
         argv:

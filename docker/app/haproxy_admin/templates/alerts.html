@@ -84,6 +84,7 @@
 
 .al-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
 .al-row-actions { white-space: nowrap; }
+.al-quiet td:not(.al-row-actions) { opacity: .55; }
 .al-row-actions .btn { padding: 3px 9px; font-size: 12px; margin-right: 4px; }
 .al-row-actions select {
   padding: 3px 6px;
@@ -155,6 +156,11 @@
     </table>
   </div>
   <div class="al-empty" id="al-active-empty">Nothing is firing</div>
+  <div class="table-meta">
+    An acknowledged alert stays here while its condition holds -- it is still
+    true -- but it leaves the panel's header and sends no reminders. It goes
+    once the condition clears.
+  </div>
 </div>
 
 <div class="card">

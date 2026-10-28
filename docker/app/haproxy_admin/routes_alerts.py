@@ -17,6 +17,7 @@ from .alertd_client import (
     alertd_history,
     alertd_portal,
     alertd_quieten,
+    alertd_retry_mail,
     alertd_save_config,
     alertd_send_test,
     alertd_state,
@@ -199,6 +200,27 @@ def api_alerts_dismiss():
         "alerts.dismiss",
         object_type="alert",
         object_id=f"{rule}:{subject}",
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        detail="" if ok else str(result.get("error") or "")[:300],
+    )
+    return jsonify(result), 200 if ok else 400
+
+
+@bp.post("/api/alerts/mail/retry")
+def api_alerts_mail_retry():
+    """Have the mail relay try what it holds now instead of at its next turn.
+
+    Any operator may: it sends nothing that was not already on its way.
+    """
+    try:
+        result = alertd_retry_mail()
+    except AlertdUnavailable as exc:
+        return _unavailable(exc)
+    ok = bool(result.get("ok"))
+    record_request(
+        "alerts.mail_retry",
+        object_type="alert",
+        object_id="mail.delivery_failed:relay",
         result=RESULT_SUCCESS if ok else RESULT_FAILURE,
         detail="" if ok else str(result.get("error") or "")[:300],
     )

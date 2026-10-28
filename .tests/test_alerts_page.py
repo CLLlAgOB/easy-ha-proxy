@@ -27,7 +27,7 @@ class RouteGuardTests(unittest.TestCase):
             block = self.source.split(route)[1].split("@bp.")[0]
             self.assertNotIn("_superadmin", block, route)
             self.assertIn("record_request(", block, route)
-        self.assertEqual(self.source.count("@bp.post"), 5)
+        self.assertEqual(self.source.count("@bp.post"), 6)
 
     def test_reads_stay_open_like_the_other_monitoring_pages(self):
         for route in ("/api/alerts/state", "/api/alerts/health", "/api/alerts/history"):
