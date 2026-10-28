@@ -40,6 +40,14 @@ def _unavailable(exc: Exception):
     return jsonify({"ok": False, "unavailable": True, "error": str(exc)}), 503
 
 
+def _offset(value) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(1_000_000, number))
+
+
 def _limit(value, default: int = 100) -> int:
     try:
         number = int(value)
@@ -73,7 +81,8 @@ def api_alerts_health():
 def api_alerts_history():
     params = {
         "limit": _limit(request.args.get("limit")),
-        "offset": _limit(request.args.get("offset", 0), default=0),
+        # A page offset starts at 0; the limit's floor of 1 hid the newest entry.
+        "offset": _offset(request.args.get("offset")),
     }
     for key in ("rule", "severity"):
         value = str(request.args.get(key) or "").strip()

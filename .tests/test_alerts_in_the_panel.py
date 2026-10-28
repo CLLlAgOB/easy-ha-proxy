@@ -79,6 +79,19 @@ class TheRoutes(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "mute it instead")
         self.assertEqual(self.audit.call_args.kwargs["result"], self.module.RESULT_FAILURE)
 
+    def test_the_first_page_of_history_starts_at_the_newest_entry(self):
+        # The offset went through the limit's floor of 1, so the newest
+        # entry -- the one just recorded -- never showed.
+        app = flask.Flask(__name__)
+        app.add_url_rule("/api/alerts/history", view_func=self.module.api_alerts_history)
+        client = app.test_client()
+        with mock.patch.object(self.module, "alertd_history",
+                               return_value={"ok": True, "events": []}) as history:
+            for query, expected in (("", 0), ("?offset=0", 0), ("?offset=-5", 0),
+                                    ("?offset=abc", 0), ("?offset=200", 200)):
+                client.get(f"/api/alerts/history{query}")
+                self.assertEqual(history.call_args.args[0]["offset"], expected, query)
+
     def test_only_a_superadmin_deletes_history(self):
         with mock.patch.object(self.module, "alertd_delete_history") as delete:
             response = self.client.post("/api/alerts/history/delete", json={"all": True})
