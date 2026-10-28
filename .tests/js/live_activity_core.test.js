@@ -27,6 +27,7 @@ test("nothing saved, or something unreadable, means the defaults", () => {
     window: 60,
     refresh: 5,
     tab: "addresses",
+    admin: false,
     sort: {addresses: {key: "requests", dir: -1}, sites: {key: "requests", dir: -1}}
   });
 });
@@ -50,8 +51,10 @@ test("a saved refresh and tab are kept only if the page offers them", () => {
 });
 
 test("a saved sort order is kept only if it names a column", () => {
-  const kept = core.restoreSettings({sort: {addresses: {key: "bytes", dir: 1}, sites: {key: "avg_ms", dir: -1}}});
-  assert.deepEqual(kept.sort, {addresses: {key: "bytes", dir: 1}, sites: {key: "avg_ms", dir: -1}});
+  const kept = core.restoreSettings({sort: {addresses: {key: "bytes", dir: 1}, sites: {key: "p95_ms", dir: -1}}});
+  assert.deepEqual(kept.sort, {addresses: {key: "bytes", dir: 1}, sites: {key: "p95_ms", dir: -1}});
+  // The average went: a sort saved by it falls back.
+  assert.deepEqual(core.restoreSettings({sort: {sites: {key: "avg_ms", dir: -1}}}).sort, core.defaults().sort);
   // A damaged entry used to be taken as it was, and the table then sorted
   // by address alone. Each table falls back on its own.
   const damaged = core.restoreSettings({
@@ -65,7 +68,7 @@ test("the columns the page restores are the columns it can sort by", () => {
   const page = fs.readFileSync(path.join(APP, "templates/live_activity.html"), "utf8");
   for (const [table, keys] of Object.entries(core.SORT_KEYS)) {
     const panel = page.split(`data-panel="${table}"`)[1].split("data-panel=")[0];
-    const headers = Array.from(panel.matchAll(/data-sort="([a-z_]+)"/g), (match) => match[1]);
+    const headers = Array.from(panel.matchAll(/data-sort="([a-z0-9_]+)"/g), (match) => match[1]);
     assert.deepEqual(headers.sort(), keys.slice().sort(), table);
   }
 });
@@ -83,15 +86,17 @@ test("a typed window is between 5 seconds and an hour", () => {
 /* ---------- filters ---------- */
 
 test("only the filters that are set go to the server", () => {
-  assert.deepEqual(core.requestParams({window: 60}), {window: 60});
+  // The panel's own requests are left out unless asked for.
+  assert.deepEqual(core.requestParams({window: 60}), {window: 60, hide_admin: "1"});
+  assert.deepEqual(core.requestParams({window: 60, admin: true}), {window: 60});
   assert.deepEqual(
     core.requestParams({
       window: 300, ip: " 192.0.2.7 ", host: "shop.example", country: "NL",
-      status: "4xx", q: "  wp-login ", blocked: true, banned: true
+      status: "4xx", q: "  wp-login ", blocked: true, banned: true, admin: true
     }),
     {window: 300, ip: "192.0.2.7", host: "shop.example", country: "NL", status: "4xx", q: "wp-login", blocked: "1", banned: "1"}
   );
-  assert.deepEqual(core.requestParams({window: 60, ip: "   ", q: "", blocked: false}), {window: 60});
+  assert.deepEqual(core.requestParams({window: 60, ip: "   ", q: "", blocked: false, admin: true}), {window: 60});
 });
 
 test("a chosen site stays selectable after its last request leaves the window", () => {
@@ -262,4 +267,23 @@ test("every word the page is given to translate is in Russian", () => {
     assert.ok(Object.prototype.hasOwnProperty.call(russian, word), word);
   }
   assert.deepEqual(Array.from(label.asked).sort(), ["days", "hr", "min", "sec"]);
+});
+
+test("the admin panel's own requests stay hidden unless the viewer chose them", () => {
+  assert.equal(core.restoreSettings({admin: true}).admin, true);
+  for (const value of ["yes", 1, null, undefined]) {
+    assert.equal(core.restoreSettings({admin: value}).admin, false, String(value));
+  }
+});
+
+test("a point on the timeline is a bar, and a bar is a span of seconds", () => {
+  assert.equal(core.timelineIndex(0, 60), 0);
+  assert.equal(core.timelineIndex(0.5, 60), 30);
+  assert.equal(core.timelineIndex(1, 60), 59);
+  assert.equal(core.timelineIndex(-0.2, 60), 0);
+  assert.equal(core.timelineIndex(0.5, 0), -1);
+  const data = {now: 1000, window: 300, bucket_seconds: 5};
+  assert.deepEqual(core.timelineSpan(0, data), {from: 700, to: 705});
+  // The last bar ends now, not a bucket later.
+  assert.deepEqual(core.timelineSpan(59, {now: 1002, window: 300, bucket_seconds: 5}), {from: 997, to: 1002});
 });

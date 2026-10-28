@@ -93,12 +93,16 @@ def normalize_request(args: Dict[str, Any]) -> Dict[str, Any]:
     country = str(args.get("country") or "").strip().upper()
     if re.fullmatch(r"[A-Z]{2}", country):
         request["country"] = country
+    # The admin panel's own polling is most of a quiet gateway's traffic:
+    # left out unless the page asks for it.
+    if str(args.get("hide_admin") or "").lower() in ("1", "true", "yes", "on"):
+        request["hide_admin"] = True
     return request
 
 
 def fetch_snapshot(request: Dict[str, Any]) -> Dict[str, Any]:
     params = {key: value for key, value in request.items() if key != "country"}
-    for flag in ("blocked", "banned"):
+    for flag in ("blocked", "banned", "hide_admin"):
         if params.get(flag):
             params[flag] = "1"
     try:

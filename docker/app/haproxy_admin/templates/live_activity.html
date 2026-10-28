@@ -66,7 +66,25 @@
 .la-card.la-bad .la-value { color: #cc4b4b; }
 .la-note { font-size: 12px; color: var(--text-secondary); margin-top: 10px; min-height: 16px; }
 .la-note.la-warn { color: #c8a13a; }
-.la-timeline { width: 100%; height: 70px; margin-top: 12px; display: block; }
+.la-timeline { width: 100%; height: 70px; margin-top: 12px; display: block; cursor: crosshair; }
+.la-timeline-wrap { position: relative; }
+.la-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.la-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.la-legend i, .la-timeline-tip i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+.la-timeline-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.la-timeline-tip[hidden] { display: none; }
 .la-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .la-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .la-table-wrap { overflow-x: auto; }
@@ -189,6 +207,9 @@
     <label class="la-check" title="Addresses in the ban table right now, with everything they sent in the window -- including requests from before the ban.">
       <input type="checkbox" id="la-banned-only"> Only banned now
     </label>
+    <label class="la-check" title="The page you are looking at polls the gateway, as does every other page of the panel. On a quiet gateway that is most of the traffic.">
+      <input type="checkbox" id="la-admin"> Show the admin panel's own requests
+    </label>
     <button type="button" class="btn btn-small" id="la-reset">Reset filters</button>
   </div>
 
@@ -203,7 +224,16 @@
     <div class="la-card"><div class="la-label">Open connections</div><div class="la-value" id="la-connections" data-i18n-skip translate="no">—</div></div>
   </div>
 
-  <svg class="la-timeline" id="la-timeline" preserveAspectRatio="none" aria-hidden="true"></svg>
+  <div class="la-timeline-wrap">
+    <svg class="la-timeline" id="la-timeline" preserveAspectRatio="none" aria-hidden="true"></svg>
+    <div class="la-timeline-tip" id="la-timeline-tip" data-i18n-skip translate="no" hidden></div>
+    <div class="la-axis" id="la-axis" data-i18n-skip translate="no"><span></span><span></span><span></span></div>
+  </div>
+  <div class="la-legend">
+    <span><i style="background:#2e9e5b"></i>Answered</span>
+    <span><i style="background:#c8a13a"></i>Errors</span>
+    <span><i style="background:#cc4b4b"></i>Refused</span>
+  </div>
   <div class="la-reasons" id="la-reasons" data-i18n-skip translate="no"></div>
   <div class="la-note" id="la-note" data-i18n-skip translate="no"></div>
 </div>
@@ -248,7 +278,8 @@
           <th data-sort="server_errors" class="la-num">5xx</th>
           <th data-sort="blocked" class="la-num">Refused</th>
           <th data-sort="addresses" class="la-num">Addresses</th>
-          <th data-sort="avg_ms" class="la-num">Avg time</th>
+          <th data-sort="p50_ms" class="la-num" title="How soon the server answered half of the requests">Median</th>
+          <th data-sort="p95_ms" class="la-num" title="How soon the server answered 95 of every 100 requests">p95</th>
           <th>Backend</th>
         </tr>
       </thead>
@@ -266,7 +297,7 @@
           <th>Site</th>
           <th>Request</th>
           <th>Status</th>
-          <th class="la-num">Time, ms</th>
+          <th class="la-num" title="How soon the server answered; the whole request is in the tooltip">Server answer</th>
           <th>Refused because</th>
         </tr>
       </thead>

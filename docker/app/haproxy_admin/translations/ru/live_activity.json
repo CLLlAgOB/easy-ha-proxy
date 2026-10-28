@@ -81,6 +81,16 @@
     "Only refused by the gateway": "Только отказы шлюза",
     "Requests the gateway refused itself: a ban, a geo block, a limit, an address rule. A request it let through to the site is not one of them, even from an address banned later.": "Запросы, которые шлюз отклонил сам: бан, геоблок, лимит, правило по адресу. Запрос, пропущенный на сайт, сюда не входит, даже если адрес потом забанили.",
     "Only banned now": "Только забаненные сейчас",
-    "Addresses in the ban table right now, with everything they sent in the window -- including requests from before the ban.": "Адреса, которые сейчас в таблице банов, со всеми их запросами за окно — в том числе отправленными до бана."
+    "Addresses in the ban table right now, with everything they sent in the window -- including requests from before the ban.": "Адреса, которые сейчас в таблице банов, со всеми их запросами за окно — в том числе отправленными до бана.",
+    "Show the admin panel's own requests": "Показывать запросы самой панели",
+    "The page you are looking at polls the gateway, as does every other page of the panel. On a quiet gateway that is most of the traffic.": "Эта страница, как и все страницы панели, сама опрашивает шлюз. На спокойном шлюзе это большая часть трафика.",
+    "The admin panel's own requests are not counted": "запросы самой панели не учитываются",
+    "Answered": "Отвечено",
+    "p95": "p95",
+    "Server answer": "Ответ сервера",
+    "How soon the server answered half of the requests": "За какое время сервер ответил на половину запросов",
+    "How soon the server answered 95 of every 100 requests": "За какое время сервер ответил на 95 запросов из 100",
+    "How soon the server answered; the whole request is in the tooltip": "Как быстро ответил сервер; полное время запроса — в подсказке",
+    "The whole request": "Весь запрос"
   }
 }

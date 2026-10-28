@@ -3249,9 +3249,15 @@ LIVE_MAX_EVENTS = 300
 LIVE_CACHE_SECONDS = 2.0
 LIVE_WANTED_SECONDS = 120
 LIVE_FAST_TICK_SECONDS = 2.0
+# The admin panel's own backend. On a quiet gateway the page watching the
+# traffic is most of it -- the panel polls -- so it is left out unless asked.
+LIVE_ADMIN_BACKEND = "be_admin"
+# After a restart the buffer is filled again from the tail of the log, at
+# most this much of it: an hour of a busy gateway, a few seconds to parse.
+LIVE_REFILL_BYTES = 16 * 1024 * 1024
 # Index of each field in a live record.
 (L_TS, L_IP, L_STATUS, L_HOST, L_PATH, L_METHOD, L_BACKEND, L_BYTES,
- L_DURATION, L_TERM, L_REASON, L_REFUSAL) = range(12)
+ L_DURATION, L_TERM, L_REASON, L_REFUSAL, L_RESPONSE) = range(13)
 
 _INTERN: Dict[str, str] = {}
 
@@ -3404,6 +3410,9 @@ def live_record(request: "ParsedRequest", ts: float) -> tuple:
         _interned(request.term),
         request.ban_reason,
         live_refusal(request.status, request.backend, request.term, request.ban_reason),
+        # %Tr: how soon the server answered; -1 when it did not. The total
+        # (L_DURATION) also holds downloads and long polls.
+        request.response_ms,
     )
 
 
@@ -3424,6 +3433,8 @@ def _live_matches(record: tuple, filters: Dict[str, Any]) -> bool:
         return False
     ips = filters.get("ips")
     if ips is not None and record[L_IP] not in ips:
+        return False
+    if filters.get("hide_admin") and record[L_BACKEND].startswith(LIVE_ADMIN_BACKEND + "/"):
         return False
     return True
 
@@ -3455,7 +3466,27 @@ def live_filters(raw: Dict[str, Any]) -> Dict[str, Any]:
     # gateway let through and "blocked" therefore does not show.
     if str(raw.get("banned") or "").lower() in ("1", "true", "yes", "on"):
         filters["banned"] = True
+    if str(raw.get("hide_admin") or "").lower() in ("1", "true", "yes", "on"):
+        filters["hide_admin"] = True
     return filters
+
+
+def _server_times(values: List[int]) -> Dict[str, Optional[int]]:
+    """Median and 95th percentile of how soon the server answered.
+
+    An average lets one slow request in twenty hide, and a mean of totals
+    put a quiet Nextcloud at twelve seconds: its long polls wait for news.
+    None without an answered request, never 0 ms.
+    """
+    if not values:
+        return {"p50_ms": None, "p95_ms": None, "avg_ms": None}
+    ordered = sorted(values)
+    last = len(ordered) - 1
+    return {
+        "p50_ms": ordered[round(0.50 * last)],
+        "p95_ms": ordered[round(0.95 * last)],
+        "avg_ms": sum(ordered) // len(ordered),
+    }
 
 
 def live_aggregate(
@@ -3475,9 +3506,11 @@ def live_aggregate(
     error_counts = [0] * buckets
     blocked_counts = [0] * buckets
     # address -> [requests, errors, 5xx, refused, bytes, ms, first ts,
-    #             last record, {host: n} or host, {reason: n} or reason]
+    #             last record, {host: n} or host, {reason: n} or reason,
+    #             server ms, answered]
     addresses: Dict[str, list] = {}
-    # site -> [requests, errors, 5xx, refused, ms, set of addresses, backend]
+    # site -> [requests, errors, 5xx, refused, ms, set of addresses, backend,
+    #          server ms of each answered request]
     sites: Dict[str, list] = {}
     statuses: Counter = Counter()
     refusals: Counter = Counter()
@@ -3515,11 +3548,16 @@ def live_aggregate(
                 server_total += 1
 
         ip = record[1]
+        answered_ms = record[12] if len(record) > 12 and record[12] >= 0 else -1
         entry = addresses.get(ip)
         if entry is None:
             addresses[ip] = [1, int(error), int(server_error), int(bool(refusal)), size,
-                             record[8], ts, record, host, (record[10] or refusal) if refusal else ""]
+                             record[8], ts, record, host, (record[10] or refusal) if refusal else "",
+                             max(0, answered_ms), int(answered_ms >= 0)]
         else:
+            if answered_ms >= 0:
+                entry[10] += answered_ms
+                entry[11] += 1
             entry[0] += 1
             entry[1] += error
             entry[2] += server_error
@@ -3544,7 +3582,9 @@ def live_aggregate(
 
         site = sites.get(host)
         if site is None:
-            site = sites[host] = [0, 0, 0, 0, 0, set(), ""]
+            site = sites[host] = [0, 0, 0, 0, 0, set(), "", []]
+        if answered_ms >= 0:
+            site[7].append(answered_ms)
         site[0] += 1
         site[1] += error
         site[2] += server_error
@@ -3570,7 +3610,7 @@ def live_aggregate(
         return {
             "ip": ip, "requests": entry[0], "rate": round(entry[0] / span, 2),
             "errors": entry[1], "server_errors": entry[2], "blocked": entry[3],
-            "bytes": entry[4], "avg_ms": entry[5] // entry[0],
+            "bytes": entry[4], "avg_ms": entry[10] // entry[11] if entry[11] else None,
             "top_host": top_host, "hosts": host_count if top_host or host_count > 1 else 0,
             "last": last[0], "last_status": last[2], "last_method": last[5],
             "last_path": last[4][:160], "last_host": last[3], "reason": reason,
@@ -3588,7 +3628,7 @@ def live_aggregate(
             {
                 "host": host, "requests": v[0], "errors": v[1], "server_errors": v[2],
                 "blocked": v[3], "addresses": len(v[5]), "backend": v[6],
-                "avg_ms": v[4] // v[0],
+                **_server_times(v[7]),
             }
             for host, v in sites.items()
         ),
@@ -3620,6 +3660,7 @@ def live_aggregate(
                 "ts": r[0], "ip": r[1], "host": r[3], "method": r[5], "path": r[4],
                 "status": r[2], "duration_ms": r[8], "bytes": r[7], "backend": r[6],
                 "term": r[9], "refusal": r[11], "ban_reason": r[10],
+                "response_ms": r[12] if len(r) > 12 and r[12] >= 0 else None,
             }
             for r in reversed(events)
         ],
@@ -3669,6 +3710,27 @@ class LiveBuffer:
                 oldest = int(records[-1][L_TS]) // 3600 * 3600 - 25 * 3600
                 for key in [key for key in self._hourly if key[0] < oldest]:
                     del self._hourly[key]
+
+    def refill(self, records: List[tuple], complete_since: float) -> None:
+        """Put back what the log says happened before the daemon started.
+
+        Older than anything already held, so added on the left; the bound on
+        size drops the oldest first, as always. From complete_since on, the
+        buffer has every request again.
+        """
+        if not records:
+            return
+        with self._lock:
+            self._records.extendleft(reversed(records))
+            overflow = len(self._records) - self.max_records
+            for _ in range(max(0, overflow)):
+                self._records.popleft()
+            for record in records:
+                if record[L_STATUS] in (400, 451):
+                    hour = int(record[L_TS]) // 3600 * 3600
+                    self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
+            self.started = min(self.started, float(complete_since))
+            self._cache.clear()
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -3828,11 +3890,68 @@ class GuardEngine:
         if thread is not None:
             thread.join(timeout=10)
 
+    def refill_live(self, now: float) -> int:
+        """After a restart, the live page's last hour from the log's tail.
+
+        Only up to where the cursor resumes: what comes after it is read the
+        usual way. Only into the live buffer: those lines were scored, stored
+        and counted before the restart. A rotated log is not followed back
+        into the old file. Returns the requests put back.
+        """
+        if self.live is None:
+            return 0
+        try:
+            stat = os.stat(self.config.log_file)
+        except OSError:
+            return 0
+        if self.cursor.inode == 0:
+            end = int(stat.st_size)
+        elif self.cursor.inode == int(stat.st_ino):
+            end = min(self.cursor.offset, int(stat.st_size))
+        else:
+            return 0
+        start = max(0, end - LIVE_REFILL_BYTES)
+        if end <= start:
+            return 0
+        try:
+            with open(self.config.log_file, "rb") as handle:
+                handle.seek(start)
+                data = handle.read(end - start)
+        except OSError:
+            return 0
+        if start > 0:
+            # The first line is cut: it begins before what was read.
+            data = data[data.find(b"\n") + 1:]
+        horizon = now - self.live.max_seconds
+        records: List[tuple] = []
+        reached_back = start == 0
+        for raw in data.splitlines():
+            line = raw[:MAX_LOG_LINE_BYTES].decode("utf-8", "replace")
+            ts = line_epoch(line)
+            if ts is None:
+                continue
+            if ts < horizon:
+                reached_back = True
+                continue
+            request = parse_access_line(line)
+            if request is not None:
+                records.append(live_record(request, ts))
+        if not records:
+            return 0
+        self.live.refill(records, horizon if reached_back else records[0][L_TS])
+        return len(records)
+
     def _run(self) -> None:
         interval = self.config.poll_interval_seconds
         next_maintenance = (
             time.monotonic() + self.config.maintenance_interval_seconds
         )
+        try:
+            refilled = self.refill_live(time.time())
+            if refilled:
+                LOG.info("Live activity: %d requests from before the start read back", refilled)
+        except Exception:  # pylint: disable=broad-except
+            LOG.exception("Could not read the live activity back from the log")
         while not self._stop.is_set():
             started = time.monotonic()
             try:

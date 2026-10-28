@@ -42,6 +42,7 @@
     try {
       window.localStorage.setItem(STORE, JSON.stringify({
         window: state.window, refresh: state.refresh, tab: state.tab, sort: state.sort,
+        admin: state.admin,
       }));
     } catch (error) {
       // The choice lasts for this page only.
@@ -86,6 +87,11 @@
     return `<button type="button" class="la-link la-mono" data-filter-host="${esc(host)}">${esc(host)}</button>`;
   }
 
+  // How soon the server answered; a dash when it did not, never "0 ms".
+  function msOrDash(value) {
+    return value === null || value === undefined ? "—" : `${number(value)} ${esc(t("ms"))}`;
+  }
+
   function refusalLabel(name) {
     const labels = (state.data && state.data.refusal_labels) || {};
     return t(labels[name] || name);
@@ -103,6 +109,7 @@
       q: byId("la-q").value,
       blocked: byId("la-blocked").checked,
       banned: byId("la-banned-only").checked,
+      admin: state.admin,
     });
   }
 
@@ -183,6 +190,9 @@
       note.textContent = `${t("Time window")}: ${duration(said.seconds)} · ${t("one bar per")} ${duration(said.bucket)}`;
       note.classList.remove("la-warn");
     }
+    if (!state.admin) {
+      note.textContent += ` · ${t("The admin panel's own requests are not counted")}`;
+    }
 
     const reasons = byId("la-reasons");
     reasons.textContent = "";
@@ -206,6 +216,60 @@
     );
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
     svg.innerHTML = parts.join("");
+    // When the window starts, its middle and now: the bars alone said
+    // neither how long ago a burst was nor when.
+    const axis = byId("la-axis");
+    if (axis) {
+      const now = Number(data.now) || 0;
+      const window = Number(data.window) || 0;
+      const marks = [now - window, now - window / 2, now];
+      axis.querySelectorAll("span").forEach((span, index) => {
+        span.textContent = clock(marks[index]);
+      });
+    }
+  }
+
+  // What one bar holds, beside the pointer.
+  function showTimelineReading(event) {
+    const svg = byId("la-timeline");
+    const tip = byId("la-timeline-tip");
+    const data = state.data;
+    const bars = (data && data.timeline) || [];
+    if (!svg || !tip || !bars.length) return;
+    const bounds = svg.getBoundingClientRect();
+    const index = core.timelineIndex((event.clientX - bounds.left) / Math.max(1, bounds.width), bars.length);
+    if (index < 0) return;
+    const bar = bars[index];
+    const span = core.timelineSpan(index, data);
+    tip.textContent = "";
+    const when = document.createElement("div");
+    when.className = "la-sub";
+    when.textContent = `${clock(span.from)} – ${clock(span.to)}`;
+    tip.appendChild(when);
+    [["ok", "Answered"], ["errors", "Errors"], ["blocked", "Refused"]].forEach(([key, label]) => {
+      const row = document.createElement("div");
+      const swatch = document.createElement("i");
+      swatch.style.background = TIMELINE_COLOURS[key];
+      row.appendChild(swatch);
+      row.appendChild(document.createTextNode(`${t(label)}: ${number(bar[key])}`));
+      tip.appendChild(row);
+    });
+    tip.hidden = false;
+    const card = svg.parentElement.getBoundingClientRect();
+    const x = event.clientX - card.left;
+    tip.style.left = `${Math.max(4, Math.min(x + 12, card.width - tip.offsetWidth - 4))}px`;
+    tip.style.top = `${bounds.top - card.top - tip.offsetHeight - 6}px`;
+  }
+
+  function bindTimeline() {
+    const svg = byId("la-timeline");
+    const tip = byId("la-timeline-tip");
+    if (!svg || !tip) return;
+    svg.addEventListener("pointermove", showTimelineReading);
+    svg.addEventListener("pointerdown", showTimelineReading);
+    svg.addEventListener("pointerleave", () => {
+      tip.hidden = true;
+    });
   }
 
   function sorted(rows, table) {
@@ -282,7 +346,8 @@
         <td class="la-num">${number(row.server_errors)}</td>
         <td class="la-num">${number(row.blocked)}</td>
         <td class="la-num">${number(row.addresses)}</td>
-        <td class="la-num">${number(row.avg_ms)} ms</td>
+        <td class="la-num">${msOrDash(row.p50_ms)}</td>
+        <td class="la-num">${msOrDash(row.p95_ms)}</td>
         <td class="la-mono">${esc(row.backend || "—")}</td>
       </tr>`).join("");
   }
@@ -298,7 +363,7 @@
         <td>${hostLink(row.host)}</td>
         <td class="la-mono"><span class="la-path" title="${esc(row.method)} ${esc(row.path)}">${esc(row.method)} ${esc(row.path)}</span></td>
         <td>${statusBadge(row.status)}</td>
-        <td class="la-num">${number(row.duration_ms)}</td>
+        <td class="la-num" title="${esc(t("The whole request"))}: ${esc(number(row.duration_ms))} ${esc(t("ms"))}">${msOrDash(row.response_ms)}</td>
         <td>${row.refusal ? `<span class="la-badge la-refused" title="${esc(row.ban_reason || "")}">${esc(refusalLabel(row.refusal))}</span>${row.ban_reason ? `<div class="la-sub">${esc(row.ban_reason)}</div>` : ""}` : ""}</td>
       </tr>`).join("");
   }
@@ -447,6 +512,17 @@
     ["la-host", "la-country", "la-status", "la-blocked", "la-banned-only"].forEach((id) => {
       byId(id).addEventListener("change", applyNow);
     });
+    // A view preference rather than a filter: remembered, and kept by "Reset".
+    const admin = byId("la-admin");
+    if (admin) {
+      admin.checked = Boolean(state.admin);
+      admin.addEventListener("change", () => {
+        state.admin = admin.checked;
+        save();
+        applyNow();
+      });
+    }
+    bindTimeline();
     ["la-ip", "la-q"].forEach((id) => {
       let pending = null;
       byId(id).addEventListener("input", () => {

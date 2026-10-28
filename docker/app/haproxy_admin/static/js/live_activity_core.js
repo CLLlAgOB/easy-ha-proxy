@@ -28,7 +28,7 @@
   // The columns each table can be sorted by, as the page's headers name them.
   const SORT_KEYS = {
     addresses: ["requests", "rate", "errors", "server_errors", "blocked", "bytes", "last"],
-    sites: ["requests", "errors", "server_errors", "blocked", "addresses", "avg_ms"]
+    sites: ["requests", "errors", "server_errors", "blocked", "addresses", "p50_ms", "p95_ms"]
   };
   // Under a flood the page falls behind the log rather than compete with
   // HAProxy for it; past this it says so.
@@ -39,6 +39,8 @@
       window: 60,
       refresh: 5,
       tab: "addresses",
+      // The admin panel's own requests, hidden until asked for.
+      admin: false,
       sort: {
         addresses: {key: "requests", dir: -1},
         sites: {key: "requests", dir: -1}
@@ -61,6 +63,7 @@
     }
     if (REFRESH_CHOICES.includes(Number(saved.refresh))) result.refresh = Number(saved.refresh);
     if (TABS.includes(saved.tab)) result.tab = saved.tab;
+    if (typeof saved.admin === "boolean") result.admin = saved.admin;
     const sort = saved.sort && typeof saved.sort === "object" ? saved.sort : {};
     Object.keys(SORT_KEYS).forEach((table) => {
       const entry = sort[table];
@@ -98,7 +101,24 @@
     if (query) params.q = query;
     if (values.blocked) params.blocked = "1";
     if (values.banned) params.banned = "1";
+    if (!values.admin) params.hide_admin = "1";
     return params;
+  }
+
+  // Which bar of the timeline a position falls on, as a share of its width.
+  function timelineIndex(share, count) {
+    if (!count) return -1;
+    return Math.min(count - 1, Math.max(0, Math.floor(share * count)));
+  }
+
+  // The seconds one bar covers: the window ends now, and the last bar may be
+  // cut short by it.
+  function timelineSpan(index, data) {
+    const now = Number(data.now) || 0;
+    const window = Number(data.window) || 0;
+    const bucket = Math.max(1, Number(data.bucket_seconds) || 1);
+    const from = now - window + index * bucket;
+    return {from: from, to: Math.min(now, from + bucket)};
   }
 
   // A select's choices: the values in the data, plus the current choice if
@@ -263,6 +283,8 @@
     summaryNote,
     refusalCounts,
     timelineRects,
+    timelineIndex,
+    timelineSpan,
     duration,
     bytes
   };
