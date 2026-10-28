@@ -31,6 +31,9 @@ SCANNED = ("ansible/roles", "docker/app/haproxy_admin", "installer", ".tests", "
 # Comments that quote a mistranslation or a Russian page on purpose: the
 # point of them is the Russian text.
 QUOTES_RUSSIAN = {
+    ".tests/js/i18n.test.js",
+    ".tests/test_alert_mail_retry.py",
+    ".tests/test_i18n_whole_sentences.py",
     ".tests/test_api_error_shape.py",
     ".tests/test_backup_schedule_page.py",
     ".tests/test_english_source.py",

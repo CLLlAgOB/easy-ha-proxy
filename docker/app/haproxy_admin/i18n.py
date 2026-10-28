@@ -119,6 +119,31 @@ def _replacement_rules(language: str) -> tuple[tuple[re.Pattern[str] | None, str
     return tuple(rules)
 
 
+# A plain English word, as a sentence has it: lowercase or capitalised, not
+# part of an identifier, a key=value, a path or a domain. Acronyms and mixed
+# case -- HAProxy, TLS, IPv6 -- are names.
+_PLAIN_WORD = re.compile(r"(?<![\w=./\[\]-])([A-Z]?[a-z]+)(?![\w=/\[\]-]|\.\w)")
+_PLACEHOLDER = re.compile(r"\{[A-Za-z0-9_]+\}")
+# A value quoted into a sentence is what someone typed, not a word of it.
+_QUOTED = re.compile(r"""(^|[\s(\[:=,])(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|«[^»\n]*»)""")
+
+
+@lru_cache(maxsize=None)
+def _kept_english(language: str) -> frozenset[str]:
+    """English words the translations keep on purpose: product names, "backend"."""
+
+    kept: set[str] = set()
+    for target in get_messages(language).values():
+        kept.update(re.findall(r"[A-Za-z]+", str(target)))
+    return frozenset(kept)
+
+
+def _partly_known(text: str, language: str) -> bool:
+    kept = _kept_english(language)
+    bare = _QUOTED.sub(r"\1 ", _PLACEHOLDER.sub(" ", text))
+    return any(len(word) >= 2 and word not in kept for word in _PLAIN_WORD.findall(bare))
+
+
 def _sentence_fragment(source: str) -> bool:
     """Whether a catalogue entry is written as a piece of a longer sentence.
 
@@ -159,6 +184,11 @@ def translate(message: str, language: str | None = None, **values: Any) -> str:
             if pattern is not None or not _sentence_fragment(source):
                 continue
             translated = translated.replace(source, target)
+        # Whole or not at all: an English word left over means the sentence
+        # was only partly known, and half of it in each language is worse
+        # than all of it in English.
+        if translated != message and _partly_known(translated, selected):
+            translated = message
     if not values:
         return translated
     try:

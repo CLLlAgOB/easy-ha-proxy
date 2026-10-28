@@ -27,6 +27,18 @@
   // dynamically rendered row, so remember what each source string resolves to.
   const TRANSLATION_CACHE_LIMIT = 5000;
 
+  // A word as a sentence has it: not part of an identifier, a key=value, a
+  // path or a domain. A dot ends a word only where it ends a sentence too.
+  const WORD_BEFORE = "(^|[^\\p{L}\\p{N}_=./-])";
+  const WORD_AFTER = "(?=$|\\.(?![\\p{L}\\p{N}])|[^\\p{L}\\p{N}_=./-])";
+  // A plain English word: lowercase, or capitalised. Acronyms and mixed case
+  // -- HAProxy, TLS, IPv6 -- are names, not words to translate.
+  // Field paths -- sites[0].cookie_attrs -- are names as well.
+  const PLAIN_WORD = /(^|[^\p{L}\p{N}_=./[\]-])([A-Z]?[a-z]+)(?=$|\.(?![\p{L}\p{N}])|[^\p{L}\p{N}_=./[\]-])/gu;
+  const PLACEHOLDER = /\{[A-Za-z0-9_]+\}/g;
+  // A value quoted into a sentence is what someone typed, not a word of it.
+  const QUOTED = /(^|[\s(\[:=,])(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|«[^»\n]*»)/g;
+
   function createTranslator(catalogue) {
     const messages = catalogue || {};
     const replacements = Object.entries(messages)
@@ -37,11 +49,28 @@
         target,
         // A token-aware expression prevents short entries such as "and" from
         // changing letters in the middle of another word, a hyphenated
-        // technical identifier, or a machine-readable key=value fragment.
+        // technical identifier, a machine-readable key=value fragment, a
+        // path or a domain.
         pattern: /^[\p{L}\p{N}_-]+$/u.test(source)
-          ? new RegExp(`(^|[^\\p{L}\\p{N}_=-])${escapeRegex(source)}(?=$|[^\\p{L}\\p{N}_=-])`, "gu")
+          ? new RegExp(`${WORD_BEFORE}${escapeRegex(source)}${WORD_AFTER}`, "gu")
           : null
       }));
+    // English words a translation keeps on purpose -- a product's name,
+    // "backend" -- may stay in a translated sentence.
+    const kept = new Set();
+    Object.values(messages).forEach((target) => {
+      for (const match of String(target).matchAll(/[A-Za-z]+/g)) kept.add(match[0]);
+    });
+    // Any other English word left after the known pieces were replaced means
+    // the sentence was only partly known. Half a sentence in each language
+    // reads worse than the whole of it in English, so it stays in English.
+    function partlyKnown(text) {
+      const bare = text.replace(PLACEHOLDER, " ").replace(QUOTED, "$1 ");
+      for (const match of bare.matchAll(PLAIN_WORD)) {
+        if (match[2].length >= 2 && !kept.has(match[2])) return true;
+      }
+      return false;
+    }
     const translationCache = new Map();
 
     return function translate(value, params) {
@@ -66,6 +95,7 @@
             result = result.split(item.source).join(item.target);
           }
         }
+        if (result !== source && partlyKnown(result)) result = source;
       }
       if (!params) {
         if (translationCache.size >= TRANSLATION_CACHE_LIMIT) translationCache.clear();

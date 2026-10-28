@@ -48,7 +48,7 @@ test("nothing to translate is an empty string, not 'null'", () => {
 });
 
 test("a single word is replaced only where it stands as a word", () => {
-  assert.equal(t("standard and Android"), "standard и Android");
+  assert.equal(t("limit and ban"), "лимит и бан");
   assert.equal(t("limit, ban."), "лимит, бан.");
   // Identifiers and key=value fragments are machine data.
   for (const text of ["rate-limit", "ban_list", "ban=1", "mode=ban", "limit2", "banned"]) {
@@ -58,23 +58,46 @@ test("a single word is replaced only where it stands as a word", () => {
 
 test("a longer entry wins over the words inside it", () => {
   assert.equal(t("Backend traffic: 5"), "Трафик бэкендов: 5");
-  assert.equal(t("Backend: shop"), "Бэкенд: shop");
+  assert.equal(t("Backend: OK"), "Бэкенд: OK");
 });
 
-test("a dot or a slash is a word boundary, so machine output has to be marked", () => {
+test("a path or a domain is machine data, not words", () => {
   // Shown to an operator for a failed backup before the jobs table was
-  // exempt. This is why paths, logs and signatures carry data-i18n-skip.
-  assert.equal(t("etc/iptables/haproxy_ban.rules"), "etc/iptables/haproxy_ban.правила");
-  assert.equal(t("/usr/local/bin/update-geoip.sh"), "/usr/локальный/bin/update-geoip.sh");
+  // exempt: "haproxy_ban.правила", "/usr/локальный/bin".
+  for (const text of ["etc/iptables/haproxy_ban.rules", "/usr/local/bin/update-geoip.sh",
+                      "rules.example.test", "update.available"]) {
+    assert.equal(t(text), text);
+  }
+  // A dot that ends the sentence still ends the word.
+  assert.equal(t("ban."), "бан.");
 });
 
-test("a phrase is replaced inside any sentence that contains it", () => {
-  // The updates page showed the broker's message like this, which is why a
-  // failed installation is now shown through setMessage(..., technical).
-  assert.equal(
-    t("an applied image digest differs from the reviewed update plan"),
-    "an applied image digest отличается от the reviewed update plan"
-  );
+test("a sentence known only in part stays whole in English", () => {
+  // "the правило is switched выкл" in the alerts' history, and the broker's
+  // "an applied image digest отличается от the reviewed update plan".
+  for (const text of [
+    "an applied image digest differs from the reviewed update plan",
+    "standard and Android",
+    "Backend: shop",
+    "the rules are local"
+  ]) {
+    assert.equal(t(text), text);
+  }
+  // Names, acronyms, numbers, placeholders and machine data are not words
+  // left untranslated.
+  assert.equal(t("limit and HAProxy"), "лимит и HAProxy");
+  assert.equal(t("ban 10.0.0.1 and limit 5"), "бан 10.0.0.1 и лимит 5");
+  assert.equal(t("Backend: shop.example.test"), "Бэкенд: shop.example.test");
+  // A quoted value is what someone typed; a field's path is a name.
+  assert.equal(t("Backend: 'my shop'"), "Бэкенд: 'my shop'");
+  assert.equal(t("sites[0].limit: ban"), "sites[0].limit: бан");
+});
+
+test("an English word a translation keeps may stay", () => {
+  // A catalogue that keeps a word in English -- a product's name -- keeps it
+  // in a sentence as well.
+  const keeping = i18n.createTranslator({"Sign in": "Войти", "with": "через", "Authelia": "Authelia"});
+  assert.equal(keeping("Sign in with Authelia"), "Войти через Authelia");
 });
 
 test("values go in after translation and are never translated", () => {
@@ -96,9 +119,9 @@ test("a call with values does not change what the same text means without them",
 });
 
 test("each catalogue is its own translator", () => {
-  const other = i18n.createTranslator({"and": "und"});
-  assert.equal(other("salt and pepper"), "salt und pepper");
-  assert.equal(t("salt and pepper"), "salt и pepper");
+  const other = i18n.createTranslator({"and": "und", "salt": "Salz", "pepper": "Pfeffer"});
+  assert.equal(other("salt and pepper"), "Salz und Pfeffer");
+  assert.equal(t("salt and pepper"), "salt and pepper");
   assert.equal(i18n.createTranslator(undefined)("Save changes"), "Save changes");
 });
 
@@ -177,12 +200,17 @@ test("durations, sizes and percentages come through untouched", () => {
   }
 });
 
-test("machine words in a daemon's sentence come out in two languages", () => {
-  // Not a rule to keep -- word-by-word substitution is the documented
-  // fallback -- but the reason machine output is marked rather than passed
-  // through t(). If this stops being true, the exemptions can be revisited.
-  const mixed = real("an applied image digest differs from the reviewed update plan");
-  assert.ok(CYRILLIC.test(mixed) && LATIN_WORD.test(mixed), mixed);
-  const file = real("/usr/local/bin/update-geoip.sh");
-  assert.notEqual(file, "/usr/local/bin/update-geoip.sh");
+test("a daemon's sentence comes out in one language", () => {
+  // With the real catalogue: whole in Russian when it is known, whole in
+  // English when it is not -- never half of each.
+  for (const text of [
+    "an applied image digest differs from the reviewed update plan",
+    "below the configured something else",
+    "the rule is switched off for now"
+  ]) {
+    const result = real(text);
+    assert.ok(!(CYRILLIC.test(result) && LATIN_WORD.test(result.replace(/\b[A-Z]{2,}\b/g, ""))), result);
+  }
+  assert.equal(real("the rule is switched off"), "условие выключено");
+  assert.equal(real("/usr/local/bin/update-geoip.sh"), "/usr/local/bin/update-geoip.sh");
 });
