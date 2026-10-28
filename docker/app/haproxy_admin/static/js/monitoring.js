@@ -112,7 +112,102 @@
     lineChoices = {};
   }
 
+  /* ---------- monitors ---------- */
+
+  // Which monitors run, as the summary reports them (the Monitors card);
+  // all of them until it does. The machine's charts belong to "machine",
+  // its group lines and component list to "components".
+  let monitors = null;
+  let monitorsEditable = false;
+  const CHART_MONITORS = {
+    requests: "requests",
+    traffic: "traffic",
+    responses: "responses",
+    latency: "latency",
+    connections: "connections",
+    cpu: "machine",
+    memory: "machine"
+  };
+  const GROUP_LINES = ["helpers", "containers", "other"];
+
+  function monitorOn(name) {
+    return !monitors || monitors[name] !== false;
+  }
+
+  function chartOn(name) {
+    return monitorOn(CHART_MONITORS[name]);
+  }
+
+  // A line that only exists because components are gathered.
+  function componentLine(spec) {
+    return Boolean(spec.component) || GROUP_LINES.includes(spec.key);
+  }
+
+  function setOff(id, off) {
+    const element = byId(id);
+    if (element) element.classList.toggle("mon-off", off);
+  }
+
+  function applyMonitors(next) {
+    if (!next || typeof next !== "object") return;
+    monitors = next;
+    CHARTS.forEach((chart) => {
+      const card = document.querySelector(`.mon-chart[data-chart="${chart.name}"]`);
+      if (card) card.classList.toggle("mon-off", !chartOn(chart.name));
+    });
+    setOff("mon-card-cpu", !monitorOn("machine"));
+    setOff("mon-card-memory", !monitorOn("machine"));
+    setOff("mon-channels-card", !monitorOn("uplinks"));
+    setOff("mon-backends-card", !monitorOn("availability"));
+    document.querySelectorAll("#mon-monitors-card input[data-monitor]").forEach((input) => {
+      input.checked = monitorOn(input.dataset.monitor);
+      // The split per component is read while the machine is: without it
+      // there is nothing to split.
+      input.disabled = !monitorsEditable ||
+        (input.dataset.monitor === "components" && !monitorOn("machine"));
+    });
+  }
+
+  function bindMonitors() {
+    const card = byId("mon-monitors-card");
+    if (!card) return;
+    monitorsEditable = card.dataset.editable === "true";
+    card.querySelectorAll("input[data-monitor]").forEach((input) => {
+      input.disabled = !monitorsEditable;
+      input.checked = true;
+      input.addEventListener("change", async () => {
+        const name = input.dataset.monitor;
+        const wanted = input.checked;
+        setText("mon-monitors-result", "");
+        try {
+          const response = await fetch("/api/monitoring/monitors", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+              "X-CSRFToken": csrfToken()
+            },
+            credentials: "same-origin",
+            body: JSON.stringify({ monitors: { [name]: wanted } })
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || !payload.monitors) {
+            throw new Error(payload.error || `HTTP ${response.status}`);
+          }
+          applyMonitors(payload.monitors);
+          setText("mon-monitors-result", uiText("Saved"));
+          // A chart switched back on has nothing drawn yet.
+          loadAll();
+        } catch (error) {
+          input.checked = !wanted;
+          setText("mon-monitors-result", `${uiText("Not saved")}: ${error.message}`);
+        }
+      });
+    });
+  }
+
   function lineVisible(chart, spec) {
+    if (componentLine(spec) && !monitorOn("components")) return false;
     return core.lineVisible(lineChoices, chart.name, spec);
   }
 
@@ -350,6 +445,7 @@
     const expanded = Boolean(legend.closest(".mon-chart-expanded"));
     let parts = null;
     core.seriesFor(chart, payload).forEach((spec) => {
+      if (componentLine(spec) && !monitorOn("components")) return;
       const raw = spec.values || (payload && payload.series && payload.series[spec.key]) || [];
       const reading = core.legendReading(spec, raw);
       const value = spec.rate ? reading.value / step : reading.value;
@@ -404,7 +500,7 @@
     });
     // The lines per component are fetched only when the list is open: the
     // folded list still has to be there to be opened.
-    if (chart.components && !parts) componentsList(legend, chart, expanded);
+    if (chart.components && !parts && monitorOn("components")) componentsList(legend, chart, expanded);
   }
 
   function componentsList(legend, chart, expanded) {
@@ -430,6 +526,7 @@
 
   // Whether a chart's lines per component should be in its answer.
   function wantsComponents(name) {
+    if (!monitorOn("components")) return false;
     return Boolean(componentsOpen[name]) || expandedChart === name;
   }
 
@@ -1344,6 +1441,7 @@
   // How one chart is fetched on this pass: whole, or -- on a refresh of a
   // window of minutes -- from its last slot on, to be joined to what it has.
   function chartPlan(chart, params, seconds, refreshing, now) {
+    if (!chartOn(chart.name)) return null;
     const query = Object.assign({ chart: chart.name }, params);
     const wanted = chart.components && wantsComponents(chart.name);
     if (chart.components) query.components = wanted ? "1" : "0";
@@ -1389,12 +1487,18 @@
     try {
       // Everything is asked for at once; it is drawn in the order below.
       const summaryRequest = getJson("/api/monitoring/summary", params);
-      const timelineRequest = getJson("/api/monitoring/states", params).catch(() => null);
+      const timelineRequest = monitorOn("availability")
+        ? getJson("/api/monitoring/states", params).catch(() => null)
+        : Promise.resolve(null);
       // Not scoped by site: a link carries every site pointed at it.
-      const channelsRequest = loadChannels().catch(() => null);
+      const channelsRequest = monitorOn("uplinks")
+        ? loadChannels().catch(() => null)
+        : Promise.resolve(null);
       const chartsRequest = chartsDue
         ? Promise.all(
-            plans.map((plan) => getJson("/api/monitoring/series", plan.query).catch(() => null))
+            plans.map((plan) =>
+              plan ? getJson("/api/monitoring/series", plan.query).catch(() => null) : null
+            )
           )
         : null;
       if (chartsRequest) chartsRequest.catch(() => null);
@@ -1406,10 +1510,12 @@
         // note says which period it belongs to.
         customWindow = null;
       }
+      applyMonitors(summary.monitors);
       renderSummary(summary);
       renderStorage(summary.storage);
 
-      renderTimeline(await timelineRequest);
+      const timeline = await timelineRequest;
+      if (monitorOn("availability")) renderTimeline(timeline);
       // After the timeline: both write the note beside the heading, and the
       // list on show has the last word.
       if (backendsView === "traffic") await loadBackendTraffic();
@@ -1418,11 +1524,13 @@
       const results = chartsRequest ? await chartsRequest : [];
       if (chartsRequest) {
         chartsView = view;
-        if (plans.every((plan) => plan.from === null)) chartsFetchedAt = now;
+        if (plans.every((plan) => !plan || plan.from === null)) chartsFetchedAt = now;
       }
       results.forEach((answer, index) => {
         const chart = CHARTS[index];
         const plan = plans[index];
+        // Switched off: not asked for, nothing to draw.
+        if (!plan) return;
         const last = lastCharts[chart.name];
         let payload = answer;
         if (plan.from !== null) {
@@ -1693,6 +1801,7 @@
     bindWindowControls();
     bindBackendsView();
     bindFullScreen();
+    bindMonitors();
 
     CHARTS.forEach((chart) => {
       const svg = byId(`mon-plot-${chart.name}`);

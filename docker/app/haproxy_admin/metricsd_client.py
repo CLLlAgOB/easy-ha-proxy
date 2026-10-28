@@ -104,6 +104,14 @@ def metricsd_channel_labels_save(
                             rejected_status=400, require_object=True)
 
 
+def metricsd_monitors_save(changes: Dict[str, bool]) -> Dict[str, Any]:
+    """Switch monitors on or off; the daemon says which name it refused."""
+
+    return _metricsd().post("/api/v1/metrics/monitors", {"monitors": changes},
+                            timeout=DEFAULT_TIMEOUT, rejected_status=400,
+                            require_object=True)
+
+
 def metricsd_states(range_key: str, site: str = "",
                     window: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     return _get_json(

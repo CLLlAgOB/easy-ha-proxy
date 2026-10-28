@@ -1,8 +1,8 @@
 # routes_monitoring.py
 #
-# The historical monitoring page. Every route only reads, except one: the
-# operator names the channels, and that route is protected like any other
-# form (superadmin + CSRF).
+# The historical monitoring page. Every route only reads, except two: the
+# operator names the channels and switches monitors on or off, and those
+# routes are protected like any other form (superadmin + CSRF).
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ def monitoring_page():
         "monitoring.html",
         ranges=monitoring.RANGES,
         default_range=monitoring.DEFAULT_RANGE,
+        can_switch_monitors=bool(getattr(g, "is_superadmin", False)),
     )
 
 
@@ -100,6 +101,39 @@ def api_monitoring_channel_labels():
         object_type="monitoring",
         after=result.get("labels"),
         detail="uplink names changed",
+    )
+    return jsonify(result)
+
+
+@bp.post("/api/monitoring/monitors")
+def api_monitoring_monitors():
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "monitoring.monitors",
+            object_type="monitoring",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    changes = payload.get("monitors")
+    try:
+        result = monitoring.save_monitors(changes)
+    except ValueError as exc:
+        record_request(
+            "monitoring.monitors",
+            object_type="monitoring",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except MetricsdUnavailable as exc:
+        return jsonify(monitoring.unavailable_payload(exc)), 503
+    record_request(
+        "monitoring.monitors",
+        object_type="monitoring",
+        after=changes,
+        detail="monitors switched",
     )
     return jsonify(result)
 

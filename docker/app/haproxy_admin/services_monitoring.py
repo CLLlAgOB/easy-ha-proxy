@@ -17,6 +17,7 @@ from .metricsd_client import (
     MetricsdUnavailable,
     metricsd_channel_labels_save,
     metricsd_series,
+    metricsd_monitors_save,
     metricsd_servers,
     metricsd_sites,
     metricsd_states,
@@ -378,6 +379,27 @@ def backend_traffic(range_key: str,
         "backends": items,
         "bytes_total": total,
     }
+
+
+# The monitors the page can switch, as the daemon names them (see
+# MONITOR_DEFAULTS in easy-ha-proxy-metricsd.py).
+MONITORS = (
+    "machine", "components", "requests", "traffic", "responses", "latency",
+    "connections", "uplinks", "availability",
+)
+
+
+def save_monitors(changes: Any) -> Dict[str, Any]:
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("monitors must be a non-empty object")
+    cleaned: Dict[str, bool] = {}
+    for name, value in changes.items():
+        if name not in MONITORS:
+            raise ValueError(f"unknown monitor: {str(name)[:40]}")
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be true or false")
+        cleaned[name] = value
+    return metricsd_monitors_save(cleaned)
 
 
 def save_channel_labels(labels: Any, hidden: Any = None) -> Dict[str, Any]:

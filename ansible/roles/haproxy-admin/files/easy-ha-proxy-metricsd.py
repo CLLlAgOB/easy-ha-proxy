@@ -775,6 +775,33 @@ CHANNEL_LABELS_KEY = "channel_labels"
 # that cannot be tidied is one nobody reads.
 CHANNEL_HIDDEN_KEY = "channel_hidden"
 
+# Which monitors run, as the operator left them on the monitoring page. Two
+# are gathered by this daemon beside HAProxy's counters and stop being
+# gathered when switched off: the machine's load, and its split per
+# component -- the walk of the cgroup tree and the containers, the costliest
+# part of a poll. The rest are drawn from the one `show stat` every poll
+# reads anyway, so for them off means not shown.
+MONITORS_KEY = "monitors"
+GATHERED_MONITORS = ("machine", "components")
+SHOWN_MONITORS = (
+    "requests", "traffic", "responses", "latency", "connections",
+    "uplinks", "availability",
+)
+MONITOR_DEFAULTS: Dict[str, bool] = {
+    name: True for name in GATHERED_MONITORS + SHOWN_MONITORS
+}
+
+
+def monitors_from(raw: Any) -> Dict[str, bool]:
+    """The stored choices over the defaults; anything unknown is dropped."""
+
+    monitors = dict(MONITOR_DEFAULTS)
+    if isinstance(raw, dict):
+        for name, value in raw.items():
+            if name in monitors and isinstance(value, bool):
+                monitors[name] = value
+    return monitors
+
 
 def _metric_table_sql(name: str) -> str:
     columns = ",\n        ".join(
@@ -2270,6 +2297,7 @@ class Collector:
         # Keyed by cgroup directory: a service and its jobs share a name.
         self._component_previous: Dict[str, Tuple[int, float]] = {}
         self._container_names: Dict[str, str] = {}
+        self.monitors: Dict[str, bool] = dict(MONITOR_DEFAULTS)
 
         self.last_poll_ts: Optional[int] = None
         self.last_flush_ts: Optional[int] = None
@@ -2281,7 +2309,30 @@ class Collector:
 
     # -- lifecycle --------------------------------------------------------
 
+    def load_monitors(self) -> None:
+        try:
+            raw = json.loads(self.database.get_state(MONITORS_KEY, "{}") or "{}")
+        except ValueError:
+            raw = {}
+        self.monitors = monitors_from(raw)
+
+    def set_monitors(self, changes: Dict[str, bool]) -> Dict[str, bool]:
+        """Apply the operator's choices, keep them, and start obeying them."""
+
+        monitors = monitors_from({**self.monitors, **changes})
+        self.database.set_state(MONITORS_KEY, json.dumps(monitors, sort_keys=True))
+        with self._state_lock:
+            self.monitors = monitors
+            if not monitors["components"] or not monitors["machine"]:
+                # Started again later, a component's first reading must not
+                # be measured against one from before the pause.
+                self._component_previous.clear()
+            if not monitors["machine"]:
+                self._cpu_previous = None
+        return monitors
+
     def start(self) -> None:
+        self.load_monitors()
         self._baselines = self.database.load_baselines()
         self._last_states = self.database.load_last_states()
         self._thread = threading.Thread(
@@ -2361,7 +2412,8 @@ class Collector:
                 self._observe(kind, proxy, server, row, now)
                 observed += 1
 
-            self._observe_host(now)
+            if self.monitors["machine"]:
+                self._observe_host(now)
 
         self._report_authelia(rows)
 
@@ -2488,6 +2540,8 @@ class Collector:
             bucket.add_gauge("memory", memory[0])
             bucket.add_gauge("memory_total", memory[1])
 
+        if not self.monitors["components"]:
+            return
         try:
             self._observe_components(now)
         except Exception as exc:  # pylint: disable=broad-except
@@ -2970,6 +3024,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
         """
 
         database: MetricsDatabase = self.server.database  # type: ignore[attr-defined]
+        if urlparse(self.path).path == "/api/v1/metrics/monitors":
+            self._set_monitors()
+            return
         if urlparse(self.path).path != "/api/v1/metrics/channel-labels":
             self._send_json(404, {"ok": False, "error": "unknown path"})
             return
@@ -3018,6 +3075,37 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"ok": False, "error": str(exc)})
             return
         self._send_json(200, {"ok": True, "labels": cleaned, "hidden": hidden})
+
+    def _set_monitors(self) -> None:
+        """Which monitors run: {"monitors": {"machine": false, ...}}.
+
+        Only the names given change; an unknown name or a value that is not
+        true or false is refused, so a typo cannot quietly switch nothing.
+        """
+
+        collector: Collector = self.server.collector  # type: ignore[attr-defined]
+        try:
+            length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+            if length <= 0 or length > 4096:
+                raise ValueError("invalid Content-Length")
+            payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+            changes = payload.get("monitors") if isinstance(payload, dict) else None
+            if not isinstance(changes, dict) or not changes:
+                raise ValueError("monitors must be a non-empty object")
+            for name, value in changes.items():
+                if name not in MONITOR_DEFAULTS:
+                    raise ValueError(f"unknown monitor: {str(name)[:40]}")
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name} must be true or false")
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        try:
+            monitors = collector.set_monitors(changes)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "monitors": monitors})
 
     def do_GET(self) -> None:  # noqa: N802
         collector: Collector = self.server.collector  # type: ignore[attr-defined]
@@ -3136,11 +3224,16 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     "health": database.backend_health(),
                     "collector": collector.health(),
                     "storage": collector.storage.report(until),
+                    "monitors": dict(collector.monitors),
                 }
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             self._send_json(200, payload)
+            return
+
+        if path == "/api/v1/metrics/monitors":
+            self._send_json(200, {"ok": True, "monitors": dict(collector.monitors)})
             return
 
         if path == "/api/v1/metrics/health":

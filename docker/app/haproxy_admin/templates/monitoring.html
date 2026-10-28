@@ -430,6 +430,20 @@ body.mon-overlay-open { overflow: hidden; }
 .mon-bar i { display: block; height: 100%; background: var(--accent-primary); }
 .mon-bar.warn i { background: #c8a13a; }
 .mon-bar.crit i { background: #cc4b4b; }
+
+/* A monitor switched off: its card is not drawn at all. Separate from
+   [hidden], which the data decides (no uplinks, no machine readings yet). */
+.mon-off { display: none !important; }
+
+.mon-monitors {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 20px;
+  margin: 10px 0 16px;
+  font-size: 14px;
+}
+
+.mon-monitors label { display: flex; align-items: center; gap: 8px; }
 </style>
 
 <div class="mon-notice error" id="mon-unavailable" hidden>
@@ -626,7 +640,7 @@ body.mon-overlay-open { overflow: hidden; }
   <div class="mon-sub" id="mon-channels-result" data-i18n-skip translate="no"></div>
 </div>
 
-<div class="card" style="margin-top:25px;">
+<div class="card" style="margin-top:25px;" id="mon-backends-card">
   <div class="card-header">
     <h2 id="mon-backends-title">Backend availability</h2>
     <span class="mon-sub" id="mon-timeline-note"></span>
@@ -681,6 +695,42 @@ body.mon-overlay-open { overflow: hidden; }
   <div class="mon-sub" style="margin-top:12px;">
     Growth is the measured change over the period, not a prediction.
   </div>
+</div>
+
+<div class="card" style="margin-top:25px;" id="mon-monitors-card"
+     data-editable="{{ 'true' if can_switch_monitors else 'false' }}">
+  <div class="card-header">
+    <h2>Monitors</h2>
+    <span class="mon-sub" id="mon-monitors-result" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Gathered by the collector beside the HAProxy counters. Switched off, they
+    are no longer gathered and their charts are hidden; what was gathered
+    before is kept.
+  </p>
+  <div class="mon-monitors">
+    <label><input type="checkbox" data-monitor="machine"> Processor and memory of the machine</label>
+    <label><input type="checkbox" data-monitor="components"> Usage per component: services and containers</label>
+  </div>
+
+  <p class="mon-sub">
+    Drawn from the counters HAProxy keeps anyway, which are read either way:
+    switched off, they are only hidden.
+  </p>
+  <div class="mon-monitors">
+    <label><input type="checkbox" data-monitor="requests"> Requests</label>
+    <label><input type="checkbox" data-monitor="traffic"> Traffic</label>
+    <label><input type="checkbox" data-monitor="responses"> Response classes</label>
+    <label><input type="checkbox" data-monitor="latency"> Response time</label>
+    <label><input type="checkbox" data-monitor="connections"> Connections</label>
+    <label><input type="checkbox" data-monitor="uplinks"> Uplinks</label>
+    <label><input type="checkbox" data-monitor="availability"> Backend availability</label>
+  </div>
+
+  {% if not can_switch_monitors %}
+  <div class="mon-sub">Only a superadmin can switch monitors.</div>
+  {% endif %}
 </div>
 
 <div class="mon-overlay" id="mon-overlay" hidden></div>
