@@ -326,7 +326,7 @@ def unavailable_payload(exc: GuarddUnavailable) -> Dict[str, Any]:
 # closed: an unknown key is dropped rather than forwarded.
 REQUEST_FILTERS = (
     "since", "until", "client", "status", "host", "backend",
-    "request_id", "method", "path", "limit", "offset",
+    "request_id", "method", "path", "limit", "before", "count", "hide_admin",
 )
 
 

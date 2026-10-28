@@ -5,7 +5,6 @@
   },
   "messages": {
     "Request log": "Журнал запросов",
-    "A bounded window over recent requests, kept so a failed request can be found again -- not a log pipeline. The query string is dropped before anything is stored, and no header, cookie or body is kept at all. The size cap is what actually holds the store down, not the retention window, and writing stops before the filesystem reserve is touched.": "Ограниченное окно последних запросов, чтобы упавший запрос можно было найти снова, — не система сбора логов. Query-строка отбрасывается до записи, заголовки, cookie и тела не сохраняются вообще. Размер держит именно лимит объёма, а не срок хранения, и запись останавливается раньше, чем будет тронут резерв свободного места.",
     "The request log is switched off. Enable": "Журнал запросов выключен. Включите",
     "and apply to start recording.": "и примените конфигурацию, чтобы начать запись.",
     "The security engine is not answering, so recent requests cannot be read. HAProxy traffic is unaffected.": "Движок безопасности не отвечает, поэтому последние запросы прочитать нельзя. На трафик HAProxy это не влияет.",
@@ -30,6 +29,12 @@
     "Start recording": "Начать запись",
     "Stop recording": "Остановить запись",
     "It was not changed": "Изменить не удалось",
-    "Chosen period": "Выбранный период"
+    "Chosen period": "Выбранный период",
+    "A bounded window over recent requests, kept so a failed request can be found again -- not a log pipeline. The query string is dropped before anything is stored; of the headers only the User-Agent is kept, as the access log writes it, and no cookie or body. The size cap is what actually holds the store down, not the retention window, and writing stops before the filesystem reserve is touched.": "Ограниченное окно последних запросов, чтобы упавший запрос можно было найти снова, — не система сбора логов. Query-строка отбрасывается до записи; из заголовков сохраняется только User-Agent, в том виде, в каком его пишет журнал доступа, а cookie и тела не сохраняются. Размер держит именно лимит объёма, а не срок хранения, и запись останавливается раньше, чем будет тронут резерв свободного места.",
+    "Searching…": "Ищу…",
+    "Found": "Найдено",
+    "Found, at least": "Найдено не меньше",
+    "The search stopped after a few seconds; it reached back to": "Поиск остановился через несколько секунд; он дошёл до",
+    "Show more carries on further back; a shorter period or a narrower filter answers sooner.": "«Показать ещё» продолжит дальше в прошлое; короткий период или более узкий фильтр ответят быстрее."
   }
 }

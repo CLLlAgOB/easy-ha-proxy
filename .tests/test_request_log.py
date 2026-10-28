@@ -32,7 +32,8 @@ guardd = load_guardd()
 PREFIX = "2026-08-12T10:00:00+00:00 gw haproxy[1234]: "
 
 
-def line(**overrides):
+def line(at=None, **overrides):
+    """An access line; `at` is its syslog stamp, which is the time stored."""
     fields = {
         "client": "203.0.113.9",
         "stamp": "12/Aug/2026:10:00:00.123",
@@ -44,8 +45,9 @@ def line(**overrides):
         "request": "GET /login?token=SECRET HTTP/1.1",
     }
     fields.update(overrides)
+    prefix = PREFIX if at is None else f"{at} gw haproxy[1234]: "
     return (
-        f"{PREFIX}{fields['client']}:51514 [{fields['stamp']}] fe_https~ "
+        f"{prefix}{fields['client']}:51514 [{fields['stamp']}] fe_https~ "
         f"{fields['backend']} {fields['times']} {fields['status']} "
         f"{fields['bytes']} ---- 5/5/0/0/0 0/0 {{}} {{}} "
         f"{fields['extra']} {fields['request']}"
@@ -105,11 +107,12 @@ class StoreTestCase(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.now = 1786600800
 
-    def ingest(self, count=1, **overrides):
+    def ingest(self, count=1, at=None, **overrides):
+        text = line(at=at, **overrides)
         for _ in range(count):
-            record = guardd.parse_access_line(line(**overrides))
+            record = guardd.parse_access_line(text)
             self.assertIsNotNone(record)
-            self.store.add(record)
+            self.store.add(record, guardd.line_epoch(text))
         return self.store.flush(self.now)
 
 
@@ -195,8 +198,8 @@ class SearchTests(StoreTestCase):
         self.assertEqual(self.store.search(limit=5)["total"], 20)
 
     def test_the_newest_request_comes_first(self):
-        self.ingest(stamp="12/Aug/2026:09:00:00.000", extra="id=older")
-        self.ingest(stamp="12/Aug/2026:11:00:00.000", extra="id=newer")
+        self.ingest(at="2026-08-12T09:00:00+00:00", extra="id=older")
+        self.ingest(at="2026-08-12T11:00:00+00:00", extra="id=newer")
         self.assertEqual(
             self.store.search()["requests"][0]["request_id"], "newer"
         )
@@ -204,7 +207,7 @@ class SearchTests(StoreTestCase):
 
 class BudgetTests(StoreTestCase):
     def test_records_past_the_retention_window_are_dropped(self):
-        self.ingest(stamp="01/Aug/2026:10:00:00.000", extra="id=ancient")
+        self.ingest(at="2026-08-01T10:00:00+00:00", extra="id=ancient")
         self.ingest(extra="id=recent")
         self.store._last_maintenance = 0
         self.store.flush(self.now)
@@ -309,7 +312,7 @@ class WiringTests(unittest.TestCase):
         # though their address is on the allow list.
         block = self.SOURCE.split("def ingest_log")[1].split("def observe_request")[0]
         self.assertLess(
-            block.index("self.requests.add(request)"),
+            block.index("self.requests.add(request, ts)"),
             block.index("self.observe_request(request, now)"),
         )
 

@@ -59,6 +59,10 @@ class RouteTests(unittest.TestCase):
     def test_the_filter_set_is_closed(self):
         # An unknown query parameter is dropped rather than forwarded.
         self.assertIn("REQUEST_FILTERS", self.service)
+        filters = self.service.split("REQUEST_FILTERS = (")[1].split(")")[0]
+        for name in ('"before"', '"count"', '"hide_admin"'):
+            self.assertIn(name, filters)
+        self.assertNotIn('"offset"', filters)
         block = self.service.split("def requests(")[1].split("def requests_status")[0]
         self.assertIn("for key in REQUEST_FILTERS", block)
 
@@ -103,7 +107,32 @@ class PageTests(unittest.TestCase):
 
     def test_the_privacy_rule_is_stated_on_the_page(self):
         self.assertIn("query string is dropped", self.template)
-        self.assertIn("no header, cookie or body", self.template)
+        # The one header kept is said by name.
+        self.assertIn("only the User-Agent is kept", self.template)
+        self.assertIn("no cookie or body", self.template)
+
+    def test_show_more_carries_on_where_the_search_on_screen_stopped(self):
+        # Not by offset: new requests would repeat rows, and filters typed
+        # since the search would mix two searches in one table.
+        self.assertNotIn("offset", self.javascript)
+        self.assertIn('params.set("before", String(next))', self.javascript)
+        self.assertIn("const params = new URLSearchParams(query);", self.javascript)
+        self.assertIn("if (mine !== sequence) return;", self.javascript)
+
+    def test_the_panels_own_requests_are_hidden_unless_asked_for(self):
+        self.assertIn('id="rq-admin"', self.template)
+        self.assertIn('params.set("hide_admin", "1")', self.javascript)
+
+    def test_the_time_shown_is_the_servers_answer(self):
+        self.assertIn("Server answer", self.template)
+        self.assertIn("entry.response_ms", self.javascript)
+        self.assertIn("The whole request", self.javascript)
+
+    def test_a_search_that_ran_out_of_time_says_so(self):
+        self.assertIn('id="rq-stopped"', self.template)
+        self.assertIn("payload.timed_out", self.javascript)
+        self.assertIn("payload.searched_to", self.javascript)
+        self.assertIn("payload.total_exact === false", self.javascript)
 
     def test_it_is_reachable_from_the_navigation(self):
         nav = (APP_DIR / "templates" / "_haproxy_nav.html").read_text(encoding="utf-8")

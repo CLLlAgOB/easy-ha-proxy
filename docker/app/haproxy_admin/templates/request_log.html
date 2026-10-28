@@ -63,15 +63,35 @@
 }
 
 .rq-more { margin-top: 14px; }
+
+.rq-filters label.rq-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 7px;
+}
+
+.rq-filters label.rq-check input { min-width: 0; }
+
+.rq-found {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+  min-height: 18px;
+}
 </style>
 
 <div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
      background: rgba(var(--accent-primary-rgb), .07);">
   A bounded window over recent requests, kept so a failed request can be found
   again -- not a log pipeline. The query string is dropped before anything is
-  stored, and no header, cookie or body is kept at all. The size cap is what
-  actually holds the store down, not the retention window, and writing stops
-  before the filesystem reserve is touched.
+  stored; of the headers only the User-Agent is kept, as the access log writes
+  it, and no cookie or body. The size cap is what actually holds the store
+  down, not the retention window, and writing stops before the filesystem
+  reserve is touched.
 </div>
 
 <div id="rq-disabled" class="rt-notice" hidden
@@ -136,9 +156,20 @@
       Request ID
       <input type="text" id="rq-request-id" placeholder="from X-Request-ID">
     </label>
+    <label class="rq-check">
+      <input type="checkbox" id="rq-admin">
+      Show the admin panel's own requests
+    </label>
     <button class="btn btn-primary" type="button" id="rq-search">Search</button>
     <button class="btn" type="button" id="rq-reset">Reset</button>
   </div>
+
+  <div class="rq-found">
+    <span id="rq-found" data-i18n-skip translate="no"></span>
+    <span id="rq-searching" hidden>Searching…</span>
+  </div>
+  <div id="rq-stopped" class="rt-notice" hidden data-i18n-skip translate="no"
+       style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);"></div>
 
   <div style="overflow-x:auto;">
     <table class="data-table">
@@ -151,7 +182,7 @@
           <th>Path</th>
           <th>Backend</th>
           <th>Client</th>
-          <th>Time</th>
+          <th title="How soon the server answered; the whole request is in the tooltip">Server answer</th>
           <th>Request ID</th>
         </tr>
       </thead>

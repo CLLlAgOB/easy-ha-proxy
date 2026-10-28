@@ -14,8 +14,14 @@
   });
 
   const PAGE_SIZE = 100;
-  let offset = 0;
-  let total = 0;
+  // The filters of the search on screen: "show more" carries on with these,
+  // not with whatever has been typed since.
+  let query = null;
+  // Where "show more" carries on: below the last row, or below where a
+  // search that ran out of time stopped. 0 when there is nothing further.
+  let next = 0;
+  // The newest search; an answer to an older one is dropped.
+  let sequence = 0;
 
   function byId(id) {
     return document.getElementById(id);
@@ -103,6 +109,8 @@
       const element = byId(id);
       if (element && element.value.trim()) params.set(name, element.value.trim());
     });
+    const admin = byId("rq-admin");
+    if (!admin || !admin.checked) params.set("hide_admin", "1");
     return params;
   }
 
@@ -146,14 +154,45 @@
         entry.server ? `${entry.backend} / ${entry.server}` : entry.backend
       );
       cell(tr, entry.client);
-      cell(tr, entry.duration_ms ? `${entry.duration_ms} ms` : "—");
+      // How soon the server answered; the whole request -- a download, a
+      // long poll -- is in the tooltip. 0 ms is an answer, not a dash.
+      const answered = Number(entry.response_ms);
+      const timing = cell(tr, Number.isFinite(answered) && answered >= 0 ? `${answered} ${t("ms")}` : "—");
+      if (Number.isFinite(Number(entry.duration_ms))) {
+        timing.title = `${t("The whole request")}: ${entry.duration_ms} ${t("ms")}`;
+      }
       cell(tr, entry.request_id, "rq-path");
       body.appendChild(tr);
     });
+  }
+
+  function renderFound(payload, append) {
+    const body = byId("rq-body");
+    const shown = body ? body.children.length : 0;
     const empty = byId("rq-empty");
-    if (empty) empty.hidden = body.children.length > 0;
+    if (empty) empty.hidden = shown > 0 || Boolean(payload.timed_out);
     const more = byId("rq-more");
-    if (more) more.hidden = body.children.length >= total;
+    if (more) more.hidden = !next;
+    const found = byId("rq-found");
+    if (found && !append && payload.total !== undefined) {
+      const total = Number(payload.total || 0).toLocaleString(document.documentElement.lang || undefined);
+      found.textContent = payload.total_exact === false
+        ? `${t("Found, at least")}: ${total}`
+        : `${t("Found")}: ${total}`;
+    }
+    const stopped = byId("rq-stopped");
+    if (stopped) {
+      stopped.hidden = !payload.timed_out;
+      stopped.textContent = payload.timed_out
+        ? `${t("The search stopped after a few seconds; it reached back to")} ${formatTime(payload.searched_to)}. ` +
+          t("Show more carries on further back; a shorter period or a narrower filter answers sooner.")
+        : "";
+    }
+  }
+
+  function setBusy(busy) {
+    const element = byId("rq-searching");
+    if (element) element.hidden = !busy;
   }
 
   function setNotice(id, visible) {
@@ -162,12 +201,28 @@
   }
 
   async function search(append) {
-    if (!append) offset = 0;
-    const params = filters();
+    if (!append || !query) {
+      query = filters();
+      next = 0;
+    }
+    const params = new URLSearchParams(query);
     params.set("limit", String(PAGE_SIZE));
-    params.set("offset", String(offset));
-
-    const { status, payload } = await getJson("/api/security/requests", params);
+    if (append) {
+      params.set("before", String(next));
+      params.set("count", "0");
+    }
+    const mine = ++sequence;
+    setBusy(true);
+    let answer;
+    try {
+      answer = await getJson("/api/security/requests", params);
+    } catch (error) {
+      answer = { status: 0, payload: {} };
+    }
+    // A newer search is on its way; this answer is for filters no longer shown.
+    if (mine !== sequence) return;
+    setBusy(false);
+    const { status, payload } = answer;
     if (status === 404 || payload.enabled === false) {
       // The daemon answers this when the store is switched off, which is a
       // different thing from the daemon being unreachable.
@@ -176,7 +231,7 @@
       render([], false);
       return;
     }
-    if (status >= 500 || payload.unavailable) {
+    if (status === 0 || status >= 500 || payload.unavailable) {
       setNotice("rq-unavailable", true);
       setNotice("rq-disabled", false);
       return;
@@ -184,9 +239,9 @@
     setNotice("rq-disabled", false);
     setNotice("rq-unavailable", false);
 
-    total = Number(payload.total || 0);
+    next = Number(payload.next || 0);
     render(payload.requests || [], append);
-    offset += (payload.requests || []).length;
+    renderFound(payload, append);
   }
 
   async function setRecording(enabled) {
@@ -250,6 +305,8 @@
             const element = byId(id);
             if (element) element.value = "";
           });
+        const admin = byId("rq-admin");
+        if (admin) admin.checked = false;
         forgetLink();
         run();
       });
@@ -262,6 +319,8 @@
     if (stop) stop.addEventListener("click", () => setRecording(false));
     const range = byId("rq-range");
     if (range) range.addEventListener("change", run);
+    const admin = byId("rq-admin");
+    if (admin) admin.addEventListener("change", run);
     document.querySelectorAll(".rq-filters input").forEach((input) => {
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") run();
