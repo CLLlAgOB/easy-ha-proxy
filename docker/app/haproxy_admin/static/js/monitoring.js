@@ -411,6 +411,143 @@
       if (dataset.spec.dash) line["stroke-dasharray"] = "6 4";
       svg.appendChild(element("path", line));
     });
+
+    // The changes and alerts of the period, over the lines so a busy chart
+    // does not hide them.
+    const marks = showEvents && eventsState ? core.eventMarks(points, step, eventsState.events) : [];
+    svg.__geometry.marks = marks;
+    marks.forEach((mark) => {
+      const x = xFor(mark.index);
+      svg.appendChild(
+        element("line", {
+          class: `mon-event mon-event-${mark.kind}`,
+          x1: x,
+          x2: x,
+          y1: padding.top,
+          y2: padding.top + plotHeight
+        })
+      );
+      svg.appendChild(
+        element("line", {
+          class: `mon-event-cap mon-event-${mark.kind}`,
+          x1: x,
+          x2: x,
+          y1: padding.top,
+          y2: padding.top + 7
+        })
+      );
+    });
+  }
+
+  /* ---------- events ---------- */
+
+  // Remembered per browser; on unless this viewer turned them off.
+  let showEvents = true;
+  let eventsState = null;
+
+  function eventText(event) {
+    const label = uiText(event.label || "");
+    if (event.kind === "change") {
+      const who = event.actor ? ` — ${event.actor}` : "";
+      return `${label}${event.object ? `: ${event.object}` : ""}${who}`;
+    }
+    return `${label}: ${event.summary || event.object || ""}`;
+  }
+
+  function renderEventsCount() {
+    const events = (showEvents && eventsState && eventsState.events) || [];
+    const count = byId("mon-events-count");
+    if (!count) return;
+    count.textContent = showEvents && eventsState ? `(${formatCount(events.length)})` : "";
+    count.title = eventsState && eventsState.truncated
+      ? uiText("Not all events of this period are shown")
+      : "";
+  }
+
+  function redrawCharts() {
+    CHARTS.forEach((chart) => {
+      if (lastCharts[chart.name]) redrawChart(chart.name);
+    });
+    renderEventsCount();
+  }
+
+  function eventsParams() {
+    // Not scoped by site: an apply or an update touches every site.
+    return Object.assign({ range: currentRange }, windowParams());
+  }
+
+  async function loadEvents() {
+    eventsState = await getJson("/api/monitoring/events", eventsParams()).catch(() => null);
+  }
+
+  function bindEvents() {
+    showEvents = remembered("mon-events", ["on", "off"], "on") === "on";
+    const box = byId("mon-events");
+    if (!box) return;
+    box.checked = showEvents;
+    box.addEventListener("change", async () => {
+      showEvents = box.checked;
+      remember("mon-events", showEvents ? "on" : "off");
+      // Hidden while off, so what is kept may belong to another period.
+      if (showEvents) await loadEvents();
+      redrawCharts();
+    });
+  }
+
+  /* ---------- needs attention ---------- */
+
+  function renderAttention(payload) {
+    const strip = byId("mon-attention");
+    const list = byId("mon-attention-list");
+    if (!strip || !list) return;
+    list.textContent = "";
+    const items = (payload && payload.items) || [];
+    const unavailable = Boolean(payload) && payload.available === false;
+    strip.hidden = !items.length && !unavailable;
+    strip.classList.toggle(
+      "critical",
+      items.some((item) => item.severity === "critical" && !item.pending)
+    );
+    if (unavailable) {
+      const row = document.createElement("li");
+      row.textContent = uiText("The alert engine is not answering");
+      list.appendChild(row);
+    }
+    const sites = siteValues();
+    items.forEach((item) => {
+      const row = document.createElement("li");
+      if (item.severity === "critical") row.className = "mon-attention-critical";
+      const text = document.createElement("span");
+      text.setAttribute("data-i18n-skip", "");
+      text.setAttribute("translate", "no");
+      text.textContent = item.summary || item.title || item.rule;
+      row.appendChild(text);
+      const when = document.createElement("small");
+      when.setAttribute("data-i18n-skip", "");
+      when.setAttribute("translate", "no");
+      const since = Number(item.since) || 0;
+      when.textContent = since ? dateTimeFormat.format(new Date(since * 1000)) : "";
+      if (item.pending) {
+        // Inside the rule's delay: the condition holds, nothing is sent yet.
+        when.textContent = `${uiText("waiting")} · ${when.textContent}`;
+      }
+      row.appendChild(when);
+      if (sites.has(item.subject) && item.subject !== currentSite) {
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "mon-link-button";
+        open.textContent = uiText("Show on charts");
+        open.addEventListener("click", () => selectSite(item.subject));
+        row.appendChild(open);
+      }
+      list.appendChild(row);
+    });
+    const more = byId("mon-attention-more");
+    if (more) {
+      const extra = Number(payload && payload.more) || 0;
+      more.hidden = extra <= 0;
+      more.textContent = extra > 0 ? `+${formatCount(extra)}` : "";
+    }
   }
 
   // What the number beside each line stands for (see legendReading in
@@ -717,11 +854,13 @@
   // The same card answers "was it up" and "how much went through it". The
   // choice is kept in the browser: someone who came for traffic yesterday
   // comes for traffic today.
-  const BACKEND_VIEWS = ["availability", "traffic"];
+  const BACKEND_VIEWS = ["availability", "traffic", "requests"];
   const BACKEND_SORTS = ["desc", "asc", "name"];
   let backendsView = "availability";
   let backendsSort = "desc";
   let backendTrafficState = null;
+  let requestsSort = "requests";
+  let backendRequestsState = null;
 
   function remembered(key, allowed, fallback) {
     try {
@@ -817,6 +956,114 @@
     }
   }
 
+  // The backends the site list offers: a name there is a way into the
+  // charts of that backend.
+  function siteValues() {
+    const select = byId("mon-site");
+    if (!select) return new Set();
+    return new Set(Array.from(select.options).map((option) => option.value).filter(Boolean));
+  }
+
+  function selectSite(proxy) {
+    const select = byId("mon-site");
+    if (!select || !siteValues().has(proxy)) return;
+    select.value = proxy;
+    currentSite = proxy;
+    loadAll();
+    const graphs = byId("mon-plot-requests");
+    if (graphs && graphs.scrollIntoView) graphs.scrollIntoView({ block: "center" });
+  }
+
+  function share(value) {
+    return `${decimalFormat.format(Number(value) || 0)}%`;
+  }
+
+  // Requests, errors and response time per backend over the period: the
+  // list sorted to find the busiest, the failing and the slow backend.
+  function renderBackendRequests(payload) {
+    const host = byId("mon-backend-requests");
+    if (!host) return;
+    if (payload !== undefined) backendRequestsState = payload;
+    host.textContent = "";
+
+    const backends = (backendRequestsState && backendRequestsState.backends) || [];
+    if (!backends.length) {
+      const empty = document.createElement("div");
+      empty.className = "mon-empty";
+      empty.textContent = uiText("No data for this period");
+      host.appendChild(empty);
+      if (backendsView === "requests") setText("mon-timeline-note", "");
+      return;
+    }
+
+    const table = document.createElement("table");
+    table.className = "mon-requests-table";
+    const head = table.createTHead().insertRow();
+    ["Backend", "Requests", "Client errors", "Server errors", "Response time"].forEach((label) => {
+      const cell = document.createElement("th");
+      cell.textContent = uiText(label);
+      head.appendChild(cell);
+    });
+    const body = table.createTBody();
+    const sites = siteValues();
+    core.sortedBackendRequests(backends, requestsSort).forEach((entry) => {
+      const row = body.insertRow();
+      const name = row.insertCell();
+      name.setAttribute("data-i18n-skip", "");
+      name.setAttribute("translate", "no");
+      if (sites.has(entry.proxy) && entry.proxy !== currentSite) {
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "mon-link-button";
+        open.textContent = entry.label || entry.proxy;
+        open.title = uiText("Show on charts");
+        open.addEventListener("click", () => selectSite(entry.proxy));
+        name.appendChild(open);
+      } else {
+        name.textContent = entry.label || entry.proxy;
+      }
+      const cells = [
+        [formatCount(entry.requests), false],
+        [`${formatCount(entry.resp_4xx)} · ${share(entry.share_4xx)}`, false],
+        [`${formatCount(entry.resp_5xx)} · ${share(entry.share_5xx)}`, Number(entry.resp_5xx) > 0],
+        [
+          entry.response_ms_avg === null || entry.response_ms_avg === undefined
+            ? "—"
+            : `${formatCount(entry.response_ms_avg)} ${uiText("ms")}`,
+          false
+        ]
+      ];
+      cells.forEach(([text, bad]) => {
+        const cell = row.insertCell();
+        cell.setAttribute("data-i18n-skip", "");
+        cell.setAttribute("translate", "no");
+        cell.textContent = text;
+        if (bad) cell.className = "mon-bad";
+      });
+      if (entry.response_ms_max !== null && entry.response_ms_max !== undefined) {
+        const peak = document.createElement("small");
+        peak.textContent = ` · ${uiText("Peak")} ${formatCount(entry.response_ms_max)}`;
+        row.cells[row.cells.length - 1].appendChild(peak);
+      }
+    });
+    host.appendChild(table);
+
+    if (backendsView === "requests") {
+      setText(
+        "mon-timeline-note",
+        `${backends.length} · ${formatCount(backendRequestsState.requests_total)}`
+      );
+    }
+  }
+
+  async function loadBackendRequests() {
+    const payload = await getJson(
+      "/api/monitoring/backend-requests",
+      Object.assign({ range: currentRange }, windowParams())
+    ).catch(() => null);
+    renderBackendRequests(payload);
+  }
+
   async function loadBackendTraffic() {
     const payload = await getJson(
       "/api/monitoring/backends",
@@ -827,15 +1074,22 @@
 
   function showBackendsView() {
     const traffic = backendsView === "traffic";
+    const requests = backendsView === "requests";
     const timeline = byId("mon-timeline");
     const table = byId("mon-backend-traffic");
+    const requestsTable = byId("mon-backend-requests");
     const sortWrap = byId("mon-backends-sort-wrap");
-    if (timeline) timeline.hidden = traffic;
+    const requestsSortWrap = byId("mon-requests-sort-wrap");
+    if (timeline) timeline.hidden = traffic || requests;
     if (table) table.hidden = !traffic;
+    if (requestsTable) requestsTable.hidden = !requests;
     if (sortWrap) sortWrap.hidden = !traffic;
+    if (requestsSortWrap) requestsSortWrap.hidden = !requests;
     const title = byId("mon-backends-title");
     if (title) {
-      title.textContent = uiText(traffic ? "Backend traffic" : "Backend availability");
+      title.textContent = uiText(
+        traffic ? "Backend traffic" : requests ? "Backend requests" : "Backend availability"
+      );
     }
     const group = byId("mon-backends-view");
     if (group) {
@@ -858,6 +1112,17 @@
         renderBackendTraffic();
       });
     }
+    requestsSort = remembered("mon-requests-sort", core.REQUEST_SORTS, "requests");
+    const requestsOrder = byId("mon-requests-sort");
+    if (requestsOrder) {
+      requestsOrder.value = requestsSort;
+      requestsOrder.addEventListener("change", () => {
+        if (!core.REQUEST_SORTS.includes(requestsOrder.value)) return;
+        requestsSort = requestsOrder.value;
+        remember("mon-requests-sort", requestsSort);
+        renderBackendRequests();
+      });
+    }
     const group = byId("mon-backends-view");
     if (group) {
       group.addEventListener("click", (event) => {
@@ -868,6 +1133,7 @@
         showBackendsView();
         // The note beside the heading belongs to whichever list is shown.
         if (backendsView === "traffic") loadBackendTraffic();
+        else if (backendsView === "requests") loadBackendRequests();
         else loadAll();
       });
     }
@@ -1547,6 +1813,12 @@
       const channelsRequest = monitorOn("uplinks")
         ? loadChannels().catch(() => null)
         : Promise.resolve(null);
+      // What is wrong now, whatever period is shown.
+      const attentionRequest = getJson("/api/monitoring/attention", {}).catch(() => null);
+      // With the charts: a period that does not change has the same events.
+      const eventsRequest = showEvents && chartsDue
+        ? getJson("/api/monitoring/events", eventsParams()).catch(() => null)
+        : null;
       const chartsRequest = chartsDue
         ? Promise.all(
             plans.map((plan) =>
@@ -1572,7 +1844,10 @@
       // After the timeline: both write the note beside the heading, and the
       // list on show has the last word.
       if (backendsView === "traffic") await loadBackendTraffic();
+      if (backendsView === "requests") await loadBackendRequests();
       await channelsRequest;
+      renderAttention(await attentionRequest);
+      if (eventsRequest) eventsState = await eventsRequest;
 
       const results = chartsRequest ? await chartsRequest : [];
       if (chartsRequest) {
@@ -1604,6 +1879,7 @@
           );
         }
       });
+      renderEventsCount();
     } catch (error) {
       showUnavailable(Boolean(error.unavailable));
       CHARTS.forEach((chart) => {
@@ -1735,6 +2011,28 @@
       row.appendChild(value);
       box.appendChild(row);
     });
+    const near = core.eventsNear(geometry.marks, index, core.eventReach(geometry, 6));
+    if (near.length) {
+      const events = document.createElement("div");
+      events.className = "mon-reading-events";
+      near.slice(0, 4).forEach((event) => {
+        const row = document.createElement("div");
+        if (event.kind === "alert" || event.kind === "recovered") row.className = `mon-event-${event.kind}`;
+        row.textContent = `${format.format(new Date(Number(event.ts) * 1000))} ${eventText(event)}`;
+        if (event.kind === "change" && event.summary) {
+          const detail = document.createElement("small");
+          detail.textContent = event.summary.length > 90 ? `${event.summary.slice(0, 89)}…` : event.summary;
+          row.appendChild(detail);
+        }
+        events.appendChild(row);
+      });
+      if (near.length > 4) {
+        const more = document.createElement("small");
+        more.textContent = `+${formatCount(near.length - 4)}`;
+        events.appendChild(more);
+      }
+      box.appendChild(events);
+    }
     box.hidden = false;
     // Beside the pointer, on whichever side has the room.
     const card = svg.closest(".mon-chart");
@@ -1981,6 +2279,7 @@
     bindFullScreen();
     bindMonitors();
     bindAutoRefresh();
+    bindEvents();
 
     CHARTS.forEach((chart) => {
       const svg = byId(`mon-plot-${chart.name}`);

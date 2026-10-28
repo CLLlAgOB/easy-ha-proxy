@@ -20,7 +20,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 LOG = logging.getLogger("haproxy-admin")
 
@@ -257,6 +257,7 @@ class AuditLog:
         *,
         actor: str = "",
         action: str = "",
+        actions: Sequence[str] = (),
         object_type: str = "",
         result: str = "",
         since: int = 0,
@@ -273,6 +274,13 @@ class AuditLog:
         if action:
             clauses.append("action = ?")
             parameters.append(action)
+        # Any of several actions: the monitoring page asks for the changes a
+        # chart can show, and a busy hour of other entries must not push them
+        # past the limit.
+        wanted = [str(name) for name in actions or () if str(name)][:100]
+        if wanted:
+            clauses.append(f"action IN ({', '.join('?' for _ in wanted)})")
+            parameters.extend(wanted)
         if object_type:
             clauses.append("object_type = ?")
             parameters.append(object_type)

@@ -543,6 +543,7 @@ class AlertDatabase:
         rule: str = "",
         severity: str = "",
         since: int = 0,
+        until: int = 0,
         limit: int = 100,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -557,6 +558,11 @@ class AlertDatabase:
         if since:
             clauses.append("ts >= ?")
             parameters.append(int(since))
+        # A period that ended in the past -- the monitoring page marks the
+        # alerts of the window it shows, not the newest ones after it.
+        if until:
+            clauses.append("ts <= ?")
+            parameters.append(int(until))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         limit = _clamp_int(limit, default=100, min_v=1, max_v=500)
         offset = max(0, int(offset or 0))
@@ -1440,6 +1446,10 @@ class AlertHandler(BaseHTTPRequestHandler):
                     severity=str(query.get("severity", [""])[0] or "").strip(),
                     since=_clamp_int(
                         query.get("since", [None])[0], default=0, min_v=0,
+                        max_v=2_000_000_000,
+                    ),
+                    until=_clamp_int(
+                        query.get("until", [None])[0], default=0, min_v=0,
                         max_v=2_000_000_000,
                     ),
                     limit=_clamp_int(

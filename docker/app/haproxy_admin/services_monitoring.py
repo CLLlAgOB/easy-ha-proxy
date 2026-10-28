@@ -11,10 +11,14 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import time
 from typing import Any, Dict, List, Tuple
 
+from .alertd_client import AlertdUnavailable, alertd_history, alertd_state
+from .audit import RESULT_SUCCESS, audit_log
 from .metricsd_client import (
     MetricsdUnavailable,
+    metricsd_backends,
     metricsd_channel_labels_save,
     metricsd_series,
     metricsd_monitors_save,
@@ -30,6 +34,15 @@ LOG = logging.getLogger("haproxy-admin")
 
 # Kept in step with RANGES/CHART_SERIES in easy-ha-proxy-metricsd.py.
 RANGES: Tuple[str, ...] = ("1h", "6h", "24h", "7d", "30d", "90d", "1y")
+RANGE_SECONDS: Dict[str, int] = {
+    "1h": 3600,
+    "6h": 6 * 3600,
+    "24h": 86400,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+    "90d": 90 * 86400,
+    "1y": 365 * 86400,
+}
 DEFAULT_RANGE = "24h"
 CHARTS: Tuple[str, ...] = (
     "requests",
@@ -378,6 +391,241 @@ def backend_traffic(range_key: str,
         "until": payload.get("until", 0),
         "backends": items,
         "bytes_total": total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Requests per backend
+# ---------------------------------------------------------------------------
+
+
+def backend_requests(range_key: str,
+                     window: Dict[str, int] | None = None) -> Dict[str, Any]:
+    """What each backend answered over the period: how much, how badly, how fast.
+
+    The list sorted to find the busiest backend, the failing one and the slow
+    one. A backend that answered nothing is left out: thirty rows of zeros
+    hide the three that matter.
+    """
+
+    payload = metricsd_backends(range_key, window)
+    items: List[Dict[str, Any]] = []
+    for entry in payload.get("backends") or []:
+        proxy = str(entry.get("proxy") or "")
+        requests = int(entry.get("requests") or 0)
+        if not proxy or requests <= 0:
+            continue
+        classes = {
+            column: int(entry.get(column) or 0)
+            for column in ("resp_2xx", "resp_3xx", "resp_4xx", "resp_5xx")
+        }
+        answered = sum(classes.values())
+        average = entry.get("response_ms_avg")
+        peak = entry.get("response_ms_max")
+        items.append({
+            "proxy": proxy,
+            "label": display_name(proxy),
+            "requests": requests,
+            "answered": answered,
+            "resp_4xx": classes["resp_4xx"],
+            "resp_5xx": classes["resp_5xx"],
+            "share_4xx": round(100.0 * classes["resp_4xx"] / answered, 1) if answered else 0.0,
+            "share_5xx": round(100.0 * classes["resp_5xx"] / answered, 1) if answered else 0.0,
+            "response_ms_avg": None if average is None else int(average),
+            "response_ms_max": None if peak is None else int(peak),
+            "bytes_total": int(entry.get("bytes_in") or 0) + int(entry.get("bytes_out") or 0),
+        })
+    items.sort(key=lambda item: (-item["requests"], item["label"].lower()))
+    return {
+        "ok": True,
+        "range": payload.get("range", range_key),
+        "since": payload.get("since", 0),
+        "until": payload.get("until", 0),
+        "backends": items,
+        "requests_total": sum(item["requests"] for item in items),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Events on the charts
+# ---------------------------------------------------------------------------
+#
+# A spike reads differently beside what happened that minute: a site was
+# changed, an update ran, a service was restarted, an alert fired. All of it
+# is already written down -- in the change log and by the alert engine -- so
+# nothing new is recorded for the charts; they only read.
+
+# The changes that can show on a chart, with the words the page puts on them.
+# Only what changes what the gateway serves: who looked at a page, or took a
+# backup, is in the change log and not here.
+EVENT_ACTIONS: Dict[str, str] = {
+    "config.apply": "Configuration applied",
+    "config.rollback": "Configuration rolled back",
+    "config.revert": "Configuration reverted",
+    "config.restore": "Configuration restored",
+    "config.upload": "Configuration uploaded",
+    "site.create": "Site added",
+    "site.update": "Site changed",
+    "site.delete": "Site removed",
+    "tcp_proxy.create": "TCP proxy added",
+    "tcp_proxy.update": "TCP proxy changed",
+    "tcp_proxy.delete": "TCP proxy removed",
+    "udp_forward.create": "UDP forward added",
+    "udp_forward.update": "UDP forward changed",
+    "udp_forward.delete": "UDP forward removed",
+    "vars.update": "Variables changed",
+    "backend.state": "Server state changed",
+    "backend.weight": "Server weight changed",
+    "service.control": "Service action",
+    "update.apply": "Update started",
+    "restore.start": "Restore from a backup started",
+    "system.reboot": "Reboot",
+    "geoip.countries": "Country rules changed",
+    "adaptive.mode": "Adaptive protection mode changed",
+    "certificate.issue": "Certificate issued",
+    "certificate.restore": "Certificate restored",
+    "certificate.standby_activate": "Standby certificate activated",
+}
+# An alert is marked where it began and where it ended; a reminder that it
+# is still on says nothing new about that minute.
+EVENT_TRANSITIONS: Dict[str, str] = {
+    "fired": "alert",
+    "escalated": "alert",
+    "recovered": "recovered",
+}
+# Per source, and on the page: more than this on one chart is a smear, and
+# the answer says it was cut.
+MAX_EVENTS = 200
+
+
+def _event_period(range_key: str, window: Dict[str, int] | None,
+                  now: int) -> Tuple[int, int]:
+    if window and window.get("since") and window.get("until"):
+        return int(window["since"]), int(window["until"])
+    return now - RANGE_SECONDS.get(range_key, RANGE_SECONDS[DEFAULT_RANGE]), now
+
+
+def events(range_key: str, window: Dict[str, int] | None = None,
+           now: int | None = None) -> Dict[str, Any]:
+    """The changes and alerts of a period, oldest first.
+
+    For the whole gateway even when one site is chosen: a configuration
+    apply or an update touches every site, and the change log does not say
+    which backend a change ended up in.
+    """
+
+    now = int(now if now is not None else time.time())
+    since, until = _event_period(range_key, window, now)
+    found: List[Dict[str, Any]] = []
+    truncated = False
+
+    changes = audit_log().query(
+        actions=tuple(EVENT_ACTIONS), result=RESULT_SUCCESS,
+        since=since, until=until, limit=MAX_EVENTS,
+    )
+    truncated = truncated or int(changes.get("total") or 0) > MAX_EVENTS
+    for row in changes.get("events") or []:
+        action = str(row.get("action") or "")
+        found.append({
+            "ts": int(row.get("ts") or 0),
+            "kind": "change",
+            "label": EVENT_ACTIONS.get(action, action),
+            "object": str(row.get("object_id") or "")[:120],
+            "actor": str(row.get("actor") or "")[:60],
+            "summary": str(row.get("summary") or "")[:160],
+        })
+
+    alerts_available = True
+    try:
+        history = alertd_history({"since": since, "until": until, "limit": 500})
+    except AlertdUnavailable:
+        history = {}
+        alerts_available = False
+    alert_rows = []
+    for row in history.get("events") or []:
+        kind = EVENT_TRANSITIONS.get(str(row.get("transition") or ""))
+        ts = int(row.get("ts") or 0)
+        # An engine older than the `until` filter answers with everything
+        # after `since`; the period is kept here as well.
+        if kind and since <= ts <= until:
+            alert_rows.append({
+                "ts": ts,
+                "kind": kind,
+                "label": "Alert" if kind == "alert" else "Recovered",
+                "object": str(row.get("subject") or "")[:120],
+                "actor": "",
+                "summary": str(row.get("summary") or "")[:160],
+                "severity": str(row.get("severity") or ""),
+            })
+    alert_rows.sort(key=lambda item: item["ts"])
+    if len(alert_rows) > MAX_EVENTS:
+        alert_rows = alert_rows[-MAX_EVENTS:]
+        truncated = True
+    found.extend(alert_rows)
+
+    found.sort(key=lambda item: item["ts"])
+    return {
+        "ok": True,
+        "since": since,
+        "until": until,
+        "events": found,
+        "truncated": truncated,
+        "alerts_available": alerts_available,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Needs attention
+# ---------------------------------------------------------------------------
+#
+# What is wrong right now, at the top of the page. The alert engine already
+# decides that -- a site down, server errors or slow answers over its
+# threshold, monitoring storage under pressure -- with the operator's own
+# thresholds and delays. A second set of rules here would disagree with it,
+# so the strip only shows the engine's open alerts: those firing, and those
+# inside their delay, which are the earliest warning there is.
+
+ATTENTION_SEVERITIES = ("critical", "warning")
+MAX_ATTENTION = 8
+
+
+def attention() -> Dict[str, Any]:
+    try:
+        state = alertd_state(limit=1)
+    except AlertdUnavailable:
+        return {"ok": True, "available": False, "items": [], "more": 0}
+
+    titles = {
+        str(rule.get("name") or ""): str(rule.get("title") or "")
+        for rule in state.get("catalogue") or []
+        if isinstance(rule, dict)
+    }
+    items: List[Dict[str, Any]] = []
+    for rows, pending in ((state.get("active") or [], False),
+                          (state.get("pending") or [], True)):
+        for row in rows:
+            severity = str(row.get("severity") or "")
+            if severity not in ATTENTION_SEVERITIES:
+                continue
+            rule = str(row.get("rule") or "")
+            items.append({
+                "rule": rule,
+                "title": titles.get(rule) or rule,
+                "subject": str(row.get("subject") or "")[:120],
+                "severity": severity,
+                "pending": pending,
+                "since": int(row.get("since_ts") or 0),
+                "summary": str(row.get("summary") or "")[:200],
+            })
+    # Firing before pending, critical before warning, the newest first.
+    items.sort(key=lambda item: (
+        item["pending"], ATTENTION_SEVERITIES.index(item["severity"]), -item["since"],
+    ))
+    return {
+        "ok": True,
+        "available": True,
+        "items": items[:MAX_ATTENTION],
+        "more": max(0, len(items) - MAX_ATTENTION),
     }
 
 

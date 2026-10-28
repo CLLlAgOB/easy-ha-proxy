@@ -452,6 +452,95 @@
     return geometry.left + (index / (count - 1)) * geometry.plotWidth;
   }
 
+  /* ---------- events on the charts ---------- */
+
+  // The sample a moment falls in: the last one at or before it. -1 outside
+  // the drawn samples, so an event of another period is not pinned to an edge.
+  function indexAtTime(points, step, ts) {
+    const count = (points || []).length;
+    const moment = Number(ts);
+    if (!count || !Number.isFinite(moment)) return -1;
+    const last = Number(points[count - 1]) + Math.max(1, Number(step) || 0);
+    if (moment < Number(points[0]) || moment >= last) return -1;
+    let low = 0;
+    let high = count - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (Number(points[middle]) <= moment) low = middle;
+      else high = middle - 1;
+    }
+    return low;
+  }
+
+  // Events by the sample they fall in: ten changes in one minute are one
+  // mark, not a smudge. A mark takes the colour of its gravest event.
+  const EVENT_KINDS = ["change", "recovered", "alert"];
+
+  function eventMarks(points, step, events) {
+    const marks = new Map();
+    (events || []).forEach((event) => {
+      const kind = EVENT_KINDS.includes(event.kind) ? event.kind : "change";
+      const index = indexAtTime(points, step, event.ts);
+      if (index < 0) return;
+      let mark = marks.get(index);
+      if (!mark) {
+        mark = {index: index, kind: kind, events: []};
+        marks.set(index, mark);
+      }
+      mark.events.push(event);
+      if (EVENT_KINDS.indexOf(kind) > EVENT_KINDS.indexOf(mark.kind)) mark.kind = kind;
+    });
+    return Array.from(marks.values()).sort((a, b) => a.index - b.index);
+  }
+
+  // How many samples a few pixels span: on a chart of a thousand samples
+  // the pointer seldom lands on a mark's own pixel, on one of ten it should
+  // not reach the neighbours.
+  function eventReach(geometry, pixels) {
+    const count = geometry.points.length;
+    if (count <= 1) return 0;
+    const perSample = geometry.plotWidth / (count - 1);
+    return Math.floor(pixels / Math.max(perSample, 0.001));
+  }
+
+  // The events within reach of a sample, oldest first.
+  function eventsNear(marks, index, reach) {
+    const found = [];
+    (marks || []).forEach((mark) => {
+      if (Math.abs(mark.index - index) <= reach) found.push(...mark.events);
+    });
+    return found.sort((a, b) => Number(a.ts) - Number(b.ts));
+  }
+
+  /* ---------- requests per backend ---------- */
+
+  // The orders the list is read in: the busiest, the failing, the slow.
+  // Errors by count, not share -- two failed requests out of two is 100%
+  // and still not the backend to look at first.
+  const REQUEST_SORTS = ["requests", "errors5xx", "errors4xx", "slowest", "name"];
+
+  function sortedBackendRequests(items, order) {
+    const list = (items || []).slice();
+    const byLabel = (a, b) => String(a.label).localeCompare(String(b.label));
+    const timed = (value) => (value === null || value === undefined ? -1 : Number(value));
+    const keys = {
+      requests: (item) => [Number(item.requests) || 0],
+      errors5xx: (item) => [Number(item.resp_5xx) || 0, Number(item.share_5xx) || 0],
+      errors4xx: (item) => [Number(item.resp_4xx) || 0, Number(item.share_4xx) || 0],
+      slowest: (item) => [timed(item.response_ms_avg)]
+    };
+    const key = keys[order];
+    if (!key) return list.sort(byLabel);
+    return list.sort((a, b) => {
+      const left = key(a);
+      const right = key(b);
+      for (let index = 0; index < left.length; index += 1) {
+        if (right[index] !== left[index]) return right[index] - left[index];
+      }
+      return byLabel(a, b);
+    });
+  }
+
   function zoomWindow(since, until) {
     if (until - since < MIN_ZOOM_SECONDS) {
       const middle = (since + until) / 2;
@@ -489,6 +578,12 @@
     viewFromQuery,
     indexAtX,
     xAtIndex,
+    indexAtTime,
+    eventMarks,
+    eventReach,
+    eventsNear,
+    REQUEST_SORTS,
+    sortedBackendRequests,
     zoomWindow
   };
 });

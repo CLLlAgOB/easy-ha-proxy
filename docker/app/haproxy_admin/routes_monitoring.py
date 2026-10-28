@@ -71,6 +71,32 @@ def api_monitoring_backends():
         return jsonify(monitoring.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/monitoring/backend-requests")
+def api_monitoring_backend_requests():
+    """Requests, errors and response time per backend over the period."""
+
+    range_key = monitoring.normalize_range(request.args.get("range"))
+    try:
+        return jsonify(monitoring.backend_requests(range_key, _window()))
+    except MetricsdUnavailable as exc:
+        return jsonify(monitoring.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/monitoring/events")
+def api_monitoring_events():
+    """The changes and alerts of the period, marked on the charts."""
+
+    range_key = monitoring.normalize_range(request.args.get("range"))
+    return jsonify(monitoring.events(range_key, _window()))
+
+
+@bp.get("/api/monitoring/attention")
+def api_monitoring_attention():
+    """The alerts open right now, for the strip at the top of the page."""
+
+    return jsonify(monitoring.attention())
+
+
 @bp.post("/api/monitoring/channels/labels")
 def api_monitoring_channel_labels():
     payload = request.get_json(silent=True) or {}

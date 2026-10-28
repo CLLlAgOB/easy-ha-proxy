@@ -498,3 +498,74 @@ test("each preset has its length, and anything else is a day", () => {
   assert.equal(core.rangeSeconds("1y"), 365 * DAY);
   assert.equal(core.rangeSeconds("bogus"), DAY);
 });
+
+test("an event is marked at the sample it fell in, and only inside the drawn samples", () => {
+  const points = [600, 660, 720, 900];
+  assert.equal(core.indexAtTime(points, 60, 600), 0);
+  assert.equal(core.indexAtTime(points, 60, 659), 0);
+  assert.equal(core.indexAtTime(points, 60, 660), 1);
+  // A gap in the samples: the last one before it.
+  assert.equal(core.indexAtTime(points, 60, 800), 2);
+  // The last slot runs a step past its sample.
+  assert.equal(core.indexAtTime(points, 60, 959), 3);
+  assert.equal(core.indexAtTime(points, 60, 960), -1);
+  assert.equal(core.indexAtTime(points, 60, 599), -1);
+  assert.equal(core.indexAtTime([], 60, 600), -1);
+  assert.equal(core.indexAtTime(points, 60, "soon"), -1);
+});
+
+test("events in one sample are one mark, coloured by the gravest", () => {
+  const marks = core.eventMarks([0, 60, 120], 60, [
+    {ts: 70, kind: "change"},
+    {ts: 10, kind: "change"},
+    {ts: 80, kind: "alert"},
+    {ts: 90, kind: "recovered"},
+    {ts: 500, kind: "alert"},
+    {ts: 125, kind: "<script>"}
+  ]);
+  assert.deepEqual(marks.map((mark) => [mark.index, mark.kind, mark.events.length]), [
+    [0, "change", 1],
+    [1, "alert", 3],
+    // An unknown kind is drawn as a change, never put into a class name.
+    [2, "change", 1]
+  ]);
+});
+
+test("the pointer finds the events a few pixels around it", () => {
+  // Five hundred samples over 500 px: a pixel each, six of them in reach.
+  const dense = {points: Array.from({length: 501}, (_, i) => i * 60), plotWidth: 500};
+  assert.equal(core.eventReach(dense, 6), 6);
+  // Ten samples over 500 px: a neighbour is 55 px away, out of reach.
+  const sparse = {points: Array.from({length: 10}, (_, i) => i * 60), plotWidth: 495};
+  assert.equal(core.eventReach(sparse, 6), 0);
+  const marks = [
+    {index: 10, events: [{ts: 600, kind: "change"}]},
+    {index: 14, events: [{ts: 840, kind: "alert"}, {ts: 830, kind: "change"}]},
+    {index: 40, events: [{ts: 2400, kind: "change"}]}
+  ];
+  assert.deepEqual(core.eventsNear(marks, 12, 2).map((event) => event.ts), [600, 830, 840]);
+  assert.deepEqual(core.eventsNear(marks, 12, 0), []);
+  assert.deepEqual(core.eventsNear(undefined, 12, 5), []);
+});
+
+test("the requests list sorts for the busiest, the failing and the slow", () => {
+  const items = [
+    {label: "b", requests: 10, resp_5xx: 2, share_5xx: 20, resp_4xx: 0, share_4xx: 0, response_ms_avg: 900},
+    {label: "a", requests: 500, resp_5xx: 50, share_5xx: 10, resp_4xx: 50, share_4xx: 10, response_ms_avg: 40},
+    {label: "c", requests: 30, resp_5xx: 9, share_5xx: 30, resp_4xx: 1, share_4xx: 3, response_ms_avg: null},
+    {label: "d", requests: 10, resp_5xx: 9, share_5xx: 90, resp_4xx: 0, share_4xx: 0, response_ms_avg: 100}
+  ];
+  const order = (sort) => core.sortedBackendRequests(items, sort).map((item) => item.label);
+  assert.deepEqual(order("requests"), ["a", "c", "b", "d"]);
+  // By count, not share: fifty failures out of five hundred come before two
+  // out of ten. At equal counts the higher share.
+  assert.deepEqual(order("errors5xx"), ["a", "d", "c", "b"]);
+  assert.deepEqual(order("errors4xx"), ["a", "c", "b", "d"]);
+  // A backend that answered nothing has no time and goes last.
+  assert.deepEqual(order("slowest"), ["b", "d", "a", "c"]);
+  assert.deepEqual(order("name"), ["a", "b", "c", "d"]);
+  assert.deepEqual(order("bogus"), ["a", "b", "c", "d"]);
+  // The list handed in is left as it was.
+  assert.deepEqual(items.map((item) => item.label), ["b", "a", "c", "d"]);
+  for (const sort of core.REQUEST_SORTS) assert.equal(order(sort).length, 4);
+});

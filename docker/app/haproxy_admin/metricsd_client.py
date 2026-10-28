@@ -89,6 +89,16 @@ def metricsd_servers(range_key: str,
     )
 
 
+def metricsd_backends(range_key: str,
+                      window: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """What each backend answered over the period, and how fast."""
+
+    return _get_json(
+        "/api/v1/metrics/backends", params=_window_params(range_key, "", window),
+        timeout=15,
+    )
+
+
 def metricsd_channel_labels_save(
     labels: Dict[str, str], hidden: Optional[list] = None
 ) -> Dict[str, Any]:

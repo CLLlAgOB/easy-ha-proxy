@@ -1650,6 +1650,48 @@ class MetricsDatabase:
             ]
         }
 
+    BACKEND_TOTAL_COLUMNS = (
+        "requests", "resp_2xx", "resp_3xx", "resp_4xx", "resp_5xx",
+        "resp_other", "bytes_in", "bytes_out", "sessions", "check_failures",
+    )
+
+    def backend_totals(self, *, since: int, until: int) -> Dict[str, Any]:
+        """What each backend answered over a range, and how fast.
+
+        Read from the backend rows HAProxy keeps, not summed from servers:
+        the response classes are counted where the request is answered. The
+        response time weighs each slot by the requests it answered, like the
+        chart, and a backend that answered nothing has none -- null rather
+        than a confident 0 ms.
+        """
+
+        table, _ = choose_resolution(max(1, until - since))
+        columns = self.BACKEND_TOTAL_COLUMNS
+        projection = ", ".join(_aggregate_sql(column) for column in columns)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT o.proxy, {projection}, "
+                "CAST(ROUND(SUM(m.response_ms_avg * m.requests) * 1.0 "
+                "/ NULLIF(SUM(m.requests), 0)) AS INTEGER), "
+                "MAX(CASE WHEN m.requests > 0 THEN m.response_ms_max END) "
+                f"FROM {table} m JOIN objects o ON o.id = m.object_id "
+                "WHERE o.kind = 'backend' "
+                "AND m.bucket_ts >= ? AND m.bucket_ts < ? "
+                "GROUP BY o.proxy ORDER BY o.proxy",
+                [since, until],
+            ).fetchall()
+        backends = []
+        for row in rows:
+            entry: Dict[str, Any] = {"proxy": str(row[0])}
+            for index, column in enumerate(columns):
+                entry[column] = int(row[index + 1] or 0)
+            average = row[len(columns) + 1]
+            peak = row[len(columns) + 2]
+            entry["response_ms_avg"] = None if average is None else int(average)
+            entry["response_ms_max"] = None if peak is None else int(peak)
+            backends.append(entry)
+        return {"backends": backends, "source": table}
+
     def latest_gauges(self, *, site: str, until: int) -> Dict[str, int]:
         """Connection gauges from the newest bucket that actually has data."""
 
@@ -3162,6 +3204,19 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 payload["hidden"] = json.loads(
                     database.get_state(CHANNEL_HIDDEN_KEY, "[]") or "[]"
                 )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            payload.update({"ok": True, "range": range_key,
+                            "since": since, "until": until})
+            self._send_json(200, payload)
+            return
+
+        if path == "/api/v1/metrics/backends":
+            query = self._query()
+            range_key, since, until = resolve_window(query)
+            try:
+                payload = database.backend_totals(since=since, until=until)
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
