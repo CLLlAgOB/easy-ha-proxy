@@ -33,6 +33,8 @@
 
   const SVG_NS = "http://www.w3.org/2000/svg";
   const REFRESH_INTERVAL_MS = 30000;
+  // Hourly rows change once an hour: a week or more is redrawn this often.
+  const LONG_RANGE_REFRESH_SECONDS = 300;
 
   const CHARTS = [
     {
@@ -1334,15 +1336,70 @@
     if (wanted && CHARTS.some((chart) => chart.name === wanted[1])) setExpanded(wanted[1]);
   }
 
-  async function loadAll() {
+  // What the charts on show were drawn for; a refresh of the same view only
+  // fetches what is new.
+  let chartsView = "";
+  let chartsFetchedAt = 0;
+
+  // How one chart is fetched on this pass: whole, or -- on a refresh of a
+  // window of minutes -- from its last slot on, to be joined to what it has.
+  function chartPlan(chart, params, seconds, refreshing, now) {
+    const query = Object.assign({ chart: chart.name }, params);
+    const wanted = chart.components && wantsComponents(chart.name);
+    if (chart.components) query.components = wanted ? "1" : "0";
+    const last = lastCharts[chart.name];
+    const points = (last && last.payload && last.payload.points) || [];
+    const joinable =
+      refreshing &&
+      !customWindow &&
+      !wanted &&
+      seconds <= 86400 &&
+      points.length > 0 &&
+      Number(last.payload.resolution_seconds) === 60;
+    if (!joinable) return { query: query, from: null };
+    // The last slot again -- it was still filling -- and at least two
+    // minutes, the shortest window the server takes.
+    const from = Math.min(Number(points[points.length - 1]), now - 120);
+    const fresh = { chart: chart.name, since: from, until: now };
+    if (currentSite) fresh.site = currentSite;
+    if (chart.components) fresh.components = "0";
+    return { query: fresh, from: from };
+  }
+
+  async function loadAll(options) {
     // A refresh redraws the charts, which would drop a selection in progress.
     if (inFlight || zoomDragging) return;
     inFlight = true;
     const params = Object.assign({ range: currentRange }, windowParams());
     if (currentSite) params.site = currentSite;
+    const seconds = customWindow
+      ? customWindow.until - customWindow.since
+      : rangeSeconds(currentRange);
+    const now = Math.floor(Date.now() / 1000);
+    const view = [currentRange, currentSite, customWindow ? `${customWindow.since}-${customWindow.until}` : ""].join("|");
+    const refreshing = Boolean(options && options.refresh) && view === chartsView;
+    // A period that has ended does not change; a week or more changes hourly.
+    let chartsDue = true;
+    if (refreshing && customWindow && customWindow.until < now - 120) chartsDue = false;
+    if (refreshing && !customWindow && seconds > 86400 && now - chartsFetchedAt < LONG_RANGE_REFRESH_SECONDS) {
+      chartsDue = false;
+    }
+    const plans = CHARTS.map((chart) => chartPlan(chart, params, seconds, refreshing, now));
 
     try {
-      const summary = await getJson("/api/monitoring/summary", params);
+      // Everything is asked for at once; it is drawn in the order below.
+      const summaryRequest = getJson("/api/monitoring/summary", params);
+      const timelineRequest = getJson("/api/monitoring/states", params).catch(() => null);
+      // Not scoped by site: a link carries every site pointed at it.
+      const channelsRequest = loadChannels().catch(() => null);
+      const chartsRequest = chartsDue
+        ? Promise.all(
+            plans.map((plan) => getJson("/api/monitoring/series", plan.query).catch(() => null))
+          )
+        : null;
+      if (chartsRequest) chartsRequest.catch(() => null);
+
+      const summary = await summaryRequest;
       showUnavailable(false);
       if (noteWindowSkew(summary)) {
         // Show what it did return rather than an empty frame, now that the
@@ -1352,27 +1409,28 @@
       renderSummary(summary);
       renderStorage(summary.storage);
 
-      const timeline = await getJson("/api/monitoring/states", params).catch(() => null);
-      renderTimeline(timeline);
+      renderTimeline(await timelineRequest);
       // After the timeline: both write the note beside the heading, and the
       // list on show has the last word.
       if (backendsView === "traffic") await loadBackendTraffic();
+      await channelsRequest;
 
-      // Not scoped by site: a link carries every site pointed at it.
-      await loadChannels();
-
-      const seconds = customWindow
-        ? customWindow.until - customWindow.since
-        : rangeSeconds(currentRange);
-      const results = await Promise.all(
-        CHARTS.map((chart) => {
-          const query = Object.assign({ chart: chart.name }, params);
-          if (chart.components) query.components = wantsComponents(chart.name) ? "1" : "0";
-          return getJson("/api/monitoring/series", query).catch(() => null);
-        })
-      );
-      results.forEach((payload, index) => {
+      const results = chartsRequest ? await chartsRequest : [];
+      if (chartsRequest) {
+        chartsView = view;
+        if (plans.every((plan) => plan.from === null)) chartsFetchedAt = now;
+      }
+      results.forEach((answer, index) => {
         const chart = CHARTS[index];
+        const plan = plans[index];
+        const last = lastCharts[chart.name];
+        let payload = answer;
+        if (plan.from !== null) {
+          // A failed refresh keeps what was drawn rather than blanking it.
+          payload = answer
+            ? core.mergeSeries(last.payload, answer, plan.from, Number(answer.until || now) - seconds)
+            : last.payload;
+        }
         lastCharts[chart.name] = payload ? { payload: payload, seconds: seconds } : null;
         redrawChart(chart.name);
         if (payload && index === 0) {
@@ -1512,7 +1570,7 @@
   function scheduleRefresh() {
     if (refreshTimer) window.clearInterval(refreshTimer);
     refreshTimer = window.setInterval(() => {
-      if (!document.hidden) loadAll();
+      if (!document.hidden) loadAll({ refresh: true });
     }, REFRESH_INTERVAL_MS);
   }
 

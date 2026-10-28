@@ -41,6 +41,37 @@ test("a rate keeps its gaps", () => {
   assert.deepEqual(view.datasets[0].values, [2, null]);
 });
 
+test("a refresh joins its new minutes to the window already drawn", () => {
+  const previous = {
+    chart: "requests", range: "24h", resolution_seconds: 60, until: 180,
+    points: [0, 60, 120], series: {requests: [1, 2, 3], other: [7, 8, 9]},
+    components: [{name: "x", values: [1, 1, 1]}]
+  };
+  const fresh = {range: "custom", until: 240, points: [120, 180], series: {requests: [30, 40], extra: [5, 6]}};
+  const merged = core.mergeSeries(previous, fresh, 120, 60);
+  // The slot that was still filling is replaced, the oldest falls off.
+  assert.deepEqual(merged.points, [60, 120, 180]);
+  assert.deepEqual(merged.series.requests, [2, 30, 40]);
+  // A line one answer lacks reads as a gap there.
+  assert.deepEqual(merged.series.other, [8, null, null]);
+  assert.deepEqual(merged.series.extra, [null, 5, 6]);
+  assert.equal(merged.until, 240);
+  // The rest of the payload is the drawn one's, without its components.
+  assert.equal(merged.range, "24h");
+  assert.equal(merged.resolution_seconds, 60);
+  assert.equal("components" in merged, false);
+  // The original is left as it was.
+  assert.deepEqual(previous.points, [0, 60, 120]);
+});
+
+test("a refresh that brought nothing keeps the window, moved on", () => {
+  const previous = {until: 180, points: [0, 60, 120], series: {requests: [1, 2, 3]}};
+  const merged = core.mergeSeries(previous, {until: 200, points: [], series: {}}, 180, 60);
+  assert.deepEqual(merged.points, [60, 120]);
+  assert.deepEqual(merged.series.requests, [2, 3]);
+  assert.equal(merged.until, 200);
+});
+
 test("a line is drawn in runs between its gaps", () => {
   assert.deepEqual(core.segments([1, 2, null, 3, null, null, 4, 5]), [[0, 1], [3, 3], [6, 7]]);
   assert.deepEqual(core.segments([null, null]), []);

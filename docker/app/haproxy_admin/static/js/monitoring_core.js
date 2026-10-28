@@ -181,6 +181,50 @@
     };
   }
 
+  /* ---------- refresh ---------- */
+
+  // A refresh's few new minutes joined to the window already drawn. Slots
+  // from `from` on come from the fresh answer -- the last one was still
+  // filling when it was first read -- and slots older than `keepFrom` fall
+  // off the left edge. A line one answer lacks reads as a gap there.
+  function mergeSeries(previous, fresh, from, keepFrom) {
+    const before = (previous && previous.series) || {};
+    const after = (fresh && fresh.series) || {};
+    const keys = Array.from(new Set(Object.keys(before).concat(Object.keys(after))));
+    const points = [];
+    const series = {};
+    keys.forEach((key) => {
+      series[key] = [];
+    });
+    const take = (source, index) => {
+      keys.forEach((key) => {
+        const value = (source[key] || [])[index];
+        series[key].push(value === undefined ? null : value);
+      });
+    };
+    ((previous && previous.points) || []).forEach((slot, index) => {
+      if (slot >= keepFrom && slot < from) {
+        points.push(slot);
+        take(before, index);
+      }
+    });
+    ((fresh && fresh.points) || []).forEach((slot, index) => {
+      if (slot >= keepFrom) {
+        points.push(slot);
+        take(after, index);
+      }
+    });
+    const merged = Object.assign({}, previous, {
+      points: points,
+      series: series,
+      until: fresh && fresh.until !== undefined ? fresh.until : previous && previous.until
+    });
+    // The lines per component are never joined: a chart showing them is
+    // fetched whole (see monitoring.js).
+    delete merged.components;
+    return merged;
+  }
+
   // Which samples get a time under them: no more labels than fit, at most
   // five, first and last always -- full screen on a phone is narrow.
   function timeLabelIndexes(pointCount, plotWidth) {
@@ -382,6 +426,7 @@
     niceCeiling,
     reading,
     segments,
+    mergeSeries,
     chartData,
     timeLabelIndexes,
     legendReading,
