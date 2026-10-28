@@ -3270,6 +3270,105 @@ def live_refusal(status: int, backend: str, term: str, ban_reason: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Minute digests for the monitoring page
+# ---------------------------------------------------------------------------
+#
+# The log is the only place that says how long each request took and why
+# the gateway turned one away. HAProxy's counters give an average response
+# time and no percentile, and count refusals by status rather than by
+# reason. This daemon reads every line anyway, so it folds each into a
+# digest of its minute -- a histogram of response times per backend, and
+# refusals by reason -- and keeps no line. The collector of the monitoring
+# page asks for the minutes that are complete and stores them like the rest
+# of what it charts.
+
+# Upper edges of the histogram, in milliseconds; one more bucket above.
+DIGEST_BOUNDS_MS = (
+    5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750,
+    1000, 1500, 2000, 3000, 5000, 10000, 30000,
+)
+# A minute is complete this long after it ended: a line is written when its
+# request ends and read within one poll.
+DIGEST_CLOSE_SECONDS = 30
+# How long complete minutes wait to be asked for.
+DIGEST_KEEP_SECONDS = 3 * 3600
+DIGEST_MAX_BACKENDS = 200
+DIGEST_REFUSALS = ("geo", "banned", "rate", "other")
+
+
+def _digest_bucket(duration_ms: int) -> int:
+    for index, bound in enumerate(DIGEST_BOUNDS_MS):
+        if duration_ms <= bound:
+            return index
+    return len(DIGEST_BOUNDS_MS)
+
+
+class MinuteDigests:
+    """Per-minute histograms and refusal counts, minutes keyed by when the
+    request ended (the syslog stamp, which carries its zone)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._minutes: Dict[int, Dict[str, Any]] = {}
+        self.late = 0
+
+    def add(self, request: "ParsedRequest", ended: float, now: int) -> None:
+        minute = int(ended) // 60 * 60
+        if minute + 60 + DIGEST_CLOSE_SECONDS <= now:
+            # Its minute was already handed out as complete.
+            self.late += 1
+            return
+        refusal = live_refusal(request.status, request.backend, request.term, request.ban_reason)
+        backend = request.backend.split("/", 1)[0] if request.backend else ""
+        answered = (
+            not refusal
+            and not request.bad_request
+            and request.status > 0
+            and backend
+            and not request.backend.endswith("/<NOSRV>")
+        )
+        if not refusal and not answered:
+            return
+        with self._lock:
+            digest = self._minutes.get(minute)
+            if digest is None:
+                digest = {"backends": {}, "refused": dict.fromkeys(DIGEST_REFUSALS, 0)}
+                self._minutes[minute] = digest
+            if refusal:
+                kind = refusal if refusal in ("geo", "banned") else (
+                    "rate" if refusal == "rate-limited" else "other"
+                )
+                digest["refused"][kind] += 1
+                return
+            histogram = digest["backends"].get(backend)
+            if histogram is None:
+                if len(digest["backends"]) >= DIGEST_MAX_BACKENDS:
+                    return
+                histogram = [0] * (len(DIGEST_BOUNDS_MS) + 1)
+                digest["backends"][backend] = histogram
+            histogram[_digest_bucket(max(0, int(request.duration_ms)))] += 1
+
+    def complete(self, since: int, now: int) -> List[Dict[str, Any]]:
+        """The complete minutes after since, oldest first; forgets old ones."""
+
+        with self._lock:
+            for minute in [m for m in self._minutes if m < now - DIGEST_KEEP_SECONDS]:
+                del self._minutes[minute]
+            ready = sorted(
+                minute for minute in self._minutes
+                if minute > since and minute + 60 + DIGEST_CLOSE_SECONDS <= now
+            )
+            return [
+                {
+                    "ts": minute,
+                    "backends": {name: list(hist) for name, hist in self._minutes[minute]["backends"].items()},
+                    "refused": dict(self._minutes[minute]["refused"]),
+                }
+                for minute in ready
+            ]
+
+
 def live_record(request: "ParsedRequest", ts: float) -> tuple:
     return (
         ts,
@@ -3648,6 +3747,7 @@ class GuardEngine:
             database.get_state(BAN_DURATIONS_CHANGED_KEY, "0")
         )
         self.policy = ScoringPolicy()
+        self.digests = MinuteDigests()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
@@ -3914,9 +4014,13 @@ class GuardEngine:
             if request is None:
                 continue
             parsed += 1
+            ts = line_epoch(line)
+            ended = ts if ts is not None else float(now)
+            # Everything, excluded addresses too: the page charts the
+            # gateway's traffic, not the engine's suspects.
+            self.digests.add(request, ended, now)
             if self.live is not None:
-                ts = line_epoch(line)
-                live.append(live_record(request, ts if ts is not None else float(now)))
+                live.append(live_record(request, ended))
             if self.requests is not None:
                 # Diagnostics and scoring are separate concerns that happen to
                 # need the same read of the same file. The request log keeps
@@ -4948,6 +5052,26 @@ class GuardHandler(BaseHTTPRequestHandler):
                         "storage": database.storage(),
                     },
                 )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/digest":
+            # The minutes complete since the collector last asked.
+            query = parse_qs(urlparse(self.path).query or "")
+            try:
+                since = int((query.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            now = _utc_now()
+            try:
+                self._send_json(200, {
+                    "ok": True,
+                    "now": now,
+                    "bounds_ms": list(DIGEST_BOUNDS_MS),
+                    "minutes": engine.digests.complete(since, now),
+                    "late": engine.digests.late,
+                })
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return

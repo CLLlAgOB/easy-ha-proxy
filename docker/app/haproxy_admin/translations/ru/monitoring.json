@@ -166,6 +166,19 @@
     "Sent": "Отправлено",
     "Disk: space and activity": "Диск: место и работа",
     "Network cards of the machine": "Сетевые карты машины",
-    "No sensor on this machine": "на этой машине нет датчика"
+    "No sensor on this machine": "на этой машине нет датчика",
+    "Median": "Медиана",
+    "95th percentile": "95-й перцентиль",
+    "99th percentile": "99-й перцентиль",
+    "Geo blocks": "Гео-блокировки",
+    "Rate limits": "Лимиты частоты",
+    "Other refusals": "Прочие отказы",
+    "Response time percentiles": "Перцентили времени ответа",
+    "From the access log: half, 95 and 99 of every hundred requests answered within": "По журналу доступа: за какое время ответили на половину, 95 и 99 запросов из каждой сотни",
+    "Refused at the gateway": "Отказано шлюзом",
+    "Requests turned away, per minute, for the whole gateway": "Отклонённые запросы в минуту, по всему шлюзу",
+    "Response time percentiles, from the access log": "Перцентили времени ответа, по журналу доступа",
+    "Requests refused at the gateway, by reason": "Запросы, отклонённые шлюзом, по причинам",
+    "The access log is read by adaptive protection. It is switched off and the request log is off too, so nothing reads it: the percentiles and the refusals have nothing to show.": "Журнал доступа читает адаптивная защита. Она выключена, журнал запросов тоже, поэтому журнал никто не читает: перцентилям и отказам нечего показать."
   }
 }

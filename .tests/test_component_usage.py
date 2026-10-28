@@ -566,7 +566,7 @@ class ThePanel(unittest.TestCase):
         self.assertEqual(
             sorted(cards),
             sorted(["requests", "traffic", "responses", "latency", "connections", "cpu", "memory",
-                    "disk", "diskio", "network", "temperature"]),
+                    "disk", "diskio", "network", "temperature", "percentiles", "refusals"]),
         )
         self.assertEqual(self.page.count("{{ expand_button() }}"), len(cards))
         self.assertIn('id="mon-overlay" hidden', self.page)

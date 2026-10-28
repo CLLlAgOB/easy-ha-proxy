@@ -206,6 +206,10 @@ _AGGREGATIONS: Dict[str, str] = {
     "net_tx": "sum",
     "temp_avg": "wavg",
     "temp_max": "max",
+    "refused_geo": "sum",
+    "refused_banned": "sum",
+    "refused_rate": "sum",
+    "refused_other": "sum",
     "memory_avg": "wavg",
     "memory_max": "max",
     "memory_total": "max",
@@ -230,12 +234,38 @@ CHART_SERIES: Dict[str, Tuple[str, ...]] = {
     "diskio": ("disk_read", "disk_write"),
     "network": ("net_rx", "net_tx"),
     "temperature": ("temp_avg", "temp_max"),
+    # From the access log, through the adaptive protection daemon that reads
+    # it: response time percentiles per backend -- HAProxy's own counters
+    # only average -- and what the gateway turned away, by reason.
+    "percentiles": ("p50", "p95", "p99"),
+    "refusals": ("refused_geo", "refused_banned", "refused_rate", "refused_other"),
 }
 
 # Charts about the machine rather than about a proxy object. They select the
 # synthetic 'host' row and ignore any site: one machine's CPU is not
 # divisible among the sites it serves.
 HOST_CHARTS = frozenset({"cpu", "memory", "disk", "diskio", "network", "temperature"})
+# The gateway's refusals: one synthetic object, like the machine's row.
+EDGE_KIND = "edge"
+# The minute digests guardd keeps of the access log (see MinuteDigests there).
+GUARDD_SOCKET_PATH = os.environ.get(
+    "GUARDD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-guardd.sock"
+)
+DIGEST_PULL_SECONDS = 60
+DIGEST_CURSOR_KEY = "digest_cursor"
+# Kept in step with DIGEST_BOUNDS_MS in easy-ha-proxy-guardd.py: upper edges
+# in milliseconds, with one more bucket above the last.
+DIGEST_BOUNDS_MS: Tuple[int, ...] = (
+    5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750,
+    1000, 1500, 2000, 3000, 5000, 10000, 30000,
+)
+HISTOGRAM_COLUMNS: Tuple[str, ...] = tuple(f"h{index}" for index in range(len(DIGEST_BOUNDS_MS) + 1))
+# The latency rollup waits this long past an hour: a minute's digest arrives
+# a minute and a half after the minute, later than its traffic.
+LATENCY_ROLLUP_LAG_SECONDS = 600
+PERCENTILES = (("p50", 0.50), ("p95", 0.95), ("p99", 0.99))
+# Charts computed from something other than the metric rows' own columns.
+DERIVED_CHARTS = frozenset({"percentiles"})
 # Where the machine is read from; attributes of the collector so a test can
 # point them at a directory of its own.
 DISK_PATH = "/"
@@ -344,7 +374,7 @@ def _from_storage(chart: str, value: Any) -> Any:
     if chart == "disk":
         # A disk is never empty: 0 is a minute it was not read.
         return int(value) * MEMORY_UNIT if value else None
-    if chart in ("diskio", "network"):
+    if chart in ("diskio", "network", "refusals"):
         return int(value or 0)
     if chart == "temperature":
         # Nothing was read: a gap, never a machine at 0 degrees.
@@ -468,6 +498,11 @@ METRIC_COLUMNS: Tuple[str, ...] = (
     "net_tx",
     "temp_avg",
     "temp_max",
+    # The edge row only: requests the gateway turned away, by reason.
+    "refused_geo",
+    "refused_banned",
+    "refused_rate",
+    "refused_other",
 )
 # Columns summed when rolling minutes up into hours; the rest are averaged
 # (weighted by sample count) or maxed, see _ROLLUP_MAX.
@@ -826,7 +861,11 @@ CHANNEL_HIDDEN_KEY = "channel_hidden"
 # part of a poll. The rest are drawn from the one `show stat` every poll
 # reads anyway, so for them off means not shown.
 MONITORS_KEY = "monitors"
-GATHERED_MONITORS = ("machine", "components", "disk", "network", "temperature")
+GATHERED_MONITORS = (
+    "machine", "components", "disk", "network", "temperature", "percentiles", "refusals",
+)
+# Both come from the same digest of the access log.
+DIGEST_MONITORS = ("percentiles", "refusals")
 # Read with the machine's row; any of them on means the row is written.
 HOST_MONITORS = ("machine", "disk", "network", "temperature")
 SHOWN_MONITORS = (
@@ -924,7 +963,65 @@ class Bucket:
             "net_tx": self.counters.get("net_tx", 0),
             "temp_avg": average("temp"),
             "temp_max": self.gauge_maxima.get("temp", 0),
+            "refused_geo": self.counters.get("refused_geo", 0),
+            "refused_banned": self.counters.get("refused_banned", 0),
+            "refused_rate": self.counters.get("refused_rate", 0),
+            "refused_other": self.counters.get("refused_other", 0),
         }
+
+
+def histogram_percentile(counts: List[int], share: float) -> Optional[int]:
+    """The value below which share of the requests fell, in milliseconds.
+
+    Read off the histogram: the bucket the rank falls in, and a straight line
+    between its edges. The top bucket has no upper edge, so a rank there
+    reads as its lower one -- "at least". None when nothing was counted.
+    """
+
+    total = sum(counts)
+    if total <= 0:
+        return None
+    rank = share * total
+    seen = 0
+    for index, count in enumerate(counts):
+        if count <= 0:
+            continue
+        if seen + count >= rank:
+            lower = DIGEST_BOUNDS_MS[index - 1] if index > 0 else 0
+            if index >= len(DIGEST_BOUNDS_MS):
+                return lower
+            upper = DIGEST_BOUNDS_MS[index]
+            return int(round(lower + (upper - lower) * (rank - seen) / count))
+        seen += count
+    return DIGEST_BOUNDS_MS[-1]
+
+
+def unix_get_json(socket_path: str, path: str, timeout: float = 10.0) -> Dict[str, Any]:
+    """GET a JSON document from a local daemon over its Unix socket."""
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        sock.connect(socket_path)
+        sock.sendall(
+            f"GET {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n".encode("ascii")
+        )
+        chunks: List[bytes] = []
+        total = 0
+        while total < 16 * 1024 * 1024:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    raw = b"".join(chunks)
+    head, _, body = raw.partition(b"\r\n\r\n")
+    status = head.split(b" ", 2)[1:2]
+    if not status or status[0] != b"200":
+        raise RuntimeError(f"{path}: {head[:80]!r}")
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path}: not an object")
+    return payload
 
 
 def read_disk_space(path: str) -> Optional[Tuple[int, int]]:
@@ -1070,6 +1167,18 @@ class MetricsDatabase:
                 cursor.execute(statement)
             cursor.execute(_metric_table_sql("metric_1m"))
             cursor.execute(_metric_table_sql("metric_1h"))
+            # A histogram of response times per backend and slot; a row only
+            # where something was answered, so idle backends cost nothing.
+            for table in ("latency_1m", "latency_1h"):
+                columns = ",\n".join(
+                    f"{column} INTEGER NOT NULL DEFAULT 0" for column in HISTOGRAM_COLUMNS
+                )
+                cursor.execute(
+                    f"CREATE TABLE IF NOT EXISTS {table} ("
+                    "bucket_ts INTEGER NOT NULL, "
+                    "object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE, "
+                    f"{columns}, PRIMARY KEY (bucket_ts, object_id)) WITHOUT ROWID"
+                )
             self._add_missing_metric_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_metric_1m_object "
@@ -1313,6 +1422,46 @@ class MetricsDatabase:
             cursor.close()
         return written
 
+    def write_latency(self, bucket_ts: int, rows: Dict[int, List[int]]) -> None:
+        """One minute's histograms, per backend. Written whole: asking for the
+        same minute twice replaces it rather than counting it twice."""
+
+        if not rows:
+            return
+        columns = ", ".join(HISTOGRAM_COLUMNS)
+        marks = ", ".join("?" for _ in HISTOGRAM_COLUMNS)
+        with self._lock, self._conn:
+            self._conn.executemany(
+                f"INSERT OR REPLACE INTO latency_1m (bucket_ts, object_id, {columns}) "
+                f"VALUES (?, ?, {marks})",
+                [(bucket_ts, object_id, *counts) for object_id, counts in rows.items()],
+            )
+
+    def rollup_latency_hours(self, before_ts: int) -> int:
+        """Histograms add up, so an hour is the sum of its minutes."""
+
+        watermark = _to_int(self.get_state("latency_rollup_watermark", "0"))
+        if before_ts <= watermark:
+            return 0
+        sums = ", ".join(f"SUM({column})" for column in HISTOGRAM_COLUMNS)
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                f"INSERT OR REPLACE INTO latency_1h (bucket_ts, object_id, {', '.join(HISTOGRAM_COLUMNS)}) "
+                f"SELECT bucket_ts - (bucket_ts % {HOUR_SECONDS}) AS hour_ts, object_id, {sums} "
+                "FROM latency_1m WHERE bucket_ts >= ? AND bucket_ts < ? "
+                "GROUP BY hour_ts, object_id",
+                (watermark, before_ts),
+            )
+            written = max(0, cursor.rowcount or 0)
+            cursor.execute(
+                "INSERT INTO collector_state (key, value) VALUES ('latency_rollup_watermark', ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (str(before_ts),),
+            )
+            cursor.close()
+        return written
+
     def apply_retention(
         self,
         *,
@@ -1328,6 +1477,10 @@ class MetricsDatabase:
                 "DELETE FROM metric_1m WHERE bucket_ts < ?", (minute_cutoff,)
             )
             deleted_minutes = cursor.rowcount or 0
+            # The histograms age with the rows they sit beside.
+            cursor.execute("DELETE FROM latency_1m WHERE bucket_ts < ?", (minute_cutoff,))
+            deleted_minutes += cursor.rowcount or 0
+            cursor.execute("DELETE FROM latency_1h WHERE bucket_ts < ?", (hour_cutoff,))
             cursor.execute(
                 "DELETE FROM metric_1m WHERE bucket_ts < ? AND object_id IN "
                 "(SELECT id FROM objects WHERE kind = 'server')",
@@ -1425,7 +1578,14 @@ class MetricsDatabase:
             return self._latency_series(
                 site=site, table=table, step=step, since=since, until=until
             )
-        if chart in HOST_CHARTS:
+        if chart == "percentiles":
+            return self._percentile_series(
+                site=site, table=table, step=step, since=since, until=until
+            )
+        if chart == "refusals":
+            # The gateway's, never a site's: a refused request reached none.
+            predicate, parameters = f"o.kind = '{EDGE_KIND}'", []
+        elif chart in HOST_CHARTS:
             # The machine's own row, and never scoped by site: picking a site
             # must not appear to filter a number that has nothing to do with
             # it. The kind is a module constant, not anything a caller sent.
@@ -1445,7 +1605,7 @@ class MetricsDatabase:
             ).fetchall()
 
         points = [int(row["slot"]) for row in rows]
-        if chart in HOST_CHARTS:
+        if chart in HOST_CHARTS or chart == "refusals":
             # Back to plain percentages and bytes at the edge -- tenths and
             # KiB are storage details nothing outside this file should have
             # to know about.
@@ -1595,6 +1755,40 @@ class MetricsDatabase:
                 "response_ms_avg": [row[1] for row in rows],
                 "response_ms_max": [row[2] for row in rows],
             },
+        }
+
+    def _percentile_series(
+        self, *, site: str, table: str, step: int, since: int, until: int
+    ) -> Dict[str, Any]:
+        """p50, p95 and p99 per slot, from the summed histograms of the
+        backends that answered in it -- or of one backend. A slot in which
+        nothing answered has none: null, a gap."""
+
+        source = "latency_1m" if table == "metric_1m" else "latency_1h"
+        predicate, parameters = "o.kind = 'backend'", []
+        if site:
+            predicate, parameters = "o.kind = 'backend' AND o.proxy = ?", [site]
+        sums = ", ".join(f"SUM(m.{column})" for column in HISTOGRAM_COLUMNS)
+        query = (
+            f"SELECT (m.bucket_ts / {step}) * {step} AS slot, {sums} "
+            f"FROM {source} m JOIN objects o ON o.id = m.object_id "
+            f"WHERE {predicate} AND m.bucket_ts >= ? AND m.bucket_ts < ? "
+            "GROUP BY slot ORDER BY slot"
+        )
+        with self._lock:
+            rows = self._conn.execute(query, [*parameters, since, until]).fetchall()
+        rows = rows[:MAX_CHART_POINTS]
+        series: Dict[str, List[Any]] = {name: [] for name, _ in PERCENTILES}
+        for row in rows:
+            counts = [int(value or 0) for value in row[1:]]
+            for name, share in PERCENTILES:
+                series[name].append(histogram_percentile(counts, share))
+        return {
+            "chart": "percentiles",
+            "resolution_seconds": step,
+            "source": source,
+            "points": [int(row[0]) for row in rows],
+            "series": series,
         }
 
     def _add_components(
@@ -2498,6 +2692,11 @@ class Collector:
         self.thermal_root = THERMAL_ROOT
         # Per counter set, per device: the reading at the previous poll.
         self._counter_previous: Dict[str, Dict[str, Tuple[int, int]]] = {}
+        # The access log's minute digests, from the adaptive protection
+        # daemon; whether it answered the last time it was asked.
+        self.guardd_socket = GUARDD_SOCKET_PATH
+        self.digests_available: Optional[bool] = None
+        self._last_digest_pull = 0.0
 
         self.last_poll_ts: Optional[int] = None
         self.last_flush_ts: Optional[int] = None
@@ -2571,6 +2770,13 @@ class Collector:
                         self.consecutive_failures,
                         exc,
                     )
+
+            if time.monotonic() - self._last_digest_pull >= DIGEST_PULL_SECONDS:
+                self._last_digest_pull = time.monotonic()
+                try:
+                    self.pull_digests(_utc_now())
+                except Exception as exc:  # pylint: disable=broad-except
+                    LOG.debug("log digests unavailable: %s", exc)
 
             if time.monotonic() >= next_maintenance:
                 try:
@@ -3166,9 +3372,76 @@ class Collector:
         self.buckets_written += len(rows)
         return len(rows)
 
+    def pull_digests(self, now: int) -> int:
+        """Store the minutes of the access log's digest completed since the
+        last ask: histograms per backend, refusals on the edge row.
+
+        Nothing is asked while both monitors are off or writing is paused. A
+        daemon that does not answer -- adaptive protection switched off, so
+        nothing reads the log -- is remembered, for the page to say so.
+        """
+
+        if not any(self.monitors[name] for name in DIGEST_MONITORS):
+            return 0
+        if self.storage.writes_paused:
+            return 0
+        since = _to_int(self.database.get_state(DIGEST_CURSOR_KEY, "0"))
+        try:
+            payload = unix_get_json(self.guardd_socket, f"/api/v1/guard/digest?since={since}")
+        except (OSError, ValueError, RuntimeError):
+            self.digests_available = False
+            raise
+        self.digests_available = True
+        if list(payload.get("bounds_ms") or []) != list(DIGEST_BOUNDS_MS):
+            # A daemon from another release cuts the histogram elsewhere;
+            # adding its buckets to ours would be a wrong answer, not a rough one.
+            LOG.warning("guardd's histogram differs from ours; digests skipped")
+            return 0
+        written = 0
+        newest = since
+        for minute in payload.get("minutes") or []:
+            try:
+                bucket_ts = int(minute.get("ts"))
+            except (TypeError, ValueError):
+                continue
+            if bucket_ts <= since:
+                continue
+            newest = max(newest, bucket_ts)
+            if self.monitors["percentiles"]:
+                rows: Dict[int, List[int]] = {}
+                for proxy, counts in (minute.get("backends") or {}).items():
+                    if (not isinstance(counts, list) or len(counts) != len(HISTOGRAM_COLUMNS)
+                            or self.config.excluded(str(proxy))):
+                        continue
+                    object_id = self._object_for("backend", str(proxy)[:200], now)
+                    rows[object_id] = [max(0, int(value)) for value in counts]
+                self.database.write_latency(bucket_ts, rows)
+                written += len(rows)
+            if self.monitors["refusals"]:
+                refused = minute.get("refused") or {}
+                row = {column: 0 for column in METRIC_COLUMNS}
+                row["samples"] = 1
+                for key in ("geo", "banned", "rate", "other"):
+                    row[f"refused_{key}"] = max(0, _to_int(refused.get(key, 0)))
+                self.database.write_buckets(bucket_ts, {self._object_for(EDGE_KIND, "", now): row})
+                written += 1
+        if newest > since:
+            self.database.set_state(DIGEST_CURSOR_KEY, str(newest))
+        return written
+
+    def _object_for(self, kind: str, proxy: str, now: int) -> int:
+        key = (kind, proxy, "")
+        object_id = self._object_ids.get(key)
+        if object_id is None:
+            object_id = self.database.object_id(kind, proxy, "", now)
+            self._object_ids[key] = object_id
+        return object_id
+
     def run_maintenance(self) -> Dict[str, Any]:
         now = _utc_now()
         rolled = self.database.rollup_hours(now - (now % HOUR_SECONDS))
+        lagged = now - LATENCY_ROLLUP_LAG_SECONDS
+        rolled += self.database.rollup_latency_hours(lagged - (lagged % HOUR_SECONDS))
         retention = self.storage.retention_for_level(self.storage.pressure_level)
         deleted = self.database.apply_retention(
             minute_cutoff=now - retention["minute_days"] * 86400,
@@ -3500,6 +3773,8 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     "storage": collector.storage.report(until),
                     "monitors": dict(collector.monitors),
                     "sensors": collector.sensors(),
+                    # None until asked: the page then shows the charts.
+                    "log_digests": {"available": collector.digests_available},
                 }
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})

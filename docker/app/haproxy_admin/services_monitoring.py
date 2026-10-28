@@ -56,6 +56,8 @@ CHARTS: Tuple[str, ...] = (
     "diskio",
     "network",
     "temperature",
+    "percentiles",
+    "refusals",
 )
 
 # Shorter names for the helper services: the prefix says only that the unit
@@ -658,7 +660,8 @@ def attention() -> Dict[str, Any]:
 # The monitors the page can switch, as the daemon names them (see
 # MONITOR_DEFAULTS in easy-ha-proxy-metricsd.py).
 MONITORS = (
-    "machine", "components", "disk", "network", "temperature", "requests",
+    "machine", "components", "disk", "network", "temperature", "percentiles", "refusals",
+    "requests",
     "traffic", "responses", "latency", "connections", "uplinks", "availability",
 )
 

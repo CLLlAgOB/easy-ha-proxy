@@ -129,6 +129,27 @@
         { key: "temp_avg", label: "Average", color: "#4a86c8", unit: "°C", summary: "mean" },
         { key: "temp_max", label: "Peak", color: "#cc4b4b", unit: "°C", summary: "max" }
       ]
+    },
+    {
+      // From the access log: the time within which half, 95 and 99 of every
+      // hundred requests were answered. HAProxy's own figure is an average,
+      // which one slow request in a hundred barely moves.
+      name: "percentiles",
+      series: [
+        { key: "p50", label: "Median", color: "#4a86c8", unit: "ms", summary: "mean" },
+        { key: "p95", label: "95th percentile", color: "#c8a13a", unit: "ms", summary: "mean" },
+        { key: "p99", label: "99th percentile", color: "#cc4b4b", unit: "ms", summary: "max" }
+      ]
+    },
+    {
+      // What the gateway turned away, by reason, per minute.
+      name: "refusals",
+      series: [
+        { key: "refused_geo", label: "Geo blocks", color: "#8a63d2", rate: true, perMinute: true },
+        { key: "refused_banned", label: "Bans", color: "#cc4b4b", rate: true, perMinute: true },
+        { key: "refused_rate", label: "Rate limits", color: "#c8a13a", rate: true, perMinute: true },
+        { key: "refused_other", label: "Other refusals", color: "#9e9e9e", rate: true, perMinute: true }
+      ]
     }
   ];
 
@@ -161,8 +182,13 @@
     disk: "disk",
     diskio: "disk",
     network: "network",
-    temperature: "temperature"
+    temperature: "temperature",
+    percentiles: "percentiles",
+    refusals: "refusals"
   };
+  // Whether anything reads the access log for these charts (from the
+  // summary): with adaptive protection off and no request log, nothing does.
+  let logDigests = null;
   // What this machine can be asked about at all (from the summary): a
   // virtual machine has no temperature sensor.
   let sensors = null;
@@ -174,6 +200,9 @@
 
   function chartOn(name) {
     if (name === "temperature" && sensors && sensors.temperature === false) return false;
+    if ((name === "percentiles" || name === "refusals") && logDigests && logDigests.available === false) {
+      return false;
+    }
     return monitorOn(CHART_MONITORS[name]);
   }
 
@@ -201,6 +230,9 @@
     const noSensor = Boolean(sensors) && sensors.temperature === false;
     const note = byId("mon-temperature-note");
     if (note) note.hidden = !noSensor;
+    const noLog = Boolean(logDigests) && logDigests.available === false;
+    const logNote = byId("mon-log-digests-note");
+    if (logNote) logNote.hidden = !noLog;
     document.querySelectorAll("#mon-monitors-card input[data-monitor]").forEach((input) => {
       input.checked = monitorOn(input.dataset.monitor);
       // The split per component is read while the machine is: without it
@@ -303,7 +335,7 @@
 
   function axisLabel(spec, value) {
     if (spec.percent) return `${decimalFormat.format(value)}%`;
-    if (spec.unit) return `${decimalFormat.format(value)} ${spec.unit}`;
+    if (spec.unit) return `${decimalFormat.format(value)} ${uiText(spec.unit)}`;
     if (spec.bytes) return formatBytes(value);
     if (value >= 1000) return formatCount(Math.round(value));
     return decimalFormat.format(value);
@@ -694,8 +726,9 @@
 
   function legendValue(spec, value) {
     if (spec.percent) return `${decimalFormat.format(value)}%`;
-    if (spec.unit) return `${decimalFormat.format(value)} ${spec.unit}`;
+    if (spec.unit) return `${decimalFormat.format(value)} ${uiText(spec.unit)}`;
     if (spec.bytes) return spec.rate ? `${formatBytes(value)}/s` : formatBytes(value);
+    if (spec.perMinute) return `${formatRate(value)}/${uiText("min")}`;
     return formatRate(value);
   }
 
@@ -725,7 +758,7 @@
       if (componentLine(spec) && !monitorOn("components")) return;
       const raw = spec.values || (payload && payload.series && payload.series[spec.key]) || [];
       const reading = core.legendReading(spec, raw);
-      const value = spec.rate ? reading.value / step : reading.value;
+      const value = spec.rate ? reading.value / core.rateDivisor(spec, step) : reading.value;
       const visible = lineVisible(chart, spec);
       // A button, so a line can be hidden to let the others fill the scale.
       const item = document.createElement("button");
@@ -1979,6 +2012,7 @@
         customWindow = null;
       }
       if (summary.sensors && typeof summary.sensors === "object") sensors = summary.sensors;
+      if (summary.log_digests && typeof summary.log_digests === "object") logDigests = summary.log_digests;
       applyMonitors(summary.monitors);
       renderSummary(summary);
       renderStorage(summary.storage);

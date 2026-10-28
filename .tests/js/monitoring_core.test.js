@@ -626,3 +626,15 @@ test("the rules of a period are listed busiest first", () => {
   assert.equal(rules[1].title, "Site is down");
   assert.deepEqual(core.eventRules(undefined), []);
 });
+
+test("rare things are counted per minute, the rest per second", () => {
+  assert.equal(core.rateDivisor({rate: true}, 60), 60);
+  assert.equal(core.rateDivisor({rate: true, perMinute: true}, 60), 1);
+  // An hourly slot: 120 bans in it are two a minute.
+  assert.equal(120 / core.rateDivisor({rate: true, perMinute: true}, 3600), 2);
+  const view = core.chartData(
+    {name: "refusals", series: [{key: "refused_geo", label: "Geo blocks", rate: true, perMinute: true}]},
+    {resolution_seconds: 3600, points: [0], series: {refused_geo: [180]}}
+  );
+  assert.deepEqual(view.datasets[0].values, [3]);
+});

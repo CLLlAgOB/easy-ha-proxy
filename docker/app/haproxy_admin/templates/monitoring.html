@@ -829,6 +829,26 @@ body.mon-overlay-open { overflow: hidden; }
       <svg class="mon-plot" id="mon-plot-temperature" preserveAspectRatio="none"></svg>
       <div class="mon-legend" id="mon-legend-temperature"></div>
     </div>
+
+    <div class="mon-chart" data-chart="percentiles">
+      <div class="mon-chart-head">
+        <h3>Response time percentiles</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">From the access log: half, 95 and 99 of every hundred requests answered within</div>
+      <svg class="mon-plot" id="mon-plot-percentiles" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-percentiles"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="refusals">
+      <div class="mon-chart-head">
+        <h3>Refused at the gateway</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Requests turned away, per minute, for the whole gateway</div>
+      <svg class="mon-plot" id="mon-plot-refusals" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-refusals"></div>
+    </div>
   </div>
 </div>
 
@@ -948,7 +968,14 @@ body.mon-overlay-open { overflow: hidden; }
       <input type="checkbox" data-monitor="temperature"> Temperature
       <small class="mon-sub" id="mon-temperature-note" hidden>No sensor on this machine</small>
     </label>
+    <label><input type="checkbox" data-monitor="percentiles"> Response time percentiles, from the access log</label>
+    <label><input type="checkbox" data-monitor="refusals"> Requests refused at the gateway, by reason</label>
   </div>
+  <p class="mon-sub" id="mon-log-digests-note" hidden>
+    The access log is read by adaptive protection. It is switched off and the
+    request log is off too, so nothing reads it: the percentiles and the
+    refusals have nothing to show.
+  </p>
 
   <p class="mon-sub">
     Drawn from the counters HAProxy keeps anyway, which are read either way:

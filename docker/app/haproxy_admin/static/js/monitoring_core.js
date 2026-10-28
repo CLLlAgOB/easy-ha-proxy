@@ -155,6 +155,13 @@
     return runs;
   }
 
+  // What a stored count is divided by to read as a rate: seconds, or
+  // minutes for the lines that count rare things -- three bans a minute
+  // reads better than 0.05 a second.
+  function rateDivisor(spec, step) {
+    return spec.perMinute ? step / 60 : step;
+  }
+
   function chartData(chart, payload, isVisible) {
     const step = Number(payload && payload.resolution_seconds) || 60;
     const shown = isVisible || ((spec) => !spec.hidden);
@@ -164,7 +171,7 @@
         const raw = spec.values || (payload && payload.series && payload.series[spec.key]) || [];
         const values = raw.map((value) => {
           const number = reading(value);
-          return number !== null && spec.rate ? number / step : number;
+          return number !== null && spec.rate ? number / rateDivisor(spec, step) : number;
         });
         return {spec: spec, values: values};
       });
@@ -641,6 +648,7 @@
     viewFromQuery,
     indexAtX,
     xAtIndex,
+    rateDivisor,
     indexAtTime,
     eventMarks,
     eventReach,

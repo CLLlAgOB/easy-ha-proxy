@@ -1177,6 +1177,11 @@ class ReadApiTests(CollectorTestCase):
         # every chart and quietly skip the only one that is scoped
         # differently.
         self.seed_host([600])
+        # The access log's digest: a histogram, and the edge's refusals.
+        self.database.write_latency(600, {
+            self.database.object_id("backend", "be_shop", "", 0): [1] * len(metricsd.HISTOGRAM_COLUMNS)
+        })
+        self.seed("edge", "", "", [600], refused_geo=1)
         for chart, columns in metricsd.CHART_SERIES.items():
             payload = self.database.series(
                 chart=chart, site="", since=0, until=1200
@@ -1301,6 +1306,9 @@ class ReadApiTests(CollectorTestCase):
 
     def test_every_chart_column_has_a_declared_aggregation(self):
         for chart, columns in metricsd.CHART_SERIES.items():
+            if chart in metricsd.DERIVED_CHARTS:
+                # Read off the histograms, not stored as columns.
+                continue
             for column in columns:
                 self.assertIn(column, metricsd._AGGREGATIONS, f"{chart}.{column}")
                 self.assertIn(column, metricsd.METRIC_COLUMNS, f"{chart}.{column}")
