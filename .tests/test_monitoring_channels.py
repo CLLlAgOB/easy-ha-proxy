@@ -508,6 +508,13 @@ class TheWindowSurvivesTheWholeCallPath(unittest.TestCase):
         monitoring.series("requests", "24h", "example.com", self.WINDOW)
         self.assertEqual(self.params_for("/series").get("site"), "example.com")
 
+    def test_the_lines_per_component_are_asked_for_only_when_wanted(self):
+        monitoring.series("cpu", "24h", "", {})
+        self.assertEqual(self.params_for("/series").get("components"), "1")
+        self.seen.clear()
+        monitoring.series("cpu", "24h", "", {}, components=False)
+        self.assertEqual(self.params_for("/series").get("components"), "0")
+
 
 if __name__ == "__main__":
     unittest.main()

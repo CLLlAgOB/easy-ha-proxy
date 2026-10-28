@@ -133,7 +133,10 @@ def api_monitoring_series():
     try:
         sites = monitoring.list_sites()
         site = monitoring.normalize_site(request.args.get("site"), sites)
-        return jsonify(monitoring.series(chart, range_key, site, _window()))
+        # The processor and memory charts' line per component, only when the
+        # page shows them: most of the answer, and most of its wait.
+        components = (request.args.get("components") or "1").strip().lower() not in ("0", "false", "no")
+        return jsonify(monitoring.series(chart, range_key, site, _window(), components))
     except MetricsdUnavailable as exc:
         return jsonify(monitoring.unavailable_payload(exc)), 503
 

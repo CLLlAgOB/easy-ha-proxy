@@ -397,25 +397,65 @@
         legend.appendChild(item);
         return;
       }
-      if (!parts) {
-        const details = document.createElement("details");
-        details.className = "mon-components";
-        details.open = expanded || Boolean(componentsOpen[chart.name]);
-        const summary = document.createElement("summary");
-        summary.textContent = uiText("By component");
-        details.appendChild(summary);
-        parts = document.createElement("div");
-        parts.className = "mon-legend";
-        details.appendChild(parts);
-        details.addEventListener("toggle", () => {
-          if (legend.closest(".mon-chart-expanded")) return;
-          componentsOpen[chart.name] = details.open;
-          remember(COMPONENTS_OPEN_KEY, JSON.stringify(componentsOpen));
-        });
-        legend.appendChild(details);
-      }
+      if (!parts) parts = componentsList(legend, chart, expanded);
       parts.appendChild(item);
     });
+    // The lines per component are fetched only when the list is open: the
+    // folded list still has to be there to be opened.
+    if (chart.components && !parts) componentsList(legend, chart, expanded);
+  }
+
+  function componentsList(legend, chart, expanded) {
+    const details = document.createElement("details");
+    details.className = "mon-components";
+    details.open = expanded || Boolean(componentsOpen[chart.name]);
+    const summary = document.createElement("summary");
+    summary.textContent = uiText("By component");
+    details.appendChild(summary);
+    const parts = document.createElement("div");
+    parts.className = "mon-legend";
+    details.appendChild(parts);
+    details.addEventListener("toggle", () => {
+      if (!legend.closest(".mon-chart-expanded")) {
+        componentsOpen[chart.name] = details.open;
+        remember(COMPONENTS_OPEN_KEY, JSON.stringify(componentsOpen));
+      }
+      if (details.open) loadComponents(chart.name);
+    });
+    legend.appendChild(details);
+    return parts;
+  }
+
+  // Whether a chart's lines per component should be in its answer.
+  function wantsComponents(name) {
+    return Boolean(componentsOpen[name]) || expandedChart === name;
+  }
+
+  function hasComponents(name) {
+    const last = lastCharts[name];
+    return Boolean(last && last.payload && Array.isArray(last.payload.components));
+  }
+
+  // Fetch one chart again, with its lines per component, once the list is
+  // opened or the chart goes full screen.
+  async function loadComponents(name) {
+    const chart = CHARTS.find((item) => item.name === name);
+    if (!chart || !chart.components || hasComponents(name)) return;
+    const params = Object.assign({ range: currentRange }, windowParams());
+    if (currentSite) params.site = currentSite;
+    try {
+      const payload = await getJson(
+        "/api/monitoring/series",
+        Object.assign({ chart: name, components: "1" }, params)
+      );
+      const seconds = customWindow
+        ? customWindow.until - customWindow.since
+        : rangeSeconds(currentRange);
+      lastCharts[name] = { payload: payload, seconds: seconds };
+      redrawChart(name);
+    } catch (error) {
+      /* the chart keeps what it had; the next refresh tries again */
+    }
   }
 
   /* ---------- availability timeline ---------- */
@@ -1259,6 +1299,7 @@
     }
     if (expandedChart) {
       redrawChart(expandedChart);
+      loadComponents(expandedChart);
       const button = card.querySelector(".mon-expand");
       if (button) button.focus();
     }
@@ -1324,11 +1365,11 @@
         ? customWindow.until - customWindow.since
         : rangeSeconds(currentRange);
       const results = await Promise.all(
-        CHARTS.map((chart) =>
-          getJson("/api/monitoring/series", Object.assign({ chart: chart.name }, params)).catch(
-            () => null
-          )
-        )
+        CHARTS.map((chart) => {
+          const query = Object.assign({ chart: chart.name }, params);
+          if (chart.components) query.components = wantsComponents(chart.name) ? "1" : "0";
+          return getJson("/api/monitoring/series", query).catch(() => null);
+        })
       );
       results.forEach((payload, index) => {
         const chart = CHARTS[index];

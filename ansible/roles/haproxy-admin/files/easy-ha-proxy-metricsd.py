@@ -1232,8 +1232,16 @@ class MetricsDatabase:
         ]
 
     def series(
-        self, *, chart: str, site: str, since: int, until: int
+        self, *, chart: str, site: str, since: int, until: int,
+        components: bool = True,
     ) -> Dict[str, Any]:
+        """One chart's lines over the window.
+
+        On the processor and memory charts, components=False leaves out the
+        line per component -- a day of them was most of the page's wait --
+        and keeps the group totals the chart draws by default.
+        """
+
         columns = CHART_SERIES[chart]
         table, step = choose_resolution(max(1, until - since))
         if chart == "latency":
@@ -1283,11 +1291,95 @@ class MetricsDatabase:
             },
         }
         if chart in COMPONENT_COLUMNS:
-            self._add_components(
+            add = self._add_components if components else self._add_component_groups
+            add(
                 payload, chart=chart, table=table, step=step,
                 since=since, until=until, host=[row[1] for row in rows],
             )
         return payload
+
+    def _add_component_groups(
+        self,
+        payload: Dict[str, Any],
+        *,
+        chart: str,
+        table: str,
+        step: int,
+        since: int,
+        until: int,
+        host: List[int],
+    ) -> None:
+        """The group totals _add_components adds, without a line per component.
+
+        When a slot is one stored row, SQLite sums the groups itself: one row
+        per slot comes back instead of one per component and slot, and no
+        component's line is built only to be thrown away. Otherwise -- a slot
+        of several hourly rows, each weighed by its own samples -- the full
+        path computes them, which on the hourly table is cheap anyway.
+        """
+
+        stored_step = BUCKET_SECONDS if table == "metric_1m" else HOUR_SECONDS
+        if step != stored_step:
+            self._add_components(
+                payload, chart=chart, table=table, step=step,
+                since=since, until=until, host=host,
+            )
+            payload.pop("components", None)
+            return
+        average, _peak = COMPONENT_COLUMNS[chart]
+        value = f"CASE WHEN m.samples > 0 THEN COALESCE(m.{average}, 0) ELSE 0 END"
+        with self._lock:
+            # HAProxy's own work is not a helper's; its rows are found the way
+            # _add_components names them, so both paths agree on what it is.
+            haproxy = [
+                int(row[0])
+                for row in self._conn.execute(
+                    "SELECT id, proxy FROM objects WHERE kind = 'component'"
+                ).fetchall()
+                if component_name(str(row[1])) == "haproxy"
+            ] or [-1]
+            marks = ", ".join("?" * len(haproxy))
+            cursor = self._conn.execute(
+                f"SELECT m.bucket_ts, "
+                f"SUM(CASE WHEN o.server = ? THEN {value} ELSE 0 END), "
+                f"SUM(CASE WHEN o.server = ? AND o.id NOT IN ({marks}) THEN {value} ELSE 0 END), "
+                f"SUM({value}) "
+                f"FROM {table} m JOIN objects o ON o.id = m.object_id "
+                "WHERE o.kind = 'component' AND m.bucket_ts >= ? AND m.bucket_ts < ? "
+                "GROUP BY m.bucket_ts",
+                [COMPONENT_CONTAINER, COMPONENT_SERVICE, *haproxy, since, until],
+            )
+            cursor.row_factory = None
+            rows = cursor.fetchall()
+
+        points = payload["points"]
+        size = len(points)
+        position = {slot: index for index, slot in enumerate(points)}
+        containers = [0] * size
+        helpers = [0] * size
+        claimed = [0] * size
+        for slot, in_containers, in_helpers, in_all in rows:
+            index = position.get(slot)
+            if index is None:
+                continue
+            containers[index] = int(in_containers)
+            helpers[index] = int(in_helpers)
+            claimed[index] = int(in_all)
+
+        if chart == "memory":
+            def convert(stored: int) -> Any:
+                return stored * MEMORY_UNIT
+        else:
+            def convert(stored: int) -> Any:
+                return round(stored / CPU_SCALE, 1)
+
+        series = payload["series"]
+        series["helpers"] = [convert(item) for item in helpers]
+        series["containers"] = [convert(item) for item in containers]
+        series["other"] = [
+            _from_storage(chart, max(0, int(host[index]) - claimed[index]))
+            for index in range(min(size, len(host)))
+        ]
 
     def _latency_series(
         self, *, site: str, table: str, step: int, since: int, until: int
@@ -2953,12 +3045,14 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 )
                 return
             range_key, since, until = resolve_window(query)
+            wanted = (query.get("components", ["1"])[0] or "1").strip().lower()
             try:
                 payload = database.series(
                     chart=chart,
                     site=self._site(query),
                     since=since,
                     until=until,
+                    components=wanted not in ("0", "false", "no"),
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})

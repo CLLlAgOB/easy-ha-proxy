@@ -130,8 +130,9 @@ def summary(range_key: str, site: str,
 
 
 def series(chart: str, range_key: str, site: str,
-           window: Dict[str, int] | None = None) -> Dict[str, Any]:
-    payload = metricsd_series(chart, range_key, site, window)
+           window: Dict[str, int] | None = None,
+           components: bool = True) -> Dict[str, Any]:
+    payload = metricsd_series(chart, range_key, site, window, components)
     for entry in payload.get("components") or []:
         entry["label"] = component_label(
             str(entry.get("name") or ""), str(entry.get("group") or "")

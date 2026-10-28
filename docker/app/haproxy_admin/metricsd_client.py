@@ -114,7 +114,9 @@ def metricsd_states(range_key: str, site: str = "",
 
 
 def metricsd_series(chart: str, range_key: str, site: str = "",
-                    window: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                    window: Optional[Dict[str, int]] = None,
+                    components: bool = True) -> Dict[str, Any]:
     params = _window_params(range_key, site, window)
     params["chart"] = chart
+    params["components"] = "1" if components else "0"
     return _get_json("/api/v1/metrics/series", params=params, timeout=15)

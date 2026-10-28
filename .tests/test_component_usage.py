@@ -424,6 +424,62 @@ class JobsRecordedBeforeAreFolded(unittest.TestCase):
         self.assertEqual(lines["easy-ha-proxy-backupd"]["peak"], 9.0)
 
 
+class ThePartsAreSentOnlyWhenShown(unittest.TestCase):
+    """Without the line per component, the chart keeps its group totals.
+
+    The processor and memory charts' answer was mostly one line per
+    component -- a day of minutes for each of 26 on the test gateway, 447 KiB
+    and most of a second. The page now asks for them only when their list
+    is open; the totals it draws by default must not change for that.
+    """
+
+    setUp = TheCharts.setUp
+    row = TheCharts.row
+
+    def seed(self):
+        for bucket in (3600, 3660, 3720):
+            self.row("host", "", "", bucket=bucket, cpu_avg=500, cpu_max=700,
+                     memory_avg=1_000_000, memory_max=1_200_000, memory_total=2_000_000)
+            self.row("component", "haproxy", "service", bucket=bucket, cpu_avg=200, memory_avg=40_000)
+            self.row("component", "haproxy-controld", "service", bucket=bucket, cpu_avg=30, memory_avg=20_000)
+            self.row("component", "haproxy-admin", "container", bucket=bucket, cpu_avg=100, memory_avg=90_000)
+            self.row("component", "dockerd", "engine", bucket=bucket, cpu_avg=10, memory_avg=60_000)
+        # A job folds into its service in both paths, and a part may be
+        # missing from a slot.
+        self.row("component", UPDATE_JOB, "service", bucket=3660, cpu_avg=40, memory_avg=7_000)
+        # A slot whose row was written but holds no samples counts nothing.
+        object_id = self.database.object_id("component", "easy-ha-proxy-guardd", "service", 3720)
+        empty = {column: 0 for column in metricsd.METRIC_COLUMNS}
+        empty.update(samples=0, cpu_avg=999, memory_avg=999_999)
+        self.database.write_buckets(3720, {object_id: empty})
+
+    def test_the_totals_are_the_same_without_the_parts(self):
+        self.seed()
+        self.database.rollup_hours(2 * 3600)
+        for chart in ("cpu", "memory"):
+            for until in (7200, 7 * 86400, 90 * 86400):
+                with self.subTest(chart=chart, until=until):
+                    full = self.database.series(chart=chart, site="", since=0, until=until)
+                    light = self.database.series(chart=chart, site="", since=0, until=until,
+                                                 components=False)
+                    self.assertTrue(full["components"])
+                    self.assertNotIn("components", light)
+                    self.assertEqual(light["points"], full["points"])
+                    self.assertEqual(light["series"], full["series"])
+
+    def test_the_haproxy_line_is_not_a_helper_in_either(self):
+        self.seed()
+        light = self.database.series(chart="cpu", site="", since=0, until=7200, components=False)
+        # controld 3.0 everywhere, plus the update job's 4.0 folded in at 3660.
+        self.assertEqual(light["series"]["helpers"], [3.0, 7.0, 3.0])
+        self.assertEqual(light["series"]["containers"], [10.0, 10.0, 10.0])
+
+    def test_the_daemon_reads_the_flag(self):
+        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-metricsd.py").read_text(encoding="utf-8")
+        self.assertIn('wanted = (query.get("components", ["1"])[0] or "1").strip().lower()', source)
+        self.assertIn('components=wanted not in ("0", "false", "no")', source)
+
+
 class ASlowAnswerDoesNotHoldEveryPage(unittest.TestCase):
     def test_the_panel_serves_with_threads(self):
         # Two single-threaded workers: the processor and memory charts took
