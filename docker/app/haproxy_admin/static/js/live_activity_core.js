@@ -24,7 +24,7 @@
   const WINDOW_MIN = 5;
   const WINDOW_MAX = 3600;
   const REFRESH_CHOICES = [2, 5, 10, 30];
-  const TABS = ["addresses", "sites", "events", "banned"];
+  const TABS = ["addresses", "sites", "events", "paths", "agents", "slow", "banned"];
   // The columns each table can be sorted by, as the page's headers name them.
   const SORT_KEYS = {
     addresses: ["requests", "rate", "errors", "server_errors", "blocked", "bytes", "last"],
@@ -102,6 +102,8 @@
     if (values.blocked) params.blocked = "1";
     if (values.banned) params.banned = "1";
     if (!values.admin) params.hide_admin = "1";
+    const agent = String(values.agent || "").trim();
+    if (agent) params.agent = agent;
     return params;
   }
 
@@ -250,6 +252,8 @@
     if (values.status) query.status = values.status;
     const q = String(values.q || "").trim();
     if (q) query.q = q;
+    const agent = String(values.agent || "").trim();
+    if (agent) query.agent = agent;
     if (values.blocked) query.blocked = "1";
     if (values.banned) query.banned = "1";
     if (values.tab && values.tab !== "addresses") query.tab = values.tab;
@@ -274,6 +278,8 @@
     if (STATUS_CLASSES.includes(status)) view.status = status;
     const q = String(params.get("q") || "").trim();
     if (q) view.q = q.slice(0, 120);
+    const agent = String(params.get("agent") || "").trim();
+    if (agent) view.agent = agent.slice(0, 120);
     if (params.get("blocked") === "1") view.blocked = true;
     if (params.get("banned") === "1") view.banned = true;
     if (TABS.includes(params.get("tab"))) view.tab = params.get("tab");
@@ -339,6 +345,18 @@
     });
   }
 
+  // A site's requests over the window as a small line: the points of an
+  // SVG polyline, the busiest bar at the top.
+  function sparkPoints(values, width, height) {
+    const list = (values || []).map((value) => Math.max(0, Number(value) || 0));
+    if (list.length < 2) return "";
+    const peak = Math.max(1, ...list);
+    const step = width / (list.length - 1);
+    return list.map((value, index) =>
+      `${(index * step).toFixed(1)},${(height - 1 - (value / peak) * (height - 2)).toFixed(1)}`
+    ).join(" ");
+  }
+
   // One request among the latest, across refreshes: the same request keeps
   // its details open while newer ones arrive above it.
   function eventKey(event) {
@@ -401,6 +419,7 @@
     termination,
     timers,
     eventKey,
+    sparkPoints,
     duration,
     bytes
   };

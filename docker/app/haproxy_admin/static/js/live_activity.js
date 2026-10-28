@@ -113,6 +113,7 @@
     return core.requestParams({
       window: state.window,
       ip: byId("la-ip").value,
+      agent: byId("la-agent").value,
       host: byId("la-host").value,
       country: byId("la-country").value,
       status: byId("la-status").value,
@@ -360,6 +361,7 @@
         <td class="la-num">${number(row.addresses)}</td>
         <td class="la-num">${msOrDash(row.p50_ms)}</td>
         <td class="la-num">${msOrDash(row.p95_ms)}</td>
+        <td>${sparkline(row.spark)}</td>
         <td class="la-mono">${row.backend
           ? `<a class="la-link la-mono" href="/monitoring?site=${encodeURIComponent(row.backend)}" title="${esc(t("Charts of this site"))}">${esc(row.backend)}</a>`
           : "—"}</td>
@@ -367,9 +369,16 @@
   }
 
   function renderEvents(data) {
-    const body = byId("la-events-body");
-    const rows = data.events || [];
-    byId("la-events-empty").hidden = rows.length > 0;
+    renderRequestRows("la-events-body", "la-events-empty", data.events || []);
+  }
+
+  function renderSlow(data) {
+    renderRequestRows("la-slow-body", "la-slow-empty", data.slow || []);
+  }
+
+  function renderRequestRows(bodyId, emptyId, rows) {
+    const body = byId(bodyId);
+    byId(emptyId).hidden = rows.length > 0;
     body.innerHTML = rows.map((row) => {
       const key = core.eventKey(row);
       const open = state.expanded === key;
@@ -384,6 +393,52 @@
         <td>${row.refusal ? `<span class="la-badge la-refused" title="${esc(row.ban_reason || "")}">${esc(refusalLabel(row.refusal))}</span>${row.ban_reason ? `<div class="la-sub">${esc(row.ban_reason)}</div>` : ""}` : ""}</td>
       </tr>${open ? detailsRow(row) : ""}`;
     }).join("");
+  }
+
+  function sparkline(values) {
+    const points = core.sparkPoints(values, 90, 22);
+    return points
+      ? `<svg class="la-spark" viewBox="0 0 90 22" preserveAspectRatio="none" aria-hidden="true"><polyline points="${points}"></polyline></svg>`
+      : "";
+  }
+
+  function pathLink(path) {
+    return `<button type="button" class="la-link la-mono la-path" data-filter-q="${esc(path)}" title="${esc(path)} \u2014 ${esc(t("Only this path"))}">${esc(path)}</button>`;
+  }
+
+  function renderPaths(data) {
+    const rows = data.paths || [];
+    byId("la-paths-empty").hidden = rows.length > 0;
+    byId("la-paths-body").innerHTML = rows.map((row) => `
+      <tr>
+        <td>${hostLink(row.host)}</td>
+        <td>${pathLink(row.path)}</td>
+        <td class="la-num">${number(row.requests)}</td>
+        <td class="la-num">${number(row.client_errors)}</td>
+        <td class="la-num">${number(row.server_errors)}</td>
+        <td class="la-num">${number(row.blocked)}</td>
+      </tr>`).join("");
+    const missing = data.not_found || [];
+    byId("la-not-found-empty").hidden = missing.length > 0;
+    byId("la-not-found-body").innerHTML = missing.map((row) => `
+      <tr>
+        <td>${hostLink(row.host)}</td>
+        <td>${pathLink(row.path)}</td>
+        <td class="la-num">${number(row.not_found)}</td>
+        <td class="la-num">${number(row.requests)}</td>
+      </tr>`).join("");
+  }
+
+  function renderAgents(data) {
+    const rows = data.agents || [];
+    byId("la-agents-empty").hidden = rows.length > 0;
+    byId("la-agents-body").innerHTML = rows.map((row) => `
+      <tr>
+        <td><button type="button" class="la-link la-mono la-agent" data-filter-agent="${esc(row.agent)}" title="${esc(t("Only this client"))}">${esc(row.agent)}</button></td>
+        <td class="la-num">${number(row.requests)}</td>
+        <td class="la-num">${number(row.addresses)}</td>
+        <td class="la-num">${number(row.blocked)}</td>
+      </tr>`).join("");
   }
 
   // One request, opened: where its time went, how it ended, and the way to
@@ -476,6 +531,9 @@
     renderAddresses(data);
     renderSites(data);
     renderEvents(data);
+    renderPaths(data);
+    renderAgents(data);
+    renderSlow(data);
     renderBanned(data);
     renderSorting();
     state.held = false;
@@ -519,7 +577,7 @@
   function writeAddress() {
     try {
       const url = new URL(window.location.href);
-      ["window", "ip", "host", "country", "status", "q", "blocked", "banned", "tab", "admin"]
+      ["window", "ip", "host", "country", "status", "q", "agent", "blocked", "banned", "tab", "admin"]
         .forEach((name) => url.searchParams.delete(name));
       const query = core.viewQuery(Object.assign({}, filters(), {
         window: state.window, tab: state.tab, admin: state.admin,
@@ -540,6 +598,7 @@
     if (view.admin) state.admin = true;
     if (view.ip) byId("la-ip").value = view.ip;
     if (view.q) byId("la-q").value = view.q;
+    if (view.agent) byId("la-agent").value = view.agent;
     if (view.status) byId("la-status").value = view.status;
     if (view.blocked) byId("la-blocked").checked = true;
     if (view.banned) byId("la-banned-only").checked = true;
@@ -650,7 +709,7 @@
     }
     bindTimeline();
     bindReading();
-    ["la-ip", "la-q"].forEach((id) => {
+    ["la-ip", "la-q", "la-agent"].forEach((id) => {
       let pending = null;
       byId(id).addEventListener("input", () => {
         window.clearTimeout(pending);
@@ -658,7 +717,7 @@
       });
     });
     byId("la-reset").addEventListener("click", () => {
-      ["la-ip", "la-q"].forEach((id) => { byId(id).value = ""; });
+      ["la-ip", "la-q", "la-agent"].forEach((id) => { byId(id).value = ""; });
       ["la-host", "la-country", "la-status"].forEach((id) => { byId(id).value = ""; });
       byId("la-blocked").checked = false;
       byId("la-banned-only").checked = false;
@@ -689,6 +748,18 @@
         applyNow();
         return;
       }
+      const path = event.target.closest("[data-filter-q]");
+      if (path) {
+        byId("la-q").value = path.dataset.filterQ;
+        applyNow();
+        return;
+      }
+      const agent = event.target.closest("[data-filter-agent]");
+      if (agent) {
+        byId("la-agent").value = agent.dataset.filterAgent;
+        applyNow();
+        return;
+      }
       const host = event.target.closest("[data-filter-host]");
       if (host) {
         fillSelect("la-host", [host.dataset.filterHost], "All sites");
@@ -716,7 +787,10 @@
       const eventRow = event.target.closest("tr[data-event]");
       if (eventRow && !event.target.closest("a, button")) {
         state.expanded = state.expanded === eventRow.dataset.event ? null : eventRow.dataset.event;
-        if (state.data) renderEvents(state.data);
+        if (state.data) {
+          renderEvents(state.data);
+          renderSlow(state.data);
+        }
       }
     });
   }

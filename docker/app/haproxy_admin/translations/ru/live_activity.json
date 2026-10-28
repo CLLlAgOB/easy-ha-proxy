@@ -124,6 +124,19 @@
     "Refused requests now": "Отклонённые запросы сейчас",
     "What this address is doing now": "Что этот адрес делает сейчас",
     "Unknown": "Неизвестно",
-    "Request": "Запрос"
+    "Request": "Запрос",
+    "Client contains": "Клиент содержит",
+    "Paths": "Пути",
+    "Clients": "Клиенты",
+    "Slow": "Медленные",
+    "Most requested": "Чаще всего запрашивают",
+    "Not found most often": "Чаще всего не найдено",
+    "Paths that do not exist, asked for again and again, are usually a scanner looking for a weakness.": "Несуществующие пути, которые запрашивают снова и снова, — обычно сканер, ищущий уязвимость.",
+    "Client (user agent)": "Клиент (User-Agent)",
+    "No client names in this window: the log records them when the user agent is logged": "В этом окне нет имён клиентов: журнал записывает их, когда включена запись User-Agent",
+    "The slowest answers of the window, by how soon the server answered.": "Самые медленные ответы окна — по времени ответа сервера.",
+    "Over the window": "За окно",
+    "Only this path": "Только этот путь",
+    "Only this client": "Только этот клиент"
   }
 }

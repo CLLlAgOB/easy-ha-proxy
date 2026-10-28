@@ -334,3 +334,32 @@ test("a request keeps its key across refreshes", () => {
   assert.equal(core.eventKey(event), core.eventKey(Object.assign({}, event, {status: 200})));
   assert.notEqual(core.eventKey(event), core.eventKey(Object.assign({}, event, {request_id: "abd"})));
 });
+
+/* ---------- top lists (phase 3) ---------- */
+
+test("the paths, clients and slowest tabs can be opened and linked to", () => {
+  for (const tab of ["paths", "agents", "slow"]) {
+    assert.ok(core.TABS.includes(tab));
+    assert.deepEqual(core.viewFromQuery(`?tab=${tab}`), {tab});
+  }
+});
+
+test("a client filter is asked for, written into the address and read back", () => {
+  assert.deepEqual(core.requestParams({window: 60, agent: " curl ", admin: true}), {window: 60, agent: "curl"});
+  assert.deepEqual(core.requestParams({window: 60, agent: "   ", admin: true}), {window: 60});
+  assert.deepEqual(core.viewQuery({window: 60, tab: "addresses", agent: " curl/8 "}), {agent: "curl/8"});
+  assert.deepEqual(core.viewFromQuery("?agent=curl%2F8"), {agent: "curl/8"});
+  assert.equal(core.viewFromQuery("?agent=" + "x".repeat(500)).agent.length, 120);
+});
+
+test("a site's line puts its busiest bar at the top and an idle one at the bottom", () => {
+  const points = core.sparkPoints([0, 5, 10], 90, 22).split(" ").map((p) => p.split(",").map(Number));
+  assert.deepEqual(points.map((p) => p[0]), [0, 45, 90]);
+  assert.equal(points[2][1], 1);   // the busiest
+  assert.equal(points[0][1], 21);  // nothing
+  // Too little to draw a line: nothing, not a dot.
+  assert.equal(core.sparkPoints([3], 90, 22), "");
+  assert.equal(core.sparkPoints(undefined, 90, 22), "");
+  // A quiet site is a flat line along the bottom, not a division by zero.
+  assert.ok(core.sparkPoints([0, 0, 0], 90, 22).split(" ").every((p) => p.endsWith(",21.0")));
+});

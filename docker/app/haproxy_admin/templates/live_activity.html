@@ -136,6 +136,10 @@
 .la-details-grid dd { margin: 0; word-break: break-all; }
 .la-timers { display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .la-held { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
+.la-spark { width: 90px; height: 22px; display: block; }
+.la-spark polyline { fill: none; stroke: var(--accent-primary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.la-link.la-mono.la-agent { white-space: normal; word-break: break-all; text-align: left; }
+.la-link.la-mono.la-path { text-align: left; }
 .la-held[hidden] { display: none; }
 .la-actions { white-space: nowrap; }
 .la-actions-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
@@ -210,6 +214,10 @@
       Path or site contains
       <input type="text" id="la-q" placeholder="/login" data-i18n-skip translate="no">
     </label>
+    <label>
+      Client contains
+      <input type="text" id="la-agent" placeholder="curl" data-i18n-skip translate="no">
+    </label>
     <label class="la-check" title="Requests the gateway refused itself: a ban, a geo block, a limit, an address rule. A request it let through to the site is not one of them, even from an address banned later.">
       <input type="checkbox" id="la-blocked"> Only refused by the gateway
     </label>
@@ -252,6 +260,9 @@
     <button type="button" class="la-chip" data-tab="addresses" aria-pressed="true">Addresses</button>
     <button type="button" class="la-chip" data-tab="sites" aria-pressed="false">Sites</button>
     <button type="button" class="la-chip" data-tab="events" aria-pressed="false">Requests</button>
+    <button type="button" class="la-chip" data-tab="paths" aria-pressed="false">Paths</button>
+    <button type="button" class="la-chip" data-tab="agents" aria-pressed="false">Clients</button>
+    <button type="button" class="la-chip" data-tab="slow" aria-pressed="false">Slow</button>
     <button type="button" class="la-chip" data-tab="banned" aria-pressed="false">Banned and limited</button>
     <span class="la-held" id="la-held" hidden>Updates wait while you read the table</span>
   </div>
@@ -290,6 +301,7 @@
           <th data-sort="addresses" class="la-num">Addresses</th>
           <th data-sort="p50_ms" class="la-num" title="How soon the server answered half of the requests">Median</th>
           <th data-sort="p95_ms" class="la-num" title="How soon the server answered 95 of every 100 requests">p95</th>
+          <th>Over the window</th>
           <th>Backend</th>
         </tr>
       </thead>
@@ -314,6 +326,72 @@
       <tbody id="la-events-body" data-i18n-skip translate="no"></tbody>
     </table>
     <div class="la-empty" id="la-events-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="paths" class="la-table-wrap" hidden>
+    <h3>Most requested</h3>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Path</th>
+          <th class="la-num">Requests</th>
+          <th class="la-num">4xx</th>
+          <th class="la-num">5xx</th>
+          <th class="la-num">Refused</th>
+        </tr>
+      </thead>
+      <tbody id="la-paths-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-paths-empty" hidden>Nothing in this window</div>
+    <h3 style="margin-top: 20px;">Not found most often</h3>
+    <p class="la-sub">Paths that do not exist, asked for again and again, are usually a scanner looking for a weakness.</p>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Path</th>
+          <th class="la-num">404</th>
+          <th class="la-num">Requests</th>
+        </tr>
+      </thead>
+      <tbody id="la-not-found-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-not-found-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="agents" class="la-table-wrap" hidden>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Client (user agent)</th>
+          <th class="la-num">Requests</th>
+          <th class="la-num">Addresses</th>
+          <th class="la-num">Refused</th>
+        </tr>
+      </thead>
+      <tbody id="la-agents-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-agents-empty" hidden>No client names in this window: the log records them when the user agent is logged</div>
+  </div>
+
+  <div data-panel="slow" class="la-table-wrap" hidden>
+    <p class="la-sub">The slowest answers of the window, by how soon the server answered.</p>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Address</th>
+          <th>Site</th>
+          <th>Request</th>
+          <th>Status</th>
+          <th class="la-num">Server answer</th>
+          <th>Refused because</th>
+        </tr>
+      </thead>
+      <tbody id="la-slow-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-slow-empty" hidden>Nothing in this window</div>
   </div>
 
   <div data-panel="banned" hidden>

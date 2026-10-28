@@ -97,6 +97,10 @@ def normalize_request(args: Dict[str, Any]) -> Dict[str, Any]:
     # left out unless the page asks for it.
     if str(args.get("hide_admin") or "").lower() in ("1", "true", "yes", "on"):
         request["hide_admin"] = True
+    # Part of a client's user agent, as the clients list shows them.
+    agent = "".join(ch for ch in str(args.get("agent") or "") if ch.isprintable()).strip()
+    if agent:
+        request["agent"] = agent[:120]
     return request
 
 
@@ -284,17 +288,19 @@ def live_view(args: Dict[str, Any]) -> Dict[str, Any]:
 
     for row in snapshot.get("addresses") or []:
         row.update(state(row["ip"]))
-    for event in snapshot.get("events") or []:
-        event["country"] = _country(event["ip"], countries)
+    for key in ("events", "slow"):
+        for event in snapshot.get(key) or []:
+            event["country"] = _country(event["ip"], countries)
 
     wanted = request.get("country")
     if wanted:
         snapshot["addresses"] = [
             row for row in snapshot.get("addresses") or [] if row.get("country") == wanted
         ]
-        snapshot["events"] = [
-            event for event in snapshot.get("events") or [] if event.get("country") == wanted
-        ]
+        for key in ("events", "slow"):
+            snapshot[key] = [
+                event for event in snapshot.get(key) or [] if event.get("country") == wanted
+            ]
 
     seen = {row["ip"]: row for row in snapshot.get("addresses") or []}
     banned = []

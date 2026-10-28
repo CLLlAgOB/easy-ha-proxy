@@ -26,6 +26,7 @@ from __future__ import annotations
 import calendar
 import contextlib
 import grp
+import heapq
 import hmac
 import ipaddress
 import itertools
@@ -3250,6 +3251,14 @@ class Enforcer:
 LIVE_MAX_ADDRESSES = 300
 LIVE_MAX_BLOCKED_ADDRESSES = 500
 LIVE_MAX_EVENTS = 300
+# The top lists of the window: what was asked for most, what was not found
+# most (scanners walk paths that do not exist), which clients, and the
+# slowest answers.
+LIVE_MAX_PATHS = 50
+LIVE_MAX_NOT_FOUND = 30
+LIVE_MAX_AGENTS = 30
+LIVE_MAX_SLOW = 50
+LOGGED_AGENT_OTHER = re.compile(r"[^a-z0-9./;:_-]")
 LIVE_CACHE_SECONDS = 2.0
 LIVE_WANTED_SECONDS = 120
 LIVE_FAST_TICK_SECONDS = 2.0
@@ -3446,6 +3455,9 @@ def _live_matches(record: tuple, filters: Dict[str, Any]) -> bool:
         return False
     if filters.get("hide_admin") and record[L_BACKEND].startswith(LIVE_ADMIN_BACKEND + "/"):
         return False
+    agent = filters.get("agent")
+    if agent and (len(record) <= L_AGENT or agent not in record[L_AGENT].lower()):
+        return False
     return True
 
 
@@ -3478,7 +3490,25 @@ def live_filters(raw: Dict[str, Any]) -> Dict[str, Any]:
         filters["banned"] = True
     if str(raw.get("hide_admin") or "").lower() in ("1", "true", "yes", "on"):
         filters["hide_admin"] = True
+    agent = str(raw.get("agent") or "").strip().lower()
+    if agent:
+        # The log keeps a user agent with every other character made "_"
+        # (the template's regsub), so "Windows NT" is looked for as written there.
+        filters["agent"] = LOGGED_AGENT_OTHER.sub("_", agent[:120])
     return filters
+
+
+def _live_event(r: tuple) -> Dict[str, Any]:
+    """One request as the page shows it."""
+    return {
+        "ts": r[0], "ip": r[1], "host": r[3], "method": r[5], "path": r[4],
+        "status": r[2], "duration_ms": r[8], "bytes": r[7], "backend": r[6],
+        "term": r[9], "refusal": r[11], "ban_reason": r[10],
+        "response_ms": r[12] if len(r) > 12 and r[12] >= 0 else None,
+        "times": r[13] if len(r) > 13 else "",
+        "request_id": r[14] if len(r) > 14 else "",
+        "user_agent": r[15] if len(r) > 15 else "",
+    }
 
 
 def _server_times(values: List[int]) -> Dict[str, Optional[int]]:
@@ -3525,6 +3555,12 @@ def live_aggregate(
     statuses: Counter = Counter()
     refusals: Counter = Counter()
     events: deque = deque(maxlen=LIVE_MAX_EVENTS)
+    # (host, path) -> [requests, 4xx, 404, 5xx, refused]
+    paths: Dict[Tuple[str, str], list] = {}
+    # user agent -> [requests, refused, set of addresses]
+    agents: Dict[str, list] = {}
+    # The slowest answers: a heap of (server ms, order, record), smallest on top.
+    slow: List[Tuple[int, int, tuple]] = []
     total = errors_total = server_total = blocked_total = bytes_total = 0
     filtering = bool(filters)
 
@@ -3592,9 +3628,37 @@ def live_aggregate(
 
         site = sites.get(host)
         if site is None:
-            site = sites[host] = [0, 0, 0, 0, 0, set(), "", []]
+            site = sites[host] = [0, 0, 0, 0, 0, set(), "", [], [0] * buckets]
         if answered_ms >= 0:
             site[7].append(answered_ms)
+            if len(slow) < LIVE_MAX_SLOW:
+                heapq.heappush(slow, (answered_ms, total, record))
+            elif answered_ms > slow[0][0]:
+                heapq.heapreplace(slow, (answered_ms, total, record))
+        site[8][slot] += 1
+        path_key = (host, record[4])
+        counted = paths.get(path_key)
+        if counted is None:
+            counted = paths[path_key] = [0, 0, 0, 0, 0]
+        counted[0] += 1
+        if refusal:
+            counted[4] += 1
+        elif status == 404:
+            counted[2] += 1
+            counted[1] += 1
+        elif server_error:
+            counted[3] += 1
+        elif error:
+            counted[1] += 1
+        agent = record[15] if len(record) > 15 else ""
+        if agent:
+            client = agents.get(agent)
+            if client is None:
+                client = agents[agent] = [0, 0, set()]
+            client[0] += 1
+            client[1] += bool(refusal)
+            if len(client[2]) < 1000:
+                client[2].add(ip)
         site[0] += 1
         site[1] += error
         site[2] += server_error
@@ -3639,6 +3703,8 @@ def live_aggregate(
                 "host": host, "requests": v[0], "errors": v[1], "server_errors": v[2],
                 "blocked": v[3], "addresses": len(v[5]), "backend": v[6],
                 **_server_times(v[7]),
+                # Requests per bar of the timeline, for the row's own line.
+                "spark": v[8],
             }
             for host, v in sites.items()
         ),
@@ -3665,6 +3731,24 @@ def live_aggregate(
         "addresses": rows,
         "addresses_total": len(addresses),
         "sites": site_rows,
+        "paths": [
+            {"host": key[0], "path": key[1], "requests": v[0], "client_errors": v[1],
+             "not_found": v[2], "server_errors": v[3], "blocked": v[4]}
+            for key, v in heapq.nlargest(LIVE_MAX_PATHS, paths.items(), key=lambda item: item[1][0])
+        ],
+        "not_found": [
+            {"host": key[0], "path": key[1], "not_found": v[2], "requests": v[0]}
+            for key, v in heapq.nlargest(
+                LIVE_MAX_NOT_FOUND,
+                ((key, v) for key, v in paths.items() if v[2]),
+                key=lambda item: item[1][2],
+            )
+        ],
+        "agents": [
+            {"agent": name, "requests": v[0], "blocked": v[1], "addresses": len(v[2])}
+            for name, v in heapq.nlargest(LIVE_MAX_AGENTS, agents.items(), key=lambda item: item[1][0])
+        ],
+        "slow": [_live_event(r) for _ms, _order, r in sorted(slow, key=lambda item: -item[0])],
         "events": [
             {
                 "ts": r[0], "ip": r[1], "host": r[3], "method": r[5], "path": r[4],
