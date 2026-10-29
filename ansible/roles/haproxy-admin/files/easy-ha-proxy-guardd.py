@@ -36,6 +36,7 @@ import os
 import pathlib
 import pwd
 import re
+import signal
 import socket
 import sqlite3
 import threading
@@ -6560,6 +6561,18 @@ def main() -> None:
     except Exception as exc:  # pylint: disable=broad-except
         LOG.warning("Failed to set socket permissions: %s", exc)
 
+    # systemd stops a unit with SIGTERM, which by default ends the process
+    # where it stands: databases not closed, the request log's last cycle
+    # not written. A backup stops this daemon to archive its databases
+    # whole, so it now shuts down as the alert engine does.
+    def _shutdown(signum: int, _frame: Any) -> None:
+        LOG.info("Received signal %s; shutting down", signum)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for signal_number in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signal_number, _shutdown)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -6568,8 +6581,12 @@ def main() -> None:
         engine.stop()
         with contextlib.suppress(Exception):
             server.server_close()
-        if requests is not None:
-            requests.close()
+        # The store in use now: recording may have been switched since start.
+        store = getattr(server, "requests", None)
+        if store is not None:
+            with contextlib.suppress(Exception):
+                store.flush()
+            store.close()
         database.close()
         with contextlib.suppress(OSError):
             if os.path.exists(SOCKET_PATH):

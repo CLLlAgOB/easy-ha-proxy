@@ -101,6 +101,12 @@ BACKUP_EXCLUDES = (
     "var/lib/easy-ha-proxy/backup-web/backups",
     "var/lib/easy-ha-proxy/backup-web/uploads",
     "var/lib/easy-ha-proxy/update-web",
+    # The request log: a window of a few days over every visitor's address,
+    # path and user agent, up to 256 MiB, written every second. It rebuilds
+    # itself as traffic arrives, and a disaster-recovery copy -- often sent
+    # off the host -- is no place for it. Whether it records is kept in the
+    # security engine's own database, which is archived.
+    "var/lib/easy-ha-proxy/requests",
 )
 # Monitoring history. It used to be left out entirely as too large and not
 # needed for a working gateway -- and a gateway rebuilt from its backup came
@@ -121,6 +127,13 @@ SSH_GLOBS = (
     "/home/*/.ssh",
 )
 QUIESCE_UNITS = (
+    # The security engine and the alert engine write their SQLite databases
+    # all the time, the write-ahead log often larger than the database: a
+    # copy of one taken a moment after the other restores as a torn file.
+    # Stopped, each closes its database cleanly; started again, the security
+    # engine carries on from its place in the access log.
+    "easy-ha-proxy-guardd.service",
+    "easy-ha-proxy-alertd.service",
     "easy-ha-proxy-geoip-update.timer",
     "easy-ha-proxy-geoip-update.service",
     "haproxy-certd.service",
