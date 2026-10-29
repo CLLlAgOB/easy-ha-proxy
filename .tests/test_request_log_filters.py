@@ -203,11 +203,11 @@ class Memory(unittest.TestCase):
 
 class TheEndpoint(unittest.TestCase):
     def test_with_the_record_off_memory_answers(self):
-        block = SOURCE.split('if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status"):')[1][:4000]
+        block = SOURCE.split('if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status",')[1][:4000]
         self.assertIn("memory = engine.live if requests is None", block)
         self.assertIn("memory.search_requests(", block)
-        # The status of the store stays "off": only the search has memory.
-        self.assertIn('path.endswith("/requests")', block)
+        # The status of the store stays "off": only searching has memory.
+        self.assertIn('not path.endswith("/status")', block)
         for name in ('yes("refused")', 'one("slower")', 'one("agent")'):
             self.assertIn(name, block)
 

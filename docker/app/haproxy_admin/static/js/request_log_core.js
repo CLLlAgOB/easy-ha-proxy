@@ -126,14 +126,70 @@
     return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
   }
 
+  /* ---------- the overview ---------- */
+
+  // The parts of a bar, bottom up, as the summary counts them.
+  const KINDS = ["ok", "client_errors", "server_errors", "refused"];
+
+  // Stacked bars for the summary's histogram, the tallest bar at the top.
+  function histogramRects(buckets, width, height) {
+    const bars = Array.isArray(buckets) ? buckets : [];
+    const peak = Math.max(1, ...bars.map((bar) => bar.reduce((sum, value) => sum + (Number(value) || 0), 0)));
+    const step = width / Math.max(1, bars.length);
+    const rects = [];
+    bars.forEach((bar, index) => {
+      let y = height;
+      KINDS.forEach((kind, part) => {
+        const h = ((Number(bar[part]) || 0) / peak) * (height - 4);
+        if (h <= 0) return;
+        y -= h;
+        rects.push({kind, index, x: index * step + 1, y, width: Math.max(1, step - 2), height: h});
+      });
+    });
+    return rects;
+  }
+
+  // The bar under a point of the histogram, -1 off it.
+  function barAt(fraction, count) {
+    if (!(count > 0) || !(fraction >= 0) || fraction > 1) return -1;
+    return Math.min(count - 1, Math.floor(fraction * count));
+  }
+
+  // The period of bars from one to another, in either order; never past now.
+  function barsSpan(from, to, summary, now) {
+    const first = Math.min(from, to);
+    const last = Math.max(from, to);
+    const start = Number(summary.start) + first * Number(summary.bucket_seconds);
+    let end = Number(summary.start) + (last + 1) * Number(summary.bucket_seconds);
+    if (now !== undefined && end > now) end = Math.floor(now);
+    return {since: start, until: Math.max(end, start + 60)};
+  }
+
+  // How far back the record reaches, and whether the size cap rather than
+  // the retention decides it: then the oldest request is younger than the
+  // days kept, and the store is at its cap.
+  function historyReach(status, now) {
+    const oldest = Number(status && status.oldest_ts) || 0;
+    if (!oldest) return null;
+    const days = Number(status.retention_days) || 0;
+    const full = Number(status.database_bytes) >= 0.9 * (Number(status.max_bytes) || Infinity);
+    const short = days > 0 && oldest > Number(now) - days * 86400 + 3600;
+    return {oldest, cappedBySize: full && short};
+  }
+
   return {
     RANGES,
     DEFAULT_RANGE,
     METHODS,
     TEXT_FILTERS,
+    KINDS,
     viewQuery,
     viewFromQuery,
     searchParams,
-    sameQuery
+    sameQuery,
+    histogramRects,
+    barAt,
+    barsSpan,
+    historyReach
   };
 });

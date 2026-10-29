@@ -64,3 +64,41 @@ test("two views asking the same thing need no new address", () => {
   assert.ok(core.sameQuery({range: core.DEFAULT_RANGE}, {}));
   assert.ok(!core.sameQuery({client: "192.0.2.7"}, {}));
 });
+
+/* ---------- the overview (phase 3) ---------- */
+
+test("the histogram stacks each bar's kinds, the busiest bar to the top", () => {
+  const rects = core.histogramRects([[2, 1, 0, 1], [0, 0, 0, 0], [1, 0, 0, 0]], 300, 84);
+  assert.deepEqual(rects.map((r) => [r.index, r.kind]), [[0, "ok"], [0, "client_errors"], [0, "refused"], [2, "ok"]]);
+  const first = rects.filter((r) => r.index === 0);
+  assert.equal(Math.round(first.reduce((sum, r) => sum + r.height, 0)), 80);
+  assert.equal(first[0].y + first[0].height, 84);
+  assert.deepEqual(core.histogramRects(undefined, 300, 84), []);
+});
+
+test("a point on the histogram is a bar", () => {
+  assert.equal(core.barAt(0, 60), 0);
+  assert.equal(core.barAt(0.5, 60), 30);
+  assert.equal(core.barAt(1, 60), 59);
+  assert.equal(core.barAt(-0.1, 60), -1);
+  assert.equal(core.barAt(0.5, 0), -1);
+});
+
+test("bars clicked or dragged across become a period, never past now", () => {
+  const summary = {start: 1000, bucket_seconds: 60};
+  assert.deepEqual(core.barsSpan(2, 2, summary), {since: 1120, until: 1180});
+  assert.deepEqual(core.barsSpan(5, 3, summary), {since: 1180, until: 1360});
+  assert.deepEqual(core.barsSpan(5, 5, summary, 1310), {since: 1300, until: 1360});
+});
+
+test("the store line says how far back, and when the size cap decides it", () => {
+  const now = 10 * 86400;
+  assert.equal(core.historyReach({}, now), null);
+  const days = {oldest_ts: now - 3 * 86400 + 60, retention_days: 3, database_bytes: 10, max_bytes: 100};
+  assert.deepEqual(core.historyReach(days, now), {oldest: days.oldest_ts, cappedBySize: false});
+  const capped = {oldest_ts: now - 86400, retention_days: 3, database_bytes: 95, max_bytes: 100};
+  assert.deepEqual(core.historyReach(capped, now), {oldest: capped.oldest_ts, cappedBySize: true});
+  // A young store that is far from its cap is just young.
+  const young = {oldest_ts: now - 3600, retention_days: 3, database_bytes: 1, max_bytes: 100};
+  assert.equal(core.historyReach(young, now).cappedBySize, false);
+});

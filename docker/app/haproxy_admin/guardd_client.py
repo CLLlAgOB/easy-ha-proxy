@@ -159,6 +159,11 @@ def guardd_requests(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _request_log_get("/api/v1/guard/requests", params=params)
 
 
+def guardd_requests_summary(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """What a search of the request log finds, over time and most common."""
+    return _request_log_get("/api/v1/guard/requests/summary", params=params)
+
+
 def guardd_set_request_log(enabled: bool) -> Dict[str, Any]:
     """Start or stop recording requests.
 

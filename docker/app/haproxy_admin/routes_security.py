@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 
-from flask import g, jsonify, render_template, request
+from flask import Response, g, jsonify, render_template, request, stream_with_context
 
 from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .guardd_client import GuarddUnavailable
@@ -336,6 +337,27 @@ def api_request_log():
         return jsonify(security.requests(request.args))
     except GuarddUnavailable as exc:
         return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/summary")
+def api_request_log_summary():
+    try:
+        return jsonify(security.requests_summary(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/export")
+def api_request_log_export():
+    """What a search finds, as a CSV file, up to EXPORT_ROWS rows."""
+    filename = datetime.now(timezone.utc).strftime("requests-%Y%m%d-%H%M.csv")
+    response = Response(
+        stream_with_context(security.requests_csv(request.args)),
+        mimetype="text/csv; charset=utf-8",
+    )
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.post("/api/security/requests/enabled")

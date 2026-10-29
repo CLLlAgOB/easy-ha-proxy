@@ -7,6 +7,9 @@ from the local GeoIP database. The daemon validates the same values again.
 
 from __future__ import annotations
 
+import csv
+from datetime import datetime, timezone
+import io
 import ipaddress
 import itertools
 import logging
@@ -23,6 +26,7 @@ from .guardd_client import (
     guardd_set_signatures,
     guardd_requests,
     guardd_requests_status,
+    guardd_requests_summary,
     guardd_set_request_log,
     GuarddUnavailable,
     guardd_health,
@@ -331,13 +335,90 @@ REQUEST_FILTERS = (
 )
 
 
-def requests(args) -> Dict[str, Any]:
+def _request_params(args, keys=REQUEST_FILTERS) -> Dict[str, str]:
     params = {}
-    for key in REQUEST_FILTERS:
+    for key in keys:
         value = str(args.get(key) or "").strip()
         if value:
             params[key] = value[:200]
-    return guardd_requests(params)
+    return params
+
+
+def requests(args) -> Dict[str, Any]:
+    return guardd_requests(_request_params(args))
+
+
+# The summary asks for the same requests, without a page.
+SUMMARY_FILTERS = tuple(key for key in REQUEST_FILTERS if key not in ("limit", "before", "count"))
+
+
+def requests_summary(args) -> Dict[str, Any]:
+    return guardd_requests_summary(_request_params(args, SUMMARY_FILTERS))
+
+
+# A download of what a search finds: the same pages the page reads, up to
+# this many rows. Enough to hand to someone; not a copy of the store.
+EXPORT_ROWS = 10000
+EXPORT_COLUMNS = (
+    ("time_utc", None), ("status", "status"), ("refused", "refusal"), ("method", "method"),
+    ("host", "host"), ("path", "path"), ("backend", "backend"), ("server", "server"),
+    ("client", "client"), ("server_answer_ms", "response_ms"), ("whole_request_ms", "duration_ms"),
+    ("bytes", "bytes_out"), ("ended", "term"), ("timers", "times"), ("ban_rule", "ban_reason"),
+    ("user_agent", "user_agent"), ("request_id", "request_id"),
+)
+# A cell a spreadsheet would read as a formula. Paths and user agents are
+# whatever a visitor sent, so one starting with "=" must stay text.
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(_FORMULA_START) and not re.fullmatch(r"-?\d+", text):
+        text = "'" + text
+    return text
+
+
+def requests_csv(args):
+    """The rows of a search as CSV lines, newest first, page after page.
+
+    The file is already on its way when a page is asked for, so a daemon
+    that stops answering ends the file where it got to.
+    """
+    params = _request_params(args, SUMMARY_FILTERS)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+
+    def flush() -> str:
+        value = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate()
+        return value
+
+    writer.writerow([name for name, _ in EXPORT_COLUMNS])
+    yield flush()
+    written = 0
+    before = ""
+    while written < EXPORT_ROWS:
+        page = dict(params, limit="500", count="0")
+        if before:
+            page["before"] = before
+        try:
+            found = guardd_requests(page)
+        except GuarddUnavailable as exc:
+            LOG.warning("request log export stopped: %s", exc)
+            break
+        rows = found.get("requests") or []
+        for row in rows[:EXPORT_ROWS - written]:
+            stamp = datetime.fromtimestamp(float(row.get("ts") or 0), timezone.utc)
+            writer.writerow([
+                stamp.strftime("%Y-%m-%dT%H:%M:%SZ") if key is None else _csv_cell(row.get(key))
+                for _, key in EXPORT_COLUMNS
+            ])
+        written += min(len(rows), EXPORT_ROWS - written)
+        yield flush()
+        before = str(found.get("next") or "")
+        if not before or found.get("ok") is False:
+            break
 
 
 def requests_status() -> Dict[str, Any]:

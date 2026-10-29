@@ -57,6 +57,20 @@
   let chosenPeriod = null;
   // The rows on screen by id, for their details.
   const shownRows = new Map();
+  // The overview of the search on screen, and the newest asked for.
+  let summaryData = null;
+  let summarySequence = 0;
+  // The bar a drag across the histogram started on, -1 when none.
+  let dragFrom = -1;
+  const HIST_WIDTH = 720;
+  const HIST_HEIGHT = 80;
+  const KIND_LABELS = {
+    ok: "Answered",
+    client_errors: "Errors (4xx)",
+    server_errors: "Server errors (5xx)",
+    refused: "Refused by the gateway"
+  };
+  const KIND_COLOURS = { ok: "#2e9e5b", client_errors: "#c8a13a", server_errors: "#d9822b", refused: "#cc4b4b" };
 
   function byId(id) {
     return document.getElementById(id);
@@ -198,6 +212,164 @@
       wrap.appendChild(why);
     }
     return wrap;
+  }
+
+  // A value clicked in the table or the overview: the search narrowed to it.
+  function applyFilter(button) {
+    const input = byId(INPUTS[button.dataset.filter]);
+    if (!input) return;
+    setValue(input, button.dataset.value);
+    if (button.dataset.host) byId("rq-host").value = button.dataset.host;
+    run(true);
+  }
+
+  /* ---------- the overview ---------- */
+
+  function count(value) {
+    return Number(value || 0).toLocaleString(document.documentElement.lang || undefined);
+  }
+
+  function topRow(button, amount) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.appendChild(button instanceof Node ? button : document.createTextNode(String(button)));
+    const number = document.createElement("td");
+    number.className = "rq-count";
+    number.textContent = count(amount);
+    tr.appendChild(label);
+    tr.appendChild(number);
+    return tr;
+  }
+
+  function fillTop(id, rows) {
+    const body = byId(id);
+    body.textContent = "";
+    rows.forEach((row) => body.appendChild(row));
+  }
+
+  function drawHistogram(pick) {
+    const svg = byId("rq-hist");
+    const data = summaryData;
+    if (!data) {
+      svg.innerHTML = "";
+      return;
+    }
+    const parts = [];
+    const bars = (data.buckets || []).length;
+    if (pick) {
+      const step = HIST_WIDTH / Math.max(1, bars);
+      const first = Math.min(pick.from, pick.to);
+      const last = Math.max(pick.from, pick.to);
+      parts.push(`<rect class="rq-pick" x="${first * step}" y="0" width="${(last - first + 1) * step}" height="${HIST_HEIGHT}"></rect>`);
+    }
+    core.histogramRects(data.buckets, HIST_WIDTH, HIST_HEIGHT).forEach((rect) => {
+      parts.push(`<rect class="${rect.kind}" x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" ` +
+        `width="${rect.width.toFixed(1)}" height="${rect.height.toFixed(1)}"></rect>`);
+    });
+    svg.innerHTML = parts.join("");
+  }
+
+  function renderSummary(data) {
+    summaryData = data;
+    const overview = byId("rq-overview");
+    overview.hidden = !data || !(Number(data.counted) > 0);
+    if (overview.hidden) return;
+    drawHistogram(null);
+    const bars = (data.buckets || []).length;
+    const end = Math.min(Date.now() / 1000, Number(data.start) + bars * Number(data.bucket_seconds));
+    byId("rq-axis-start").textContent = formatTime(data.start);
+    byId("rq-axis-end").textContent = formatTime(end);
+    const partial = byId("rq-summary-partial");
+    partial.hidden = Boolean(data.complete);
+    partial.textContent = data.complete
+      ? ""
+      : `${t("The overview covers the newest of these requests, back to")} ${formatTime(data.reached_to)}.`;
+    fillTop("rq-top-clients", (data.clients || []).map((row) =>
+      topRow(filterButton("client", row.client), row.count)));
+    fillTop("rq-top-paths", (data.paths || []).map((row) => {
+      const button = filterButton("path", row.path, `${row.host || ""}${row.path || ""}`, "rq-mono");
+      if (button instanceof Node && row.host) button.dataset.host = row.host;
+      return topRow(button, row.count);
+    }));
+    fillTop("rq-top-statuses", (data.statuses || []).map((row) =>
+      topRow(filterButton("status", String(row.status), String(row.status), `rq-status ${statusClass(row.status)}`), row.count)));
+  }
+
+  async function summarize(params) {
+    const mine = ++summarySequence;
+    let answer;
+    try {
+      answer = await getJson("/api/security/requests/summary", params);
+    } catch (error) {
+      answer = { status: 0, payload: {} };
+    }
+    if (mine !== summarySequence) return;
+    const { status, payload } = answer;
+    renderSummary(status === 200 && payload.ok !== false ? payload : null);
+  }
+
+  function barUnder(event) {
+    const svg = byId("rq-hist");
+    const box = svg.getBoundingClientRect();
+    const bars = summaryData ? (summaryData.buckets || []).length : 0;
+    return core.barAt((event.clientX - box.left) / Math.max(1, box.width), bars);
+  }
+
+  function showTip(event, index) {
+    const tip = byId("rq-hist-tip");
+    if (index < 0 || !summaryData) {
+      tip.hidden = true;
+      return;
+    }
+    const span = core.barsSpan(index, index, summaryData, Date.now() / 1000);
+    const bar = summaryData.buckets[index] || [];
+    tip.textContent = "";
+    const head = document.createElement("div");
+    head.textContent = `${formatTime(span.since)} – ${formatTime(span.until)}`;
+    tip.appendChild(head);
+    core.KINDS.forEach((kind, part) => {
+      const line = document.createElement("div");
+      const swatch = document.createElement("i");
+      swatch.style.background = KIND_COLOURS[kind];
+      line.appendChild(swatch);
+      line.appendChild(document.createTextNode(`${t(KIND_LABELS[kind])}: ${count(bar[part])}`));
+      tip.appendChild(line);
+    });
+    const wrap = byId("rq-hist").getBoundingClientRect();
+    const x = event.clientX - wrap.left;
+    tip.hidden = false;
+    tip.style.left = `${Math.max(0, Math.min(x + 12, wrap.width - tip.offsetWidth))}px`;
+    tip.style.top = "0px";
+  }
+
+  function wireHistogram() {
+    const svg = byId("rq-hist");
+    svg.addEventListener("pointerdown", (event) => {
+      dragFrom = barUnder(event);
+      if (dragFrom >= 0) {
+        svg.setPointerCapture(event.pointerId);
+        drawHistogram({ from: dragFrom, to: dragFrom });
+      }
+    });
+    svg.addEventListener("pointermove", (event) => {
+      const index = barUnder(event);
+      showTip(event, index);
+      if (dragFrom >= 0 && index >= 0) drawHistogram({ from: dragFrom, to: index });
+    });
+    svg.addEventListener("pointerup", (event) => {
+      const from = dragFrom;
+      dragFrom = -1;
+      const to = barUnder(event);
+      if (from < 0 || !summaryData) return;
+      // One bar clicked, or a stretch dragged across: that time only.
+      choosePeriod(core.barsSpan(from, to < 0 ? from : to, summaryData, Date.now() / 1000));
+      byId("rq-hist-tip").hidden = true;
+      run(true);
+    });
+    svg.addEventListener("pointerleave", () => {
+      byId("rq-hist-tip").hidden = true;
+      if (dragFrom < 0) drawHistogram(null);
+    });
   }
 
   function render(rows, append) {
@@ -381,6 +553,8 @@
     if (!append || !query) {
       query = core.searchParams(readView(), Date.now() / 1000);
       next = 0;
+      byId("rq-export").href = `/api/security/requests/export?${new URLSearchParams(query).toString()}`;
+      summarize(query);
     }
     const params = new URLSearchParams(query);
     params.set("limit", String(PAGE_SIZE));
@@ -474,6 +648,12 @@
       `${megabytes} / ${cap} MiB`,
       `${payload.retention_days || 0} ${t("days")}`
     ];
+    // How far back a search can look: usually the size cap, not the days.
+    const reach = core.historyReach(payload, Date.now() / 1000);
+    if (reach) {
+      parts.splice(1, 0, `${t("history from")} ${formatTime(reach.oldest)}`);
+      if (reach.cappedBySize) parts.push(t("the size cap decides how far back"));
+    }
     if (payload.paused) parts.push(t("paused"));
     element.textContent = parts.join(" · ");
   }
@@ -500,14 +680,15 @@
         if (event.key === "Enter") run(true);
       });
     });
+    byId("rq-overview").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-filter]");
+      if (button) applyFilter(button);
+    });
+    wireHistogram();
     byId("rq-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-filter]");
       if (button) {
-        const input = byId(INPUTS[button.dataset.filter]);
-        if (input) {
-          setValue(input, button.dataset.value);
-          run(true);
-        }
+        applyFilter(button);
         return;
       }
       // A row opens its details; a link inside it does what it says.

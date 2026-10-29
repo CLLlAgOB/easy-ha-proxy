@@ -38,6 +38,15 @@
     "Any method": "Любой метод",
     "Server answer slower than, ms": "Ответ сервера медленнее, мс",
     "Search for only this": "Искать только это",
-    "Recording is off, so these are the requests guardd keeps in memory, back to": "Запись выключена, поэтому это запросы, которые guardd держит в памяти, — начиная с"
+    "Recording is off, so these are the requests guardd keeps in memory, back to": "Запись выключена, поэтому это запросы, которые guardd держит в памяти, — начиная с",
+    "Errors (4xx)": "Ошибки (4xx)",
+    "Server errors (5xx)": "Ошибки сервера (5xx)",
+    "Drag across the bars to look at that time only": "Протяните по столбикам, чтобы смотреть только это время",
+    "Statuses": "Статусы",
+    "Download CSV": "Скачать CSV",
+    "Up to 10 000 rows of this search, newest first": "До 10 000 строк этого поиска, сначала новые",
+    "The overview covers the newest of these requests, back to": "Обзор охватывает самые новые из этих запросов, начиная с",
+    "history from": "история с",
+    "the size cap decides how far back": "глубину истории определяет лимит объёма"
   }
 }

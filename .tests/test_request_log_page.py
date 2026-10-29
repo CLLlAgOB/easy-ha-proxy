@@ -114,7 +114,8 @@ class PageTests(unittest.TestCase):
     def test_show_more_carries_on_where_the_search_on_screen_stopped(self):
         # Not by offset: new requests would repeat rows, and filters typed
         # since the search would mix two searches in one table.
-        self.assertNotIn("offset", self.javascript)
+        self.assertNotIn('"offset"', self.javascript)
+        self.assertNotIn("offset +=", self.javascript)
         self.assertIn('params.set("before", String(next))', self.javascript)
         self.assertIn("const params = new URLSearchParams(query);", self.javascript)
         self.assertIn("if (mine !== sequence) return;", self.javascript)

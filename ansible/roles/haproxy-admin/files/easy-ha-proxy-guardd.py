@@ -3099,6 +3099,64 @@ class RequestQuery:
         return True
 
 
+# The summary of a search: its requests over the period and what is most
+# common among them. Within this time, as the search; a summary that runs
+# out of it says how far back it got.
+REQUEST_SUMMARY_SECONDS = 3.0
+REQUEST_SUMMARY_TOP = 10
+# Bars of the histogram: the period cut into at most this many, each a
+# length a person reads at a glance.
+_SUMMARY_BARS = 72
+_SUMMARY_STEPS = (60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+
+
+def summary_layout(start: float, end: float) -> Tuple[int, int, int]:
+    """(first bar's start, seconds per bar, bars) for a period."""
+    start, end = int(start), int(max(end, start + 60))
+    step = next((s for s in _SUMMARY_STEPS if (end - start) / s <= _SUMMARY_BARS), _SUMMARY_STEPS[-1])
+    first = start - start % step
+    return first, step, max(1, -(-(end - first) // step))
+
+
+class RequestSummary:
+    """Counts folded in a part at a time, then read out."""
+
+    def __init__(self, first: int, step: int, bars: int) -> None:
+        self.first, self.step, self.bars = first, step, bars
+        # Per bar: answered, 4xx, 5xx, refused by the gateway.
+        self.histogram = [[0, 0, 0, 0] for _ in range(bars)]
+        self.statuses: Counter = Counter()
+        self.clients: Counter = Counter()
+        self.paths: Counter = Counter()
+        self.counted = 0
+
+    def add(self, bar: int, status: int, refused: bool, count: int = 1) -> None:
+        bar = min(max(int(bar), 0), self.bars - 1)
+        kind = 3 if refused else 2 if status >= 500 else 1 if status >= 400 else 0
+        self.histogram[bar][kind] += count
+        self.statuses[status] += count
+        self.counted += count
+
+    @staticmethod
+    def _most(counter: Counter, top: int) -> List[Tuple[Any, int]]:
+        # Ties in a fixed order, so the store and memory read out alike.
+        return heapq.nsmallest(top, counter.items(), key=lambda item: (-item[1], str(item[0])))
+
+    def read(self) -> Dict[str, Any]:
+        return {
+            "start": self.first,
+            "bucket_seconds": self.step,
+            "buckets": self.histogram,
+            "counted": self.counted,
+            "statuses": [{"status": status, "count": count}
+                         for status, count in self._most(self.statuses, 12)],
+            "clients": [{"client": client, "count": count}
+                        for client, count in self._most(self.clients, REQUEST_SUMMARY_TOP)],
+            "paths": [{"host": key[0], "path": key[1], "count": count}
+                      for key, count in self._most(self.paths, REQUEST_SUMMARY_TOP)],
+        }
+
+
 def _like_literal(value: str) -> str:
     """A value for LIKE in which % and _ mean themselves."""
     for character in (_LIKE_ESCAPE, "%", "_"):
@@ -3513,16 +3571,7 @@ class RequestLog:
         back than the last; after it, a step that would overrun the time is
         interrupted and searched again by the next page.
         """
-        top = connection.execute(
-            "SELECT id FROM requests INDEXED BY ix_requests_ts WHERE ts <= ?"
-            " ORDER BY ts DESC LIMIT 1", (int(until),)
-        ).fetchone() if until else connection.execute("SELECT MAX(id) FROM requests").fetchone()
-        bottom = connection.execute(
-            "SELECT id FROM requests INDEXED BY ix_requests_ts WHERE ts >= ?"
-            " ORDER BY ts LIMIT 1", (int(since),)
-        ).fetchone() if since else connection.execute("SELECT MIN(id) FROM requests").fetchone()
-        high = int(top[0]) if top and top[0] is not None else 0
-        low = int(bottom[0]) if bottom and bottom[0] is not None else 1
+        low, high = self._id_bounds(connection, since, until)
         if before:
             high = min(high, before - 1)
         where = self._where(clauses)
@@ -3600,6 +3649,70 @@ class RequestLog:
         result["total"] = max(counted, len(rows))
         result["total_exact"] = exact
         return result
+
+    @staticmethod
+    def _id_bounds(connection: sqlite3.Connection, since: int, until: int) -> Tuple[int, int]:
+        """The first and last id of a period, found through the time index."""
+        top = connection.execute(
+            "SELECT id FROM requests INDEXED BY ix_requests_ts WHERE ts <= ?"
+            " ORDER BY ts DESC LIMIT 1", (int(until),)
+        ).fetchone() if until else connection.execute("SELECT MAX(id) FROM requests").fetchone()
+        bottom = connection.execute(
+            "SELECT id FROM requests INDEXED BY ix_requests_ts WHERE ts >= ?"
+            " ORDER BY ts LIMIT 1", (int(since),)
+        ).fetchone() if since else connection.execute("SELECT MIN(id) FROM requests").fetchone()
+        high = int(top[0]) if top and top[0] is not None else 0
+        low = int(bottom[0]) if bottom and bottom[0] is not None else 1
+        return low, high
+
+    def summary(self, *, seconds: float = REQUEST_SUMMARY_SECONDS, **filters: Any) -> Dict[str, Any]:
+        """The requests a search finds, over its period and by what is most
+        common: newest first, a step of ids at a time, as the search reads
+        them, each step counted by SQLite rather than row by row here."""
+        query = RequestQuery.build(**filters)
+        clauses, parameters = query.clauses()
+        where = self._where(clauses)
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        if not self._searching.acquire(timeout=10):
+            raise RuntimeError("other searches of the request log are still running")
+        try:
+            connection = self._reader()
+            try:
+                low, high = self._id_bounds(connection, int(query.since), int(query.until))
+                oldest = self._ts_at(connection, low) if high >= low else 0
+                start = query.since or oldest or time.time()
+                end = query.until or time.time()
+                summary = RequestSummary(*summary_layout(start, end))
+                refused = f"CASE WHEN {_REFUSED_SQL} THEN 1 ELSE 0 END"
+                position = high
+                while position >= low:
+                    floor = max(low, position - REQUEST_SCAN_STEP + 1)
+                    part = "FROM requests NOT INDEXED WHERE id BETWEEN ? AND ?" + where
+                    values = [floor, position] + parameters
+                    for bar, status, gateway, count in connection.execute(
+                        f"SELECT (ts - ?) / ?, status, {refused}, COUNT(*) {part} GROUP BY 1, 2, 3",
+                        [summary.first, summary.step] + values,
+                    ):
+                        summary.add(bar, status, bool(gateway), count)
+                    for client, count in connection.execute(
+                        f"SELECT client, COUNT(*) {part} GROUP BY client", values
+                    ):
+                        summary.clients[client] += count
+                    for host, path, count in connection.execute(
+                        f"SELECT host, path, COUNT(*) {part} GROUP BY host, path", values
+                    ):
+                        summary.paths[(host, path)] += count
+                    position = floor - 1
+                    if time.monotonic() > deadline:
+                        break
+                result = summary.read()
+                result["complete"] = position < low
+                result["reached_to"] = 0 if result["complete"] else self._ts_at(connection, position + 1)
+                return result
+            finally:
+                connection.close()
+        finally:
+            self._searching.release()
 
     @staticmethod
     def _ts_at(connection: sqlite3.Connection, row_id: int) -> int:
@@ -4414,6 +4527,24 @@ class LiveBuffer:
         if count:
             result["total"] = min(counted, REQUEST_COUNT_CAP)
             result["total_exact"] = counted <= REQUEST_COUNT_CAP
+        return result
+
+    def summarize_requests(self, query: "RequestQuery") -> Dict[str, Any]:
+        """The request log's summary, answered from memory."""
+        with self._lock:
+            records = list(self._records)
+        start = query.since or (records[0][L_TS] if records else time.time())
+        end = query.until or time.time()
+        summary = RequestSummary(*summary_layout(start, end))
+        for record in records:
+            if not query.matches(record):
+                continue
+            summary.add((int(record[L_TS]) - summary.first) // summary.step,
+                        record[L_STATUS], bool(record[L_REFUSAL]))
+            summary.clients[record[L_IP]] += 1
+            summary.paths[(record[L_HOST], record[L_PATH])] += 1
+        result = summary.read()
+        result.update({"complete": True, "reached_to": 0, "source": "memory"})
         return result
 
     def status(self) -> Dict[str, Any]:
@@ -5980,12 +6111,13 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return
 
-        if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status"):
+        if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status",
+                    "/api/v1/guard/requests/summary"):
             requests = getattr(self.server, "requests", None)
             # With the record off, a search is answered from the live buffer:
             # the last hour or so, so a link from the live page or the charts
             # still finds its requests.
-            memory = engine.live if requests is None and path.endswith("/requests") else None
+            memory = engine.live if requests is None and not path.endswith("/status") else None
             if requests is None and memory is None:
                 self._send_json(
                     404,
@@ -6021,6 +6153,14 @@ class GuardHandler(BaseHTTPRequestHandler):
                     slower=_clamp_int(one("slower"), default=0, min_v=0, max_v=86_400_000),
                     agent=one("agent"),
                 )
+                if path.endswith("/summary"):
+                    if requests is None:
+                        payload = memory.summarize_requests(RequestQuery.build(**filters))
+                    else:
+                        payload = requests.summary(**filters)
+                    self._send_json(200, {"ok": True, "enabled": requests is not None,
+                                          "ts": _utc_now(), **payload})
+                    return
                 count = one("count").lower() not in ("0", "false", "no", "off")
                 limit = _clamp_int(one("limit"), default=100, min_v=1, max_v=500)
                 before = _clamp_int(one("before"), default=0, min_v=-(2 ** 62), max_v=2 ** 62)
