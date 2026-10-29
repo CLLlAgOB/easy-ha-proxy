@@ -7,6 +7,7 @@ typed.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 import unittest
 from unittest import mock
@@ -108,6 +109,21 @@ class TheSameOverviewFromMemory(StoreTestCase):
                 self.assertEqual(held["source"], "memory")
                 for key in ("start", "bucket_seconds", "buckets", "counted", "statuses", "clients", "paths"):
                     self.assertEqual(held[key], stored[key], key)
+
+
+class MemorysOwnPeriod(unittest.TestCase):
+    def test_the_bars_start_where_memory_does(self):
+        # Asked for a day with an hour in memory: a day of empty bars and
+        # the hour squeezed against the right edge, as first seen on a
+        # gateway with recording off.
+        buffer = guardd.LiveBuffer(1000, 7 * 86400)
+        records = []
+        for text in traffic_lines():
+            records.append(guardd.live_record(guardd.parse_access_line(text), guardd.line_epoch(text)))
+        buffer.extend(records)
+        found = buffer.summarize_requests(guardd.RequestQuery.build(since=TEN - 86400, until=TEN + 3600))
+        self.assertEqual((found["start"], found["bucket_seconds"]), (TEN, 60))
+        self.assertEqual(found["counted"], len(records))
 
 
 class TheEndpoint(unittest.TestCase):
@@ -216,6 +232,35 @@ class ThePage(unittest.TestCase):
 
     def test_the_store_line_says_how_far_back(self):
         self.assertIn("core.historyReach(payload", self.script)
+
+    def test_memory_is_said_right_under_the_count(self):
+        # Below the overview it was out of sight: the page showed requests
+        # with recording off and did not say where they came from.
+        found = self.template.index('class="rq-found"')
+        memory = self.template.index('id="rq-memory"')
+        overview = self.template.index('id="rq-overview"')
+        self.assertLess(found, memory)
+        self.assertLess(memory, overview)
+
+
+class HiddenMeansHidden(unittest.TestCase):
+    """.btn sets display: inline-flex, which outranks the hidden attribute:
+    "Stop recording" showed with recording off, and every "Show more" with
+    nothing more."""
+
+    CSS = (APP / "static/css/styles.css").read_text(encoding="utf-8")
+
+    def test_a_hidden_button_is_hidden_on_every_page(self):
+        self.assertRegex(self.CSS, r"(?m)^\.btn\[hidden\] \{\s*display: none;")
+        hidden_buttons = []
+        for template in sorted((APP / "templates").glob("*.html")):
+            for tag in re.findall(r"<button[^>]*>", template.read_text(encoding="utf-8")):
+                if 'class="btn' in tag and " hidden" in tag:
+                    hidden_buttons.append((template.name, tag))
+        self.assertTrue(hidden_buttons)  # the rule has buttons to hide
+
+    def test_an_empty_note_is_not_a_dot(self):
+        self.assertRegex(self.CSS, r"(?m)^\.table-meta:empty \{\s*display: none;")
 
 
 if __name__ == "__main__":

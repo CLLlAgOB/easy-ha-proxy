@@ -4533,7 +4533,10 @@ class LiveBuffer:
         """The request log's summary, answered from memory."""
         with self._lock:
             records = list(self._records)
-        start = query.since or (records[0][L_TS] if records else time.time())
+        # Memory holds the last hour or so: a day's bars would be a day of
+        # nothing and an hour squeezed against the right edge.
+        oldest = records[0][L_TS] if records else time.time()
+        start = max(query.since, oldest) if query.since else oldest
         end = query.until or time.time()
         summary = RequestSummary(*summary_layout(start, end))
         for record in records:
