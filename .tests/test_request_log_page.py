@@ -121,7 +121,9 @@ class PageTests(unittest.TestCase):
 
     def test_the_panels_own_requests_are_hidden_unless_asked_for(self):
         self.assertIn('id="rq-admin"', self.template)
-        self.assertIn('params.set("hide_admin", "1")', self.javascript)
+        self.assertIn('byId("rq-admin").checked', self.javascript)
+        core = (APP_DIR / "static" / "js" / "request_log_core.js").read_text(encoding="utf-8")
+        self.assertIn('if (!view.admin) params.hide_admin = "1";', core)
 
     def test_the_time_shown_is_the_servers_answer(self):
         self.assertIn("Server answer", self.template)
@@ -133,6 +135,39 @@ class PageTests(unittest.TestCase):
         self.assertIn("payload.timed_out", self.javascript)
         self.assertIn("payload.searched_to", self.javascript)
         self.assertIn("payload.total_exact === false", self.javascript)
+
+    def test_the_search_on_screen_is_in_the_address(self):
+        # A reload, a bookmark or a link opens the same search; Back
+        # returns to the one before.
+        self.assertIn("window.history.pushState", self.javascript)
+        self.assertIn('window.addEventListener("popstate"', self.javascript)
+        self.assertIn("core.viewFromQuery(window.location.search)", self.javascript)
+        self.assertIn("run(false)", self.javascript)
+
+    def test_the_cores_load_before_the_page(self):
+        order = [self.template.index(f"js/{name}") for name in
+                 ("live_activity_core.js", "request_log_core.js", "request_log.js")]
+        self.assertEqual(order, sorted(order))
+
+    def test_a_value_in_the_table_narrows_the_search_to_itself(self):
+        for name in ("status", "method", "host", "path", "backend", "client"):
+            self.assertIn(f'filterButton("{name}"', self.javascript)
+        self.assertIn('event.target.closest("[data-filter]")', self.javascript)
+
+    def test_a_row_opens_what_the_live_page_shows_of_a_request(self):
+        details = self.javascript.split("  function detailsRow(entry) {")[1].split("\n  }\n")[0]
+        for part in ("live.termination(entry.term)", "live.timers(entry.times)", "entry.user_agent",
+                     "entry.ban_reason", "/monitoring/live?ip="):
+            self.assertIn(part, details)
+
+    def test_the_new_filters_are_offered(self):
+        for element_id in ("rq-method", "rq-agent", "rq-slower", "rq-refused"):
+            self.assertIn(f'id="{element_id}"', self.template)
+
+    def test_memory_is_said_to_be_memory(self):
+        self.assertIn('id="rq-memory"', self.template)
+        self.assertIn('payload.source === "memory"', self.javascript)
+        self.assertIn("payload.reaches_back_to", self.javascript)
 
     def test_it_is_reachable_from_the_navigation(self):
         nav = (APP_DIR / "templates" / "_haproxy_nav.html").read_text(encoding="utf-8")

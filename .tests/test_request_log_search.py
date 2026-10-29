@@ -259,7 +259,7 @@ class TheEndpoint(unittest.TestCase):
     def test_it_passes_the_new_choices_and_drops_offset(self):
         block = SOURCE.split('if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status"):')[1]
         block = block[:3000]
-        for name in ('one("hide_admin")', 'one("before")', 'one("count")'):
+        for name in ('yes("hide_admin")', 'one("before")', 'one("count")'):
             self.assertIn(name, block)
         self.assertNotIn('one("offset")', block)
 

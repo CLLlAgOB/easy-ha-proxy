@@ -14,7 +14,6 @@
     "Last day": "Последние сутки",
     "Last 3 days": "Последние 3 суток",
     "Everything kept": "Всё, что хранится",
-    "404 or 5xx": "404 или 5xx",
     "Client address": "Адрес клиента",
     "Host": "Host",
     "Path starts with": "Путь начинается с",
@@ -35,6 +34,10 @@
     "Found": "Найдено",
     "Found, at least": "Найдено не меньше",
     "The search stopped after a few seconds; it reached back to": "Поиск остановился через несколько секунд; он дошёл до",
-    "Show more carries on further back; a shorter period or a narrower filter answers sooner.": "«Показать ещё» продолжит дальше в прошлое; короткий период или более узкий фильтр ответят быстрее."
+    "Show more carries on further back; a shorter period or a narrower filter answers sooner.": "«Показать ещё» продолжит дальше в прошлое; короткий период или более узкий фильтр ответят быстрее.",
+    "Any method": "Любой метод",
+    "Server answer slower than, ms": "Ответ сервера медленнее, мс",
+    "Search for only this": "Искать только это",
+    "Recording is off, so these are the requests guardd keeps in memory, back to": "Запись выключена, поэтому это запросы, которые guardd держит в памяти, — начиная с"
   }
 }

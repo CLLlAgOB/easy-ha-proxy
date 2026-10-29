@@ -73,6 +73,38 @@
 
 .rq-filters label.rq-check input { min-width: 0; }
 
+.rq-link {
+  color: var(--accent-primary);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+}
+
+.rq-link:hover { text-decoration: underline; }
+.rq-link.rq-status { color: inherit; }
+.rq-link.rq-2xx { color: #2e9e5b; }
+.rq-link.rq-3xx { color: var(--accent-primary); }
+.rq-link.rq-4xx { color: #c8a13a; }
+.rq-link.rq-5xx { color: #cc4b4b; }
+.rq-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.rq-mono { font-family: 'Fira Code', 'Consolas', monospace; font-size: 12px; word-break: break-all; }
+.rq-row { cursor: pointer; }
+.rq-row.rq-open td { background: rgba(var(--accent-primary-rgb), .06); }
+.rq-details td { background: rgba(var(--accent-primary-rgb), .04); }
+.rq-details-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 4px 0;
+  font-size: 13px;
+}
+.rq-details-grid dt { color: var(--text-secondary); }
+.rq-details-grid dd { margin: 0; }
+.rq-timers { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+
 .rq-found {
   display: flex;
   gap: 12px;
@@ -134,7 +166,7 @@
     </label>
     <label>
       Status
-      <input type="text" id="rq-status" placeholder="404 or 5xx">
+      <input type="text" id="rq-status" placeholder="4xx, 500" data-i18n-skip translate="no">
     </label>
     <label>
       Client address
@@ -149,12 +181,30 @@
       <input type="text" id="rq-backend" placeholder="be_shop">
     </label>
     <label>
+      Method
+      <select id="rq-method">
+        <option value="">Any method</option>
+      </select>
+    </label>
+    <label>
       Path starts with
       <input type="text" id="rq-path" placeholder="/api">
     </label>
     <label>
+      Client contains
+      <input type="text" id="rq-agent" placeholder="curl" data-i18n-skip translate="no">
+    </label>
+    <label>
+      Server answer slower than, ms
+      <input type="number" id="rq-slower" min="1" step="1" placeholder="1000">
+    </label>
+    <label>
       Request ID
       <input type="text" id="rq-request-id" placeholder="from X-Request-ID">
+    </label>
+    <label class="rq-check">
+      <input type="checkbox" id="rq-refused">
+      Only refused by the gateway
     </label>
     <label class="rq-check">
       <input type="checkbox" id="rq-admin">
@@ -168,6 +218,7 @@
     <span id="rq-found" data-i18n-skip translate="no"></span>
     <span id="rq-searching" hidden>Searching…</span>
   </div>
+  <div id="rq-memory" class="rt-notice" hidden data-i18n-skip translate="no"></div>
   <div id="rq-stopped" class="rt-notice" hidden data-i18n-skip translate="no"
        style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);"></div>
 
@@ -197,5 +248,7 @@
   </div>
 </div>
 
+<script src="{{ url_for('static', filename='js/live_activity_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/request_log_core.js') }}"></script>
 <script src="{{ url_for('static', filename='js/request_log.js') }}"></script>
 {% endblock %}

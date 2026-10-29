@@ -2949,6 +2949,163 @@ REQUEST_SEARCHES_AT_ONCE = 2
 REQUEST_INDEXED_ROWS = 5000
 
 
+# What a search of the request log asks for, read once and answered the same
+# way by the store (as SQL) and by the live buffer in memory (as a test of
+# each record), so the page means the same thing whichever answers it.
+_STATUS_TOKEN = re.compile(r"^([1-5])(\d\d|xx)$")
+# The status codes the gateway answers itself (a server never chose them):
+# the same rule as live_refusal, in SQL. The store keeps "" as the server of
+# a request no server answered.
+_REFUSED_SQL = (
+    "(status IN (423, 429) OR ban_reason != '' OR (server = '' AND"
+    " (status IN (451, 401, 403, 400) OR term LIKE 'PR%')))"
+)
+
+
+def parse_statuses(text: str) -> Tuple[Tuple[int, int], ...]:
+    """ "404", "5xx", or several: "4xx, 500". Ranges as [low, high)."""
+    ranges: List[Tuple[int, int]] = []
+    for token in re.split(r"[\s,;]+", str(text or "").strip().lower())[:8]:
+        found = _STATUS_TOKEN.match(token)
+        if found is None:
+            continue
+        if found.group(2) == "xx":
+            low = int(found.group(1)) * 100
+            ranges.append((low, low + 100))
+        else:
+            code = int(token)
+            ranges.append((code, code + 1))
+    return tuple(dict.fromkeys(ranges))
+
+
+@dataclass(frozen=True)
+class RequestQuery:
+    since: float = 0
+    until: float = 0
+    client: str = ""
+    statuses: Tuple[Tuple[int, int], ...] = ()
+    host: str = ""
+    backend: str = ""
+    request_id: str = ""
+    method: str = ""
+    path: str = ""
+    hide_admin: bool = False
+    refused: bool = False
+    slower_ms: int = 0
+    # As the log writes a user agent: lower case, every other character "_".
+    agent: str = ""
+
+    @classmethod
+    def build(cls, *, since: Any = 0, until: Any = 0, client: str = "", status: str = "",
+              host: str = "", backend: str = "", request_id: str = "", method: str = "",
+              path: str = "", hide_admin: bool = False, refused: bool = False,
+              slower: Any = 0, agent: str = "") -> "RequestQuery":
+        agent = str(agent or "").strip().lower()[:120]
+        backend = str(backend or "")[:200]
+        request_id = str(request_id or "")[:200]
+        return cls(
+            since=float(since or 0),
+            until=float(until or 0),
+            client=str(client or "")[:200],
+            statuses=parse_statuses(status),
+            host=str(host or "")[:200],
+            backend=backend,
+            request_id=request_id,
+            method=str(method or "").upper()[:10],
+            path=str(path or "")[:MAX_PATH_LENGTH],
+            # The panel's own polling is most of a quiet gateway's traffic.
+            # Asked for by id, or by the panel's own backend, it is shown all
+            # the same.
+            hide_admin=bool(hide_admin) and not request_id and backend != LIVE_ADMIN_BACKEND,
+            refused=bool(refused),
+            slower_ms=_clamp_int(slower, default=0, min_v=0, max_v=86_400_000),
+            agent=LOGGED_AGENT_OTHER.sub("_", agent) if agent else "",
+        )
+
+    def clauses(self) -> Tuple[List[str], List[Any]]:
+        clauses: List[str] = []
+        parameters: List[Any] = []
+        if self.since:
+            clauses.append("ts >= ?")
+            parameters.append(int(self.since))
+        if self.until:
+            clauses.append("ts <= ?")
+            parameters.append(int(self.until))
+        for column, value in (
+            ("client", self.client),
+            ("host", self.host),
+            ("backend", self.backend),
+            ("request_id", self.request_id),
+            ("method", self.method),
+        ):
+            if value:
+                clauses.append(column + " = ?")
+                parameters.append(value)
+        if self.hide_admin:
+            clauses.append("backend != ?")
+            parameters.append(LIVE_ADMIN_BACKEND)
+        if self.path:
+            # A prefix match, so /api finds everything under it. Anchored on
+            # purpose: a leading wildcard would scan the whole table.
+            clauses.append("path LIKE ? ESCAPE ?")
+            parameters.extend([_like_literal(self.path) + "%", _LIKE_ESCAPE])
+        if self.statuses:
+            clauses.append(
+                "(" + " OR ".join("(status >= ? AND status < ?)" for _ in self.statuses) + ")"
+            )
+            for low, high in self.statuses:
+                parameters.extend([low, high])
+        if self.refused:
+            clauses.append(_REFUSED_SQL)
+        if self.slower_ms:
+            clauses.append("response_ms >= ?")
+            parameters.append(self.slower_ms)
+        if self.agent:
+            clauses.append(
+                "agent_id IN (SELECT id FROM agents WHERE agent LIKE ? ESCAPE ?)"
+            )
+            parameters.extend(["%" + _like_literal(self.agent) + "%", _LIKE_ESCAPE])
+        return clauses, parameters
+
+    def matches(self, record: tuple) -> bool:
+        """The same question asked of one record of the live buffer."""
+        if self.since and record[L_TS] < self.since:
+            return False
+        if self.until and record[L_TS] > self.until:
+            return False
+        if self.client and record[L_IP] != self.client:
+            return False
+        if self.host and record[L_HOST] != self.host:
+            return False
+        backend = record[L_BACKEND].partition("/")[0]
+        if self.backend and backend != self.backend:
+            return False
+        if self.request_id and (len(record) <= L_REQUEST_ID or record[L_REQUEST_ID] != self.request_id):
+            return False
+        if self.method and record[L_METHOD] != self.method:
+            return False
+        if self.hide_admin and backend == LIVE_ADMIN_BACKEND:
+            return False
+        if self.path and not record[L_PATH].startswith(self.path):
+            return False
+        if self.statuses and not any(low <= record[L_STATUS] < high for low, high in self.statuses):
+            return False
+        if self.refused and not record[L_REFUSAL]:
+            return False
+        if self.slower_ms and (len(record) <= L_RESPONSE or record[L_RESPONSE] < self.slower_ms):
+            return False
+        if self.agent and (len(record) <= L_AGENT or self.agent not in record[L_AGENT].lower()):
+            return False
+        return True
+
+
+def _like_literal(value: str) -> str:
+    """A value for LIKE in which % and _ mean themselves."""
+    for character in (_LIKE_ESCAPE, "%", "_"):
+        value = value.replace(character, _LIKE_ESCAPE + character)
+    return value
+
+
 def _local_offset(wall: int) -> int:
     """Seconds this host's zone was ahead of UTC at a wall-clock time
     written as if it were UTC (HAProxy's %t, read by parse_stamp)."""
@@ -3244,6 +3401,9 @@ class RequestLog:
         method: str = "",
         path: str = "",
         hide_admin: bool = False,
+        refused: bool = False,
+        slower: int = 0,
+        agent: str = "",
         before: int = 0,
         count: bool = True,
         limit: int = 100,
@@ -3257,46 +3417,13 @@ class RequestLog:
         whole period was searched; when it was not, `searched_to` is how far
         back it got and `next` continues from there.
         """
-        clauses: List[str] = []
-        parameters: List[Any] = []
-        if since:
-            clauses.append("ts >= ?")
-            parameters.append(int(since))
-        if until:
-            clauses.append("ts <= ?")
-            parameters.append(int(until))
-        for column, value in (
-            ("client", client),
-            ("host", host),
-            ("backend", backend),
-            ("request_id", request_id),
-            ("method", method),
-        ):
-            if value:
-                clauses.append(column + " = ?")
-                parameters.append(str(value)[:200])
-        # The panel's own polling is most of a quiet gateway's traffic. Asked
-        # for by id, or by the panel's own backend, it is shown all the same.
-        if hide_admin and not request_id and backend != LIVE_ADMIN_BACKEND:
-            clauses.append("backend != ?")
-            parameters.append(LIVE_ADMIN_BACKEND)
-        if path:
-            # A prefix match, so /api finds everything under it. Anchored on
-            # purpose: a leading wildcard would scan the whole table.
-            escaped = str(path)[:MAX_PATH_LENGTH]
-            for character in (_LIKE_ESCAPE, "%", "_"):
-                escaped = escaped.replace(character, _LIKE_ESCAPE + character)
-            clauses.append("path LIKE ? ESCAPE ?")
-            parameters.extend([escaped + "%", _LIKE_ESCAPE])
-        if status:
-            text = str(status).strip()
-            if len(text) == 3 and text.endswith("xx") and text[0].isdigit():
-                low = int(text[0]) * 100
-                clauses.append("status >= ? AND status < ?")
-                parameters.extend([low, low + 100])
-            elif text.isdigit():
-                clauses.append("status = ?")
-                parameters.append(int(text))
+        query = RequestQuery.build(
+            since=since, until=until, client=client, status=status, host=host,
+            backend=backend, request_id=request_id, method=method, path=path,
+            hide_admin=hide_admin, refused=refused, slower=slower, agent=agent,
+        )
+        clauses, parameters = query.clauses()
+        since, until = int(query.since), int(query.until)
         limit = _clamp_int(limit, default=100, min_v=1, max_v=500)
         before = _clamp_int(before, default=0, min_v=0, max_v=2 ** 62)
         deadline = time.monotonic() + max(0.0, float(seconds))
@@ -3306,9 +3433,9 @@ class RequestLog:
             connection = self._reader()
             try:
                 index = ""
-                if request_id:
+                if query.request_id:
                     index = "ix_requests_rid"
-                elif client and self._few(connection, clauses, parameters):
+                elif query.client and self._few(connection, clauses, parameters):
                     index = "ix_requests_client"
                 if index:
                     found = self._search_indexed(
@@ -4158,6 +4285,23 @@ def live_aggregate(
     }
 
 
+def _memory_row(row_id: int, r: tuple) -> Dict[str, Any]:
+    """A live record as the request log shows a stored row."""
+    backend, _, server = r[L_BACKEND].partition("/")
+    bad = r[L_PATH] == "<BADREQ>"
+    return {
+        "id": row_id, "ts": int(r[L_TS]), "request_id": r[L_REQUEST_ID] if len(r) > L_REQUEST_ID else "",
+        "client": r[L_IP], "status": r[L_STATUS], "frontend": "", "backend": backend,
+        "server": "" if server in ("", "<NOSRV>") else server, "method": r[L_METHOD],
+        "host": r[L_HOST], "path": "" if bad else r[L_PATH], "bytes_out": r[L_BYTES],
+        "duration_ms": r[L_DURATION], "bad_request": 1 if bad else 0,
+        "response_ms": r[L_RESPONSE] if len(r) > L_RESPONSE and r[L_RESPONSE] >= 0 else -1,
+        "times": r[L_TIMES] if len(r) > L_TIMES else "",
+        "term": r[L_TERM], "ban_reason": r[L_REASON],
+        "user_agent": r[L_AGENT] if len(r) > L_AGENT else "", "refusal": r[L_REFUSAL],
+    }
+
+
 class LiveBuffer:
     """The latest requests, in memory, bounded by count and by age."""
 
@@ -4165,6 +4309,12 @@ class LiveBuffer:
         self.max_records = max(1, int(max_records))
         self.max_seconds = max(60, int(max_seconds))
         self._records: deque = deque()
+        # The id of the first record held. Every record keeps its id however
+        # many are added after it or dropped before it, which is what lets
+        # the request log page through memory without repeating a row. Far
+        # from zero, so what is read back after a restart (added before the
+        # first) never reaches 0, which means "nothing further" to the page.
+        self._base = 10 ** 12
         self._lock = threading.Lock()
         self._compute_lock = threading.Lock()
         self._cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -4189,10 +4339,12 @@ class LiveBuffer:
             overflow = len(self._records) - self.max_records
             for _ in range(max(0, overflow)):
                 self._records.popleft()
+            self._base += max(0, overflow)
             self.evicted_for_size += max(0, overflow)
             horizon = records[-1][L_TS] - self.max_seconds
             while self._records and self._records[0][L_TS] < horizon:
                 self._records.popleft()
+                self._base += 1
             for record in records:
                 if record[L_STATUS] in (400, 451):
                     hour = int(record[L_TS]) // 3600 * 3600
@@ -4213,15 +4365,56 @@ class LiveBuffer:
             return
         with self._lock:
             self._records.extendleft(reversed(records))
+            self._base -= len(records)
             overflow = len(self._records) - self.max_records
             for _ in range(max(0, overflow)):
                 self._records.popleft()
+            self._base += max(0, overflow)
             for record in records:
                 if record[L_STATUS] in (400, 451):
                     hour = int(record[L_TS]) // 3600 * 3600
                     self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
             self.started = min(self.started, float(complete_since))
             self._cache.clear()
+
+    def search_requests(self, query: "RequestQuery", *, before: Any = 0, limit: int = 100,
+                        count: bool = True) -> Dict[str, Any]:
+        """The request log's search, answered from memory: the last hour or
+        so, with the record switched off. Shaped like the store's answer."""
+        limit = _clamp_int(limit, default=100, min_v=1, max_v=500)
+        with self._lock:
+            records = list(self._records)
+            base = self._base
+        top = len(records)
+        before = _clamp_int(before, default=0, min_v=-(2 ** 62), max_v=2 ** 62)
+        if before:
+            top = max(0, min(top, before - base))
+        rows: List[Tuple[int, tuple]] = []
+        counted = 0
+        for index in range(top - 1, -1, -1):
+            record = records[index]
+            if not query.matches(record):
+                continue
+            if len(rows) <= limit:
+                rows.append((base + index, record))
+            counted += 1
+            if counted > REQUEST_COUNT_CAP or (not count and len(rows) > limit):
+                break
+        more = len(rows) > limit
+        rows = rows[:limit]
+        result: Dict[str, Any] = {
+            "requests": [_memory_row(row_id, record) for row_id, record in rows],
+            "next": rows[-1][0] if more else 0,
+            "complete": True,
+            "timed_out": False,
+            "searched_to": 0,
+            "source": "memory",
+            "reaches_back_to": records[0][L_TS] if records else 0,
+        }
+        if count:
+            result["total"] = min(counted, REQUEST_COUNT_CAP)
+            result["total_exact"] = counted <= REQUEST_COUNT_CAP
+        return result
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -5789,7 +5982,11 @@ class GuardHandler(BaseHTTPRequestHandler):
 
         if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status"):
             requests = getattr(self.server, "requests", None)
-            if requests is None:
+            # With the record off, a search is answered from the live buffer:
+            # the last hour or so, so a link from the live page or the charts
+            # still finds its requests.
+            memory = engine.live if requests is None and path.endswith("/requests") else None
+            if requests is None and memory is None:
                 self._send_json(
                     404,
                     {"ok": False, "enabled": False, "error": "the request log is off"},
@@ -5806,13 +6003,12 @@ class GuardHandler(BaseHTTPRequestHandler):
                 def one(name: str) -> str:
                     return (query.get(name, [""])[0] or "").strip()
 
-                payload = requests.search(
-                    since=_clamp_int(
-                        one("since"), default=0, min_v=0, max_v=2_000_000_000
-                    ),
-                    until=_clamp_int(
-                        one("until"), default=0, min_v=0, max_v=2_000_000_000
-                    ),
+                def yes(name: str) -> bool:
+                    return one(name).lower() in ("1", "true", "yes", "on")
+
+                filters = dict(
+                    since=_clamp_int(one("since"), default=0, min_v=0, max_v=2_000_000_000),
+                    until=_clamp_int(one("until"), default=0, min_v=0, max_v=2_000_000_000),
                     client=one("client"),
                     status=one("status"),
                     host=one("host"),
@@ -5820,10 +6016,22 @@ class GuardHandler(BaseHTTPRequestHandler):
                     request_id=one("request_id"),
                     method=one("method").upper(),
                     path=one("path"),
-                    hide_admin=one("hide_admin").lower() in ("1", "true", "yes", "on"),
-                    before=_clamp_int(one("before"), default=0, min_v=0, max_v=2 ** 62),
-                    count=one("count").lower() not in ("0", "false", "no", "off"),
-                    limit=_clamp_int(one("limit"), default=100, min_v=1, max_v=500),
+                    hide_admin=yes("hide_admin"),
+                    refused=yes("refused"),
+                    slower=_clamp_int(one("slower"), default=0, min_v=0, max_v=86_400_000),
+                    agent=one("agent"),
+                )
+                count = one("count").lower() not in ("0", "false", "no", "off")
+                limit = _clamp_int(one("limit"), default=100, min_v=1, max_v=500)
+                before = _clamp_int(one("before"), default=0, min_v=-(2 ** 62), max_v=2 ** 62)
+                if requests is None:
+                    payload = memory.search_requests(
+                        RequestQuery.build(**filters), before=before, limit=limit, count=count,
+                    )
+                    self._send_json(200, {"ok": True, "enabled": False, "ts": _utc_now(), **payload})
+                    return
+                payload = requests.search(
+                    **filters, before=max(0, before), count=count, limit=limit,
                 )
                 self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
             except Exception as exc:  # pylint: disable=broad-except

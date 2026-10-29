@@ -327,6 +327,7 @@ def unavailable_payload(exc: GuarddUnavailable) -> Dict[str, Any]:
 REQUEST_FILTERS = (
     "since", "until", "client", "status", "host", "backend",
     "request_id", "method", "path", "limit", "before", "count", "hide_admin",
+    "refused", "slower", "agent",
 )
 
 
