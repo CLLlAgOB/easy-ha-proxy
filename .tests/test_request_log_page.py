@@ -164,6 +164,14 @@ class PageTests(unittest.TestCase):
         for element_id in ("rq-method", "rq-agent", "rq-slower", "rq-refused"):
             self.assertIn(f'id="{element_id}"', self.template)
 
+    def test_switched_off_shows_no_stop_button_and_no_empty_store(self):
+        # The status route answers "off" with a 200 and enabled: false; read
+        # by its status alone, the page offered to stop a record that was not
+        # running and showed "0 records · 0 / 0 MiB · 0 days".
+        block = self.javascript.split("async function refreshStore()")[1].split("\n  }\n")[0]
+        self.assertIn("payload.enabled !== false", block)
+        self.assertIn('byId("rq-disable").hidden = !recording;', block)
+
     def test_memory_is_said_to_be_memory(self):
         self.assertIn('id="rq-memory"', self.template)
         self.assertIn('payload.source === "memory"', self.javascript)

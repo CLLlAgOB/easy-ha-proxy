@@ -459,9 +459,11 @@
   async function refreshStore() {
     const { status, payload } = await getJson("/api/security/requests/status", {});
     const element = byId("rq-store");
-    // 200 means the store exists; 404 is the daemon saying it is switched off.
-    byId("rq-disable").hidden = status !== 200;
-    if (status !== 200) {
+    // The panel passes the daemon's "switched off" on with a 200, so the
+    // body says it, not the status: no stop button and no "0 records" then.
+    const recording = status === 200 && payload.enabled !== false && payload.ok !== false;
+    byId("rq-disable").hidden = !recording;
+    if (!recording) {
       element.textContent = "";
       return;
     }
