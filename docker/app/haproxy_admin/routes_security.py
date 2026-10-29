@@ -353,7 +353,7 @@ def api_request_log_export():
     filename = datetime.now(timezone.utc).strftime("requests-%Y%m%d-%H%M.csv")
     response = Response(
         stream_with_context(security.requests_csv(request.args)),
-        mimetype="text/csv; charset=utf-8",
+        mimetype="text/csv",
     )
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     response.headers["Cache-Control"] = "no-store"

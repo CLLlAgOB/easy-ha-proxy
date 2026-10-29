@@ -160,14 +160,16 @@ class TheDownload(unittest.TestCase):
     def test_what_a_visitor_typed_stays_text_in_a_spreadsheet(self):
         row = self.rows(1)[0]
         row.update(path="=HYPERLINK(\"http://x\")", user_agent="+cmd|' /C calc'!A0", ban_reason="@SUM(1)",
-                   response_ms=-1)
+                   response_ms=-1, term="-----")
         lines, _ = self.download([{"requests": [row], "next": 0}])
         cells = lines[1]
         self.assertIn("'=HYPERLINK", cells)
         self.assertIn("'+cmd", cells)
         self.assertIn("'@SUM", cells)
-        # A number stays a number.
+        # A number stays a number, and a request that ended normally ("-----")
+        # stays as HAProxy wrote it.
         self.assertIn(",-1,", cells)
+        self.assertIn(",-----,", cells)
 
     def test_a_daemon_that_stops_answering_ends_the_file(self):
         with mock.patch.object(security, "guardd_requests",
@@ -183,6 +185,8 @@ class TheRoutes(unittest.TestCase):
         self.assertIn('@bp.get("/api/security/requests/summary")', block)
         self.assertIn('@bp.get("/api/security/requests/export")', block)
         self.assertIn("attachment; filename=", block)
+        # Flask adds the charset itself; naming it too wrote it twice.
+        self.assertIn('mimetype="text/csv",', block)
         self.assertEqual(block.count("@bp.post"), 1)
 
 

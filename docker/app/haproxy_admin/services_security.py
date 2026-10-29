@@ -373,7 +373,10 @@ _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 
 def _csv_cell(value: Any) -> str:
     text = "" if value is None else str(value)
-    if text.startswith(_FORMULA_START) and not re.fullmatch(r"-?\d+", text):
+    # A number, or HAProxy's "-----" (a request that ended normally), is
+    # what it looks like; anything else that a spreadsheet would start
+    # computing is kept as text.
+    if text.startswith(_FORMULA_START) and not re.fullmatch(r"-?\d+|-+", text):
         text = "'" + text
     return text
 
