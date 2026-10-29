@@ -424,6 +424,14 @@ def _validate_site(site: Any, index: int) -> None:
         email = str(site["alert_email"]).strip()
         if len(email) > 254 or not EMAIL_RE.fullmatch(email):
             raise ValueError(f"sites[{index}].alert_email must be a valid email")
+    if site.get("alert_slow_ms") is not None and (
+        isinstance(site["alert_slow_ms"], bool)
+        or not isinstance(site["alert_slow_ms"], int)
+        or not 0 <= site["alert_slow_ms"] <= 600000
+    ):
+        raise ValueError(
+            f"sites[{index}].alert_slow_ms must be a number of milliseconds from 0 to 600000"
+        )
     for srv_index, server in enumerate(site.get("servers") or []):
         if not isinstance(server, dict):
             raise ValueError(f"sites[{index}].servers[{srv_index}] must be an object")

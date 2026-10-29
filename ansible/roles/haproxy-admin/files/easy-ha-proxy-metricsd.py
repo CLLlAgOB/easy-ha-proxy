@@ -2651,6 +2651,49 @@ class StorageGuard:
 AUTHELIA_BACKEND = "authelia_backend"
 TRAFFIC_ALERT_SKIP = frozenset({AUTHELIA_BACKEND, "be_access_granted"})
 
+# A site's own settings are in websites.yml, edited in the panel. Its own
+# slow-response threshold (alert_slow_ms, 0 for off) is read from there: an
+# application that holds requests open on purpose -- the 1C web client -- is
+# "slow" by design, and one threshold for every site either misses real
+# slowness or never stops alerting about that one.
+WEBSITES_FILE = os.environ.get("METRICSD_WEBSITES", "/opt/haproxy-admin/config/websites.yml")
+_SITE_ID_OTHER = re.compile(r"[^A-Za-z0-9_]")
+
+
+def site_slow_thresholds(path: str) -> Dict[str, int]:
+    """backend -> the site's own slow-response threshold in ms (0: off).
+
+    The backend is named as the HAProxy template names it: be_ and the
+    site's name with every other character made "_".
+    """
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            data = yaml.safe_load(stream) or {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.warning("Cannot read %s for the sites' alert thresholds: %s", path, exc)
+        return {}
+    sites = data.get("sites") if isinstance(data, dict) else None
+    thresholds: Dict[str, int] = {}
+    for site in sites if isinstance(sites, list) else []:
+        if not isinstance(site, dict) or not site.get("name"):
+            continue
+        value = site.get("alert_slow_ms")
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            milliseconds = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= milliseconds <= 600000:
+            thresholds["be_" + _SITE_ID_OTHER.sub("_", str(site["name"]))] = milliseconds
+    return thresholds
+
 
 class Collector:
     """Polls HAProxy, accumulates a minute, then writes it out."""
@@ -2692,6 +2735,10 @@ class Collector:
         self.thermal_root = THERMAL_ROOT
         # Per counter set, per device: the reading at the previous poll.
         self._counter_previous: Dict[str, Dict[str, Tuple[int, int]]] = {}
+        # The sites' own slow-response thresholds, read again when the file
+        # changes: (modification time, thresholds).
+        self.websites_path = WEBSITES_FILE
+        self._site_thresholds: Tuple[Optional[float], Dict[str, int]] = (None, {})
         # The access log's minute digests, from the adaptive protection
         # daemon; whether it answered the last time it was asked.
         self.guardd_socket = GUARDD_SOCKET_PATH
@@ -2865,6 +2912,17 @@ class Collector:
                 )
             return
 
+    def _slow_thresholds(self) -> Dict[str, int]:
+        try:
+            changed = os.stat(self.websites_path).st_mtime
+        except OSError:
+            changed = None
+        if changed != self._site_thresholds[0]:
+            self._site_thresholds = (
+                changed, site_slow_thresholds(self.websites_path) if changed is not None else {}
+            )
+        return self._site_thresholds[1]
+
     def _report_traffic(self, rows: Dict[int, Dict[str, int]]) -> None:
         """http.error_ratio and response.slow, per backend, per minute.
 
@@ -2878,6 +2936,7 @@ class Collector:
             return
         config = self.config
         names = {object_id: key for key, object_id in self._object_ids.items()}
+        own_thresholds = self._slow_thresholds()
         for object_id, row in rows.items():
             key = names.get(object_id)
             if not key or key[0] != "backend" or key[1] in TRAFFIC_ALERT_SKIP:
@@ -2906,9 +2965,11 @@ class Collector:
                             else ""
                         ),
                     )
-                if config.alert_slow_response_ms > 0:
+                own = own_thresholds.get(proxy)
+                threshold = config.alert_slow_response_ms if own is None else own
+                if threshold > 0:
                     average = int(row.get("response_ms_avg") or 0)
-                    slow = enough and average >= config.alert_slow_response_ms
+                    slow = enough and average >= threshold
                     alerts.observe(
                         "response.slow",
                         proxy,
@@ -2920,10 +2981,20 @@ class Collector:
                         ),
                         detail=(
                             f"average over the last minute, {requests} requests "
-                            f"(threshold {config.alert_slow_response_ms} ms)"
+                            f"(threshold {threshold} ms"
+                            f"{' for this site' if own is not None else ''})"
                             if slow
                             else ""
                         ),
+                    )
+                elif own == 0:
+                    # Off for this site: what it held clears now rather than
+                    # waiting to go stale.
+                    alerts.observe(
+                        "response.slow",
+                        proxy,
+                        active=False,
+                        summary=f"{proxy}: slow-response alerts are off for this site",
                     )
 
     def _observe_host(self, now: int) -> None:

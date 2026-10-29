@@ -479,6 +479,17 @@
             delete site[key];
           }
         });
+        // A number of milliseconds; 0 is a choice (off for this site), so
+        // only an empty field falls back to the global threshold.
+        var slow = document.getElementById("alert_slow_ms");
+        if (slow) {
+          var slowValue = (slow.value || "").trim();
+          if (/^[0-9]+$/.test(slowValue)) {
+            site.alert_slow_ms = parseInt(slowValue, 10);
+          } else {
+            delete site.alert_slow_ms;
+          }
+        }
       }
 
       var geoCountriesText = text("geo_countries");

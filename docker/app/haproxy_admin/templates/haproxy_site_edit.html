@@ -722,6 +722,12 @@
                            value="{{ site.alert_email if site.alert_email is defined and site.alert_email is not none else '' }}">
                     <div class="table-meta">Optional recipient for this site only; delivery uses the Mail settings relay.</div>
 
+                    <label class="form-label" for="alert_slow_ms" style="margin-top: 10px;">alert_slow_ms</label>
+                    <input id="alert_slow_ms" name="alert_slow_ms" type="number" class="form-input"
+                           min="0" max="600000" step="100" placeholder="Default (global threshold)" autocomplete="off"
+                           value="{{ site.alert_slow_ms if site.alert_slow_ms is defined and site.alert_slow_ms is not none else '' }}">
+                    <div class="table-meta">Slow-response alert (response.slow) for this site: the average server answer over a minute above which it fires, in ms. Empty keeps the global threshold; 0 turns it off for this site, for an application that keeps requests open on purpose, such as the 1C web client.</div>
+
                     <label class="form-label" for="rate_ban" style="margin-top: 10px;">rate_ban</label>
                     <select name="rate_ban" id="rate_ban" class="form-input">
                         <option value="" {% if raw_rateban is none %}selected{% endif %}>

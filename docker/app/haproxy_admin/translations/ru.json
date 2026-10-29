@@ -1778,6 +1778,8 @@
     "No certificate of its own was found for it here, so there is nothing for certbot to skip.": "Собственного сертификата для него здесь не найдено, так что certbot пропускать нечего.",
     "The certificate service could not be told about the renewal pause yet": "Службу сертификатов пока не удалось уведомить о паузе продления",
     "it will be told on the next apply.": "она будет уведомлена при следующем применении.",
-    "The internal relay could not verify the certificate of the external SMTP server and keeps the message queued. Check the server name, its certificate, or the relay's trusted certificates.": "Внутренний relay не смог проверить сертификат внешнего SMTP-сервера и держит письмо в очереди. Проверьте имя сервера, его сертификат или доверенные сертификаты relay."
+    "The internal relay could not verify the certificate of the external SMTP server and keeps the message queued. Check the server name, its certificate, or the relay's trusted certificates.": "Внутренний relay не смог проверить сертификат внешнего SMTP-сервера и держит письмо в очереди. Проверьте имя сервера, его сертификат или доверенные сертификаты relay.",
+    "Slow-response alert (response.slow) for this site: the average server answer over a minute above which it fires, in ms. Empty keeps the global threshold; 0 turns it off for this site, for an application that keeps requests open on purpose, such as the 1C web client.": "Оповещение о медленных ответах (response.slow) для этого сайта: среднее время ответа сервера за минуту, выше которого оно срабатывает, в мс. Пусто — общий порог; 0 — выключено для этого сайта, для приложения, которое намеренно держит запросы открытыми, например веб-клиента 1С.",
+    "Default (global threshold)": "По умолчанию (общий порог)"
   }
 }
