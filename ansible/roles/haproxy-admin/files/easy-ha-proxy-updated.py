@@ -1883,9 +1883,8 @@ def auto_check_loop() -> None:
             AUTO_CHECK_STATE["retry_after"] = time.time() + AUTO_CHECK_RETRY_SECONDS
         try:
             if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
-                installed = auto_install_tick()
-                if installed is not None:
-                    LOG.info("Automatic installation: %s", installed)
+                # record_auto_install logs the outcome itself.
+                auto_install_tick()
         except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
             LOG.exception("Automatic installation failed")
         if STOP_EVENT.wait(AUTO_CHECK_POLL_SECONDS):
