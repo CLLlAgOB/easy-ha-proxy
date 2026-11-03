@@ -3855,6 +3855,18 @@ class Enforcer:
         self.applied += 1
         return True
 
+    def active_bans(self) -> Dict[str, int]:
+        """Every ban standing in the table, with its reason code."""
+
+        rows = parse_table(
+            runtime_command(self.config.haproxy_socket, "show table tbl_ban")
+        )
+        return {
+            ip: _safe_int(fields.get("gpt0"))
+            for ip, fields in rows.items()
+            if _safe_int(fields.get("gpc0")) > 0
+        }
+
     def adaptive_bans(self) -> Dict[str, Dict[str, str]]:
         """Only the entries this daemon owns, identified by their reason code."""
 
@@ -4681,6 +4693,11 @@ class GuardEngine:
         self.enforcer = Enforcer(
             config, override if override in SUPPORTED_MODES else config.mode
         )
+        # Every decision about bans -- the cycle, an operator's unban, a mode
+        # change -- under one lock. An unban that ran between the cycle's read
+        # of the schedule and its re-assert used to be undone by that
+        # re-assert, which still had the old schedule (F05).
+        self._decisions = threading.RLock()
         self.ban_durations = load_ban_durations(database)
         self.ban_durations_changed_at = _safe_int(
             database.get_state(BAN_DURATIONS_CHANGED_KEY, "0")
@@ -5589,6 +5606,10 @@ class GuardEngine:
         switch have to work even after enforcement has been turned back off.
         """
 
+        with self._decisions:
+            return self._apply_enforcement(now)
+
+    def _apply_enforcement(self, now: Optional[int] = None) -> Dict[str, Any]:
         now = now or _utc_now()
         applied: List[str] = []
         lifted: List[str] = []
@@ -5639,9 +5660,13 @@ class GuardEngine:
         # the entries the schedule still wants closes all three: `set table`
         # rewrites the entry and restarts its expiry, so the schedule is the
         # only thing that decides when a ban ends.
-        present = set(self.enforcer.adaptive_bans())
+        # Any ban standing in the table, whoever placed it: an operator's (50)
+        # or HAProxy's own is left as it is. Re-asserting over it wrote 40 in
+        # place of 50, and the operator's ban then ended with the adaptive
+        # one (F06). When that other ban ends, the next cycle re-asserts.
+        standing = self.enforcer.active_bans()
         for ip, until in scheduled.items():
-            if until <= now or ip in present:
+            if until <= now or ip in standing:
                 continue
             if self.enforcer.ban(ip):
                 LOG.info("Re-asserted the ban on %s, gone from the table", ip)
@@ -5651,6 +5676,10 @@ class GuardEngine:
             if row["score"] < WOULD_BAN_SCORE:
                 continue
             if scheduled.get(ip, 0) > now:
+                continue
+            if standing.get(ip, ADAPTIVE_BAN_CODE) != ADAPTIVE_BAN_CODE:
+                # Already banned by an operator or by HAProxy's own rules:
+                # not overwritten; decided again once that ban is over.
                 continue
             blockers = self.ban_blockers(row)
             if blockers:
@@ -5761,6 +5790,10 @@ class GuardEngine:
         if not checked:
             raise ValueError("an address is required")
 
+        with self._decisions:
+            return self._forget_ban(checked, now)
+
+    def _forget_ban(self, checked: str, now: int) -> Dict[str, Any]:
         held = int(self.database.scheduled_bans().get(checked, 0))
         self.database.clear_ban(checked)
         lifted = self.enforcer.lift(checked)
@@ -5790,11 +5823,12 @@ class GuardEngine:
         if mode not in SUPPORTED_MODES:
             raise ValueError(f"mode must be one of {', '.join(SUPPORTED_MODES)}")
         now = now or _utc_now()
-        previous = self.enforcer.mode
-        self.database.set_state("mode_override", mode)
-        self.enforcer.mode = mode
-        LOG.warning("Adaptive protection mode changed: %s -> %s", previous, mode)
-        result = self.apply_enforcement(now)
+        with self._decisions:
+            previous = self.enforcer.mode
+            self.database.set_state("mode_override", mode)
+            self.enforcer.mode = mode
+            LOG.warning("Adaptive protection mode changed: %s -> %s", previous, mode)
+            result = self._apply_enforcement(now)
         return {"mode": mode, "previous": previous, **result}
 
     @staticmethod
