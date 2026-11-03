@@ -105,7 +105,18 @@ LOGS_IP_CACHE_SECONDS = float(os.getenv("HAPADM_LOGS_IP_CACHE_SECONDS", "2"))
 
 # reading the tail of LOG_FILE in Python (no tac|grep); how it is read
 LOG_FILE_TAIL_CHUNK = int(os.getenv("HAPADM_LOG_FILE_TAIL_CHUNK", "65536"))   # bytes
-LOG_FILE_TAIL_MAX_BYTES = int(os.getenv("HAPADM_LOG_FILE_TAIL_MAX_BYTES", "0"))  # 0 = no limit
+# How much of the log's tail a search reads at most (0: the whole file). It
+# used to be unlimited: an address that is not there read every byte, on a
+# two-core gateway, for each request (F10, 30 October review).
+LOG_FILE_TAIL_MAX_BYTES = int(os.getenv("HAPADM_LOG_FILE_TAIL_MAX_BYTES", str(64 * 1024 * 1024)))
+# Log searches at once; more wait their turn.
+_LOG_SCANS = threading.BoundedSemaphore(2)
+
+
+def _line_has_ip(line: str, ip: str) -> bool:
+    """The address itself, not one that starts with it: 203.0.113.1 used to
+    find 203.0.113.10 and 203.0.113.100 as well."""
+    return re.search(r"(?<![0-9A-Fa-f.:])" + re.escape(ip) + r"(?![0-9A-Fa-f])", line) is not None
 MAX_COMMAND_BYTES = int(os.getenv("HAPADM_MAX_COMMAND_BYTES", str(32 * 1024 * 1024)))
 MAX_CONFIG_BYTES = int(os.getenv("HAPADM_MAX_CONFIG_BYTES", str(4 * 1024 * 1024)))
 CONFIG_BACKUP_DIR = Path(os.getenv(
@@ -1021,7 +1032,7 @@ def _journal_window_for_ip(
         raw_lines = out.splitlines()
         filtered: list[str] = []
         for ln in raw_lines:
-            if ip in ln and not _is_selfcheck_line(ln, ip):
+            if _line_has_ip(ln, ip) and not _is_selfcheck_line(ln, ip):
                 filtered.append(ln)
 
         ordered = _sort_log_lines_by_time(filtered)[:limit]
@@ -1072,6 +1083,11 @@ def _file_tail_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     chunk_size = max(4096, int(LOG_FILE_TAIL_CHUNK))
     max_bytes = int(LOG_FILE_TAIL_MAX_BYTES) if LOG_FILE_TAIL_MAX_BYTES else 0
 
+    with _LOG_SCANS:
+        return _file_tail_scan(ip, limit, chunk_size, max_bytes)
+
+
+def _file_tail_scan(ip: str, limit: int, chunk_size: int, max_bytes: int) -> list[str]:
     try:
         found: list[str] = []
         with open(LOG_FILE, "rb") as f:
@@ -1098,12 +1114,12 @@ def _file_tail_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
                     if len(found) >= limit:
                         break
                     ln = raw.decode("utf-8", "replace")
-                    if ip in ln and not _is_selfcheck_line(ln, ip):
+                    if _line_has_ip(ln, ip) and not _is_selfcheck_line(ln, ip):
                         found.append(ln)
 
             if pos == 0 and buf and len(found) < limit:
                 ln = buf.decode("utf-8", "replace")
-                if ip in ln and not _is_selfcheck_line(ln, ip):
+                if _line_has_ip(ln, ip) and not _is_selfcheck_line(ln, ip):
                     found.append(ln)
 
         found.reverse()  # back into natural order
@@ -1232,6 +1248,9 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
 
 _IP_RE = re.compile(r'(\d{1,3}(?:\.\d{1,3}){3})')
+# The status is the field after the five timers (%TR/%Tw/%Tc/%Tr/%Ta), not any
+# " 400 " in the line: a 200 answer of 400 bytes counted as a 400.
+_LOG_STATUS_RE = re.compile(r"\s-?\d+/-?\d+/-?\d+/-?\d+/-?\d+\s(\d{3})\s")
 
 
 def logs_attackers() -> dict:
@@ -1239,7 +1258,7 @@ def logs_attackers() -> dict:
     Totals for "Threat analytics":
     - the top addresses by HTTP 400
     - the top addresses by HTTP 451 (geo-blocking)
-    The codes are found the way the application always did: by the substrings ' 400 ' and ' 451 '.
+    The status is read from its own field, after the timers.
     """
     if not os.path.exists(LOG_FILE):
         return {
@@ -1259,13 +1278,24 @@ def logs_attackers() -> dict:
     a400 = defaultdict(int)
     a451 = defaultdict(int)
 
-    # read as a stream, to keep memory down
-    with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-        for ln in f:
+    # The tail, read as a stream: at most LOG_FILE_TAIL_MAX_BYTES of it.
+    max_bytes = int(LOG_FILE_TAIL_MAX_BYTES) if LOG_FILE_TAIL_MAX_BYTES else 0
+    with _LOG_SCANS, open(LOG_FILE, "rb") as raw_file:
+        size = os.fstat(raw_file.fileno()).st_size
+        start = max(0, size - max_bytes) if max_bytes else 0
+        raw_file.seek(start)
+        if start:
+            raw_file.readline()  # a line cut by the start of the window
+        diag["partial"] = bool(start)
+        diag["scanned_bytes"] = size - start
+        for raw in raw_file:
+            ln = raw.decode("utf-8", "replace")
             diag["total_lines"] += 1
 
-            has400 = " 400 " in ln
-            has451 = " 451 " in ln
+            status = _LOG_STATUS_RE.search(ln)
+            code = status.group(1) if status else ""
+            has400 = code == "400"
+            has451 = code == "451"
 
             if has400:
                 diag["lines_with_400"] += 1
