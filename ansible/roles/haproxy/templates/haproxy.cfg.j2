@@ -634,26 +634,34 @@ frontend fe_https
     # ---- Error tracking (all through sc1, guarded against matching more than once) ----
     http-request set-var(txn._err_tracked) bool(false)
 
+{# F04: the error counter counts the gateway's own refusals too -- on
+   HAProxy 2.8 a "deny status 429" adds to http_err of the tracked table --
+   so the rate limit's 429s and a banned address's 423s used to grow into an
+   error-limit ban (code 10) and guardd's ERROR_RATE_EXCEEDED. A request the
+   gateway is about to refuse is therefore not tracked here. Before the rate
+   table counts this request, "will be refused" is "already at the limit". #}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set _err_mode = s.err_ignore_rules | default(sd.err_ignore_rules_default | default(false)) %}
+{% set _site_rate = (s.max_req_rate | default(0)) | int %}
 {% if _err_mode != 'ignore' %}
 {% if not (s.allow_ips | default([])) %}
-    http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool }
+    http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }{% if _site_rate > 0 %} !{ src_http_req_rate(tbl_rate_{{ id }}) ge {{ _site_rate }} }{% endif %}
+
 {% endif %}
     http-request set-var(txn._err_tracked) bool(true) if host_{{ id }} !{ var(txn._err_tracked) -m bool }
 {% endif %}
 {% endfor %}
 
     # anything that "misses" a valid SNI/Host goes to tbl_err_other (exactly once)
-    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
 
-    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool }
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool }
 
-    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
 
     # ---- Ban variables, initialised on every request ----
