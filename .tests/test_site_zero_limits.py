@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 import unittest
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
