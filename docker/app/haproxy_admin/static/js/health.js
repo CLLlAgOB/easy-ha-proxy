@@ -47,6 +47,30 @@
 
   let CAPS = null;
   let timer = null;
+  // The last status healthd confirmed, and the one refresh in flight: an
+  // answer that fails leaves the rows as history, marked so, never as now.
+  let lastConfirmed = null;
+  let refreshing = null;
+  const statusFreshness = $("status-freshness");
+  const monitoringGrid = document.querySelector(".monitoring-grid");
+  const clock = new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
+    timeStyle: "medium"
+  });
+
+  function showFreshness(error) {
+    const stale = Boolean(error);
+    if (monitoringGrid) monitoringGrid.classList.toggle("is-stale", stale);
+    if (!statusFreshness) return;
+    statusFreshness.classList.toggle("stale", stale);
+    if (!stale) {
+      statusFreshness.textContent = `${uiText("Checked at")} ${clock.format(lastConfirmed)}`;
+      return;
+    }
+    statusFreshness.textContent = lastConfirmed
+      ? `${uiText("Not updated since")} ${clock.format(lastConfirmed)}: ${error}`
+      : `${uiText("No answer from the status service")}: ${error}`;
+  }
+
   let selectedLogs = null; // { kind: systemd|docker, name }
   let recentAvailableUnits = [];
 
@@ -577,7 +601,23 @@
     }
   }
 
-  async function refreshAll(force = false) {
+  function refreshAll(force = false) {
+    // One at a time: a slow healthd must not pile up requests behind it.
+    if (refreshing) return refreshing;
+    refreshing = loadStatus(force)
+      .then(() => {
+        showFreshness("");
+      })
+      .catch((error) => {
+        showFreshness(error && error.message ? error.message : String(error));
+      })
+      .finally(() => {
+        refreshing = null;
+      });
+    return refreshing;
+  }
+
+  async function loadStatus(force) {
     const status = await apiGet(`/api/health/status?refresh=${force ? "1" : "0"}`);
     if (!status || status.ok === false) throw new Error(status && status.error ? status.error : "status not ok");
 
@@ -585,6 +625,9 @@
     renderSystemd(systemdUnits);
     setRecentAvailableUnits(Object.keys(systemdUnits));
     renderDocker((status.docker || {}).containers || {}, (status.docker || {}).available);
+    // When healthd took it, which a cached answer can be well before now.
+    const taken = Date.parse(status.ts_utc || "");
+    lastConfirmed = Number.isFinite(taken) ? new Date(taken) : new Date();
 
     if (force) await loadRecentLogs();
   }
@@ -642,15 +685,20 @@
     timer = null;
     if (!enabled) return;
     timer = setInterval(() => {
-      refreshAll(false).catch(() => { });
+      refreshAll(false);
     }, 5000);
   }
 
   async function init() {
     loadRecentPreferences();
+    // The controls come first: a status service that does not answer the
+    // first time must still leave Refresh and auto-refresh there to retry.
+    bindControls();
     await loadCapabilities();
     await refreshAll(true);
+  }
 
+  function bindControls() {
     if (btnRefresh) {
       btnRefresh.addEventListener("click", async () => {
         await loadCapabilities();

@@ -95,6 +95,16 @@
 .monitoring-toolbar {
   flex-wrap: wrap;
 }
+/* Rows healthd has not confirmed since: kept, as history, and dimmed. */
+.monitoring-grid.is-stale {
+  opacity: .5;
+}
+#status-freshness.stale {
+  color: var(--danger, #c0392b);
+}
+#status-freshness:empty {
+  display: none;
+}
 .monitoring-grid {
   display: grid;
   grid-template-columns: minmax(680px, 1.45fr) minmax(420px, .9fr);
@@ -338,6 +348,7 @@
     </div>
     <div class="monitoring-toolbar">
       <span class="tag" id="control-msg" style="display:none;"></span>
+      <span class="tag notranslate" translate="no" data-i18n-skip id="status-freshness" aria-live="polite"></span>
       <button class="btn" id="btnRefresh">Refresh</button>
       <label class="badge" title="Auto-refresh">
         <input type="checkbox" id="chkAuto" style="transform: translateY(1px);">
