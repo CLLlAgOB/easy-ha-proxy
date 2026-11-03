@@ -11,3 +11,6 @@ cb1530321d5f2bb78bdb40c4d87a7ae2a382d8ce:.tests/test_certd_standby.py:private-ke
 
 # a throwaway ed25519 key, used nowhere, whose line shape a backup test checks
 bd59647a46a4b7d32414ccd5f4969c57b29f0bc8:.tests/test_destination_key_material.py:private-key:47
+
+# a made-up TSIG secret (base64 of "secret-tsig-key") a DNS profile test keeps across an edit
+1e476c8d525e40c9d32ee710fc346acd31dbd2a7:.tests/test_dns_profile_partial_edit.py:generic-api-key:27
