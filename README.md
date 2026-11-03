@@ -366,6 +366,22 @@ changes it (off, 6 h, 12 h, a day, 3 days, a week) without Ansible -- and keeps
 the `update.available` alert in step: raised when something can be installed,
 resolved by the check after it was.
 
+Automatic installation is off until a `superadmin` turns it on in the same
+**Settings** fold, per gateway. It installs only easy-ha-proxy's own updates --
+the host, the panel and the Authelia images, as the project tested them --
+never the operating-system packages and never a reboot; once a night inside a
+window of the gateway's local hours (03:00-05:00 unless changed), through the
+same plan, selection, guards and worker as the Install button. A failure or a
+refusal (pending HAProxy changes, say) raises `update.failed`; the page shows
+the last outcome. A check also reports, as information only, when Redis has
+released a newer version upstream than the one the project pins -- nothing is
+pulled or re-pinned for it -- and an image counts as current only when its
+container actually runs the same layers, not merely when the tag was pulled.
+
+Every page's footer names the host build and the panel build -- each as its
+commit's time and short hash -- and warns when the panel was built from other
+web files than the host has.
+
 The host and the web application are installed as one version. The web
 application talks to the host's daemons and renders HAProxy's configuration
 from the host's template, so one without the other can break the panel. Each
