@@ -975,17 +975,19 @@ frontend fe_https
     default_backend be_maintenance
 
 {# ---------------- HTTP80 enable logic ---------------- #}
-{% set need_http80 = false %}
-{% if enable_http80 | default(false) %}
-{% set need_http80 = true %}
-{% else %}
+{# A `set` inside a for loop does not leave it in Jinja, so a site asking
+   for the HTTP -> HTTPS redirect never opened :80 while the global switch
+   was off. A namespace carries the answer out of the loop. #}
+{% set http80 = namespace(need=enable_http80 | default(false)) %}
+{% if not http80.need %}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% if s.redirect_to_https | default(false) %}
-{% set need_http80 = true %}
+{% set http80.need = true %}
 {% endif %}
 {% endfor %}
 {% endif %}
+{% set need_http80 = http80.need %}
 
 {% if need_http80 %}
 #################################
