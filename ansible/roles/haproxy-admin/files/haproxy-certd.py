@@ -2334,9 +2334,6 @@ def _ca_item(ca_id: str, kind: str, certificates: List[x509.Certificate]) -> Dic
 
 
 def _list_certificate_authorities() -> Dict[str, Any]:
-    expiry_watch = CertificateExpiryWatch()
-    expiry_watch.start()
-
     _prepare_ca_root()
     client_auth_ids = set(_load_client_auth_ids())
 
@@ -4731,12 +4728,22 @@ CERT_WATCH_INTERVAL_SECONDS = int(
 
 
 class CertificateExpiryWatch(threading.Thread):
+    """One per daemon, started with it.
+
+    It used to be started by every reading of the certificate authorities
+    list -- which the certificates page does -- so a gateway nobody looked at
+    never checked, and each visit added a thread and an immediate scan (and,
+    on one gateway, another warning by email).
+    """
+
     def __init__(self) -> None:
         super().__init__(name="cert-expiry-watch", daemon=True)
-        self._stop = threading.Event()
+        # Not `_stop`: threading.Thread has a method of that name, which
+        # join() calls.
+        self._halt = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def run(self) -> None:
         if _ALERTS is None:
@@ -4748,7 +4755,7 @@ class CertificateExpiryWatch(threading.Thread):
                 self.scan()
             except Exception:  # pylint: disable=broad-except
                 LOG.exception("certificate expiry scan failed")
-            if self._stop.wait(CERT_WATCH_INTERVAL_SECONDS):
+            if self._halt.wait(CERT_WATCH_INTERVAL_SECONDS):
                 return
 
     def scan(self) -> int:
@@ -4848,12 +4855,17 @@ def main() -> None:
     except Exception:
         pass
 
+    # The expiry watch: one, for as long as the daemon runs.
+    expiry_watch = CertificateExpiryWatch()
+    expiry_watch.start()
+
     try:
         LOG.info("haproxy-certd is listening on unix://%s", SOCKET_PATH)
         server.serve_forever()
     except KeyboardInterrupt:
         LOG.info("Interrupted by user")
     finally:
+        expiry_watch.stop()
         try:
             server.server_close()
         finally:
