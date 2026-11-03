@@ -331,6 +331,7 @@ def derive_release_channel(
 REQUEST_FIELDS = {
     "status": frozenset({"action", "job_id"}),
     "set_settings": frozenset({"action", "auto_check_hours"}),
+    "set_auto_install": frozenset({"action", "enabled", "start", "end"}),
     "summary": frozenset({"action"}),
     "start_check": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
@@ -1655,7 +1656,172 @@ def settings_payload() -> dict[str, Any]:
             if isinstance(next_at, (int, float)) and next_at > 0
             else None
         ),
+        "auto_install": {**auto_install_settings(), "last": last_auto_install()},
     }
+
+
+# Automatic installation, off until the page turns it on. Only easy-ha-proxy's
+# own updates -- the host source, the panel image, the Authelia stack images,
+# as the project tested them -- never the operating system's packages, and
+# never a reboot: those stay with the operator. Once a night, inside a window
+# of the gateway's local hours, through exactly the path the Install button
+# takes: a fresh plan, the same selection rules, the same guards. A failed
+# installation raises update.failed like any other; a refused one too.
+AUTO_INSTALL_WINDOW = (3, 5)
+AUTO_INSTALL_PATH = STATE_ROOT / "auto-install.json"
+AUTO_INSTALL_STATE: dict[str, Any] = {"night": None}
+AUTO_INSTALL_EXCLUDED = frozenset({"os"})
+
+
+def auto_install_settings() -> dict[str, Any]:
+    settings = read_settings()
+    start = settings.get("auto_install_start")
+    end = settings.get("auto_install_end")
+    if not (
+        isinstance(start, int) and isinstance(end, int)
+        and not isinstance(start, bool) and not isinstance(end, bool)
+        and 0 <= start <= 23 and 0 <= end <= 23 and start != end
+    ):
+        start, end = AUTO_INSTALL_WINDOW
+    return {"enabled": settings.get("auto_install") is True, "start": start, "end": end}
+
+
+def set_auto_install(request: dict[str, Any]) -> dict[str, Any]:
+    enabled = request.get("enabled")
+    start = request.get("start")
+    end = request.get("end")
+    if not isinstance(enabled, bool):
+        raise UpdatedError("enabled must be true or false", code="invalid")
+    for value in (start, end):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
+            raise UpdatedError("the window is given in whole hours, 0 to 23", code="invalid")
+    if start == end:
+        raise UpdatedError("the window must not start and end at the same hour", code="invalid")
+    settings = read_settings()
+    settings.update(auto_install=enabled, auto_install_start=start, auto_install_end=end)
+    atomic_json(SETTINGS_PATH, settings)
+    LOG.info("Automatic installation %s, window %02d:00-%02d:00",
+             "on" if enabled else "off", start, end)
+    return {"ok": True, "settings": settings_payload()}
+
+
+def in_install_window(local: dt.datetime, start: int, end: int) -> bool:
+    """Whether a local time falls in [start, end), the window may span midnight."""
+
+    if start < end:
+        return start <= local.hour < end
+    return local.hour >= start or local.hour < end
+
+
+def install_night(local: dt.datetime, start: int, end: int) -> str:
+    """The date the current window opened on, so a night gets one attempt."""
+
+    opened = local.date()
+    if start > end and local.hour < end:
+        opened -= dt.timedelta(days=1)
+    return opened.isoformat()
+
+
+def auto_install_selection(plan: dict[str, Any]) -> list[str]:
+    """What the Install button's "select all" would take, without the OS.
+
+    The changes-only update when the plan offers it, with the container
+    images beside it; else the complete stack, which brings the services,
+    the daemons and the panel with it; else each actionable component.
+    """
+
+    available = plan_component_map(plan)
+    actionable = [
+        component_id
+        for component_id, item in available.items()
+        if item.get("state") == "available"
+        and item.get("actionable") is True
+        and component_id not in AUTO_INSTALL_EXCLUDED
+    ]
+    if "all" in actionable and changes_scope(available.get("all")) is not None:
+        return [CHANGES_COMPONENT] + [
+            component_id
+            for component_id in ("authelia-container", "admin-container")
+            if component_id in actionable
+        ]
+    if "all" in actionable:
+        # The complete stack pulls the Authelia and panel images itself.
+        return ["all"]
+    return sorted(actionable)
+
+
+def last_auto_install() -> dict[str, Any] | None:
+    try:
+        return safe_json_file(AUTO_INSTALL_PATH) if AUTO_INSTALL_PATH.exists() else None
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def record_auto_install(outcome: str, **values: Any) -> None:
+    record = {"at": utc_now(), "outcome": outcome, **values}
+    try:
+        atomic_json(AUTO_INSTALL_PATH, record)
+    except OSError:
+        LOG.warning("Could not record the automatic installation")
+    LOG.info("Automatic installation: %s %s", outcome, values or "")
+
+
+def auto_install_once() -> str:
+    """One night's attempt: "busy" to try again in a minute, else the outcome."""
+
+    if SHUTDOWN_REQUESTED.is_set() or reboot_guard_present() or ACTIVE_MARKER.exists():
+        return "busy"
+    plan = load_latest_plan()
+    if plan is None or plan_is_expired(plan):
+        checked = auto_check_once()
+        if checked == "busy":
+            return "busy"
+        plan = load_latest_plan()
+        if checked != "done" or plan is None or plan_is_expired(plan):
+            record_auto_install("check-failed")
+            report_alert("update.failed", "auto-install",
+                         "The automatic installation could not check for updates")
+            return "check-failed"
+    components = auto_install_selection(plan)
+    if not components:
+        record_auto_install("nothing")
+        return "nothing"
+    try:
+        validate_selection(plan, components)
+        lock_fd = acquire_operation()
+    except UpdatedError as exc:
+        if exc.code == "busy":
+            return "busy"
+        record_auto_install("refused", components=components, error=str(exc)[:500])
+        report_alert("update.failed", "auto-install",
+                     "The automatic installation was refused", str(exc)[:1000])
+        return "refused"
+    job = new_job("apply", components=components, plan_id=plan["id"], scheduled=True)
+    record_auto_install("started", components=components, job_id=job["id"])
+    # The same worker as the Install button; it reports a failure itself.
+    apply_worker(job["id"], lock_fd, plan, components)
+    status = str(load_job(job["id"], include_log=False).get("status") or "")
+    outcome = "installed" if status == "completed" else "failed"
+    record_auto_install(outcome, components=components, job_id=job["id"])
+    return outcome
+
+
+def auto_install_tick(now: dt.datetime | None = None) -> str | None:
+    """Called each minute by the schedule; None when it is not the time."""
+
+    settings = auto_install_settings()
+    if not settings["enabled"]:
+        return None
+    local = (now or dt.datetime.now()).astimezone()
+    if not in_install_window(local, settings["start"], settings["end"]):
+        return None
+    night = install_night(local, settings["start"], settings["end"])
+    if AUTO_INSTALL_STATE.get("night") == night:
+        return None
+    outcome = auto_install_once()
+    if outcome != "busy":
+        AUTO_INSTALL_STATE["night"] = night
+    return outcome
 
 
 def set_settings(request: dict[str, Any]) -> dict[str, Any]:
@@ -1715,6 +1881,13 @@ def auto_check_loop() -> None:
         except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
             LOG.exception("Scheduled update check failed")
             AUTO_CHECK_STATE["retry_after"] = time.time() + AUTO_CHECK_RETRY_SECONDS
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                installed = auto_install_tick()
+                if installed is not None:
+                    LOG.info("Automatic installation: %s", installed)
+        except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
+            LOG.exception("Automatic installation failed")
         if STOP_EVENT.wait(AUTO_CHECK_POLL_SECONDS):
             return
 
@@ -2419,6 +2592,8 @@ def dispatch(request: Any) -> dict[str, Any]:
         return set_channels(request)
     if action == "set_settings":
         return set_settings(request)
+    if action == "set_auto_install":
+        return set_auto_install(request)
     if action == "summary":
         return summary_response()
     if action == "reboot":

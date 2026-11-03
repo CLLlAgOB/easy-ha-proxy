@@ -14,6 +14,7 @@
      data-apply-url="{{ url_for('system_updates.start_apply') }}"
      data-channels-url="{{ url_for('system_updates.save_channels') }}"
      data-settings-url="{{ url_for('system_updates.save_settings') }}"
+     data-auto-install-url="{{ url_for('system_updates.save_auto_install') }}"
      data-reboot-url="{{ url_for('system_updates.reboot') }}"
      data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}">
 
@@ -218,6 +219,26 @@
           an alert (update.available), and the alert settings decide whom to tell.
         </p>
         <p class="updates-hero-meta"><a href="{{ url_for('routes.alerts_page') }}">Alert settings</a></p>
+      </div>
+
+      {# Off until turned on, per gateway. #}
+      <div class="updates-setting" id="updates-auto-install-block">
+        <label class="updates-field-label">
+          <input type="checkbox" id="updates-auto-install">
+          Install easy-ha-proxy updates automatically
+        </label>
+        <div class="updates-channel-line">
+          <span>Install window from</span>
+          <select id="updates-auto-install-start" class="form-input" data-i18n-skip translate="no"></select>
+          <span>until</span>
+          <select id="updates-auto-install-end" class="form-input" data-i18n-skip translate="no"></select>
+          <button type="button" class="btn btn-small" id="updates-save-auto-install" disabled>Save</button>
+        </div>
+        <div id="updates-auto-install-status" class="result-message" role="status" aria-live="polite"></div>
+        <p id="updates-auto-install-last" class="updates-hero-meta"></p>
+        <p class="updates-hero-meta">
+          Only easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images. Operating-system packages and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
+        </p>
       </div>
     </div>
   </details>

@@ -76,6 +76,7 @@ AUDITED_ACTIONS = {
     ),
     "start_apply": ("update.apply", ("plan_id", "components")),
     "set_settings": ("update.settings", ("auto_check_hours",)),
+    "set_auto_install": ("update.auto_install", ("enabled", "start", "end")),
     "reboot": ("system.reboot", ("expected_boot_id",)),
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
 }
@@ -233,6 +234,22 @@ def save_settings():
     if isinstance(value, bool) or not isinstance(value, int) or value not in AUTO_CHECK_HOURS:
         abort(400, description="choose one of the offered check intervals")
     return _call_daemon({"action": "set_settings", "auto_check_hours": value})
+
+
+@bp_system_updates.post("/api/auto-install")
+def save_auto_install():
+    """Whether easy-ha-proxy's own updates install themselves, and in which
+    hours of the night; the broker refuses anything else as well."""
+    payload = _json_payload({"enabled", "start", "end"})
+    enabled, start, end = payload["enabled"], payload["start"], payload["end"]
+    if not isinstance(enabled, bool):
+        abort(400, description="enabled must be true or false")
+    for value in (start, end):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
+            abort(400, description="the window is given in whole hours, 0 to 23")
+    if start == end:
+        abort(400, description="the window must not start and end at the same hour")
+    return _call_daemon({"action": "set_auto_install", "enabled": enabled, "start": start, "end": end})
 
 
 @bp_system_updates.post("/api/apply")

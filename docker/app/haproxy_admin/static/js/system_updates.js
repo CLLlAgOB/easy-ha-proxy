@@ -12,6 +12,7 @@
     apply: app.dataset.applyUrl,
     channels: app.dataset.channelsUrl,
     settings: app.dataset.settingsUrl,
+    autoInstall: app.dataset.autoInstallUrl,
     reboot: app.dataset.rebootUrl,
     rebootCancel: app.dataset.rebootCancelUrl
   };
@@ -820,6 +821,80 @@
       : "";
     updateSettingsSummary();
     updateAutoCheckControls();
+    renderAutoInstall(settings.auto_install);
+  }
+
+  // Automatic installation: on or off, and the night window it keeps to.
+  let autoInstall = null;
+  const AUTO_INSTALL_OUTCOMES = {
+    installed: "Last automatic installation: installed",
+    failed: "Last automatic installation: failed",
+    refused: "Last automatic installation: refused",
+    "check-failed": "Last automatic installation: the check failed",
+    nothing: "Last automatic installation: nothing to install",
+    started: "Last automatic installation: started"
+  };
+  function hourOptions(select) {
+    if (select.options.length) return;
+    for (let hour = 0; hour < 24; hour += 1) {
+      const option = document.createElement("option");
+      option.value = String(hour);
+      option.textContent = `${String(hour).padStart(2, "0")}:00`;
+      select.appendChild(option);
+    }
+  }
+  function renderAutoInstall(settings) {
+    const box = byId("updates-auto-install");
+    if (!box || !settings || typeof settings !== "object") return;
+    autoInstall = settings;
+    const start = byId("updates-auto-install-start");
+    const end = byId("updates-auto-install-end");
+    hourOptions(start);
+    hourOptions(end);
+    if (!box.dataset.dirty) {
+      box.checked = settings.enabled === true;
+      start.value = String(settings.start);
+      end.value = String(settings.end);
+    }
+    const last = settings.last;
+    const note = byId("updates-auto-install-last");
+    note.textContent = last && AUTO_INSTALL_OUTCOMES[last.outcome]
+      ? `${t(AUTO_INSTALL_OUTCOMES[last.outcome])} · ${formatDate(last.at)}`
+      : "";
+    updateAutoInstallControls();
+  }
+  function updateAutoInstallControls() {
+    const box = byId("updates-auto-install");
+    if (!box) return;
+    const start = byId("updates-auto-install-start");
+    const end = byId("updates-auto-install-end");
+    const dirty = Boolean(autoInstall) && (
+      box.checked !== (autoInstall.enabled === true)
+      || start.value !== String(autoInstall.start)
+      || end.value !== String(autoInstall.end)
+    );
+    box.dataset.dirty = dirty ? "1" : "";
+    byId("updates-save-auto-install").disabled = !autoInstall || !dirty || requestRunning
+      || start.value === end.value;
+  }
+  async function saveAutoInstall() {
+    const box = byId("updates-auto-install");
+    byId("updates-save-auto-install").disabled = true;
+    setMessage("updates-auto-install-status", t("Saving…"));
+    try {
+      const response = await postJson(endpoints.autoInstall, {
+        enabled: box.checked,
+        start: Number(byId("updates-auto-install-start").value),
+        end: Number(byId("updates-auto-install-end").value)
+      });
+      delete box.dataset.dirty;
+      renderAutoInstall((response.settings || {}).auto_install);
+      setMessage("updates-auto-install-status", t("Saved."), true);
+      clearMessageLater("updates-auto-install-status");
+    } catch (error) {
+      setMessage("updates-auto-install-status", error.message, false, true);
+      updateAutoInstallControls();
+    }
   }
   function updateSettingsSummary() {
     const parts = [t(RELEASE_NAMES[installedRelease] || installedRelease)];
@@ -1360,6 +1435,10 @@
   });
   byId("updates-save-channels").addEventListener("click", saveChannels);
   byId("updates-save-auto-check").addEventListener("click", saveAutoCheck);
+  byId("updates-save-auto-install").addEventListener("click", saveAutoInstall);
+  ["updates-auto-install", "updates-auto-install-start", "updates-auto-install-end"].forEach((id) => {
+    byId(id).addEventListener("change", updateAutoInstallControls);
+  });
   byId("updates-auto-check").addEventListener("change", updateAutoCheckControls);
   byId("updates-reboot-confirm").addEventListener("input", updateRebootButton);
   byId("updates-reboot-now").addEventListener("click", requestReboot);
