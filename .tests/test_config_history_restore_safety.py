@@ -122,13 +122,18 @@ class Sources(unittest.TestCase):
                     locked.append(True)
             return {"ok": True, "state": "pending_confirmation"}
 
-        # The restore imports these at call time, from whatever sys.modules holds.
-        live = "haproxy_admin.services_haproxy_config."
+        # The restore imports these at call time, from whatever sys.modules
+        # holds; patched there by object (Python 3.10's dotted lookup goes
+        # through the package attribute, which other tests replace).
+        import haproxy_admin.services_haproxy_config  # noqa: F401
+        import haproxy_admin.services_haproxy_vars  # noqa: F401
+        live = sys.modules["haproxy_admin.services_haproxy_config"]
+        guard = sys.modules["haproxy_admin.services_haproxy_vars"]
         with mock.patch.object(history, "version_sources", return_value=({"id": "v1"}, OLD)), \
-                mock.patch(live + "render_haproxy_cfg", return_value="global\n"), \
-                mock.patch(live + "preflight_cfg_confirmation", return_value={"ok": True}), \
-                mock.patch(live + "begin_cfg_confirmation", side_effect=begin), \
-                mock.patch("haproxy_admin.services_haproxy_vars.validate_admin_access_for_client"):
+                mock.patch.object(live, "render_haproxy_cfg", return_value="global\n"), \
+                mock.patch.object(live, "preflight_cfg_confirmation", return_value={"ok": True}), \
+                mock.patch.object(live, "begin_cfg_confirmation", side_effect=begin), \
+                mock.patch.object(guard, "validate_admin_access_for_client"):
             result = history.restore("v1", client_ip="203.0.113.5")
         return result, locked
 
