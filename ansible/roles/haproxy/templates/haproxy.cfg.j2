@@ -232,6 +232,19 @@ backend tbl_err_other
 {% set conn_cur_limit = conn_cur_limit | int %}
 {% if conn_cur_limit <= 0 %}{% set conn_cur_limit = 500 %}{% endif %}
 
+{# The hard floor on an entry that takes connections straight from clients:
+   counted in the frontend's own table (named after it), the ordinary burst
+   for anonymous addresses, the hard ceilings for everyone. #}
+{% macro edge_connection_floor(table, with_requests=false) %}
+    stick-table type ip size 100k expire {{ conn_expire }} store conn_rate({{ conn_rate_window }}),conn_cur{% if with_requests %},http_req_rate({{ hard_req_window }}){% endif %}
+
+    tcp-request connection track-sc0 src
+    tcp-request connection reject if { sc0_conn_rate({{ table }}) gt {{ conn_rate_burst }} } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if authelia_enabled %} !ip_auth_ok{% endif %}
+
+    tcp-request connection reject if { sc0_conn_rate({{ table }}) gt {{ conn_rate_hard }} }
+    tcp-request connection reject if { sc0_conn_cur({{ table }}) gt {{ conn_cur_limit }} }
+{%- endmacro %}
+
 {% if has_passthru %}
 {# The router's own connection counters. Not fe_https's table: a request
    tracked there counts as a connection too, so a client making 200 requests
@@ -1058,6 +1071,16 @@ frontend fe_http80
     mode http
     option dontlognull
 
+    acl ip_whitelist src -f {{ whitelist_global_file }}
+{% if admin_ips_enabled %}
+    acl allowed_admin src -f {{ admin_ips_file }}
+{% endif %}
+{% if authelia_enabled %}
+    acl ip_auth_ok src_get_gpc0(tbl_ip_auth) gt 0
+{% endif %}
+    # The same hard floor as :443 (U02): it had no limit of its own.
+{{ edge_connection_floor('fe_http80', with_requests=true) }}
+
     # The same as on :443: "name:80" is "name".
     http-request set-header Host %[req.hdr(host),regsub(:80$,)] if { req.hdr(host) -m end :80 }
 
@@ -1071,6 +1094,9 @@ frontend fe_http80
     # unambiguously and no substring search can mistake it for a status.
     http-request set-var(txn.log_ua) req.fhdr(user-agent),bytes(0,128),regsub([^A-Za-z0-9./;:_-],_,g)
 {% endif %}
+
+    # The hard request ceiling, once the log fields are captured.
+    http-request deny status 429 if { sc0_http_req_rate(fe_http80) gt {{ hard_req_rate }} }
 
     acl acme_challenge_http path_beg /.well-known/acme-challenge/
 
@@ -1128,6 +1154,8 @@ frontend fe_tcp_{{ san(t.name) }}
     tcp-request connection reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
+    # The same connection floor as :443 (U02): these had none.
+{{ edge_connection_floor('fe_tcp_' ~ san(t.name)) }}
 
     default_backend be_tcp_{{ san(t.name) }}
 {% endfor %}

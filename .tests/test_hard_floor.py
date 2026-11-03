@@ -95,6 +95,36 @@ class TheFloor(unittest.TestCase):
         self.assertIsNone(re.search(r"sc0_http_req_rate\(fe_https\).*(tbl_ban|ban_code)", self.https))
 
 
+class TheOtherEntries(unittest.TestCase):
+    """Plain HTTP on :80 and each generic TCP proxy had no limit of their own
+    (04.6c); they take their connections straight from clients, so their own
+    tables see the real address."""
+
+    def setUp(self):
+        self.config = render([site("shop", "shop.example.test", redirect_to_https=True)],
+                             admin_ips_enabled=True,
+                             tcp_proxies=[{"name": "files", "bind_port": 6690,
+                                           "backend_host": "10.0.0.20", "backend_port": 22}])
+
+    def check_floor(self, block, table):
+        self.assertIn("tcp-request connection track-sc0 src", block)
+        [burst] = lines_with(block, f"sc0_conn_rate({table}) gt 200")
+        for trusted in ("!ip_whitelist", "!allowed_admin", "!ip_auth_ok"):
+            self.assertIn(trusted, burst)
+        self.assertIn(f"tcp-request connection reject if {{ sc0_conn_rate({table}) gt 1000 }}", block)
+        self.assertIn(f"tcp-request connection reject if {{ sc0_conn_cur({table}) gt 500 }}", block)
+
+    def test_plain_http_has_the_floor_and_the_request_ceiling(self):
+        http80 = frontend(self.config, "fe_http80")
+        self.check_floor(http80, "fe_http80")
+        self.assertIn("http-request deny status 429 if { sc0_http_req_rate(fe_http80) gt 1000 }", http80)
+
+    def test_a_tcp_proxy_has_the_connection_floor(self):
+        tcp = frontend(self.config, "fe_tcp_files")
+        self.check_floor(tcp, "fe_tcp_files")
+        self.assertIn("stick-table type ip size 100k", tcp)
+
+
 class BehindTheRouter(unittest.TestCase):
     """With a passthrough site an SNI router takes :443 and hands fe_https its
     connections from 127.0.0.1 with a PROXY header. At fe_https's connection
