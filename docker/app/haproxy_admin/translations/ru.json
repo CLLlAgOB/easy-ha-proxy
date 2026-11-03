@@ -743,6 +743,7 @@
     "changes": "меняет",
     "check": "проверки",
     "check-ssl for backend servers": "check-ssl для backend-серверов",
+    "Only the health check is a TLS handshake; the traffic passes through unchanged.": "Только проверка доступности идёт через TLS-рукопожатие; сам трафик проходит без изменений.",
     "client": "клиента",
     "clocks": "часов",
     "code": "код",

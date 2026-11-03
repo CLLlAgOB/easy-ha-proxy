@@ -132,7 +132,7 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
             srv_out["host"] = host
             srv_out["port"] = port_int
 
-            # the backup flag can be kept "for later", even if the template does not use it
+            # a backup server takes traffic only when no regular server is up
             if bool(srv.get("backup")):
                 srv_out["backup"] = True
 

@@ -1274,12 +1274,17 @@ backend be_tcp_{{ san(t.name) }}
     balance {{ t.balance | default('source') }}
     default-server inter {{ t.inter | default('3s') }} rise 2 fall 3
 
+{# ssl_check makes only the health check a TLS handshake; the traffic itself
+   passes through untouched. A backup server takes traffic only when no
+   regular server is up. #}
+{% set _tcp_check = 'check check-ssl verify none' if (t.ssl_check | default(false)) else 'check' %}
 {% if t.servers is defined %}
 {% for srv in t.servers %}
-    server {{ srv.name }} {{ srv.host }}:{{ srv.port }} check
+    server {{ srv.name }} {{ srv.host }}:{{ srv.port }} {{ _tcp_check }}{% if srv.backup | default(false) %} backup{% endif %}
+
 {% endfor %}
 {% else %}
-    server srv1 {{ t.backend_host }}:{{ t.backend_port }} check
+    server srv1 {{ t.backend_host }}:{{ t.backend_port }} {{ _tcp_check }}
 {% endif %}
 {% endfor %}
 {% endif %}

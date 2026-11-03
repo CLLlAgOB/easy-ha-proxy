@@ -139,6 +139,9 @@
             <input id="field-ssl-check" name="ssl_check" type="checkbox" {% if tcp.ssl_check %}checked{% endif %}>
             check-ssl for backend servers
           </label>
+          <div class="form-help">
+            Only the health check is a TLS handshake; the traffic passes through unchanged.
+          </div>
         </div>
       </div>
 
