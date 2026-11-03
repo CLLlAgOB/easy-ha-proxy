@@ -44,11 +44,18 @@ def alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    # A zombie still answers; read its state where /proc exists.
+    # A zombie still answers; read its state where /proc exists. The process
+    # can be reaped between the two looks -- reading its status then fails
+    # with ESRCH (ProcessLookupError) or ENOENT -- and it is gone either way.
+    if not Path("/proc/self/status").exists():
+        return True
     status = Path(f"/proc/{pid}/status")
-    if status.exists():
+    try:
         return "\nState:\tZ" not in status.read_text()
-    return True
+    except (ProcessLookupError, FileNotFoundError):
+        return False
+    except OSError:
+        return True
 
 
 def wait_gone(pid: int, seconds: float = 5.0) -> bool:
