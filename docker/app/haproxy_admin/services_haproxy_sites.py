@@ -435,11 +435,7 @@ def _add_site_minimal(
         ok, msg = update_yaml_file("websites", content)
         if ok:
             rule_ok, rule_msg = _ensure_access_gate_authelia_rule([domain])
-            if not rule_ok:
-                return True, (
-                    f"{msg} Note: add a one_factor Authelia rule for {domain} "
-                    f"on the access rules page ({rule_msg})."
-                )
+            return True, _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
         return ok, msg
 
     try:
@@ -907,13 +903,37 @@ def _save_site_from_json(
             if str(a).strip()
         ]
         rule_ok, rule_msg = _ensure_access_gate_authelia_rule(gate_domains)
-        if not rule_ok:
-            return True, (
-                f"{msg} Note: the Authelia login rule for the gate could not be "
-                f"added automatically ({rule_msg}); add a one_factor rule for "
-                f"{domain} on the Authelia access rules page."
-            )
+        return True, _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
     return ok, msg
+
+
+def _with_gate_rule_outcome(msg: str, domain: str, rule_ok: bool, rule_msg: str) -> str:
+    """The save's message, plus what it did to Authelia.
+
+    Unlike the rest of a site save, which waits for the HAProxy apply, the
+    gate's Authelia rule and restart are live at once -- so the operator is
+    told, whichever way it went.
+    """
+
+    if not rule_ok:
+        return (
+            f"{msg} Note: the Authelia login rule for the gate could not be "
+            f"added automatically ({rule_msg}); add a one_factor rule for "
+            f"{domain} on the Authelia access rules page."
+        )
+    if rule_msg == "rule added":
+        return (
+            f"{msg} Authelia now has a one_factor access rule for this gate "
+            "and was restarted to load it; that took effect at once, before "
+            "the HAProxy apply."
+        )
+    if rule_msg.startswith("rule saved"):
+        return (
+            f"{msg} The Authelia access rule for this gate was saved, but "
+            "Authelia could not be restarted to load it; restart it on the "
+            f"Authelia page ({rule_msg})."
+        )
+    return msg
 
 
 def _ensure_access_gate_authelia_rule(domains: List[str]) -> Tuple[bool, str]:

@@ -519,6 +519,7 @@
           <option value="normal" selected>Normal site (proxy to a backend)</option>
           <option value="gate">Access gate (login page, no backend)</option>
         </select>
+        <div class="table-meta">An access gate changes Authelia as soon as it is added: a one_factor access rule for its domain and an Authelia restart, before anything is applied in HAProxy.</div>
 
         <label class="form-label" for="domain" style="margin-top: 10px;">Domain *</label>
         <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" data-i18n-skip translate="no">
