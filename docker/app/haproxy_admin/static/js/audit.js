@@ -161,6 +161,22 @@
     params.set("offset", String(offset));
     try {
       const payload = await getJson("/api/audit/events", params);
+      // A log that cannot be read is not an empty one.
+      if (payload.available === false) {
+        renderRows([], false);
+        const empty = byId("au-empty");
+        if (empty) {
+          empty.dataset.normal = empty.dataset.normal || empty.textContent;
+          empty.textContent = t("The change log cannot be read now");
+        }
+        const status = byId("au-status");
+        if (status) status.textContent = payload.error || "";
+        const more = byId("au-more");
+        if (more) more.hidden = true;
+        return;
+      }
+      const empty = byId("au-empty");
+      if (empty && empty.dataset.normal) empty.textContent = empty.dataset.normal;
       total = Number(payload.total) || 0;
       const events = payload.events || [];
       renderRows(events, append);

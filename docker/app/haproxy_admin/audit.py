@@ -300,7 +300,9 @@ class AuditLog:
         with self._lock:
             conn = self._connect()
             if conn is None:
-                return {"total": 0, "events": []}
+                # Not "no entries": the page says the log cannot be read.
+                return {"total": 0, "events": [], "available": False,
+                        "error": "the change log cannot be opened"}
             try:
                 total = conn.execute(
                     f"SELECT COUNT(*) AS value FROM audit_events{where}", parameters
@@ -312,8 +314,9 @@ class AuditLog:
                 ).fetchall()
             except Exception as exc:  # pylint: disable=broad-except
                 self._note_failure(exc)
-                return {"total": 0, "events": []}
-        return {"total": int(total), "events": [dict(row) for row in rows]}
+                return {"total": 0, "events": [], "available": False,
+                        "error": str(exc)[:200] or "the change log cannot be read"}
+        return {"total": int(total), "events": [dict(row) for row in rows], "available": True}
 
     def distinct(self, column: str, limit: int = 100) -> List[str]:
         """Values for the filter drop-downs. The column comes from a fixed set."""

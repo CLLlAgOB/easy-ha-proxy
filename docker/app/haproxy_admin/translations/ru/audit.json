@@ -21,6 +21,7 @@
     "Before": "До",
     "After": "После",
     "Nothing has been recorded for this period": "За этот период записей нет",
-    "Show more": "Показать ещё"
+    "Show more": "Показать ещё",
+    "The change log cannot be read now": "Журнал изменений сейчас не читается"
   }
 }
