@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import contextlib
 from pathlib import Path
 import re
 import sys
@@ -201,6 +202,10 @@ class RestoreTests(unittest.TestCase):
 
         patchers = [
             mock.patch.object(history, "current_sources", return_value=self.original),
+            # Nothing unapplied, and no real lock files: the safety around a
+            # restore has tests of its own on real files.
+            mock.patch.object(history, "applied_sources", return_value=self.original),
+            mock.patch.object(history, "source_lock", lambda _kind: contextlib.nullcontext()),
             mock.patch.object(
                 history,
                 "version_sources",
@@ -310,9 +315,14 @@ class SourcePathTests(unittest.TestCase):
         # last_applied_*.yml — the safe snapshot the guarded apply rolls back
         # to. Writing there would destroy the very thing that makes a failed
         # apply recoverable, while leaving the real configuration untouched.
+        # It is read, to show what runs; the writer never names it.
         source = (APP_DIR / "services_config_history.py").read_text(encoding="utf-8")
-        self.assertNotIn("_applied_config_source_paths", source)
-        self.assertIn("_current_config_source_paths", source)
+        writer = source.split("def _write_sources")[1].split("\ndef ")[0]
+        self.assertNotIn("_applied_config_source_paths", writer)
+        self.assertIn("_current_config_source_paths", writer)
+        reader = source.split("def applied_sources")[1].split("\ndef ")[0]
+        self.assertIn("_applied_config_source_paths", reader)
+        self.assertEqual(source.count("_applied_config_source_paths()"), 1)
 
     def test_the_two_accessors_really_are_different_files(self):
         from haproxy_admin.services_haproxy_config import (
@@ -375,8 +385,17 @@ class PageTests(unittest.TestCase):
 
     def test_restore_is_only_offered_against_the_running_configuration(self):
         # "Make this the running configuration" is meaningless when the
-        # comparison is between two old versions.
-        self.assertIn("right.value === CURRENT", self.javascript)
+        # comparison is between two old versions. Against what runs, or
+        # against what is saved: either is "now".
+        self.assertIn("NOW.includes(right.value)", self.javascript)
+        self.assertIn("const NOW = [APPLIED, CURRENT];", self.javascript)
+
+    def test_applied_and_saved_are_two_choices(self):
+        # The saved files may hold changes nobody applied: calling them
+        # "Applied now" was the fault.
+        self.assertIn('[APPLIED, "Applied now"]', self.javascript)
+        self.assertIn('[CURRENT, "Saved now, including changes not yet applied"]', self.javascript)
+        self.assertNotIn('now.value = CURRENT;\n      now.textContent = uiText("Applied now")', self.javascript)
 
     def test_identifiers_and_values_are_excluded_from_dom_translation(self):
         for element_id in ("ch-list", "ch-left", "ch-right"):

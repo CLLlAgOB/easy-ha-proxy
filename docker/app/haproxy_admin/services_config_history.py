@@ -10,24 +10,35 @@ diff of a thousand lines does not answer "what did I change".
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import os
 import stat
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from . import services_haproxy_config as _config
 from .services_haproxy_config import (
     CONFIG_SOURCE_ORDER,
+    _applied_config_source_paths,
     _controld_json_request,
     _current_config_source_paths,
     _read_config_source_bundle,
+    source_lock,
 )
 
 LOG = logging.getLogger("haproxy-admin")
 
+# Two "now"s, kept apart: CURRENT is what the editors have saved, which may
+# hold changes nobody has applied yet; APPLIED is the last configuration
+# confirmed in HAProxy. A save without an apply moves the first only.
 CURRENT = "current"
+APPLIED = "applied"
 MAX_VERSIONS = 200
+# A restore over unapplied changes sets them aside first; this many sets.
+KEEP_SET_ASIDE = 5
 
 
 class HistoryUnavailable(RuntimeError):
@@ -81,6 +92,27 @@ def current_sources() -> Dict[str, str]:
         _current_config_source_paths(), label="current"
     )
     return {name: raw.decode("utf-8", "replace") for name, raw in bundle.items()}
+
+
+def applied_sources() -> Dict[str, str]:
+    """What was last confirmed in HAProxy: the applied-state snapshots."""
+
+    try:
+        bundle = _read_config_source_bundle(
+            _applied_config_source_paths(), label="applied"
+        )
+    except ValueError as exc:
+        raise ValueError("Nothing has been applied on this gateway yet") from exc
+    return {name: raw.decode("utf-8", "replace") for name, raw in bundle.items()}
+
+
+def unapplied_changes() -> Optional[bool]:
+    """Whether the saved sources differ from the applied ones; None if unknown."""
+
+    try:
+        return current_sources() != applied_sources()
+    except Exception:  # pylint: disable=broad-except
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +241,13 @@ def compare(before: Dict[str, str], after: Dict[str, str]) -> Dict[str, Any]:
 
 
 def diff(left: str, right: str) -> Dict[str, Any]:
-    """Compare two versions; `current` means what is applied now."""
+    """Compare two versions; `current` is what is saved, `applied` what runs."""
 
     def load(identifier: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
         if identifier == CURRENT:
             return {"id": CURRENT}, current_sources()
+        if identifier == APPLIED:
+            return {"id": APPLIED}, applied_sources()
         return version_sources(identifier)
 
     left_meta, left_sources = load(left)
@@ -238,20 +272,82 @@ class RestoreError(RuntimeError):
 
 
 def _write_sources(sources: Dict[str, str]) -> None:
-    """Put the managed YAML files in place, each by an atomic replacement."""
+    """Put the managed YAML files in place: all of them or none.
+
+    Every file is written beside its target first; only then are they moved
+    in. A failure part way through puts back the ones already moved, so the
+    editors never see a mix of two versions.
+    """
 
     paths = _current_config_source_paths()
-    for name in CONFIG_SOURCE_ORDER:
-        target = paths[name]
-        temporary = target.with_name(f".{target.name}.restore")
-        temporary.write_text(sources[name], encoding="utf-8")
+    staged: List[Tuple[Any, Any]] = []
+    try:
+        for name in CONFIG_SOURCE_ORDER:
+            target = paths[name]
+            temporary = target.with_name(f".{target.name}.restore")
+            temporary.write_text(sources[name], encoding="utf-8")
+            try:
+                # Keep whatever ownership and mode the live file already had.
+                existing = target.stat()
+                os.chmod(temporary, stat.S_IMODE(existing.st_mode))
+            except OSError:
+                pass
+            staged.append((temporary, target))
+    except Exception:
+        for temporary, _target in staged:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+        raise
+
+    previous: Dict[Any, Optional[bytes]] = {}
+    for _temporary, target in staged:
         try:
-            # Keep whatever ownership and mode the live file already had.
-            existing = target.stat()
-            os.chmod(temporary, stat.S_IMODE(existing.st_mode))
-        except OSError:
-            pass
-        os.replace(temporary, target)
+            previous[target] = target.read_bytes()
+        except FileNotFoundError:
+            previous[target] = None
+    moved: List[Any] = []
+    try:
+        for temporary, target in staged:
+            os.replace(temporary, target)
+            moved.append(target)
+    except Exception:
+        for target in moved:
+            raw = previous[target]
+            if raw is None:
+                with contextlib.suppress(OSError):
+                    target.unlink()
+                continue
+            back = target.with_name(f".{target.name}.restore-back")
+            back.write_bytes(raw)
+            os.replace(back, target)
+        for temporary, _target in staged:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+        raise
+
+
+def _set_aside(sources: Dict[str, str]) -> str:
+    """Keep the saved sources a restore is about to replace; say where."""
+
+    folder = _config.BASE_DIR / "backups" / f"before-restore-{time.strftime('%Y%m%d%H%M%S')}"
+    folder.mkdir(parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    for name, text in sources.items():
+        path = folder / name
+        path.write_text(text, encoding="utf-8")
+        os.chmod(path, 0o600)
+    kept = sorted(
+        (item for item in folder.parent.glob("before-restore-*") if item.is_dir()),
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    for old in kept[KEEP_SET_ASIDE:]:
+        for item in old.iterdir():
+            with contextlib.suppress(OSError):
+                item.unlink()
+        with contextlib.suppress(OSError):
+            old.rmdir()
+    return f"backups/{folder.name}"
 
 
 def restore(version_id: str, *, client_ip: str = "") -> Dict[str, Any]:
@@ -263,6 +359,56 @@ def restore(version_id: str, *, client_ip: str = "") -> Dict[str, Any]:
     swapped in, and swapped back if the transaction could not even start.
     """
 
+    meta, sources = version_sources(version_id)
+    missing = [name for name in CONFIG_SOURCE_ORDER if name not in sources]
+    if missing:
+        raise RestoreError(
+            "This version does not contain " + ", ".join(missing),
+            error_code="version_incomplete",
+        )
+
+    # No editor's save may land between the read of what is there and the
+    # transaction: it would be written over, or half of it kept.
+    with source_lock("websites"), source_lock("tcp"), source_lock("vars"):
+        original = current_sources()
+        try:
+            unapplied = original != applied_sources()
+        except ValueError:
+            unapplied = True
+        set_aside = ""
+        if unapplied:
+            # Saved but never applied: neither the history nor the applied
+            # snapshot holds it, so it is kept before it is replaced.
+            try:
+                set_aside = _set_aside(original)
+            except OSError as exc:
+                raise RestoreError(
+                    "The unapplied changes could not be set aside, so nothing "
+                    f"was restored: {exc}",
+                    error_code="set_aside_failed",
+                ) from exc
+        try:
+            _write_sources(sources)
+        except Exception as exc:  # pylint: disable=broad-except
+            raise RestoreError(
+                f"The version could not be written, so nothing was restored: {exc}",
+                error_code="restore_write_failed",
+            ) from exc
+        result = _apply_restored(original, client_ip)
+
+    result["restored_version"] = meta.get("id") or version_id
+    if set_aside:
+        result["set_aside"] = set_aside
+    return result
+
+
+def _apply_restored(original: Dict[str, str], client_ip: str) -> Dict[str, Any]:
+    """Validate and start the transaction for sources already in place.
+
+    On any failure before the transaction starts the sources go back to
+    what they were.
+    """
+
     from .services_haproxy_config import (  # local import: heavy module
         CONFIG_YAML,
         _load_yaml,
@@ -272,16 +418,6 @@ def restore(version_id: str, *, client_ip: str = "") -> Dict[str, Any]:
     )
     from .services_haproxy_vars import validate_admin_access_for_client
 
-    meta, sources = version_sources(version_id)
-    missing = [name for name in CONFIG_SOURCE_ORDER if name not in sources]
-    if missing:
-        raise RestoreError(
-            "This version does not contain " + ", ".join(missing),
-            error_code="version_incomplete",
-        )
-
-    original = current_sources()
-    _write_sources(sources)
     try:
         cfg_text = render_haproxy_cfg()
         config_vars = _load_yaml(CONFIG_YAML)
@@ -318,8 +454,6 @@ def restore(version_id: str, *, client_ip: str = "") -> Dict[str, Any]:
         if isinstance(exc, RestoreError):
             raise
         raise RestoreError(str(exc)) from exc
-
-    result["restored_version"] = meta.get("id") or version_id
     return result
 
 

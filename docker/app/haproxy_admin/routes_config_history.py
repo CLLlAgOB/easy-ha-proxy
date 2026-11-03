@@ -33,7 +33,13 @@ def api_config_versions():
     except (TypeError, ValueError):
         limit = 50
     try:
-        return jsonify({"ok": True, "versions": history.list_versions(limit)})
+        versions = history.list_versions(limit)
+        return jsonify({
+            "ok": True,
+            "versions": versions,
+            # Whether a restore would replace changes saved but not applied.
+            "unapplied": history.unapplied_changes(),
+        })
     except history.HistoryUnavailable as exc:
         return jsonify(history.unavailable_payload(exc)), 503
 
@@ -41,7 +47,7 @@ def api_config_versions():
 @bp.get("/api/haproxy/config/versions/diff")
 def api_config_version_diff():
     left = str(request.args.get("left") or "").strip()
-    right = str(request.args.get("right") or history.CURRENT).strip()
+    right = str(request.args.get("right") or history.APPLIED).strip()
     if not left:
         return jsonify({"ok": False, "error": "left version is required"}), 400
     try:

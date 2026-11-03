@@ -12,9 +12,14 @@
     timeStyle: "medium"
   });
 
+  // Two "now"s: what HAProxy runs, and what the editors have saved -- which
+  // may hold changes nobody has applied yet.
   const CURRENT = "current";
+  const APPLIED = "applied";
+  const NOW = [APPLIED, CURRENT];
   let versions = [];
   let selected = "";
+  let unapplied = null;
 
   function byId(id) {
     return document.getElementById(id);
@@ -49,17 +54,22 @@
 
   function fillSelects() {
     [
-      ["ch-left", CURRENT],
-      ["ch-right", CURRENT]
+      ["ch-left", APPLIED],
+      ["ch-right", APPLIED]
     ].forEach(([id, fallback]) => {
       const select = byId(id);
       if (!select) return;
       const previous = select.value;
       select.textContent = "";
-      const now = document.createElement("option");
-      now.value = CURRENT;
-      now.textContent = uiText("Applied now");
-      select.appendChild(now);
+      [
+        [APPLIED, "Applied now"],
+        [CURRENT, "Saved now, including changes not yet applied"]
+      ].forEach(([value, text]) => {
+        const now = document.createElement("option");
+        now.value = value;
+        now.textContent = uiText(text);
+        select.appendChild(now);
+      });
       versions.forEach((version) => {
         const option = document.createElement("option");
         option.value = version.id;
@@ -102,7 +112,7 @@
         // actually have; picking one from the list sets that up.
         if (left) left.value = version.id;
         const right = byId("ch-right");
-        if (right) right.value = CURRENT;
+        if (right) right.value = APPLIED;
         renderVersions();
         loadDiff();
       });
@@ -178,8 +188,8 @@
     // Restoring means "make this the running configuration", which only makes
     // sense when the comparison is against what is running now.
     const right = byId("ch-right");
-    const offered = Boolean(versionId) && versionId !== CURRENT
-      && (!right || right.value === CURRENT);
+    const offered = Boolean(versionId) && !NOW.includes(versionId)
+      && (!right || NOW.includes(right.value));
     if (block) block.hidden = !offered;
     const confirm = byId("ch-confirm");
     if (confirm && !offered) confirm.hidden = true;
@@ -194,6 +204,12 @@
     text.textContent =
       `${uiText("Replace the running configuration with the version from")} ` +
       `${version ? formatTime(version.ts) : left.value}?`;
+    if (unapplied) {
+      // Those changes are in no version and not in HAProxy: say they go.
+      text.textContent += " " + uiText(
+        "Changes saved but not yet applied will be replaced too; a copy of them is kept first."
+      );
+    }
     confirm.hidden = false;
   }
 
@@ -202,7 +218,7 @@
     const confirm = byId("ch-confirm");
     const result = byId("ch-restore-result");
     if (confirm) confirm.hidden = true;
-    if (!left || !left.value || left.value === CURRENT) return;
+    if (!left || !left.value || NOW.includes(left.value)) return;
     const button = byId("ch-restore-start");
     if (button) button.disabled = true;
     try {
@@ -224,6 +240,9 @@
         result.textContent = uiText(
           "Applied and awaiting confirmation — confirm it on the HAProxy configuration page before the deadline."
         );
+        if (payload.set_aside) {
+          result.textContent += ` ${uiText("The unapplied changes were kept in")} ${payload.set_aside}`;
+        }
       }
     } catch (error) {
       if (result) result.textContent = String(error.message || error);
@@ -240,7 +259,7 @@
     try {
       const payload = await getJson("/api/haproxy/config/versions/diff", {
         left: left.value,
-        right: right ? right.value : CURRENT
+        right: right ? right.value : APPLIED
       });
       renderDiff(payload);
       showRestore(left.value);
@@ -259,6 +278,7 @@
     try {
       const payload = await getJson("/api/haproxy/config/versions", { limit: 50 });
       versions = payload.versions || [];
+      unapplied = payload.unapplied === undefined ? null : payload.unapplied;
       renderVersions();
       fillSelects();
       if (versions.length) {
