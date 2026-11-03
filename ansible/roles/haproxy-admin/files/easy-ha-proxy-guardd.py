@@ -6624,9 +6624,13 @@ def main() -> None:
         config, database, alerts=_alert_client(), requests=requests
     )
 
+    # The mode in force: the panel's choice when one was made, which the
+    # configuration file does not show. This line used to print the file's
+    # mode, "monitor", on a gateway the panel had set to enforce.
     LOG.info(
-        "Starting easy-ha-proxy-guardd: mode=%s socket=%s db=%s log=%s "
+        "Starting easy-ha-proxy-guardd: mode=%s (configured %s) socket=%s db=%s log=%s "
         "interval=%ss exclusions=%d networks",
+        engine.enforcer.mode,
         config.mode,
         SOCKET_PATH,
         DATABASE_PATH,
