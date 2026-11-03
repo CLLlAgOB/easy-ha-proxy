@@ -63,7 +63,7 @@ from .routes_authelia_settings import bp_authelia_settings
 from .authelia_acl import bp_authelia_acl
 from .routes_backup import bp_system_backups
 from .routes_updates import bp_system_updates
-from . import updates_badge
+from . import build_info, updates_badge
 
 logger = logging.getLogger("haproxy-admin")
 csrf = CSRFProtect()
@@ -269,6 +269,15 @@ def create_app() -> Flask:
             return {"updates_badge": updates_badge.current_level()}
         except Exception:  # pylint: disable=broad-except
             return {"updates_badge": None}
+
+    @app.context_processor
+    def inject_build():
+        # Which build the panel and the host run, for the footer; never a
+        # reason for a page to fail either.
+        try:
+            return {"build": build_info.footer()}
+        except Exception:  # pylint: disable=broad-except
+            return {"build": {"panel": None, "host": None, "match": None}}
 
     @app.context_processor
     def inject_i18n_context():

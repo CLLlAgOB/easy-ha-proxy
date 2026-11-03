@@ -823,6 +823,14 @@ footer {
   border-top: 1px solid var(--border)
 }
 
+footer .footer-build {
+  white-space: nowrap;
+}
+
+footer .footer-build-mismatch {
+  color: var(--warning, #d68910);
+}
+
 /* ===== Animations ===== */
 @keyframes spin {
   to {

@@ -104,6 +104,18 @@
 
   <footer>
     HAProxy Security&nbsp;Dashboard © 2026 ·
+    {# Which build runs where: a commit's time orders builds, its hash names one. #}
+    {% if build and build.host %}
+    <span class="footer-build"><span>Host build</span>
+      <span class="notranslate" translate="no" data-i18n-skip>{{ build.host.when }} · {{ build.host.revision }}</span></span> ·
+    {% endif %}
+    {% if build and build.panel %}
+    <span class="footer-build"><span>Panel build</span>
+      <span class="notranslate" translate="no" data-i18n-skip>{{ build.panel.when }} · {{ build.panel.revision }}</span></span> ·
+    {% endif %}
+    {% if build and build.match is sameas false %}
+    <span class="footer-build-mismatch">The panel was built from other web files than the host has; update the panel.</span> ·
+    {% endif %}
     <a href="https://db-ip.com" rel="noopener noreferrer">IP Geolocation by DB-IP</a>
   </footer>
 

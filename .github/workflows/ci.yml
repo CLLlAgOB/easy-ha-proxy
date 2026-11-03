@@ -237,6 +237,8 @@ jobs:
         run: |
           tree="$(git ls-tree -r --full-tree HEAD -- Dockerfile .dockerignore docker/app | sha256sum | cut -d' ' -f1)"
           echo "tree=${tree}" >> "$GITHUB_OUTPUT"
+          # The footer's build: the commit's time, which a shallow checkout has.
+          echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
             echo "channel=latest" >> "$GITHUB_OUTPUT"
             echo "key=source-${tree}" >> "$GITHUB_OUTPUT"
@@ -278,6 +280,7 @@ jobs:
         if: steps.credentials.outputs.ready == 'true'
         env:
           TREE: ${{ steps.tree.outputs.tree }}
+          BUILT_AT: ${{ steps.tree.outputs.date }}
           KEY: ${{ steps.tree.outputs.key }}
           CHANNEL: ${{ steps.tree.outputs.channel }}
         run: |
@@ -306,6 +309,9 @@ jobs:
               --label "io.easy-ha-proxy.source-tree=${TREE}" \
               --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
               --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --build-arg "EHP_BUILD_REVISION=${GITHUB_SHA}" \
+              --build-arg "EHP_BUILD_DATE=${BUILT_AT}" \
+              --build-arg "EHP_SOURCE_TREE=${TREE}" \
               --tag "${key_image}" \
               --tag "${channel_image}" \
               --push \

@@ -25,6 +25,17 @@ RUN groupadd -g 1001 haproxyadmin \
  && mkdir -p /var/lib/haproxy-admin \
  && chown -R haproxyadmin:haproxyadmin /var/lib/haproxy-admin
 
+# Which commit this image was built from, for the panel's footer. CI and the
+# publish scripts pass them; a build by hand leaves them empty, and the footer
+# then leaves the panel's build out rather than guess. Last, so the layers
+# above are shared between builds.
+ARG EHP_BUILD_REVISION=""
+ARG EHP_BUILD_DATE=""
+ARG EHP_SOURCE_TREE=""
+ENV EHP_BUILD_REVISION=${EHP_BUILD_REVISION} \
+    EHP_BUILD_DATE=${EHP_BUILD_DATE} \
+    EHP_SOURCE_TREE=${EHP_SOURCE_TREE}
+
 USER haproxyadmin
 WORKDIR /opt/haproxy-admin
 

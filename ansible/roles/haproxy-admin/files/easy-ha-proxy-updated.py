@@ -2038,6 +2038,64 @@ def set_channels(request: dict[str, Any]) -> dict[str, Any]:
         release_operation(lock_fd)
 
 
+# The build the host runs, for the panel's footer: which commit the managed
+# source is at, when it was made, and the fingerprint of its web files -- the
+# same `git ls-tree` sum CI labels the panel image with, so the panel can say
+# whether it was built from what the host has. The source is a shallow clone,
+# so a commit count would always be 1; the commit time orders builds instead.
+BUILD_TTL_SECONDS = 60.0
+WEB_TREE_INPUTS = ("Dockerfile", ".dockerignore", "docker/app")
+_HOST_BUILD: dict[str, Any] = {"at": None, "value": None}
+_HOST_BUILD_LOCK = threading.Lock()
+
+
+def _source_git(*args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={SOURCE_DIR}", "-C", str(SOURCE_DIR), *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", "replace")
+
+
+def _read_host_build() -> dict[str, str] | None:
+    if not (SOURCE_DIR / ".git").exists():
+        return None
+    head = (_source_git("log", "-1", "--format=%H %cI") or "").split()
+    if len(head) != 2 or not SOURCE_REVISION_RE.fullmatch(head[0]):
+        return None
+    try:
+        committed = dt.datetime.fromisoformat(head[1])
+    except ValueError:
+        return None
+    listing = _source_git("ls-tree", "-r", "--full-tree", "HEAD", "--", *WEB_TREE_INPUTS)
+    return {
+        "revision": head[0],
+        "committed_at": committed.astimezone(dt.timezone.utc).isoformat(timespec="seconds"),
+        "web_tree": hashlib.sha256(listing.encode("utf-8")).hexdigest() if listing else "",
+    }
+
+
+def host_build() -> dict[str, str] | None:
+    """The installed source's build, read at most once a minute."""
+
+    with _HOST_BUILD_LOCK:
+        at = _HOST_BUILD["at"]
+        if at is not None and time.monotonic() - at < BUILD_TTL_SECONDS:
+            return _HOST_BUILD["value"]
+        value = _read_host_build()
+        _HOST_BUILD.update(at=time.monotonic(), value=value)
+        return value
+
+
 def summary_payload(plan: dict[str, Any] | None) -> dict[str, Any]:
     """What the navigation shows: whether the newest check found anything.
 
@@ -2060,6 +2118,7 @@ def summary_payload(plan: dict[str, Any] | None) -> dict[str, Any]:
         "level": level,
         "components": kinds,
         "checked_at": (plan or {}).get("created_at"),
+        "build": host_build(),
     }
 
 
