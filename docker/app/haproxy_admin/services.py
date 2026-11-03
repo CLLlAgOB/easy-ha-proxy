@@ -4,7 +4,7 @@ services.py -- ban/err tables, log analytics, the ipset firewall, sessions, back
 
 Every path and setting is read from environment variables that Ansible renders:
   SOCKET_PATH                 (default /run/haproxy/admin.sock)
-  UI_EXCLUDE_EXACT           (comma-separated; default: be_admin,be_http_challenge,be_tls_terminator,be_maintenance)
+  UI_EXCLUDE_EXACT           (comma-separated; default: be_admin,be_stats,be_http_challenge,be_tls_terminator,be_maintenance)
   UI_EXCLUDE_PREFIX          (comma-separated; default: tbl_)
   LOG_FILE                   (default /var/log/haproxy.log)
   WHITELIST_GEO_FILE         (default /etc/haproxy/geoip/whitelist.geo)
@@ -52,7 +52,7 @@ HAPROXY_CFG: str = os.environ.get(
 EXCLUDE_EXACT: set[str] = set(
     s for s in os.environ.get(
         "UI_EXCLUDE_EXACT",
-        "be_admin,be_http_challenge,be_tls_terminator,be_maintenance"
+        "be_admin,be_stats,be_http_challenge,be_tls_terminator,be_maintenance"
     ).split(",") if s
 )
 EXCLUDE_PREFIX: tuple[str, ...] = tuple(

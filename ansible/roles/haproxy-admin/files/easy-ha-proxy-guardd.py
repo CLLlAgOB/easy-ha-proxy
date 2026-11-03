@@ -3017,7 +3017,7 @@ class RequestQuery:
             # The panel's own polling is most of a quiet gateway's traffic.
             # Asked for by id, or by the panel's own backend, it is shown all
             # the same.
-            hide_admin=bool(hide_admin) and not request_id and backend != LIVE_ADMIN_BACKEND,
+            hide_admin=bool(hide_admin) and not request_id and backend not in LIVE_ADMIN_BACKENDS,
             refused=bool(refused),
             slower_ms=_clamp_int(slower, default=0, min_v=0, max_v=86_400_000),
             agent=LOGGED_AGENT_OTHER.sub("_", agent) if agent else "",
@@ -3043,8 +3043,8 @@ class RequestQuery:
                 clauses.append(column + " = ?")
                 parameters.append(value)
         if self.hide_admin:
-            clauses.append("backend != ?")
-            parameters.append(LIVE_ADMIN_BACKEND)
+            clauses.append("backend NOT IN (" + ",".join("?" * len(LIVE_ADMIN_BACKENDS)) + ")")
+            parameters.extend(LIVE_ADMIN_BACKENDS)
         if self.path:
             # A prefix match, so /api finds everything under it. Anchored on
             # purpose: a leading wildcard would scan the whole table.
@@ -3085,7 +3085,7 @@ class RequestQuery:
             return False
         if self.method and record[L_METHOD] != self.method:
             return False
-        if self.hide_admin and backend == LIVE_ADMIN_BACKEND:
+        if self.hide_admin and backend in LIVE_ADMIN_BACKENDS:
             return False
         if self.path and not record[L_PATH].startswith(self.path):
             return False
@@ -3900,6 +3900,9 @@ LIVE_FAST_TICK_SECONDS = 2.0
 # The admin panel's own backend. On a quiet gateway the page watching the
 # traffic is most of it -- the panel polls -- so it is left out unless asked.
 LIVE_ADMIN_BACKEND = "be_admin"
+# The panel's own traffic: its pages, and the HAProxy statistics page it
+# shows in a frame and refreshes every 30 seconds.
+LIVE_ADMIN_BACKENDS: Tuple[str, ...] = (LIVE_ADMIN_BACKEND, "be_stats")
 # After a restart the buffer is filled again from the tail of the log, at
 # most this much of it: an hour of a busy gateway, a few seconds to parse.
 LIVE_REFILL_BYTES = 16 * 1024 * 1024
@@ -4088,7 +4091,7 @@ def _live_matches(record: tuple, filters: Dict[str, Any]) -> bool:
     ips = filters.get("ips")
     if ips is not None and record[L_IP] not in ips:
         return False
-    if filters.get("hide_admin") and record[L_BACKEND].startswith(LIVE_ADMIN_BACKEND + "/"):
+    if filters.get("hide_admin") and record[L_BACKEND].partition("/")[0] in LIVE_ADMIN_BACKENDS:
         return False
     agent = filters.get("agent")
     if agent and (len(record) <= L_AGENT or agent not in record[L_AGENT].lower()):

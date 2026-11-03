@@ -524,6 +524,7 @@ _ROLLUP_WAVG = tuple(
 
 DEFAULT_EXCLUDE_EXACT = (
     "be_admin",
+    "be_stats",
     "be_http_challenge",
     "be_tls_terminator",
     "be_maintenance",

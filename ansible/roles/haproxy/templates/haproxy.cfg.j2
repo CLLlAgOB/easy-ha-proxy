@@ -947,6 +947,10 @@ frontend fe_https
     use_backend authelia_backend if authelia_up host_authelia !path_access_granted
 {% endif %}
 {% if admin_domain is defined %}
+    # HAProxy's statistics page, on the admin host only and after its
+    # authentication. Declared on this frontend it answered /stats on every
+    # site, to anyone; a site's own /stats now reaches the site.
+    use_backend be_stats if host_admin path_stats
     use_backend be_admin if admin_up host_admin !path_stats
 {% endif %}
 
@@ -969,17 +973,6 @@ frontend fe_https
 {% endfor %}
 
     default_backend be_maintenance
-
-    stats enable
-    stats uri /stats
-    stats refresh 30s
-
-{% if admin_domain is defined and not admin_authelia_enabled and admin_password %}
-    stats admin if host_admin AuthOK
-{% endif %}
-{% if admin_authelia_enabled and admin_domain is defined %}
-    stats admin if host_admin
-{% endif %}
 
 {# ---------------- HTTP80 enable logic ---------------- #}
 {% set need_http80 = false %}
@@ -1314,6 +1307,20 @@ backend be_maintenance
     # display-name: maintenance
     mode http
     errorfile 503 /etc/haproxy/errors/maintenance.http
+
+{% if admin_domain is defined %}
+backend be_stats
+    # display-name: statistics
+    # Only the admin host routes here, and only once its own check has let
+    # the request through (Authelia, or the stats password).
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 30s
+{% if admin_authelia_enabled or admin_password %}
+    stats admin if TRUE
+{% endif %}
+{% endif %}
 
 {% if export_prometheus | default(false) %}
 listen stats_prom

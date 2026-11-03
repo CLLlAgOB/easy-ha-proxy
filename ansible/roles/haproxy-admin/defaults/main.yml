@@ -9,7 +9,7 @@ venv_dir: "{{ app_dir }}/venv"
 whitelist_global_file: /etc/haproxy/whitelist.ip
 whitelist_geo_file: /etc/haproxy/geoip/whitelist.geo
 ui_exclude_backends_exact:
-  [be_admin, be_http_challenge, be_tls_terminator, be_maintenance]
+  [be_admin, be_stats, be_http_challenge, be_tls_terminator, be_maintenance]
 ui_exclude_backends_prefix: [tbl_]
 haproxy_log: /var/log/haproxy.log
 haproxy_conf: /etc/haproxy/haproxy.cfg

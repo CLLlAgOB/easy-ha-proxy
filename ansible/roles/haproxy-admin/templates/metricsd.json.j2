@@ -9,7 +9,7 @@
     "one_hour_days": {{ metricsd_retention_one_hour_days | default(365) }}
   },
   "exclude": {
-    "exact": {{ (metricsd_exclude_exact | default(ui_exclude_backends_exact | default(['be_admin', 'be_http_challenge', 'be_tls_terminator', 'be_maintenance']))) | tojson }},
+    "exact": {{ (metricsd_exclude_exact | default(ui_exclude_backends_exact | default(['be_admin', 'be_stats', 'be_http_challenge', 'be_tls_terminator', 'be_maintenance']))) | tojson }},
     "prefix": {{ (metricsd_exclude_prefix | default(ui_exclude_backends_prefix | default(['tbl_']))) | tojson }}
   },
   "storage": {
