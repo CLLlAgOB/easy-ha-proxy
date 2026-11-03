@@ -71,8 +71,13 @@ class AlertClient:
         detail: str = "",
         trigger_delay: Optional[int] = None,
         recipient: str = "",
+        retired: bool = False,
     ) -> bool:
         """Report one observation. Returns whether the engine accepted it.
+
+        ``retired`` says the object is no longer checked at all (a
+        certificate only switched-off sites use): an alert it holds closes
+        without a recovery message, since nothing recovered.
 
         ``trigger_delay`` and ``recipient`` carry policy that belongs to the
         object rather than to the rule — a site's own alert_after and
@@ -82,7 +87,7 @@ class AlertClient:
             return False
 
         key = f"{rule}\x00{subject}"
-        signature = (active, severity, summary, detail, trigger_delay, recipient)
+        signature = (active, severity, summary, detail, trigger_delay, recipient, retired)
         now = time.monotonic()
         with self._lock:
             previous = self._last.get(key)
@@ -105,6 +110,8 @@ class AlertClient:
             payload["severity"] = severity
         if summary:
             payload["summary"] = summary
+        if retired:
+            payload["retired"] = True
         if detail:
             payload["detail"] = detail
         if trigger_delay is not None:

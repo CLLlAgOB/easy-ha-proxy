@@ -179,7 +179,13 @@
         act("/api/alerts/quieten", { ...key, mode: "mute", seconds: Number(choice.value) })
       ));
     }
-    if (kinds[entry.rule] === "event") {
+    // A condition its source stopped reporting keeps its last state, marked
+    // as unconfirmed; once the source is gone for good it can be closed.
+    const staleSince = Number(entry.stale_since_ts) || 0;
+    if (staleSince) {
+      note(`${t("No report since")} ${formatTime(Number(entry.last_seen_ts) || staleSince)}`);
+    }
+    if (kinds[entry.rule] === "event" || staleSince) {
       td.appendChild(smallButton("Dismiss", () => act("/api/alerts/dismiss", key)));
     }
     // Mail held back waits up to an hour between attempts; once the cause is

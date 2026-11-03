@@ -218,17 +218,77 @@ class EventConditionTests(EngineTestCase):
 
 
 class StaleReportTests(EngineTestCase):
-    def test_a_level_nobody_reports_any_more_recovers(self):
-        # The producer may have died; leaving the alert firing would be a lie.
+    """Silence is not a recovery (F24, 30 October review).
+
+    Resolving whatever a producer stopped reporting sent a "recovered" mail
+    for a source that had died, and -- on one gateway, four times in a day
+    -- 15 minutes after each 6-hourly certificate warning, for a certificate
+    nobody had renewed. A silent alert now keeps its last state, marked as
+    unconfirmed, and recovers only when its source says so."""
+
+    def fire(self):
         self.observe("authelia.unavailable", subject="authelia")
         self.advance(121)
         self.observe("authelia.unavailable", subject="authelia")
         self.assertEqual(len(self.channel.sent), 1)
+
+    def test_a_level_nobody_reports_any_more_is_unconfirmed_not_recovered(self):
+        self.fire()
+        self.advance(901)
+        self.assertEqual(self.engine.sweep()["stale"], 1)
+        self.assertEqual(len(self.channel.sent), 1)  # no "recovered" mail
+        active = self.database.active_alerts()
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["stale_since_ts"], self.now)
+        self.assertEqual([event["transition"] for event in self.history()][:1], ["stale"])
+        # Marked once, not again at every sweep.
+        self.advance(60)
+        self.assertEqual(self.engine.sweep()["stale"], 0)
+
+    def test_it_recovers_once_when_its_source_reports_it_well(self):
+        self.fire()
         self.advance(901)
         self.engine.sweep()
+        self.observe("authelia.unavailable", subject="authelia", active=False)
         self.assertEqual(len(self.channel.sent), 2)
         self.assertIn("RESOLVED", self.channel.sent[1][0])
         self.assertEqual(self.database.active_alerts(), [])
+
+    def test_reported_again_it_is_confirmed_with_no_new_mail(self):
+        self.fire()
+        self.advance(901)
+        self.engine.sweep()
+        self.observe("authelia.unavailable", subject="authelia")
+        self.assertEqual(len(self.channel.sent), 1)
+        self.assertEqual(self.database.active_alerts()[0]["stale_since_ts"], 0)
+
+    def test_unconfirmed_for_a_week_it_closes_without_a_recovery(self):
+        self.fire()
+        self.advance(901)
+        self.engine.sweep()
+        self.advance(alertd.STALE_CLOSE_AFTER)
+        self.assertEqual(self.engine.sweep()["expired"], 1)
+        self.assertEqual(len(self.channel.sent), 1)
+        self.assertEqual(self.database.open_states(), [])
+        self.assertEqual(self.history()[0]["transition"], "stale_closed")
+
+    def test_only_an_unconfirmed_level_can_be_dismissed(self):
+        self.fire()
+        with self.assertRaises(ValueError):
+            self.engine.dismiss({"rule": "authelia.unavailable", "subject": "authelia"})
+        self.advance(901)
+        self.engine.sweep()
+        self.engine.dismiss({"rule": "authelia.unavailable", "subject": "authelia", "by": "admin"})
+        self.assertEqual(self.database.open_states(), [])
+        self.assertEqual(len(self.channel.sent), 1)
+
+    def test_a_certificate_checked_every_six_hours_stays_confirmed_between_checks(self):
+        self.observe("certificate.expiring", subject="shop.example.test")
+        self.assertEqual(len(self.channel.sent), 1)
+        self.advance(6 * 3600 + 120)
+        self.assertEqual(self.engine.sweep()["stale"], 0)
+        self.assertEqual(self.database.active_alerts()[0]["stale_since_ts"], 0)
+        self.assertEqual(len(self.channel.sent), 1)
 
     def test_a_pending_level_that_goes_quiet_is_dropped_silently(self):
         self.observe("site.down")
@@ -804,9 +864,10 @@ class PerSubjectPolicyTests(EngineTestCase):
         )
         self.assertEqual(seen, ["ops@example.test", "ops@example.test"])
 
-    def test_a_stale_recovery_also_reaches_the_right_address(self):
-        # The sweep resolves it, and the sweep has only the stored row to
-        # work from.
+    def test_silence_sends_nothing_and_the_recovery_reaches_the_right_address(self):
+        # Silence used to be resolved by the sweep, with a "recovered" mail
+        # to the site's own address; now it sends nothing, and the real
+        # recovery, reported by the producer, goes there.
         seen = []
 
         class Watching(RecordingChannel):
@@ -818,6 +879,8 @@ class PerSubjectPolicyTests(EngineTestCase):
         self.observe("site.down", trigger_delay=0, recipient="ops@example.test")
         self.advance(901)
         self.engine.sweep()
+        self.assertEqual(seen, ["ops@example.test"])
+        self.observe("site.down", active=False, trigger_delay=0, recipient="ops@example.test")
         self.assertEqual(seen, ["ops@example.test", "ops@example.test"])
 
     def test_a_per_subject_recipient_is_not_written_into_the_settings(self):

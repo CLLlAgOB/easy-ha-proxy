@@ -44,7 +44,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import yaml  # type: ignore
 from cryptography import x509  # type: ignore
@@ -207,6 +207,7 @@ def report_alert_level(
     severity: str = "",
     summary: str = "",
     detail: str = "",
+    retired: bool = False,
 ) -> None:
     """Report a level condition. Never disturbs the daemon."""
     if _ALERTS is None:
@@ -219,6 +220,7 @@ def report_alert_level(
             severity=severity,
             summary=summary,
             detail=detail,
+            retired=retired,
         )
     except Exception:  # pylint: disable=broad-except
         LOG.debug("alert reporting failed", exc_info=True)
@@ -4727,6 +4729,81 @@ CERT_WATCH_INTERVAL_SECONDS = int(
 )
 
 
+# What the gateway serves now: the sites as last applied. The draft beside
+# vars.yml is the fallback before anything has been applied.
+APPLIED_WEBSITES = Path(
+    os.environ.get(
+        "HAPROXY_APPLIED_WEBSITES", "/opt/haproxy-admin/backups/haproxy/last_applied_websites.yml"
+    )
+)
+
+
+def _site_names(site: Dict[str, Any]) -> Set[str]:
+    names: Set[str] = set()
+    for key in ("domain", "alt_names", "aliases", "domains"):
+        value = site.get(key)
+        for item in value if isinstance(value, list) else [value]:
+            if item:
+                names.add(_normalize_dns_name(str(item)))
+    return {name for name in names if name}
+
+
+def certificate_users() -> Optional[Tuple[Set[str], Set[str]]]:
+    """(names someone still uses, names only switched-off sites use).
+
+    A site is switched off when it is both paused and has its renewal paused;
+    its names stop counting only then. Everything else the gateway serves --
+    other sites, the admin and sign-in hosts -- and every name a delivery
+    target sends elsewhere counts as in use. None when the sites cannot be
+    read: what cannot be known is checked, never skipped.
+    """
+    path = APPLIED_WEBSITES if APPLIED_WEBSITES.exists() else CONFIG_YAML.parent / "websites.yml"
+    sites = _load_yaml(path).get("sites")
+    if not isinstance(sites, list):
+        return None
+    used: Set[str] = set()
+    switched_off: Set[str] = set()
+    for site in sites:
+        if not isinstance(site, dict):
+            continue
+        if site.get("paused") is True and site.get("cert_renewal_paused") is True:
+            switched_off |= _site_names(site)
+        else:
+            used |= _site_names(site)
+    settings = _load_yaml(CONFIG_YAML)
+    for key in ("admin_domain", "aut_domain"):
+        if settings.get(key):
+            used.add(_normalize_dns_name(str(settings[key])))
+    if DELIVERY_DIR.is_dir():
+        for record_path in sorted(DELIVERY_DIR.glob("*.json")):
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - an unreadable target may use anything
+                return None
+            for domain in record.get("domains") or []:
+                used.add(_normalize_dns_name(str(domain)))
+    return used, switched_off - used
+
+
+def _name_covers(certificate_name: str, name: str) -> bool:
+    if certificate_name == name:
+        return True
+    if certificate_name.startswith("*."):
+        suffix = certificate_name[1:]
+        return name.endswith(suffix) and "." not in name[: -len(suffix)]
+    return False
+
+
+def _only_switched_off(names: List[str], users: Optional[Tuple[Set[str], Set[str]]]) -> bool:
+    """A certificate some switched-off site uses and nothing else does."""
+    if users is None or not names:
+        return False
+    used, switched_off = users
+    if any(_name_covers(cert_name, name) for cert_name in names for name in used):
+        return False
+    return any(_name_covers(cert_name, name) for cert_name in names for name in switched_off)
+
+
 class CertificateExpiryWatch(threading.Thread):
     """One per daemon, started with it.
 
@@ -4767,12 +4844,31 @@ class CertificateExpiryWatch(threading.Thread):
         except OSError as exc:
             LOG.warning("cannot list %s: %s", directory, exc)
             return 0
+        users = certificate_users()
         for path in entries:
             info = _load_cert_info(path)
             if not info:
                 continue
             days = int(info["days_left"])
             domain = path.stem
+            cert = _load_first_cert_from_pem(path)
+            names = sorted(_get_cert_dns_names(cert)) if cert is not None else []
+            if _only_switched_off(names, users):
+                # Paused, with its renewal paused: nobody is served by it and
+                # nobody will renew it. Warning about its expiry, every six
+                # hours, only taught the operator to ignore the mail.
+                report_alert_level(
+                    "certificate.expiring",
+                    domain,
+                    active=False,
+                    retired=True,
+                    summary=(
+                        f"The certificate for {domain} is not checked: only switched-off "
+                        "sites use it"
+                    ),
+                )
+                reported += 1
+                continue
             expiring = days <= int(info["warn_days"])
             report_alert_level(
                 "certificate.expiring",

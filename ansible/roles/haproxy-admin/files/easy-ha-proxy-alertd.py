@@ -106,6 +106,17 @@ TRANSITION_ESCALATED = "escalated"
 TRANSITION_RECOVERED = "recovered"
 TRANSITION_SUPPRESSED = "suppressed"
 TRANSITION_DISMISSED = "dismissed"
+# A firing condition its producer stopped reporting. Silence is not a
+# recovery: the producer may have died, or may only check every few hours.
+# The alert keeps its last reported state, marked as unconfirmed, and says
+# so in the history -- by no message.
+TRANSITION_STALE = "stale"
+# Unconfirmed for STALE_CLOSE_AFTER: closed without claiming a recovery.
+TRANSITION_EXPIRED = "stale_closed"
+# The object is no longer checked (its producer said so): closed without a
+# recovery message.
+TRANSITION_RETIRED = "retired"
+STALE_CLOSE_AFTER = 7 * 86400
 
 SEVERITY_INFO = "info"
 SEVERITY_WARNING = "warning"
@@ -211,8 +222,11 @@ RULES: Tuple[Rule, ...] = (
          "Monitoring storage is under pressure", trigger_delay=0),
     Rule("monitoring.paused", KIND_LEVEL, SEVERITY_WARNING,
          "Historical monitoring is paused", trigger_delay=0),
+    # certd checks every six hours: two missed checks and a margin before the
+    # alert counts as unconfirmed.
     Rule("certificate.expiring", KIND_LEVEL, SEVERITY_WARNING,
-         "Certificate expires soon", trigger_delay=0, repeat_after=24 * 3600),
+         "Certificate expires soon", trigger_delay=0, repeat_after=24 * 3600,
+         stale_after=13 * 3600),
     Rule("certificate.renewal_failed", KIND_EVENT, SEVERITY_CRITICAL,
          "Certificate renewal failed", auto_clear=6 * 3600),
     Rule("security.burst", KIND_EVENT, SEVERITY_WARNING,
@@ -483,6 +497,8 @@ class AlertDatabase:
                 ("acknowledged_ts", "INTEGER NOT NULL DEFAULT 0"),
                 ("acknowledged_by", "TEXT NOT NULL DEFAULT ''"),
                 ("muted_until", "INTEGER NOT NULL DEFAULT 0"),
+                # Since when the producer has not reported a firing condition.
+                ("stale_since_ts", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in columns:
                     cursor.execute(f"ALTER TABLE alert_state ADD COLUMN {column} {ddl}")
@@ -523,6 +539,7 @@ class AlertDatabase:
                 )
                 ON CONFLICT(rule, subject) DO UPDATE SET
                     state = excluded.state,
+                    stale_since_ts = 0,
                     severity = excluded.severity,
                     since_ts = excluded.since_ts,
                     last_seen_ts = excluded.last_seen_ts,
@@ -580,6 +597,13 @@ class AlertDatabase:
             self._conn.execute(
                 "DELETE FROM alert_state WHERE rule = ? AND subject = ?",
                 (rule, subject),
+            )
+
+    def mark_stale(self, rule: str, subject: str, since: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE alert_state SET stale_since_ts = ? WHERE rule = ? AND subject = ?",
+                (since, rule, subject),
             )
 
     def open_states(self) -> List[sqlite3.Row]:
@@ -1051,6 +1075,10 @@ class AlertEngine:
         if recipient and not _EMAIL_RE.fullmatch(recipient):
             raise ValueError("the recipient is not a valid email address")
 
+        if payload.get("retired") is True and rule.kind == KIND_LEVEL:
+            with self._lock:
+                return self._retire(rule, subject, summary)
+
         with self._lock:
             return self._apply(
                 rule,
@@ -1062,6 +1090,21 @@ class AlertEngine:
                 override_delay,
                 recipient,
             )
+
+    def _retire(self, rule: Rule, subject: str, summary: str) -> Dict[str, Any]:
+        """Close what an object no longer checked still holds, quietly."""
+        row = self.database.get_state(rule.name, subject)
+        if row is None or str(row["state"]) == STATE_OK:
+            return {"rule": rule.name, "subject": subject, "state": STATE_OK}
+        self.database.drop_state(rule.name, subject)
+        self.database.add_event({
+            "ts": _utc_now(), "rule": rule.name, "subject": subject,
+            "transition": TRANSITION_RETIRED, "severity": str(row["severity"]),
+            "summary": str(row["summary"]), "detail": summary,
+            "delivered": "", "delivery_error": "",
+        })
+        return {"rule": rule.name, "subject": subject, "state": STATE_OK,
+                "transition": TRANSITION_RETIRED, "notified": False}
 
     def _apply(
         self,
@@ -1340,9 +1383,18 @@ class AlertEngine:
 
     # -- periodic work --------------------------------------------------
     def sweep(self) -> Dict[str, int]:
-        """Resolve what nothing reports any more and clear finished events."""
+        """Mark what nothing reports any more and clear finished events.
+
+        A firing level its producer stopped reporting is not resolved: it is
+        marked as unconfirmed, with no message, and closes on its own --
+        again with no "recovered" -- only after STALE_CLOSE_AFTER. It used to
+        be resolved after `stale_after` with a recovery email, which on one
+        gateway meant a "certificate renewed" mail 15 minutes after every
+        6-hourly expiry warning, for a certificate nobody had renewed.
+        """
         now = _utc_now()
-        recovered = 0
+        stale = 0
+        expired = 0
         cleared = 0
         with self._lock:
             for row in self.database.open_states():
@@ -1360,34 +1412,49 @@ class AlertEngine:
                     continue
                 if age < rule.stale_after:
                     continue
-                # A level nobody has reported for a while: the producer either
-                # stopped seeing it or stopped running. Both mean this alert
-                # can no longer be trusted as active.
-                if row["state"] == STATE_FIRING:
-                    # The recovery has to reach whoever got the alert, which
-                    # for a site is its own alert_email rather than the
-                    # shared recipient.
-                    self._apply(
-                        rule,
-                        str(row["subject"]),
-                        False,
-                        str(row["severity"]),
-                        f"{rule.title} is no longer reported",
-                        "The condition stopped being reported; treating it as "
-                        "resolved.",
-                        row["trigger_delay"],
-                        str(row["recipient"] or ""),
-                    )
-                    recovered += 1
-                else:
-                    self.database.drop_state(rule.name, str(row["subject"]))
+                subject = str(row["subject"])
+                if row["state"] != STATE_FIRING:
+                    # Pending and never sent: nothing to say about it.
+                    self.database.drop_state(rule.name, subject)
                     cleared += 1
+                    continue
+                # Firing, and nobody has reported it for a while: the producer
+                # stopped seeing it, stopped running, or checks rarely. None
+                # of these is a recovery.
+                stale_since = int(row["stale_since_ts"]) if "stale_since_ts" in row.keys() else 0
+                last_seen = int(row["last_seen_ts"])
+                if not stale_since:
+                    self.database.mark_stale(rule.name, subject, now)
+                    self.database.add_event({
+                        "ts": now, "rule": rule.name, "subject": subject,
+                        "transition": TRANSITION_STALE, "severity": str(row["severity"]),
+                        "summary": str(row["summary"]),
+                        "detail": (
+                            f"No report since {_iso(last_seen)}; the last reported state "
+                            "is kept until the source reports again."
+                        ),
+                        "delivered": "", "delivery_error": "",
+                    })
+                    stale += 1
+                elif now - stale_since >= STALE_CLOSE_AFTER:
+                    self.database.drop_state(rule.name, subject)
+                    self.database.add_event({
+                        "ts": now, "rule": rule.name, "subject": subject,
+                        "transition": TRANSITION_EXPIRED, "severity": str(row["severity"]),
+                        "summary": str(row["summary"]),
+                        "detail": (
+                            f"No report since {_iso(last_seen)}; closed without a "
+                            "recovery."
+                        ),
+                        "delivered": "", "delivery_error": "",
+                    })
+                    expired += 1
 
             if now - self._last_prune >= 3600:
                 self._last_prune = now
                 with contextlib.suppress(Exception):
                     self.database.prune()
-        return {"recovered": recovered, "cleared": cleared}
+        return {"stale": stale, "expired": expired, "cleared": cleared}
 
     # -- the operator's hand --------------------------------------------
     def quieten(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1416,14 +1483,13 @@ class AlertEngine:
         return {"rule": rule.name, "subject": subject, **values}
 
     def dismiss(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Close an event before its timer does. A level cannot be: it holds
-        until its producer says otherwise, and dismissing it would only bring
-        it back at the next observation -- it is muted instead."""
+        """Close an event before its timer does, or a level its producer no
+        longer reports (a site deleted, a source gone). A level that is still
+        reported cannot be: it would come back at the next observation -- it
+        is muted instead."""
         rule = RULES_BY_NAME.get(str(payload.get("rule") or ""))
         if rule is None:
             raise ValueError("unknown rule")
-        if rule.kind != KIND_EVENT:
-            raise ValueError("a condition that still holds cannot be dismissed; mute it instead")
         subject = str(payload.get("subject") or "")
         actor = _clean_text(payload.get("by") or "", 120)
         now = _utc_now()
@@ -1431,6 +1497,9 @@ class AlertEngine:
             row = self.database.get_state(rule.name, subject)
             if row is None:
                 raise LookupError("no such alert")
+            stale = "stale_since_ts" in row.keys() and int(row["stale_since_ts"] or 0) > 0
+            if rule.kind != KIND_EVENT and not stale:
+                raise ValueError("a condition that still holds cannot be dismissed; mute it instead")
             self.database.drop_state(rule.name, subject)
             self.database.add_event({
                 "ts": now, "rule": rule.name, "subject": subject,
