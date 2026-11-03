@@ -81,6 +81,12 @@ class TheFloor(unittest.TestCase):
         self.assertIn("gt 3000 }", lines_with(https, "sc0_http_req_rate(fe_https)")[0])
         self.assertIn("http_req_rate(20s)", https)
 
+    def test_the_settings_page_shows_and_edits_it(self):
+        source = (ROOT / "docker/app/haproxy_admin/services_haproxy_vars.py").read_text(encoding="utf-8")
+        for key in ("site_defaults.hard_req_rate", "site_defaults.hard_req_window",
+                    "site_defaults.conn_rate_burst_trusted"):
+            self.assertIn(f'"{key}"', source)
+
     def test_it_bans_nobody(self):
         self.assertIsNone(re.search(r"sc0_http_req_rate\(fe_https\).*(tbl_ban|ban_code)", self.https))
 

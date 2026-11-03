@@ -235,16 +235,51 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
                 minimum=0,
                 maximum=1000000,
                 default=200,
-                help_text="New connections from one address per window. Default: 200.",
+                help_text=(
+                    "New connections from one address per window, for addresses "
+                    "that are neither whitelisted, admin nor signed in. Default: 200."
+                ),
+            ),
+            _field(
+                "site_defaults.conn_rate_burst_trusted",
+                "Hard connection burst limit",
+                "integer",
+                minimum=1,
+                maximum=1000000,
+                default=1000,
+                help_text=(
+                    "New connections from one address per window for everyone, "
+                    "trusted addresses included. Default: 1000."
+                ),
             ),
             _field(
                 "site_defaults.conn_cur_limit",
                 "Concurrent connection limit",
                 "integer",
-                minimum=0,
+                minimum=1,
                 maximum=1000000,
                 default=500,
-                help_text="Open connections from one address. Default: 500.",
+                help_text="Open connections from one address, for everyone. Default: 500.",
+            ),
+            _field(
+                "site_defaults.hard_req_rate",
+                "Hard request limit",
+                "integer",
+                minimum=1,
+                maximum=1000000,
+                default=1000,
+                help_text=(
+                    "Requests from one address across all sites per hard window, "
+                    "for everyone; the excess is refused, nobody is banned. Default: 1000."
+                ),
+            ),
+            _field(
+                "site_defaults.hard_req_window",
+                "Hard request window",
+                "interval",
+                pattern=INTERVAL_RE.pattern,
+                default="10s",
+                help_text="Default: 10s.",
             ),
             _field("site_defaults.err_limit", "Per-site error limit", "integer", minimum=0, maximum=1000000),
             _field("site_defaults.err_window", "Per-site error window", "interval", pattern=INTERVAL_RE.pattern),
