@@ -27,6 +27,9 @@
         <p class="updates-hero-meta" id="updates-hero-meta">
           <span>Last check:</span> <span id="updates-checked-at">Never</span><span id="updates-next-check"></span>
         </p>
+        {# Newer releases upstream that the project has not taken up yet:
+           information only, nothing here installs them. #}
+        <ul id="updates-upstream" class="updates-hero-meta updates-upstream" hidden></ul>
       </div>
       <button type="button" class="btn btn-refresh" id="updates-check">
         <span class="spinner" aria-hidden="true"></span>

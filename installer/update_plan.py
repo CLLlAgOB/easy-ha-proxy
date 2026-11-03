@@ -21,6 +21,8 @@ import subprocess
 import tempfile
 import sys
 from typing import Any, Callable, Protocol, Sequence
+import urllib.error
+import urllib.request
 
 # The broker runs this file as a script from the installer directory; tests
 # and tools may load it by path.
@@ -1379,6 +1381,135 @@ def _check_running(detail: dict[str, Any], tag: str, running: dict[str, list[str
     detail["running"] = "same-content"
 
 
+# ---------------------------------------------------------------------------
+# Newer upstream releases (U01): information only
+# ---------------------------------------------------------------------------
+#
+# The checks above say whether the pinned tag's content moved, and the source
+# update says when the project pins a newer one. Neither says that upstream
+# has released something newer the project has not taken up yet. This does,
+# for an allow-listed repository, and changes nothing: no pull, no new pin,
+# no button. It sits outside the components, so it is not part of what an
+# installation is held to -- a release upstream between the check and the
+# install must not make the install refuse.
+#
+# Only a plain release in the pinned tag's own flavour counts (8.10.3-alpine
+# -> 8.12.0-alpine; not 8.12-alpine, not 8.12.0-rc1-alpine, not
+# 8.12.0-alpine3.22). Docker Hub's registry answers the whole tag list at
+# once; a list it cuts short, or no answer, is "unknown", never "none".
+UPSTREAM_REPOSITORIES = {"redis": "library/redis"}
+UPSTREAM_TIMEOUT = 8.0
+UPSTREAM_MAX_BYTES = 1024 * 1024
+_RELEASE_TAG_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)((?:-[a-z]+)?)$")
+
+
+def _http_get(url: str, headers: dict[str, str]) -> tuple[bytes, dict[str, str]]:
+    request = urllib.request.Request(url, headers={"User-Agent": "easy-ha-proxy", **headers})
+    with urllib.request.urlopen(request, timeout=UPSTREAM_TIMEOUT) as response:  # noqa: S310 - fixed https hosts
+        body = response.read(UPSTREAM_MAX_BYTES + 1)
+        return body, {key.lower(): value for key, value in response.headers.items()}
+
+
+def _registry_tags(repository: str, fetch: Callable[..., tuple[bytes, dict[str, str]]]) -> tuple[list[str], bool]:
+    """Every tag of a Docker Hub repository, and whether the list is whole."""
+
+    token_body, _ = fetch(
+        "https://auth.docker.io/token?service=registry.docker.io"
+        f"&scope=repository:{repository}:pull",
+        {},
+    )
+    token = json.loads(token_body.decode("utf-8")).get("token")
+    if not isinstance(token, str) or not token:
+        raise ValueError("the registry gave no token")
+    body, headers = fetch(
+        f"https://registry-1.docker.io/v2/{repository}/tags/list?n=10000",
+        {"Authorization": f"Bearer {token}"},
+    )
+    if len(body) > UPSTREAM_MAX_BYTES:
+        return [], False
+    tags = json.loads(body.decode("utf-8")).get("tags")
+    if not isinstance(tags, list):
+        raise ValueError("the registry gave no tag list")
+    # A Link header means there is another page this did not read.
+    return [tag for tag in tags if isinstance(tag, str)], "link" not in headers
+
+
+def _upstream_release(
+    image: str,
+    *,
+    pinned_by: str,
+    fetch: Callable[..., tuple[bytes, dict[str, str]]],
+) -> dict[str, Any] | None:
+    """What upstream has beyond the pinned release of one image, or None
+    when the image is not one this looks at."""
+
+    repository = _image_repository(image)
+    if not repository or "@" in image:
+        return None
+    name = repository.removeprefix("docker.io/").removeprefix("library/")
+    hub = UPSTREAM_REPOSITORIES.get(name)
+    if hub is None:
+        return None
+    tag = image.rsplit(":", 1)[1] if ":" in image.rsplit("/", 1)[-1] else "latest"
+    result: dict[str, Any] = {"image": image, "repository": name, "pinned_by": pinned_by}
+    pinned = _RELEASE_TAG_RE.fullmatch(tag)
+    if not pinned:
+        result.update(state="unknown", reason="pin-is-not-a-release")
+        return result
+    current = tuple(int(part) for part in pinned.groups()[:3])
+    flavour = pinned.group(4)
+    try:
+        tags, complete = _registry_tags(hub, fetch)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        result.update(state="unknown", reason="registry-unavailable",
+                      error=_redact_sensitive_text(str(exc))[:200])
+        return result
+    newer = []
+    for candidate in tags:
+        match = _RELEASE_TAG_RE.fullmatch(candidate)
+        if match and match.group(4) == flavour:
+            version = tuple(int(part) for part in match.groups()[:3])
+            if version > current:
+                newer.append((version, candidate))
+    newer.sort()
+    same_major = [tag for version, tag in newer if version[0] == current[0]]
+    result.update(
+        current=tag,
+        newest_same_major=same_major[-1] if same_major else None,
+        newest=newer[-1][1] if newer else None,
+        complete=complete,
+    )
+    if newer:
+        result["state"] = "newer"
+    elif complete:
+        result["state"] = "none"
+    else:
+        result.update(state="unknown", reason="tag-list-incomplete")
+    return result
+
+
+def _upstream_releases(
+    components: list[dict[str, Any]],
+    variables: dict[str, Any],
+    fetch: Callable[..., tuple[bytes, dict[str, str]]],
+) -> list[dict[str, Any]]:
+    overridden = {
+        str(variables.get(variable))
+        for variable, _template in _AUTHELIA_IMAGE_VARIABLES
+        if isinstance(variables.get(variable), str)
+    }
+    found: list[dict[str, Any]] = []
+    for component in components:
+        for detail in (component.get("details") or {}).get("images") or []:
+            image = str(detail.get("image") or "") if isinstance(detail, dict) else ""
+            pinned_by = "override" if image in overridden else "project"
+            entry = _upstream_release(image, pinned_by=pinned_by, fetch=fetch)
+            if entry is not None:
+                entry["component"] = component.get("id")
+                found.append(entry)
+    return found
+
+
 def _probe_retargeted_image(image: str, target: str, runner: Runner) -> dict[str, Any]:
     """Probe an image the source update replaces: what runs now, what will."""
 
@@ -1811,6 +1942,7 @@ def build_update_plan(
     runner: Runner | None = None,
     now: dt.datetime | None = None,
     artifact_path: Callable[[Path], Path] | None = None,
+    upstream_fetch: Callable[..., tuple[bytes, dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-serializable, read-only update plan.
 
@@ -2076,6 +2208,13 @@ def build_update_plan(
         "has_updates": bool(actionable),
         "actionable_components": actionable,
         "warnings": warnings,
+        # Newer upstream releases the project has not taken up: information
+        # only, and outside the components an installation is held to.
+        "upstream": (
+            _upstream_releases(components, variables, upstream_fetch)
+            if upstream_fetch is not None
+            else []
+        ),
     }
     # Fail here during development if a new field accidentally stops being
     # serializable; callers can safely pass the returned mapping to json.dump.
@@ -2101,6 +2240,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_channel=args.source_channel,
             image_channel=args.image_channel,
             branch=args.branch,
+            # The scheduled and the requested checks ask the registry; a
+            # caller that passes nothing (tests, other tools) stays offline.
+            upstream_fetch=_http_get,
         )
     except (OSError, ValueError) as exc:
         _argument_parser().error(str(exc))

@@ -343,7 +343,48 @@
     }
     byId("updates-changelog-list").innerHTML = items.join("");
   }
+  // What upstream has released beyond the pinned images. The project tests a
+  // release before it pins it, so a newer one is news, not an action.
+  const upstreamLabels = {
+    newer: "Newer upstream release, not yet tested by this project:",
+    none: "No newer upstream release:",
+    unknown: "Upstream releases could not be checked:"
+  };
+
+  function renderUpstream(plan) {
+    const list = byId("updates-upstream");
+    if (!list) return;
+    list.textContent = "";
+    const entries = Array.isArray(plan?.upstream) ? plan.upstream : [];
+    entries.forEach((entry) => {
+      const label = upstreamLabels[entry?.state];
+      if (!label) return;
+      const item = document.createElement("li");
+      const words = document.createElement("span");
+      words.textContent = t(label);
+      const facts = document.createElement("span");
+      facts.className = "mono notranslate";
+      facts.setAttribute("translate", "no");
+      facts.setAttribute("data-i18n-skip", "");
+      const name = String(entry.repository || entry.image || "");
+      if (entry.state === "newer") {
+        const offered = entry.newest_same_major || entry.newest;
+        let text = `${name} ${offered} ← ${entry.current}`;
+        if (entry.newest && entry.newest !== offered) text += ` · ${entry.newest}`;
+        facts.textContent = ` ${text}`;
+      } else if (entry.state === "none") {
+        facts.textContent = ` ${name} ${entry.current}`;
+      } else {
+        facts.textContent = ` ${name}`;
+      }
+      item.append(words, facts);
+      list.appendChild(item);
+    });
+    list.hidden = !list.childElementCount;
+  }
+
   function renderPlan(plan) {
+    renderUpstream(plan);
     currentPlan = plan;
     resetConfirmation();
     const components = withChangesRow(normalizeComponents(plan));
