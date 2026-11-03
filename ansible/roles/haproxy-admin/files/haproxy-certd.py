@@ -3499,6 +3499,40 @@ def handle_internal_cert_issue(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any
     }
 
 
+def _internal_ca_client_trust(authority: x509.Certificate) -> Optional[Dict[str, Any]]:
+    """Where HAProxy trusts the internal CA to authenticate clients, or None.
+
+    Rotating or deleting it does not yet carry that trust along: the bundle
+    and issuers files would keep the old root, and the new one would not be
+    in them. Until both move together the change is refused here. The trust
+    list and the bundle HAProxy reads both count -- a site that is paused or
+    not yet applied does not make the root unused -- and the sites that ask
+    for its client certificates are named so the operator knows what to move.
+    """
+
+    listed = "internal" in _load_client_auth_ids()
+    in_bundle = False
+    try:
+        held = _load_pem_certificates((_mtls_dir() / MTLS_BUNDLE_NAME).read_bytes())
+        fingerprint = authority.fingerprint(hashes.SHA256())
+        in_bundle = any(cert.fingerprint(hashes.SHA256()) == fingerprint for cert in held)
+    except (OSError, ValueError):
+        pass
+    if not listed and not in_bundle:
+        return None
+    sites: Set[str] = set()
+    for path in (APPLIED_WEBSITES, CONFIG_YAML.parent / "websites.yml"):
+        entries = _load_yaml(path).get("sites") if path.exists() else None
+        for site in entries if isinstance(entries, list) else []:
+            if (
+                isinstance(site, dict)
+                and str(site.get("mtls_ca_id") or "").strip().lower() == "internal"
+                and str(site.get("mtls_mode") or "disabled").strip().lower() != "disabled"
+            ):
+                sites.add(str(site.get("name") or site.get("domain") or "?"))
+    return {"trust_list": listed, "bundle": in_bundle, "sites": sorted(sites)}
+
+
 def handle_internal_ca_rotate(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     """Replace the internal root and atomically reissue all of its active PEMs."""
     if str(body.get("confirmation") or "") != "ROTATE":
@@ -3512,6 +3546,19 @@ def handle_internal_ca_rotate(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         if not key_path.is_file() or not cert_path.is_file():
             return 404, {"ok": False, "error": "internal certificate authority was not found"}
         old_cert, _, _ = _ensure_internal_ca_locked()
+        trust = _internal_ca_client_trust(old_cert)
+        if trust is not None:
+            return 409, {
+                "ok": False,
+                "error": (
+                    "The internal CA is trusted to authenticate client certificates, "
+                    "and rotating it would leave HAProxy trusting the old root. Move the "
+                    "sites that ask for its client certificates to another authority or "
+                    "switch their client certificates off, take it off the client "
+                    "certificate trust list, then rotate."
+                ),
+                "client_trust": trust,
+            }
         affected = _internal_leaf_certificates(old_cert)
         new_cert, new_key = _generate_internal_ca_material()
         replacement_pems = {
@@ -3586,6 +3633,19 @@ def handle_internal_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         if not key_path.is_file() or not cert_path.is_file():
             return 404, {"ok": False, "error": "internal certificate authority was not found"}
         authority, _, _ = _ensure_internal_ca_locked()
+        trust = _internal_ca_client_trust(authority)
+        if trust is not None:
+            return 409, {
+                "ok": False,
+                "error": (
+                    "The internal CA is trusted to authenticate client certificates, "
+                    "and deleting it would leave HAProxy trusting it still. Move the "
+                    "sites that ask for its client certificates to another authority or "
+                    "switch their client certificates off, take it off the client "
+                    "certificate trust list, then delete."
+                ),
+                "client_trust": trust,
+            }
         affected = _internal_leaf_certificates(authority)
         if affected:
             return 409, {

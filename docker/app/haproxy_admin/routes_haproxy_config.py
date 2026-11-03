@@ -248,6 +248,18 @@ def merge_site_from_edit_form(name, existing, form):
     return site, ""
 
 
+def _client_trust_sites(res):
+    """The sites certd named as still asking for the CA's client certificates.
+
+    Quoted, so a translated refusal stays whole around them.
+    """
+    sites = (res.get("client_trust") or {}).get("sites") or []
+    if not sites:
+        return ""
+    return (" Sites that ask for its client certificates: "
+            + ", ".join(repr(str(name)) for name in sites) + ".")
+
+
 def _available_dns_profiles():
     """DNS-01 profiles offered by the site editor.
 
@@ -1379,6 +1391,7 @@ def haproxy_certs_page():
                 )
             else:
                 error = res.get("error") or "Failed to rotate the internal certificate authority"
+                error += _client_trust_sites(res)
 
         elif action == "delete_internal_ca":
             res = delete_internal_ca(request.form.get("confirmation") or "")
@@ -1386,6 +1399,7 @@ def haproxy_certs_page():
                 message = res.get("message") or "Internal certificate authority deleted."
             else:
                 error = res.get("error") or "Failed to delete the internal certificate authority"
+                error += _client_trust_sites(res)
                 blockers = res.get("blocking_certificates") or []
                 if blockers:
                     error += ": " + ", ".join(
