@@ -193,9 +193,11 @@
         tcp.servers = servers;
       }
 
+      var revisionField = document.getElementById("tcp-revision");
       var payload = {
         tcp: tcp,
-        original_name: editForm.getAttribute("data-original-name") || tcp.name
+        original_name: editForm.getAttribute("data-original-name") || tcp.name,
+        revision: revisionField ? revisionField.value : ""
       };
       return payload;
     }
@@ -234,17 +236,27 @@
         body: JSON.stringify(payload)
       })
         .then(function (resp) {
-          if (!resp.ok) {
-            throw new Error("HTTP " + resp.status);
-          }
-          return resp.json();
+          // A refused save (409 when the proxy changed in another session)
+          // still says why in its body.
+          return resp.json().catch(function () { return null; }).then(function (data) {
+            if (!data) {
+              throw new Error("HTTP " + resp.status);
+            }
+            return data;
+          });
         })
         .then(function (data) {
-          if (!data) {
-            throw new Error("Empty server response");
-          }
           if (data.ok) {
             setSaveStatus(data.message || "Saved", false);
+            // The page now shows what was written: a second save from it is
+            // checked against that, under the name it was saved with.
+            var revisionField = document.getElementById("tcp-revision");
+            if (revisionField && data.revision) {
+              revisionField.value = data.revision;
+            }
+            if (payload.tcp.name) {
+              editForm.setAttribute("data-original-name", payload.tcp.name);
+            }
             document.dispatchEvent(
               new CustomEvent("easy-ha-proxy:config-state-changed")
             );

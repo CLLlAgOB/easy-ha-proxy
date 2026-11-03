@@ -6,10 +6,12 @@ from flask import jsonify, request
 
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
+from .services_haproxy_config import StaleEntry, source_lock
 from .services_haproxy_tcp import (
     delete_tcp_proxy,
     get_tcp_proxies_list,
     save_tcp_from_json,
+    tcp_revision,
 )
 
 
@@ -48,10 +50,27 @@ def haproxy_tcp_save():
         return jsonify({"ok": False, "error": "The 'tcp' field must be an object"}), 400
 
     name = str(tcp.get("name") or original_name or "").strip()
-    before = _stored_tcp(original_name)
+    expected_revision = payload.get("revision") or None
+    before = {}
+    revision = None
 
     try:
-        ok, msg = save_tcp_from_json(tcp, original_name=original_name)
+        with source_lock("tcp"):
+            before = _stored_tcp(original_name)
+            ok, msg = save_tcp_from_json(
+                tcp, original_name=original_name, expected_revision=expected_revision
+            )
+            if ok:
+                revision = tcp_revision(name)
+    except StaleEntry as exc:
+        record_request(
+            "tcp_proxy.update",
+            object_type="tcp_proxy",
+            object_id=name,
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
+        return jsonify({"ok": False, "conflict": True, "error": str(exc)}), 409
     except Exception as exc:
         traceback.print_exc()
         record_request(
@@ -71,7 +90,10 @@ def haproxy_tcp_save():
         summary=summarize(before, tcp) if ok else "",
         detail="" if ok else str(msg)[:500],
     )
-    return jsonify({"ok": ok, ("message" if ok else "error"): msg})
+    answer = {"ok": ok, ("message" if ok else "error"): msg}
+    if revision:
+        answer["revision"] = revision
+    return jsonify(answer)
 
 
 @bp.post("/haproxy/tcp/<name>/delete")

@@ -811,9 +811,11 @@ delete site.geo_mode;
 delete site.geo_countries;
       }
 
+      var revisionField = document.getElementById("site-revision");
       var payload = {
         site: site,
-        original_name: form.getAttribute("data-original-name") || site.name
+        original_name: form.getAttribute("data-original-name") || site.name,
+        revision: revisionField ? revisionField.value : ""
       };
       return payload;
     }
@@ -893,19 +895,31 @@ delete site.geo_countries;
           body: JSON.stringify(payload)
         })
           .then(function (resp) {
-            if (!resp.ok) {
-              throw new Error("HTTP " + resp.status);
-            }
-            return resp.json();
+            // A refused save (400, or 409 when the site changed in another
+            // session) still says why in its body.
+            return resp.json().catch(function () { return null; }).then(function (data) {
+              if (!data) {
+                throw new Error("HTTP " + resp.status);
+              }
+              return data;
+            });
           })
           .then(function (data) {
-            if (!data || !data.ok) {
-              var msg =
-                (data && (data.error || data.message)) || "Save error";
+            if (!data.ok) {
+              var msg = data.error || data.message || "Save error";
               setSaveStatus(msg, true);
               return;
             }
             setSaveStatus(data.message || "Saved", false);
+            // The page now shows what was written: a second save from it is
+            // checked against that, under the name it was saved with.
+            var revisionField = document.getElementById("site-revision");
+            if (revisionField && data.revision) {
+              revisionField.value = data.revision;
+            }
+            if (payload.site.name) {
+              editForm.setAttribute("data-original-name", payload.site.name);
+            }
             document.dispatchEvent(
               new CustomEvent("easy-ha-proxy:config-state-changed")
             );

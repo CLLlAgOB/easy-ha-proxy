@@ -5,10 +5,12 @@ from flask import jsonify, request
 
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
+from .services_haproxy_config import StaleEntry, source_lock
 from .services_haproxy_sites import (
     delete_site,
     get_site_raw_and_effective,
     save_site_from_json,
+    site_revision,
     sync_renewal_pauses,
 )
 from .certd_client import upload_cert_for_site
@@ -44,16 +46,33 @@ def haproxy_site_save():
 
     site = payload.get("site") or {}
     original_name = payload.get("original_name") or None
+    expected_revision = payload.get("revision") or None
 
-    # The stored site is read before the write so the record can say what
-    # moved rather than dump the whole object. An unknown name means a create.
     name = str(site.get("name") or original_name or "").strip()
     before = {}
-    if original_name:
-        _defaults, previous, _effective = get_site_raw_and_effective(original_name)
-        before = previous or {}
-
-    ok, msg = save_site_from_json(site, original_name=original_name)
+    revision = None
+    try:
+        # One hold from the read to the write: the record says what this
+        # save moved, and the fingerprint handed back is of what it wrote.
+        with source_lock("websites"):
+            # An unknown name means a create.
+            if original_name:
+                _defaults, previous, _effective = get_site_raw_and_effective(original_name)
+                before = previous or {}
+            ok, msg = save_site_from_json(
+                site, original_name=original_name, expected_revision=expected_revision
+            )
+            if ok:
+                revision = site_revision(name)
+    except StaleEntry as exc:
+        record_request(
+            "site.update",
+            object_type="site",
+            object_id=name,
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
+        return jsonify({"ok": False, "conflict": True, "error": str(exc)}), 409
     record_request(
         "site.update" if before else "site.create",
         object_type="site",
@@ -73,7 +92,10 @@ def haproxy_site_save():
                 "it will be told on the next apply."
             )
     status = 200 if ok else 400
-    return jsonify({"ok": ok, ("message" if ok else "error"): msg}), status
+    answer = {"ok": ok, ("message" if ok else "error"): msg}
+    if revision:
+        answer["revision"] = revision
+    return jsonify(answer), status
 
 @bp.route("/haproxy/sites/<site_name>/upload-cert", methods=["POST"])
 def haproxy_site_upload_cert(site_name):

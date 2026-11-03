@@ -44,6 +44,8 @@
   </div>
 
   <form id="tcp-edit-form" method="post" data-original-name="{{ tcp.name }}">
+    {# The proxy as this page loaded it: a save after someone else's is refused, not written over it. #}
+    <input type="hidden" name="revision" id="tcp-revision" value="{{ tcp_revision | default('') }}">
     <div class="card-body">
 
       <div class="form-grid">

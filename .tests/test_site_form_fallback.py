@@ -294,7 +294,7 @@ class RouteWiringTests(unittest.TestCase):
             "\n    # ВАЖНО"
         )[0]
         self.assertIn(
-            "merge_site_from_edit_form(\n                name, site_raw, request.form\n            )",
+            "merge_site_from_edit_form(\n                        name, site_raw, request.form\n                    )",
             branch,
         )
         # The old branch built a fresh dict; nothing may reintroduce that.

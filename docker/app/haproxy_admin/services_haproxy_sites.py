@@ -19,11 +19,15 @@ from .services_haproxy_config import (
     WEBSITES_YAML,
     CONFIG_YAML,
     _load_yaml,
+    check_entry_revision,
+    entry_revision,
+    source_lock,
     update_yaml_file,
     jinja_combine,
 )
 from .validation import (
     CA_ID_RE,
+    site_identity_conflict,
     validate_cidr,
     validate_domain,
     validate_host,
@@ -240,15 +244,32 @@ def set_site_pause(name: str, key: str, paused: bool) -> Tuple[bool, str]:
 
     if key not in PAUSE_KEYS:
         return False, f"Unknown pause setting {key!r}"
-    for site in get_websites_list():
-        if isinstance(site, dict) and site.get("name") == name:
-            updated = dict(site)
-            if paused:
-                updated[key] = True
-            else:
-                updated.pop(key, None)
-            return save_site_raw(name, updated)
+    with source_lock("websites"):
+        for site in get_websites_list():
+            if isinstance(site, dict) and site.get("name") == name:
+                updated = dict(site)
+                if paused:
+                    updated[key] = True
+                else:
+                    updated.pop(key, None)
+                if key == "paused" and not paused:
+                    # Back in HAProxy: its names must be free again.
+                    others = [s for s in get_websites_list()
+                              if not (isinstance(s, dict) and s.get("name") == name)]
+                    conflict = site_identity_conflict(updated, others)
+                    if conflict:
+                        return False, conflict
+                return save_site_raw(name, updated)
     return False, f"Site {name!r} was not found"
+
+
+def site_revision(name: str) -> Optional[str]:
+    """The fingerprint of a stored site, for its edit form; None when absent."""
+
+    for site in get_websites_list():
+        if isinstance(site, dict) and (site.get("name") or "").strip() == name:
+            return entry_revision(site)
+    return None
 
 
 def sync_renewal_pauses() -> Dict[str, Any]:
@@ -368,6 +389,16 @@ def add_site_minimal(
     backend_ip: str,
     backend_port: str,
 ) -> Tuple[bool, str]:
+    with source_lock("websites"):
+        return _add_site_minimal(name, domain, backend_ip, backend_port)
+
+
+def _add_site_minimal(
+    name: str,
+    domain: str,
+    backend_ip: str,
+    backend_port: str,
+) -> Tuple[bool, str]:
     """
     Adds a minimal site:
       - name, domain, backend_ip, backend_port
@@ -384,17 +415,16 @@ def add_site_minimal(
         sites = data.get("sites") or []
         if not isinstance(sites, list):
             sites = []
-        for s in sites:
-            if s.get("name") == name:
-                return False, f"A site named {name!r} already exists"
-        sites.append(
-            {
-                "name": name,
-                "domain": domain,
-                "access_gate": True,
-                "authelia_enabled": True,
-            }
-        )
+        gate = {
+            "name": name,
+            "domain": domain,
+            "access_gate": True,
+            "authelia_enabled": True,
+        }
+        conflict = site_identity_conflict(gate, sites)
+        if conflict:
+            return False, conflict
+        sites.append(gate)
         data["sites"] = sites
         content = yaml.safe_dump(
             data,
@@ -425,17 +455,15 @@ def add_site_minimal(
     if not isinstance(sites, list):
         sites = []
 
-    # Reject a duplicate name
-    for s in sites:
-        if s.get("name") == name:
-            return False, f"A site named {name!r} already exists"
-
     new_site = {
         "name": name,
         "domain": domain,
         "backend_ip": backend_ip,
         "backend_port": port_int,
     }
+    conflict = site_identity_conflict(new_site, sites)
+    if conflict:
+        return False, conflict
     sites.append(new_site)
     data["sites"] = sites
 
@@ -453,6 +481,11 @@ def delete_site_by_name(name: str) -> Tuple[bool, str]:
     """
     Deletes the site with this name from websites.yml.
     """
+    with source_lock("websites"):
+        return _delete_site_by_name(name)
+
+
+def _delete_site_by_name(name: str) -> Tuple[bool, str]:
     data = _load_yaml(WEBSITES_YAML)
     sites = data.get("sites") or []
     if not isinstance(sites, list):
@@ -551,7 +584,23 @@ def get_site_raw_and_effective(
 
     return site_defaults, None, None
 
-def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = None) -> Tuple[bool, str]:
+def save_site_from_json(
+    site: Dict[str, Any],
+    original_name: Optional[str] = None,
+    expected_revision: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Save a site from its form; raises StaleEntry when expected_revision
+    no longer matches the stored site. See _save_site_from_json."""
+
+    with source_lock("websites"):
+        return _save_site_from_json(site, original_name, expected_revision)
+
+
+def _save_site_from_json(
+    site: Dict[str, Any],
+    original_name: Optional[str] = None,
+    expected_revision: Optional[str] = None,
+) -> Tuple[bool, str]:
     """
     Saves a site from JSON (the edit or create form).
 
@@ -787,7 +836,6 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
         return False, 'Invalid websites.yml structure (expected a sites list)'
 
     # --- create a new site or update the existing one ---------------------------
-    name_norm = name
     orig_norm = (original_name or "").strip() or None
 
     # The editor rebuilds the whole site from its form, so a key it does not
@@ -798,6 +846,10 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
          and (s.get("name") or "").strip() == (orig_norm or "")),
         {},
     )
+    if orig_norm is not None:
+        # The form was loaded with this site as it was then; another
+        # session's save since would be lost under this one.
+        check_entry_revision(previous or None, expected_revision, "This site")
     for key in PAUSE_KEYS:
         if key not in site:
             if previous.get(key) is True:
@@ -807,12 +859,18 @@ def save_site_from_json(site: Dict[str, Any], original_name: Optional[str] = Non
         else:
             site_out.pop(key, None)
 
+    # The site being edited is not its own rival; every other one is.
+    others = [
+        s for s in sites
+        if orig_norm is None or not isinstance(s, dict)
+        or (s.get("name") or "").strip() != orig_norm
+    ]
+    conflict = site_identity_conflict(site_out, others)
+    if conflict:
+        return False, conflict
+
     if orig_norm is None:
         # Creating a new site
-        for s in sites:
-            if (s.get("name") or "").strip() == name_norm:
-                return False, f"A site named {name_norm!r} already exists"
-
         sites.append(site_out)
     else:
         # Editing an existing one (it may be renamed)
@@ -930,6 +988,11 @@ def save_site_raw(name: str, new_site: Dict[str, Any]) -> Tuple[bool, str]:
     site_defaults are not added here, so the defaults keep working from
     one place.
     """
+    with source_lock("websites"):
+        return _save_site_raw(name, new_site)
+
+
+def _save_site_raw(name: str, new_site: Dict[str, Any]) -> Tuple[bool, str]:
     data = _load_yaml(WEBSITES_YAML)
     sites = data.get("sites") or []
     if not isinstance(sites, list):

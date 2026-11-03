@@ -207,6 +207,15 @@
     ": must be a comma-separated list of protocols such as h2,http/1.1": ": укажите протоколы через запятую, например h2,http/1.1",
     "the reload did not finish within ": "перезагрузка не завершилась за ",
     " did not finish within ": " не завершился за ",
-    " seconds and was stopped": " секунд; выполнение остановлено"
+    " seconds and was stopped": " секунд; выполнение остановлено",
+    "This site was changed in another session after this page was loaded. Reload the page to see that change, then make yours again.": "Этот сайт изменили в другом сеансе после загрузки этой страницы. Перезагрузите страницу, чтобы увидеть это изменение, и внесите своё ещё раз.",
+    "This TCP proxy was changed in another session after this page was loaded. Reload the page to see that change, then make yours again.": "Этот TCP-прокси изменили в другом сеансе после загрузки этой страницы. Перезагрузите страницу, чтобы увидеть это изменение, и внесите своё ещё раз.",
+    "Choose another name: ": "Выберите другое имя: ",
+    " gives the same HAProxy backend name as the site ": " даёт то же имя backend в HAProxy, что и сайт ",
+    " gives the same HAProxy backend name as the TCP proxy ": " даёт то же имя backend в HAProxy, что и TCP-прокси ",
+    "This domain is already served by another site: ": "Этот домен уже обслуживает другой сайт: ",
+    " belongs to the site ": " принадлежит сайту ",
+    "This listening address is already taken by another TCP proxy: ": "Этот адрес приёма уже занят другим TCP-прокси: ",
+    " belongs to the TCP proxy ": " принадлежит TCP-прокси "
   }
 }

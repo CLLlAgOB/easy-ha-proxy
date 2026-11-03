@@ -71,6 +71,8 @@
     <form method="post" id="site-edit-form" data-original-name="{{ original_name }}">
         <input type="hidden" name="action" value="save">
         <input type="hidden" id="site_name" value="{{ site.name }}">
+        {# The site as this page loaded it: a save after someone else's is refused, not written over it. #}
+        <input type="hidden" name="revision" id="site-revision" value="{{ site_revision | default('') }}">
 
         <div class="flex-container" style="gap: 20px; align-items: flex-start; padding: 0 16px 16px;">
 

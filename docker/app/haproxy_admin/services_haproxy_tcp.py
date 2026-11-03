@@ -10,11 +10,15 @@ import yaml
 from .services_haproxy_config import (
     TCP_YAML,
     _load_yaml,
+    check_entry_revision,
+    entry_revision,
+    source_lock,
     update_yaml_file,
 )
 from .validation import (
     BALANCE_VALUES,
     INTERVAL_RE,
+    tcp_identity_conflict,
     validate_host,
     validate_identifier,
     validate_port,
@@ -171,7 +175,32 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
     return True, "", out
 
 
-def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None) -> Tuple[bool, str]:
+def tcp_revision(name: str) -> Optional[str]:
+    """The fingerprint of a stored TCP proxy, for its edit form; None when absent."""
+
+    for proxy in get_tcp_proxies_list():
+        if isinstance(proxy, dict) and proxy.get("name") == name:
+            return entry_revision(proxy)
+    return None
+
+
+def save_tcp_from_json(
+    tcp: Dict[str, Any],
+    original_name: Optional[str] = None,
+    expected_revision: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Save a TCP proxy from its form; raises StaleEntry when expected_revision
+    no longer matches the stored proxy. See _save_tcp_from_json."""
+
+    with source_lock("tcp"):
+        return _save_tcp_from_json(tcp, original_name, expected_revision)
+
+
+def _save_tcp_from_json(
+    tcp: Dict[str, Any],
+    original_name: Optional[str] = None,
+    expected_revision: Optional[str] = None,
+) -> Tuple[bool, str]:
     """
     Saves a TCP proxy from JSON (the edit or create form).
 
@@ -183,8 +212,6 @@ def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None)
     ok, msg, tcp_out = _normalize_tcp_entry(tcp)
     if not ok or tcp_out is None:
         return False, msg
-
-    name = tcp_out["name"]
 
     data = _load_yaml(TCP_YAML)
     proxies = data.get("tcp_proxies")
@@ -202,20 +229,19 @@ def save_tcp_from_json(tcp: Dict[str, Any], original_name: Optional[str] = None)
                 break
         if idx is None:
             return False, f"TCP proxy with name={original_name!r} not found"
-
-        # Reject a name that clashes (after a rename)
-        if name != original_name:
-            for t in proxies:
-                if t.get("name") == name:
-                    return False, f"TCP proxy with name={name!r} already exists"
+        check_entry_revision(proxies[idx], expected_revision, "This TCP proxy")
+        # A rename may not take another proxy's name, nor its port
+        conflict = tcp_identity_conflict(tcp_out, proxies[:idx] + proxies[idx + 1:])
+        if conflict:
+            return False, conflict
 
         proxies[idx] = tcp_out
 
     # Creating
     else:
-        for t in proxies:
-            if t.get("name") == name:
-                return False, f"TCP proxy with name={name!r} already exists"
+        conflict = tcp_identity_conflict(tcp_out, proxies)
+        if conflict:
+            return False, conflict
         proxies.append(tcp_out)
 
     # Saved under the key tcp_proxies
@@ -235,6 +261,11 @@ def delete_tcp_proxy(name: str) -> Tuple[bool, str]:
     """
     Deletes the TCP proxy with this name from tcp.yml.
     """
+    with source_lock("tcp"):
+        return _delete_tcp_proxy(name)
+
+
+def _delete_tcp_proxy(name: str) -> Tuple[bool, str]:
     data = _load_yaml(TCP_YAML)
     proxies = data.get("tcp_proxies")
     if proxies is None:

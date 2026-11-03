@@ -469,6 +469,105 @@ def _validate_tcp(proxy: Any, index: int) -> None:
         validate_port(server.get("port"), f"tcp_proxies[{index}].servers[{srv_index}].port")
 
 
+def haproxy_name(name: Any) -> str:
+    """The name HAProxy gets for a site or TCP proxy: the template's san()."""
+
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(name or "").strip())
+
+
+def _routing_names(site: dict[str, Any]) -> set[str]:
+    names = [site.get("domain")] + list(site.get("alt_names") or [])
+    return {str(name).strip().lower() for name in names if str(name or "").strip()}
+
+
+def site_identity_conflict(candidate: dict[str, Any], others: list[Any]) -> str | None:
+    """Why a site cannot stand beside the others, or None.
+
+    Two sites may not share a name, nor two names that HAProxy writes the
+    same (shop.a and shop-a both become be_shop_a). Two sites that are both
+    in HAProxy may not route the same host name: the first would take every
+    request and the second would never see one. A paused site is out of
+    HAProxy, so a replacement may serve its domain meanwhile -- resuming it
+    is then refused until one of them gives the name up.
+    """
+
+    name = str(candidate.get("name") or "").strip()
+    serving = candidate.get("paused") is not True
+    routing = _routing_names(candidate)
+    for other in others:
+        if not isinstance(other, dict):
+            continue
+        other_name = str(other.get("name") or "").strip()
+        if other_name == name:
+            return f"A site named {name!r} already exists"
+        if haproxy_name(other_name) == haproxy_name(name):
+            return (
+                f"Choose another name: {name!r} gives the same HAProxy backend "
+                f"name as the site {other_name!r}."
+            )
+        if serving and other.get("paused") is not True:
+            shared = sorted(routing & _routing_names(other))
+            if shared:
+                return (
+                    "This domain is already served by another site: "
+                    f"{shared[0]!r} belongs to the site {other_name!r}."
+                )
+    return None
+
+
+_ANY_ADDRESS = {"", "*", "0.0.0.0", "::", "[::]"}
+
+
+def tcp_identity_conflict(candidate: dict[str, Any], others: list[Any]) -> str | None:
+    """Why a TCP proxy cannot stand beside the others, or None.
+
+    Names as for sites. Two proxies on one port would both bind it -- HAProxy
+    shares a port between its own listeners -- and connections would be dealt
+    between them at random, so a shared port needs two distinct addresses.
+    """
+
+    name = str(candidate.get("name") or "").strip()
+    address = str(candidate.get("bind_ip") or "").strip()
+    port = str(candidate.get("bind_port") or "").strip()
+    for other in others:
+        if not isinstance(other, dict):
+            continue
+        other_name = str(other.get("name") or "").strip()
+        if other_name == name:
+            return f"TCP proxy with name={name!r} already exists"
+        if haproxy_name(other_name) == haproxy_name(name):
+            return (
+                f"Choose another name: {name!r} gives the same HAProxy backend "
+                f"name as the TCP proxy {other_name!r}."
+            )
+        other_address = str(other.get("bind_ip") or "").strip()
+        if port and str(other.get("bind_port") or "").strip() == port and (
+            address == other_address or address in _ANY_ADDRESS or other_address in _ANY_ADDRESS
+        ):
+            return (
+                "This listening address is already taken by another TCP proxy: "
+                f"{address or '*'}:{port} belongs to the TCP proxy {other_name!r}."
+            )
+    return None
+
+
+def _no_shared_haproxy_names(entries: list[Any], label: str) -> None:
+    # Checked over the whole file, so an uploaded one is held to it too. Host
+    # names and ports are checked where one entry is saved: a file that
+    # already shares them must still accept saves of its other entries.
+    seen: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        key = haproxy_name(name)
+        if key in seen:
+            raise ValueError(
+                f"{label}: {name!r} and {seen[key]!r} give the same HAProxy name"
+            )
+        seen[key] = name
+
+
 def validate_config_data(kind: str, data: dict[str, Any]) -> None:
     reject_unsafe_scalars(data)
     if kind == "websites":
@@ -477,12 +576,14 @@ def validate_config_data(kind: str, data: dict[str, Any]) -> None:
             raise ValueError('sites must be a list of at most 500 items')
         for index, site in enumerate(sites):
             _validate_site(site, index)
+        _no_shared_haproxy_names(sites, "sites")
     elif kind == "tcp":
         proxies = data.get("tcp_proxies", data.get("tcp", []))
         if not isinstance(proxies, list) or len(proxies) > 500:
             raise ValueError('tcp_proxies must be a list of at most 500 items')
         for index, proxy in enumerate(proxies):
             _validate_tcp(proxy, index)
+        _no_shared_haproxy_names(proxies, "tcp_proxies")
     elif kind == "vars":
         # Every site inherits these through the template.
         defaults = data.get("site_defaults")

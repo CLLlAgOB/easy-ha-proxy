@@ -34,6 +34,10 @@ from .services_haproxy_config import (
     candidate_request_reachable,
     CONFIG_GENERATION_HEADER,
     update_yaml_file,
+    StaleEntry,
+    check_entry_revision,
+    entry_revision,
+    source_lock,
     WEBSITES_YAML,
     TCP_YAML,
     CONFIG_YAML,
@@ -1712,11 +1716,22 @@ def haproxy_site_edit(name):
         # Saving through a classic HTML form is kept just in case, but
         # normally JS intercepts it and sends JSON to /haproxy/sites/save.
         elif action == "save":
-            new_site, error = merge_site_from_edit_form(
-                name, site_raw, request.form
-            )
+            # Read, merge and write under one hold, so a save from another
+            # session in between is neither lost nor written over unseen.
+            with source_lock("websites"):
+                site_defaults, site_raw, site_effective = get_site_raw_and_effective(name)
+                if site_raw is None:
+                    abort(404)
+                try:
+                    check_entry_revision(site_raw, request.form.get("revision"), "This site")
+                    new_site, error = merge_site_from_edit_form(
+                        name, site_raw, request.form
+                    )
+                except StaleEntry as exc:
+                    new_site, error = None, str(exc)
+                if not error:
+                    ok, msg = save_site_raw(name, new_site)
             if not error:
-                ok, msg = save_site_raw(name, new_site)
                 if ok and (site_raw or {}).get("cert_renewal_paused") != new_site.get(
                     "cert_renewal_paused"
                 ):
@@ -1756,6 +1771,7 @@ def haproxy_site_edit(name):
         error=error,
         message=message,
         original_name=name,
+        site_revision=entry_revision(site_raw),
         is_new=False,
         internal_ca=authorities.get("internal"),
         external_cas=authorities.get("external") or [],
@@ -2124,6 +2140,7 @@ def haproxy_tcp_edit(name):
     return render_template(
         "haproxy_tcp_edit.html",
         tcp=tcp_obj,
+        tcp_revision=entry_revision(tcp_obj),
         error=error,
         message=message,
     )

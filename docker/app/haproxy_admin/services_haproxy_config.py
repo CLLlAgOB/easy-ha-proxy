@@ -2,6 +2,8 @@
 # Rendering, checking and applying haproxy.cfg
 # + basic operations on the YAML files (no site logic)
 
+import contextlib
+import fcntl
 import os
 import base64
 import re
@@ -15,6 +17,7 @@ import hashlib
 import ipaddress
 import secrets
 import difflib
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
@@ -23,6 +26,7 @@ from jinja2 import Environment, FileSystemLoader
 import yaml  # could be replaced with ruamel.yaml if needed
 from .validation import (
     control_plane_domains,
+    site_identity_conflict,
     validate_config_data,
     validate_control_plane_transition,
 )
@@ -1377,6 +1381,81 @@ def check_cfg(cfg_text: str) -> Tuple[int, str, str]:
 # next to BASE_DIR / HAPROXY_BACKUP_DIR / MAX_YAML_BACKUPS
 
 
+def _source_paths() -> Dict[str, Path]:
+    # Looked up on each call, so tests and other installations can patch them.
+    return {
+        "websites": WEBSITES_YAML,
+        "tcp": TCP_YAML,
+        "vars": CONFIG_YAML,
+    }
+
+
+_SOURCE_LOCKS_HELD = threading.local()
+
+
+@contextlib.contextmanager
+def source_lock(kind: str):
+    """Hold one source file still from the read to the write.
+
+    Each panel worker is its own process, and a save reads the whole file,
+    changes one entry and writes the file back. Without this, two saves of
+    different sites both succeeded and the later one dropped the earlier
+    one's change. The lock file sits beside the source; vars.yml shares the
+    one its editor already takes. Re-entrant within a thread, so a save that
+    holds it can still call update_yaml_file. Take several in the order
+    websites, tcp, vars.
+    """
+
+    held = getattr(_SOURCE_LOCKS_HELD, "kinds", None)
+    if held is None:
+        held = _SOURCE_LOCKS_HELD.kinds = set()
+    if kind in held:
+        yield
+        return
+    path = _source_paths()[kind]
+    lock_path = path.parent / f".{path.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        held.add(kind)
+        try:
+            yield
+        finally:
+            held.discard(kind)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class StaleEntry(Exception):
+    """A site or TCP proxy changed after its form was loaded."""
+
+
+def entry_revision(entry: Any) -> str:
+    """A fingerprint of one stored site or TCP proxy.
+
+    The edit form carries the one it was loaded with; a save whose
+    fingerprint no longer matches would write over someone else's change.
+    """
+
+    canonical = json.dumps(entry, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def check_entry_revision(entry: Any, expected: Optional[str], what: str) -> None:
+    """Raise StaleEntry when a form's fingerprint no longer matches.
+
+    No fingerprint means a caller that predates them (or a create), so
+    there is nothing to compare.
+    """
+
+    expected = str(expected or "").strip()
+    if expected and entry is not None and entry_revision(entry) != expected:
+        raise StaleEntry(
+            f"{what} was changed in another session after this page was "
+            "loaded. Reload the page to see that change, then make yours again."
+        )
+
+
 def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:
     """
     Replaces one of the YAML files (websites/tcp/vars) as a whole.
@@ -1386,14 +1465,14 @@ def update_yaml_file(kind: str, content: str) -> Tuple[bool, str]:
     if pending:
         return False, pending_message
 
-    mapping = {
-        "websites": WEBSITES_YAML,
-        "tcp": TCP_YAML,
-        "vars": CONFIG_YAML,
-    }
-    path = mapping.get(kind)
+    path = _source_paths().get(kind)
     if path is None:
         return False, f"Unknown file type: {kind!r}"
+    with source_lock(kind):
+        return _replace_yaml_source(kind, path, content)
+
+
+def _replace_yaml_source(kind: str, path: Path, content: str) -> Tuple[bool, str]:
     if len(content.encode("utf-8")) > 2 * 1024 * 1024:
         return False, 'YAML file exceeds the 2 MB size limit'
 
@@ -1444,6 +1523,17 @@ def add_site_minimal(
     backend_port: str,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
+    with source_lock("websites"):
+        return _add_site_minimal(name, domain, backend_ip, backend_port, extra)
+
+
+def _add_site_minimal(
+    name: str,
+    domain: str,
+    backend_ip: str,
+    backend_port: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
     """
     Adds a site:
       - required fields: name, domain, backend_ip, backend_port
@@ -1464,11 +1554,6 @@ def add_site_minimal(
     if not isinstance(sites, list):
         sites = []
 
-    # Reject a duplicate name
-    for s in sites:
-        if s.get("name") == name:
-            return False, f"A site named {name!r} already exists"
-
     new_site: Dict[str, Any] = {
         "name": name,
         "domain": domain,
@@ -1482,6 +1567,9 @@ def add_site_minimal(
             if v is not None:
                 new_site[k] = v
 
+    conflict = site_identity_conflict(new_site, sites)
+    if conflict:
+        return False, conflict
     sites.append(new_site)
     data["sites"] = sites
 
@@ -1802,16 +1890,21 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
         (HAPROXY_STATE_VARS, CONFIG_YAML, "vars.yml"),
     ]
 
-    for src, dst, label in mapping:
-        if not src.exists():
-            # this file was not backed up: skip it
-            continue
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            any_restored = True
-        except OSError as e:
-            errors.append(f"{label}: {e}")
+    # A save running alongside must land before or after the revert, never
+    # half inside it; and each file is replaced whole, never left half copied.
+    with source_lock("websites"), source_lock("tcp"), source_lock("vars"):
+        for src, dst, label in mapping:
+            if not src.exists():
+                # this file was not backed up: skip it
+                continue
+            try:
+                raw = src.read_bytes()
+                mode = (dst.stat().st_mode & 0o777) if dst.exists() else 0o640
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_snapshot(dst, raw, mode=mode)
+                any_restored = True
+            except OSError as e:
+                errors.append(f"{label}: {e}")
 
     if errors:
         return False, "Failed to revert some files: " + "; ".join(errors)
