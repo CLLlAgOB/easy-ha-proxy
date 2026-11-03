@@ -220,11 +220,21 @@ def connection_limits() -> Dict[str, int]:
 
 
 def connection_table() -> Dict[str, Dict[str, int]]:
-    """New-connection rate and open connections per address, from fe_https."""
-    try:
-        raw = haproxy_runtime_command("show table fe_https", SOCKET, timeout=2)
-    except Exception:  # pylint: disable=broad-except
-        return {}
+    """New-connection rate and open connections per address.
+
+    With an SNI router in front (a passthrough site), the router counts them
+    in tbl_conn_edge by the client's address; fe_https behind it sees only
+    127.0.0.1 at its connection stage. Without one, fe_https counts them.
+    """
+    raw = ""
+    for table in ("tbl_conn_edge", "fe_https"):
+        try:
+            raw = str(haproxy_runtime_command(f"show table {table}", SOCKET, timeout=2))
+        except Exception:  # pylint: disable=broad-except
+            continue
+        if raw.lstrip().startswith("# table:"):
+            break
+        raw = ""
     rows = {}
     for line in str(raw).splitlines():
         match = _CONN_ROW.search(line)

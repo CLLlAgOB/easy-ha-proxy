@@ -81,6 +81,10 @@ class TheFloor(unittest.TestCase):
         self.assertIn("gt 3000 }", lines_with(https, "sc0_http_req_rate(fe_https)")[0])
         self.assertIn("http_req_rate(20s)", https)
 
+    def test_without_a_router_fe_https_counts_connections_itself(self):
+        self.assertIn("tcp-request connection track-sc0 src", self.https)
+        self.assertNotIn("tbl_conn_edge", self.config)
+
     def test_the_settings_page_shows_and_edits_it(self):
         source = (ROOT / "docker/app/haproxy_admin/services_haproxy_vars.py").read_text(encoding="utf-8")
         for key in ("site_defaults.hard_req_rate", "site_defaults.hard_req_window",
@@ -89,6 +93,47 @@ class TheFloor(unittest.TestCase):
 
     def test_it_bans_nobody(self):
         self.assertIsNone(re.search(r"sc0_http_req_rate\(fe_https\).*(tbl_ban|ban_code)", self.https))
+
+
+class BehindTheRouter(unittest.TestCase):
+    """With a passthrough site an SNI router takes :443 and hands fe_https its
+    connections from 127.0.0.1 with a PROXY header. At fe_https's connection
+    stage the source is still 127.0.0.1: on the test host its table had one
+    row, key 127.0.0.1, so every client shared one connection counter -- and
+    the first version of this floor one request counter for the whole
+    gateway. The router now counts connections by the client's address in a
+    table of its own (a request tracked in fe_https's table counts as a
+    connection too: 3 connections of 4 requests read conn_rate=15 there), and
+    fe_https counts requests once the PROXY header has been read."""
+
+    def setUp(self):
+        self.config = render([site("shop", "shop.example.test"),
+                              site("files", "files.example.test", tcp_passthrough=True)],
+                             admin_ips_enabled=True)
+        self.router = frontend(self.config, "fe_tls_router")
+        self.https = frontend(self.config)
+
+    def test_the_router_counts_connections_by_the_client(self):
+        self.assertIn("backend tbl_conn_edge", self.config)
+        self.assertIn("tcp-request connection track-sc1 src table tbl_conn_edge", self.router)
+        [burst] = lines_with(self.router, "sc1_conn_rate(tbl_conn_edge) gt 200")
+        for trusted in ("!ip_whitelist", "!allowed_admin", "!ip_auth_ok"):
+            self.assertIn(trusted, burst)
+        self.assertIn("tcp-request connection reject if { sc1_conn_rate(tbl_conn_edge) gt 1000 }", self.router)
+        self.assertIn("tcp-request connection reject if { sc1_conn_cur(tbl_conn_edge) gt 500 }", self.router)
+
+    def test_fe_https_no_longer_counts_its_127_0_0_1(self):
+        self.assertNotIn("tcp-request connection track-sc0", self.https)
+        self.assertNotIn("reject if conn_", self.https)
+
+    def test_requests_are_counted_by_the_client_before_the_ceiling(self):
+        track = self.https.index("http-request track-sc0 src")
+        ceiling = self.https.index("sc0_http_req_rate(fe_https) gt 1000")
+        self.assertLess(track, ceiling)
+
+    def test_the_live_page_reads_the_routers_table_first(self):
+        source = (ROOT / "docker/app/haproxy_admin/services_live.py").read_text(encoding="utf-8")
+        self.assertIn('for table in ("tbl_conn_edge", "fe_https")', source)
 
 
 if __name__ == "__main__":
