@@ -14,7 +14,13 @@ host key live beside the record as <name>.key and <name>.known_hosts, both
 root-only.
 
 Invoked from certbot's deploy hook with the lineage and the renewed domains,
-and by certd when the operator asks to test a target from the interface.
+and by certd with --target when the operator sends to one target from the
+interface: that one alone is written, whatever names the others share.
+
+A target receives one certificate. Before anything is sent the certificate
+must cover every name the target lists; a target naming two certificates
+would get whichever renewed last at its one remote path, so it is refused
+with a word on making one target per certificate.
 
 Two things it deliberately does not do. It does not reload HAProxy: the hook
 before it already did that, and a delivery to an unreachable host must never
@@ -126,6 +132,47 @@ def wants_domain(record: Dict[str, Any], domains: List[str]) -> bool:
     if not wanted:
         return False
     return bool(wanted & {str(d).strip().lower() for d in domains})
+
+
+def certificate_names(lineage: Path) -> List[str]:
+    """The DNS names in the lineage's certificate, as openssl reads them."""
+
+    chain = lineage / "fullchain.pem"
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-in", str(chain), "-noout", "-text"],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DeliveryError(f"openssl could not read {chain}: {exc}") from None
+    if result.returncode != 0:
+        raise DeliveryError(
+            f"openssl could not read {chain}: "
+            + result.stderr.decode("utf-8", "replace").strip()
+        )
+    text = result.stdout.decode("utf-8", "replace")
+    return sorted({name.lower() for name in re.findall(r"DNS:([^\s,]+)", text)})
+
+
+def name_covered(name: str, held: List[str]) -> bool:
+    """Whether a certificate holding `held` is valid for `name`.
+
+    A wildcard stands for exactly one label, as TLS clients read it.
+    """
+
+    name = str(name).strip().lower().rstrip(".")
+    for entry in held:
+        if entry == name:
+            return True
+        if entry.startswith("*.") and "." in name and name.split(".", 1)[1] == entry[2:]:
+            return True
+    return False
+
+
+def uncovered_names(record: Dict[str, Any], lineage: Path) -> List[str]:
+    held = certificate_names(lineage)
+    names = [str(d).strip().lower() for d in record.get("domains") or [] if str(d).strip()]
+    return [name for name in names if not name_covered(name, held)]
 
 
 # ───────────────────── the artefact ─────────────────────
@@ -310,6 +357,18 @@ def deliver(record: Dict[str, Any], lineage: Path) -> Dict[str, Any]:
         return {"name": name, "ok": False,
                 "error": "no host key saved for this target"}
 
+    # Checked before any connection: the far side keeps what it had.
+    try:
+        missing = uncovered_names(record, lineage)
+    except DeliveryError as exc:
+        return {"name": name, "ok": False, "error": str(exc)}
+    if missing:
+        return {"name": name, "ok": False, "error": (
+            f"the certificate in {lineage.name} does not cover "
+            f"{', '.join(missing)}; a target receives one certificate, so "
+            "give each certificate a target of its own"
+        )}
+
     with tempfile.TemporaryDirectory(prefix="cert-deliver-") as tmp:
         workdir = Path(tmp)
         os.chmod(workdir, 0o700)
@@ -358,7 +417,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lineage", default=os.environ.get("RENEWED_LINEAGE", ""))
     parser.add_argument("--domains", default=os.environ.get("RENEWED_DOMAINS", ""))
+    # An operator's "Send now": that target alone, never every target that
+    # shares one of its names (an older worker refuses the flag outright,
+    # which is the safe way for a mixed upgrade to fail).
+    parser.add_argument("--target", default="")
     args = parser.parse_args(argv)
+
+    if args.target:
+        if not args.lineage:
+            LOG.error("--target needs --lineage")
+            return 2
+        try:
+            record = load_destination(args.target)
+        except DeliveryError as exc:
+            LOG.error("%s", exc)
+            return 1
+        outcome = deliver(record, Path(args.lineage))
+        if not outcome.get("ok"):
+            LOG.error("delivery to %s failed: %s", outcome["name"], outcome.get("error"))
+            return 1
+        LOG.info("delivered to %s", outcome["name"])
+        if outcome.get("warning"):
+            LOG.warning("%s: %s", outcome["name"], outcome["warning"])
+        return 0
 
     if not args.lineage:
         # Not an error: certbot runs deploy hooks only after a renewal, and

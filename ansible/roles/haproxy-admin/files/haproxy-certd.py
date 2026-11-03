@@ -1632,6 +1632,13 @@ def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
     ]
     if not domains:
         raise ValueError("choose at least one certificate to deliver")
+    if len(domains) > 1 and _resolve_lineage(domains[0]) is not None             and _lineage_covering(domains) is None:
+        # Two certificates at one remote path: each renewal would overwrite
+        # the other. Not yet issued means it cannot be judged, so it is kept.
+        raise ValueError(
+            "no one certificate covers all of " + ", ".join(domains)
+            + "; a target receives one certificate, so give each certificate a target of its own"
+        )
 
     transport = str(payload.get("transport") or "sftp").strip().lower()
     if transport not in DELIVERY_TRANSPORTS:
@@ -1725,18 +1732,24 @@ def test_cert_delivery(name: Any) -> Dict[str, Any]:
     if not domains:
         raise ValueError("this target has no certificate chosen")
 
-    lineage = _resolve_lineage(domains[0])
+    lineage = _lineage_covering(domains)
     if lineage is None:
+        if _resolve_lineage(domains[0]) is None:
+            raise ValueError(
+                f"there is no issued certificate for {domains[0]} to send yet"
+            )
         raise ValueError(
-            f"there is no issued certificate for {domains[0]} to send yet"
+            "no one certificate covers all of " + ", ".join(domains)
+            + "; a target receives one certificate, so give each certificate a target of its own"
         )
 
     # The worker copies over SSH: a hung ssh under it is stopped with it.
+    # --target: this record alone, never every target sharing a name with it.
     result = _run_bounded(
         [
             DELIVERY_WORKER,
             "--lineage", str(lineage),
-            "--domains", " ".join(domains),
+            "--target", checked,
         ],
         timeout=DELIVERY_TIMEOUT_SECONDS,
         text=False,
@@ -1791,6 +1804,25 @@ def _resolve_lineage(domain: str) -> Optional[Path]:
             continue
         cert = _load_first_cert_from_pem(chain)
         if cert is not None and _cert_matches_domain(cert, domain):
+            return path
+    return None
+
+
+def _lineage_covering(domains: List[str]) -> Optional[Path]:
+    """The lineage whose certificate covers every one of the names.
+
+    The one _resolve_lineage picks for the first name is tried first, so a
+    single-name target is sent what it always was.
+    """
+
+    first = _resolve_lineage(domains[0])
+    candidates = [first] if first is not None else []
+    live = _get_le_live_dir()
+    if live.is_dir():
+        candidates += [path for path in sorted(live.iterdir()) if path != first]
+    for path in candidates:
+        cert = _load_first_cert_from_pem(path / "fullchain.pem")
+        if cert is not None and all(_cert_matches_domain(cert, d) for d in domains):
             return path
     return None
 
