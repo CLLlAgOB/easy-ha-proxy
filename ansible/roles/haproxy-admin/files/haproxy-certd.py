@@ -577,6 +577,23 @@ def list_dns_providers() -> Dict[str, Any]:
     }
 
 
+def _read_dns_profile(path: Path) -> Dict[str, Any]:
+    """A stored profile's provider and values; nothing when there is none."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return {"provider": "", "values": {}}
+    provider = ""
+    values: Dict[str, str] = {}
+    for line in text.splitlines():
+        if line.startswith("# provider:"):
+            provider = line.split(":", 1)[1].strip()
+        elif " = " in line and not line.startswith("#"):
+            key, value = line.split(" = ", 1)
+            values[key.strip()] = value
+    return {"provider": provider, "values": values}
+
+
 def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Write a profile's credentials with mode 0600."""
 
@@ -593,9 +610,20 @@ def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
     if set(supplied) - set(spec["keys"]):
         raise ValueError("credentials contain an unsupported field")
 
+    # The page sends only the fields that were filled in; an empty one means
+    # "unchanged". Writing the file from the sent fields alone dropped every
+    # other stored value -- changing an RFC 2136 server erased its TSIG key,
+    # and the next renewal failed (F20, 30 October review). For the same
+    # provider the stored values stay unless a new one is sent; a change of
+    # provider starts afresh, so keys never mix.
+    stored = _read_dns_profile(path)
+    kept = stored["values"] if stored["provider"] == provider else {}
+
     lines = [f"# provider: {provider}"]
     for key in spec["keys"]:
         raw = supplied.get(key)
+        if raw is None or str(raw) == "":
+            raw = kept.get(key)
         if raw is None or str(raw) == "":
             continue
         value = str(raw)
