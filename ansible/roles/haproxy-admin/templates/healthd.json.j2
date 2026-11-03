@@ -4,6 +4,7 @@
       [
         "haproxy.service",
         "docker.service",
+        "easy-ha-proxy-alertd.service",
         "easy-ha-proxy-backupd.service",
         "easy-ha-proxy-updated.service",
         "easy-ha-proxy-metricsd.service",
@@ -13,6 +14,11 @@
         "journal-vacuum.timer"
       ]
       + (["update-admin-rt.timer"] if admin_dyn_enabled | default(false) | bool else [])
+      + (
+        ["easy-ha-proxy-backup.service", "easy-ha-proxy-backup.timer"]
+        if backup_schedule_enabled | default(true) | bool
+        else []
+      )
       + (
         [
           "easy-ha-proxy-geoip-update.service",

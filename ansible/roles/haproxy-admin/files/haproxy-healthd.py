@@ -132,6 +132,11 @@ def _control_allowed_actions(kind: str, name: str) -> Tuple[str, ...]:
         # healthd itself: restart only
         if base == _unit_base(HEALTHD_UNIT):
             return ("restart",)
+        # The scheduled backup job: shown with its journal, never started
+        # from here -- a run stops services while it archives, and backups
+        # are made on the backup page.
+        if base == "easy-ha-proxy-backup":
+            return tuple()
         # The other daemons: start/stop/restart
         return ("start", "stop", "restart")
 
