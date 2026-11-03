@@ -80,7 +80,8 @@ class TheLinters(unittest.TestCase):
             line for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
-        self.assertEqual(len(acknowledged), 4)
+        # Each one a test fixture, added deliberately: a new one moves this.
+        self.assertEqual(len(acknowledged), 5)
         self.assertTrue(all(line.split(":")[1].startswith(".tests/") for line in acknowledged))
 
     def test_the_names_come_from_a_secret(self):
