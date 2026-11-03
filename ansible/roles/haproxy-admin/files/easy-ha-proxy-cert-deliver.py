@@ -213,7 +213,9 @@ def ssh_base_command(record: Dict[str, Any], binary: str) -> List[str]:
         "-o", "IdentitiesOnly=yes",
         "-o", "ConnectTimeout=20",
         "-i", str(key_path(name)),
-        "-P" if binary.endswith("sftp") else "-p", port,
+        # sftp and scp take the port as -P (scp's -p keeps file times, and
+        # the number then reads as a file to copy); only ssh takes -p.
+        "-p" if binary.endswith("/ssh") or binary == "ssh" else "-P", port,
     ]
 
 

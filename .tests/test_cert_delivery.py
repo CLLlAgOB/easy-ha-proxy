@@ -208,13 +208,18 @@ class TheTransportIsPinned(unittest.TestCase):
         self.assertIn("BatchMode=yes", command)
 
     def test_the_port_flag_matches_the_binary(self):
-        # sftp wants -P, ssh and scp want -p. The wrong one is taken as a
-        # different option entirely.
-        sftp = deliver.ssh_base_command({"name": "x", "port": 2222}, "/usr/bin/sftp")
+        # sftp and scp want -P, ssh wants -p. The wrong one is taken as a
+        # different option entirely: scp's -p keeps file times, and the port
+        # number then reads as a file to copy -- on the standard port too,
+        # since the flag is always given (F21, 30 October review).
+        for binary in ("/usr/bin/sftp", "/usr/bin/scp"):
+            with self.subTest(binary=binary):
+                command = deliver.ssh_base_command({"name": "x", "port": 2222}, binary)
+                self.assertEqual(command[command.index("-P") + 1], "2222")
+                self.assertNotIn("-p", command)
         ssh = deliver.ssh_base_command({"name": "x", "port": 2222}, "/usr/bin/ssh")
-        self.assertIn("-P", sftp)
-        self.assertNotIn("-p", sftp)
-        self.assertIn("-p", ssh)
+        self.assertEqual(ssh[ssh.index("-p") + 1], "2222")
+        self.assertNotIn("-P", ssh)
 
     def test_a_remote_name_with_a_space_survives_the_batch_language(self):
         quoted = deliver.remote_quote("/srv/my certs/cert.pfx")
