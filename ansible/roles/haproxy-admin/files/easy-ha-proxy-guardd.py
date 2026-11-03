@@ -189,6 +189,17 @@ RUNTIME_MAX_BYTES = 8 * 1024 * 1024
 # belong to the HAProxy rules, so adaptive bans stay distinguishable in the
 # existing ban list -- and a kill switch can lift exactly these.
 ADAPTIVE_BAN_CODE = 40
+# Set by an operator from the panel (services_live.MANUAL_BAN_CODE).
+MANUAL_BAN_CODE = 50
+# Bans this daemon or an operator made. Seeing one in the table is seeing the
+# gateway's own decision, not something the client did: it must never count
+# as a finding (F03 -- an adaptive ban observed as LEGACY_HAPROXY_BAN, worth
+# 30, turned a one-hour ban into a week's with no new request).
+OWN_BAN_CODES = frozenset({ADAPTIVE_BAN_CODE, MANUAL_BAN_CODE})
+# The bans already seen, kept across restarts: a restart used to observe
+# every standing ban again, 30 points each time.
+KNOWN_BANS_STATE_KEY = "known_bans"
+KNOWN_BANS_MAX = 5000
 
 # security.burst: this many addresses banned within the window is a wave, not
 # the background; reported at most once per gap.
@@ -1662,6 +1673,11 @@ def state_for(score: int) -> str:
     return "NORMAL"
 
 
+def _own_ban_observation(event: Dict[str, Any]) -> bool:
+    detail = str(event.get("detail", ""))
+    return any(detail == f"code={code}" for code in OWN_BAN_CODES)
+
+
 def score_events(
     events: Iterable[Dict[str, Any]], now: int, policy: ScoringPolicy
 ) -> Dict[str, Any]:
@@ -1685,6 +1701,10 @@ def score_events(
         event_type = str(event.get("event_type", ""))
         base = policy.weight(event_type)
         if base <= 0:
+            continue
+        if event_type == EVENT_LEGACY_BAN and _own_ban_observation(event):
+            # Recorded before the gateway's own bans stopped being written as
+            # findings; they keep no weight.
             continue
         if int(event.get("handled", 0)) and event_type not in REFUSAL_DOES_NOT_EXCUSE:
             # HAProxy already refused this request; banning on top of a GeoIP
@@ -2685,13 +2705,19 @@ class SecurityDatabase:
         return str(row["detail"] or "") if row else ""
 
     def newest_finding_ts(self, ip: str) -> int:
-        """Timestamp of the most recent event that carries weight."""
+        """Timestamp of the most recent event that carries weight.
 
+        The gateway's own bans seen in the table are not findings, including
+        those recorded before they stopped being written.
+        """
+
+        own = [f"code={code}" for code in sorted(OWN_BAN_CODES)]
         with self._lock:
             row = self._conn.execute(
                 "SELECT MAX(ts) AS value FROM security_events "
-                "WHERE ip = ? AND event_type NOT IN (?, ?)",
-                (ip, EVENT_BAN_APPLIED, EVENT_BAN_LIFTED),
+                "WHERE ip = ? AND event_type NOT IN (?, ?) "
+                f"AND NOT (event_type = ? AND detail IN ({','.join('?' * len(own))}))",
+                (ip, EVENT_BAN_APPLIED, EVENT_BAN_LIFTED, EVENT_LEGACY_BAN, *own),
             ).fetchone()
         return int(row["value"] or 0) if row else 0
 
@@ -3802,6 +3828,7 @@ class Enforcer:
         self.mode = mode or config.mode
         self.refused = 0
         self.applied = 0
+        self.failed = 0
         self.lifted = 0
 
     @property
@@ -3814,10 +3841,17 @@ class Enforcer:
             return False
         if not enforceable(ip):
             return False
-        runtime_command(
+        answer = runtime_command(
             self.config.haproxy_socket,
             f"set table tbl_ban key {ip} data.gpc0 1 data.gpt0 {int(code)}",
         )
+        # HAProxy answers a successful `set table` with an empty line; any
+        # text is its refusal ("No such table"). A ban it refused is not a
+        # ban: no schedule, no BAN_APPLIED, and the next cycle tries again.
+        if answer.strip():
+            self.failed += 1
+            LOG.warning("HAProxy refused the ban on %s: %s", ip, answer.strip()[:200])
+            return False
         self.applied += 1
         return True
 
@@ -4687,7 +4721,8 @@ class GuardEngine:
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._known_bans: Set[str] = set()
+        # The bans already seen, as they stood before a restart.
+        self._known_bans: Set[str] = self._load_known_bans()
 
         self.last_poll_ts: Optional[int] = None
         self.last_error: Optional[str] = None
@@ -4865,6 +4900,13 @@ class GuardEngine:
             )
         return result
 
+    def _load_known_bans(self) -> Set[str]:
+        try:
+            stored = json.loads(self.database.get_state(KNOWN_BANS_STATE_KEY, "[]") or "[]")
+        except (ValueError, TypeError):
+            return set()
+        return {str(ip) for ip in stored} if isinstance(stored, list) else set()
+
     def ingest_tables(
         self, tables: Dict[str, Dict[str, Dict[str, str]]], now: int
     ) -> int:
@@ -4884,6 +4926,10 @@ class GuardEngine:
         }
         events: List[Dict[str, Any]] = []
         for ip in sorted(active - self._known_bans):
+            if _safe_int(bans[ip].get("gpt0")) in OWN_BAN_CODES:
+                # This daemon's or an operator's own ban: not something the
+                # client did.
+                continue
             # An observation, not a decision: HAProxy banned this address on
             # its own rules and guardd is recording that it happened.
             events.append(
@@ -4897,6 +4943,10 @@ class GuardEngine:
                 }
             )
             self.database.observe_ip(ip, now, self.exclusions.verdict(ip))
+        if active != self._known_bans:
+            self.database.set_state(
+                KNOWN_BANS_STATE_KEY, json.dumps(sorted(active)[:KNOWN_BANS_MAX])
+            )
         self._known_bans = active
         written = self.database.record_events(events)
         self.events_recorded += written
