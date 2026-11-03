@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import gzip
 import hashlib
 import json
@@ -66,7 +68,9 @@ from . import updates_badge
 logger = logging.getLogger("haproxy-admin")
 csrf = CSRFProtect()
 
-_DEFAULT_SECRET_FILE = "/opt/haproxy-admin/config/secret.key"
+# Where the compose file points it too; the image makes this directory
+# writable for its user, and /opt/haproxy-admin is read-only.
+_DEFAULT_SECRET_FILE = "/var/lib/haproxy-admin/secret_key"
 
 # Per-language cache of the translation catalog served as a standalone,
 # browser-cacheable JavaScript asset. Previously the whole catalog (~200 KB,
@@ -140,32 +144,58 @@ def _get_or_create_secret_key() -> str:
         logger.info("Using Flask secret key from env HAPROXY_ADMIN_SECRET_KEY")
         return env_key
 
-    # 2) Secret file.
+    # 2) Secret file, shared by every worker process.
     secret_file = os.environ.get("HAPROXY_ADMIN_SECRET_FILE", _DEFAULT_SECRET_FILE)
-
     try:
-        if os.path.exists(secret_file):
-            with open(secret_file, "r", encoding="utf-8") as f:
-                existing = f.read().strip()
-            if existing:
-                logger.info("Using Flask secret key from %s", secret_file)
-                return existing
-    except Exception as e:  # pylint: disable=broad-except
-        logger.warning("Cannot read secret file %s: %s", secret_file, e)
+        return _shared_secret_key(secret_file)
+    except OSError as exc:
+        # A key of its own per worker would sign a session or a form token
+        # that the next request, served by another worker, rejects -- and
+        # every restart would sign everyone out. Better not to start.
+        raise RuntimeError(
+            f"Cannot keep the Flask secret key in {secret_file} ({exc}); make its "
+            "directory writable or set HAPROXY_ADMIN_SECRET_KEY"
+        ) from exc
 
-    # 3) Generate a new secret.
-    new_key = secrets.token_hex(32)
 
-    try:
-        os.makedirs(os.path.dirname(secret_file), exist_ok=True)
-        with open(secret_file, "w", encoding="utf-8") as f:
-            f.write(new_key)
-        os.chmod(secret_file, 0o600)
+def _shared_secret_key(secret_file: str) -> str:
+    """Read the key, or make it, with every worker agreeing on one.
+
+    On a first start the workers arrive together. Each used to find no file,
+    make a key and write it, and the last writer won -- after the others had
+    already taken their own. Under the lock the first makes it and the rest
+    read it. It is written whole to a temporary file and moved into place.
+    """
+
+    directory = os.path.dirname(secret_file) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(f"{secret_file}.lock", "a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(secret_file, "r", encoding="utf-8") as handle:
+                existing = handle.read().strip()
+        except FileNotFoundError:
+            existing = ""
+        if existing:
+            logger.info("Using Flask secret key from %s", secret_file)
+            return existing
+
+        new_key = secrets.token_hex(32)
+        temporary = f"{secret_file}.new"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(new_key)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, secret_file)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
         logger.info("Generated new Flask secret key and saved to %s", secret_file)
-    except Exception as e:  # pylint: disable=broad-except
-        logger.warning("Cannot write secret file %s: %s", secret_file, e)
-
-    return new_key
+        return new_key
 
 
 def create_app() -> Flask:
