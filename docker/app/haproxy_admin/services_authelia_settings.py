@@ -3,7 +3,7 @@
 The service layer of the interactive Authelia settings page (without access_control.rules).
 """
 
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
 import logging
 import ipaddress
 import re
@@ -477,6 +477,33 @@ def _parse_int(form, name: str, default=None) -> int | None:
         ) from exc
 
 
+class CookiesUnreadable(RuntimeError):
+    pass
+
+
+def _cookies_with_first_updated(cookie: Dict[str, str]) -> List[Dict[str, Any]]:
+    """The stored session cookies, with only what the form shows changed.
+
+    The form edits three fields of the first cookie; configd replaces lists
+    whole. Sending [cookie] dropped every other cookie domain and the first
+    cookie's own name, same_site and lifetimes on any save -- a change of
+    log_level included (F22, 30 October review). When the stored cookies
+    cannot be read the save stops rather than writing over them.
+    """
+    resp = get_config_without_rules()
+    if not resp.get("ok"):
+        raise CookiesUnreadable(
+            "The session cookies stored now cannot be read, so the settings were not "
+            "saved: saving would replace them."
+        )
+    current = ((resp.get("config") or {}).get("session") or {}).get("cookies")
+    if not isinstance(current, list) or not current:
+        return [cookie]
+    first = dict(current[0]) if isinstance(current[0], dict) else {}
+    first.update(cookie)
+    return [first] + [dict(item) for item in current[1:] if isinstance(item, dict)]
+
+
 def save_settings_from_form(form_data) -> Tuple[bool, str]:
     """
     Takes request.form, builds a FRAGMENT of Authelia's configuration and
@@ -525,7 +552,7 @@ def save_settings_from_form(form_data) -> Tuple[bool, str]:
                 form_data.get("cookie_default_redirection_url") or ""
             ).strip(),
         }
-        session["cookies"] = [cookie]
+        session["cookies"] = _cookies_with_first_updated(cookie)
 
         # IMPORTANT: redis is NOT added here, so the existing session.redis block is left alone
         cfg["session"] = session
@@ -550,6 +577,8 @@ def save_settings_from_form(form_data) -> Tuple[bool, str]:
 
     except ValueError as exc:
         # A number failed to parse
+        return False, str(exc)
+    except CookiesUnreadable as exc:
         return False, str(exc)
 
     # Hand it to the root daemon
