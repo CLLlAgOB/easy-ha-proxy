@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "docker" / "app"))
 WINDOWS = sys.platform == "win32"
 if not WINDOWS:
-    from haproxy_admin import routes, services  # noqa: E402
+    # Imported by name: Python 3.10's mock.patch does not import a package's
+    # submodule from a dotted string.
+    from haproxy_admin import guardd_client, routes, services  # noqa: E402
 
 IP = "203.0.113.9"
 
@@ -26,7 +28,7 @@ IP = "203.0.113.9"
 class LiftingABan(unittest.TestCase):
     def lift(self, runtime, engine_down=False):
         forget = mock.Mock(side_effect=OSError("down") if engine_down else None)
-        with mock.patch("haproxy_admin.guardd_client.guardd_forget_ban", forget), \
+        with mock.patch.object(guardd_client, "guardd_forget_ban", forget), \
                 mock.patch.object(services, "haproxy_runtime_command", **runtime):
             return services.unban_ip(IP)
 
