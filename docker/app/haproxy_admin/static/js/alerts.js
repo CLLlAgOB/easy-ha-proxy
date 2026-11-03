@@ -419,7 +419,13 @@
     if (notice) notice.hidden = !unavailable;
   }
 
-  async function refresh() {
+  // The settings forms are drawn from the first answer and after a save --
+  // never by the timer, which redrew them every 20 seconds and wiped what
+  // was being typed (a recipient, a webhook secret) before it was saved.
+  let formDrawn = false;
+
+  async function refresh(options) {
+    const drawForm = Boolean(options && options.form) || !formDrawn;
     const status = byId("al-status");
     try {
       const state = await getJson("/api/alerts/state", { limit: 1 });
@@ -427,8 +433,11 @@
       renderActive(state.active, state.pending, state.catalogue);
       renderRuleFilter(state.catalogue);
       if (!historyBusy()) await loadHistory(false);
-      renderRules(state.catalogue);
-      renderConfig(state.config);
+      if (drawForm) {
+        renderRules(state.catalogue);
+        renderConfig(state.config);
+        formDrawn = true;
+      }
       const firing = (state.active || []).length;
       const pending = (state.pending || []).length;
       byId("al-count-firing").textContent = String(firing);
@@ -488,7 +497,8 @@
         ? t("Saved")
         : response.error || t("The settings were not saved");
     }
-    if (ok) await refresh();
+    // Saved: the forms show what is stored now.
+    if (ok) await refresh({ form: true });
   }
 
   function wireHistory() {
