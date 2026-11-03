@@ -750,7 +750,7 @@
 
                     <label class="form-label" for="max_req_rate" style="margin-top: 10px;">max_req_rate</label>
                     <input id="max_req_rate" name="max_req_rate" type="number" min="0" class="form-input"
-                        value="{{ site.max_req_rate or '' }}"
+                        value="{{ site.max_req_rate if site.max_req_rate is defined and site.max_req_rate is not none else '' }}"
                         placeholder="{{ eff.max_req_rate or site_defaults.max_req_rate or 200 }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Maximum request rate per IP for this site.
@@ -759,14 +759,14 @@
                             <li>the client receives <code>429</code> (Too Many Requests);</li>
                             <li>if <code>rate_ban=true</code>, IP may be added in <code>tbl_ban</code>.</li>
                         </ul>
-                        0 or empty — use the default value (from <code>site_defaults</code>).
+                        Empty — the default value (from <code>site_defaults</code>); 0 — no limit for this site.
                     </div>
 
                     <h3 style="margin-top: 20px;">Errors / error-based bans</h3>
 
                     <label class="form-label" for="err_limit" style="margin-top: 10px;">err_limit</label>
                     <input id="err_limit" name="err_limit" type="number" min="0" class="form-input"
-                        value="{{ site.err_limit or '' }}"
+                        value="{{ site.err_limit if site.err_limit is defined and site.err_limit is not none else '' }}"
                         placeholder="{{ eff.err_limit or site_defaults.err_limit or 8 }}" data-i18n-skip translate="no">
                     <div class="table-meta">
                         Error-rate threshold for this site.
@@ -776,6 +776,7 @@
                         (in window <code>err_window</code>), IP may be added in <code>tbl_ban</code>.
                         Empty — use the default value (from <code>site_defaults.err_limit</code> or default
                         8).
+                        <br>0 — the strictest: the first error may already ban the address.
                     </div>
 
                     <label class="form-label" for="err_window" style="margin-top: 10px;">err_window</label>
