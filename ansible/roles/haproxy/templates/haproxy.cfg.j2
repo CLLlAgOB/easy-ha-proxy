@@ -914,7 +914,11 @@ frontend fe_https
     http-request deny if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
     http-request redirect location %[var(txn.auth_response_location)] if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
     http-request deny status 503 if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool }
-    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if authelia_protected{{ admin_probe_condition }} { var(txn.auth_response_successful) -m bool }
+    {# Trust follows a signed-in user, not merely an allowed request: Authelia
+       answers a "bypass" rule with 200 and no user, and that marked the
+       address as authorized -- for the zero-trust TCP/UDP proxies, and as an
+       exemption from the error bans -- without anyone having signed in. #}
+    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if authelia_protected{{ admin_probe_condition }} { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
 {% endif %}
 
 {% if aut_domain is defined %}
@@ -922,7 +926,7 @@ frontend fe_https
     http-request deny if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
     http-request redirect location %[var(txn.auth_response_location)] if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
     http-request deny status 503 if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool }
-    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool }
+    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
 {% endif %}
 {% endif %}
 
