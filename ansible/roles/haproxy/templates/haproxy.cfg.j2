@@ -318,13 +318,30 @@ frontend fe_https
    over it for as long as it keeps retrying. Floods still run to thousands. #}
 {% set conn_rate_burst = sd.conn_rate_burst | default(200) %}
 {% set conn_cur_limit = sd.conn_cur_limit | default(500) %}
-    stick-table type ip size 200k expire {{ conn_expire }} store conn_rate({{ conn_rate_window }}),conn_cur
+{# The hard floor (U02; numbers chosen on 2026-11-03 from a week of real
+   traffic, where the busiest legitimate address made 216 requests in 10 s
+   with up to 98 in flight). It holds for everyone -- the whitelist, the
+   admin addresses and signed-in users included -- because a trusted machine
+   can be infected too. It refuses the excess at once and bans nobody: no
+   tbl_ban, no score, no kernel rule. Zero or less never switches it off. #}
+{% set hard_req_rate = (sd.hard_req_rate | default(1000)) | int %}
+{% if hard_req_rate <= 0 %}{% set hard_req_rate = 1000 %}{% endif %}
+{% set hard_req_window = sd.hard_req_window | default('10s') %}
+{% set conn_rate_hard = (sd.conn_rate_burst_trusted | default(1000)) | int %}
+{% if conn_rate_hard <= 0 %}{% set conn_rate_hard = 1000 %}{% endif %}
+{% set conn_cur_limit = conn_cur_limit | int %}
+{% if conn_cur_limit <= 0 %}{% set conn_cur_limit = 500 %}{% endif %}
+    stick-table type ip size 200k expire {{ conn_expire }} store conn_rate({{ conn_rate_window }}),conn_cur,http_req_rate({{ hard_req_window }})
     tcp-request connection track-sc0 src
     acl conn_rate_burst sc0_conn_rate(fe_https) gt {{ conn_rate_burst }}
+    acl conn_rate_hard  sc0_conn_rate(fe_https) gt {{ conn_rate_hard }}
     acl conn_too_many  sc0_conn_cur(fe_https)  gt {{ conn_cur_limit }}
-    tcp-request connection reject if conn_rate_burst !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    # Anonymous addresses: the ordinary connection burst.
+    tcp-request connection reject if conn_rate_burst !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if authelia_enabled %} !ip_auth_ok{% endif %}
 
-    tcp-request connection reject if conn_too_many  !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    # Everyone: the hard ceilings.
+    tcp-request connection reject if conn_rate_hard
+    tcp-request connection reject if conn_too_many
 
     # "name:443" names the same site as "name" (RFC 9110), and some clients
     # send it: one application checked its site as name:443 every minute and
@@ -344,6 +361,11 @@ frontend fe_https
     # unambiguously and no substring search can mistake it for a status.
     http-request set-var(txn.log_ua) req.fhdr(user-agent),bytes(0,128),regsub([^A-Za-z0-9./;:_-],_,g)
 {% endif %}
+
+    # The hard request ceiling, for everyone (see the hard floor above). Here,
+    # before any counter of errors and before the sign-in check: the cheapest
+    # place, and a refusal here is the gateway's own, not the client's error.
+    http-request deny status 429 if { sc0_http_req_rate(fe_https) gt {{ hard_req_rate }} }
 
     # SNI / HOST
     acl sni_found ssl_fc_sni -m found
