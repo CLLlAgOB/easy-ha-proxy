@@ -694,7 +694,8 @@ const Dashboard = (() => {
           });
           const txt = await r.text();
           if (r.ok) {
-            res.textContent = 'Success!'; res.className = 'success';
+            // A partial success says what did not happen.
+            res.textContent = txt && txt !== 'OK' ? txt : 'Success!'; res.className = 'success';
             getEl('ip').value = '';
             loadTables();
           } else {

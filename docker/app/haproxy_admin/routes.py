@@ -134,8 +134,22 @@ def api_unban():
             detail=str(exc),
         )
         raise
-    record_request("ban.lift", object_type="ip", object_id=ip)
+    _record_outcome("ban.lift", ip, response)
     return response
+
+
+def _record_outcome(action: str, ip: str, response, summary: str = "") -> None:
+    """The change log records what happened: a refusal from HAProxy is a
+    failure even though no exception was raised."""
+    text, code = response if isinstance(response, tuple) else (str(response), 200)
+    record_request(
+        action,
+        object_type="ip",
+        object_id=ip,
+        result=RESULT_SUCCESS if int(code) < 300 else RESULT_FAILURE,
+        summary=summary,
+        detail="" if int(code) < 300 and text in ("OK", "") else str(text)[:300],
+    )
 
 
 def _whitelist_api_error(scope: str, exc: Exception):
@@ -160,9 +174,7 @@ def api_whitelist():
             detail=str(exc),
         )
         return _whitelist_api_error("GEO", exc)
-    record_request(
-        "whitelist.add", object_type="ip", object_id=ip, summary="scope: geo"
-    )
+    _record_outcome("whitelist.add", ip, response, summary="scope: geo")
     return response
 
 
@@ -183,9 +195,7 @@ def api_whitelist_global():
             detail=str(exc),
         )
         return _whitelist_api_error("GLOBAL", exc)
-    record_request(
-        "whitelist.add", object_type="ip", object_id=ip, summary="scope: global"
-    )
+    _record_outcome("whitelist.add", ip, response, summary="scope: global")
     return response
 
 

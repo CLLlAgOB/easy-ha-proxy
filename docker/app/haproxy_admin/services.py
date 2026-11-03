@@ -778,6 +778,17 @@ def get_whitelists() -> dict:
 
 # ───────── Ban / unban ───────────────────────────────────────────
 
+def runtime_ok(response: str) -> bool:
+    """HAProxy answers a successful set/add/del with nothing but a newline;
+    anything else is its error ("No such table", "Unknown command")."""
+    return not str(response or "").strip()
+
+
+def reload_ok(result: str) -> bool:
+    """reload_haproxy says "... reload ok" when one of its ways worked."""
+    return bool(re.search(r"\breload ok\b", str(result or "").lower()))
+
+
 def unban_ip(ip: str):
     if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip):
         return "Invalid IP", 400
@@ -791,19 +802,47 @@ def unban_ip(ip: str):
     # Told first, so there is no window in which the engine could re-assert
     # between the two steps. Best effort: an engine that is not running must
     # not stop an operator lifting a ban HAProxy placed under its own rules.
+    engine_note = ""
     try:
         from .guardd_client import guardd_forget_ban
 
         guardd_forget_ban(ip)
     except Exception:  # pylint: disable=broad-except
         logger.info("adaptive engine not reachable while unbanning %s", ip, exc_info=True)
+        engine_note = (
+            "Lifted in HAProxy, but the adaptive engine did not answer: "
+            "a ban it scheduled may come back."
+        )
 
-    haproxy_runtime_command(
-        f"set table tbl_ban key {ip} data.gpc0 0", SOCKET, timeout=2
-    )
+    # What HAProxy said is the result: "No such table" or an unreachable
+    # socket used to be reported as OK, and recorded as a lifted ban.
+    try:
+        response = haproxy_runtime_command(
+            f"set table tbl_ban key {ip} data.gpc0 0", SOCKET, timeout=2
+        )
+    except OSError as exc:
+        return f"HAProxy did not lift the ban: {exc}", 502
+    if not runtime_ok(response):
+        return f"HAProxy did not lift the ban: {response.strip()[:200]}", 502
     global cache_time
     cache_time = datetime.min
-    return "OK", 200
+    return (engine_note or "OK"), 200
+
+
+def whitelist_outcome(done: str, cidr: str, runtime: str, reload: str):
+    """The answer to a change of an allow list: the file is written; whether
+    HAProxy took it is what the runtime update and the reload said."""
+    if reload_ok(reload):
+        return f"{done}: {cidr}", 200
+    if runtime_ok(runtime):
+        return (
+            f"{done} in the running HAProxy: {cidr}. The reload failed, so it "
+            f"is in the file but the next restart may not have it: {reload}"
+        ), 200
+    return (
+        f"Saved to the file, but HAProxy did not take it: {cidr}. "
+        f"Runtime: {runtime.strip() or 'no answer'}; reload: {reload}"
+    ), 502
 
 
 # ───── helpers for the GEO allow-list ─────
@@ -941,11 +980,13 @@ def add_to_whitelist(ip: str):
         rl_res = _safe_reload_haproxy()
         logger.info("whitelist remove %s (rt=%s, reload=%s)",
                     cidr, rt_res, rl_res)
-        return f"Removed: {cidr}", 200
+        return whitelist_outcome("Removed", cidr, rt_res, rl_res)
 
     rt_res = _safe_runtime_acl("add", cidr, _add_acl_runtime)
     rl_res = _safe_reload_haproxy()
     logger.info("whitelist add %s (rt=%s, reload=%s)", cidr, rt_res, rl_res)
+    if not reload_ok(rl_res):
+        return whitelist_outcome("Added", cidr, rt_res, rl_res)
 
     return f"Added: {cidr}", 200
 
@@ -1010,14 +1051,14 @@ def add_to_global_whitelist(ip: str):
         rl_res = _safe_reload_haproxy()
         logger.info("global whitelist remove %s (rt=%s, reload=%s)",
                     cidr, rt_res, rl_res)
-        return f"Removed from global allow list: {cidr}", 200
+        return whitelist_outcome("Removed from global allow list", cidr, rt_res, rl_res)
 
     rt_res = _safe_runtime_acl("add-global", cidr, _add_acl_runtime_global)
     rl_res = _safe_reload_haproxy()
     logger.info("global whitelist add %s (rt=%s, reload=%s)",
                 cidr, rt_res, rl_res)
 
-    return f"Added to global allow list: {cidr}", 200
+    return whitelist_outcome("Added to global allow list", cidr, rt_res, rl_res)
 
 
 def remove_host_from_global_whitelist(ip: str) -> tuple[bool, str | None]:
