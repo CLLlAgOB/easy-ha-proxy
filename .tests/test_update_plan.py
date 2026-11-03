@@ -447,6 +447,9 @@ class UpdatePlanTests(unittest.TestCase):
                     image = command[4]
                     digest = DIGEST_A if image.startswith("authelia/") else DIGEST_B
                     return CommandResult(0, f"Name: {image}\nDigest: {digest}\n")
+                if command[:2] == ("docker", "compose") and command[-2:] == ("ps", "-q"):
+                    # Which containers run: a read, never a pull.
+                    return CommandResult(0, "")
                 raise AssertionError(f"Unexpected command: {command!r}")
 
             runner = FakeRunner(handler)

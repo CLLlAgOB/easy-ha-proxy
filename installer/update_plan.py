@@ -1286,6 +1286,99 @@ def _source_image_changes(
     return changes
 
 
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
+
+
+def _running_images(compose_file: Path, runner: Runner) -> dict[str, list[str]] | None:
+    """What each running container of the stack was started from.
+
+    The image reference the container was created with (Config.Image), and
+    the image it actually runs (.Image). None when either cannot be read; an
+    empty mapping when nothing of the stack runs.
+    """
+
+    listed = runner.run(
+        ("docker", "compose", "-f", str(compose_file), "ps", "-q"),
+        timeout=COMPOSE_TIMEOUT,
+    )
+    if listed.returncode != 0:
+        return None
+    containers = [
+        line.strip()
+        for line in listed.stdout.splitlines()
+        if _CONTAINER_ID_RE.fullmatch(line.strip())
+    ]
+    if not containers:
+        return {}
+    inspected = runner.run(
+        ("docker", "inspect", "--format", "{{json .Config.Image}} {{json .Image}}", *sorted(containers)),
+        timeout=COMPOSE_TIMEOUT,
+    )
+    if inspected.returncode != 0:
+        return None
+    running: dict[str, list[str]] = {}
+    for line in inspected.stdout.splitlines():
+        try:
+            reference, image_id = (json.loads(part) for part in line.split(" ", 1))
+        except (TypeError, ValueError):
+            return None
+        if isinstance(reference, str) and isinstance(image_id, str):
+            running.setdefault(reference, [])
+            if image_id not in running[reference]:
+                running[reference].append(image_id)
+    return {reference: sorted(ids) for reference, ids in running.items()}
+
+
+def _image_layers(reference: str, runner: Runner) -> list[str] | None:
+    result = runner.run(
+        ("docker", "image", "inspect", reference, "--format", "{{json .RootFS.Layers}}"),
+        timeout=COMPOSE_TIMEOUT,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        layers = json.loads(result.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+    return layers if isinstance(layers, list) and layers else None
+
+
+def _check_running(detail: dict[str, Any], tag: str, running: dict[str, list[str]] | None,
+                   runner: Runner) -> None:
+    """Hold a "current" image to what its container really runs.
+
+    The tag being current says what a restart would start, not what runs:
+    after a pull, the tag names the new image while the container keeps the
+    old one. Compared by content -- the filesystem layers -- because the IDs
+    come in kinds that do not compare (a config ID, a platform manifest, an
+    index digest), and the same image can show two of them. A stack that
+    cannot be listed is left as the tag says, and said so.
+    """
+
+    if detail.get("state") != "current" or detail.get("reason") == "digest-pinned":
+        return
+    if running is None:
+        detail["running"] = "unchecked"
+        return
+    started = running.get(tag) or []
+    if not started:
+        return
+    wanted = _image_layers(tag, runner)
+    for image_id in started:
+        layers = _image_layers(image_id, runner) if wanted is not None else None
+        if layers is None:
+            detail.update({"state": "unknown", "reason": "running-image-unreadable",
+                           "running_image": image_id})
+            return
+        if layers != wanted:
+            # The tag is current; the container is not on it. Applying the
+            # update recreates it on what the tag now names.
+            detail.update({"state": "available", "reason": "running-older-image",
+                           "running_image": image_id})
+            return
+    detail["running"] = "same-content"
+
+
 def _probe_retargeted_image(image: str, target: str, runner: Runner) -> dict[str, Any]:
     """Probe an image the source update replaces: what runs now, what will."""
 
@@ -1371,6 +1464,10 @@ def _probe_compose(
         else _probe_image(image, runner)
         for image in images
     ]
+    running = _running_images(compose_file, runner)
+    for image, result in zip(images, image_results, strict=True):
+        if image not in retarget:
+            _check_running(result, image, running, runner)
     available = [item for item in image_results if item["state"] == "available"]
     unknown = [item for item in image_results if item["state"] == "unknown"]
     details = {"compose_file": str(compose_file), "images": image_results}
@@ -1580,6 +1677,24 @@ def _probe_admin_compose(
             details=details,
         )
     image_detail["state"] = "current"
+    _check_running(image_detail, current_image, _running_images(compose_file, runner), runner)
+    if image_detail["state"] == "available":
+        return _component(
+            "admin-container",
+            "available",
+            "The HAProxy Admin container still runs an older image than the one downloaded.",
+            current_version=local,
+            available_version=candidate,
+            details=details,
+        )
+    if image_detail["state"] == "unknown":
+        return _component(
+            "admin-container",
+            "unknown",
+            "The image the HAProxy Admin container runs could not be read.",
+            current_version=local,
+            details=details,
+        )
     return _component(
         "admin-container",
         "current",
