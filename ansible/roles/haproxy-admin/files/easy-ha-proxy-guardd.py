@@ -191,6 +191,8 @@ RUNTIME_MAX_BYTES = 8 * 1024 * 1024
 ADAPTIVE_BAN_CODE = 40
 # Set by an operator from the panel (services_live.MANUAL_BAN_CODE).
 MANUAL_BAN_CODE = 50
+# A manual ban whose table expiry jumps by more than this was placed again.
+MANUAL_BAN_REPLACED_MARGIN = 120
 # Bans this daemon or an operator made. Seeing one in the table is seeing the
 # gateway's own decision, not something the client did: it must never count
 # as a finding (F03 -- an adaptive ban observed as LEGACY_HAPROXY_BAN, worth
@@ -3156,6 +3158,19 @@ _SCHEMA_STATEMENTS: Tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_rate_warnings_ended ON rate_warnings (ended)",
+    # The operator's bans (code 50), as seen in the ban table (04.6g). The
+    # table lives in HAProxy's memory, so a restart or a reboot emptied it and
+    # the operator's decisions went with it, while this daemon put its own
+    # back from its schedule. Created where missing, like rate_warnings.
+    """
+    CREATE TABLE IF NOT EXISTS manual_bans (
+        ip          TEXT    PRIMARY KEY,
+        placed_at   INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL,
+        seen_at     INTEGER NOT NULL,
+        reasserted  INTEGER NOT NULL DEFAULT 0
+    )
+    """,
 )
 
 def _add_column_if_missing(
@@ -3342,6 +3357,48 @@ class SecurityDatabase:
                 "UPDATE ip_state SET banned_until = 0, ban_code = 0 WHERE ip = ?",
                 (ip,),
             )
+
+    # -- the operator's bans (04.6g) --------------------------------------
+
+    def manual_bans(self) -> Dict[str, Dict[str, int]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ip, placed_at, expires_at, seen_at, reasserted FROM manual_bans"
+            ).fetchall()
+        return {
+            str(row["ip"]): {
+                "placed_at": int(row["placed_at"]),
+                "expires_at": int(row["expires_at"]),
+                "seen_at": int(row["seen_at"]),
+                "reasserted": int(row["reasserted"]),
+            }
+            for row in rows
+        }
+
+    def note_manual_ban(self, ip: str, now: int, expires_at: int) -> None:
+        """Remember a manual ban seen in the table now.
+
+        Its end is the table's expiry as first seen. A ban placed again by
+        hand restarts that expiry, and is taken as the new end; a copy this
+        daemon put back after a restart restarts it too, and is not.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO manual_bans (ip, placed_at, expires_at, seen_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (ip) DO UPDATE SET seen_at = excluded.seen_at, "
+                "expires_at = CASE WHEN manual_bans.reasserted = 0 "
+                "AND excluded.expires_at > manual_bans.expires_at + ? "
+                "THEN excluded.expires_at ELSE manual_bans.expires_at END",
+                (ip, now, expires_at, now, MANUAL_BAN_REPLACED_MARGIN),
+            )
+
+    def mark_manual_reasserted(self, ip: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE manual_bans SET reasserted = 1 WHERE ip = ?", (ip,))
+
+    def forget_manual_ban(self, ip: str) -> bool:
+        with self._lock, self._conn:
+            return bool(self._conn.execute("DELETE FROM manual_bans WHERE ip = ?", (ip,)).rowcount)
 
     def scheduled_bans(self) -> Dict[str, int]:
         """Addresses this daemon believes it has banned, and until when."""
@@ -4647,6 +4704,43 @@ class Enforcer:
         self.lifted += 1
         return True
 
+    def restore(self, ip: str, code: int) -> bool:
+        """Put an entry back as it was, whatever the mode.
+
+        Not a decision of this daemon's -- the operator's ban a restart of
+        HAProxy dropped -- so neither monitor mode nor the kill switch stops it.
+        """
+        if not enforceable(ip):
+            return False
+        answer = runtime_command(
+            self.config.haproxy_socket,
+            f"set table tbl_ban key {ip} data.gpc0 1 data.gpt0 {int(code)}",
+        )
+        if answer.strip():
+            LOG.warning("HAProxy refused to restore the ban on %s: %s", ip, answer.strip()[:200])
+            return False
+        return True
+
+    def lift_code(self, ip: str, code: int) -> bool:
+        """Clear the entry only while it still carries this code (re-read first)."""
+        rows = parse_table(
+            runtime_command(self.config.haproxy_socket, f"show table tbl_ban key {ip}")
+        )
+        fields = rows.get(ip)
+        if fields is None or _safe_int(fields.get("gpt0")) != code:
+            return False
+        runtime_command(self.config.haproxy_socket, f"clear table tbl_ban key {ip}")
+        return True
+
+    def started_at(self) -> int:
+        """When the running HAProxy process started; 0 if it cannot be told."""
+        try:
+            info = runtime_command(self.config.haproxy_socket, "show info")
+        except OSError:
+            return 0
+        found = re.search(r"^Start_time_sec:\s*(\d+)", info, re.MULTILINE)
+        return int(found.group(1)) if found else 0
+
     def lift_legacy(self, ip: str) -> int:
         """Clear a ban HAProxy wrote under the old rules; 0 if it is not one.
 
@@ -5467,6 +5561,7 @@ class GuardEngine:
         self.ban_policy = BAN_POLICY_LEGACY
         self.legacy_bans: Dict[str, int] = {}
         self.legacy_lifted = 0
+        self.manual_restored = 0
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
@@ -5747,7 +5842,54 @@ class GuardEngine:
         self.legacy_bans = counts
         if counts and self.ban_policy == BAN_POLICY_U02 and self.switch_recorded():
             self.reconcile_legacy_bans(bans, now)
+        try:
+            self.keep_manual_bans(bans, now)
+        except OSError as exc:
+            LOG.warning("Could not check the manual bans against HAProxy: %s", exc)
         return written + self.ingest_rate_tables(tables, now)
+
+    def keep_manual_bans(self, bans: Dict[str, Dict[str, str]], now: int) -> int:
+        """Remember the operator's bans, and put back what a restart lost.
+
+        A manual ban that vanished is put back only if HAProxy started after
+        it was last seen: its table was emptied. One that vanished while the
+        same HAProxy kept running was lifted -- from the panel, or by hand on
+        the socket -- and is forgotten, so an unban never undoes itself. Each
+        ends when its table expiry, as first seen, says so.
+        """
+        for ip, fields in bans.items():
+            if _safe_int(fields.get("gpc0")) > 0 and _safe_int(fields.get("gpt0")) == MANUAL_BAN_CODE:
+                remaining = max(0, _safe_int(fields.get("exp")) // 1000)
+                self.database.note_manual_ban(ip, now, now + remaining)
+        records = self.database.manual_bans()
+        started: Optional[int] = None
+        restored = 0
+        for ip, record in sorted(records.items()):
+            entry = bans.get(ip) or {}
+            held = _safe_int(entry.get("gpc0")) > 0
+            code = _safe_int(entry.get("gpt0"))
+            if record["expires_at"] <= now:
+                # Over. A copy put back after a restart carries a fresh table
+                # expiry, past the operator's own: that one is lifted here.
+                if record["reasserted"] and held and code == MANUAL_BAN_CODE:
+                    self.enforcer.lift_code(ip, MANUAL_BAN_CODE)
+                self.database.forget_manual_ban(ip)
+                continue
+            if held:
+                continue
+            if started is None:
+                started = self.enforcer.started_at()
+            if not started:
+                continue  # cannot tell a restart from an unban: wait
+            if started > record["seen_at"]:
+                if self.enforcer.restore(ip, MANUAL_BAN_CODE):
+                    self.database.mark_manual_reasserted(ip)
+                    restored += 1
+                    LOG.warning("Restored the manual ban on %s, lost when HAProxy restarted", ip)
+            else:
+                self.database.forget_manual_ban(ip)
+        self.manual_restored += restored
+        return restored
 
     # -- the ban policy (U02) ---------------------------------------------
 
@@ -6741,6 +6883,9 @@ class GuardEngine:
     def _forget_ban(self, checked: str, now: int) -> Dict[str, Any]:
         held = int(self.database.scheduled_bans().get(checked, 0))
         self.database.clear_ban(checked)
+        # The operator's own ban is lifted by the caller; remembering it would
+        # put it back after the next restart of HAProxy.
+        self.database.forget_manual_ban(checked)
         lifted = self.enforcer.lift(checked)
         if held or lifted:
             self._emit(
@@ -7005,6 +7150,10 @@ class GuardEngine:
                 "switch": self.ban_policy_state(),
                 "legacy_bans": dict(self.legacy_bans),
                 "legacy_lifted": self.legacy_lifted,
+            },
+            "manual_bans": {
+                "remembered": len(self.database.manual_bans()),
+                "restored": self.manual_restored,
             },
         }
 

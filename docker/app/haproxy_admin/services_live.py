@@ -348,7 +348,8 @@ def ban_address(ip: str, client_ip: str, drop_allowlist: bool = False) -> Dict[s
 
     It goes into tbl_ban with its own code, so the ban list, the unban button
     and the firewall mirror all treat it like any other ban; it lasts as long
-    as the table keeps its entries. The operator's own address is refused:
+    as the table keeps its entries, and guardd puts it back if a restart of
+    HAProxy empties the table first. The operator's own address is refused:
     banning it would lock the operator out of the page that lifts the ban.
 
     An allow-listed address is refused too, because every ban rule carries

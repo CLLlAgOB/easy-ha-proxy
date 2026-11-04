@@ -959,6 +959,13 @@ exemption. On the switch it writes the whole ban table to
 wrote under the old rules (codes 10, 20, 30) one address at a time; manual and
 adaptive bans stay. Switching back restores none of the lifted bans.
 
+A ban placed by hand (code 50) lives in HAProxy's ban table, which a restart
+of HAProxy or a reboot empties. Adaptive protection remembers each one it
+sees, with the end the table gave it, and puts it back if HAProxy started
+after the ban was last seen. A manual ban that disappears while HAProxy keeps
+running was lifted and is forgotten, so an unban never undoes itself. This
+needs adaptive protection running (Observe or Enforce).
+
 Query strings are checked separately, and by what the **value** looks like
 rather than by the parameter it arrived under. That distinction is not
 cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`
