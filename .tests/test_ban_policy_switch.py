@@ -144,6 +144,25 @@ class TheTemplate(unittest.TestCase):
         self.assertIn("u02", fields["site_defaults.rate_ban"]["help"])
 
 
+class NewGatewaysStartOnU02(unittest.TestCase):
+    """D02 (user decision 2026-11-04): a new installation starts on the new
+    ban policy; an existing gateway is not switched by an update."""
+
+    def test_a_new_installation_writes_u02(self):
+        sys.path.insert(0, str(ROOT / "installer"))
+        import easy_ha_proxy  # pylint: disable=import-outside-toplevel
+
+        defaults = easy_ha_proxy.build_site_defaults(geoip_enabled=True)
+        self.assertEqual(defaults["ban_policy"], "u02")
+
+    def test_a_gateway_that_never_named_a_policy_stays_where_it_was(self):
+        # The template's own default, which is what a vars.yml without the
+        # key renders with: still the old policy.
+        self.assertEqual(config(None), config("legacy"))
+        template = (ROOT / "ansible/roles/haproxy/templates/haproxy.cfg.j2").read_text(encoding="utf-8")
+        self.assertIn("sd.ban_policy | default('legacy')", template)
+
+
 class Workspace(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

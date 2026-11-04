@@ -233,7 +233,8 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
                     "rate_ban is on, for its request rate. u02: an ordinary excess is refused "
                     "on that site while it lasts (429), signed-in addresses are let through with "
                     "a warning, and bans come only from adaptive protection or an operator. "
-                    "Default: legacy."
+                    "A new installation starts on u02; a gateway installed earlier stays on "
+                    "legacy until it is switched here."
                 ),
             ),
             _field("site_defaults.max_req_rate", "Maximum request rate", "integer", minimum=0, maximum=1000000),

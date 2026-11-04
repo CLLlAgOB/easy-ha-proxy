@@ -1796,7 +1796,7 @@
     "); 0 — no limit for this site.": "); 0 — без ограничения для этого сайта.",
     "0 — the strictest: the first error may already ban the address.": "0 — самое строгое: уже первая ошибка может забанить адрес.",
     "Ban policy": "Политика банов",
-    "legacy: HAProxy bans an address itself for too many errors and, where rate_ban is on, for its request rate. u02: an ordinary excess is refused on that site while it lasts (429), signed-in addresses are let through with a warning, and bans come only from adaptive protection or an operator. Default: legacy.": "legacy: HAProxy сам банит адрес за слишком много ошибок и, где включён rate_ban, за частоту запросов. u02: обычное превышение отклоняется на этом сайте, пока оно длится (429), вошедшие адреса пропускаются с предупреждением, а баны ставят только адаптивная защита или оператор. По умолчанию: legacy.",
+    "legacy: HAProxy bans an address itself for too many errors and, where rate_ban is on, for its request rate. u02: an ordinary excess is refused on that site while it lasts (429), signed-in addresses are let through with a warning, and bans come only from adaptive protection or an operator. A new installation starts on u02; a gateway installed earlier stays on legacy until it is switched here.": "legacy: HAProxy сам банит адрес за слишком много ошибок и, где включён rate_ban, за частоту запросов. u02: обычное превышение отклоняется на этом сайте, пока оно длится (429), вошедшие адреса пропускаются с предупреждением, а баны ставят только адаптивная защита или оператор. Новая установка начинает с u02; шлюз, установленный раньше, остаётся на legacy, пока его не переключат здесь.",
     "Has no effect under the u02 ban policy.": "При политике банов u02 не действует."
   }
 }

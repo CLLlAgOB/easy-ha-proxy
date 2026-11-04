@@ -968,7 +968,9 @@ on two reads in a row -- becomes the evidence of a flood in their place
 never weighed). Which weights apply is decided by the switch below.
 
 The switch is **Ban policy** under *Rate and connection protection* in the
-HAProxy settings (`site_defaults.ban_policy`), `legacy` by default. Under `u02`
+HAProxy settings (`site_defaults.ban_policy`). A new installation starts on
+`u02`; a gateway installed before it stays on `legacy` until it is switched
+here -- an update never switches it. Under `u02`
 HAProxy writes no ban of its own: a stranger over a site's request or error
 limit is refused on that site while it lasts (429), a signed-in, whitelisted or
 admin address is let through and recorded as a warning, and `rate_ban` has no

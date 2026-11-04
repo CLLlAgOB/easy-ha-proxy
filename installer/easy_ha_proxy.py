@@ -771,6 +771,13 @@ def build_site_defaults(*, geoip_enabled: bool) -> dict[str, Any]:
         "add_headers": {},
         "max_req_rate": 200,
         "rate_window": "20s",
+        # A new gateway starts on the ban policy the old one switches to by
+        # hand (D02): a hard floor for everybody, a 429 rather than a week's
+        # ban for going over a site's limit, and bans only for what looks
+        # like an attack. Under it rate_ban does nothing. Written here, not
+        # as the role's default, so an existing gateway whose vars.yml never
+        # named a policy is not switched by an update.
+        "ban_policy": "u02",
         "rate_ban": True,
         "enable_geoip": True,
         "tcp_check": False,
