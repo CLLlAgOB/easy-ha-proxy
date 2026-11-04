@@ -178,6 +178,8 @@
     "No decisions recorded yet": "Решений пока не записано",
     "Show older": "Показать более ранние",
     "Score {score}": "Баллы {score}",
-    "The security engine is not answering, so its decisions cannot be read.": "Движок безопасности не отвечает, поэтому его решения прочитать нельзя."
+    "The security engine is not answering, so its decisions cannot be read.": "Движок безопасности не отвечает, поэтому его решения прочитать нельзя.",
+    "Banned, but the security engine could not remember it: it will not come back after HAProxy restarts.": "Забанен, но движок безопасности не смог его запомнить: после перезапуска HAProxy бан не вернётся.",
+    "Banned in HAProxy, but the security engine did not answer: the ban will not come back after HAProxy restarts.": "Забанен в HAProxy, но движок безопасности не ответил: после перезапуска HAProxy бан не вернётся."
   }
 }

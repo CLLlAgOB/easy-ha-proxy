@@ -244,6 +244,24 @@ class TheRate(unittest.TestCase):
         self.assertEqual(rate, {"records_per_hour": 0, "bytes_per_hour": 0, "measured_seconds": 0})
 
 
+class TheHourlyTops(unittest.TestCase):
+    """The dashboard's top 400/451 addresses are counted beside the buffer,
+    outside its budget: bounded on their own (4 November review)."""
+
+    def test_a_flood_of_different_addresses_keeps_the_busiest(self):
+        now = 1_800_000_000
+        buffer = guardd.LiveBuffer(100_000, 3600)
+        buffer.set_budget(16 * MIB)
+        with mock.patch.object(guardd, "LIVE_HOURLY_MAX_ADDRESSES", 100):
+            busy = [record(line("198.51.100.7", 451, at=now + i)) for i in range(50)]
+            flood = [record(line(f"198.18.{i // 256}.{i % 256}", 451, at=now + i * 0.01)) for i in range(1000)]
+            buffer.extend(busy + flood)
+            sizes = [len(counter) for counter in buffer._hourly.values()]
+            self.assertLessEqual(max(sizes), 100)
+            top = buffer.attackers(now=now + 60)["code_451"]
+        self.assertEqual(top[0], {"ip": "198.51.100.7", "count": 50})
+
+
 class TheCeiling(unittest.TestCase):
     def ceiling(self, rss, limit, available, held_bytes=0, host=True):
         with mock.patch.object(guardd, "process_rss_bytes", return_value=rss), \

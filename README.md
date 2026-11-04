@@ -985,9 +985,15 @@ wrote under the old rules (codes 10, 20, 30) one address at a time; manual and
 adaptive bans stay. Switching back restores none of the lifted bans.
 
 A ban placed by hand (code 50) lives in HAProxy's ban table, which a restart
-of HAProxy or a reboot empties. Adaptive protection remembers each one it
-sees, with the end the table gave it, and puts it back if HAProxy started
-after the ban was last seen. A manual ban that disappears while HAProxy keeps
+of HAProxy or a reboot empties. A ban placed from the panel is placed by
+adaptive protection itself, which remembers it before the panel says
+"banned" and does it under the same lock as its own changes to the table,
+so an expiring adaptive ban cannot take it off; if the engine does not
+answer, the panel bans in HAProxy alone and says the ban will not come back
+after a restart. Adaptive protection also remembers each manual ban it sees
+in the table, with the end the table gave it, and puts it back if HAProxy
+started after the ban was last seen. A lift HAProxy refuses is not taken
+for one: the ban stays on the schedule and is lifted on a later cycle. A manual ban that disappears while HAProxy keeps
 running was lifted and is forgotten, so an unban never undoes itself. This
 needs adaptive protection running (Observe or Enforce).
 

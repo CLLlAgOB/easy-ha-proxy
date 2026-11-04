@@ -691,6 +691,8 @@
       window.alert(t(payload.error || "The ban was not placed"));
       return;
     }
+    // Banned, but it may not survive a restart of HAProxy: said, not hidden.
+    if (payload.note) window.alert(t(payload.note));
     refresh(true);
   }
 
@@ -708,6 +710,8 @@
       window.alert(t(payload.error || "The ban was not placed"));
       return;
     }
+    // Banned, but it may not survive a restart of HAProxy: said, not hidden.
+    if (payload.note) window.alert(t(payload.note));
     refresh(true);
   }
 

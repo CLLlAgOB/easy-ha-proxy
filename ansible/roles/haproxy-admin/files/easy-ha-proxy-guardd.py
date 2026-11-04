@@ -193,6 +193,13 @@ ADAPTIVE_BAN_CODE = 40
 MANUAL_BAN_CODE = 50
 # A manual ban whose table expiry jumps by more than this was placed again.
 MANUAL_BAN_REPLACED_MARGIN = 120
+# A manual ban's term before HAProxy has said what its table gives it: the
+# table's own default expiry (sd.ban_expire, 168h).
+MANUAL_BAN_DEFAULT_SECONDS = 7 * 86400
+
+
+class ManualBanRefused(RuntimeError):
+    """HAProxy refused an operator's ban."""
 # Ban decisions (06.1-06.4): how much of the reason is kept, for how many
 # rows, and how long a decision may stay pending before a cycle settles it.
 DECISION_EVIDENCE_LISTED = 12
@@ -4856,6 +4863,10 @@ class RequestLog:
 # ---------------------------------------------------------------------------
 
 
+class LiftRefused(OSError):
+    """HAProxy refused to remove a ban table entry: the ban still stands."""
+
+
 class Enforcer:
     """The ban path, isolated so the monitor guarantee stays checkable.
 
@@ -4949,11 +4960,22 @@ class Enforcer:
                 fields.get("gpt0"),
             )
             return False
-        runtime_command(
-            self.config.haproxy_socket, f"clear table tbl_ban key {ip}"
-        )
+        self._clear(ip)
         self.lifted += 1
         return True
+
+    def _clear(self, ip: str) -> None:
+        """Remove the entry, or raise LiftRefused with HAProxy's words.
+
+        HAProxy answers a successful `clear table` with nothing. Any text is
+        its refusal, and it used to be taken for a lift: the schedule was
+        dropped and the history said "lifted" while the entry stayed, for as
+        long as the table keeps it (R01).
+        """
+        answer = runtime_command(self.config.haproxy_socket, f"clear table tbl_ban key {ip}")
+        if answer.strip():
+            self.failed += 1
+            raise LiftRefused(f"HAProxy refused to lift the ban on {ip}: {answer.strip()[:200]}")
 
     def restore(self, ip: str, code: int) -> bool:
         """Put an entry back as it was, whatever the mode.
@@ -4980,7 +5002,7 @@ class Enforcer:
         fields = rows.get(ip)
         if fields is None or _safe_int(fields.get("gpt0")) != code:
             return False
-        runtime_command(self.config.haproxy_socket, f"clear table tbl_ban key {ip}")
+        self._clear(ip)
         return True
 
     def started_at(self) -> int:
@@ -5008,7 +5030,7 @@ class Enforcer:
         code = _safe_int(fields.get("gpt0"))
         if code not in LEGACY_BAN_CODES:
             return 0
-        runtime_command(self.config.haproxy_socket, f"clear table tbl_ban key {ip}")
+        self._clear(ip)
         return code
 
 
@@ -5059,6 +5081,11 @@ LIVE_REFILL_BYTES = 16 * 1024 * 1024
 # begins.
 LIVE_REFILL_CHUNK_BYTES = 4 * 1024 * 1024
 LIVE_REFILL_FULL = 0.98
+# The dashboard's top 400/451 addresses are counted per hour beside the
+# buffer, not in it. At most this many addresses an hour each; past it the
+# less busy half goes (the 4 November review measured 40 000 addresses in
+# about 5 MB outside the budget).
+LIVE_HOURLY_MAX_ADDRESSES = 10_000
 # Index of each field in a live record.
 (L_TS, L_IP, L_STATUS, L_HOST, L_PATH, L_METHOD, L_BACKEND, L_BYTES,
  L_DURATION, L_TERM, L_REASON, L_REFUSAL, L_RESPONSE, L_TIMES, L_REQUEST_ID,
@@ -5761,7 +5788,14 @@ class LiveBuffer:
                 slot[1] += size
             if record[L_STATUS] in (400, 451):
                 hour = int(record[L_TS]) // 3600 * 3600
-                self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
+                counter = self._hourly.setdefault((hour, record[L_STATUS]), Counter())
+                counter[record[L_IP]] += 1
+                if len(counter) > LIVE_HOURLY_MAX_ADDRESSES:
+                    # Outside the memory budget, so bounded on its own: a
+                    # flood of different addresses keeps the busiest ones.
+                    kept = counter.most_common(LIVE_HOURLY_MAX_ADDRESSES // 2)
+                    counter.clear()
+                    counter.update(dict(kept))
         if len(arrivals) > LIVE_RATE_SECONDS // 60 + 10:
             first = max(arrivals) - LIVE_RATE_SECONDS // 60
             for minute in [minute for minute in arrivals if minute < first]:
@@ -6589,12 +6623,15 @@ class GuardEngine:
             if code in LEGACY_BAN_CODES:
                 counts[str(code)] = counts.get(str(code), 0) + 1
         self.legacy_bans = counts
-        if counts and self.ban_policy == BAN_POLICY_U02 and self.switch_recorded():
-            self.reconcile_legacy_bans(bans, now)
-        try:
-            self.keep_manual_bans(bans, now)
-        except OSError as exc:
-            LOG.warning("Could not check the manual bans against HAProxy: %s", exc)
+        # Changes to the ban table, under the lock every other one takes --
+        # expiry, an operator's ban or unban, a mode switch (R03).
+        with self._decisions:
+            if counts and self.ban_policy == BAN_POLICY_U02 and self.switch_recorded():
+                self.reconcile_legacy_bans(bans, now)
+            try:
+                self.keep_manual_bans(bans, now)
+            except OSError as exc:
+                LOG.warning("Could not check the manual bans against HAProxy: %s", exc)
         return written + self.ingest_rate_tables(tables, now)
 
     def keep_manual_bans(self, bans: Dict[str, Dict[str, str]], now: int) -> int:
@@ -6633,6 +6670,10 @@ class GuardEngine:
                 self.database.forget_manual_ban(ip)
                 continue
             if held:
+                continue
+            if record["seen_at"] >= now:
+                # Remembered after this cycle read the table (a ban placed by
+                # hand just now): the table read says nothing about it yet.
                 continue
             if started is None:
                 started = self.enforcer.started_at()
@@ -7491,7 +7532,12 @@ class GuardEngine:
                 LOG.warning("Recorded the ban on %s applied before a crash", ip)
                 continue
             if standing.get(ip) == ADAPTIVE_BAN_CODE and ip not in scheduled:
-                self.enforcer.lift(ip)  # its term is over, or it was never ours to keep
+                try:
+                    self.enforcer.lift(ip)  # its term is over, or it was never ours to keep
+                except LiftRefused as exc:
+                    # Left pending: the next cycle tries again.
+                    LOG.warning("%s", exc)
+                    continue
             self.database.settle_decision(int(decision["id"]), "abandoned")
 
     def ban_duration(self, ip: str, now: int) -> int:
@@ -7542,7 +7588,14 @@ class GuardEngine:
             # trap.
             if enforcing and not served:
                 continue
-            if self.enforcer.lift(ip):
+            try:
+                taken_off = self.enforcer.lift(ip)
+            except LiftRefused as exc:
+                # The ban still stands: kept on the schedule, so the next
+                # cycle lifts it -- no "lifted" written, no strike (R01).
+                LOG.warning("%s; trying again next cycle", exc)
+                continue
+            if taken_off:
                 lifted.append(ip)
                 self._emit(
                     ip,
@@ -7572,8 +7625,11 @@ class GuardEngine:
             for ip in self.enforcer.adaptive_bans():
                 if ip in scheduled:
                     continue
-                if self.enforcer.lift(ip):
-                    lifted.append(ip)
+                try:
+                    if self.enforcer.lift(ip):
+                        lifted.append(ip)
+                except LiftRefused as exc:
+                    LOG.warning("%s; trying again next cycle", exc)
             return {"applied": applied, "lifted": lifted, "enforcing": False}
 
         # A ban longer than the stick table's own expiry would lapse inside
@@ -7736,6 +7792,55 @@ class GuardEngine:
                 ),
             )
 
+    def place_manual_ban(self, ip: str, now: Optional[int] = None) -> Dict[str, Any]:
+        """An operator's ban, placed here rather than by the panel (R02/R03).
+
+        Under the same lock as every other decision about the ban table, so
+        an expiring adaptive ban read as code 40 can no longer clear a manual
+        ban written in between. Remembered before HAProxy is asked, and with
+        the term the table gives it once it is there: a restart of HAProxy
+        right after the panel says "banned" puts it back. Raises ValueError
+        for an address that cannot be banned and ManualBanRefused when
+        HAProxy refuses.
+        """
+        now = now or _utc_now()
+        checked = str(ip or "").strip()
+        if not enforceable(checked):
+            raise ValueError("only an IPv4 address can be banned")
+        with self._decisions:
+            remembered = True
+            try:
+                self.database.note_manual_ban(checked, now, now + MANUAL_BAN_DEFAULT_SECONDS)
+            except sqlite3.Error as exc:
+                remembered = False
+                LOG.warning("Could not remember the manual ban on %s: %s", checked, exc)
+            if not self.enforcer.restore(checked, MANUAL_BAN_CODE):
+                if remembered:
+                    with contextlib.suppress(sqlite3.Error):
+                        self.database.forget_manual_ban(checked)
+                raise ManualBanRefused(f"HAProxy refused the ban on {checked}")
+            until = now + MANUAL_BAN_DEFAULT_SECONDS
+            with contextlib.suppress(OSError):
+                fields = parse_table(runtime_command(
+                    self.config.haproxy_socket, f"show table tbl_ban key {checked}"
+                )).get(checked) or {}
+                if _safe_int(fields.get("exp")) > 0:
+                    until = now + _safe_int(fields.get("exp")) // 1000
+            try:
+                self.database.note_manual_ban(checked, now, until)
+                self.database.record_decision(
+                    checked, now, "applied", "operator", "applied",
+                    code=MANUAL_BAN_CODE, until=until, policy=self.ban_policy,
+                )
+            except sqlite3.Error as exc:
+                # Banned all the same; the answer says it may not survive a
+                # restart of HAProxy rather than promising that it will.
+                remembered = False
+                LOG.warning("Banned %s by hand, but could not remember it: %s", checked, exc)
+        LOG.warning("Ban placed by hand on %s until %s", checked, until)
+        return {"ok": True, "ip": checked, "code": MANUAL_BAN_CODE, "until": until,
+                "remembered": remembered}
+
     def forget_ban(self, ip: str, now: Optional[int] = None) -> Dict[str, Any]:
         """Drop this daemon's hold on an address, because a person said so.
 
@@ -7766,7 +7871,15 @@ class GuardEngine:
         # The operator's own ban is lifted by the caller; remembering it would
         # put it back after the next restart of HAProxy.
         manual = self.database.forget_manual_ban(checked)
-        lifted = self.enforcer.lift(checked)
+        # The schedule goes whatever HAProxy says: the operator means the
+        # address to be let go, and the panel clears the entry itself right
+        # after. A refusal is said, and written as one -- not as a lift.
+        refused = ""
+        try:
+            lifted = self.enforcer.lift(checked)
+        except LiftRefused as exc:
+            lifted, refused = False, str(exc)
+            LOG.warning("%s", exc)
         if held or lifted:
             self._emit(
                 checked,
@@ -7785,13 +7898,14 @@ class GuardEngine:
         legacy = self._settle_legacy_observed(checked)
         if held or lifted or manual or legacy:
             self.database.record_decision(
-                checked, now, "lifted", "operator", "applied",
+                checked, now, "lifted", "operator", "failed" if refused else "applied",
                 code=(ADAPTIVE_BAN_CODE if (held or lifted)
                       else MANUAL_BAN_CODE if manual else legacy),
                 until=held, policy=self.ban_policy,
             )
         return {
             "ok": True,
+            "refused": refused,
             "ip": checked,
             "was_scheduled": bool(held),
             "lifted": lifted,
@@ -8582,6 +8696,33 @@ class GuardHandler(BaseHTTPRequestHandler):
             self._send_json(
                 200, {"ok": True, "ban_durations_seconds": list(steps)}
             )
+            return
+
+        if path == "/api/v1/guard/ban/manual":
+            # An operator's ban from the panel: placed and remembered here,
+            # serialized with every other change to the ban table (R02/R03).
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+                if length <= 0 or length > 1024:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+                if not isinstance(payload, dict):
+                    raise ValueError("expected an object")
+                result = engine.place_manual_ban(str(payload.get("ip", "")))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            except (ManualBanRefused, OSError) as exc:
+                self._send_json(502, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("cannot place the manual ban")
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, result)
             return
 
         if path == "/api/v1/guard/ban/forget":

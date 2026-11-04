@@ -142,6 +142,18 @@ def guardd_forget_ban(ip: str) -> Dict[str, Any]:
                           timeout=15, with_token=True)
 
 
+def guardd_manual_ban(ip: str) -> Dict[str, Any]:
+    """Have the engine place an operator's ban and remember it.
+
+    The body comes back whatever the status: ok=false carries HAProxy's or
+    the engine's refusal. GuarddUnavailable when the engine does not answer.
+    """
+
+    return _guardd().post("/api/v1/guard/ban/manual", {"ip": (ip or "").strip()},
+                          timeout=15, with_token=True, check_status=False,
+                          require_object=True)
+
+
 def guardd_set_mode(mode: str) -> Dict[str, Any]:
     """Switch between observing and enforcing.
 

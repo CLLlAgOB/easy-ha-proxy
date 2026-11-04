@@ -23,6 +23,8 @@
       window.alert(t(payload.error || "The ban was not placed"));
       return false;
     }
+    // Banned, but it may not survive a restart of HAProxy: said, not hidden.
+    if (payload.note) window.alert(t(payload.note));
     return true;
   }
 

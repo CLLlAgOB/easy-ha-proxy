@@ -654,11 +654,35 @@ def ban_address(ip: str, client_ip: str, drop_allowlist: bool = False) -> Dict[s
                 "error": "The address was not found as a single allow-list entry",
             }
 
-    answer = haproxy_runtime_command(
-        f"set table tbl_ban key {ip} data.gpc0 1 data.gpt0 {MANUAL_BAN_CODE}", SOCKET, timeout=2
-    )
-    if str(answer).strip():
-        return {"ok": False, "error": f"HAProxy refused: {str(answer).strip()[:200]}"}
+    # Placed by the security engine (R02/R03): there it is serialized with the
+    # engine's own changes to the ban table -- an expiring adaptive ban can
+    # no longer clear it -- and remembered before "banned" is answered, so a
+    # restart of HAProxy right after still puts it back.
+    from .guardd_client import GuarddUnavailable, guardd_manual_ban
+
+    note = ""
+    try:
+        answer = guardd_manual_ban(ip)
+    except GuarddUnavailable:
+        LOG.info("security engine not reachable while banning %s by hand", ip, exc_info=True)
+        answer = None
+    if answer is not None:
+        if answer.get("ok") is False:
+            return {"ok": False, "error": str(answer.get("error") or "The ban was not placed")[:300]}
+        if answer.get("remembered") is False:
+            note = "Banned, but the security engine could not remember it: it will not come back after HAProxy restarts."
+    else:
+        # The engine is down: HAProxy alone, as before, and said so.
+        reply = haproxy_runtime_command(
+            f"set table tbl_ban key {ip} data.gpc0 1 data.gpt0 {MANUAL_BAN_CODE}", SOCKET, timeout=2
+        )
+        if str(reply).strip():
+            return {"ok": False, "error": f"HAProxy refused: {str(reply).strip()[:200]}"}
+        note = ("Banned in HAProxy, but the security engine did not answer: "
+                "the ban will not come back after HAProxy restarts.")
     # get_tables caches for a few seconds; the page should see the ban now.
     services.cache_time = services.datetime.min
-    return {"ok": True, "ip": ip, "code": MANUAL_BAN_CODE, "dropped_from_allowlist": bool(drop_allowlist)}
+    result = {"ok": True, "ip": ip, "code": MANUAL_BAN_CODE, "dropped_from_allowlist": bool(drop_allowlist)}
+    if note:
+        result["note"] = note
+    return result
