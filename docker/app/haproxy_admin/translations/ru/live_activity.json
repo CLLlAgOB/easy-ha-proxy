@@ -156,6 +156,16 @@
     "An old HAProxy ban, lifted by the new ban policy": "Старый бан HAProxy, снят новой политикой банов",
     "HAProxy refused it": "HAProxy его не принял",
     "Not applied": "Не применён",
-    "Being applied": "Применяется"
+    "Being applied": "Применяется",
+    "Banned by HAProxy's own rule (first seen)": "Забанен собственным правилом HAProxy (когда замечен)",
+    "HAProxy's own ban is no longer in force": "Собственный бан HAProxy больше не действует",
+    "Request rate": "Частота запросов",
+    "Error rate (4xx)": "Частота ошибок (4xx)",
+    "HAProxy banned this address on its own rule. HAProxy does not record when it decided or what tipped it over; below is when the security engine first saw the ban and the site counters at that moment.": "HAProxy забанил этот адрес собственным правилом. Когда он это решил и что стало последней каплей, HAProxy не записывает; ниже — когда движок безопасности впервые увидел бан и счётчики сайтов в тот момент.",
+    "First seen": "Впервые замечен",
+    "Counter": "Счётчик",
+    "Limit": "Предел",
+    "Unknown names": "Неизвестные имена",
+    "No site counter held this address when the ban was first seen.": "Когда бан впервые заметили, ни один счётчик сайта этот адрес не держал."
   }
 }

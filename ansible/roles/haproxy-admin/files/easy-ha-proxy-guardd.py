@@ -209,6 +209,13 @@ OWN_BAN_CODES = frozenset({ADAPTIVE_BAN_CODE, MANUAL_BAN_CODE})
 # every standing ban again, 30 points each time.
 KNOWN_BANS_STATE_KEY = "known_bans"
 KNOWN_BANS_MAX = 5000
+# HAProxy's own bans (codes 10/20/30) this daemon wrote into the decision
+# history when it first saw them, address -> code, so the end of each is
+# written once (06.5b). Kept across restarts like the known bans.
+LEGACY_OBSERVED_STATE_KEY = "legacy_observed"
+# The site counters kept with such a ban: the ones that held the address
+# when it was first seen, most telling first.
+LEGACY_READINGS_LISTED = 6
 
 # security.burst: this many addresses banned within the window is a wave, not
 # the background; reported at most once per gap.
@@ -2059,6 +2066,39 @@ def read_thresholds(path: str = "") -> Dict[str, int]:
         match.group("table"): int(match.group("limit"))
         for match in _THRESHOLD_RE.finditer(text)
     }
+
+
+def legacy_ban_readings(
+    ip: str, tables: Dict[str, Dict[str, Dict[str, str]]], thresholds: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """The per-site request and error counters holding an address, with the
+    limit each is held to: what can be said about a ban HAProxy placed on
+    its own rules, which it does not explain. Over the limit first."""
+    readings: List[Dict[str, Any]] = []
+    for name in sorted(tables):
+        if name.startswith("tbl_rate_"):
+            counter = "http_req_rate"
+        elif name.startswith("tbl_err_"):
+            counter = "http_err_rate"
+        else:
+            continue
+        fields = tables[name].get(ip)
+        if not fields:
+            continue
+        value = next((_safe_int(raw) for key, raw in fields.items() if key.startswith(counter)), 0)
+        if value <= 0:
+            continue
+        limit = thresholds.get(name)
+        readings.append({
+            "table": name,
+            "site": name.split("_", 2)[-1],
+            "counter": counter,
+            "value": value,
+            "limit": limit,
+            "over": limit is not None and value > limit,
+        })
+    readings.sort(key=lambda item: (not item["over"], -item["value"], item["table"]))
+    return readings[:LEGACY_READINGS_LISTED]
 
 
 # ---------------------------------------------------------------------------
@@ -5963,6 +6003,7 @@ class GuardEngine:
         self._thread: Optional[threading.Thread] = None
         # The bans already seen, as they stood before a restart.
         self._known_bans: Set[str] = self._load_known_bans()
+        self.legacy_observed: Dict[str, int] = self._load_legacy_observed()
 
         self.last_poll_ts: Optional[int] = None
         self.last_error: Optional[str] = None
@@ -6249,6 +6290,86 @@ class GuardEngine:
             return set()
         return {str(ip) for ip in stored} if isinstance(stored, list) else set()
 
+    def _load_legacy_observed(self) -> Dict[str, int]:
+        try:
+            stored = json.loads(self.database.get_state(LEGACY_OBSERVED_STATE_KEY, "{}") or "{}")
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(stored, dict):
+            return {}
+        return {
+            str(ip): _safe_int(code) for ip, code in stored.items()
+            if _safe_int(code) in LEGACY_BAN_CODES
+        }
+
+    def _save_legacy_observed(self) -> None:
+        while len(self.legacy_observed) > KNOWN_BANS_MAX:
+            self.legacy_observed.pop(next(iter(self.legacy_observed)))
+        self.database.set_state(LEGACY_OBSERVED_STATE_KEY, json.dumps(self.legacy_observed))
+
+    def observe_legacy_bans(
+        self,
+        bans: Dict[str, Dict[str, str]],
+        newly: Set[str],
+        tables: Dict[str, Dict[str, Dict[str, str]]],
+        now: int,
+    ) -> int:
+        """Write HAProxy's own bans into the decision history, as seen (06.5b).
+
+        HAProxy does not record when it decided a ban or what tipped it over,
+        and this does not make either up: what is written is when this daemon
+        first saw the ban, its code and expiry, and the site counters that
+        held the address at that moment. A ban already standing before this
+        record existed is left alone rather than given a first sighting that
+        is not one. When one leaves the table -- it ran out, HAProxy
+        restarted, another ban replaced it -- that is written once.
+        """
+        written = 0
+        changed = False
+        thresholds: Optional[Dict[str, int]] = None
+        for ip in sorted(newly):
+            fields = bans.get(ip) or {}
+            code = _safe_int(fields.get("gpt0"))
+            if code not in LEGACY_BAN_CODES:
+                continue
+            if thresholds is None:
+                thresholds = read_thresholds()
+            remaining = max(0, _safe_int(fields.get("exp")) // 1000)
+            self.database.record_decision(
+                ip, now, "observed", "haproxy", "observed",
+                code=code, until=now + remaining, policy=self.ban_policy,
+                reason={
+                    "first_seen": now,
+                    # Not known: HAProxy keeps no record of it.
+                    "decided_at": None,
+                    "readings": legacy_ban_readings(ip, tables, thresholds),
+                },
+            )
+            self.legacy_observed[ip] = code
+            written += 1
+            changed = True
+        for ip, code in list(self.legacy_observed.items()):
+            fields = bans.get(ip) or {}
+            if _safe_int(fields.get("gpc0")) > 0 and _safe_int(fields.get("gpt0")) == code:
+                continue
+            del self.legacy_observed[ip]
+            self.database.record_decision(
+                ip, now, "ended", "haproxy", "observed", code=code, policy=self.ban_policy,
+            )
+            written += 1
+            changed = True
+        if changed:
+            self._save_legacy_observed()
+        return written
+
+    def _settle_legacy_observed(self, ip: str) -> int:
+        """Stop following an observed ban whose end was written another way;
+        returns its code, 0 when it was not followed."""
+        code = self.legacy_observed.pop(ip, 0)
+        if code:
+            self._save_legacy_observed()
+        return code
+
     def ingest_tables(
         self, tables: Dict[str, Dict[str, Dict[str, str]]], now: int
     ) -> int:
@@ -6267,7 +6388,12 @@ class GuardEngine:
             ip for ip, fields in bans.items() if _safe_int(fields.get("gpc0")) > 0
         }
         events: List[Dict[str, Any]] = []
-        for ip in sorted(active - self._known_bans):
+        newly = active - self._known_bans
+        try:
+            self.observe_legacy_bans(bans, newly, tables, now)
+        except sqlite3.Error as exc:
+            LOG.warning("Could not write HAProxy's own bans into the decision history: %s", exc)
+        for ip in sorted(newly):
             if _safe_int(bans[ip].get("gpt0")) in OWN_BAN_CODES:
                 # This daemon's or an operator's own ban: not something the
                 # client did.
@@ -6451,6 +6577,8 @@ class GuardEngine:
             self.database.record_decision(
                 ip, now, "lifted", "policy", "applied", code=code, policy=BAN_POLICY_U02,
             )
+            # Its end is this decision; not "no longer in force" next cycle too.
+            self._settle_legacy_observed(ip)
         if lifted:
             self.legacy_lifted += lifted
             LOG.warning("Lifted %d bans HAProxy wrote under the old rules", lifted)
@@ -7450,10 +7578,15 @@ class GuardEngine:
             LOG.warning(
                 "Ban on %s cleared by hand; the schedule is dropped", checked
             )
-        if held or lifted or manual:
+        # HAProxy's own ban is lifted by the caller too (the panel clears the
+        # entry right after this call): written here as the operator's, not
+        # as "no longer in force" on the next cycle.
+        legacy = self._settle_legacy_observed(checked)
+        if held or lifted or manual or legacy:
             self.database.record_decision(
                 checked, now, "lifted", "operator", "applied",
-                code=ADAPTIVE_BAN_CODE if (held or lifted) else MANUAL_BAN_CODE,
+                code=(ADAPTIVE_BAN_CODE if (held or lifted)
+                      else MANUAL_BAN_CODE if manual else legacy),
                 until=held, policy=self.ban_policy,
             )
         return {

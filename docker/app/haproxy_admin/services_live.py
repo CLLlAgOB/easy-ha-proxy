@@ -197,6 +197,13 @@ DECISION_LABELS = {
     ("lifted", "mode"): "Lifted: enforcement was turned off",
     ("lifted", "operator"): "Lifted by hand",
     ("lifted", "policy"): "An old HAProxy ban, lifted by the new ban policy",
+    ("observed", "haproxy"): "Banned by HAProxy's own rule (first seen)",
+    ("ended", "haproxy"): "HAProxy's own ban is no longer in force",
+}
+# Which counter a site reading is, as the history card names it.
+READING_COUNTERS = {
+    "http_req_rate": "Request rate",
+    "http_err_rate": "Error rate (4xx)",
 }
 DECISION_OUTCOMES = {
     "failed": "HAProxy refused it",
@@ -244,15 +251,22 @@ def ban_history(ip: str) -> "Dict[str, Any] | None":
             "strike": int(item.get("strike") or 0),
             "score": int(item.get("score") or 0),
         })
+    # The newest ban with something to say about why: adaptive protection's
+    # own reason, or what was seen of a ban HAProxy placed on its own rules.
     latest = next(
         (
             item for item in decisions
-            if item.get("action") == "applied" and item.get("source") == "adaptive"
-            and item.get("outcome") == "applied"
+            if (item.get("action") == "applied" and item.get("source") == "adaptive"
+                and item.get("outcome") == "applied")
+            or (item.get("action") == "observed" and item.get("source") == "haproxy")
         ),
         None,
     )
     reason = None
+    observed = None
+    if latest and latest.get("source") == "haproxy":
+        observed = _observed_ban(latest)
+        latest = None
     if latest:
         recorded = latest.get("reason") or {}
         reason = {
@@ -276,7 +290,41 @@ def ban_history(ip: str) -> "Dict[str, Any] | None":
             ],
             "evidence_total": int(recorded.get("evidence_total") or 0),
         }
-    return {"decisions": rows, "reason": reason}
+    return {"decisions": rows, "reason": reason, "observed": observed}
+
+
+def _observed_ban(decision: Dict[str, Any]) -> Dict[str, Any]:
+    """What the engine saw of a ban HAProxy placed on its own rules: when it
+    first saw it, its rule, and the site counters at that moment."""
+    recorded = decision.get("reason") or {}
+    try:
+        from .services_security import _site_limits
+
+        sites = _site_limits()
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("site names unavailable for the ban history", exc_info=True)
+        sites = {}
+    code = str(int(decision.get("code") or 0))
+    readings = []
+    for entry in recorded.get("readings") or []:
+        site = str(entry.get("site") or "")
+        known = sites.get(site) or {}
+        readings.append({
+            # tbl_err_other: requests for names no site serves.
+            "unknown": site == "other",
+            "site": str(known.get("domain") or site),
+            "counter": READING_COUNTERS.get(str(entry.get("counter") or ""), str(entry.get("counter") or "")),
+            "value": int(entry.get("value") or 0),
+            "limit": entry.get("limit"),
+            "over": bool(entry.get("over")),
+        })
+    return {
+        "when": _when(decision.get("ts")),
+        "until": _when(decision.get("until")),
+        "code": code,
+        "rule": BAN_CODE_LABELS.get(code, f"Ban code {code}"),
+        "readings": readings,
+    }
 
 
 def current_bans() -> Dict[str, Dict[str, Any]]:

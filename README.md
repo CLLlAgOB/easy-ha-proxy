@@ -995,6 +995,14 @@ as the ban records the strike ladder counts from. An address's page
 (`/ip/<address>`) shows it as **Why it is banned**, with every decision about
 the address below.
 
+The bans HAProxy places on its own rules under the old ban policy (a site's
+error or request-rate limit) are recorded too, as seen: HAProxy keeps no
+record of when it decided or what tipped it over, so what is kept is when the
+engine first saw the ban, its rule and expiry, and the site counters that held
+the address at that moment -- the time of the decision is left unknown rather
+than guessed. When the ban ends -- it runs out, HAProxy restarts, an operator
+or the new ban policy lifts it -- that is recorded once.
+
 Query strings are checked separately, and by what the **value** looks like
 rather than by the parameter it arrived under. That distinction is not
 cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`

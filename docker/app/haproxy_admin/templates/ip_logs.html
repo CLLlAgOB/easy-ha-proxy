@@ -82,6 +82,35 @@
   </div>
   {% endif %}
   {% endif %}
+  {% if history.observed %}
+  <p class="ipp-muted">HAProxy banned this address on its own rule. HAProxy does not record when it decided or what tipped it over; below is when the security engine first saw the ban and the site counters at that moment.</p>
+  <div class="ipp-row" style="margin-bottom:10px;">
+    <span class="ipp-badge ipp-ban">{{ history.observed.rule }}</span>
+    <span class="ipp-muted">First seen</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ history.observed.when }} → {{ history.observed.until }}</span>
+  </div>
+  {% if history.observed.readings %}
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr><th>Site</th><th>Counter</th><th>Value</th><th>Limit</th></tr>
+      </thead>
+      <tbody>
+        {% for entry in history.observed.readings %}
+        <tr>
+          <td>{% if entry.unknown %}Unknown names{% else %}<span data-i18n-skip translate="no">{{ entry.site }}</span>{% endif %}</td>
+          <td>{{ entry.counter }}</td>
+          <td data-i18n-skip translate="no">{% if entry.over %}<strong>{{ entry.value }}</strong>{% else %}{{ entry.value }}{% endif %}</td>
+          <td data-i18n-skip translate="no">{{ entry.limit if entry.limit is not none else "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="ipp-muted">No site counter held this address when the ban was first seen.</p>
+  {% endif %}
+  {% endif %}
   <h3 style="margin:14px 0 6px;font-size:15px;">Decisions</h3>
   <div style="overflow-x:auto;">
     <table class="data-table">
