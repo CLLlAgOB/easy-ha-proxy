@@ -285,11 +285,6 @@
             {% set eff_max_rate = eff.max_req_rate | default(def_max_rate) %}
             {{ diff_flag(ns, 'max_req_rate', eff_max_rate, def_max_rate) }}
 
-            {# --- rate_errors --- #}
-            {% set def_rate_errors = site_defaults.rate_errors if site_defaults.rate_errors is defined else none %}
-            {% set eff_rate_errors = eff.rate_errors if eff.rate_errors is defined else def_rate_errors %}
-            {{ diff_flag(ns, 'rate_errors', eff_rate_errors, def_rate_errors) }}
-
             {# --- Maintenance --- #}
             {% set def_maint = site_defaults.maintenance | default(false) %}
             {% set eff_maint = eff.maintenance | default(def_maint) %}

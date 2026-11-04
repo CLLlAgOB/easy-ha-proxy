@@ -1232,7 +1232,6 @@
     "Redirect HTTP to HTTPS": "Перенаправлять HTTP на HTTPS",
     "Removed TCP proxies:": "Удалены TCP-прокси:",
     "Request error: {error}": "Ошибка запроса: {error}",
-    "Request-rate strike threshold": "Порог нарушений частоты запросов",
     "Request-rate window": "Окно частоты запросов",
     "Response is not JSON ({status}): {body}": "Ответ не является JSON ({status}): {body}",
     "Restoring pending configuration confirmation…": "Восстанавливаем ожидающее подтверждение конфигурации…",

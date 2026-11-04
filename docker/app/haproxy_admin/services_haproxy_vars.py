@@ -244,7 +244,6 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
                 "boolean",
                 help_text="Has no effect under the u02 ban policy.",
             ),
-            _field("site_defaults.rate_errors", "Request-rate strike threshold", "integer", minimum=0, maximum=1000000),
             _field("site_defaults.conn_table_expire", "Connection table expiry", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.conn_rate_window", "Connection-rate window", "interval", pattern=INTERVAL_RE.pattern),
             _field(

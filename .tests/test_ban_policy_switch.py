@@ -116,6 +116,23 @@ class TheTemplate(unittest.TestCase):
                       authelia_enabled=False, admin_ips_enabled=False)
         self.assertNotIn("ip_auth_ok", text)
 
+    def test_rate_errors_is_no_longer_offered_and_is_not_revived(self):
+        # No rule ever read it (04.5c): the page offered a "strike threshold"
+        # that did nothing. It is not offered or seeded any more, and a value
+        # already in vars.yml is left where it is -- the guided save writes
+        # only the fields it shows.
+        from haproxy_admin import services_haproxy_vars
+
+        self.assertNotIn("rate_errors", (ROOT / "ansible/roles/haproxy/templates/haproxy.cfg.j2").read_text(
+            encoding="utf-8"))
+        self.assertNotIn("site_defaults.rate_errors", services_haproxy_vars.EDITABLE_FIELDS)
+        for path in ("installer/easy_ha_proxy.py", "ansible/roles/haproxy/defaults/main.yml",
+                     "docker/app/haproxy_admin/templates/haproxy_sites.html"):
+            self.assertNotIn("rate_errors", (ROOT / path).read_text(encoding="utf-8"), path)
+        # A value left in vars.yml changes nothing either.
+        text = render(SITES, site_defaults={"ban_policy": "u02", "rate_errors": 3}, admin_ips_enabled=True)
+        self.assertEqual(text, config("u02"))
+
     def test_the_settings_page_offers_it(self):
         from haproxy_admin import services_haproxy_vars
 

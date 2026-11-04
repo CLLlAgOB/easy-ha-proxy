@@ -772,7 +772,6 @@ def build_site_defaults(*, geoip_enabled: bool) -> dict[str, Any]:
         "max_req_rate": 200,
         "rate_window": "20s",
         "rate_ban": True,
-        "rate_errors": 20,
         "enable_geoip": True,
         "tcp_check": False,
         "health_uri": "/",

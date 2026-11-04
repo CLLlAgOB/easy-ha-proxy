@@ -57,8 +57,7 @@ site_defaults:
   # — Rate-limit & ban —
   max_req_rate: 200                           # 0 => no limit
   rate_window: "20s"
-  rate_ban: false                           # put the IP in tbl_ban when the limit is exceeded
-  rate_errors: 8                            # global automatic ban above N 4xx per rate_window
+  rate_ban: false                           # put the IP in tbl_ban when the limit is exceeded (legacy ban policy only)
 
   # — Geo filter —
   # The top-level enable_geoip remains the master switch. Individual sites may
