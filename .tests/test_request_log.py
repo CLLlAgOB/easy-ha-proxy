@@ -313,7 +313,7 @@ class WiringTests(unittest.TestCase):
         block = self.SOURCE.split("def ingest_log")[1].split("def observe_request")[0]
         self.assertLess(
             block.index("self.requests.add(request, ts)"),
-            block.index("self.observe_request(request, now)"),
+            block.index("self.observe_request(request, now, ts)"),
         )
 
     def test_the_query_endpoints_say_so_when_it_is_off(self):

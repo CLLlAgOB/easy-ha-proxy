@@ -2228,8 +2228,15 @@ class TrustedRates:
 
     # -- observing --------------------------------------------------------
 
-    def observe(self, request: "ParsedRequest", trust: str, now: int = 0) -> None:
-        """Count one request, if a trusted address made it to a limited site."""
+    def observe(self, request: "ParsedRequest", trust: str, now: int = 0,
+                stamp: Optional[float] = None) -> None:
+        """Count one request, if a trusted address made it to a limited site.
+
+        ``stamp`` is the syslog time, which carries its zone. HAProxy's %t
+        is local time without one, so on a gateway east of UTC it read an
+        hour or more in the future; it is used only when a line has no
+        syslog stamp.
+        """
         if not self._checked:
             self._maybe_reload()
         if not trust and not self._any_allow_list:
@@ -2250,7 +2257,7 @@ class TrustedRates:
                 if site.allow is None or not _in_networks(request.client_ip, site.allow):
                     return
                 trust = "site-allow-list"
-            ts = int(request.ts or now or self.clock)
+            ts = int(stamp or request.ts or now or self.clock)
             self.clock = max(self.clock, ts)
             key = (request.client_ip, site.id)
             counter = self._counters.get(key)
@@ -5572,7 +5579,7 @@ class GuardEngine:
                 # Its time is the syslog stamp, as on the live page and the
                 # charts, so a link between them means the same minutes.
                 self.requests.add(request, ts)
-            self.observe_request(request, now)
+            self.observe_request(request, now, ts)
         self.lines_parsed += parsed
         if self.live is not None:
             self.live.extend(live)
@@ -5580,7 +5587,8 @@ class GuardEngine:
             self.requests.flush(now)
         return len(lines)
 
-    def observe_request(self, request: ParsedRequest, now: int) -> None:
+    def observe_request(self, request: ParsedRequest, now: int,
+                        stamp: Optional[float] = None) -> None:
         """Fold one request into the address's memory and emit any findings."""
 
         ip = request.client_ip
@@ -5592,7 +5600,7 @@ class GuardEngine:
             trust = "signed-in"
         elif verdict.reason == "whitelisted":
             trust = verdict.source or "whitelist"
-        self.trusted_rates.observe(request, trust, now)
+        self.trusted_rates.observe(request, trust, now, stamp)
         if verdict.excluded:
             self.excluded_observations += 1
             return
@@ -6591,6 +6599,23 @@ class GuardEngine:
 REQUEST_TIMEOUT_SECONDS = 30
 
 
+def rate_warnings_payload(engine: "GuardEngine", database: "SecurityDatabase",
+                          limit: int, now: int) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "ts": now,
+        # Nothing on this list was refused, scored or banned because of it.
+        "observed_only": True,
+        "open": engine.trusted_rates.open_episodes(),
+        "recent": database.rate_warnings(limit=limit),
+        "last_24h": database.rate_warning_count(since=now - 86400),
+        "keep_days": RATE_WARNINGS_KEEP_DAYS,
+        # Nested: the observer's own "open" is a count and must not
+        # replace the list above.
+        "observer": engine.trusted_rates.summary(),
+    }
+
+
 class GuardHandler(BaseHTTPRequestHandler):
     server_version = "easy-ha-proxy-guardd/1.0"
     timeout = REQUEST_TIMEOUT_SECONDS
@@ -6798,20 +6823,8 @@ class GuardHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/guard/rate-warnings":
             query = parse_qs(urlparse(self.path).query or "")
             try:
-                now = _utc_now()
                 limit = _clamp_int(query.get("limit", [None])[0], default=100, min_v=1, max_v=500)
-                self._send_json(200, {
-                    "ok": True,
-                    "ts": now,
-                    # Nothing on this list was refused, scored or banned
-                    # because of it.
-                    "observed_only": True,
-                    "open": engine.trusted_rates.open_episodes(),
-                    "recent": database.rate_warnings(limit=limit),
-                    "last_24h": database.rate_warning_count(since=now - 86400),
-                    "keep_days": RATE_WARNINGS_KEEP_DAYS,
-                    **engine.trusted_rates.summary(),
-                })
+                self._send_json(200, rate_warnings_payload(engine, database, limit, _utc_now()))
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return

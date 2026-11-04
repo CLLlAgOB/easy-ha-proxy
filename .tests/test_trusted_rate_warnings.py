@@ -14,7 +14,9 @@ no finding, no score and no strike, and it holds a bounded number of counters.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib.util
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -303,6 +305,18 @@ class TheEngineObservesAndDoesNothingElse(Workspace):
             "192.0.2.10": "geo-whitelist", "203.0.113.9": "signed-in",
         })
 
+    def test_its_time_is_the_syslog_stamp_not_haproxys_local_one(self):
+        # %t is local time without a zone. Read as UTC, it put a gateway at
+        # UTC+1 an hour in the future; the syslog stamp says where it is.
+        line = access_line("198.51.100.7").replace(
+            "2026-08-11T07:00:00.000000+00:00", "2026-08-11T08:00:00.000000+01:00",
+        ).replace("[11/Aug/2026:07:00:00.000]", "[11/Aug/2026:08:00:00.000]")
+        self.append(*[line] * 6)
+        self.engine.ingest_log(T0)
+        [episode] = self.engine.trusted_rates.open_episodes()
+        self.assertEqual(episode["started"],
+                         int(datetime(2026, 8, 11, 7, tzinfo=timezone.utc).timestamp()))
+
     def test_no_finding_score_or_memory_comes_of_it(self):
         self.append(*[access_line("198.51.100.7")] * 50)
         self.engine.ingest_log(T0)
@@ -340,6 +354,23 @@ class TheEngineObservesAndDoesNothingElse(Workspace):
         summary = self.engine.health()["rate_warnings"]
         self.assertEqual(summary["sites"], 1)
         self.assertEqual(summary["max_tracked"], guardd.TRUSTED_RATE_MAX_KEYS)
+
+    def test_an_episode_going_on_reaches_the_panel_as_a_row(self):
+        # The observer's counters once replaced the "open" list with a
+        # number, and the panel's server failed on it.
+        from haproxy_admin import services_security
+
+        self.append(*[access_line("198.51.100.7")] * 6)
+        self.engine.ingest_log(T0)
+        payload = json.loads(json.dumps(
+            guardd.rate_warnings_payload(self.engine, self.database, 100, T0 + 1)))
+        self.assertEqual([row["ip"] for row in payload["open"]], ["198.51.100.7"])
+        self.assertEqual(payload["observer"]["open"], 1)
+        with mock.patch.object(services_security, "guardd_rate_warnings", return_value=payload), \
+                mock.patch.object(services_security, "_site_limits", return_value={}), \
+                mock.patch.object(services_security, "get_country_code", return_value=""):
+            result = services_security.rate_warnings({})
+        self.assertEqual([row["ip"] for row in result["open"]], ["198.51.100.7"])
 
 
 class TheTable(unittest.TestCase):
