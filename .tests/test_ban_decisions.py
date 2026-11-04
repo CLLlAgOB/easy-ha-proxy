@@ -15,6 +15,7 @@ the next cycle, and the strike counts once.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 import sys
 import unittest
@@ -161,10 +162,16 @@ class TheRecordIsBounded(Decisions):
 
 
 class TheAddressPage(unittest.TestCase):
+    @staticmethod
+    def client():
+        # The module object itself: on Python 3.10 a dotted patch target can
+        # miss a submodule another test left the package without.
+        return importlib.import_module("haproxy_admin.guardd_client")
+
     def history(self, payload):
         from haproxy_admin import services_live
 
-        with mock.patch("haproxy_admin.guardd_client.guardd_decisions", return_value=payload):
+        with mock.patch.object(self.client(), "guardd_decisions", return_value=payload):
             return services_live.ban_history(IP)
 
     def test_says_why_with_the_recorded_findings(self):
@@ -186,7 +193,7 @@ class TheAddressPage(unittest.TestCase):
     def test_leaves_the_card_out_when_the_engine_does_not_answer(self):
         from haproxy_admin import services_live
 
-        with mock.patch("haproxy_admin.guardd_client.guardd_decisions", side_effect=OSError("down")):
+        with mock.patch.object(self.client(), "guardd_decisions", side_effect=OSError("down")):
             self.assertIsNone(services_live.ban_history(IP))
 
     def test_the_page_has_the_card(self):
