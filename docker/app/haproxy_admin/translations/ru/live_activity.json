@@ -137,6 +137,25 @@
     "The slowest answers of the window, by how soon the server answered.": "Самые медленные ответы окна — по времени ответа сервера.",
     "Over the window": "За окно",
     "Only this path": "Только этот путь",
-    "Only this client": "Только этот клиент"
+    "Only this client": "Только этот клиент",
+    "Why it is banned": "Почему забанен",
+    "Ban history": "История банов",
+    "The reason adaptive protection wrote down when it last banned this address. The findings behind it fade from the score within hours; this record does not.": "Причина, которую адаптивная защита записала, когда в последний раз забанила этот адрес. Находки, на которых она основана, уходят из баллов за несколько часов, а эта запись остаётся.",
+    "Banned by adaptive protection": "Забанен адаптивной защитой",
+    "Finding": "Находка",
+    "Detail": "Подробности",
+    "Points": "Баллы",
+    "Decisions": "Решения",
+    "What": "Что",
+    "Code": "Код",
+    "Banned by hand": "Забанен вручную",
+    "Ban put back after HAProxy restarted": "Бан возвращён после перезапуска HAProxy",
+    "The ban ran out": "Срок бана истёк",
+    "Lifted: enforcement was turned off": "Снят: блокировка выключена",
+    "Lifted by hand": "Снят вручную",
+    "An old HAProxy ban, lifted by the new ban policy": "Старый бан HAProxy, снят новой политикой банов",
+    "HAProxy refused it": "HAProxy его не принял",
+    "Not applied": "Не применён",
+    "Being applied": "Применяется"
   }
 }

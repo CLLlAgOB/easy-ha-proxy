@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import datetime
 import ipaddress
 import logging
 import re
@@ -185,6 +186,97 @@ def address_status(ip: str) -> Dict[str, Any]:
         LOG.debug("ban state unavailable for %s", ip, exc_info=True)
         status["ban_known"] = False
     return status
+
+
+# What each kind of ban decision is called on the address page (06.4).
+DECISION_LABELS = {
+    ("applied", "adaptive"): "Banned by adaptive protection",
+    ("applied", "operator"): "Banned by hand",
+    ("restored", "restart"): "Ban put back after HAProxy restarted",
+    ("lifted", "expiry"): "The ban ran out",
+    ("lifted", "mode"): "Lifted: enforcement was turned off",
+    ("lifted", "operator"): "Lifted by hand",
+    ("lifted", "policy"): "An old HAProxy ban, lifted by the new ban policy",
+}
+DECISION_OUTCOMES = {
+    "failed": "HAProxy refused it",
+    "abandoned": "Not applied",
+    "pending": "Being applied",
+}
+
+
+def _when(ts: Any) -> str:
+    try:
+        value = int(ts or 0)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return datetime.datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def ban_history(ip: str) -> "Dict[str, Any] | None":
+    """Why an address is or was banned, from the engine's own record.
+
+    The reason is the one written down when the ban was decided -- the
+    findings decay out of the score within hours, so working it out again
+    later would say "score 0" about every ban. None when the engine does not
+    answer (or is older than this record): the card is left out rather than
+    claiming there is no history.
+    """
+    from .guardd_client import guardd_decisions
+
+    try:
+        payload = guardd_decisions(ip)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("ban history unavailable for %s", ip, exc_info=True)
+        return None
+    decisions = payload.get("decisions") or []
+    rows = []
+    for item in decisions:
+        action, source = str(item.get("action") or ""), str(item.get("source") or "")
+        rows.append({
+            "when": _when(item.get("ts")),
+            "label": DECISION_LABELS.get((action, source), f"{action} ({source})"),
+            "outcome": DECISION_OUTCOMES.get(str(item.get("outcome") or ""), ""),
+            "code": int(item.get("code") or 0),
+            "until": _when(item.get("until")) if action != "lifted" else "",
+            "strike": int(item.get("strike") or 0),
+            "score": int(item.get("score") or 0),
+        })
+    latest = next(
+        (
+            item for item in decisions
+            if item.get("action") == "applied" and item.get("source") == "adaptive"
+            and item.get("outcome") == "applied"
+        ),
+        None,
+    )
+    reason = None
+    if latest:
+        recorded = latest.get("reason") or {}
+        reason = {
+            "when": _when(latest.get("ts")),
+            "until": _when(latest.get("until")),
+            "score": int(latest.get("score") or 0),
+            "strike": int(latest.get("strike") or 0),
+            "policy": str(latest.get("policy") or ""),
+            "evidence": [
+                {
+                    "when": _when(entry.get("ts")),
+                    "finding": (
+                        f"{entry.get('event_type')} ({entry.get('category')})"
+                        if entry.get("category") else str(entry.get("event_type") or "")
+                    ),
+                    "site": str(entry.get("site") or ""),
+                    "detail": str(entry.get("detail") or ""),
+                    "points": entry.get("points"),
+                }
+                for entry in recorded.get("evidence") or []
+            ],
+            "evidence_total": int(recorded.get("evidence_total") or 0),
+        }
+    return {"decisions": rows, "reason": reason}
 
 
 def current_bans() -> Dict[str, Dict[str, Any]]:

@@ -234,7 +234,15 @@ def view_ip_logs(ip: str):
     except Exception:  # pylint: disable=broad-except
         current_app.logger.exception("Failed to read the state of %s", ip)
         status = None
-    return render_template("ip_logs.html", ip=ip, lines=lines, status=status)
+    # Why it is (or was) banned, as the engine wrote it down at the time.
+    try:
+        from . import services_live
+
+        history = services_live.ban_history(ip)
+    except Exception:  # pylint: disable=broad-except
+        current_app.logger.exception("Failed to read the ban history of %s", ip)
+        history = None
+    return render_template("ip_logs.html", ip=ip, lines=lines, status=status, history=history)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Authelia users (managing users_database.yml)

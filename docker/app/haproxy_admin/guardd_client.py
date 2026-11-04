@@ -74,6 +74,12 @@ def guardd_rate_warnings(limit: int = 100) -> Dict[str, Any]:
     return _get_json("/api/v1/guard/rate-warnings", params={"limit": limit})
 
 
+def guardd_decisions(address: str, limit: int = 20) -> Dict[str, Any]:
+    """Every ban decision about one address, newest first, with its reason."""
+
+    return _get_json("/api/v1/guard/decisions", params={"ip": address, "limit": limit}, timeout=3)
+
+
 def guardd_ip(address: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     query: Dict[str, Any] = {"ip": address}
     query.update(params or {})

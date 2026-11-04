@@ -193,6 +193,13 @@ ADAPTIVE_BAN_CODE = 40
 MANUAL_BAN_CODE = 50
 # A manual ban whose table expiry jumps by more than this was placed again.
 MANUAL_BAN_REPLACED_MARGIN = 120
+# Ban decisions (06.1-06.4): how much of the reason is kept, for how many
+# rows, and how long a decision may stay pending before a cycle settles it.
+DECISION_EVIDENCE_LISTED = 12
+DECISION_DETAIL_LENGTH = 240
+DECISION_REASON_MAX_BYTES = 8192
+DECISIONS_KEEP_ROWS = 20000
+DECISION_PENDING_GRACE = 60
 # Bans this daemon or an operator made. Seeing one in the table is seeing the
 # gateway's own decision, not something the client did: it must never count
 # as a finding (F03 -- an adaptive ban observed as LEGACY_HAPROXY_BAN, worth
@@ -3171,6 +3178,28 @@ _SCHEMA_STATEMENTS: Tuple[str, ...] = (
         reasserted  INTEGER NOT NULL DEFAULT 0
     )
     """,
+    # Every ban decision and every lift, with the reason as it stood when
+    # the decision was made (06.1-06.3). The findings behind a ban decay out
+    # of the score in hours and are swept with ordinary events; what was
+    # written down at the time was only "score=90 [vcs,secrets]". The reason
+    # is never rewritten; only a pending decision's outcome is settled.
+    """
+    CREATE TABLE IF NOT EXISTS ban_decisions (
+        id       INTEGER PRIMARY KEY,
+        ts       INTEGER NOT NULL,
+        ip       TEXT    NOT NULL,
+        action   TEXT    NOT NULL,
+        source   TEXT    NOT NULL,
+        code     INTEGER NOT NULL DEFAULT 0,
+        until    INTEGER NOT NULL DEFAULT 0,
+        strike   INTEGER NOT NULL DEFAULT 0,
+        score    INTEGER NOT NULL DEFAULT 0,
+        policy   TEXT    NOT NULL DEFAULT '',
+        outcome  TEXT    NOT NULL,
+        reason   TEXT    NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ban_decisions_ip ON ban_decisions (ip, ts)",
 )
 
 def _add_column_if_missing(
@@ -3357,6 +3386,103 @@ class SecurityDatabase:
                 "UPDATE ip_state SET banned_until = 0, ban_code = 0 WHERE ip = ?",
                 (ip,),
             )
+
+    # -- ban decisions (06.2-06.3) ----------------------------------------
+
+    def record_decision(
+        self,
+        ip: str,
+        ts: int,
+        action: str,
+        source: str,
+        outcome: str,
+        *,
+        code: int = 0,
+        until: int = 0,
+        strike: int = 0,
+        score: int = 0,
+        policy: str = "",
+        reason: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Write one decision; its reason is never changed afterwards."""
+        text = json.dumps(reason or {}, sort_keys=True, ensure_ascii=False)
+        if len(text) > DECISION_REASON_MAX_BYTES:
+            text = json.dumps({"truncated": True}, sort_keys=True)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO ban_decisions "
+                "(ts, ip, action, source, code, until, strike, score, policy, outcome, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, ip, action, source, int(code), int(until), int(strike), int(score),
+                 policy, outcome, text),
+            )
+            return int(cursor.lastrowid)
+
+    def settle_decision(self, decision_id: int, outcome: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE ban_decisions SET outcome = ? WHERE id = ? AND outcome = 'pending'",
+                (outcome, decision_id),
+            )
+
+    def commit_ban(self, decision_id: int, ip: str, until: int, code: int, now: int, detail: str) -> None:
+        """Make an applied ban count, all at once: the schedule, the strike
+        (a BAN_APPLIED event) and the decision's outcome, in one transaction.
+        A crash leaves all three or none."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE ip_state SET banned_until = ?, ban_code = ?, last_seen = ? WHERE ip = ?",
+                (until, code, now, ip),
+            )
+            self._conn.execute(
+                "INSERT INTO security_events (ts, ip, event_type, source, site, category, detail, handled) "
+                "VALUES (?, ?, ?, 'guardd', '', '', ?, 0)",
+                (now, ip, EVENT_BAN_APPLIED, detail[:MAX_PATH_LENGTH]),
+            )
+            self._conn.execute(
+                "UPDATE ban_decisions SET outcome = 'applied' WHERE id = ? AND outcome = 'pending'",
+                (decision_id,),
+            )
+
+    def pending_decisions(self, before: int) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, ip, code, until, strike, score FROM ban_decisions "
+                "WHERE outcome = 'pending' AND ts < ? ORDER BY ts",
+                (before,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ban_decisions(self, ip: str, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, ip, action, source, code, until, strike, score, policy, outcome, reason "
+                "FROM ban_decisions WHERE ip = ? ORDER BY ts DESC, id DESC LIMIT ?",
+                (ip, int(limit)),
+            ).fetchall()
+        decisions = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["reason"] = json.loads(item["reason"] or "{}")
+            except (TypeError, ValueError):
+                item["reason"] = {}
+            decisions.append(item)
+        return decisions
+
+    def prune_decisions(self, before: int, keep: int) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute("DELETE FROM ban_decisions WHERE ts < ?", (before,))
+            deleted = cursor.rowcount or 0
+            cursor.execute(
+                "DELETE FROM ban_decisions WHERE id NOT IN "
+                "(SELECT id FROM ban_decisions ORDER BY ts DESC, id DESC LIMIT ?)",
+                (int(keep),),
+            )
+            deleted += cursor.rowcount or 0
+            cursor.close()
+        return deleted
 
     # -- the operator's bans (04.6g) --------------------------------------
 
@@ -5857,10 +5983,18 @@ class GuardEngine:
         the socket -- and is forgotten, so an unban never undoes itself. Each
         ends when its table expiry, as first seen, says so.
         """
+        known = self.database.manual_bans()
         for ip, fields in bans.items():
             if _safe_int(fields.get("gpc0")) > 0 and _safe_int(fields.get("gpt0")) == MANUAL_BAN_CODE:
                 remaining = max(0, _safe_int(fields.get("exp")) // 1000)
                 self.database.note_manual_ban(ip, now, now + remaining)
+                if ip not in known:
+                    # Who placed it is in the panel's change log; here, that
+                    # an operator did and until when the table holds it.
+                    self.database.record_decision(
+                        ip, now, "applied", "operator", "applied",
+                        code=MANUAL_BAN_CODE, until=now + remaining, policy=self.ban_policy,
+                    )
         records = self.database.manual_bans()
         started: Optional[int] = None
         restored = 0
@@ -5886,6 +6020,10 @@ class GuardEngine:
                     self.database.mark_manual_reasserted(ip)
                     restored += 1
                     LOG.warning("Restored the manual ban on %s, lost when HAProxy restarted", ip)
+                    self.database.record_decision(
+                        ip, now, "restored", "restart", "applied",
+                        code=MANUAL_BAN_CODE, until=record["expires_at"], policy=self.ban_policy,
+                    )
             else:
                 self.database.forget_manual_ban(ip)
         self.manual_restored += restored
@@ -5975,6 +6113,9 @@ class GuardEngine:
                 source="guardd",
                 detail=f"code={code} policy={BAN_POLICY_U02}",
                 fingerprint=f"{ip}|{EVENT_LEGACY_BAN_LIFTED}|{now}",
+            )
+            self.database.record_decision(
+                ip, now, "lifted", "policy", "applied", code=code, policy=BAN_POLICY_U02,
             )
         if lifted:
             self.legacy_lifted += lifted
@@ -6663,6 +6804,71 @@ class GuardEngine:
             return 0
         return level
 
+    # -- ban decisions (06.1-06.3) ----------------------------------------
+
+    def decision_reason(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """The reason for a ban as it stands now, to be kept as it was.
+
+        The findings that counted, heaviest first, each with what it was
+        about. The details are this daemon's own -- a normalised path, a rule
+        name, a counter reading -- never a query string or a header.
+        """
+        counted = [
+            item for item in row.get("contributions") or []
+            if float(item.get("points") or 0) > 0
+        ]
+        counted.sort(key=lambda item: (-float(item.get("points") or 0), -int(item.get("ts") or 0)))
+        return {
+            "score": int(row.get("score") or 0),
+            "state": str(row.get("state") or ""),
+            "categories": dict(row.get("categories") or {}),
+            "evidence": [
+                {
+                    "ts": int(item.get("ts") or 0),
+                    "event_type": str(item.get("event_type") or ""),
+                    "category": str(item.get("category") or ""),
+                    "points": round(float(item.get("points") or 0), 2),
+                    "site": str(item.get("site") or ""),
+                    "detail": str(item.get("detail") or "")[:DECISION_DETAIL_LENGTH],
+                }
+                for item in counted[:DECISION_EVIDENCE_LISTED]
+            ],
+            "evidence_total": len(counted),
+        }
+
+    def settle_pending_decisions(self, now: int) -> None:
+        """Settle a decision a crash left between applying and recording.
+
+        Applied in HAProxy but not recorded: recorded now, with the time and
+        term it was given, so the strike counts once. Not applied: abandoned.
+        """
+        pending = self.database.pending_decisions(before=now - DECISION_PENDING_GRACE)
+        if not pending:
+            return
+        try:
+            standing = self.enforcer.active_bans()
+        except OSError as exc:
+            LOG.warning("Could not read the ban table to settle decisions: %s", exc)
+            return
+        scheduled = self.database.scheduled_bans()
+        for decision in pending:
+            ip = decision["ip"]
+            if (
+                standing.get(ip) == ADAPTIVE_BAN_CODE
+                and ip not in scheduled
+                and int(decision["until"]) > now
+            ):
+                self.database.commit_ban(
+                    int(decision["id"]), ip, int(decision["until"]), ADAPTIVE_BAN_CODE,
+                    int(decision["ts"]),
+                    f"score={decision['score']} seconds={int(decision['until']) - int(decision['ts'])} [settled]",
+                )
+                LOG.warning("Recorded the ban on %s applied before a crash", ip)
+                continue
+            if standing.get(ip) == ADAPTIVE_BAN_CODE and ip not in scheduled:
+                self.enforcer.lift(ip)  # its term is over, or it was never ours to keep
+            self.database.settle_decision(int(decision["id"]), "abandoned")
+
     def ban_duration(self, ip: str, now: int) -> int:
         ladder = self.ban_durations
         index = min(self.strike_level(ip, now), len(ladder) - 1)
@@ -6701,6 +6907,7 @@ class GuardEngine:
         applied: List[str] = []
         lifted: List[str] = []
 
+        self.settle_pending_decisions(now)
         scheduled = self.database.scheduled_bans()
         enforcing = self.enforcer.allowed
         for ip, until in scheduled.items():
@@ -6719,6 +6926,10 @@ class GuardEngine:
                     source="guardd",
                     detail="expired" if enforcing else "enforcement disabled",
                     fingerprint=f"{ip}|{EVENT_BAN_LIFTED}|{until}",
+                )
+                self.database.record_decision(
+                    ip, now, "lifted", "expiry" if served else "mode", "applied",
+                    code=ADAPTIVE_BAN_CODE, until=int(until), policy=self.ban_policy,
                 )
             # Forgotten only once the time was actually served. Switching the
             # mode off used to clear the schedule as well, so a pause was an
@@ -6779,19 +6990,25 @@ class GuardEngine:
             if last_ban and self.database.newest_finding_ts(ip) <= last_ban:
                 continue
             duration = self.ban_duration(ip, now)
-            if not self.enforcer.ban(ip):
-                continue
-            self.database.set_ban(ip, now + duration, ADAPTIVE_BAN_CODE, now)
-            applied.append(ip)
-            categories = ", ".join(sorted(row.get("categories") or {}))
-            self._emit(
-                ip,
-                EVENT_BAN_APPLIED,
-                now,
-                source="guardd",
-                detail=f"score={row['score']} seconds={duration} [{categories}]",
-                fingerprint=f"{ip}|{EVENT_BAN_APPLIED}|{now}",
+            # The reason is written down before anything is applied, and
+            # what happened after: a crash between the two leaves a pending
+            # decision the next cycle settles (settle_pending_decisions).
+            decision = self.database.record_decision(
+                ip, now, "applied", "adaptive", "pending",
+                code=ADAPTIVE_BAN_CODE, until=now + duration,
+                strike=self.strike_level(ip, now) + 1, score=int(row["score"]),
+                policy=self.ban_policy, reason=self.decision_reason(row),
             )
+            if not self.enforcer.ban(ip):
+                self.database.settle_decision(decision, "failed")
+                continue
+            categories = ", ".join(sorted(row.get("categories") or {}))
+            self.database.commit_ban(
+                decision, ip, now + duration, ADAPTIVE_BAN_CODE, now,
+                f"score={row['score']} seconds={duration} [{categories}]",
+            )
+            self.events_recorded += 1
+            applied.append(ip)
             LOG.warning(
                 "Adaptive ban applied to %s for %ds (score %d)",
                 ip,
@@ -6885,7 +7102,7 @@ class GuardEngine:
         self.database.clear_ban(checked)
         # The operator's own ban is lifted by the caller; remembering it would
         # put it back after the next restart of HAProxy.
-        self.database.forget_manual_ban(checked)
+        manual = self.database.forget_manual_ban(checked)
         lifted = self.enforcer.lift(checked)
         if held or lifted:
             self._emit(
@@ -6898,6 +7115,12 @@ class GuardEngine:
             )
             LOG.warning(
                 "Ban on %s cleared by hand; the schedule is dropped", checked
+            )
+        if held or lifted or manual:
+            self.database.record_decision(
+                checked, now, "lifted", "operator", "applied",
+                code=ADAPTIVE_BAN_CODE if (held or lifted) else MANUAL_BAN_CODE,
+                until=held, policy=self.ban_policy,
             )
         return {
             "ok": True,
@@ -7081,6 +7304,11 @@ class GuardEngine:
         )
         deleted["rate_warnings"] = self.database.prune_rate_warnings(
             before=now - RATE_WARNINGS_KEEP_DAYS * 86400, keep=RATE_WARNINGS_KEEP_ROWS
+        )
+        # As long as the ban records themselves: the reason must not go
+        # before the strike it explains.
+        deleted["ban_decisions"] = self.database.prune_decisions(
+            before=ban_cutoff, keep=DECISIONS_KEEP_ROWS
         )
         if any(deleted.values()):
             self.database.incremental_vacuum()
@@ -7387,6 +7615,26 @@ class GuardHandler(BaseHTTPRequestHandler):
                     **filters, before=max(0, before), count=count, limit=limit,
                 )
                 self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/decisions":
+            query = parse_qs(urlparse(self.path).query or "")
+            address = (query.get("ip", [""])[0] or "").strip()
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "invalid ip"})
+                return
+            try:
+                limit = _clamp_int(query.get("limit", [None])[0], default=20, min_v=1, max_v=100)
+                self._send_json(200, {
+                    "ok": True,
+                    "ip": address,
+                    "decisions": database.ban_decisions(address, limit=limit),
+                    "keep_seconds": engine.longest_strike_retention(),
+                })
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return

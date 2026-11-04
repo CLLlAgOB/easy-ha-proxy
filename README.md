@@ -966,6 +966,14 @@ after the ban was last seen. A manual ban that disappears while HAProxy keeps
 running was lifted and is forgotten, so an unban never undoes itself. This
 needs adaptive protection running (Observe or Enforce).
 
+Every ban decision and every lift is kept with its reason as it stood when
+it was made: for an adaptive ban, the findings that counted, heaviest first,
+each with its site and detail. The findings themselves fade from the score
+within hours and are swept with ordinary events; the decision is kept as long
+as the ban records the strike ladder counts from. An address's page
+(`/ip/<address>`) shows it as **Why it is banned**, with every decision about
+the address below.
+
 Query strings are checked separately, and by what the **value** looks like
 rather than by the parameter it arrived under. That distinction is not
 cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`

@@ -44,6 +44,65 @@
 </div>
 {% endif %}
 
+{% if history and history.decisions %}
+<div class="card" style="margin-bottom:20px;" id="ipp-history">
+  <div class="card-header">
+    {% if status and status.ban %}
+    <h2>Why it is banned</h2>
+    {% else %}
+    <h2>Ban history</h2>
+    {% endif %}
+  </div>
+  {% if history.reason %}
+  <p class="ipp-muted">The reason adaptive protection wrote down when it last banned this address. The findings behind it fade from the score within hours; this record does not.</p>
+  <div class="ipp-row" style="margin-bottom:10px;">
+    <span class="ipp-badge ipp-ban">Banned by adaptive protection</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.when }} → {{ history.reason.until }}</span>
+    <span class="ipp-muted">Score</span><span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.score }}</span>
+    <span class="ipp-muted">Strike</span><span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.strike }}</span>
+  </div>
+  {% if history.reason.evidence %}
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr><th>When</th><th>Finding</th><th>Site</th><th>Detail</th><th>Points</th></tr>
+      </thead>
+      <tbody data-i18n-skip translate="no">
+        {% for entry in history.reason.evidence %}
+        <tr>
+          <td>{{ entry.when }}</td>
+          <td>{{ entry.finding }}</td>
+          <td>{{ entry.site or "—" }}</td>
+          <td class="ip-cell">{{ entry.detail or "—" }}</td>
+          <td>{{ entry.points }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% endif %}
+  <h3 style="margin:14px 0 6px;font-size:15px;">Decisions</h3>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr><th>When</th><th>What</th><th>Code</th><th>Until</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history.decisions %}
+        <tr>
+          <td data-i18n-skip translate="no">{{ row.when }}</td>
+          <td><span>{{ row.label }}</span>{% if row.outcome %} <span class="ipp-muted">{{ row.outcome }}</span>{% endif %}</td>
+          <td data-i18n-skip translate="no">{{ row.code or "—" }}</td>
+          <td data-i18n-skip translate="no">{{ row.until or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <div class="card-header">
     <h2>Last 30 matches</h2>
