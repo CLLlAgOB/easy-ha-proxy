@@ -148,6 +148,65 @@ class TheBuffer(unittest.TestCase):
         self.assertEqual(snapshot["window"], 3600)
 
 
+class TheOverview(unittest.TestCase):
+    """With a budget a day of requests can be held; on the test gateway's ARM
+    board the overview counted 200 000 of them one by one in 3.7 s."""
+
+    def setUp(self):
+        self.now = time.time()
+        self.buffer = guardd.LiveBuffer(100_000, 3600)
+        self.buffer.set_budget(64 * MIB)
+        self.buffer.started = self.now - 2 * 86400
+        kinds = [
+            dict(status=200), dict(status=404), dict(status=502),
+            dict(status=451, backend="fe_https/<NOSRV>", term="PR--"),
+            dict(status=200, host="docs.example.test"),
+        ]
+        records = []
+        for i in range(6000):
+            extra = dict(kinds[i % len(kinds)])
+            status = extra.pop("status")
+            records.append(record(line(f"203.0.113.{i % 7}", status, at=self.now - 80000 + i * 13,
+                                       request=f"GET /p{i % 11} HTTP/1.1", **extra)))
+        self.buffer.extend(records)
+
+    def reference(self, query):
+        """The overview counted one request at a time, as it was."""
+        records = list(self.buffer._records)
+        oldest = records[0][guardd.L_TS]
+        start = max(query.since, oldest) if query.since else oldest
+        summary = guardd.RequestSummary(*guardd.summary_layout(start, query.until))
+        for r in records:
+            if not query.matches(r):
+                continue
+            summary.add((int(r[guardd.L_TS]) - summary.first) // summary.step, r[guardd.L_STATUS],
+                        bool(r[guardd.L_REFUSAL]))
+            summary.clients[r[guardd.L_IP]] += 1
+            summary.paths[(r[guardd.L_HOST], r[guardd.L_PATH])] += 1
+        return summary.read()
+
+    def test_counted_in_bulk_it_reads_the_same(self):
+        until = int(self.now)
+        for query in (guardd.RequestQuery.build(until=until),
+                      guardd.RequestQuery.build(until=until, since=until - 3600),
+                      guardd.RequestQuery.build(until=until, status="4xx"),
+                      guardd.RequestQuery.build(until=until, host="docs.example.test")):
+            result = self.buffer.summarize_requests(query)
+            self.assertTrue(result.pop("complete"))
+            self.assertEqual(result.pop("reached_to"), 0)
+            self.assertEqual(result.pop("source"), "memory")
+            self.assertEqual(result, self.reference(query))
+
+    def test_out_of_time_it_says_how_far_back_it_got(self):
+        with mock.patch.object(guardd, "REQUEST_SUMMARY_SECONDS", -1):
+            result = self.buffer.summarize_requests(guardd.RequestQuery.build(until=int(self.now)))
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["reached_to"], self.buffer.status()["oldest"])
+        # The newest part was counted, not the oldest.
+        self.assertGreater(result["counted"], 0)
+        self.assertLess(result["counted"], 6000)
+
+
 class TheRate(unittest.TestCase):
     def setUp(self):
         self.now = time.time()

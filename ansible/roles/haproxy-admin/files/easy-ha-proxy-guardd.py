@@ -5776,15 +5776,37 @@ class LiveBuffer:
         start = max(query.since, oldest) if query.since else oldest
         end = query.until or time.time()
         summary = RequestSummary(*summary_layout(start, end))
-        for record in records:
-            if not query.matches(record):
-                continue
-            summary.add((int(record[L_TS]) - summary.first) // summary.step,
-                        record[L_STATUS], bool(record[L_REFUSAL]))
-            summary.clients[record[L_IP]] += 1
-            summary.paths[(record[L_HOST], record[L_PATH])] += 1
+        # Newest first and within the store's time, as the store reads: with
+        # a memory budget a day of requests can be held, and on a small ARM
+        # board counting 200 000 of them one by one took nearly 4 seconds.
+        # One that runs out of time says how far back it got.
+        deadline = time.monotonic() + REQUEST_SUMMARY_SECONDS
+        matches = query.matches
+        matched: List[tuple] = []
+        reached_to = 0
+        for index in range(len(records) - 1, -1, -1):
+            record = records[index]
+            if matches(record):
+                matched.append(record)
+            if not index % 4096 and index and time.monotonic() > deadline:
+                reached_to = int(record[L_TS])
+                break
+        # Counted in bulk: Counter.update over a generator is counted in C.
+        first, step, last_bar = summary.first, summary.step, summary.bars - 1
+        bars = Counter(
+            (int(r[L_TS]) - first) // step * 4
+            + (3 if r[L_REFUSAL] else 2 if r[L_STATUS] >= 500 else 1 if r[L_STATUS] >= 400 else 0)
+            for r in matched
+        )
+        for key, count in bars.items():
+            bar, kind = divmod(key, 4)
+            summary.histogram[min(max(bar, 0), last_bar)][kind] += count
+        summary.counted += len(matched)
+        summary.statuses.update(r[L_STATUS] for r in matched)
+        summary.clients.update(r[L_IP] for r in matched)
+        summary.paths.update((r[L_HOST], r[L_PATH]) for r in matched)
         result = summary.read()
-        result.update({"complete": True, "reached_to": 0, "source": "memory"})
+        result.update({"complete": not reached_to, "reached_to": reached_to, "source": "memory"})
         return result
 
     def status(self) -> Dict[str, Any]:

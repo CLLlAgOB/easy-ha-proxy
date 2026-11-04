@@ -607,7 +607,12 @@ hour), applied only on **Apply**. With a budget the age limit becomes a day.
 The engine refuses more than 128 MB, and less when its service memory limit or
 the machine's free memory would not leave room; a smaller budget drops the
 oldest requests at once, and the page says how many hours would remain before
-anything is applied. The choice is kept in the engine's own state and outlives
+anything is applied; the engine reuses the memory freed that way, but the
+operating system gets it back only when the engine restarts. Measured on a
+4-core ARM board at 96 MB: about 200,000 requests held, the process about as
+large as the estimate, a search under half a second and the overview about
+two (it stops at three seconds and says how far back it got). The choice is
+kept in the engine's own state and outlives
 restarts and updates; after a restart the memory is filled again from the last
 16 MB of the access log, not from the whole budget. If two administrators
 change it at the same time, the second is refused and shown the setting in
