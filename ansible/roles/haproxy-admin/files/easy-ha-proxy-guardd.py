@@ -857,8 +857,8 @@ DEFAULT_WEIGHTS: Dict[str, int] = {
     EVENT_RATE_EXCEEDED: 15,
     EVENT_ERROR_RATE_EXCEEDED: 15,
     EVENT_LEGACY_BAN: 30,
-    # Recorded, not yet weighed: the policy that weighs it (U02_WEIGHTS) is
-    # shown beside this one until the switch (04.8).
+    # Recorded under both policies, weighed only under the u02 ban policy
+    # (see u02_policy).
     EVENT_HARD_FLOOR: 0,
 }
 
@@ -1675,18 +1675,17 @@ def policy_from_query(
 #
 # They stay recorded, and shown with every address; under U02 they weigh
 # nothing. A sustained hard-floor episode is the evidence that takes their
-# place. Until the switch the engine scores with DEFAULT_WEIGHTS and shows the
-# U02 result beside it.
+# place. Which weights apply follows the ban policy HAProxy runs (see
+# BanPolicyWatch): DEFAULT_WEIGHTS under legacy, u02_policy under u02.
 TELEMETRY_EVENTS: frozenset = frozenset(
     {EVENT_RATE_EXCEEDED, EVENT_ERROR_RATE_EXCEEDED, EVENT_LEGACY_BAN}
 )
-# One sustained episode reaches the ban line: the ceilings are about five
-# times what the busiest legitimate address was measured doing (216 requests
-# in 10 s, 98 in flight), held for two reads in a row. A proposal for the
-# switch, not applied before it.
+# One sustained episode reaches the ban line (the operator's choice, 4
+# November): the ceilings are about five times what the busiest legitimate
+# address was measured doing (216 requests in 10 s, 98 in flight), held for
+# two reads in a row; in 7.6 days of two production gateways' logs no address
+# came near them (the highest was 708, once, a scanner).
 U02_EVIDENCE_WEIGHTS: Dict[str, int] = {EVENT_HARD_FLOOR: 60}
-# How many addresses the preview names on each side; the counts are whole.
-U02_PREVIEW_LISTED = 20
 
 
 def u02_policy(base: ScoringPolicy) -> ScoringPolicy:
@@ -5821,6 +5820,12 @@ class GuardEngine:
             if not code:
                 continue
             lifted += 1
+            # What is left to lift, as of now rather than of the last read.
+            left = self.legacy_bans.get(str(code), 0) - 1
+            if left > 0:
+                self.legacy_bans[str(code)] = left
+            else:
+                self.legacy_bans.pop(str(code), None)
             self._emit(
                 ip,
                 EVENT_LEGACY_BAN_LIFTED,
@@ -6371,7 +6376,6 @@ class GuardEngine:
         now: Optional[int] = None,
         policy: Optional[ScoringPolicy] = None,
         scheduled: Optional[Dict[str, int]] = None,
-        compare: Optional[ScoringPolicy] = None,
     ) -> Dict[str, Any]:
         now = now or _utc_now()
         policy = policy or self.scoring_policy()
@@ -6381,8 +6385,6 @@ class GuardEngine:
             scheduled = self.database.scheduled_bans()
         events = self.database.events_for(ip, now - policy.window_seconds)
         result = score_events(events, now, policy)
-        # Scored from the same events, so the comparison costs no query.
-        other = score_events(events, now, compare)["score"] if compare is not None else None
         result["ip"] = ip
         result["enforceable"] = enforceable(ip)
         verdict = self.exclusions.verdict(ip)
@@ -6407,19 +6409,6 @@ class GuardEngine:
         result["would_ban"] = (
             result["score"] >= WOULD_BAN_SCORE and not result["blockers"]
         )
-        if other is not None:
-            # As U02 would see it: the GeoIP whitelist is no exemption there,
-            # and a sign-in protects for seven days rather than for ever.
-            if verdict.excluded and verdict.source != "geo-whitelist":
-                other = 0
-            u02_view = dict(result, excluded=bool(verdict.excluded and verdict.source != "geo-whitelist"))
-            u02_blockers = self.ban_blockers(u02_view, now, BAN_POLICY_U02)
-            result["u02"] = {
-                "score": other,
-                "state": state_for(other),
-                "would_ban": other >= WOULD_BAN_SCORE and not u02_blockers,
-                "blockers": u02_blockers,
-            }
         result["banned_until"] = int(scheduled.get(ip, 0))
         # The review question that matters: did an address the engine wanted to
         # act on turn out to belong to somebody who then logged in?
@@ -6433,13 +6422,12 @@ class GuardEngine:
         now: Optional[int] = None,
         limit: int = 200,
         policy: Optional[ScoringPolicy] = None,
-        compare: Optional[ScoringPolicy] = None,
     ) -> List[Dict[str, Any]]:
         now = now or _utc_now()
         policy = policy or self.scoring_policy()
         scheduled = self.database.scheduled_bans()
         rows = [
-            self.reputation(ip, now, policy, scheduled, compare)
+            self.reputation(ip, now, policy, scheduled)
             for ip in self.database.active_addresses(
                 now - policy.window_seconds, limit=limit
             )
@@ -6874,8 +6862,7 @@ class GuardEngine:
 
         now = now or _utc_now()
         policy = policy or self.scoring_policy()
-        after = u02_policy(policy)
-        rows = self.reputation_table(now, limit=limit, policy=policy, compare=after)
+        rows = self.reputation_table(now, limit=limit, policy=policy)
         by_state: Dict[str, int] = {}
         for row in rows:
             by_state[row["state"]] = by_state.get(row["state"], 0) + 1
@@ -6930,64 +6917,10 @@ class GuardEngine:
                 ),
                 "by_state": by_state,
             },
-            "u02": dict(
-                self.u02_preview(rows, policy, after),
-                applied=self.ban_policy == BAN_POLICY_U02,
-                ban_policy=self.ban_policy,
-                switch=self.ban_policy_state(),
-                # Bans HAProxy wrote under the old rules, by code: what a
-                # switch would lift, or what is still left to lift.
-                legacy_bans=dict(self.legacy_bans),
-                legacy_lifted=self.legacy_lifted,
-            ),
             "addresses": [
                 {key: value for key, value in row.items() if key != "contributions"}
                 for row in rows
             ],
-        }
-
-    @staticmethod
-    def u02_preview(
-        rows: List[Dict[str, Any]], policy: ScoringPolicy, after: ScoringPolicy
-    ) -> Dict[str, Any]:
-        """What the U02 policy would change, before the switch makes it so.
-
-        Enforcement keeps using ``policy`` until the switch. U02's own
-        exemptions are used for its side: the GeoIP whitelist is none, and a
-        sign-in protects for seven days rather than for ever.
-        """
-
-        def brief(row: Dict[str, Any]) -> Dict[str, Any]:
-            telemetry = sum(
-                float(item.get("points") or 0)
-                for item in row.get("contributions") or []
-                if item.get("event_type") in TELEMETRY_EVENTS
-            )
-            return {
-                "ip": row["ip"],
-                "score": row["score"],
-                "u02_score": row["u02"]["score"],
-                "telemetry_points": round(telemetry, 2),
-            }
-
-        changed = sorted(set(policy.weights) | set(after.weights))
-        no_longer = [row for row in rows if row["would_ban"] and not row["u02"]["would_ban"]]
-        newly = [row for row in rows if row["u02"]["would_ban"] and not row["would_ban"]]
-        return {
-            "applied": False,
-            "telemetry": sorted(TELEMETRY_EVENTS),
-            "weights": {
-                event_type: [policy.weight(event_type), after.weight(event_type)]
-                for event_type in changed
-                if policy.weight(event_type) != after.weight(event_type)
-            },
-            "would_ban": sum(1 for row in rows if row["u02"]["would_ban"]),
-            "would_ban_now": sum(1 for row in rows if row["would_ban"]),
-            "lower": sum(1 for row in rows if row["u02"]["score"] < row["score"]),
-            "no_longer": [brief(row) for row in no_longer[:U02_PREVIEW_LISTED]],
-            "no_longer_count": len(no_longer),
-            "newly": [brief(row) for row in newly[:U02_PREVIEW_LISTED]],
-            "newly_count": len(newly),
         }
 
     # -- maintenance ------------------------------------------------------

@@ -276,27 +276,14 @@ class TheSwitch(Workspace):
                 self.engine.snapshot_bans(T0 + step)
         self.assertEqual(len(list(self.root.glob("ban-policy-u02-*.json"))), guardd.BAN_SNAPSHOTS_KEPT)
 
-    def test_the_page_says_whether_it_is_in_force(self):
-        before = self.engine.shadow_review(now=T0)["u02"]
-        self.assertIs(before["applied"], False)
+    def test_the_status_says_which_policy_is_in_force(self):
+        self.engine.refresh_ban_policy(T0)
+        self.assertEqual(self.engine.health()["ban_policy"]["current"], "legacy")
         self.switch("u02")
-        after = self.engine.shadow_review(now=T0 + 1)["u02"]
-        self.assertIs(after["applied"], True)
-        self.assertEqual(after["switch"]["policy"], "u02")
         health = self.engine.health()["ban_policy"]
-        self.assertEqual(health["current"], "u02")
+        self.assertEqual((health["current"], health["switch"]["policy"]), ("u02", "u02"))
         self.assertEqual(health["legacy_lifted"], 2)
-
-
-class ThePanel(unittest.TestCase):
-    def test_the_block_changes_its_words_once_switched(self):
-        html = (ROOT / "docker/app/haproxy_admin/templates/adaptive_protection.html").read_text(encoding="utf-8")
-        script = (ROOT / "docker/app/haproxy_admin/static/js/adaptive_protection.js").read_text(encoding="utf-8")
-        for element in ('id="ap-u02-title-active" hidden', 'id="ap-u02-active" hidden', 'id="ap-u02-legacy"'):
-            self.assertIn(element, html)
-        block = script.split("function renderU02")[1].split("function renderTable")[0]
-        self.assertIn("preview.applied", block)
-        self.assertIn("preview.legacy_bans", block)
+        self.assertEqual(health["legacy_bans"], {})
 
 
 if __name__ == "__main__":

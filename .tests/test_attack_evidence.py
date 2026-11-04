@@ -10,8 +10,8 @@ the moment its sign-in lapsed.
 
 They stay recorded and shown. Under the U02 policy they weigh nothing, and
 an address that stays over a hard ceiling -- something no client does --
-is the evidence that takes their place. Until the switch (04.8) enforcement
-keeps today's weights and the page shows the U02 result beside them.
+is the evidence that takes their place. Which weights apply follows the ban
+policy HAProxy runs (see test_ban_policy_switch).
 """
 
 from __future__ import annotations
@@ -244,72 +244,14 @@ class TheEngineReadsOnlyTheOffenders(unittest.TestCase):
         floor.assert_called_once()
 
 
-class ThePreview(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        root = Path(directory.name)
-        log = root / "haproxy.log"
-        log.write_text("", encoding="utf-8")
-        self.database = guardd.SecurityDatabase(str(root / "security.db"))
-        self.addCleanup(self.database.close)
-        self.engine = guardd.GuardEngine(guardd.GuardConfig(log_file=str(log)), self.database)
-        self.database.record_events([
-            # Ordinary excess only: banned today, not after the switch.
-            event(guardd.EVENT_LEGACY_BAN, ip="203.0.113.1", category="ban", detail="code=10"),
-            event(guardd.EVENT_RATE_EXCEEDED, ip="203.0.113.1"),
-            event(guardd.EVENT_ERROR_RATE_EXCEEDED, ip="203.0.113.1"),
-            # A flood: nothing today, banned after.
-            event(guardd.EVENT_HARD_FLOOR, ip="203.0.113.2", category="flood"),
-            # A scanner: banned either way.
-            event(guardd.EVENT_SCANNER_DECISIVE, ip="203.0.113.3", category="secrets"),
-        ])
-
-    def test_it_names_who_the_switch_would_change(self):
-        review = self.engine.shadow_review(now=T0 + 1)
-        preview = review["u02"]
-        self.assertIs(preview["applied"], False)
-        self.assertEqual([row["ip"] for row in preview["no_longer"]], ["203.0.113.1"])
-        self.assertEqual(preview["no_longer"][0]["u02_score"], 0)
-        self.assertGreater(preview["no_longer"][0]["telemetry_points"], 0)
-        self.assertEqual([row["ip"] for row in preview["newly"]], ["203.0.113.2"])
-        self.assertEqual((preview["would_ban_now"], preview["would_ban"]), (2, 2))
-        self.assertEqual(preview["weights"][guardd.EVENT_RATE_EXCEEDED], [15, 0])
-        self.assertEqual(preview["weights"][guardd.EVENT_HARD_FLOOR], [0, 60])
-
-    def test_enforcement_still_uses_todays_scores(self):
-        review = self.engine.shadow_review(now=T0 + 1)
-        flood = next(row for row in review["addresses"] if row["ip"] == "203.0.113.2")
-        self.assertEqual((flood["score"], flood["would_ban"]), (0, False))
-        self.assertEqual(flood["u02"]["score"], 60)
-        self.assertEqual(self.engine.reputation("203.0.113.1", T0 + 1)["score"], 60)
-
-
 class ThePanel(unittest.TestCase):
-    def test_the_preview_rows_carry_their_country(self):
-        from haproxy_admin import services_security
-
-        payload = {"ok": True, "addresses": [],
-                   "u02": {"no_longer": [{"ip": "203.0.113.1"}], "newly": [{"ip": "203.0.113.2"}]}}
-        with mock.patch.object(services_security, "guardd_shadow", return_value=payload), \
-                mock.patch.object(services_security, "get_country_code", return_value="NL"):
-            result = services_security.shadow({})
-        self.assertEqual(result["u02"]["no_longer"][0]["country"], "NL")
-        self.assertEqual(result["u02"]["newly"][0]["country"], "NL")
-
-    def test_an_older_daemon_without_a_preview_is_fine(self):
-        from haproxy_admin import services_security
-
-        with mock.patch.object(services_security, "guardd_shadow", return_value={"addresses": []}):
-            self.assertNotIn("u02", services_security.shadow({}))
-
-    def test_the_page_shows_it_and_hides_it_when_absent(self):
+    def test_the_page_has_no_preview_of_the_policy(self):
+        # Shown for a day before the switch and dropped at the operator's
+        # word (4 November): the policy is chosen in the settings.
         html = (ROOT / "docker/app/haproxy_admin/templates/adaptive_protection.html").read_text(encoding="utf-8")
         script = (ROOT / "docker/app/haproxy_admin/static/js/adaptive_protection.js").read_text(encoding="utf-8")
-        self.assertIn('id="ap-u02" hidden', html)
-        self.assertIn("renderU02(payload.u02)", script)
-        block = script.split("function renderU02")[1].split("function renderTable")[0]
-        self.assertIn("box.hidden = !preview", block)
+        self.assertNotIn("ap-u02", html)
+        self.assertNotIn("renderU02", script)
 
 
 if __name__ == "__main__":

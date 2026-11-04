@@ -250,16 +250,6 @@
 .ap-flag.noenforce { background: rgba(120,120,140,.2); color: var(--text-secondary); }
 .ap-flag.ban { background: rgba(204,75,75,.18); color: #cc4b4b; }
 
-.ap-u02 {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-
-.ap-u02[hidden] { display: none; }
-.ap-u02 h3 { margin: 0 0 6px; font-size: 15px; }
-.ap-u02-line { margin-top: 6px; overflow-wrap: anywhere; }
-
 .ap-row-link { cursor: pointer; }
 
 .ap-detail { margin-top: 18px; }
@@ -485,46 +475,6 @@
   <p class="mon-sub">
     <a href="{{ url_for('routes.detection_rules_page') }}">See what each finding means, and what it is worth</a>
   </p>
-
-  <div class="ap-u02" id="ap-u02" hidden>
-    <h3 id="ap-u02-title-pending">After the switch to the new ban policy (preview)</h3>
-    <h3 id="ap-u02-title-active" hidden>The new ban policy is in force</h3>
-    <p class="mon-sub" id="ap-u02-pending">
-      Under the new policy an ordinary excess, over a site's request or error
-      limit, is still recorded but scores nothing, and neither does the ban
-      HAProxy writes for it. An address that stays over the hard floor counts
-      as an attack. Nothing here is applied yet: enforcement still uses the
-      scores above.
-    </p>
-    <p class="mon-sub" id="ap-u02-active" hidden>
-      An ordinary excess is refused without a ban, and bans come only from
-      evidence of an attack or from an operator. Bans HAProxy wrote under the
-      old rules are lifted.
-    </p>
-    <div class="ap-cards">
-      <div class="ap-card danger">
-        <div class="ap-label">Would be banned after the switch</div>
-        <div class="ap-value" id="ap-u02-wouldban" data-i18n-skip translate="no">—</div>
-      </div>
-      <div class="ap-card">
-        <div class="ap-label">No longer banned</div>
-        <div class="ap-value" id="ap-u02-nolonger" data-i18n-skip translate="no">—</div>
-      </div>
-      <div class="ap-card">
-        <div class="ap-label">Newly banned</div>
-        <div class="ap-value" id="ap-u02-newly" data-i18n-skip translate="no">—</div>
-      </div>
-      <div class="ap-card">
-        <div class="ap-label">Lower score</div>
-        <div class="ap-value" id="ap-u02-lower" data-i18n-skip translate="no">—</div>
-      </div>
-      <div class="ap-card">
-        <div class="ap-label">Old HAProxy bans (codes 10, 20, 30)</div>
-        <div class="ap-value" id="ap-u02-legacy" data-i18n-skip translate="no">—</div>
-      </div>
-    </div>
-    <div class="mon-sub" id="ap-u02-list" data-i18n-skip translate="no"></div>
-  </div>
 </div>
 
 <div class="card" style="margin-top:25px;">

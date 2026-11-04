@@ -944,8 +944,7 @@ shown with each address, worth nothing. An address that stays over a hard
 ceiling -- 1000 requests or 1000 new connections in 10 s, or 500 open at once,
 on two reads in a row -- becomes the evidence of a flood in their place
 (`HARD_FLOOR_EPISODE`; for a trusted address `HARD_FLOOR_TRUSTED`, which is
-never weighed). Until the switch, enforcement keeps the current weights and the
-review card shows a preview: who would no longer be banned, and who would be.
+never weighed). Which weights apply is decided by the switch below.
 
 The switch is **Ban policy** under *Rate and connection protection* in the
 HAProxy settings (`site_defaults.ban_policy`), `legacy` by default. Under `u02`

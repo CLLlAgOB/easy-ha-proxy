@@ -101,15 +101,6 @@
     "Allowed on the site": "Разрешён на сайте",
     "Limit not applied": "Лимит не применяется",
     "Banned for its request rate": "Забанен за частоту запросов",
-    "Going on now": "Продолжается",
-    "After the switch to the new ban policy (preview)": "После перехода на новую политику банов (предпросмотр)",
-    "Under the new policy an ordinary excess, over a site's request or error limit, is still recorded but scores nothing, and neither does the ban HAProxy writes for it. An address that stays over the hard floor counts as an attack. Nothing here is applied yet: enforcement still uses the scores above.": "По новой политике обычное превышение лимита запросов или ошибок сайта по-прежнему записывается, но баллов не даёт, как и бан, который HAProxy ставит за него. Адрес, который держится выше жёсткого пола, считается атакующим. Пока ничего из этого не применяется: баны идут по баллам выше.",
-    "Would be banned after the switch": "Были бы забанены после перехода",
-    "No longer banned": "Перестали бы банить",
-    "Newly banned": "Начали бы банить",
-    "Lower score": "Балл ниже",
-    "The new ban policy is in force": "Новая политика банов действует",
-    "An ordinary excess is refused without a ban, and bans come only from evidence of an attack or from an operator. Bans HAProxy wrote under the old rules are lifted.": "Обычное превышение отклоняется без бана, а баны ставятся только за признаки атаки или оператором. Баны, которые HAProxy поставил по старым правилам, сняты.",
-    "Old HAProxy bans (codes 10, 20, 30)": "Старые баны HAProxy (коды 10, 20, 30)"
+    "Going on now": "Продолжается"
   }
 }
