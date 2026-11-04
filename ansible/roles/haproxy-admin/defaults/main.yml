@@ -165,8 +165,9 @@ haproxy_admin_start_wait_timeout: 180
 haproxy_admin_compose_pull_timeout: 420
 haproxy_admin_compose_up_timeout: 180
 
-# Container timezone.
-haproxy_admin_timezone: "Europe/Moscow"
+# Container time zone. Empty: the gateway's own (easy_ha_proxy_host_timezone,
+# read by the playbook), so the times the panel writes match the host's.
+haproxy_admin_timezone: ""
 haproxy_admin_default_language: "en"
 
 # Technical UI debug routes are disabled by default.

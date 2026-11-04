@@ -1,5 +1,7 @@
 services:
 {% set relay_enabled = (mail_notify_enabled | default(false) | bool) or (mail_relay_server | default(false) | bool) %}
+{# The operator's choice, else the gateway's own zone. #}
+{% set container_timezone = authelia_timezone | default('', true) or easy_ha_proxy_host_timezone | default('UTC', true) %}
 {% if authelia_session_redis_enabled | default(true) %}
   authelia-redis:
     image: {{ authelia_redis_image | default('redis:8.10.3-alpine') }}
@@ -24,7 +26,7 @@ services:
     volumes:
       - {{ authelia_redis_data_dir }}:/data
     environment:
-      - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+      - TZ={{ container_timezone }}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -54,7 +56,7 @@ services:
     env_file:
       - "{{ authelia_env_file }}"
     environment:
-      - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+      - TZ={{ container_timezone }}
       # Read only at start: a changed script must recreate the container.
       - EASY_HA_PROXY_RELAY_SCRIPTS={{ authelia_mail_relay_scripts_digest | default('') }}
     healthcheck:
@@ -85,7 +87,7 @@ services:
     volumes:
       - /opt/authelia:/config
     environment:
-      - TZ={{ authelia_timezone | default('Europe/Moscow') }}
+      - TZ={{ container_timezone }}
     ports:
       - "127.0.0.1:9091:9091"
 {% if relay_enabled %}

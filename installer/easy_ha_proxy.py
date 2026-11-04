@@ -651,13 +651,33 @@ def parse_countries(value: str) -> list[str]:
     return countries
 
 
-def detect_timezone() -> str:
-    timezone_file = Path("/etc/timezone")
+_TIMEZONE_NAME_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$")
+
+
+def detect_timezone(
+    timezone_file: Path = Path("/etc/timezone"),
+    localtime: Path = Path("/etc/localtime"),
+) -> str:
+    """The host's zone name, as the playbook reads it when none is chosen.
+
+    /etc/timezone is Debian's; elsewhere the /etc/localtime link names the
+    zone. A host that says neither gets UTC rather than a guess.
+    """
+
     try:
-        value = timezone_file.read_text(encoding="utf-8").strip()
-    except OSError:
+        value = timezone_file.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError):
         value = ""
-    return value or "UTC"
+    if not value:
+        try:
+            target = os.readlink(localtime)
+        except OSError:
+            target = ""
+        _, marker, name = target.partition("zoneinfo/")
+        value = name.removeprefix("posix/").removeprefix("right/") if marker else ""
+    if not _TIMEZONE_NAME_RE.fullmatch(value) or ".." in value:
+        return "UTC"
+    return value
 
 
 def detect_local_ip() -> str:

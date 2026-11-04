@@ -28,7 +28,8 @@ services:
       - "{{ haproxy_admin_env_file }}"
 
     environment:
-      TZ: "{{ haproxy_admin_timezone }}"
+      # The operator's choice, else the gateway's own zone.
+      TZ: "{{ haproxy_admin_timezone | default('', true) or easy_ha_proxy_host_timezone | default('UTC', true) }}"
       HOME: "/tmp"
       HAPROXY_ADMIN_SECRET_FILE: "/var/lib/haproxy-admin/secret_key"
       HAPROXY_ADMIN_GEOIP_DB: "/etc/haproxy/geoip/current/dbip-country-lite.mmdb"

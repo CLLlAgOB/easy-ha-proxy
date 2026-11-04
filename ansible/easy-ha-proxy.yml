@@ -55,6 +55,37 @@
       no_log: true
       tags: always
 
+    # The containers run in the gateway's own time zone unless the operator
+    # chose one (haproxy_admin_timezone, authelia_timezone). Both used to
+    # default to Europe/Moscow whatever the host said, so a panel on a
+    # gateway elsewhere showed its own times hours off.
+    - name: Read the gateway's time zone
+      ansible.builtin.shell: |
+        zone=$(timedatectl show -p Timezone --value 2>/dev/null) || zone=""
+        if [ -z "$zone" ] && [ -r /etc/timezone ]; then
+          zone=$(head -n 1 /etc/timezone)
+        fi
+        if [ -z "$zone" ]; then
+          zone=$(readlink -f /etc/localtime 2>/dev/null \
+            | sed -n -e 's#^.*/zoneinfo/##' -e 's#^posix/##' -e 's#^right/##' -e p)
+        fi
+        case "$zone" in
+          "" | /* | */ | *..* | *[!A-Za-z0-9_+/-]*) zone=UTC ;;
+        esac
+        printf '%s\n' "$zone"
+      args:
+        executable: /bin/bash
+      register: easy_ha_proxy_host_timezone_probe
+      changed_when: false
+      check_mode: false
+      tags: always
+
+    - name: Remember the gateway's time zone
+      ansible.builtin.set_fact:
+        easy_ha_proxy_host_timezone: >-
+          {{ easy_ha_proxy_host_timezone_probe.stdout | default('') | trim | default('UTC', true) }}
+      tags: always
+
     - name: Use new-lineage issuance mode for addsite
       set_fact:
         cert_issue_mode: new

@@ -56,8 +56,9 @@ authelia_cookie_domain: "example.com"
 authelia_portal_url: "https://auth.example.com"
 authelia_default_redirection_url: "https://example.com"
 
-# Container timezone.
-authelia_timezone: "Europe/Moscow"
+# Container time zone. Empty: the gateway's own (easy_ha_proxy_host_timezone,
+# read by the playbook).
+authelia_timezone: ""
 
 # ----------------- MAIL / SMTP / RELAY -----------------
 
