@@ -1003,6 +1003,12 @@ the address at that moment -- the time of the decision is left unknown rather
 than guessed. When the ban ends -- it runs out, HAProxy restarts, an operator
 or the new ban policy lifts it -- that is recorded once.
 
+An address Authelia has banned from signing in (its regulation, after too
+many failed attempts) is shown on the same page, from the list on the
+**Authelia bans** page, as what it is: a block on signing in only. HAProxy
+does not refuse such an address, and sites that need no sign-in still answer
+it, so it is kept apart from HAProxy's ban and never counted as one.
+
 Query strings are checked separately, and by what the **value** looks like
 rather than by the parameter it arrived under. That distinction is not
 cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`

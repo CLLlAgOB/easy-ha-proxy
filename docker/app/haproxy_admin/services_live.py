@@ -17,6 +17,7 @@ import datetime
 import ipaddress
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from .cache import get_country_code
@@ -291,6 +292,54 @@ def ban_history(ip: str) -> "Dict[str, Any] | None":
             "evidence_total": int(recorded.get("evidence_total") or 0),
         }
     return {"decisions": rows, "reason": reason, "observed": observed}
+
+
+# Authelia's list of banned addresses, read through authelia-bansd (two
+# `docker exec` calls into the Authelia container): kept this long, so
+# opening one address after another does not ask every time.
+AUTHELIA_BANS_CACHE_SECONDS = 30
+_authelia_bans_cache: Dict[str, Any] = {"at": float("-inf"), "value": None}
+
+
+def authelia_sign_in_ban(ip: str) -> Optional[Dict[str, Any]]:
+    """Authelia's own ban on signing in from this address, or None (06.5c).
+
+    Authelia bans an address from signing in after too many failed
+    attempts (its regulation). That is all it blocks: HAProxy does not
+    refuse the address, and a site that needs no sign-in still answers it,
+    so it is shown apart from the HAProxy ban, never as one. None as well
+    when Authelia's list cannot be read: the page says nothing rather than
+    "not banned".
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    cached = _authelia_bans_cache
+    now = time.monotonic()
+    if cached["value"] is None or now - cached["at"] > AUTHELIA_BANS_CACHE_SECONDS:
+        from .services import get_authelia_bans
+
+        cached["value"] = get_authelia_bans()
+        cached["at"] = now
+    bans = cached["value"] or {}
+    if bans.get("error"):
+        return None
+    for entry in bans.get("ips") or []:
+        subject = str(entry.get("subject") or "")
+        try:
+            network = ipaddress.ip_network(subject, strict=False)
+        except ValueError:
+            continue
+        if address.version == network.version and address in network:
+            return {
+                "subject": subject,
+                "network": network.num_addresses > 1,
+                "expires": str(entry.get("expires") or ""),
+                "source": str(entry.get("source") or ""),
+                "reason": str(entry.get("reason") or ""),
+            }
+    return None
 
 
 def _observed_ban(decision: Dict[str, Any]) -> Dict[str, Any]:

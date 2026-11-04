@@ -242,7 +242,16 @@ def view_ip_logs(ip: str):
     except Exception:  # pylint: disable=broad-except
         current_app.logger.exception("Failed to read the ban history of %s", ip)
         history = None
-    return render_template("ip_logs.html", ip=ip, lines=lines, status=status, history=history)
+    # Authelia's own ban: on signing in only, shown apart from HAProxy's.
+    try:
+        from . import services_live
+
+        authelia_ban = services_live.authelia_sign_in_ban(ip)
+    except Exception:  # pylint: disable=broad-except
+        current_app.logger.exception("Failed to read Authelia's bans for %s", ip)
+        authelia_ban = None
+    return render_template("ip_logs.html", ip=ip, lines=lines, status=status, history=history,
+                           authelia_ban=authelia_ban)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Authelia users (managing users_database.yml)

@@ -166,6 +166,8 @@
     "Counter": "Счётчик",
     "Limit": "Предел",
     "Unknown names": "Неизвестные имена",
-    "No site counter held this address when the ban was first seen.": "Когда бан впервые заметили, ни один счётчик сайта этот адрес не держал."
+    "No site counter held this address when the ban was first seen.": "Когда бан впервые заметили, ни один счётчик сайта этот адрес не держал.",
+    "Sign-in blocked by Authelia": "Вход заблокирован Authelia",
+    "Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.": "Заблокирован только вход — после слишком многих неудачных попыток: HAProxy этот адрес не отклоняет, и сайты без входа ему по-прежнему отвечают."
   }
 }

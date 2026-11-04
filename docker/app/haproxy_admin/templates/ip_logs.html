@@ -44,6 +44,26 @@
 </div>
 {% endif %}
 
+{% if authelia_ban %}
+<div class="card" style="margin-bottom:20px;" id="ipp-authelia">
+  <div class="ipp-row">
+    <span class="ipp-badge ipp-ban">Sign-in blocked by Authelia</span>
+    <span class="ipp-muted">Until</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ authelia_ban.expires or "—" }}</span>
+    {% if authelia_ban.network %}
+    <span class="ipp-muted">Network</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ authelia_ban.subject }}</span>
+    {% endif %}
+    {% if authelia_ban.reason %}
+    <span class="ipp-muted">Reason</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ authelia_ban.reason }}</span>
+    {% endif %}
+    <a class="btn" href="{{ url_for('routes.authelia_bans') }}">Authelia bans</a>
+  </div>
+  <p class="ipp-muted" style="margin:8px 0 0;">Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.</p>
+</div>
+{% endif %}
+
 {% if history and history.decisions %}
 <div class="card" style="margin-bottom:20px;" id="ipp-history">
   <div class="card-header">
