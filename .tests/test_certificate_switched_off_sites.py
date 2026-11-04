@@ -183,6 +183,61 @@ class TheEngine(unittest.TestCase):
         self.assertEqual(self.database.events(limit=5)["events"], [])
 
 
+class SavedButNotApplied(unittest.TestCase):
+    """R05 (4 November review): the sites as applied were read with the
+    admin and sign-in names of the saved draft. After a Save without Apply
+    the old admin name -- still served -- looked unused, and a certificate
+    for it and a switched-off site was left unchecked."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        self.draft = root / "config"
+        self.applied = root / "applied"
+        self.draft.mkdir()
+        self.applied.mkdir()
+        for patcher in (
+            mock.patch.object(CERTD, "CONFIG_YAML", self.draft / "vars.yml"),
+            mock.patch.object(CERTD, "APPLIED_WEBSITES", self.applied / "last_applied_websites.yml"),
+            mock.patch.object(CERTD, "APPLIED_VARS", self.applied / "last_applied_vars.yml"),
+            mock.patch.object(CERTD, "DELIVERY_DIR", root / "deliveries"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write(self, applied_sites, applied_vars, draft_sites, draft_vars):
+        (self.applied / "last_applied_websites.yml").write_text(applied_sites, encoding="utf-8")
+        (self.applied / "last_applied_vars.yml").write_text(applied_vars, encoding="utf-8")
+        (self.draft / "websites.yml").write_text(draft_sites, encoding="utf-8")
+        (self.draft / "vars.yml").write_text(draft_vars, encoding="utf-8")
+
+    def only_switched_off(self, *names):
+        return CERTD._only_switched_off(list(names), CERTD.certificate_users())
+
+    OFF = ("sites:\n  - name: old\n    domain: old.example.test\n"
+           "    paused: true\n    cert_renewal_paused: true\n")
+
+    def test_the_admin_name_still_served_counts_after_a_save_without_apply(self):
+        self.write(self.OFF, "admin_domain: old.example.test\n", self.OFF, "admin_domain: new.example.test\n")
+        self.assertFalse(self.only_switched_off("old.example.test"))
+
+    def test_a_site_switched_on_again_but_not_applied_counts(self):
+        on = "sites:\n  - name: old\n    domain: old.example.test\n"
+        self.write(self.OFF, "admin_domain: ha.example.test\n", on, "admin_domain: ha.example.test\n")
+        self.assertFalse(self.only_switched_off("old.example.test"))
+
+    def test_switched_off_in_both_is_still_left_out(self):
+        self.write(self.OFF, "admin_domain: ha.example.test\n", self.OFF, "admin_domain: ha.example.test\n")
+        self.assertTrue(self.only_switched_off("old.example.test"))
+
+    def test_nothing_applied_yet_reads_the_draft(self):
+        (self.draft / "websites.yml").write_text(self.OFF, encoding="utf-8")
+        (self.draft / "vars.yml").write_text("admin_domain: ha.example.test\n", encoding="utf-8")
+        self.assertTrue(self.only_switched_off("old.example.test"))
+        self.assertFalse(self.only_switched_off("ha.example.test"))
+
+
 class TheClient(unittest.TestCase):
     def test_it_passes_retired_on(self):
         source = (FILES / "easy_ha_proxy_alert_client.py").read_text(encoding="utf-8")

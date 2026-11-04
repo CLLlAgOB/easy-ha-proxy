@@ -4856,6 +4856,13 @@ APPLIED_WEBSITES = Path(
         "HAPROXY_APPLIED_WEBSITES", "/opt/haproxy-admin/backups/haproxy/last_applied_websites.yml"
     )
 )
+# The settings as last applied, beside the sites: the admin and sign-in names
+# the gateway serves now (R05).
+APPLIED_VARS = Path(
+    os.environ.get(
+        "HAPROXY_APPLIED_VARS", "/opt/haproxy-admin/backups/haproxy/last_applied_vars.yml"
+    )
+)
 
 
 def _site_names(site: Dict[str, Any]) -> Set[str]:
@@ -4877,23 +4884,32 @@ def certificate_users() -> Optional[Tuple[Set[str], Set[str]]]:
     target sends elsewhere counts as in use. None when the sites cannot be
     read: what cannot be known is checked, never skipped.
     """
-    path = APPLIED_WEBSITES if APPLIED_WEBSITES.exists() else CONFIG_YAML.parent / "websites.yml"
-    sites = _load_yaml(path).get("sites")
-    if not isinstance(sites, list):
+    # What is served and what is saved but not applied yet, both: a name
+    # counts as used if either uses it (R05). Applied sites with the draft's
+    # admin and sign-in names used to be compared -- after a Save without
+    # Apply the old admin name, still served, looked unused.
+    site_files = [path for path in (CONFIG_YAML.parent / "websites.yml", APPLIED_WEBSITES)
+                  if path.exists()]
+    if not site_files:
         return None
     used: Set[str] = set()
     switched_off: Set[str] = set()
-    for site in sites:
-        if not isinstance(site, dict):
-            continue
-        if site.get("paused") is True and site.get("cert_renewal_paused") is True:
-            switched_off |= _site_names(site)
-        else:
-            used |= _site_names(site)
-    settings = _load_yaml(CONFIG_YAML)
-    for key in ("admin_domain", "aut_domain"):
-        if settings.get(key):
-            used.add(_normalize_dns_name(str(settings[key])))
+    for sites_path in site_files:
+        sites = _load_yaml(sites_path).get("sites")
+        if not isinstance(sites, list):
+            return None
+        for site in sites:
+            if not isinstance(site, dict):
+                continue
+            if site.get("paused") is True and site.get("cert_renewal_paused") is True:
+                switched_off |= _site_names(site)
+            else:
+                used |= _site_names(site)
+    for vars_path in (CONFIG_YAML, APPLIED_VARS):
+        settings = _load_yaml(vars_path)
+        for key in ("admin_domain", "aut_domain"):
+            if settings.get(key):
+                used.add(_normalize_dns_name(str(settings[key])))
     if DELIVERY_DIR.is_dir():
         for record_path in sorted(DELIVERY_DIR.glob("*.json")):
             try:
