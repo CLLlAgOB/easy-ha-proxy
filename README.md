@@ -991,7 +991,13 @@ Every ban decision and every lift is kept with its reason as it stood when
 it was made: for an adaptive ban, the findings that counted, heaviest first,
 each with its site and detail. The findings themselves fade from the score
 within hours and are swept with ordinary events; the decision is kept as long
-as the ban records the strike ladder counts from. An address's page
+as the ban records the strike ladder counts from, and a decision whose ban
+is still in force is never swept, however many come after it. The full
+backup carries them (the engine is stopped while its database is copied); the
+request log stays out of it. If the engine cannot do its work -- a full disk
+or a damaged database stops every cycle, and nothing is scored, banned or
+recorded meanwhile -- the alert **Adaptive protection is not working** says
+so after five minutes, with the error, and closes once it works again. An address's page
 (`/ip/<address>`) shows it as **Why it is banned**, with every decision about
 the address below.
 

@@ -112,6 +112,7 @@
     "stale": "нет данных",
     "No report since": "Нет данных с",
     "stale_closed": "закрыто без данных",
-    "retired": "больше не проверяется"
+    "retired": "больше не проверяется",
+    "Adaptive protection is not working": "Адаптивная защита не работает"
   }
 }

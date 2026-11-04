@@ -233,6 +233,10 @@ RULES: Tuple[Rule, ...] = (
          "Burst of hostile requests", auto_clear=3600),
     Rule("security.hostile_ip", KIND_EVENT, SEVERITY_INFO,
          "Adaptive protection acted on an address", auto_clear=3600),
+    # guardd's cycle failing again and again -- a full disk, a damaged
+    # database: nothing is scored, banned or recorded meanwhile.
+    Rule("security.engine_failing", KIND_LEVEL, SEVERITY_WARNING,
+         "Adaptive protection is not working", trigger_delay=300),
     Rule("backup.failed", KIND_EVENT, SEVERITY_CRITICAL,
          "Backup job failed", auto_clear=6 * 3600),
     Rule("backup.space_low", KIND_EVENT, SEVERITY_WARNING,

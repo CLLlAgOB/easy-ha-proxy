@@ -222,6 +222,12 @@ LEGACY_READINGS_LISTED = 6
 BURST_WINDOW_SECONDS = 300
 BURST_MIN_BANS = 15
 BURST_REPORT_GAP_SECONDS = 3600
+# security.engine_failing: this many failed cycles in a row is no longer a
+# hiccup. A cycle that cannot write -- a full disk, a damaged database --
+# scores nothing, bans nothing and records no decision, and used to say so
+# only in the service journal (06.7).
+ENGINE_FAILING_AFTER = 3
+ENGINE_FAILING_RULE = "security.engine_failing"
 
 # Sanitising limits. A request line is attacker-controlled text.
 MAX_PATH_LENGTH = 200
@@ -3510,15 +3516,21 @@ class SecurityDatabase:
             decisions.append(item)
         return decisions
 
-    def prune_decisions(self, before: int, keep: int) -> int:
+    def prune_decisions(self, before: int, keep: int, now: int = 0) -> int:
+        """Drop decisions older than `before`, then the oldest beyond `keep`
+        rows -- but never one whose ban is still in force (until > now): a
+        wave of bans must not cost a standing ban its reason (06.7)."""
+        now = int(now or _utc_now())
         with self._lock, self._conn:
             cursor = self._conn.cursor()
-            cursor.execute("DELETE FROM ban_decisions WHERE ts < ?", (before,))
+            cursor.execute(
+                "DELETE FROM ban_decisions WHERE ts < ? AND until <= ?", (before, now)
+            )
             deleted = cursor.rowcount or 0
             cursor.execute(
-                "DELETE FROM ban_decisions WHERE id NOT IN "
+                "DELETE FROM ban_decisions WHERE until <= ? AND id NOT IN "
                 "(SELECT id FROM ban_decisions ORDER BY ts DESC, id DESC LIMIT ?)",
-                (int(keep),),
+                (now, int(keep)),
             )
             deleted += cursor.rowcount or 0
             cursor.close()
@@ -5936,6 +5948,7 @@ class GuardEngine:
         # the alert engine's decision, not this daemon's; here it is only
         # reported.
         self.alerts = alerts
+        self._failing_reported = False
         self._burst_bans: deque = deque()
         self._burst_reported: Optional[int] = None
         # The rendered config supplies the default; an operator's choice in the
@@ -6204,6 +6217,7 @@ class GuardEngine:
                         self.consecutive_failures,
                         exc,
                     )
+            self.report_failing()
             if time.monotonic() >= next_maintenance:
                 try:
                     self.run_maintenance()
@@ -7514,6 +7528,44 @@ class GuardEngine:
                 ),
             )
 
+    def report_failing(self) -> None:
+        """Tell the alert engine while the cycle keeps failing, and once when
+        it works again (06.7).
+
+        A level, reported every cycle it holds (the client sends an unchanged
+        one again only every two minutes), so an engine that dies with it
+        raised lets it go stale rather than pinning it on. Best effort, like
+        every report: the cycle does not depend on the alert daemon.
+        """
+        failing = self.consecutive_failures >= ENGINE_FAILING_AFTER
+        if not failing and not self._failing_reported:
+            return
+        self._failing_reported = failing
+        if self.alerts is None:
+            return
+        with contextlib.suppress(Exception):
+            if failing:
+                self.alerts.observe(
+                    ENGINE_FAILING_RULE,
+                    "guardd",
+                    active=True,
+                    # No running count in it: an unchanged report is sent
+                    # again only every two minutes, a changed one at once.
+                    summary=(
+                        "Adaptive protection keeps failing: "
+                        f"{str(self.last_error or 'unknown error')[:200]}"
+                    ),
+                    detail=(
+                        "Until it works again nothing is scored or banned and no ban decision "
+                        "is recorded; bans already in HAProxy stay. The service journal of "
+                        "easy-ha-proxy-guardd has the details; a full disk is the usual cause."
+                    ),
+                )
+            else:
+                self.alerts.clear(
+                    ENGINE_FAILING_RULE, "guardd", summary="Adaptive protection works again",
+                )
+
     def _report_ban(
         self, ip: str, duration: int, row: Dict[str, Any], categories: str
     ) -> None:
@@ -7775,7 +7827,7 @@ class GuardEngine:
         # As long as the ban records themselves: the reason must not go
         # before the strike it explains.
         deleted["ban_decisions"] = self.database.prune_decisions(
-            before=ban_cutoff, keep=DECISIONS_KEEP_ROWS
+            before=ban_cutoff, keep=DECISIONS_KEEP_ROWS, now=now
         )
         if any(deleted.values()):
             self.database.incremental_vacuum()

@@ -543,7 +543,7 @@ class CatalogueTests(unittest.TestCase):
         expected = {
             "site.down", "http.error_ratio",
             "response.slow", "security.burst", "security.hostile_ip",
-            "monitoring.storage", "monitoring.paused", "certificate.expiring",
+            "security.engine_failing", "monitoring.storage", "monitoring.paused", "certificate.expiring",
             "certificate.renewal_failed", "backup.failed", "restore.failed",
             "update.failed", "authelia.unavailable", "config.apply_failed",
             "backup.space_low", "update.available", "mail.delivery_failed",
@@ -921,7 +921,8 @@ class ProducerWiringTests(unittest.TestCase):
             "monitoring.storage", "monitoring.paused", "authelia.unavailable",
             "http.error_ratio", "response.slow",
         ),
-        "easy-ha-proxy-guardd.py": ("security.hostile_ip", "security.burst"),
+        "easy-ha-proxy-guardd.py": ("security.hostile_ip", "security.burst",
+                                    "security.engine_failing"),
         "easy-ha-proxy-backupd.py": ("backup.failed", "restore.failed"),
         "easy-ha-proxy-updated.py": ("update.failed", "update.available"),
         "haproxy-controld.py": ("config.apply_failed",),
