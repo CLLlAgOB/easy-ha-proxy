@@ -1331,18 +1331,38 @@ def _running_images(compose_file: Path, runner: Runner) -> dict[str, list[str]] 
     return {reference: sorted(ids) for reference, ids in running.items()}
 
 
-def _image_layers(reference: str, runner: Runner) -> list[str] | None:
+# What a container runs besides its files (R06): the same layers with another
+# command, environment or user are another image. Labels are left out: they
+# carry build times and revisions, and would make every rebuild look new.
+RUNTIME_CONFIG_KEYS = (
+    "Entrypoint", "Cmd", "Env", "User", "WorkingDir", "ExposedPorts",
+    "Volumes", "StopSignal", "Healthcheck", "Shell",
+)
+
+
+def _image_content(reference: str, runner: Runner) -> tuple[list[str], dict[str, Any]] | None:
+    """An image's filesystem layers and the part of its configuration a
+    container runs with; None when either cannot be read."""
     result = runner.run(
-        ("docker", "image", "inspect", reference, "--format", "{{json .RootFS.Layers}}"),
+        ("docker", "image", "inspect", reference, "--format",
+         "{{json .RootFS.Layers}}\t{{json .Config}}"),
         timeout=COMPOSE_TIMEOUT,
     )
     if result.returncode != 0:
         return None
     try:
-        layers = json.loads(result.stdout.strip())
+        raw_layers, raw_config = result.stdout.strip().split("\t", 1)
+        layers = json.loads(raw_layers)
+        config = json.loads(raw_config)
     except (TypeError, ValueError):
         return None
-    return layers if isinstance(layers, list) and layers else None
+    if not isinstance(layers, list) or not layers or not isinstance(config, (dict, type(None))):
+        return None
+    config = config or {}
+    runtime = {key: config.get(key) for key in RUNTIME_CONFIG_KEYS if config.get(key) not in (None, [], {}, "")}
+    if isinstance(runtime.get("Env"), list):
+        runtime["Env"] = sorted(str(item) for item in runtime["Env"])
+    return layers, runtime
 
 
 def _check_running(detail: dict[str, Any], tag: str, running: dict[str, list[str]] | None,
@@ -1351,28 +1371,29 @@ def _check_running(detail: dict[str, Any], tag: str, running: dict[str, list[str
 
     The tag being current says what a restart would start, not what runs:
     after a pull, the tag names the new image while the container keeps the
-    old one. Compared by content -- the filesystem layers -- because the IDs
-    come in kinds that do not compare (a config ID, a platform manifest, an
-    index digest), and the same image can show two of them. A stack that
-    cannot be listed is left as the tag says, and said so.
+    old one. Compared by content -- the filesystem layers and the runtime
+    configuration (command, environment, user...) -- because the IDs come in
+    kinds that do not compare (a config ID, a platform manifest, an index
+    digest), and the same image can show two of them. A stack that cannot
+    be listed is unknown, not current (R06).
     """
 
     if detail.get("state") != "current" or detail.get("reason") == "digest-pinned":
         return
     if running is None:
-        detail["running"] = "unchecked"
+        detail.update({"state": "unknown", "reason": "running-unchecked", "running": "unchecked"})
         return
     started = running.get(tag) or []
     if not started:
         return
-    wanted = _image_layers(tag, runner)
+    wanted = _image_content(tag, runner)
     for image_id in started:
-        layers = _image_layers(image_id, runner) if wanted is not None else None
-        if layers is None:
+        content = _image_content(image_id, runner) if wanted is not None else None
+        if content is None:
             detail.update({"state": "unknown", "reason": "running-image-unreadable",
                            "running_image": image_id})
             return
-        if layers != wanted:
+        if content != wanted:
             # The tag is current; the container is not on it. Applying the
             # update recreates it on what the tag now names.
             detail.update({"state": "available", "reason": "running-older-image",

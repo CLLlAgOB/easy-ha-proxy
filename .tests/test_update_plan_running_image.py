@@ -38,10 +38,19 @@ NEW_LAYERS = ["sha256:" + "a" * 64, "sha256:" + "e" * 64]
 OLD_LAYERS = ["sha256:" + "a" * 64, "sha256:" + "d" * 64]
 
 
+CONFIG = {"Cmd": ["redis-server"], "Env": ["PATH=/usr/bin"], "Labels": {"built": "monday"}}
+CONTENT_FORMAT = "{{json .RootFS.Layers}}\t{{json .Config}}"
+
+
+def content(layers, config=None):
+    return json.dumps(layers) + chr(9) + json.dumps(CONFIG if config is None else config)
+
+
 class Docker:
-    def __init__(self, *, running_id, layers, ps=None):
+    def __init__(self, *, running_id, layers, ps=None, configs=None):
         self.running_id = running_id
         self.layers = layers
+        self.configs = configs or {}
         self.ps = ps
 
     def run(self, argv, timeout=None):
@@ -56,9 +65,11 @@ class Docker:
             return CommandResult(0, f"Name: {IMAGE}\nDigest: {DIGEST}\n")
         if argv[:3] == ("docker", "image", "inspect") and argv[-1] == "{{json .RepoDigests}}":
             return CommandResult(0, f'["example/cache@{DIGEST}"]\n')
-        if argv[:3] == ("docker", "image", "inspect") and argv[-1] == "{{json .RootFS.Layers}}":
+        if argv[:3] == ("docker", "image", "inspect") and argv[-1] == CONTENT_FORMAT:
             layers = self.layers.get(argv[3])
-            return CommandResult(0, json.dumps(layers)) if layers else CommandResult(1, stderr="No such image")
+            if not layers:
+                return CommandResult(1, stderr="No such image")
+            return CommandResult(0, content(layers, self.configs.get(argv[3])))
         return CommandResult(1, stderr="unexpected " + " ".join(argv))
 
 
@@ -93,11 +104,35 @@ class TheStack(unittest.TestCase):
         self.assertEqual(component["state"], "unknown")
         self.assertEqual(image["reason"], "running-image-unreadable")
 
-    def test_a_stack_that_cannot_be_listed_says_so(self):
+    def test_a_stack_that_cannot_be_listed_is_unknown_not_current(self):
+        # R06: what runs could not be told, so it is not "current".
         docker = Docker(running_id=OLD_ID, layers={}, ps=CommandResult(1, stderr="daemon down"))
         component, image = self.probe(docker)
+        self.assertEqual(component["state"], "unknown")
+        self.assertEqual((image["reason"], image["running"]), ("running-unchecked", "unchecked"))
+
+    def test_the_same_files_run_another_way_are_not_current(self):
+        # R06: same layers, another command or environment: another image.
+        changed = dict(CONFIG, Env=["PATH=/usr/bin", "POLICY=legacy"])
+        docker = Docker(running_id=OTHER_KIND_ID, layers={IMAGE: NEW_LAYERS, OTHER_KIND_ID: NEW_LAYERS},
+                        configs={OTHER_KIND_ID: changed})
+        component, image = self.probe(docker)
+        self.assertEqual(component["state"], "available")
+        self.assertEqual(image["reason"], "running-older-image")
+
+    def test_labels_alone_do_not_make_an_update(self):
+        relabelled = dict(CONFIG, Labels={"built": "tuesday"})
+        docker = Docker(running_id=OTHER_KIND_ID, layers={IMAGE: NEW_LAYERS, OTHER_KIND_ID: NEW_LAYERS},
+                        configs={OTHER_KIND_ID: relabelled})
+        component, image = self.probe(docker)
         self.assertEqual(component["state"], "current")
-        self.assertEqual(image["running"], "unchecked")
+        self.assertEqual(image["running"], "same-content")
+
+    def test_the_order_of_the_environment_does_not_matter(self):
+        reordered = dict(CONFIG, Env=list(reversed(CONFIG["Env"] + ["A=1"])))
+        docker = Docker(running_id=OTHER_KIND_ID, layers={IMAGE: NEW_LAYERS, OTHER_KIND_ID: NEW_LAYERS},
+                        configs={IMAGE: dict(CONFIG, Env=CONFIG["Env"] + ["A=1"]), OTHER_KIND_ID: reordered})
+        self.assertEqual(self.probe(docker)[0]["state"], "current")
 
     def test_a_stopped_stack_is_judged_by_its_tag(self):
         docker = Docker(running_id=OLD_ID, layers={}, ps=CommandResult(0, ""))
@@ -118,8 +153,8 @@ class TheAdminImage(unittest.TestCase):
                     return CommandResult(0, CONTAINER + "\n")
                 if argv[:2] == ("docker", "inspect"):
                     return CommandResult(0, f"{json.dumps(image)} {json.dumps(OLD_ID)}\n")
-                if argv[:3] == ("docker", "image", "inspect") and argv[-1] == "{{json .RootFS.Layers}}":
-                    return CommandResult(0, json.dumps(NEW_LAYERS if argv[3] == image else OLD_LAYERS))
+                if argv[:3] == ("docker", "image", "inspect") and argv[-1] == CONTENT_FORMAT:
+                    return CommandResult(0, content(NEW_LAYERS if argv[3] == image else OLD_LAYERS))
                 if argv[:3] == ("docker", "image", "inspect") and argv[-1] == "{{json .RepoDigests}}":
                     return CommandResult(0, f'["ghcr.io/example/haproxy-admin-ui@{DIGEST}"]\n')
                 if argv[:3] == ("docker", "buildx", "imagetools"):
