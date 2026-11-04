@@ -31,6 +31,7 @@ from .guardd_client import (
     GuarddUnavailable,
     guardd_health,
     guardd_ip,
+    guardd_rate_warnings,
     guardd_set_ban_durations,
     guardd_set_mode,
     guardd_shadow,
@@ -177,6 +178,28 @@ def _explain(contribution: Dict[str, Any], limits: Dict[str, Dict[str, Any]]) ->
     # never a number below the limit already in force, which would read as
     # advice to tighten it.
     contribution["suggested"] = max(limit + 1, int(observed * 1.5))
+
+
+def rate_warnings(args: Dict[str, str]) -> Dict[str, Any]:
+    """Trusted addresses over a site's limit, with the real site and country."""
+
+    try:
+        limit = max(1, min(500, int(args.get("limit") or 100)))
+    except (TypeError, ValueError):
+        limit = 100
+    payload = guardd_rate_warnings(limit)
+    try:
+        limits = _site_limits()
+    except Exception:  # pylint: disable=broad-except
+        LOG.warning("cannot read site limits for the rate warnings", exc_info=True)
+        limits = {}
+    for row in itertools.chain(payload.get("open") or [], payload.get("recent") or []):
+        _annotate(row)
+        known = limits.get(str(row.get("site") or ""))
+        if known:
+            row["site_name"] = known["site"]
+            row["site_domain"] = known["domain"]
+    return payload
 
 
 def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:

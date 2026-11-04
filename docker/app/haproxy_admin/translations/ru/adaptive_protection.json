@@ -85,6 +85,22 @@
     "How long each one has left, on this engine's own schedule. The ban list on the HAProxy page shows the stick table's expiry instead, which is the table's own lifetime and says days about a ban that lifts within the hour.": "Сколько каждому осталось по графику самого движка. Список банов на странице HAProxy показывает срок жизни stick-таблицы — это её собственное время, и оно скажет «дни» про бан, который снимется в течение часа.",
     "Lifts in": "Снимется через",
     "What it did": "За что",
-    "Check this one": "Проверьте"
+    "Check this one": "Проверьте",
+    "Trusted addresses over a site's limit": "Доверенные адреса сверх лимита сайта",
+    "These addresses are trusted: signed in, whitelisted, on the admin list or allowed on the site. Each row is one stretch of time in which one of them went over a site's request limit. This list only observes: it refuses nothing and adds nothing to any score.": "Это доверенные адреса: вошедшие, из белого списка, из списка администраторов или разрешённые на сайте. Каждая строка — один отрезок времени, когда такой адрес превысил лимит запросов сайта. Этот список только наблюдает: он ничего не отклоняет и ничего не добавляет к баллам.",
+    "The Refused column shows what the gateway's current rules did with those requests: 429 for the request limit, 423 for a ban.": "Колонка «Отказано» показывает, что сделали с этими запросами действующие правила шлюза: 429 — лимит запросов, 423 — бан.",
+    "Trusted as": "Доверие",
+    "Peak and limit": "Пик и лимит",
+    "Requests over the limit": "Запросов сверх лимита",
+    "No trusted address has gone over a site's limit": "Ни один доверенный адрес не превышал лимит сайта",
+    "Signed in": "Вошёл",
+    "Whitelist": "Белый список",
+    "Admin list": "Список администраторов",
+    "GeoIP whitelist": "Белый список GeoIP",
+    "Trusted network": "Доверенная сеть",
+    "Allowed on the site": "Разрешён на сайте",
+    "Limit not applied": "Лимит не применяется",
+    "Banned for its request rate": "Забанен за частоту запросов",
+    "Going on now": "Продолжается"
   }
 }

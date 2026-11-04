@@ -68,6 +68,12 @@ def guardd_shadow(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _get_json("/api/v1/guard/shadow", params=params)
 
 
+def guardd_rate_warnings(limit: int = 100) -> Dict[str, Any]:
+    """Trusted addresses that went over a site's limit: observed only."""
+
+    return _get_json("/api/v1/guard/rate-warnings", params={"limit": limit})
+
+
 def guardd_ip(address: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     query: Dict[str, Any] = {"ip": address}
     query.update(params or {})

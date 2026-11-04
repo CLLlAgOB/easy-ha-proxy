@@ -841,6 +841,11 @@ frontend fe_https
 {% set id = sanitize(s.name) %}
 {% set allow_ips = s.allow_ips | default([]) %}
 {% if allow_ips %}
+{% set _warn_rate = (s.max_req_rate | default(0)) | int %}
+{% if _warn_rate > 0 %}
+    # Not applied here; guardd reads it to warn when a listed address goes over it.
+    # guardd-rate-warning site={{ id }} gt {{ _warn_rate }} per {{ s.rate_window | default(sd.rate_window | default('20s')) }}
+{% endif %}
     acl site_ips_{{ id }} src {{ allow_ips | join(' ') }}
     http-request deny status 403 if host_{{ id }} !site_ips_{{ id }}
 {% endif %}

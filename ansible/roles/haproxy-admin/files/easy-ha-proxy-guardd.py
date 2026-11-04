@@ -1775,6 +1775,10 @@ def score_events(
 class Verdict:
     excluded: bool
     reason: str
+    # Which list made a whitelisted address trusted: "whitelist", "admin",
+    # "geo-whitelist" or "trusted-network". The rate warnings say it, because
+    # the gateway treats them differently (see TrustedRates).
+    source: str = ""
 
 
 class ExclusionModel:
@@ -1807,13 +1811,15 @@ class ExclusionModel:
         if not force and signatures == self._signatures:
             return False
 
-        networks: List[Any] = []
+        # Each network with the list it came from.
+        networks: List[Tuple[Any, str]] = []
         for path in self.config.whitelist_files:
-            networks.extend(self._read_acl_file(path))
+            source = self._source_of(path)
+            networks.extend((network, source) for network in self._read_acl_file(path))
         for entry in self.config.trusted_networks:
             network = self._parse_network(entry)
             if network is not None:
-                networks.append(network)
+                networks.append((network, "trusted-network"))
 
         with self._lock:
             self._networks = networks
@@ -1824,6 +1830,21 @@ class ExclusionModel:
             len(self.config.whitelist_files),
         )
         return True
+
+    @staticmethod
+    def _source_of(path: str) -> str:
+        """Which of the three lists a file is, by its name.
+
+        The admin allow-list and the GeoIP whitelist are not the same kind of
+        trust as the global whitelist: HAProxy exempts a GeoIP-whitelisted
+        address from the country filter only, and still rate-limits it.
+        """
+        name = os.path.basename(path).lower()
+        if "admin" in name:
+            return "admin"
+        if "geo" in name:
+            return "geo-whitelist"
+        return "whitelist"
 
     @staticmethod
     def _parse_network(entry: str) -> Optional[Any]:
@@ -1875,9 +1896,9 @@ class ExclusionModel:
             return Verdict(True, "unparsable")
         if address.is_loopback or address.is_link_local:
             return Verdict(True, "local")
-        for network in networks:
+        for network, source in networks:
             if address.version == network.version and address in network:
-                return Verdict(True, "whitelisted")
+                return Verdict(True, "whitelisted", source)
         return Verdict(False, "")
 
     @property
@@ -1963,6 +1984,384 @@ def read_thresholds(path: str = "") -> Dict[str, int]:
         match.group("table"): int(match.group("limit"))
         for match in _THRESHOLD_RE.finditer(text)
     }
+
+
+# ---------------------------------------------------------------------------
+# Rate warnings for trusted addresses (observed only)
+# ---------------------------------------------------------------------------
+#
+# A trusted address -- signed in, whitelisted, on the admin list, or allowed
+# on a site that only lets named addresses in -- is not a stranger to slow
+# down. Today HAProxy still applies a site's request limit to a signed-in
+# user (429, and with rate_ban a week-long ban), and does not count the
+# whitelist at all. Before that changes, this records how often trusted
+# addresses actually go over a site's limit, and what the gateway did to
+# them when they did.
+#
+# It changes nothing: no finding, no score, no strike, no ban. It is counted
+# from the log the engine reads anyway, per address and site, the way HAProxy
+# counts http_req_rate, and kept as one record per episode -- from the first
+# request over the limit until the rate has stayed under it for a window --
+# never one row per request.
+
+RATE_WARNING = "RATE_WARNING"
+# Address-and-site counters held at once; the least recently used goes first.
+TRUSTED_RATE_MAX_KEYS = 4096
+# Finished episodes waiting to be written; beyond that they are counted only.
+TRUSTED_RATE_MAX_PENDING = 500
+RATE_WARNINGS_KEEP_ROWS = 2000
+RATE_WARNINGS_KEEP_DAYS = 30
+# How often the ceilings are looked for again in the generated configuration.
+RATE_CEILINGS_RECHECK = 60
+
+_HOST_ACL_RE = re.compile(
+    r"^\s*acl\s+host_(?P<id>[A-Za-z0-9_]+)\s+hdr\(host\)\s+-i\s+(?P<names>.+?)\s*$",
+    re.MULTILINE,
+)
+_RATE_TABLE_RE = re.compile(
+    r"^backend\s+tbl_rate_(?P<id>[A-Za-z0-9_]+)\s*\n\s*stick-table\b[^\n]*?"
+    r"\bhttp_req_rate\((?P<window>[^)]+)\)",
+    re.MULTILINE,
+)
+_SITE_IPS_RE = re.compile(
+    r"^\s*acl\s+site_ips_(?P<id>[A-Za-z0-9_]+)\s+src\s+(?P<addresses>.+?)\s*$",
+    re.MULTILINE,
+)
+# A site open only to named addresses has no rate table at all: a ceiling
+# there could only ever throttle the operator. The template states the
+# site's limit in a comment instead, for these warnings and nothing else.
+_WARNING_ONLY_RE = re.compile(
+    r"^\s*#\s*guardd-rate-warning\s+site=(?P<id>[A-Za-z0-9_]+)\s+gt\s+"
+    r"(?P<limit>\d+)\s+per\s+(?P<window>\S+)\s*$",
+    re.MULTILINE,
+)
+_HAPROXY_TIME_RE = re.compile(r"^\s*(?P<value>\d+)\s*(?P<unit>ms|s|m|h|d)?\s*$")
+_TIME_UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def haproxy_seconds(text: Any) -> int:
+    """A HAProxy time such as 20s or 1m in whole seconds; 0 if unreadable.
+
+    A bare number is milliseconds, as HAProxy reads it.
+    """
+    match = _HAPROXY_TIME_RE.match(str(text or ""))
+    if not match:
+        return 0
+    value = int(match.group("value"))
+    if value <= 0:
+        return 0
+    return max(1, int(value * _TIME_UNITS[match.group("unit") or "ms"]))
+
+
+@dataclass(frozen=True)
+class SiteCeiling:
+    """One site's request limit, as the generated configuration states it."""
+
+    id: str
+    names: Tuple[str, ...]
+    limit: int
+    window: int
+    # The networks a site open only to named addresses lets in; None for an
+    # ordinary site.
+    allow: Optional[Tuple[Any, ...]] = None
+    # False where nothing applies the limit and only these warnings read it.
+    enforced: bool = True
+
+
+def read_site_ceilings(path: str = "") -> Dict[str, SiteCeiling]:
+    """Every site with a request limit: its names, limit and window."""
+    try:
+        text = pathlib.Path(path or HAPROXY_CONFIG_PATH).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError as exc:
+        LOG.warning("cannot read %s for site limits: %s", path or HAPROXY_CONFIG_PATH, exc)
+        return {}
+    limits = {
+        match.group("table"): int(match.group("limit"))
+        for match in _THRESHOLD_RE.finditer(text)
+    }
+    windows = {
+        match.group("id"): haproxy_seconds(match.group("window"))
+        for match in _RATE_TABLE_RE.finditer(text)
+    }
+    warning_only = {
+        match.group("id"): (int(match.group("limit")), haproxy_seconds(match.group("window")))
+        for match in _WARNING_ONLY_RE.finditer(text)
+    }
+    allowed: Dict[str, Tuple[Any, ...]] = {}
+    for match in _SITE_IPS_RE.finditer(text):
+        networks = []
+        for token in match.group("addresses").split():
+            with contextlib.suppress(ValueError):
+                networks.append(ipaddress.ip_network(token, strict=False))
+        allowed.setdefault(match.group("id"), tuple(networks))
+    names: Dict[str, Tuple[str, ...]] = {}
+    for match in _HOST_ACL_RE.finditer(text):
+        # The same ACL is written once per frontend; the first one counts.
+        names.setdefault(
+            match.group("id"),
+            tuple(name.lower() for name in match.group("names").split()),
+        )
+    sites: Dict[str, SiteCeiling] = {}
+    for site_id, hostnames in names.items():
+        limit = limits.get(f"tbl_rate_{site_id}")
+        window = windows.get(site_id, 0)
+        enforced = True
+        if limit is None or window <= 0:
+            if site_id not in warning_only:
+                continue
+            limit, window = warning_only[site_id]
+            enforced = False
+        if limit <= 0 or window <= 0:
+            continue
+        sites[site_id] = SiteCeiling(
+            id=site_id,
+            names=hostnames,
+            limit=limit,
+            window=window,
+            allow=allowed.get(site_id),
+            enforced=enforced,
+        )
+    return sites
+
+
+def _in_networks(ip: str, networks: Iterable[Any]) -> bool:
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(
+        address.version == network.version and address in network
+        for network in networks
+    )
+
+
+class _TrustedCounter:
+    """HAProxy's http_req_rate for one address on one site.
+
+    The same arithmetic as HAProxy's period counter: this period's count
+    plus the previous period's, weighted by how much of the window it still
+    covers. Agreeing with HAProxy matters more here than being exact.
+    """
+
+    __slots__ = ("start", "curr", "prev", "episode")
+
+    def __init__(self, ts: int) -> None:
+        self.start = ts
+        self.curr = 0
+        self.prev = 0
+        self.episode: Optional[Dict[str, Any]] = None
+
+    def add(self, ts: int, period: int) -> int:
+        # A line logged late counts in the current period, not in the past.
+        ts = max(ts, self.start)
+        passed = (ts - self.start) // period
+        if passed >= 2:
+            self.prev = 0
+            self.curr = 0
+            self.start += passed * period
+        elif passed == 1:
+            self.prev = self.curr
+            self.curr = 0
+            self.start += period
+        self.curr += 1
+        elapsed = ts - self.start
+        return self.curr + (self.prev * (period - elapsed)) // period
+
+
+class TrustedRates:
+    """Episodes of trusted addresses going over a site's request limit."""
+
+    def __init__(self, config_path: str = "", max_keys: int = TRUSTED_RATE_MAX_KEYS) -> None:
+        self._path = config_path
+        self._lock = threading.Lock()
+        self._sites: Dict[str, SiteCeiling] = {}
+        self._hosts: Dict[str, str] = {}
+        self._any_allow_list = False
+        self._signature: Optional[Tuple[int, int]] = None
+        self._checked = 0.0
+        self._counters: "OrderedDict[Tuple[str, str], _TrustedCounter]" = OrderedDict()
+        self._finished: List[Dict[str, Any]] = []
+        self.max_keys = max(1, int(max_keys))
+        # The newest request time seen: the clock episodes are closed by while
+        # the log is being read, so a backlog does not close them too early.
+        self.clock = 0
+        self.opened = 0
+        self.evicted = 0
+        self.dropped = 0
+
+    # -- the ceilings -----------------------------------------------------
+
+    def reload(self, *, force: bool = False) -> bool:
+        path = self._path or HAPROXY_CONFIG_PATH
+        try:
+            stat = os.stat(path)
+            signature: Optional[Tuple[int, int]] = (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            signature = None
+        if not force and signature == self._signature:
+            return False
+        sites = read_site_ceilings(path) if signature is not None else {}
+        hosts: Dict[str, str] = {}
+        for site in sites.values():
+            for name in site.names:
+                hosts.setdefault(name, site.id)
+        with self._lock:
+            # An episode is measured against one limit. When the limit
+            # changes or the site goes, it ends.
+            for key in [k for k in self._counters if self._sites.get(k[1]) != sites.get(k[1])]:
+                counter = self._counters.pop(key)
+                if counter.episode is not None:
+                    self._finish(counter.episode)
+            self._sites = sites
+            self._hosts = hosts
+            self._any_allow_list = any(site.allow is not None for site in sites.values())
+            self._signature = signature
+        return True
+
+    def _maybe_reload(self) -> None:
+        moment = time.monotonic()
+        if not self._checked or moment - self._checked >= RATE_CEILINGS_RECHECK:
+            self._checked = moment
+            self.reload()
+
+    # -- observing --------------------------------------------------------
+
+    def observe(self, request: "ParsedRequest", trust: str, now: int = 0) -> None:
+        """Count one request, if a trusted address made it to a limited site."""
+        if not self._checked:
+            self._maybe_reload()
+        if not trust and not self._any_allow_list:
+            # Nearly every request: a stranger, and no site that trusts by
+            # address. Costs nothing more than this test.
+            return
+        host = normalize_host(request.host)
+        if not host:
+            return
+        with self._lock:
+            site_id = self._hosts.get(host)
+            site = self._sites.get(site_id or "")
+            if site is None:
+                return
+            if not trust:
+                # A stranger on an ordinary site: HAProxy's own limit applies
+                # and the anonymous findings already cover it.
+                if site.allow is None or not _in_networks(request.client_ip, site.allow):
+                    return
+                trust = "site-allow-list"
+            ts = int(request.ts or now or self.clock)
+            self.clock = max(self.clock, ts)
+            key = (request.client_ip, site.id)
+            counter = self._counters.get(key)
+            if counter is None:
+                counter = self._counters[key] = _TrustedCounter(ts)
+                if len(self._counters) > self.max_keys:
+                    _, oldest = self._counters.popitem(last=False)
+                    self.evicted += 1
+                    if oldest.episode is not None:
+                        self._finish(oldest.episode)
+            else:
+                self._counters.move_to_end(key)
+            rate = counter.add(ts, site.window)
+            episode = counter.episode
+            if rate > site.limit:
+                if episode is None:
+                    episode = counter.episode = {
+                        "kind": RATE_WARNING,
+                        "ip": request.client_ip,
+                        "site": site.id,
+                        "trust": trust,
+                        "limit": site.limit,
+                        "window": site.window,
+                        "enforced": site.enforced,
+                        "started": ts,
+                        "ended": ts,
+                        "last_over": ts,
+                        "peak": rate,
+                        "over_limit": 0,
+                        "requests": 0,
+                        "rate_limited": 0,
+                        "banned": 0,
+                        "rate_ban": False,
+                    }
+                    self.opened += 1
+                episode["last_over"] = ts
+                episode["over_limit"] += 1
+                episode["peak"] = max(episode["peak"], rate)
+            if episode is None:
+                return
+            # What the gateway did with it under the rules in force today.
+            episode["requests"] += 1
+            episode["ended"] = max(episode["ended"], ts)
+            refusal = live_refusal(request.status, request.backend, request.term, request.ban_reason)
+            if refusal == "rate-limited":
+                episode["rate_limited"] += 1
+            elif refusal == "banned":
+                episode["banned"] += 1
+            if request.ban_reason.startswith("RATE_LIMIT_SITE"):
+                episode["rate_ban"] = True
+
+    def tick(self, now: int, *, idle: bool) -> None:
+        """End the episodes whose rate has stayed under the limit for a window.
+
+        While lines are coming in, the clock is the newest request; with the
+        log caught up, it is the wall clock.
+        """
+        self._maybe_reload()
+        with self._lock:
+            reference = max(self.clock, int(now)) if idle else self.clock
+            for key, counter in list(self._counters.items()):
+                site = self._sites.get(key[1])
+                window = site.window if site else 0
+                episode = counter.episode
+                if episode is not None and reference - episode["last_over"] > window:
+                    self._finish(episode)
+                    counter.episode = None
+                if counter.episode is None and reference - counter.start > 2 * window:
+                    del self._counters[key]
+
+    def finish_all(self) -> None:
+        with self._lock:
+            for counter in self._counters.values():
+                if counter.episode is not None:
+                    self._finish(counter.episode)
+                    counter.episode = None
+
+    def _finish(self, episode: Dict[str, Any]) -> None:
+        if len(self._finished) >= TRUSTED_RATE_MAX_PENDING:
+            self.dropped += 1
+            return
+        self._finished.append(dict(episode))
+
+    def take_finished(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            finished, self._finished = self._finished, []
+        return finished
+
+    # -- reporting --------------------------------------------------------
+
+    def open_episodes(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = [
+                {**counter.episode, "open": True}
+                for counter in self._counters.values()
+                if counter.episode is not None
+            ]
+        rows.sort(key=lambda row: row["started"], reverse=True)
+        return rows
+
+    def summary(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "sites": len(self._sites),
+                "tracked": len(self._counters),
+                "max_tracked": self.max_keys,
+                "open": sum(1 for c in self._counters.values() if c.episode is not None),
+                "opened": self.opened,
+                "evicted": self.evicted,
+                "dropped": self.dropped,
+            }
 
 
 def _safe_int(value: Any) -> int:
@@ -2488,6 +2887,30 @@ _SCHEMA_STATEMENTS: Tuple[str, ...] = (
         value TEXT NOT NULL
     )
     """,
+    # Trusted addresses over a site's limit, one row per episode. Kept apart
+    # from security_events on purpose: nothing that scores reads this table.
+    # Created where it is missing rather than by a schema step, so a daemon
+    # rolled back to before it still opens the database.
+    """
+    CREATE TABLE IF NOT EXISTS rate_warnings (
+        id           INTEGER PRIMARY KEY,
+        ip           TEXT    NOT NULL,
+        site         TEXT    NOT NULL,
+        trust        TEXT    NOT NULL,
+        rate_limit   INTEGER NOT NULL,
+        window_s     INTEGER NOT NULL,
+        enforced     INTEGER NOT NULL DEFAULT 1,
+        started      INTEGER NOT NULL,
+        ended        INTEGER NOT NULL,
+        peak         INTEGER NOT NULL,
+        over_limit   INTEGER NOT NULL,
+        requests     INTEGER NOT NULL,
+        rate_limited INTEGER NOT NULL DEFAULT 0,
+        banned       INTEGER NOT NULL DEFAULT 0,
+        rate_ban     INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_rate_warnings_ended ON rate_warnings (ended)",
 )
 
 def _add_column_if_missing(
@@ -2836,6 +3259,76 @@ class SecurityDatabase:
             "cooldowns": cooldowns,
             "addresses": addresses,
         }
+
+    # -- rate warnings ----------------------------------------------------
+
+    _RATE_WARNING_COLUMNS = (
+        "ip", "site", "trust", "rate_limit", "window_s", "enforced", "started",
+        "ended", "peak", "over_limit", "requests", "rate_limited", "banned",
+        "rate_ban",
+    )
+
+    def record_rate_warnings(self, episodes: Iterable[Dict[str, Any]]) -> int:
+        rows = [
+            (
+                str(e["ip"]), str(e["site"]), str(e["trust"]), int(e["limit"]),
+                int(e["window"]), 1 if e.get("enforced", True) else 0,
+                int(e["started"]), int(e["ended"]), int(e["peak"]),
+                int(e["over_limit"]), int(e["requests"]),
+                int(e.get("rate_limited") or 0), int(e.get("banned") or 0),
+                1 if e.get("rate_ban") else 0,
+            )
+            for e in episodes
+        ]
+        if not rows:
+            return 0
+        with self._lock, self._conn:
+            self._conn.executemany(
+                f"INSERT INTO rate_warnings ({', '.join(self._RATE_WARNING_COLUMNS)}) "
+                f"VALUES ({', '.join('?' * len(self._RATE_WARNING_COLUMNS))})",
+                rows,
+            )
+        return len(rows)
+
+    def rate_warnings(self, *, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join(self._RATE_WARNING_COLUMNS)} FROM rate_warnings "
+                "ORDER BY ended DESC, id DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["kind"] = RATE_WARNING
+            item["limit"] = item.pop("rate_limit")
+            item["window"] = item.pop("window_s")
+            item["enforced"] = bool(item["enforced"])
+            item["rate_ban"] = bool(item["rate_ban"])
+            item["open"] = False
+            result.append(item)
+        return result
+
+    def rate_warning_count(self, *, since: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM rate_warnings WHERE ended >= ?", (int(since),)
+            ).fetchone()
+        return int(row["n"] or 0)
+
+    def prune_rate_warnings(self, *, before: int, keep: int) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute("DELETE FROM rate_warnings WHERE ended < ?", (int(before),))
+            deleted = cursor.rowcount or 0
+            cursor.execute(
+                "DELETE FROM rate_warnings WHERE id NOT IN "
+                "(SELECT id FROM rate_warnings ORDER BY id DESC LIMIT ?)",
+                (max(0, int(keep)),),
+            )
+            deleted += cursor.rowcount or 0
+            cursor.close()
+        return deleted
 
     def incremental_vacuum(self, pages: int = 256) -> None:
         with self._lock, self._conn:
@@ -4704,6 +5197,7 @@ class GuardEngine:
         )
         self.policy = ScoringPolicy()
         self.digests = MinuteDigests()
+        self.trusted_rates = TrustedRates()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
@@ -4763,6 +5257,10 @@ class GuardEngine:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=10)
+        # An episode still going on is kept as far as it got rather than lost.
+        self.trusted_rates.finish_all()
+        with contextlib.suppress(sqlite3.Error):
+            self.database.record_rate_warnings(self.trusted_rates.take_finished())
 
     def refill_live(self, now: float) -> int:
         """After a restart, the live page's last hour from the log's tail.
@@ -4881,6 +5379,7 @@ class GuardEngine:
             now,
             max_bytes=max(64 * 1024, self.config.log_read_bytes_per_cycle - self._cycle_bytes),
         )
+        self.flush_rate_warnings(now, idle=from_log == 0)
 
         # Runs in every mode: expiry and the kill switch have to keep working
         # after enforcement is turned off.
@@ -5029,6 +5528,21 @@ class GuardEngine:
                     written += 1
         return written
 
+    def flush_rate_warnings(self, now: int, *, idle: bool) -> int:
+        """Close the episodes that are over and write them, in one go.
+
+        A warning that cannot be written is lost, not retried: it must never
+        cost the cycle its enforcement step.
+        """
+        self.trusted_rates.tick(now, idle=idle)
+        finished = self.trusted_rates.take_finished()
+        try:
+            return self.database.record_rate_warnings(finished)
+        except sqlite3.Error as exc:
+            self.trusted_rates.dropped += len(finished)
+            LOG.warning("Could not record %d rate warnings: %s", len(finished), exc)
+            return 0
+
     def ingest_log(self, now: int, max_bytes: Optional[int] = None) -> int:
         before = self.cursor.offset
         lines = self.cursor.read(max_bytes or self.config.log_read_bytes_per_cycle)
@@ -5071,6 +5585,14 @@ class GuardEngine:
 
         ip = request.client_ip
         verdict = self.exclusions.verdict(ip)
+        # Before the exclusion returns: the trusted are exactly who these
+        # warnings are about. Observed only (see TrustedRates).
+        trust = ""
+        if verdict.reason == "authenticated":
+            trust = "signed-in"
+        elif verdict.reason == "whitelisted":
+            trust = verdict.source or "whitelist"
+        self.trusted_rates.observe(request, trust, now)
         if verdict.excluded:
             self.excluded_observations += 1
             return
@@ -5989,6 +6511,9 @@ class GuardEngine:
         deleted = self.database.apply_retention(
             events_before=cutoff, bans_before=ban_cutoff
         )
+        deleted["rate_warnings"] = self.database.prune_rate_warnings(
+            before=now - RATE_WARNINGS_KEEP_DAYS * 86400, keep=RATE_WARNINGS_KEEP_ROWS
+        )
         if any(deleted.values()):
             self.database.incremental_vacuum()
         pruned = self.memory.prune(now - 6 * 3600)
@@ -6050,6 +6575,7 @@ class GuardEngine:
                 "observations_skipped": self.excluded_observations,
             },
             "events_recorded": self.events_recorded,
+            "rate_warnings": self.trusted_rates.summary(),
         }
 
 
@@ -6265,6 +6791,27 @@ class GuardHandler(BaseHTTPRequestHandler):
                     **filters, before=max(0, before), count=count, limit=limit,
                 )
                 self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/rate-warnings":
+            query = parse_qs(urlparse(self.path).query or "")
+            try:
+                now = _utc_now()
+                limit = _clamp_int(query.get("limit", [None])[0], default=100, min_v=1, max_v=500)
+                self._send_json(200, {
+                    "ok": True,
+                    "ts": now,
+                    # Nothing on this list was refused, scored or banned
+                    # because of it.
+                    "observed_only": True,
+                    "open": engine.trusted_rates.open_episodes(),
+                    "recent": database.rate_warnings(limit=limit),
+                    "last_24h": database.rate_warning_count(since=now - 86400),
+                    "keep_days": RATE_WARNINGS_KEEP_DAYS,
+                    **engine.trusted_rates.summary(),
+                })
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return

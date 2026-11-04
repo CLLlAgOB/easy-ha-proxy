@@ -193,6 +193,14 @@ def api_adaptive_shadow():
         return jsonify(security.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/security/adaptive/rate-warnings")
+def api_adaptive_rate_warnings():
+    try:
+        return jsonify(security.rate_warnings(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
 @bp.get("/api/security/adaptive/ip")
 def api_adaptive_ip():
     address = security.valid_ip(request.args.get("ip"))

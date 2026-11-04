@@ -622,6 +622,98 @@
       });
   }
 
+  /* ---------- trusted addresses over a site's limit ---------- */
+
+  const TRUST_LABELS = {
+    "signed-in": "Signed in",
+    whitelist: "Whitelist",
+    admin: "Admin list",
+    "geo-whitelist": "GeoIP whitelist",
+    "trusted-network": "Trusted network",
+    "site-allow-list": "Allowed on the site"
+  };
+
+  function formatSpan(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    if (total < 60) return `${total}${uiText("sec")}`;
+    return formatLeft(total);
+  }
+
+  function cell(text) {
+    const td = document.createElement("td");
+    td.setAttribute("data-i18n-skip", "");
+    td.setAttribute("translate", "no");
+    td.textContent = text == null || text === "" ? "—" : String(text);
+    return td;
+  }
+
+  function badge(td, text, kind) {
+    const flag = document.createElement("span");
+    flag.className = `ap-flag ${kind}`;
+    flag.textContent = text;
+    td.appendChild(flag);
+  }
+
+  function renderWarnings(payload) {
+    const card = byId("ap-warnings-card");
+    const host = byId("ap-warnings");
+    const empty = byId("ap-warnings-empty");
+    if (!card || !host) return;
+    // A daemon from before these warnings does not know the request: the
+    // card stays away rather than claiming there is nothing to show.
+    card.hidden = !payload;
+    if (!payload) return;
+    const rows = (payload.open || []).concat(payload.recent || []);
+    setText("ap-warnings-note", rows.length ? String(rows.length) : "");
+    host.textContent = "";
+    if (empty) empty.hidden = rows.length > 0;
+    rows.forEach((row) => {
+      const tr = document.createElement("tr");
+
+      const address = cell(row.country ? `${row.ip} ${row.country}` : row.ip);
+      tr.appendChild(address);
+
+      tr.appendChild(cell(uiText(TRUST_LABELS[row.trust] || row.trust)));
+
+      const site = cell(row.site_domain || row.site_name || row.site);
+      if (row.site_name && row.site_domain && row.site_name !== row.site_domain) {
+        site.title = row.site_name;
+      }
+      tr.appendChild(site);
+
+      const peak = cell(
+        `${formatCount(row.peak)} / ${formatCount(row.limit)} · ${formatSpan(row.window)}`
+      );
+      if (row.enforced === false) badge(peak, uiText("Limit not applied"), "noenforce");
+      tr.appendChild(peak);
+
+      tr.appendChild(cell(formatCount(row.over_limit)));
+
+      const parts = [];
+      if (Number(row.rate_limited) > 0) parts.push(`429 × ${formatCount(row.rate_limited)}`);
+      if (Number(row.banned) > 0) parts.push(`423 × ${formatCount(row.banned)}`);
+      const refused = cell(parts.join(", "));
+      if (row.rate_ban) badge(refused, uiText("Banned for its request rate"), "ban");
+      tr.appendChild(refused);
+
+      const when = cell(
+        `${formatTime(row.started)} · ${formatSpan(Number(row.ended) - Number(row.started))}`
+      );
+      if (row.open) badge(when, uiText("Going on now"), "fp");
+      tr.appendChild(when);
+
+      host.appendChild(tr);
+    });
+  }
+
+  async function loadWarnings() {
+    try {
+      renderWarnings(await getJson("/api/security/adaptive/rate-warnings", { limit: 100 }));
+    } catch (error) {
+      renderWarnings(null);
+    }
+  }
+
   async function loadDetail(address) {
     if (!address) return;
     selectedAddress = address;
@@ -712,5 +804,6 @@
   document.addEventListener("DOMContentLoaded", () => {
     bind();
     load();
+    loadWarnings();
   });
 })();

@@ -248,6 +248,7 @@
 
 .ap-flag.fp { background: rgba(200,161,58,.2); color: #c8a13a; }
 .ap-flag.noenforce { background: rgba(120,120,140,.2); color: var(--text-secondary); }
+.ap-flag.ban { background: rgba(204,75,75,.18); color: #cc4b4b; }
 
 .ap-row-link { cursor: pointer; }
 
@@ -387,6 +388,40 @@
       </thead>
       <tbody id="ap-bans"></tbody>
     </table>
+  </div>
+</div>
+
+<div class="card" id="ap-warnings-card" hidden>
+  <div class="card-header">
+    <h2>Trusted addresses over a site's limit</h2>
+    <span class="mon-sub" id="ap-warnings-note" data-i18n-skip translate="no"></span>
+  </div>
+  <div style="padding: 12px 16px;">
+    <p class="mon-sub" style="margin-top:0;">
+      These addresses are trusted: signed in, whitelisted, on the admin list or
+      allowed on the site. Each row is one stretch of time in which one of them
+      went over a site's request limit. This list only observes: it refuses
+      nothing and adds nothing to any score.
+    </p>
+    <p class="mon-sub">
+      The Refused column shows what the gateway's current rules did with those
+      requests: 429 for the request limit, 423 for a ban.
+    </p>
+    <table class="table mono" style="width:100%;">
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th>Trusted as</th>
+          <th>Site</th>
+          <th>Peak and limit</th>
+          <th>Requests over the limit</th>
+          <th>Refused</th>
+          <th>When</th>
+        </tr>
+      </thead>
+      <tbody id="ap-warnings"></tbody>
+    </table>
+    <div class="ap-empty" id="ap-warnings-empty" hidden>No trusted address has gone over a site's limit</div>
   </div>
 </div>
 
