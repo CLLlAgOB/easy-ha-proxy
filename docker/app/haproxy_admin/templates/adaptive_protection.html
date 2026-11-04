@@ -487,13 +487,19 @@
   </p>
 
   <div class="ap-u02" id="ap-u02" hidden>
-    <h3>After the switch to the new ban policy (preview)</h3>
-    <p class="mon-sub">
+    <h3 id="ap-u02-title-pending">After the switch to the new ban policy (preview)</h3>
+    <h3 id="ap-u02-title-active" hidden>The new ban policy is in force</h3>
+    <p class="mon-sub" id="ap-u02-pending">
       Under the new policy an ordinary excess, over a site's request or error
       limit, is still recorded but scores nothing, and neither does the ban
       HAProxy writes for it. An address that stays over the hard floor counts
       as an attack. Nothing here is applied yet: enforcement still uses the
       scores above.
+    </p>
+    <p class="mon-sub" id="ap-u02-active" hidden>
+      An ordinary excess is refused without a ban, and bans come only from
+      evidence of an attack or from an operator. Bans HAProxy wrote under the
+      old rules are lifted.
     </p>
     <div class="ap-cards">
       <div class="ap-card danger">
@@ -511,6 +517,10 @@
       <div class="ap-card">
         <div class="ap-label">Lower score</div>
         <div class="ap-value" id="ap-u02-lower" data-i18n-skip translate="no">—</div>
+      </div>
+      <div class="ap-card">
+        <div class="ap-label">Old HAProxy bans (codes 10, 20, 30)</div>
+        <div class="ap-value" id="ap-u02-legacy" data-i18n-skip translate="no">—</div>
       </div>
     </div>
     <div class="mon-sub" id="ap-u02-list" data-i18n-skip translate="no"></div>

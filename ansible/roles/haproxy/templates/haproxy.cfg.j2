@@ -31,6 +31,17 @@
 {% set export_prometheus = runtime_vars.get('export_prometheus', export_prometheus | default(false)) %}
 {% set prometheus_port = runtime_vars.get('prometheus_port', prometheus_port | default(8404)) %}
 {% set sd = site_defaults %}
+{# The ban policy (U02, set by the operator on 31 October). "legacy": HAProxy
+   bans an address itself for errors (codes 10 and 20) and, on a site with
+   rate_ban, for its request rate (30). "u02": it bans nobody for an ordinary
+   excess. A stranger over a site's request or error limit is refused the
+   excess on that site, for as long as it lasts (429); a trusted address --
+   whitelisted, on the admin list or signed in -- is let through, and guardd
+   records a warning. Bans come only from guardd's evidence or an operator,
+   and the hard floor holds for everyone either way. Anything but "u02" is
+   legacy. #}
+{% set ban_policy = 'u02' if ((sd.ban_policy | default('legacy')) | string | lower) == 'u02' else 'legacy' %}
+{% set u02 = ban_policy == 'u02' %}
 {# make sure these are lists #}
 {# A paused site keeps its configuration but is not published: nothing below
    sees it, so it has no routing, no certificate name in the SNI list and no
@@ -716,21 +727,29 @@ frontend fe_https
 {% set _site_rate = (s.max_req_rate | default(0)) | int %}
 {% if _err_mode != 'ignore' %}
 {% if not (s.allow_ips | default([])) %}
-    http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }{% if _site_rate > 0 %} !{ src_http_req_rate(tbl_rate_{{ id }}) ge {{ _site_rate }} }{% endif %}
+{# Under U02 an address over the error limit is refused (429) instead of
+   banned, so "will be refused" also means "already over it": counting those
+   refusals would hold it there for as long as it kept asking. And a trusted
+   address is never refused for errors, so it is not counted at all -- a
+   count it ran up while signed in must not refuse it the moment the sign-in
+   lapses. #}
+    http-request track-sc1 src table tbl_err_{{ id }} if host_{{ id }} !{ var(txn._err_tracked) -m bool } !{ var(txn.site_{{ id }}_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }{% if _site_rate > 0 %} !{ src_http_req_rate(tbl_rate_{{ id }}) ge {{ _site_rate }} }{% endif %}{% if u02 %} !{ src_http_err_rate(tbl_err_{{ id }}) gt {{ s.err_limit | default(sd.err_limit | default(20)) }} } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}{% endif %}
 
 {% endif %}
     http-request set-var(txn._err_tracked) bool(true) if host_{{ id }} !{ var(txn._err_tracked) -m bool }
 {% endif %}
 {% endfor %}
 
+{% set other_err_limit = sd.other_err_limit | default(20) %}
+{% set _other_u02 %}{% if u02 %} !{ src_http_err_rate(tbl_err_other) gt {{ other_err_limit }} } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}{% endif %}{% endset %}
     # anything that "misses" a valid SNI/Host goes to tbl_err_other (exactly once)
-    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }{{ _other_u02 }}
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !sni_found !{ var(txn.other_excl) -m bool }
 
-    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }{{ _other_u02 }}
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } sni_found !valid_sni !{ var(txn.other_excl) -m bool }
 
-    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }
+    http-request track-sc1 src table tbl_err_other if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool } !{ src_get_gpc0(tbl_ban) gt 0 }{{ _other_u02 }}
     http-request set-var(txn._err_tracked) bool(true) if !{ var(txn._err_tracked) -m bool } !valid_host !{ var(txn.other_excl) -m bool }
 
     # ---- Ban variables, initialised on every request ----
@@ -749,18 +768,21 @@ frontend fe_https
 {% set err_limit = s.err_limit | default(sd.err_limit | default(20)) %}
 {% if not (s.allow_ips | default([])) %}
     acl too_many_errs_{{ id }} src_http_err_rate(tbl_err_{{ id }}) gt {{ err_limit }}
+{% if not u02 %}
     http-request set-var(txn.ban_code)   int(10) if too_many_errs_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn.ban_reason) str("ERR_LIMIT_SITE name={{ s.name }} limit={{ err_limit }}") if too_many_errs_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
+{% endif %}
 {% endfor %}
 
-{% set other_err_limit = sd.other_err_limit | default(20) %}
     acl too_many_errs_other src_http_err_rate(tbl_err_other) gt {{ other_err_limit }}
+{% if not u02 %}
     http-request set-var(txn.ban_code)   int(20) if too_many_errs_other !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn.ban_reason) str("ERR_LIMIT_OTHER limit={{ other_err_limit }}") if too_many_errs_other !{ var(txn.ban_reason) -m found } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+{% endif %}
 
     # ---- Rate limit (optional) ----
     http-request set-var(txn._rate_tracked) bool(false)
@@ -772,13 +794,13 @@ frontend fe_https
 {# A request-rate ceiling exists to slow down strangers. On a site only the
    named addresses can reach, it can only ever throttle the operator. #}
 {% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
-    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
 
     http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
 
     acl too_fast_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) gt {{ max_req_rate }}
 
-{% if s.rate_ban | default(false) %}
+{% if s.rate_ban | default(false) and not u02 %}
     http-request set-var(txn.ban_code)   int(30) if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     http-request set-var(txn.ban_reason) str("RATE_LIMIT_SITE name={{ s.name }} max_req_rate={{ max_req_rate }}") if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
@@ -789,6 +811,7 @@ frontend fe_https
 {% endfor %}
 
     # --- The final ban trigger ---
+    # guardd-ban-policy {{ ban_policy }}
     acl ban_trigger var(txn.ban_code) -m int gt 0
 
     # 1) An address already banned is cut off at once
@@ -828,11 +851,26 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 and not (s.rate_ban | default(false)) and not (s.allow_ips | default([])) %}
-    http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+{% if max_req_rate > 0 and (u02 or not (s.rate_ban | default(false))) and not (s.allow_ips | default([])) %}
+    http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
 
 {% endif %}
 {% endfor %}
+{% if u02 %}
+    # ---- Error limits (429), U02: a cooldown on the site, not a ban ----
+    # A stranger over a site's error limit is refused on that site until the
+    # count falls back under it; the trusted are not counted (see above).
+{% for site in sites %}
+{% set s = sd | combine(site, recursive=True) %}
+{% set id = sanitize(s.name) %}
+{% if not (s.allow_ips | default([])) %}
+    http-request deny status 429 if host_{{ id }} too_many_errs_{{ id }} !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
+{% endfor %}
+    http-request deny status 429 if too_many_errs_other !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+{% endif %}
 
     # ---- Sites open only to the listed addresses ----
     # Naming the addresses is the whole access policy for these sites. The

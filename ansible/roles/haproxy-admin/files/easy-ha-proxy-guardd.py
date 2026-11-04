@@ -821,6 +821,8 @@ EVENT_HARD_FLOOR_TRUSTED = "HARD_FLOOR_TRUSTED"
 # Actions rather than findings: they carry no weight and never feed the score.
 EVENT_BAN_APPLIED = "BAN_APPLIED"
 EVENT_BAN_LIFTED = "BAN_LIFTED"
+# A ban HAProxy wrote under the old rules, lifted after the switch to U02.
+EVENT_LEGACY_BAN_LIFTED = "LEGACY_BAN_LIFTED"
 
 DEFAULT_WEIGHTS: Dict[str, int] = {
     # 25 left a scanner that brought one signature, a sweep by IP and six
@@ -1853,6 +1855,8 @@ class ExclusionModel:
         self._networks: List[Any] = []
         self._signatures: Dict[str, Tuple[int, int]] = {}
         self._authenticated: Set[str] = set()
+        # False under U02, set by the engine from the policy HAProxy runs.
+        self.geo_trusted = True
         self.reload_files(force=True)
 
     # -- static files -----------------------------------------------------
@@ -1947,6 +1951,7 @@ class ExclusionModel:
             if ip in self._authenticated:
                 return Verdict(True, "authenticated")
             networks = list(self._networks)
+            geo_trusted = self.geo_trusted
         try:
             address = ipaddress.ip_address(ip)
         except ValueError:
@@ -1954,6 +1959,11 @@ class ExclusionModel:
         if address.is_loopback or address.is_link_local:
             return Verdict(True, "local")
         for network, source in networks:
+            if source == "geo-whitelist" and not geo_trusted:
+                # Under U02 the GeoIP whitelist means what it means to HAProxy:
+                # past the country filter, not trusted (the operator's choice,
+                # 4 November).
+                continue
             if address.version == network.version and address in network:
                 return Verdict(True, "whitelisted", source)
         return Verdict(False, "")
@@ -2530,6 +2540,74 @@ class HardFloorWatch:
             "over_now": len(self._streak),
             "sustained_reads": self.episodes,
         }
+
+
+# ---------------------------------------------------------------------------
+# The ban policy HAProxy runs (U02, 04.3c and 04.9)
+# ---------------------------------------------------------------------------
+#
+# One switch, site_defaults.ban_policy, decides it, and the generated
+# configuration states the result in a comment. guardd follows that comment
+# rather than a setting of its own, so it can never run one policy while
+# HAProxy runs the other: whatever HAProxy was reloaded with is what guardd
+# scores by.
+#
+# Under "u02" HAProxy writes no ban codes 10, 20 or 30. Those still in the
+# table were written under the old rules, by this gateway before the switch,
+# an old process, or a peer that has not switched -- and are lifted, one
+# address at a time, re-read before each removal. The operator's (50) and
+# this daemon's (40) are never touched. Before the first lift the whole
+# table is written to a snapshot file, for the record; switching back does
+# not restore it, because a ban lifted on purpose must not come back.
+
+BAN_POLICY_LEGACY = "legacy"
+BAN_POLICY_U02 = "u02"
+BAN_POLICY_STATE_KEY = "ban_policy"
+LEGACY_BAN_CODES = frozenset({10, 20, 30})
+LEGACY_LIFTS_PER_CYCLE = 200
+BAN_SNAPSHOTS_KEPT = 5
+# How long a sign-in keeps an address from an adaptive ban under U02 (the
+# operator's choice, 4 November): long enough for a weekend or a short trip,
+# not forever. The old rule was "ever signed in".
+TRUST_AFTER_SIGN_IN_SECONDS = 7 * 86400
+_BAN_POLICY_RE = re.compile(
+    r"^\s*#\s*guardd-ban-policy\s+(?P<policy>legacy|u02)\s*$", re.MULTILINE
+)
+
+
+def read_ban_policy(path: str = "") -> str:
+    """The policy the generated configuration says HAProxy runs."""
+    try:
+        text = pathlib.Path(path or HAPROXY_CONFIG_PATH).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return BAN_POLICY_LEGACY
+    found = _BAN_POLICY_RE.search(text)
+    return found.group("policy") if found else BAN_POLICY_LEGACY
+
+
+class BanPolicyWatch:
+    """The ban policy, re-read whenever the configuration file changes.
+
+    Checked on every poll rather than every minute: a switch should change
+    what guardd scores by within one cycle of HAProxy changing.
+    """
+
+    def __init__(self, config_path: str = "") -> None:
+        self.config_path = config_path
+        self._key: Optional[Tuple[int, int]] = None
+        self._policy = BAN_POLICY_LEGACY
+
+    def current(self) -> str:
+        path = self.config_path or HAPROXY_CONFIG_PATH
+        try:
+            info = os.stat(path)
+            key: Optional[Tuple[int, int]] = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            key = None
+        if key != self._key:
+            self._key = key
+            self._policy = read_ban_policy(path) if key else BAN_POLICY_LEGACY
+        return self._policy
 
 
 def _safe_int(value: Any) -> int:
@@ -4570,6 +4648,25 @@ class Enforcer:
         self.lifted += 1
         return True
 
+    def lift_legacy(self, ip: str) -> int:
+        """Clear a ban HAProxy wrote under the old rules; 0 if it is not one.
+
+        Re-read first, like lift(): an operator may have banned the same
+        address since the table was last read, and that ban stays.
+        """
+
+        rows = parse_table(
+            runtime_command(self.config.haproxy_socket, f"show table tbl_ban key {ip}")
+        )
+        fields = rows.get(ip)
+        if fields is None or _safe_int(fields.get("gpc0")) <= 0:
+            return 0
+        code = _safe_int(fields.get("gpt0"))
+        if code not in LEGACY_BAN_CODES:
+            return 0
+        runtime_command(self.config.haproxy_socket, f"clear table tbl_ban key {ip}")
+        return code
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -5367,6 +5464,10 @@ class GuardEngine:
         self.digests = MinuteDigests()
         self.trusted_rates = TrustedRates()
         self.hard_floor = HardFloorWatch()
+        self.ban_policy_watch = BanPolicyWatch()
+        self.ban_policy = BAN_POLICY_LEGACY
+        self.legacy_bans: Dict[str, int] = {}
+        self.legacy_lifted = 0
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
@@ -5542,6 +5643,7 @@ class GuardEngine:
     def poll(self) -> Dict[str, int]:
         now = _utc_now()
         self.exclusions.reload_files()
+        self.refresh_ban_policy(now)
         tables = self.read_tables()
         from_tables = self.ingest_tables(tables, now)
         from_tables += self.ingest_hard_floor(now)
@@ -5636,7 +5738,101 @@ class GuardEngine:
         self._known_bans = active
         written = self.database.record_events(events)
         self.events_recorded += written
+        # What the preview says a switch would lift, and -- once switched --
+        # what is left to lift.
+        counts: Dict[str, int] = {}
+        for ip in active:
+            code = _safe_int(bans[ip].get("gpt0"))
+            if code in LEGACY_BAN_CODES:
+                counts[str(code)] = counts.get(str(code), 0) + 1
+        self.legacy_bans = counts
+        if counts and self.ban_policy == BAN_POLICY_U02 and self.switch_recorded():
+            self.reconcile_legacy_bans(bans, now)
         return written + self.ingest_rate_tables(tables, now)
+
+    # -- the ban policy (U02) ---------------------------------------------
+
+    def scoring_policy(self) -> ScoringPolicy:
+        """The weights the policy HAProxy runs calls for."""
+        return u02_policy(self.policy) if self.ban_policy == BAN_POLICY_U02 else self.policy
+
+    def ban_policy_state(self) -> Dict[str, Any]:
+        try:
+            state = json.loads(self.database.get_state(BAN_POLICY_STATE_KEY, "") or "{}")
+        except (TypeError, ValueError):
+            state = {}
+        return state if isinstance(state, dict) else {}
+
+    def refresh_ban_policy(self, now: int) -> str:
+        """Follow the policy in the configuration; mark a switch when it happens."""
+        policy = self.ban_policy_watch.current()
+        self.ban_policy = policy
+        self.exclusions.geo_trusted = policy != BAN_POLICY_U02
+        state = self.ban_policy_state()
+        if state.get("policy", BAN_POLICY_LEGACY) == policy:
+            return policy
+        record: Dict[str, Any] = {"policy": policy, "since": now, "previous": state.get("policy", BAN_POLICY_LEGACY)}
+        if policy == BAN_POLICY_U02:
+            # Written before anything is lifted. If it cannot be written the
+            # switch is not marked -- nothing is lifted, scoring already
+            # follows the new policy -- and the next cycle tries again.
+            try:
+                record["snapshot"] = self.snapshot_bans(now)
+            except OSError as exc:
+                LOG.warning("Ban policy %s seen, but the ban table snapshot failed: %s", policy, exc)
+                return policy
+        self.database.set_state(BAN_POLICY_STATE_KEY, json.dumps(record))
+        LOG.warning("Ban policy is now %s (was %s)", policy, record["previous"])
+        return policy
+
+    def switch_recorded(self) -> bool:
+        """True once the switch to U02 is marked, and its snapshot written."""
+        return self.ban_policy_state().get("policy") == BAN_POLICY_U02
+
+    def snapshot_bans(self, now: int) -> str:
+        """Write every entry of tbl_ban to a file next to the database."""
+        rows = parse_table(runtime_command(self.config.haproxy_socket, "show table tbl_ban"))
+        directory = pathlib.Path(self.database.path).parent
+        target = directory / f"ban-policy-u02-{now}.json"
+        temporary = target.with_suffix(".tmp")
+        payload = {"ts": now, "entries": rows}
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+        for old in sorted(directory.glob("ban-policy-u02-*.json"))[:-BAN_SNAPSHOTS_KEPT]:
+            with contextlib.suppress(OSError):
+                old.unlink()
+        return str(target)
+
+    def reconcile_legacy_bans(self, bans: Dict[str, Dict[str, str]], now: int) -> int:
+        """Lift the bans HAProxy wrote under the old rules, address by address."""
+        legacy = sorted(
+            ip for ip, fields in bans.items()
+            if _safe_int(fields.get("gpc0")) > 0 and _safe_int(fields.get("gpt0")) in LEGACY_BAN_CODES
+        )
+        lifted = 0
+        for ip in legacy[:LEGACY_LIFTS_PER_CYCLE]:
+            try:
+                code = self.enforcer.lift_legacy(ip)
+            except OSError as exc:
+                LOG.warning("Could not lift the legacy ban on %s: %s", ip, exc)
+                break
+            if not code:
+                continue
+            lifted += 1
+            self._emit(
+                ip,
+                EVENT_LEGACY_BAN_LIFTED,
+                now,
+                source="guardd",
+                detail=f"code={code} policy={BAN_POLICY_U02}",
+                fingerprint=f"{ip}|{EVENT_LEGACY_BAN_LIFTED}|{now}",
+            )
+        if lifted:
+            self.legacy_lifted += lifted
+            LOG.warning("Lifted %d bans HAProxy wrote under the old rules", lifted)
+        return lifted
 
     def ingest_hard_floor(self, now: int) -> int:
         """Record the addresses that have stayed over a hard ceiling.
@@ -6178,7 +6374,7 @@ class GuardEngine:
         compare: Optional[ScoringPolicy] = None,
     ) -> Dict[str, Any]:
         now = now or _utc_now()
-        policy = policy or self.policy
+        policy = policy or self.scoring_policy()
         # Passed in when scoring a whole table, so one query answers for every
         # address instead of one per row.
         if scheduled is None:
@@ -6207,16 +6403,22 @@ class GuardEngine:
             result["state"] = "NORMAL"
             result["recommended_action"] = "none"
 
-        result["blockers"] = self.ban_blockers(result)
+        result["blockers"] = self.ban_blockers(result, now)
         result["would_ban"] = (
             result["score"] >= WOULD_BAN_SCORE and not result["blockers"]
         )
         if other is not None:
-            other = 0 if verdict.excluded else other
+            # As U02 would see it: the GeoIP whitelist is no exemption there,
+            # and a sign-in protects for seven days rather than for ever.
+            if verdict.excluded and verdict.source != "geo-whitelist":
+                other = 0
+            u02_view = dict(result, excluded=bool(verdict.excluded and verdict.source != "geo-whitelist"))
+            u02_blockers = self.ban_blockers(u02_view, now, BAN_POLICY_U02)
             result["u02"] = {
                 "score": other,
                 "state": state_for(other),
-                "would_ban": other >= WOULD_BAN_SCORE and not result["blockers"],
+                "would_ban": other >= WOULD_BAN_SCORE and not u02_blockers,
+                "blockers": u02_blockers,
             }
         result["banned_until"] = int(scheduled.get(ip, 0))
         # The review question that matters: did an address the engine wanted to
@@ -6234,7 +6436,7 @@ class GuardEngine:
         compare: Optional[ScoringPolicy] = None,
     ) -> List[Dict[str, Any]]:
         now = now or _utc_now()
-        policy = policy or self.policy
+        policy = policy or self.scoring_policy()
         scheduled = self.database.scheduled_bans()
         rows = [
             self.reputation(ip, now, policy, scheduled, compare)
@@ -6247,7 +6449,12 @@ class GuardEngine:
 
     # -- enforcement ------------------------------------------------------
 
-    def ban_blockers(self, reputation: Dict[str, Any]) -> List[str]:
+    def ban_blockers(
+        self,
+        reputation: Dict[str, Any],
+        now: Optional[int] = None,
+        policy: Optional[str] = None,
+    ) -> List[str]:
         """Why this address must not be banned, whatever its score.
 
         These are not tunable. The first two exist because banning the person
@@ -6255,14 +6462,21 @@ class GuardEngine:
         and the third because a ban simply would not work.
         """
 
+        policy = policy or self.ban_policy
         blockers: List[str] = []
         if reputation.get("excluded"):
             blockers.append(f"exempt ({reputation.get('exclusion_reason')})")
-        if reputation.get("authenticated_at"):
-            # Ever authenticated, not merely authenticated right now: the
-            # runtime authorization expires, and a lapsed session must not turn
-            # a real user into a ban candidate.
-            blockers.append("has authenticated before")
+        authenticated_at = int(reputation.get("authenticated_at") or 0)
+        if authenticated_at:
+            # Not merely authenticated right now: the runtime authorization
+            # expires, and a lapsed session must not turn a real user into a
+            # ban candidate. The old rule held for ever; U02 holds for seven
+            # days after the address last held a sign-in, so an address that
+            # was once a user's and later starts scanning can be banned again.
+            if policy != BAN_POLICY_U02:
+                blockers.append("has authenticated before")
+            elif authenticated_at >= (now or _utc_now()) - TRUST_AFTER_SIGN_IN_SECONDS:
+                blockers.append("signed in within the last 7 days")
         if not reputation.get("enforceable"):
             blockers.append("IPv4-only ban path")
         return blockers
@@ -6424,7 +6638,7 @@ class GuardEngine:
                 # Already banned by an operator or by HAProxy's own rules:
                 # not overwritten; decided again once that ban is over.
                 continue
-            blockers = self.ban_blockers(row)
+            blockers = self.ban_blockers(row, now)
             if blockers:
                 continue
             # Findings decay over hours, so a score that justified one ban is
@@ -6659,7 +6873,7 @@ class GuardEngine:
         """What enforcement would have done, and where it would have been wrong."""
 
         now = now or _utc_now()
-        policy = policy or self.policy
+        policy = policy or self.scoring_policy()
         after = u02_policy(policy)
         rows = self.reputation_table(now, limit=limit, policy=policy, compare=after)
         by_state: Dict[str, int] = {}
@@ -6716,7 +6930,16 @@ class GuardEngine:
                 ),
                 "by_state": by_state,
             },
-            "u02": self.u02_preview(rows, policy, after),
+            "u02": dict(
+                self.u02_preview(rows, policy, after),
+                applied=self.ban_policy == BAN_POLICY_U02,
+                ban_policy=self.ban_policy,
+                switch=self.ban_policy_state(),
+                # Bans HAProxy wrote under the old rules, by code: what a
+                # switch would lift, or what is still left to lift.
+                legacy_bans=dict(self.legacy_bans),
+                legacy_lifted=self.legacy_lifted,
+            ),
             "addresses": [
                 {key: value for key, value in row.items() if key != "contributions"}
                 for row in rows
@@ -6729,9 +6952,9 @@ class GuardEngine:
     ) -> Dict[str, Any]:
         """What the U02 policy would change, before the switch makes it so.
 
-        Only a preview: enforcement keeps using ``policy``. The blockers are
-        today's, the "has authenticated before" one included -- 04.3c decides
-        what replaces it.
+        Enforcement keeps using ``policy`` until the switch. U02's own
+        exemptions are used for its side: the GeoIP whitelist is none, and a
+        sign-in protects for seven days rather than for ever.
         """
 
         def brief(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -6844,6 +7067,12 @@ class GuardEngine:
             "events_recorded": self.events_recorded,
             "rate_warnings": self.trusted_rates.summary(),
             "hard_floor": self.hard_floor.summary(),
+            "ban_policy": {
+                "current": self.ban_policy,
+                "switch": self.ban_policy_state(),
+                "legacy_bans": dict(self.legacy_bans),
+                "legacy_lifted": self.legacy_lifted,
+            },
         }
 
 
@@ -7117,7 +7346,7 @@ class GuardHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/guard/shadow":
             query = parse_qs(urlparse(self.path).query or "")
             try:
-                policy = policy_from_query(query, engine.policy)
+                policy = policy_from_query(query, engine.scoring_policy())
                 limit = _clamp_int(
                     query.get("limit", [None])[0], default=200, min_v=1, max_v=500
                 )
@@ -7139,7 +7368,7 @@ class GuardHandler(BaseHTTPRequestHandler):
                 return
             try:
                 now = _utc_now()
-                policy = policy_from_query(query, engine.policy)
+                policy = policy_from_query(query, engine.scoring_policy())
                 payload = engine.reputation(address, now, policy)
                 payload["events"] = database.events_for(
                     address, now - policy.window_seconds, limit=200

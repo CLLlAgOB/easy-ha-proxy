@@ -222,9 +222,28 @@ VARS_EDITOR_SECTIONS: tuple[dict[str, Any], ...] = (
         "title": "Rate and connection protection",
         "description": "Default limits inherited by HTTP sites.",
         "fields": (
+            _field(
+                "site_defaults.ban_policy",
+                "Ban policy",
+                "choice",
+                options=("legacy", "u02"),
+                default="legacy",
+                help_text=(
+                    "legacy: HAProxy bans an address itself for too many errors and, where "
+                    "rate_ban is on, for its request rate. u02: an ordinary excess is refused "
+                    "on that site while it lasts (429), signed-in addresses are let through with "
+                    "a warning, and bans come only from adaptive protection or an operator. "
+                    "Default: legacy."
+                ),
+            ),
             _field("site_defaults.max_req_rate", "Maximum request rate", "integer", minimum=0, maximum=1000000),
             _field("site_defaults.rate_window", "Request-rate window", "interval", pattern=INTERVAL_RE.pattern),
-            _field("site_defaults.rate_ban", "Ban clients that exceed the request rate", "boolean"),
+            _field(
+                "site_defaults.rate_ban",
+                "Ban clients that exceed the request rate",
+                "boolean",
+                help_text="Has no effect under the u02 ban policy.",
+            ),
             _field("site_defaults.rate_errors", "Request-rate strike threshold", "integer", minimum=0, maximum=1000000),
             _field("site_defaults.conn_table_expire", "Connection table expiry", "interval", pattern=INTERVAL_RE.pattern),
             _field("site_defaults.conn_rate_window", "Connection-rate window", "interval", pattern=INTERVAL_RE.pattern),

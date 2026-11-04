@@ -107,6 +107,9 @@
     "Would be banned after the switch": "Были бы забанены после перехода",
     "No longer banned": "Перестали бы банить",
     "Newly banned": "Начали бы банить",
-    "Lower score": "Балл ниже"
+    "Lower score": "Балл ниже",
+    "The new ban policy is in force": "Новая политика банов действует",
+    "An ordinary excess is refused without a ban, and bans come only from evidence of an attack or from an operator. Bans HAProxy wrote under the old rules are lifted.": "Обычное превышение отклоняется без бана, а баны ставятся только за признаки атаки или оператором. Баны, которые HAProxy поставил по старым правилам, сняты.",
+    "Old HAProxy bans (codes 10, 20, 30)": "Старые баны HAProxy (коды 10, 20, 30)"
   }
 }

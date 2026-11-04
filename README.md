@@ -947,6 +947,19 @@ on two reads in a row -- becomes the evidence of a flood in their place
 never weighed). Until the switch, enforcement keeps the current weights and the
 review card shows a preview: who would no longer be banned, and who would be.
 
+The switch is **Ban policy** under *Rate and connection protection* in the
+HAProxy settings (`site_defaults.ban_policy`), `legacy` by default. Under `u02`
+HAProxy writes no ban of its own: a stranger over a site's request or error
+limit is refused on that site while it lasts (429), a signed-in, whitelisted or
+admin address is let through and recorded as a warning, and `rate_ban` has no
+effect. Adaptive protection follows what HAProxy runs: telemetry weighs
+nothing, a sign-in keeps an address from an adaptive ban for seven days after
+it last held one (instead of for ever), and the GeoIP whitelist is no
+exemption. On the switch it writes the whole ban table to
+`ban-policy-u02-<time>.json` beside its database, then lifts the bans HAProxy
+wrote under the old rules (codes 10, 20, 30) one address at a time; manual and
+adaptive bans stay. Switching back restores none of the lifted bans.
+
 Query strings are checked separately, and by what the **value** looks like
 rather than by the parameter it arrived under. That distinction is not
 cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`

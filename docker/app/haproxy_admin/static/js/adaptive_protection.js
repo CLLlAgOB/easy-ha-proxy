@@ -489,6 +489,21 @@
     if (!box) return;
     box.hidden = !preview;
     if (!preview) return;
+    // Once switched, the same block says so instead of offering a preview.
+    const active = Boolean(preview.applied);
+    ["ap-u02-title-pending", "ap-u02-pending"].forEach((id) => {
+      const element = byId(id);
+      if (element) element.hidden = active;
+    });
+    ["ap-u02-title-active", "ap-u02-active"].forEach((id) => {
+      const element = byId(id);
+      if (element) element.hidden = !active;
+    });
+    const legacy = Object.values(preview.legacy_bans || {}).reduce(
+      (total, count) => total + (Number(count) || 0),
+      0
+    );
+    setText("ap-u02-legacy", formatCount(legacy));
     setText("ap-u02-wouldban", formatCount(preview.would_ban));
     setText("ap-u02-nolonger", formatCount(preview.no_longer_count));
     setText("ap-u02-newly", formatCount(preview.newly_count));
