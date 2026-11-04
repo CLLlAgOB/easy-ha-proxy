@@ -613,8 +613,10 @@ operating system gets it back only when the engine restarts. Measured on a
 large as the estimate, a search under half a second and the overview about
 two (it stops at three seconds and says how far back it got). The choice is
 kept in the engine's own state and outlives
-restarts and updates; after a restart the memory is filled again from the last
-16 MB of the access log, not from the whole budget. If two administrators
+restarts and updates. After a restart the memory is filled again from the
+access log: the last 16 MB at once, the rest in the background a piece at a
+time -- each followed by a pause as long as it took -- up to the budget or a
+day, from the current file only (not one already rotated). If two administrators
 change it at the same time, the second is refused and shown the setting in
 force.
 

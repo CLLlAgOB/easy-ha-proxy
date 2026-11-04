@@ -707,7 +707,8 @@
     }
     const refill = (memory.limits || {}).refill_bytes;
     if (refill) {
-      lines.push(t("After a restart, at most the last {size} MB of the access log are read back into memory.", {
+      lines.push(t("After a restart, the last {size} MB of the access log are read back at once, and older " +
+        "requests in the background, up to the limit or a day.", {
         size: sizeText(refill)
       }));
     }

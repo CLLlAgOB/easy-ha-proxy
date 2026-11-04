@@ -59,7 +59,7 @@
     "At the current traffic that is about {size} MB an hour ({count} requests).": "При нынешнем потоке это примерно {size} МБ в час (запросов: {count}).",
     "Limit now: {size} MB, and nothing older than a day.": "Предел сейчас: {size} МБ и не старше суток.",
     "Limit now: the usual {count} requests or {duration}, whichever comes first.": "Предел сейчас обычный: {count} запросов или {duration} — что наступит раньше.",
-    "After a restart, at most the last {size} MB of the access log are read back into memory.": "После перезапуска в память заново читается не больше последних {size} МБ журнала доступа.",
+    "After a restart, the last {size} MB of the access log are read back at once, and older requests in the background, up to the limit or a day.": "После перезапуска последние {size} МБ журнала доступа читаются в память сразу, а более ранние запросы — в фоне, до предела или суток.",
     "{size} MB": "{size} МБ",
     "{size} MB: a whole day at the current traffic, the longest kept": "{size} МБ: целые сутки при нынешнем потоке — это наибольший срок",
     "{size} MB ≈ {duration} at the current traffic": "{size} МБ ≈ {duration} при нынешнем потоке",

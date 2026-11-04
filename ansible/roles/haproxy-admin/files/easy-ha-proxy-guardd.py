@@ -5054,6 +5054,11 @@ LIVE_ADMIN_BACKENDS: Tuple[str, ...] = (LIVE_ADMIN_BACKEND, "be_stats")
 # After a restart the buffer is filled again from the tail of the log, at
 # most this much of it: an hour of a busy gateway, a few seconds to parse.
 LIVE_REFILL_BYTES = 16 * 1024 * 1024
+# What is older than that is read in the background, this much at a time
+# (08), until the buffer is this full, the horizon is reached or the file
+# begins.
+LIVE_REFILL_CHUNK_BYTES = 4 * 1024 * 1024
+LIVE_REFILL_FULL = 0.98
 # Index of each field in a live record.
 (L_TS, L_IP, L_STATUS, L_HOST, L_PATH, L_METHOD, L_BACKEND, L_BYTES,
  L_DURATION, L_TERM, L_REASON, L_REFUSAL, L_RESPONSE, L_TIMES, L_REQUEST_ID,
@@ -6080,6 +6085,9 @@ class GuardEngine:
         self._live_budget_lock = threading.Lock()
         self.live_budget = self._load_live_budget()
         self._apply_live_budget_at_start()
+        # Where reading the log back stopped at the start, for the rest to be
+        # read in the background: (inode, offset, horizon), or None.
+        self._refill_resume: Optional[Tuple[int, int, float]] = None
         # Bytes the fast ticks between polls already took from this cycle's
         # read budget, so following the log closely never reads more per
         # cycle than the configured limit.
@@ -6141,16 +6149,33 @@ class GuardEngine:
         start = max(0, end - LIVE_REFILL_BYTES)
         if end <= start:
             return 0
+        horizon = now - self.live.max_seconds
         try:
-            with open(self.config.log_file, "rb") as handle:
-                handle.seek(start)
-                data = handle.read(end - start)
+            records, reached_back, boundary = self._read_back(start, end, horizon)
         except OSError:
             return 0
+        if records:
+            self.live.refill(records, horizon if reached_back else records[0][L_TS])
+        # The rest -- up to the budget or a day, never past the start of
+        # this file -- is read in the background (08): a budget of many hours
+        # used to come back as only the last 16 MiB after every update.
+        if not reached_back and boundary > 0:
+            self._refill_resume = (int(stat.st_ino), boundary, horizon)
+        return len(records)
+
+    def _read_back(self, start: int, end: int, horizon: float) -> Tuple[List[tuple], bool, int]:
+        """The requests logged between two offsets, oldest first: whether
+        they reach back past `horizon`, and where the first whole line
+        begins -- where the next, older read has to end."""
+        with open(self.config.log_file, "rb") as handle:
+            handle.seek(start)
+            data = handle.read(end - start)
+        boundary = start
         if start > 0:
             # The first line is cut: it begins before what was read.
-            data = data[data.find(b"\n") + 1:]
-        horizon = now - self.live.max_seconds
+            cut = data.find(b"\n") + 1
+            data = data[cut:]
+            boundary = start + cut
         records: List[tuple] = []
         reached_back = start == 0
         for raw in data.splitlines():
@@ -6164,10 +6189,57 @@ class GuardEngine:
             request = parse_access_line(line)
             if request is not None:
                 records.append(live_record(request, ts))
-        if not records:
+        return records, reached_back, boundary
+
+    def _background_refill(self) -> None:
+        try:
+            self.continue_refill()
+        except Exception:  # pylint: disable=broad-except
+            LOG.exception("Could not read older live activity back from the log")
+
+    def _live_full(self) -> bool:
+        status = self.live.status() if self.live is not None else {}
+        if not status:
+            return True
+        if status["max_bytes"]:
+            return status["bytes"] >= status["max_bytes"] * LIVE_REFILL_FULL
+        return status["records"] >= status["max_records"] * LIVE_REFILL_FULL
+
+    def continue_refill(self) -> int:
+        """Read the log back further, a piece at a time, after the start (08).
+
+        Older pieces go in on the left of the buffer, as the first one did;
+        it stops at the horizon (the budget's day, or the profile's hour), at
+        the start of the file, when the buffer is full, or when the log is
+        rotated underneath it. Between pieces it waits as long as the last
+        one took: the collector and HAProxy come first. Returns the requests
+        put back.
+        """
+        resume, self._refill_resume = self._refill_resume, None
+        if not resume or self.live is None:
             return 0
-        self.live.refill(records, horizon if reached_back else records[0][L_TS])
-        return len(records)
+        inode, boundary, horizon = resume
+        added = 0
+        while boundary > 0 and not self._stop.is_set() and not self._live_full():
+            try:
+                if int(os.stat(self.config.log_file).st_ino) != inode:
+                    break
+                started = time.monotonic()
+                start = max(0, boundary - LIVE_REFILL_CHUNK_BYTES)
+                records, reached_back, first = self._read_back(start, boundary, horizon)
+            except OSError:
+                break
+            if records:
+                self.live.refill(records, horizon if reached_back else records[0][L_TS])
+                added += len(records)
+            if reached_back:
+                break
+            # A line longer than a piece: carry on before it.
+            boundary = first if first < boundary else start
+            self._stop.wait(max(0.05, time.monotonic() - started))
+        if added:
+            LOG.info("Live activity: %d older requests read back from the log", added)
+        return added
 
     # -- the live buffer's memory (07.4-07.5) ------------------------------
 
@@ -6275,6 +6347,10 @@ class GuardEngine:
                 LOG.info("Live activity: %d requests from before the start read back", refilled)
         except Exception:  # pylint: disable=broad-except
             LOG.exception("Could not read the live activity back from the log")
+        if self._refill_resume is not None:
+            threading.Thread(
+                target=self._background_refill, name="guardd-refill", daemon=True
+            ).start()
         while not self._stop.is_set():
             started = time.monotonic()
             try:
