@@ -270,7 +270,11 @@ IPv4 backends must be on another LAN address or in a container; loopback
 addresses (`127.0.0.0/8`) are intentionally rejected. Backends see the proxy
 address because of MASQUERADE. For a one-host smoke test, place the echo
 backend in a temporary container or network namespace so the test exercises
-the real routed path. GeoIP filtering is not currently applied to UDP.
+the real routed path. GeoIP filtering is not currently applied to UDP, and
+neither is the hard floor of the new ban policy: the kernel forwards these
+packets without a per-address rate or connection limit, so a UDP forward
+needs its own consideration. Two saves at once are taken one after the
+other, and an edit form that is out of date is refused.
 
 Every full install or update has two independent channels:
 

@@ -139,6 +139,7 @@
     <input type="hidden" name="action" value="save">
     {% if original_name %}
     <input type="hidden" name="original_name" value="{{ original_name }}">
+    {% if revision %}<input type="hidden" name="revision" value="{{ revision }}">{% endif %}
     {% endif %}
 
     <div class="card-body">

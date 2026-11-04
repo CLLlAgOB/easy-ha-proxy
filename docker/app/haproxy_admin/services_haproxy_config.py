@@ -1412,7 +1412,9 @@ def source_lock(kind: str):
     if kind in held:
         yield
         return
-    path = _source_paths()[kind]
+    # udp.yml is saved and applied on its own page, not through the raw
+    # editor, so it is lockable here without becoming an editable kind (R04).
+    path = UDP_YAML if kind == "udp" else _source_paths()[kind]
     lock_path = path.parent / f".{path.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as handle:

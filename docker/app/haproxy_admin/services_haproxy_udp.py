@@ -11,10 +11,14 @@ import yaml
 
 from .services_haproxy_config import (
     UDP_YAML,
+    StaleEntry,
     _atomic_write_snapshot,
     _load_yaml,
     apply_udp_forwards,
+    check_entry_revision,
+    entry_revision,
     get_udp_runtime_status,
+    source_lock,
     udp_listen_port_conflict,
 )
 from .validation import (
@@ -210,10 +214,31 @@ def _write_and_apply(data: Dict[str, Any]) -> Tuple[bool, str]:
     )
 
 
+def udp_revision(forward: Dict[str, Any]) -> str:
+    """The fingerprint an edit form carries, to tell a stale save (R04)."""
+    return entry_revision(forward)
+
+
 def save_udp_from_json(
-    udp: Dict[str, Any], original_name: Optional[str] = None
+    udp: Dict[str, Any], original_name: Optional[str] = None, revision: Optional[str] = None
 ) -> Tuple[bool, str]:
-    """Create or edit one UDP forward from the edit form JSON."""
+    """Create or edit one UDP forward from the edit form JSON.
+
+    From the read to the apply -- and its rollback -- under the lock beside
+    udp.yml (R04): two panel workers saving at once used to start from the
+    same file, and the later write dropped the earlier forward; a failed
+    apply's rollback could put back a file without someone else's save.
+    """
+    with source_lock("udp"):
+        try:
+            return _save_udp(udp, original_name, revision)
+        except StaleEntry as exc:
+            return False, str(exc)
+
+
+def _save_udp(
+    udp: Dict[str, Any], original_name: Optional[str], revision: Optional[str]
+) -> Tuple[bool, str]:
     ok, msg, entry = _normalize_udp_entry(udp)
     if not ok or entry is None:
         return False, msg
@@ -239,6 +264,7 @@ def save_udp_from_json(
         )
         if idx is None:
             return False, f"UDP forward with name={original_name!r} not found"
+        check_entry_revision(forwards[idx], revision, f"UDP forward {original_name!r}")
         if name != original_name and any(f.get("name") == name for f in forwards):
             return False, f"UDP forward with name={name!r} already exists"
         overlap = _overlapping_forward(
@@ -276,7 +302,12 @@ def save_udp_from_json(
 
 
 def delete_udp_forward(name: str) -> Tuple[bool, str]:
-    """Remove one UDP forward by name and re-apply."""
+    """Remove one UDP forward by name and re-apply, under the same lock."""
+    with source_lock("udp"):
+        return _delete_udp(name)
+
+
+def _delete_udp(name: str) -> Tuple[bool, str]:
     data = _load_yaml(UDP_YAML)
     forwards = data.get("udp_forwards")
     if forwards is None:

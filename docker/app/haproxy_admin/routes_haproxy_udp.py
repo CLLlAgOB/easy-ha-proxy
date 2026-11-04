@@ -12,6 +12,7 @@ from .services_haproxy_udp import (
     get_udp_forwards_list,
     get_udp_status,
     save_udp_from_json,
+    udp_revision,
 )
 
 
@@ -41,6 +42,7 @@ def haproxy_udp_page():
     error = None
     edit_forward = None
     original_name = None
+    revision = None
 
     if request.method == "POST":
         action = (request.form.get("action") or "save").strip()
@@ -74,6 +76,7 @@ def haproxy_udp_page():
                 ok, msg = save_udp_from_json(
                     udp_obj,
                     original_name=original_name,
+                    revision=(request.form.get("revision") or "").strip() or None,
                 )
             except Exception:
                 traceback.print_exc()
@@ -91,6 +94,7 @@ def haproxy_udp_page():
                 return redirect(url_for("routes.haproxy_udp_page"))
             error = msg
             edit_forward = udp_obj
+            revision = (request.form.get("revision") or "").strip() or None
 
     if request.method == "GET":
         original_name = (request.args.get("edit") or "").strip() or None
@@ -105,6 +109,9 @@ def haproxy_udp_page():
             )
             if edit_forward is None:
                 error = f"UDP forward with name={original_name!r} not found"
+            else:
+                # The form carries what it was loaded from (R04).
+                revision = udp_revision(edit_forward)
 
     return render_template(
         "haproxy_udp.html",
@@ -113,6 +120,7 @@ def haproxy_udp_page():
         error=error,
         edit_forward=edit_forward,
         original_name=original_name,
+        revision=revision,
     )
 
 
@@ -135,7 +143,10 @@ def haproxy_udp_save():
     before = _stored_udp(original_name)
 
     try:
-        ok, msg = save_udp_from_json(udp, original_name=original_name)
+        ok, msg = save_udp_from_json(
+            udp, original_name=original_name,
+            revision=str(payload.get("revision") or "").strip() or None,
+        )
     except Exception as exc:
         traceback.print_exc()
         record_request(
