@@ -376,18 +376,20 @@
       table's own lifetime and says days about a ban that lifts within the
       hour.
     </p>
-    <table class="table mono" style="width:100%;">
-      <thead>
-        <tr>
-          <th>Address</th>
-          <th>Lifts in</th>
-          <th>Strike</th>
-          <th>Score</th>
-          <th>What it did</th>
-        </tr>
-      </thead>
-      <tbody id="ap-bans"></tbody>
-    </table>
+    <div style="overflow-x:auto;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th>Lifts in</th>
+            <th>Strike</th>
+            <th>Score</th>
+            <th>What it did</th>
+          </tr>
+        </thead>
+        <tbody id="ap-bans"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -407,20 +409,22 @@
       The Refused column shows what the gateway's current rules did with those
       requests: 429 for the request limit, 423 for a ban.
     </p>
-    <table class="table mono" style="width:100%;">
-      <thead>
-        <tr>
-          <th>Address</th>
-          <th>Trusted as</th>
-          <th>Site</th>
-          <th>Peak and limit</th>
-          <th>Requests over the limit</th>
-          <th>Refused</th>
-          <th>When</th>
-        </tr>
-      </thead>
-      <tbody id="ap-warnings"></tbody>
-    </table>
+    <div style="overflow-x:auto;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th>Trusted as</th>
+            <th>Site</th>
+            <th>Peak and limit</th>
+            <th>Requests over the limit</th>
+            <th>Refused</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody id="ap-warnings"></tbody>
+      </table>
+    </div>
     <div class="ap-empty" id="ap-warnings-empty" hidden>No trusted address has gone over a site's limit</div>
   </div>
 </div>

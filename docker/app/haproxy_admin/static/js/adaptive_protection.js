@@ -406,11 +406,11 @@
       const address = document.createElement("td");
       address.setAttribute("data-i18n-skip", "");
       address.setAttribute("translate", "no");
+      address.className = "ip-cell";
       address.textContent = ban.ip;
       if (ban.likely_false_positive) {
         const flag = document.createElement("span");
-        flag.className = "badge warn";
-        flag.style.marginLeft = "6px";
+        flag.className = "ap-flag fp";
         flag.textContent = uiText("Check this one");
         address.appendChild(flag);
       }
@@ -670,7 +670,11 @@
     rows.forEach((row) => {
       const tr = document.createElement("tr");
 
-      const address = cell(row.country ? `${row.ip} ${row.country}` : row.ip);
+      // "??" is "country unknown" (a private address, say): beside the
+      // address it reads as a question, so it is left out.
+      const known = row.country && row.country !== "??";
+      const address = cell(known ? `${row.ip} ${row.country}` : row.ip);
+      address.className = "ip-cell";
       tr.appendChild(address);
 
       tr.appendChild(cell(uiText(TRUST_LABELS[row.trust] || row.trust)));

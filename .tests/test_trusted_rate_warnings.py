@@ -439,6 +439,13 @@ class ThePanel(unittest.TestCase):
         self.assertIn("renderWarnings(null)", block)
         self.assertNotIn("showUnavailable", block)
 
+    def test_its_table_is_drawn_like_the_others_on_the_page(self):
+        # "table mono" is styled nowhere: the cells ran into each other.
+        html = (ROOT / "docker/app/haproxy_admin/templates/adaptive_protection.html").read_text(encoding="utf-8")
+        card = html.split('id="ap-warnings-card"')[1].split('<div class="card"')[0]
+        self.assertIn('<table class="data-table">', card)
+        self.assertNotIn('class="table mono"', html)
+
 
 if __name__ == "__main__":
     unittest.main()
