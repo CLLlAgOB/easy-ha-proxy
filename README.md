@@ -937,6 +937,16 @@ already keeps. A missing stylesheet or image is not a signal at all.
 `LOW_AND_SLOW_SCANNER` is deliberately rate-blind: the slower a scan is, the
 less the existing limits can see it.
 
+The gateway is moving to a ban policy in which an ordinary excess is answered
+by refusing the excess, never by a ban. Under it the rate and error counters,
+and the bans HAProxy writes for them, become **telemetry**: still recorded and
+shown with each address, worth nothing. An address that stays over a hard
+ceiling -- 1000 requests or 1000 new connections in 10 s, or 500 open at once,
+on two reads in a row -- becomes the evidence of a flood in their place
+(`HARD_FLOOR_EPISODE`; for a trusted address `HARD_FLOOR_TRUSTED`, which is
+never weighed). Until the switch, enforcement keeps the current weights and the
+review card shows a preview: who would no longer be banned, and who would be.
+
 Query strings are checked separately, and by what the **value** looks like
 rather than by the parameter it arrived under. That distinction is not
 cosmetic: on one production gateway, 73 of the 74 addresses sending `?cmd=`

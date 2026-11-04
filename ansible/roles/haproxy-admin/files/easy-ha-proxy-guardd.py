@@ -812,6 +812,12 @@ EVENT_NOSNI_PROBING = "NOSNI_PROBING"
 EVENT_RATE_EXCEEDED = "RATE_EXCEEDED"
 EVENT_ERROR_RATE_EXCEEDED = "ERROR_RATE_EXCEEDED"
 EVENT_LEGACY_BAN = "LEGACY_HAPROXY_BAN"
+# An address that stayed over one of the hard ceilings (U02, 04.7b): far past
+# anything a client does, so a flood rather than a busy user.
+EVENT_HARD_FLOOR = "HARD_FLOOR_EPISODE"
+# The same, by a trusted address: kept as a record, never weighed (a trusted
+# address is not punished for load until D09b says how).
+EVENT_HARD_FLOOR_TRUSTED = "HARD_FLOOR_TRUSTED"
 # Actions rather than findings: they carry no weight and never feed the score.
 EVENT_BAN_APPLIED = "BAN_APPLIED"
 EVENT_BAN_LIFTED = "BAN_LIFTED"
@@ -849,6 +855,9 @@ DEFAULT_WEIGHTS: Dict[str, int] = {
     EVENT_RATE_EXCEEDED: 15,
     EVENT_ERROR_RATE_EXCEEDED: 15,
     EVENT_LEGACY_BAN: 30,
+    # Recorded, not yet weighed: the policy that weighs it (U02_WEIGHTS) is
+    # shown beside this one until the switch (04.8).
+    EVENT_HARD_FLOOR: 0,
 }
 
 # One category is one finding. Fifty different /wp-* URLs say "looked for
@@ -892,6 +901,9 @@ COOLDOWN_SECONDS: Dict[str, int] = {
     EVENT_NOSNI_PROBING: 600,
     EVENT_RATE_EXCEEDED: 60,
     EVENT_ERROR_RATE_EXCEEDED: 60,
+    # One record per ten minutes of a flood, not one per read.
+    EVENT_HARD_FLOOR: 600,
+    EVENT_HARD_FLOOR_TRUSTED: 600,
 }
 
 # Thresholds for the derived detections.
@@ -1647,6 +1659,51 @@ def policy_from_query(
     )
 
 
+# Attack evidence and telemetry (U02, 04.7b).
+#
+# The policy the operator set on 31 October: an ordinary excess is answered
+# with a refusal of the excess (429 for a stranger, a warning for a trusted
+# address), never a ban; bans are for evidence of an attack. Three findings
+# are the ordinary excess and what HAProxy did about it, and each repeats its
+# cause: a rate or error counter over a site's soft limit, and the legacy ban
+# HAProxy wrote for exactly that reading. Real enumeration is caught from the
+# log by distinct paths (NOT_FOUND/WIDE/MASS_ENUMERATION), which a monitor
+# repeating one 403 never trips -- on one gateway 72 legacy bans in eight
+# days were cloud monitors with sixteen answers of each code.
+#
+# They stay recorded, and shown with every address; under U02 they weigh
+# nothing. A sustained hard-floor episode is the evidence that takes their
+# place. Until the switch the engine scores with DEFAULT_WEIGHTS and shows the
+# U02 result beside it.
+TELEMETRY_EVENTS: frozenset = frozenset(
+    {EVENT_RATE_EXCEEDED, EVENT_ERROR_RATE_EXCEEDED, EVENT_LEGACY_BAN}
+)
+# One sustained episode reaches the ban line: the ceilings are about five
+# times what the busiest legitimate address was measured doing (216 requests
+# in 10 s, 98 in flight), held for two reads in a row. A proposal for the
+# switch, not applied before it.
+U02_EVIDENCE_WEIGHTS: Dict[str, int] = {EVENT_HARD_FLOOR: 60}
+# How many addresses the preview names on each side; the counts are whole.
+U02_PREVIEW_LISTED = 20
+
+
+def u02_policy(base: ScoringPolicy) -> ScoringPolicy:
+    """The same policy with telemetry weighing nothing and the floor weighed."""
+
+    weights = dict(base.weights)
+    for event_type in TELEMETRY_EVENTS:
+        weights[event_type] = 0
+    for event_type, weight in U02_EVIDENCE_WEIGHTS.items():
+        if not weights.get(event_type):
+            weights[event_type] = weight
+    return ScoringPolicy(
+        weights=weights,
+        category_cap=base.category_cap,
+        window_seconds=base.window_seconds,
+        decay_seconds=base.decay_seconds,
+    )
+
+
 # Findings that score even when HAProxy had already refused the request.
 #
 # A refusal used to excuse everything: an address whose every request was
@@ -2369,6 +2426,110 @@ class TrustedRates:
                 "evicted": self.evicted,
                 "dropped": self.dropped,
             }
+
+
+# ---------------------------------------------------------------------------
+# Hard-floor episodes (U02, 04.7b)
+# ---------------------------------------------------------------------------
+#
+# The hard floor refuses the excess and bans nobody (04.6b). What it cannot
+# do is tell a flood that keeps going from a burst that stopped, and the log
+# cannot either: a refused connection is never logged, and a refused request
+# reads 429 like a site's soft limit. The stick tables can. Each table that
+# holds a ceiling names it in a comment the template writes beside it, and
+# guardd asks HAProxy only for the addresses above it -- "show table T
+# data.C gt N" returns the offenders and nothing else, so the cost does not
+# grow with the gateway's traffic. An address above a ceiling on two reads in
+# a row (ten seconds apart) is an episode.
+
+HARD_FLOOR_COUNTERS: Tuple[str, ...] = ("http_req_rate", "conn_rate", "conn_cur")
+HARD_FLOOR_SUSTAIN_READS = 2
+HARD_FLOOR_MAX_TRACKED = 4096
+_HARD_FLOOR_RE = re.compile(
+    r"^\s*#\s*guardd-hard-floor\s+table=(?P<table>[A-Za-z0-9_.-]+)"
+    r"(?P<limits>(?:\s+(?:http_req_rate|conn_rate|conn_cur)=\d+)+)\s*$",
+    re.MULTILINE,
+)
+_HARD_FLOOR_LIMIT_RE = re.compile(r"(?P<counter>http_req_rate|conn_rate|conn_cur)=(?P<limit>\d+)")
+
+
+def read_hard_floor(path: str = "") -> Dict[str, Dict[str, int]]:
+    """{table: {counter: ceiling}} from the generated configuration."""
+    try:
+        text = pathlib.Path(path or HAPROXY_CONFIG_PATH).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    floors: Dict[str, Dict[str, int]] = {}
+    for match in _HARD_FLOOR_RE.finditer(text):
+        limits = floors.setdefault(match.group("table"), {})
+        for item in _HARD_FLOOR_LIMIT_RE.finditer(match.group("limits")):
+            limit = int(item.group("limit"))
+            if limit > 0:
+                limits[item.group("counter")] = limit
+    return {table: limits for table, limits in floors.items() if limits}
+
+
+class HardFloorWatch:
+    """Which addresses have stayed over a hard ceiling, read after read."""
+
+    def __init__(self, config_path: str = "") -> None:
+        self.config_path = config_path
+        self._key: Optional[Tuple[int, int]] = None
+        self._checked = 0.0
+        self._ceilings: Dict[str, Dict[str, int]] = {}
+        self._streak: Dict[Tuple[str, str, str], int] = {}
+        self.episodes = 0
+
+    def ceilings(self) -> Dict[str, Dict[str, int]]:
+        moment = time.monotonic()
+        if self._checked and moment - self._checked < RATE_CEILINGS_RECHECK:
+            return self._ceilings
+        self._checked = moment
+        path = self.config_path or HAPROXY_CONFIG_PATH
+        try:
+            info = os.stat(path)
+            key: Optional[Tuple[int, int]] = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            key = None
+        if key != self._key:
+            self._key = key
+            self._ceilings = read_hard_floor(path) if key else {}
+        return self._ceilings
+
+    def queries(self) -> List[Tuple[str, str, int]]:
+        return [
+            (table, counter, limit)
+            for table, limits in sorted(self.ceilings().items())
+            for counter, limit in sorted(limits.items())
+        ]
+
+    def update(
+        self, over: Dict[Tuple[str, str, str], Tuple[int, int]]
+    ) -> List[Tuple[Tuple[str, str, str], Tuple[int, int]]]:
+        """Take one read's offenders; return those now over for long enough.
+
+        ``over`` maps (address, table, counter) to (value, ceiling). An
+        address missing from a read starts again from nothing, so a burst
+        that one read caught and the next did not is never an episode.
+        """
+        streak: Dict[Tuple[str, str, str], int] = {}
+        sustained = []
+        for key in sorted(over):
+            count = self._streak.get(key, 0) + 1
+            if len(streak) < HARD_FLOOR_MAX_TRACKED:
+                streak[key] = count
+            if count >= HARD_FLOOR_SUSTAIN_READS:
+                sustained.append((key, over[key]))
+        self._streak = streak
+        self.episodes += len(sustained)
+        return sustained
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "tables": len(self._ceilings),
+            "over_now": len(self._streak),
+            "sustained_reads": self.episodes,
+        }
 
 
 def _safe_int(value: Any) -> int:
@@ -5205,6 +5366,7 @@ class GuardEngine:
         self.policy = ScoringPolicy()
         self.digests = MinuteDigests()
         self.trusted_rates = TrustedRates()
+        self.hard_floor = HardFloorWatch()
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
@@ -5382,6 +5544,7 @@ class GuardEngine:
         self.exclusions.reload_files()
         tables = self.read_tables()
         from_tables = self.ingest_tables(tables, now)
+        from_tables += self.ingest_hard_floor(now)
         from_log = self.ingest_log(
             now,
             max_bytes=max(64 * 1024, self.config.log_read_bytes_per_cycle - self._cycle_bytes),
@@ -5474,6 +5637,45 @@ class GuardEngine:
         written = self.database.record_events(events)
         self.events_recorded += written
         return written + self.ingest_rate_tables(tables, now)
+
+    def ingest_hard_floor(self, now: int) -> int:
+        """Record the addresses that have stayed over a hard ceiling.
+
+        A trusted address over it is recorded under a type that weighs
+        nothing in any policy: the floor already refuses its excess, and
+        whether load alone may ever punish a trusted address is D09b's
+        question, not this one's.
+        """
+        queries = self.hard_floor.queries()
+        if not queries:
+            return 0
+        over: Dict[Tuple[str, str, str], Tuple[int, int]] = {}
+        for table, counter, limit in queries:
+            try:
+                payload = runtime_command(
+                    self.config.haproxy_socket, f"show table {table} data.{counter} gt {limit}"
+                )
+            except OSError as exc:
+                LOG.debug("cannot read %s for the hard floor: %s", table, exc)
+                continue
+            for ip, fields in parse_table(payload).items():
+                value = next(
+                    (_safe_int(raw) for name, raw in fields.items() if name.startswith(counter)), 0
+                )
+                if value > limit:
+                    over[(ip, table, counter)] = (value, limit)
+        written = 0
+        for (ip, table, counter), (value, limit) in self.hard_floor.update(over):
+            verdict = self.exclusions.verdict(ip)
+            event_type = EVENT_HARD_FLOOR_TRUSTED if verdict.excluded else EVENT_HARD_FLOOR
+            detail = f"{counter}={value} limit={limit} table={table}"
+            if verdict.excluded:
+                detail += f" trusted={verdict.source or verdict.reason}"
+            if self._emit(
+                ip, event_type, now, source="stick-table", category="flood", detail=detail
+            ):
+                written += 1
+        return written
 
     def ingest_rate_tables(
         self, tables: Dict[str, Dict[str, Dict[str, str]]], now: int
@@ -5973,6 +6175,7 @@ class GuardEngine:
         now: Optional[int] = None,
         policy: Optional[ScoringPolicy] = None,
         scheduled: Optional[Dict[str, int]] = None,
+        compare: Optional[ScoringPolicy] = None,
     ) -> Dict[str, Any]:
         now = now or _utc_now()
         policy = policy or self.policy
@@ -5982,6 +6185,8 @@ class GuardEngine:
             scheduled = self.database.scheduled_bans()
         events = self.database.events_for(ip, now - policy.window_seconds)
         result = score_events(events, now, policy)
+        # Scored from the same events, so the comparison costs no query.
+        other = score_events(events, now, compare)["score"] if compare is not None else None
         result["ip"] = ip
         result["enforceable"] = enforceable(ip)
         verdict = self.exclusions.verdict(ip)
@@ -6006,6 +6211,13 @@ class GuardEngine:
         result["would_ban"] = (
             result["score"] >= WOULD_BAN_SCORE and not result["blockers"]
         )
+        if other is not None:
+            other = 0 if verdict.excluded else other
+            result["u02"] = {
+                "score": other,
+                "state": state_for(other),
+                "would_ban": other >= WOULD_BAN_SCORE and not result["blockers"],
+            }
         result["banned_until"] = int(scheduled.get(ip, 0))
         # The review question that matters: did an address the engine wanted to
         # act on turn out to belong to somebody who then logged in?
@@ -6019,12 +6231,13 @@ class GuardEngine:
         now: Optional[int] = None,
         limit: int = 200,
         policy: Optional[ScoringPolicy] = None,
+        compare: Optional[ScoringPolicy] = None,
     ) -> List[Dict[str, Any]]:
         now = now or _utc_now()
         policy = policy or self.policy
         scheduled = self.database.scheduled_bans()
         rows = [
-            self.reputation(ip, now, policy, scheduled)
+            self.reputation(ip, now, policy, scheduled, compare)
             for ip in self.database.active_addresses(
                 now - policy.window_seconds, limit=limit
             )
@@ -6447,7 +6660,8 @@ class GuardEngine:
 
         now = now or _utc_now()
         policy = policy or self.policy
-        rows = self.reputation_table(now, limit=limit, policy=policy)
+        after = u02_policy(policy)
+        rows = self.reputation_table(now, limit=limit, policy=policy, compare=after)
         by_state: Dict[str, int] = {}
         for row in rows:
             by_state[row["state"]] = by_state.get(row["state"], 0) + 1
@@ -6502,10 +6716,55 @@ class GuardEngine:
                 ),
                 "by_state": by_state,
             },
+            "u02": self.u02_preview(rows, policy, after),
             "addresses": [
                 {key: value for key, value in row.items() if key != "contributions"}
                 for row in rows
             ],
+        }
+
+    @staticmethod
+    def u02_preview(
+        rows: List[Dict[str, Any]], policy: ScoringPolicy, after: ScoringPolicy
+    ) -> Dict[str, Any]:
+        """What the U02 policy would change, before the switch makes it so.
+
+        Only a preview: enforcement keeps using ``policy``. The blockers are
+        today's, the "has authenticated before" one included -- 04.3c decides
+        what replaces it.
+        """
+
+        def brief(row: Dict[str, Any]) -> Dict[str, Any]:
+            telemetry = sum(
+                float(item.get("points") or 0)
+                for item in row.get("contributions") or []
+                if item.get("event_type") in TELEMETRY_EVENTS
+            )
+            return {
+                "ip": row["ip"],
+                "score": row["score"],
+                "u02_score": row["u02"]["score"],
+                "telemetry_points": round(telemetry, 2),
+            }
+
+        changed = sorted(set(policy.weights) | set(after.weights))
+        no_longer = [row for row in rows if row["would_ban"] and not row["u02"]["would_ban"]]
+        newly = [row for row in rows if row["u02"]["would_ban"] and not row["would_ban"]]
+        return {
+            "applied": False,
+            "telemetry": sorted(TELEMETRY_EVENTS),
+            "weights": {
+                event_type: [policy.weight(event_type), after.weight(event_type)]
+                for event_type in changed
+                if policy.weight(event_type) != after.weight(event_type)
+            },
+            "would_ban": sum(1 for row in rows if row["u02"]["would_ban"]),
+            "would_ban_now": sum(1 for row in rows if row["would_ban"]),
+            "lower": sum(1 for row in rows if row["u02"]["score"] < row["score"]),
+            "no_longer": [brief(row) for row in no_longer[:U02_PREVIEW_LISTED]],
+            "no_longer_count": len(no_longer),
+            "newly": [brief(row) for row in newly[:U02_PREVIEW_LISTED]],
+            "newly_count": len(newly),
         }
 
     # -- maintenance ------------------------------------------------------
@@ -6584,6 +6843,7 @@ class GuardEngine:
             },
             "events_recorded": self.events_recorded,
             "rate_warnings": self.trusted_rates.summary(),
+            "hard_floor": self.hard_floor.summary(),
         }
 
 

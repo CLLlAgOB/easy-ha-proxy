@@ -231,6 +231,10 @@ backend tbl_err_other
 {% if conn_rate_hard <= 0 %}{% set conn_rate_hard = 1000 %}{% endif %}
 {% set conn_cur_limit = conn_cur_limit | int %}
 {% if conn_cur_limit <= 0 %}{% set conn_cur_limit = 500 %}{% endif %}
+{# Each table that holds a hard ceiling says so in a "guardd-hard-floor"
+   comment beside it. HAProxy ignores the line; guardd reads it to know which
+   tables to ask and what "over" means, and records an address that stays
+   over a ceiling as an attack episode (U02, 04.7b). #}
 
 {# The hard floor on an entry that takes connections straight from clients:
    counted in the frontend's own table (named after it), the ordinary burst
@@ -243,6 +247,7 @@ backend tbl_err_other
 
     tcp-request connection reject if { sc0_conn_rate({{ table }}) gt {{ conn_rate_hard }} }
     tcp-request connection reject if { sc0_conn_cur({{ table }}) gt {{ conn_cur_limit }} }
+    # guardd-hard-floor table={{ table }} conn_rate={{ conn_rate_hard }} conn_cur={{ conn_cur_limit }}{% if with_requests %} http_req_rate={{ hard_req_rate }}{% endif %}
 {%- endmacro %}
 
 {% if has_passthru %}
@@ -288,6 +293,7 @@ frontend fe_tls_router
 
     tcp-request connection reject if { sc1_conn_rate(tbl_conn_edge) gt {{ conn_rate_hard }} }
     tcp-request connection reject if { sc1_conn_cur(tbl_conn_edge) gt {{ conn_cur_limit }} }
+    # guardd-hard-floor table=tbl_conn_edge conn_rate={{ conn_rate_hard }} conn_cur={{ conn_cur_limit }}
 
     tcp-request inspect-delay 5s
     tcp-request content accept if { req_ssl_hello_type 1 }
@@ -375,6 +381,7 @@ frontend fe_https
     # Everyone: the hard ceilings.
     tcp-request connection reject if conn_rate_hard
     tcp-request connection reject if conn_too_many
+    # guardd-hard-floor table=fe_https conn_rate={{ conn_rate_hard }} conn_cur={{ conn_cur_limit }}
 {% endif %}
 
     # "name:443" names the same site as "name" (RFC 9110), and some clients
@@ -405,6 +412,7 @@ frontend fe_https
     http-request track-sc0 src
 {% endif %}
     http-request deny status 429 if { sc0_http_req_rate(fe_https) gt {{ hard_req_rate }} }
+    # guardd-hard-floor table=fe_https http_req_rate={{ hard_req_rate }}
 
     # SNI / HOST
     acl sni_found ssl_fc_sni -m found

@@ -482,6 +482,41 @@
     });
   }
 
+  // What the new ban policy (U02) would change, shown before it is applied.
+  // A daemon from before it sends no preview, and the block stays away.
+  function renderU02(preview) {
+    const box = byId("ap-u02");
+    if (!box) return;
+    box.hidden = !preview;
+    if (!preview) return;
+    setText("ap-u02-wouldban", formatCount(preview.would_ban));
+    setText("ap-u02-nolonger", formatCount(preview.no_longer_count));
+    setText("ap-u02-newly", formatCount(preview.newly_count));
+    setText("ap-u02-lower", formatCount(preview.lower));
+    const host = byId("ap-u02-list");
+    if (!host) return;
+    host.textContent = "";
+    [
+      ["No longer banned", preview.no_longer],
+      ["Newly banned", preview.newly]
+    ].forEach(([label, rows]) => {
+      if (!rows || !rows.length) return;
+      const line = document.createElement("div");
+      line.className = "ap-u02-line";
+      const name = document.createElement("strong");
+      name.textContent = `${uiText(label)}: `;
+      line.appendChild(name);
+      line.appendChild(
+        document.createTextNode(
+          rows
+            .map((row) => `${row.ip} (${formatCount(row.score)} → ${formatCount(row.u02_score)})`)
+            .join(", ")
+        )
+      );
+      host.appendChild(line);
+    });
+  }
+
   function renderTable(addresses) {
     const body = byId("ap-table");
     const empty = byId("ap-table-empty");
@@ -742,6 +777,7 @@
       renderMode(payload);
       renderPolicy(payload.policy);
       renderSummary(payload.summary);
+      renderU02(payload.u02);
       renderBans(payload.bans);
       renderTable(payload.addresses);
       setText("ap-updated", payload.ts ? formatTime(payload.ts) : "");

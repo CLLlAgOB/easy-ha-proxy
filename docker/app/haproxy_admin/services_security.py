@@ -55,6 +55,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "RATE_EXCEEDED",
     "ERROR_RATE_EXCEEDED",
     "LEGACY_HAPROXY_BAN",
+    "HARD_FLOOR_EPISODE",
 )
 
 
@@ -105,7 +106,10 @@ def _annotate(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 def shadow(args: Dict[str, str]) -> Dict[str, Any]:
     payload = guardd_shadow(simulator_params(args))
-    for entry in payload.get("addresses") or []:
+    preview = payload.get("u02") if isinstance(payload.get("u02"), dict) else {}
+    for entry in itertools.chain(
+        payload.get("addresses") or [], preview.get("no_longer") or [], preview.get("newly") or []
+    ):
         _annotate(entry)
     return payload
 
