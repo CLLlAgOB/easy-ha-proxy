@@ -168,6 +168,16 @@
     "Unknown names": "Неизвестные имена",
     "No site counter held this address when the ban was first seen.": "Когда бан впервые заметили, ни один счётчик сайта этот адрес не держал.",
     "Sign-in blocked by Authelia": "Вход заблокирован Authelia",
-    "Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.": "Заблокирован только вход — после слишком многих неудачных попыток: HAProxy этот адрес не отклоняет, и сайты без входа ему по-прежнему отвечают."
+    "Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.": "Заблокирован только вход — после слишком многих неудачных попыток: HAProxy этот адрес не отклоняет, и сайты без входа ему по-прежнему отвечают.",
+    "Ban decisions": "Решения о банах",
+    "Every ban and lift the security engine has recorded, newest first: by adaptive protection, by hand, by HAProxy's own rules (as the engine saw them) and by the new ban policy. Kept in the engine's database, not in the stream of requests, so a busy hour does not push them out. Authelia's sign-in bans are not among them: Authelia keeps only its current list, shown on its own page and on each address's page.": "Все баны и снятия, которые записал движок безопасности, сначала новые: адаптивной защитой, вручную, собственными правилами HAProxy (как их увидел движок) и новой политикой банов. Хранятся в базе движка, а не в потоке запросов, поэтому загруженный час их не вытесняет. Банов входа Authelia здесь нет: Authelia хранит только текущий список — он на её собственной странице и на странице каждого адреса.",
+    "Which decisions": "Какие решения",
+    "All decisions": "Все решения",
+    "Lifts": "Снятия",
+    "Why": "Почему",
+    "No decisions recorded yet": "Решений пока не записано",
+    "Show older": "Показать более ранние",
+    "Score {score}": "Баллы {score}",
+    "The security engine is not answering, so its decisions cannot be read.": "Движок безопасности не отвечает, поэтому его решения прочитать нельзя."
   }
 }

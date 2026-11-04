@@ -141,6 +141,7 @@
       }
       state.data = payload;
       render(force);
+      refreshDecisions();
     } catch (error) {
       byId("la-note").textContent = String(error);
     } finally {
@@ -495,6 +496,68 @@
       </tr>`).join("");
   }
 
+  /* ---------- ban decisions (06.6) ---------- */
+
+  // Read from the engine's database a page at a time, below the last id
+  // shown. The first page is read again now and then while the tab is open;
+  // once older pages are loaded it is left alone, so the rows being read do
+  // not move.
+  const decisions = { rows: [], next: 0, kind: "all", pages: 0, loadedAt: 0, loading: false };
+  const DECISIONS_REFRESH_MS = 30000;
+
+  async function loadDecisions(older) {
+    if (decisions.loading) return;
+    decisions.loading = true;
+    const note = byId("la-decisions-note");
+    try {
+      const params = new URLSearchParams({ kind: decisions.kind });
+      if (older && decisions.next) params.set("before", String(decisions.next));
+      const response = await fetch(`/api/monitoring/live/decisions?${params}`, {
+        headers: { Accept: "application/json" }, credentials: "same-origin",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        note.textContent = payload.unavailable
+          ? t("The security engine is not answering, so its decisions cannot be read.")
+          : String(payload.error || response.status);
+        return;
+      }
+      note.textContent = "";
+      const rows = payload.decisions || [];
+      decisions.rows = older ? decisions.rows.concat(rows) : rows;
+      decisions.next = Number(payload.next || 0);
+      decisions.pages = older ? decisions.pages + 1 : 1;
+      decisions.loadedAt = Date.now();
+      renderDecisions();
+    } catch (error) {
+      note.textContent = String(error);
+    } finally {
+      decisions.loading = false;
+    }
+  }
+
+  function renderDecisions() {
+    const rows = decisions.rows;
+    byId("la-decisions-empty").hidden = rows.length > 0;
+    byId("la-decisions-more").hidden = !decisions.next;
+    byId("la-decisions-body").innerHTML = rows.map((row) => `
+      <tr>
+        <td class="la-mono">${esc(row.when)}</td>
+        <td><a class="la-link la-mono" href="/ip/${encodeURIComponent(row.ip)}">${esc(row.ip)}</a> ${countryCell(row.country)}</td>
+        <td>${esc(t(row.label))}${row.outcome ? ` <span class="la-sub">${esc(t(row.outcome))}</span>` : ""}</td>
+        <td class="la-num">${esc(row.code || "—")}</td>
+        <td class="la-mono">${esc(row.until || "—")}</td>
+        <td>${esc(core.decisionWhy(row, t) || "—")}</td>
+      </tr>`).join("");
+  }
+
+  // The first page again, when the tab is open and nobody paged back.
+  function refreshDecisions() {
+    if (state.tab !== "decisions" || decisions.pages > 1 || reading()) return;
+    if (Date.now() - decisions.loadedAt < DECISIONS_REFRESH_MS) return;
+    loadDecisions(false);
+  }
+
   function fillSelect(id, values, label) {
     const select = byId(id);
     const current = select.value;
@@ -731,7 +794,13 @@
       save();
       writeAddress();
       if (state.held && state.data) renderTables(state.data);
+      if (state.tab === "decisions" && decisions.pages <= 1) loadDecisions(false);
     });
+    byId("la-decisions-kind").addEventListener("change", (event) => {
+      decisions.kind = event.target.value;
+      loadDecisions(false);
+    });
+    byId("la-decisions-more").addEventListener("click", () => loadDecisions(true));
     document.querySelectorAll("th[data-sort]").forEach((th) => {
       th.addEventListener("click", () => {
         const table = th.closest("[data-panel]").dataset.panel;
@@ -822,6 +891,7 @@
     markTab();
     bind();
     refresh();
+    if (state.tab === "decisions") loadDecisions(false);
     schedule();
   });
 })();

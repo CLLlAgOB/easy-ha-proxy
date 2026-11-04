@@ -239,6 +239,18 @@ def api_live_activity():
         return jsonify({"ok": False, "unavailable": True, "error": str(exc)}), 503
 
 
+@bp.get("/api/monitoring/live/decisions")
+def api_live_decisions():
+    """Every address's ban decisions, newest first (06.6). Read-only."""
+    from .guardd_client import GuarddUnavailable
+
+    try:
+        return jsonify(live.decision_feed(request.args))
+    except GuarddUnavailable as exc:
+        LOG.warning("ban decisions unavailable: %s", exc)
+        return jsonify({"ok": False, "unavailable": True, "error": str(exc)}), 503
+
+
 @bp.post("/api/monitoring/live/ban")
 def api_live_ban():
     """Ban one address by hand from the live page."""

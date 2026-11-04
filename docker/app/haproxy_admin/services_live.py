@@ -294,6 +294,74 @@ def ban_history(ip: str) -> "Dict[str, Any] | None":
     return {"decisions": rows, "reason": reason, "observed": observed}
 
 
+DECISION_FEED_KINDS = ("all", "bans", "lifts")
+DECISION_FEED_PAGE = 50
+
+
+def decision_feed(args: Any) -> Dict[str, Any]:
+    """The ban decisions about every address, newest first (06.6).
+
+    Read from the engine's database, a page at a time below the last id
+    shown, so the stream of requests never pushes a decision out and a
+    decision written meanwhile never shifts the page. Raises
+    GuarddUnavailable when the engine does not answer.
+    """
+    from .guardd_client import guardd_decision_feed
+
+    kind = str(args.get("kind") or "all")
+    if kind not in DECISION_FEED_KINDS:
+        kind = "all"
+    try:
+        before = max(0, int(args.get("before") or 0))
+    except (TypeError, ValueError):
+        before = 0
+    payload = guardd_decision_feed({"kind": kind, "before": before, "limit": DECISION_FEED_PAGE})
+    try:
+        from .services_security import _site_limits
+
+        sites = _site_limits()
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("site names unavailable for the decision feed", exc_info=True)
+        sites = {}
+    rows = []
+    for item in payload.get("decisions") or []:
+        action, source = str(item.get("action") or ""), str(item.get("source") or "")
+        ip = str(item.get("ip") or "")
+        summary = item.get("summary") or {}
+        over = []
+        for entry in summary.get("over") or []:
+            site = str(entry.get("site") or "")
+            over.append({
+                "unknown": site == "other",
+                "site": str((sites.get(site) or {}).get("domain") or site),
+                "counter": READING_COUNTERS.get(str(entry.get("counter") or ""), str(entry.get("counter") or "")),
+                "value": int(entry.get("value") or 0),
+                "limit": entry.get("limit"),
+            })
+        rows.append({
+            "id": int(item.get("id") or 0),
+            "ts": int(item.get("ts") or 0),
+            "when": _when(item.get("ts")),
+            "ip": ip,
+            "country": get_country_code(ip) or "",
+            "label": DECISION_LABELS.get((action, source), f"{action} ({source})"),
+            "outcome": DECISION_OUTCOMES.get(str(item.get("outcome") or ""), ""),
+            "code": int(item.get("code") or 0),
+            "until": _when(item.get("until")) if action not in ("lifted", "ended") else "",
+            "score": int(item.get("score") or 0),
+            "strike": int(item.get("strike") or 0),
+            "categories": [str(name) for name in summary.get("categories") or []][:4],
+            "over": over,
+        })
+    return {
+        "ok": True,
+        "kind": kind,
+        "decisions": rows,
+        "next": int(payload.get("next") or 0),
+        "sources": [str(name) for name in payload.get("sources") or []],
+    }
+
+
 # Authelia's list of banned addresses, read through authelia-bansd (two
 # `docker exec` calls into the Authelia container): kept this long, so
 # opening one address after another does not ask every time.

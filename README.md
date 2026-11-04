@@ -997,7 +997,10 @@ backup carries them (the engine is stopped while its database is copied); the
 request log stays out of it. If the engine cannot do its work -- a full disk
 or a damaged database stops every cycle, and nothing is scored, banned or
 recorded meanwhile -- the alert **Adaptive protection is not working** says
-so after five minutes, with the error, and closes once it works again. An address's page
+so after five minutes, with the error, and closes once it works again. The
+**Ban decisions** tab of the live page lists them for every address, newest
+first, a page at a time, read from that database rather than from the stream
+of requests. An address's page
 (`/ip/<address>`) shows it as **Why it is banned**, with every decision about
 the address below.
 

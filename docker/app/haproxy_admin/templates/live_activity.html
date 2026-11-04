@@ -146,6 +146,9 @@
 .la-actions .btn { padding: 4px 10px; font-size: 12px; box-shadow: none; }
 .la-empty { color: var(--text-secondary); font-size: 13px; padding: 30px 0; text-align: center; }
 .la-sub { font-size: 11px; color: var(--text-secondary); }
+.la-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0 10px; }
+.la-row select { padding: 5px 9px; border-radius: 9px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); }
+#la-decisions-more { margin-top: 10px; }
 </style>
 
 <div id="la-unavailable" class="rt-notice" hidden
@@ -264,6 +267,7 @@
     <button type="button" class="la-chip" data-tab="agents" aria-pressed="false">Clients</button>
     <button type="button" class="la-chip" data-tab="slow" aria-pressed="false">Slow</button>
     <button type="button" class="la-chip" data-tab="banned" aria-pressed="false">Banned and limited</button>
+    <button type="button" class="la-chip" data-tab="decisions" aria-pressed="false">Ban decisions</button>
     <span class="la-held" id="la-held" hidden>Updates wait while you read the table</span>
   </div>
 
@@ -421,6 +425,34 @@
       </table>
     </div>
     <div class="la-empty" id="la-limited-empty" hidden>Nobody is over the connection limit</div>
+  </div>
+
+  <div data-panel="decisions" hidden>
+    <p class="la-sub">
+      Every ban and lift the security engine has recorded, newest first: by adaptive
+      protection, by hand, by HAProxy's own rules (as the engine saw them) and by the new
+      ban policy. Kept in the engine's database, not in the stream of requests, so a busy
+      hour does not push them out. Authelia's sign-in bans are not among them: Authelia
+      keeps only its current list, shown on its own page and on each address's page.
+    </p>
+    <div class="la-row">
+      <select id="la-decisions-kind" aria-label="Which decisions">
+        <option value="all">All decisions</option>
+        <option value="bans">Bans</option>
+        <option value="lifts">Lifts</option>
+      </select>
+      <span class="la-sub" id="la-decisions-note" data-i18n-skip translate="no"></span>
+    </div>
+    <div class="la-table-wrap">
+      <table class="data-table la-table">
+        <thead>
+          <tr><th>Time</th><th>Address</th><th>What</th><th class="la-num">Code</th><th>Until</th><th>Why</th></tr>
+        </thead>
+        <tbody id="la-decisions-body" data-i18n-skip translate="no"></tbody>
+      </table>
+    </div>
+    <div class="la-empty" id="la-decisions-empty" hidden>No decisions recorded yet</div>
+    <button type="button" class="btn btn-small" id="la-decisions-more" hidden>Show older</button>
   </div>
 </div>
 

@@ -24,7 +24,7 @@
   const WINDOW_MIN = 5;
   const WINDOW_MAX = 3600;
   const REFRESH_CHOICES = [2, 5, 10, 30];
-  const TABS = ["addresses", "sites", "events", "paths", "agents", "slow", "banned"];
+  const TABS = ["addresses", "sites", "events", "paths", "agents", "slow", "banned", "decisions"];
   // The columns each table can be sorted by, as the page's headers name them.
   const SORT_KEYS = {
     addresses: ["requests", "rate", "errors", "server_errors", "blocked", "bytes", "last"],
@@ -389,9 +389,25 @@
     return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
   }
 
+  // Why, in one line, for the ban decisions tab (06.6): the score and the
+  // categories adaptive protection counted, or the site counters a ban
+  // HAProxy placed on its own rules was first seen over. `say` translates.
+  function decisionWhy(row, say) {
+    const parts = [];
+    if (Number(row.score) > 0) parts.push(say("Score {score}", {score: Number(row.score)}));
+    if (Array.isArray(row.categories) && row.categories.length) parts.push(row.categories.join(", "));
+    (row.over || []).forEach((entry) => {
+      const site = entry.unknown ? say("Unknown names") : String(entry.site || "");
+      const limit = entry.limit === null || entry.limit === undefined ? "" : ` / ${entry.limit}`;
+      parts.push(`${site}: ${say(String(entry.counter || ""))} ${Number(entry.value) || 0}${limit}`);
+    });
+    return parts.join(" · ");
+  }
+
   return {
     WINDOW_PRESETS,
     REFRESH_CHOICES,
+    decisionWhy,
     TABS,
     SORT_KEYS,
     BEHIND_SECONDS,

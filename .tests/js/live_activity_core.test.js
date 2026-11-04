@@ -363,3 +363,15 @@ test("a site's line puts its busiest bar at the top and an idle one at the botto
   // A quiet site is a flat line along the bottom, not a division by zero.
   assert.ok(core.sparkPoints([0, 0, 0], 90, 22).split(" ").every((p) => p.endsWith(",21.0")));
 });
+
+// The ban decisions tab (06.6): why, in one line.
+test("a decision says why in one line", () => {
+  const say = (text, params) => String(text).replace(/\{(\w+)\}/g, (m, key) => (params && key in params ? params[key] : m));
+  assert.equal(core.decisionWhy({score: 95, categories: ["secrets", "vcs"]}, say), "Score 95 · secrets, vcs");
+  assert.equal(
+    core.decisionWhy({over: [{site: "shop.example.test", counter: "Request rate", value: 350, limit: 200},
+                             {unknown: true, counter: "Error rate (4xx)", value: 9, limit: null}]}, say),
+    "shop.example.test: Request rate 350 / 200 · Unknown names: Error rate (4xx) 9");
+  assert.equal(core.decisionWhy({}, say), "");
+  assert.ok(core.TABS.includes("decisions"));
+});

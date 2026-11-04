@@ -200,6 +200,15 @@ DECISION_DETAIL_LENGTH = 240
 DECISION_REASON_MAX_BYTES = 8192
 DECISIONS_KEEP_ROWS = 20000
 DECISION_PENDING_GRACE = 60
+# The feed of every address's decisions (06.6): what "bans" and "lifts" are,
+# and who writes into the record at all -- so the page can say which sources
+# it shows, and that one it does not show is not "no bans".
+DECISION_FEED_KINDS: Dict[str, Tuple[str, ...]] = {
+    "all": (),
+    "bans": ("applied", "restored", "observed"),
+    "lifts": ("lifted", "ended"),
+}
+DECISION_FEED_SOURCES = ("adaptive", "operator", "restart", "haproxy", "policy", "expiry", "mode")
 # Bans this daemon or an operator made. Seeing one in the table is seeing the
 # gateway's own decision, not something the client did: it must never count
 # as a finding (F03 -- an adaptive ban observed as LEGACY_HAPROXY_BAN, worth
@@ -2074,6 +2083,35 @@ def read_thresholds(path: str = "") -> Dict[str, int]:
     }
 
 
+def decision_summary(reason: Dict[str, Any]) -> Dict[str, Any]:
+    """A decision's reason in one line's worth, for the feed (06.6): the
+    categories an adaptive ban counted, heaviest first, or the site counters
+    over their limit when HAProxy's own ban was first seen."""
+    summary: Dict[str, Any] = {}
+    categories = reason.get("categories")
+    if isinstance(categories, dict) and categories:
+        ranked = sorted(categories.items(), key=lambda item: (-float(item[1] or 0), str(item[0])))
+        summary["categories"] = [str(name) for name, _ in ranked[:4]]
+    elif isinstance(reason.get("evidence"), list):
+        seen: List[str] = []
+        for entry in reason["evidence"]:
+            name = str((entry or {}).get("category") or (entry or {}).get("event_type") or "")
+            if name and name not in seen:
+                seen.append(name)
+        if seen:
+            summary["categories"] = seen[:4]
+    if reason.get("evidence_total"):
+        summary["evidence_total"] = int(reason["evidence_total"])
+    readings = reason.get("readings")
+    if isinstance(readings, list):
+        over = [entry for entry in readings if isinstance(entry, dict) and entry.get("over")]
+        summary["over"] = [
+            {key: entry.get(key) for key in ("site", "counter", "value", "limit")}
+            for entry in over[:2]
+        ]
+    return summary
+
+
 def legacy_ban_readings(
     ip: str, tables: Dict[str, Dict[str, Dict[str, str]]], thresholds: Dict[str, int],
 ) -> List[Dict[str, Any]]:
@@ -3515,6 +3553,41 @@ class SecurityDatabase:
                 item["reason"] = {}
             decisions.append(item)
         return decisions
+
+    def decision_feed(
+        self, before: int = 0, limit: int = 50, actions: Tuple[str, ...] = (),
+    ) -> List[Dict[str, Any]]:
+        """Decisions about every address, newest first, `limit` + 1 of them
+        so the caller can tell whether there are more (06.6).
+
+        Paged by id, below `before`: a decision written while someone reads
+        never shifts or repeats a row, as an offset would. The reason comes
+        back summarised (decision_summary), not whole.
+        """
+        clauses, values = [], []
+        if before > 0:
+            clauses.append("id < ?")
+            values.append(int(before))
+        if actions:
+            clauses.append(f"action IN ({', '.join('?' for _ in actions)})")
+            values.extend(actions)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, ip, action, source, code, until, strike, score, policy, outcome, reason "
+                f"FROM ban_decisions {where}ORDER BY id DESC LIMIT ?",
+                (*values, int(limit) + 1),
+            ).fetchall()
+        feed = []
+        for row in rows:
+            item = dict(row)
+            try:
+                reason = json.loads(item.pop("reason") or "{}")
+            except (TypeError, ValueError):
+                reason = {}
+            item["summary"] = decision_summary(reason if isinstance(reason, dict) else {})
+            feed.append(item)
+        return feed
 
     def prune_decisions(self, before: int, keep: int, now: int = 0) -> int:
         """Drop decisions older than `before`, then the oldest beyond `keep`
@@ -8157,6 +8230,31 @@ class GuardHandler(BaseHTTPRequestHandler):
                     **filters, before=max(0, before), count=count, limit=limit,
                 )
                 self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/decisions/feed":
+            # Every address's decisions, newest first (06.6). Read from the
+            # database, so the stream of requests never pushes one out.
+            query = parse_qs(urlparse(self.path).query or "")
+            kind = (query.get("kind", ["all"])[0] or "all").strip()
+            if kind not in DECISION_FEED_KINDS:
+                self._send_json(400, {"ok": False, "error": "kind must be all, bans or lifts"})
+                return
+            try:
+                limit = _clamp_int(query.get("limit", [None])[0], default=50, min_v=1, max_v=200)
+                before = _clamp_int(query.get("before", [None])[0], default=0, min_v=0, max_v=2 ** 62)
+                rows = database.decision_feed(before, limit, DECISION_FEED_KINDS[kind])
+                more = len(rows) > limit
+                rows = rows[:limit]
+                self._send_json(200, {
+                    "ok": True,
+                    "decisions": rows,
+                    "next": rows[-1]["id"] if more and rows else 0,
+                    "sources": list(DECISION_FEED_SOURCES),
+                    "keep_seconds": engine.longest_strike_retention(),
+                })
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return
