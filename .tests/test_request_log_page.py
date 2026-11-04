@@ -20,10 +20,12 @@ class RouteTests(unittest.TestCase):
     def test_the_explorer_reads_and_never_deletes(self):
         block = self.routes.split("# Log Explorer")[1]
         self.assertNotIn("@bp.delete", block)
-        # Exactly one thing in this section changes anything: the switch that
-        # decides whether requests are recorded at all.
-        self.assertEqual(block.count("@bp.post"), 1)
+        # Two things in this section change anything: the switch that decides
+        # whether requests are recorded at all, and how much memory the
+        # latest requests may take. Neither deletes a stored request.
+        self.assertEqual(block.count("@bp.post"), 2)
         self.assertIn('@bp.post("/api/security/requests/enabled")', block)
+        self.assertIn('@bp.post("/api/security/requests/memory")', block)
 
     def test_the_recording_switch_is_guarded_like_a_mutation(self):
         # It decides whether the gateway keeps a record of what every visitor

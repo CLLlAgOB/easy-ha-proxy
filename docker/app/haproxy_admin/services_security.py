@@ -14,7 +14,7 @@ import ipaddress
 import itertools
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from .cache import get_country_code
 from .guardd_client import (
@@ -31,8 +31,10 @@ from .guardd_client import (
     GuarddUnavailable,
     guardd_health,
     guardd_ip,
+    guardd_live_memory,
     guardd_rate_warnings,
     guardd_set_ban_durations,
+    guardd_set_live_memory,
     guardd_set_mode,
     guardd_shadow,
 )
@@ -454,3 +456,27 @@ def requests_status() -> Dict[str, Any]:
 
 def set_request_log(enabled: Any) -> Dict[str, Any]:
     return guardd_set_request_log(bool(enabled))
+
+
+def live_memory() -> Dict[str, Any]:
+    return guardd_live_memory()
+
+
+def set_live_memory(payload: Any) -> Tuple[int, Dict[str, Any]]:
+    """The panel's status for the daemon's answer, and the answer.
+
+    The daemon validates the budget again; here only the shape is checked,
+    so a page cannot send it anything but two whole numbers.
+    """
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "expected an object"}
+    budget, revision = payload.get("budget_mib"), payload.get("revision")
+    if (isinstance(budget, bool) or not isinstance(budget, int)
+            or isinstance(revision, bool) or not isinstance(revision, int)):
+        return 400, {"ok": False, "error": "budget_mib and revision must be whole numbers"}
+    answer = guardd_set_live_memory(budget, revision)
+    if answer.get("ok") is not False:
+        return 200, answer
+    if answer.get("conflict"):
+        return 409, answer
+    return 400, answer

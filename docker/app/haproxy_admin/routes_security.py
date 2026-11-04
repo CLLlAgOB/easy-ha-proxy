@@ -414,3 +414,63 @@ def api_request_log_status():
         return jsonify(security.requests_status())
     except GuarddUnavailable as exc:
         return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/memory")
+def api_live_memory():
+    """What guardd keeps of the latest requests in memory, and its budget."""
+    try:
+        return jsonify(security.live_memory())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/requests/memory")
+def api_live_memory_set():
+    """Give the latest requests in memory a budget in MiB, or 0 for the
+    configured profile. Superadmin only and audited: it decides how much of
+    the gateway's memory the engine may take."""
+    payload = request.get_json(silent=True)
+    wanted = payload.get("budget_mib") if isinstance(payload, dict) else None
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "request_log.memory",
+            object_type="request_log",
+            object_id=str(wanted),
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        status, result = security.set_live_memory(payload)
+    except GuarddUnavailable as exc:
+        record_request(
+            "request_log.memory",
+            object_type="request_log",
+            object_id=str(wanted),
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    if status != 200:
+        record_request(
+            "request_log.memory",
+            object_type="request_log",
+            object_id=str(wanted),
+            result=RESULT_FAILURE,
+            detail=str(result.get("error") or "refused"),
+        )
+        return jsonify(result), status
+    record_request(
+        "request_log.memory",
+        object_type="request_log",
+        object_id=str(result.get("budget_mib")),
+        after={"budget_mib": result.get("budget_mib")},
+        result=RESULT_SUCCESS,
+        summary=(
+            f"latest requests in memory: {result.get('budget_mib')} MiB"
+            if result.get("budget_mib") else "latest requests in memory: configured profile"
+        ),
+        detail=f"dropped {result.get('dropped', 0)}",
+    )
+    return jsonify(result)

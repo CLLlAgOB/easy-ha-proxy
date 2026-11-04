@@ -5096,6 +5096,139 @@ def live_record(request: "ParsedRequest", ts: float) -> tuple:
     )
 
 
+# The size of a live record, estimated as it is added (07.2), so the buffer
+# can be bounded by memory without ever walking it. The tuple, its numbers and
+# the shared strings (hosts, methods, backends, states, agents -- kept once
+# in _INTERN) come to about LIVE_RECORD_BASE_BYTES; each string of the
+# request's own costs its object and its characters. Calibrated with
+# tracemalloc on two production gateways' logs: 532 estimated against 514
+# traced and about 574 held by the process (allocator slack) on the busier.
+LIVE_RECORD_BASE_BYTES = 230
+LIVE_STRING_BYTES = 49
+_LIVE_OWN_FIELDS = (L_IP, L_PATH, L_REASON, L_TIMES, L_REQUEST_ID)
+
+
+def live_record_bytes(record: tuple) -> int:
+    size = LIVE_RECORD_BASE_BYTES
+    for index in _LIVE_OWN_FIELDS:
+        if index < len(record):
+            value = record[index]
+            if value:
+                size += LIVE_STRING_BYTES + len(value)
+    return size
+
+
+# The memory an operator may give the live buffer (07.4-07.5). Until one is
+# chosen the buffer keeps the profile it always had -- 100000 requests or an
+# hour -- so nothing changes on an installation nobody touched. A chosen
+# budget bounds it by memory instead, up to a day of requests, with a count
+# far above anything the budget allows as a last guard.
+LIVE_BUDGET_MIN_MIB = 16
+LIVE_BUDGET_MAX_MIB = 128
+LIVE_BUDGET_STEP_MIB = 8
+LIVE_BUDGET_MAX_SECONDS = 24 * 3600
+LIVE_BUDGET_MAX_RECORDS = 1_000_000
+LIVE_BUDGET_STATE_KEY = "live_memory_budget"
+# What a budget may take, besides the cap above. The process holds more than
+# the estimate (allocator slack, and Python keeps a peak it reached), and a
+# search or a snapshot briefly needs room of its own; so inside the service's
+# memory limit a reserve stays free, and growing the buffer may take at most
+# a quarter of what the whole machine still has available.
+LIVE_BUDGET_SLACK = 1.15
+LIVE_BUDGET_SERVICE_RESERVE = 96 * 1024 * 1024
+LIVE_BUDGET_HOST_SHARE = 0.25
+# The traffic a budget is measured against: the last hour of arrivals.
+LIVE_RATE_SECONDS = 3600
+# The live page's longest window, however far the buffer reaches: a snapshot
+# walks the whole window, and on a small ARM board an hour already takes a
+# good part of a second.
+LIVE_WINDOW_MAX_SECONDS = 3600
+MIB = 1024 * 1024
+
+
+class LiveBudgetConflict(Exception):
+    """The budget was changed since the page asking was read."""
+
+
+def _read_first_line(path: str) -> str:
+    try:
+        with open(path, encoding="ascii", errors="replace") as handle:
+            return handle.readline().strip()
+    except OSError:
+        return ""
+
+
+def process_rss_bytes() -> int:
+    """This process's resident memory, or 0 when it cannot be read."""
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def service_memory_limit() -> int:
+    """The memory limit of the service this process runs in (systemd's
+    MemoryMax, a cgroup's memory.max), or 0 when there is none."""
+    try:
+        with open("/proc/self/cgroup", encoding="ascii", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        if parts[0] == "0" and parts[1] == "":
+            text = _read_first_line(f"/sys/fs/cgroup{parts[2].rstrip('/')}/memory.max")
+        elif "memory" in parts[1].split(","):
+            text = _read_first_line(f"/sys/fs/cgroup/memory{parts[2].rstrip('/')}/memory.limit_in_bytes")
+        else:
+            continue
+        if text.isdigit() and 0 < int(text) < 2 ** 50:
+            return int(text)
+    return 0
+
+
+def host_memory_available() -> int:
+    """MemAvailable of the whole machine, or 0 when it cannot be read."""
+    try:
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def live_budget_ceiling(held_bytes: int, host: bool = True) -> Tuple[int, str]:
+    """The largest budget, in MiB, the buffer may be given now, and what set
+    it: "cap" (this daemon's own limit), "service" (the unit's MemoryMax) or
+    "host" (the memory the machine has available). Rounded down to a step of
+    the panel's slider."""
+    ceiling, reason = float(LIVE_BUDGET_MAX_MIB), "cap"
+    limit = service_memory_limit()
+    rss = process_rss_bytes()
+    if limit and rss:
+        # The rest of the daemon, without what the buffer holds now.
+        baseline = max(0, rss - held_bytes * LIVE_BUDGET_SLACK)
+        room = (limit - baseline - LIVE_BUDGET_SERVICE_RESERVE) / LIVE_BUDGET_SLACK / MIB
+        if room < ceiling:
+            ceiling, reason = room, "service"
+    if host:
+        available = host_memory_available()
+        if available:
+            room = (held_bytes + available * LIVE_BUDGET_HOST_SHARE / LIVE_BUDGET_SLACK) / MIB
+            if room < ceiling:
+                ceiling, reason = room, "host"
+    stepped = int(max(0.0, ceiling)) // LIVE_BUDGET_STEP_MIB * LIVE_BUDGET_STEP_MIB
+    return stepped, reason
+
+
 def _live_matches(record: tuple, filters: Dict[str, Any]) -> bool:
     ip = filters.get("ip")
     if ip and not record[L_IP].startswith(ip):
@@ -5443,11 +5576,23 @@ def _memory_row(row_id: int, r: tuple) -> Dict[str, Any]:
 
 
 class LiveBuffer:
-    """The latest requests, in memory, bounded by count and by age."""
+    """The latest requests, in memory, bounded by count and by age -- or, once
+    an operator gives it a budget, by memory (07.4)."""
 
     def __init__(self, max_records: int, max_seconds: int) -> None:
-        self.max_records = max(1, int(max_records))
-        self.max_seconds = max(60, int(max_seconds))
+        # The profile from guardd.json, kept for when a budget is taken away.
+        self.default_records = max(1, int(max_records))
+        self.default_seconds = max(60, int(max_seconds))
+        self.max_records = self.default_records
+        self.max_seconds = self.default_seconds
+        # 0: no budget, the count and the age above decide.
+        self.max_bytes = 0
+        # The estimated size of everything held, kept as records come and go.
+        self._bytes = 0
+        # Minute -> [requests, bytes] that arrived in it: the traffic a budget
+        # is measured against. Arrivals, not what is held: a buffer cut down
+        # by its budget still knows how fast requests come.
+        self._arrivals: Dict[int, List[int]] = {}
         self._records: deque = deque()
         # The id of the first record held. Every record keeps its id however
         # many are added after it or dropped before it, which is what lets
@@ -5471,24 +5616,54 @@ class LiveBuffer:
         """Someone has the live page open, so the log is followed closely."""
         return time.monotonic() - self._wanted_at < LIVE_WANTED_SECONDS
 
+    def _count(self, records: List[tuple]) -> None:
+        """Size, arrivals and the dashboard's hourly tops of new records."""
+        arrivals = self._arrivals
+        for record in records:
+            size = live_record_bytes(record)
+            self._bytes += size
+            minute = int(record[L_TS]) // 60
+            slot = arrivals.get(minute)
+            if slot is None:
+                arrivals[minute] = [1, size]
+            else:
+                slot[0] += 1
+                slot[1] += size
+            if record[L_STATUS] in (400, 451):
+                hour = int(record[L_TS]) // 3600 * 3600
+                self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
+        if len(arrivals) > LIVE_RATE_SECONDS // 60 + 10:
+            first = max(arrivals) - LIVE_RATE_SECONDS // 60
+            for minute in [minute for minute in arrivals if minute < first]:
+                del arrivals[minute]
+
+    def _trim(self, newest: Optional[float]) -> int:
+        """Drop the oldest until the count, the budget and the age allow;
+        returns how many went for size. Under the lock."""
+        records = self._records
+        dropped = 0
+        while records and (len(records) > self.max_records
+                           or (self.max_bytes and self._bytes > self.max_bytes)):
+            self._bytes -= live_record_bytes(records.popleft())
+            dropped += 1
+        self._base += dropped
+        self.evicted_for_size += dropped
+        if newest is not None:
+            horizon = newest - self.max_seconds
+            while records and records[0][L_TS] < horizon:
+                self._bytes -= live_record_bytes(records.popleft())
+                self._base += 1
+        if not records:
+            self._bytes = 0
+        return dropped
+
     def extend(self, records: List[tuple]) -> None:
         if not records:
             return
         with self._lock:
             self._records.extend(records)
-            overflow = len(self._records) - self.max_records
-            for _ in range(max(0, overflow)):
-                self._records.popleft()
-            self._base += max(0, overflow)
-            self.evicted_for_size += max(0, overflow)
-            horizon = records[-1][L_TS] - self.max_seconds
-            while self._records and self._records[0][L_TS] < horizon:
-                self._records.popleft()
-                self._base += 1
-            for record in records:
-                if record[L_STATUS] in (400, 451):
-                    hour = int(record[L_TS]) // 3600 * 3600
-                    self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
+            self._count(records)
+            self._trim(records[-1][L_TS])
             if len(self._hourly) > 60:
                 oldest = int(records[-1][L_TS]) // 3600 * 3600 - 25 * 3600
                 for key in [key for key in self._hourly if key[0] < oldest]:
@@ -5497,8 +5672,8 @@ class LiveBuffer:
     def refill(self, records: List[tuple], complete_since: float) -> None:
         """Put back what the log says happened before the daemon started.
 
-        Older than anything already held, so added on the left; the bound on
-        size drops the oldest first, as always. From complete_since on, the
+        Older than anything already held, so added on the left; the bounds on
+        size drop the oldest first, as always. From complete_since on, the
         buffer has every request again.
         """
         if not records:
@@ -5506,16 +5681,51 @@ class LiveBuffer:
         with self._lock:
             self._records.extendleft(reversed(records))
             self._base -= len(records)
-            overflow = len(self._records) - self.max_records
-            for _ in range(max(0, overflow)):
-                self._records.popleft()
-            self._base += max(0, overflow)
-            for record in records:
-                if record[L_STATUS] in (400, 451):
-                    hour = int(record[L_TS]) // 3600 * 3600
-                    self._hourly.setdefault((hour, record[L_STATUS]), Counter())[record[L_IP]] += 1
+            self._count(records)
+            self._trim(None)
             self.started = min(self.started, float(complete_since))
             self._cache.clear()
+
+    def set_budget(self, max_bytes: int) -> int:
+        """Bound the buffer by memory (max_bytes > 0), or give it back its
+        profile from guardd.json (0). What no longer fits goes at once,
+        oldest first; returns how many requests that was."""
+        with self._lock:
+            before = len(self._records)
+            if max_bytes > 0:
+                self.max_bytes = int(max_bytes)
+                self.max_records = LIVE_BUDGET_MAX_RECORDS
+                self.max_seconds = LIVE_BUDGET_MAX_SECONDS
+            else:
+                self.max_bytes = 0
+                self.max_records = self.default_records
+                self.max_seconds = self.default_seconds
+            newest = self._records[-1][L_TS] if self._records else None
+            self._trim(newest)
+            self._cache.clear()
+            return before - len(self._records)
+
+    def _rate(self) -> Dict[str, int]:
+        """Requests and bytes an hour, over the last hour of arrivals. Under
+        the lock."""
+        if not self._records:
+            return {"records_per_hour": 0, "bytes_per_hour": 0, "measured_seconds": 0}
+        newest = self._records[-1][L_TS]
+        first = int(newest) // 60 - (LIVE_RATE_SECONDS // 60 - 1)
+        count = size = 0
+        for minute, (requests, nbytes) in self._arrivals.items():
+            if minute >= first:
+                count += requests
+                size += nbytes
+        # Only as far back as the buffer has every request: right after a
+        # start without a refill, a few minutes are not an hour.
+        since = max(first * 60.0, min(self.started, self._records[0][L_TS]))
+        measured = max(60.0, newest - since)
+        return {
+            "records_per_hour": int(count * 3600 / measured),
+            "bytes_per_hour": int(size * 3600 / measured),
+            "measured_seconds": int(measured),
+        }
 
     def search_requests(self, query: "RequestQuery", *, before: Any = 0, limit: int = 100,
                         count: bool = True) -> Dict[str, Any]:
@@ -5582,7 +5792,9 @@ class LiveBuffer:
             oldest = self._records[0][L_TS] if self._records else None
             newest = self._records[-1][L_TS] if self._records else None
             return {"records": len(self._records), "max_records": self.max_records,
-                    "oldest": oldest, "newest": newest, "started": self.started}
+                    "max_seconds": self.max_seconds, "max_bytes": self.max_bytes,
+                    "bytes": self._bytes, "oldest": oldest, "newest": newest,
+                    "started": self.started, "rate": self._rate()}
 
     def snapshot(self, raw: Dict[str, Any], now: Optional[float] = None,
                  banned: Optional[Iterable[str]] = None) -> Dict[str, Any]:
@@ -5591,7 +5803,7 @@ class LiveBuffer:
             window = int(raw.get("window") or 60)
         except (TypeError, ValueError):
             raise ValueError("window must be a number of seconds") from None
-        window = max(5, min(self.max_seconds, window))
+        window = max(5, min(self.max_seconds, LIVE_WINDOW_MAX_SECONDS, window))
         filters = live_filters(raw)
         key = json.dumps([window, filters], sort_keys=True)
         if filters.get("banned"):
@@ -5715,6 +5927,11 @@ class GuardEngine:
             LiveBuffer(config.live_buffer_records, config.live_buffer_seconds)
             if config.live_buffer_records > 0 else None
         )
+        # The operator's memory budget for it, from the panel; kept in
+        # guardd's own state, which Ansible and an update leave alone.
+        self._live_budget_lock = threading.Lock()
+        self.live_budget = self._load_live_budget()
+        self._apply_live_budget_at_start()
         # Bytes the fast ticks between polls already took from this cycle's
         # read budget, so following the log closely never reads more per
         # cycle than the configured limit.
@@ -5802,6 +6019,101 @@ class GuardEngine:
             return 0
         self.live.refill(records, horizon if reached_back else records[0][L_TS])
         return len(records)
+
+    # -- the live buffer's memory (07.4-07.5) ------------------------------
+
+    def _load_live_budget(self) -> Dict[str, int]:
+        state = {"budget_mib": 0, "revision": 0, "changed_at": 0}
+        with contextlib.suppress(ValueError, TypeError, AttributeError):
+            stored = json.loads(self.database.get_state(LIVE_BUDGET_STATE_KEY, "") or "{}")
+            state["budget_mib"] = _clamp_int(stored.get("budget_mib"), default=0,
+                                             min_v=0, max_v=LIVE_BUDGET_MAX_MIB)
+            state["revision"] = _clamp_int(stored.get("revision"), default=0, min_v=0, max_v=2 ** 31)
+            state["changed_at"] = _clamp_int(stored.get("changed_at"), default=0, min_v=0, max_v=2 ** 33)
+        if 0 < state["budget_mib"] < LIVE_BUDGET_MIN_MIB:
+            state["budget_mib"] = LIVE_BUDGET_MIN_MIB
+        return state
+
+    def _apply_live_budget_at_start(self) -> None:
+        wanted = self.live_budget["budget_mib"]
+        if self.live is None or not wanted:
+            return
+        # The unit's memory limit may have been lowered since the choice was
+        # made. What the machine has free is not asked here: early in a boot
+        # it says little about later.
+        ceiling, _ = live_budget_ceiling(0, host=False)
+        applied = max(LIVE_BUDGET_MIN_MIB, min(wanted, ceiling))
+        if applied < wanted:
+            LOG.warning("Live buffer: %d MiB chosen, %d MiB fit the service's memory limit",
+                        wanted, applied)
+        self.live.set_budget(applied * MIB)
+
+    def live_memory(self) -> Dict[str, Any]:
+        """The live buffer's memory: the choice, what it holds, what it may
+        be given and the traffic it is measured against."""
+        live = self.live
+        if live is None:
+            raise LookupError("the live buffer is off")
+        status = live.status()
+        ceiling, reason = live_budget_ceiling(status["bytes"])
+        return {
+            "budget_mib": self.live_budget["budget_mib"],
+            "applied_mib": live.max_bytes // MIB,
+            "revision": self.live_budget["revision"],
+            "changed_at": self.live_budget["changed_at"],
+            "default": {"records": live.default_records, "seconds": live.default_seconds},
+            "limits": {
+                "min_mib": LIVE_BUDGET_MIN_MIB,
+                "max_mib": ceiling,
+                "cap_mib": LIVE_BUDGET_MAX_MIB,
+                "step_mib": LIVE_BUDGET_STEP_MIB,
+                "limited_by": reason,
+                "max_seconds": LIVE_BUDGET_MAX_SECONDS,
+                "refill_bytes": LIVE_REFILL_BYTES,
+            },
+            "buffer": status,
+            "process": {
+                "rss_bytes": process_rss_bytes(),
+                "service_limit_bytes": service_memory_limit(),
+                "host_available_bytes": host_memory_available(),
+            },
+        }
+
+    def set_live_memory(self, budget_mib: Any, revision: Any) -> Dict[str, Any]:
+        """An operator's budget in MiB, or 0 for the profile in guardd.json.
+
+        Refused with LiveBudgetConflict when the revision is not the one in
+        force -- another admin changed it since the page was read -- and with
+        ValueError when it is out of range or more than the gateway can give
+        now. Lowering is always allowed.
+        """
+        if self.live is None:
+            raise LookupError("the live buffer is off")
+        if isinstance(budget_mib, bool) or not isinstance(budget_mib, (int, str)):
+            raise ValueError("budget_mib must be a whole number of MiB")
+        try:
+            wanted = int(budget_mib)
+            seen = int(revision)
+        except (TypeError, ValueError):
+            raise ValueError("budget_mib and revision must be whole numbers") from None
+        if wanted and not LIVE_BUDGET_MIN_MIB <= wanted <= LIVE_BUDGET_MAX_MIB:
+            raise ValueError(
+                f"budget_mib must be 0 or from {LIVE_BUDGET_MIN_MIB} to {LIVE_BUDGET_MAX_MIB}"
+            )
+        with self._live_budget_lock:
+            if seen != self.live_budget["revision"]:
+                raise LiveBudgetConflict("changed by someone else in the meantime")
+            if wanted:
+                ceiling, reason = live_budget_ceiling(self.live.status()["bytes"])
+                if wanted > ceiling and wanted > self.live.max_bytes // MIB:
+                    raise ValueError(f"at most {ceiling} MiB can be given now ({reason})")
+            state = {"budget_mib": wanted, "revision": seen + 1, "changed_at": _utc_now()}
+            self.database.set_state(LIVE_BUDGET_STATE_KEY, json.dumps(state))
+            self.live_budget = state
+            dropped = self.live.set_budget(wanted * MIB)
+        LOG.warning("Live buffer: %s from the web interface; %d older requests dropped",
+                    f"{wanted} MiB" if wanted else "back to its configured profile", dropped)
+        return {**self.live_memory(), "dropped": dropped}
 
     def _run(self) -> None:
         interval = self.config.poll_interval_seconds
@@ -7383,6 +7695,20 @@ class GuardEngine:
                 "remembered": len(self.database.manual_bans()),
                 "restored": self.manual_restored,
             },
+            "live_buffer": self._live_health(),
+        }
+
+    def _live_health(self) -> Optional[Dict[str, Any]]:
+        if self.live is None:
+            return None
+        status = self.live.status()
+        return {
+            "records": status["records"],
+            "bytes": status["bytes"],
+            "budget_mib": self.live_budget["budget_mib"],
+            "max_bytes": status["max_bytes"],
+            "max_records": status["max_records"],
+            "max_seconds": status["max_seconds"],
         }
 
 
@@ -7514,6 +7840,15 @@ class GuardHandler(BaseHTTPRequestHandler):
                         ],
                     },
                 )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/v1/guard/live/memory":
+            try:
+                self._send_json(200, {"ok": True, "ts": _utc_now(), **engine.live_memory()})
+            except LookupError as exc:
+                self._send_json(404, {"ok": False, "error": str(exc)})
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
             return
@@ -7739,6 +8074,38 @@ class GuardHandler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 LOG.exception("cannot change the request log")
+                self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True, **result})
+            return
+
+        if path == "/api/v1/guard/live/memory":
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or "0")
+                if length <= 0 or length > 1024:
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+                if not isinstance(payload, dict):
+                    raise ValueError("expected an object")
+                result = engine.set_live_memory(payload.get("budget_mib"), payload.get("revision"))
+            except LiveBudgetConflict as exc:
+                # The page shows what is in force now and asks again.
+                current: Dict[str, Any] = {}
+                with contextlib.suppress(Exception):
+                    current = engine.live_memory()
+                self._send_json(409, {"ok": False, "error": str(exc), "conflict": True, **current})
+                return
+            except LookupError as exc:
+                self._send_json(404, {"ok": False, "error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                LOG.exception("cannot change the live buffer's memory")
                 self._send_json(500, {"ok": False, "error": str(exc)})
                 return
             self._send_json(200, {"ok": True, **result})

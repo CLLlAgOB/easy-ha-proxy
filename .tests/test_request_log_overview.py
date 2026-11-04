@@ -203,7 +203,11 @@ class TheRoutes(unittest.TestCase):
         self.assertIn("attachment; filename=", block)
         # Flask adds the charset itself; naming it too wrote it twice.
         self.assertIn('mimetype="text/csv",', block)
-        self.assertEqual(block.count("@bp.post"), 1)
+        # The overview and the download change nothing; the two changes in
+        # this section are the recording switch and the memory budget.
+        self.assertEqual(block.count("@bp.post"), 2)
+        self.assertNotIn('@bp.post("/api/security/requests/summary")', block)
+        self.assertNotIn('@bp.post("/api/security/requests/export")', block)
 
 
 class ThePage(unittest.TestCase):

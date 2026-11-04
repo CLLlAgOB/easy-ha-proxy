@@ -102,3 +102,51 @@ test("the store line says how far back, and when the size cap decides it", () =>
   const young = {oldest_ts: now - 3600, retention_days: 3, database_bytes: 1, max_bytes: 100};
   assert.equal(core.historyReach(young, now).cappedBySize, false);
 });
+
+// The latest requests in memory (07.6): the slider says MB and roughly how
+// many hours that holds at the current traffic, before anything is applied.
+const MIB = 1048576;
+const memory = (extra) => Object.assign({
+  budget_mib: 0, applied_mib: 0, revision: 0,
+  default: {records: 100000, seconds: 3600},
+  limits: {min_mib: 16, max_mib: 128, step_mib: 8, max_seconds: 86400},
+  buffer: {records: 20000, bytes: 11 * MIB, oldest: 1000, newest: 4600,
+           rate: {bytes_per_hour: 11 * MIB, records_per_hour: 20000}}
+}, extra || {});
+
+test("the slider reaches what the gateway can give, and never hides the budget in force", () => {
+  assert.deepEqual(core.budgetRange(memory()), {min: 16, max: 128, step: 8, usable: true});
+  const tight = memory({applied_mib: 96, limits: {min_mib: 16, max_mib: 40, step_mib: 8}});
+  assert.equal(core.budgetRange(tight).max, 96);
+  assert.equal(core.budgetRange(memory({limits: {min_mib: 16, max_mib: 8, step_mib: 8}})).usable, false);
+});
+
+test("with the usual limit the slider starts at about what is held", () => {
+  assert.equal(core.budgetStart(memory()), 16);
+  assert.equal(core.budgetStart(memory({buffer: {bytes: 41 * MIB}})), 48);
+  assert.equal(core.budgetStart(memory({applied_mib: 64})), 64);
+  assert.equal(core.budgetStart(memory({buffer: {bytes: 900 * MIB}})), 128);
+});
+
+test("hours at the current traffic, at most a day", () => {
+  const rate = {bytes_per_hour: 8 * MIB};
+  assert.deepEqual(core.budgetReach(48, rate, 86400), {seconds: 6 * 3600, capped: false});
+  assert.deepEqual(core.budgetReach(128, {bytes_per_hour: MIB}, 86400), {seconds: 86400, capped: true});
+  assert.equal(core.budgetReach(48, {bytes_per_hour: 0}, 86400), null);
+  assert.equal(core.budgetReach(0, rate, 86400), null);
+});
+
+test("a smaller budget says how much stays", () => {
+  const buffer = {bytes: 40 * MIB, oldest: 0, newest: 8 * 3600};
+  assert.deepEqual(core.budgetKeeps(16, buffer), {seconds: 8 * 3600 * 16 / 40, dropBytes: 24 * MIB});
+  assert.equal(core.budgetKeeps(48, buffer), null);
+});
+
+test("sizes and durations as the page writes them", () => {
+  assert.equal(core.megabytes(5.25 * MIB), 5.3);
+  assert.equal(core.megabytes(41.6 * MIB), 42);
+  assert.deepEqual(core.durationParts(90), {unit: "min", value: 2});
+  assert.deepEqual(core.durationParts(20), {unit: "min", value: 1});
+  assert.deepEqual(core.durationParts(5.5 * 3600), {unit: "h", value: 5.5});
+  assert.deepEqual(core.durationParts(13.6 * 3600), {unit: "h", value: 14});
+});

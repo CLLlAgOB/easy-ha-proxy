@@ -658,6 +658,213 @@
     element.textContent = parts.join(" · ");
   }
 
+  /* ---------- the latest requests in memory ---------- */
+
+  // The setting as guardd last answered it, and whether the slider has been
+  // moved since: a refresh then updates what is held, not the slider.
+  let memoryState = null;
+  let memoryMoved = false;
+  const MEMORY_REFRESH_MS = 60000;
+
+  function number(value) {
+    return Number(value || 0).toLocaleString(document.documentElement.lang || undefined);
+  }
+
+  function sizeText(bytes) {
+    return number(core.megabytes(bytes));
+  }
+
+  function durationText(seconds) {
+    const parts = core.durationParts(seconds);
+    return parts.unit === "min"
+      ? t("{value} min", {value: number(parts.value)})
+      : t("{value} h", {value: number(parts.value)});
+  }
+
+  function memoryLines(memory) {
+    const buffer = memory.buffer || {};
+    const lines = [];
+    if (buffer.records) {
+      lines.push(t("In memory now: {size} MB, {count} requests, back to {since}.", {
+        size: sizeText(buffer.bytes), count: number(buffer.records), since: formatTime(buffer.oldest)
+      }));
+    } else {
+      lines.push(t("Nothing is held in memory yet."));
+    }
+    const rate = buffer.rate || {};
+    if (rate.bytes_per_hour > 0) {
+      lines.push(t("At the current traffic that is about {size} MB an hour ({count} requests).", {
+        size: sizeText(rate.bytes_per_hour), count: number(rate.records_per_hour)
+      }));
+    }
+    if (memory.applied_mib) {
+      lines.push(t("Limit now: {size} MB, and nothing older than a day.", {size: number(memory.applied_mib)}));
+    } else {
+      const usual = memory.default || {};
+      lines.push(t("Limit now: the usual {count} requests or {duration}, whichever comes first.", {
+        count: number(usual.records), duration: durationText(usual.seconds)
+      }));
+    }
+    const refill = (memory.limits || {}).refill_bytes;
+    if (refill) {
+      lines.push(t("After a restart, at most the last {size} MB of the access log are read back into memory.", {
+        size: sizeText(refill)
+      }));
+    }
+    return lines;
+  }
+
+  function renderMemoryChoice() {
+    const memory = memoryState;
+    if (!memory) return;
+    const slider = byId("rq-mem-range");
+    const chosen = Number(slider.value);
+    const reach = core.budgetReach(chosen, (memory.buffer || {}).rate, (memory.limits || {}).max_seconds);
+    const value = byId("rq-mem-value");
+    if (!reach) {
+      value.textContent = t("{size} MB", {size: number(chosen)});
+    } else if (reach.capped) {
+      value.textContent = t("{size} MB: a whole day at the current traffic, the longest kept", {
+        size: number(chosen)
+      });
+    } else {
+      value.textContent = t("{size} MB ≈ {duration} at the current traffic", {
+        size: number(chosen), duration: durationText(reach.seconds)
+      });
+    }
+    const warning = byId("rq-mem-warning");
+    const keeps = core.budgetKeeps(chosen, memory.buffer);
+    const changed = chosen !== Number(memory.applied_mib || 0);
+    const usual = memory.default || {};
+    const buffer = memory.buffer || {};
+    const span = Math.max(0, Number(buffer.newest) - Number(buffer.oldest)) || 0;
+    if (changed && keeps) {
+      warning.hidden = false;
+      warning.textContent = t("Less than is held now: the oldest requests go at once, and about the last {duration} remain.", {
+        duration: durationText(keeps.seconds)
+      });
+    } else if (memory.applied_mib && (buffer.records > usual.records || span > usual.seconds)) {
+      warning.hidden = false;
+      warning.textContent = t("Back to the usual limit drops at once whatever is beyond {count} requests or {duration}.", {
+        count: number(usual.records), duration: durationText(usual.seconds)
+      });
+    } else {
+      warning.hidden = true;
+      warning.textContent = "";
+    }
+    byId("rq-mem-apply").disabled = !changed || slider.disabled;
+  }
+
+  function renderMemory(memory, keepSlider) {
+    memoryState = memory;
+    byId("rq-mem").hidden = false;
+    const lines = byId("rq-mem-now");
+    lines.replaceChildren(...memoryLines(memory).map((line) => {
+      const div = document.createElement("div");
+      div.textContent = line;
+      return div;
+    }));
+    const range = core.budgetRange(memory);
+    const slider = byId("rq-mem-range");
+    slider.min = String(range.min);
+    slider.max = String(Math.max(range.min, range.max));
+    slider.step = String(range.step);
+    slider.disabled = !range.usable;
+    if (!keepSlider) {
+      slider.value = String(core.budgetStart(memory));
+      memoryMoved = false;
+    }
+    const limits = memory.limits || {};
+    const limit = byId("rq-mem-limit");
+    if (!range.usable) {
+      limit.textContent = t("The gateway cannot give the latest requests more memory now.");
+    } else if (limits.limited_by === "service") {
+      limit.textContent = t("At most {size} MB: the rest of the security engine's memory limit stays free.", {
+        size: number(range.max)
+      });
+    } else if (limits.limited_by === "host") {
+      limit.textContent = t("At most {size} MB now: the gateway has little memory available.", {
+        size: number(range.max)
+      });
+    } else {
+      limit.textContent = "";
+    }
+    limit.hidden = !limit.textContent;
+    byId("rq-mem-default").hidden = !memory.applied_mib;
+    renderMemoryChoice();
+  }
+
+  async function refreshMemory(keepSlider) {
+    const { status, payload } = await getJson("/api/security/requests/memory", {}).catch(
+      () => ({status: 0, payload: {}})
+    );
+    // Off (the live buffer is switched off in guardd.json) or unreachable:
+    // nothing to choose.
+    if (status !== 200 || payload.ok === false) {
+      byId("rq-mem").hidden = true;
+      return;
+    }
+    renderMemory(payload, keepSlider);
+  }
+
+  async function setMemory(budget) {
+    if (!memoryState) return;
+    const note = byId("rq-mem-status");
+    note.textContent = "…";
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    let response;
+    let payload = {};
+    try {
+      response = await fetch("/api/security/requests/memory", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "X-CSRFToken": meta ? meta.getAttribute("content") || "" : ""
+        },
+        body: JSON.stringify({budget_mib: budget, revision: Number(memoryState.revision || 0)})
+      });
+      payload = await response.json().catch(() => ({}));
+    } catch (error) {
+      note.textContent = t("It was not changed");
+      return;
+    }
+    if (response.status === 409 && payload.limits) {
+      // Someone else changed it: what is in force now, and the slider with it.
+      renderMemory(payload, false);
+      note.textContent = t("Another administrator changed this in the meantime; the setting in force is shown.");
+      return;
+    }
+    if (response.status === 403) {
+      note.textContent = t("Only a superadmin can change this.");
+      return;
+    }
+    if (!response.ok || payload.ok === false) {
+      note.textContent = payload.error || t("It was not changed");
+      return;
+    }
+    renderMemory(payload, false);
+    note.textContent = payload.dropped
+      ? t("Applied: {count} older requests dropped.", {count: number(payload.dropped)})
+      : t("Applied.");
+  }
+
+  function wireMemory() {
+    const slider = byId("rq-mem-range");
+    slider.addEventListener("input", () => {
+      memoryMoved = true;
+      byId("rq-mem-status").textContent = "";
+      renderMemoryChoice();
+    });
+    byId("rq-mem-apply").addEventListener("click", () => setMemory(Number(slider.value)));
+    byId("rq-mem-default").addEventListener("click", () => setMemory(0));
+    refreshMemory(false);
+    window.setInterval(() => {
+      if (!document.hidden) refreshMemory(memoryMoved);
+    }, MEMORY_REFRESH_MS);
+  }
+
   /* ---------- wiring ---------- */
 
   function wire() {
@@ -711,6 +918,7 @@
       methods.appendChild(option);
     });
     wire();
+    wireMemory();
     fillInputs(core.viewFromQuery(window.location.search));
     run(false);
   });

@@ -189,3 +189,21 @@ def guardd_set_request_log(enabled: bool) -> Dict[str, Any]:
 
 def guardd_requests_status() -> Dict[str, Any]:
     return _request_log_get("/api/v1/guard/requests/status")
+
+
+def guardd_live_memory() -> Dict[str, Any]:
+    """What the live buffer holds, its budget and the traffic it is measured
+    against. A body with ok=false when the buffer is off."""
+    return _request_log_get("/api/v1/guard/live/memory")
+
+
+def guardd_set_live_memory(budget_mib: int, revision: int) -> Dict[str, Any]:
+    """Give the live buffer a memory budget in MiB, or 0 for its profile.
+
+    The body comes back whatever the status: a refusal carries the reason,
+    and a conflict (conflict=true) carries the setting now in force.
+    """
+    return _guardd().post("/api/v1/guard/live/memory",
+                          {"budget_mib": budget_mib, "revision": revision},
+                          timeout=15, with_token=True, check_status=False,
+                          require_object=True)

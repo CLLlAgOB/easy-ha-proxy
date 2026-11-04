@@ -137,6 +137,13 @@
 .rq-tops td.rq-count { text-align: right; white-space: nowrap; color: var(--text-secondary); width: 1%; }
 .rq-tops .rq-link { word-break: break-all; }
 
+.rq-mem-text { font-size: 13px; color: var(--text-secondary); margin: 0 0 10px; }
+.rq-mem-lines { font-size: 13px; line-height: 1.6; margin-bottom: 10px; }
+.rq-mem-slider { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
+.rq-mem-slider input[type="range"] { flex: 1 1 260px; max-width: 520px; }
+.rq-mem-value { font-weight: 600; font-size: 14px; }
+.rq-mem-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+
 .rq-found {
   display: flex;
   gap: 12px;
@@ -311,6 +318,31 @@
 
   <div class="rq-more">
     <button class="btn" type="button" id="rq-more" hidden>Show more</button>
+  </div>
+</div>
+
+<div class="card" id="rq-mem" hidden>
+  <div class="card-header">
+    <h2>Latest requests in memory</h2>
+  </div>
+  <p class="rq-mem-text">
+    The security engine keeps the latest requests in memory: the live page reads them, and so does
+    this search while recording is off. More memory reaches further back and takes more of the
+    gateway's memory.
+  </p>
+  <div class="rq-mem-lines" id="rq-mem-now" data-i18n-skip translate="no"></div>
+  <div class="rq-mem-slider">
+    <input type="range" id="rq-mem-range" min="16" max="128" step="8" value="16"
+           aria-label="Memory for the latest requests, MB">
+    <span class="rq-mem-value" id="rq-mem-value" data-i18n-skip translate="no"></span>
+  </div>
+  <div class="table-meta" id="rq-mem-limit" hidden data-i18n-skip translate="no"></div>
+  <div class="rt-notice" id="rq-mem-warning" hidden data-i18n-skip translate="no"
+       style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);"></div>
+  <div class="rq-mem-actions">
+    <button type="button" class="btn btn-primary" id="rq-mem-apply" disabled>Apply</button>
+    <button type="button" class="btn" id="rq-mem-default" hidden>Back to the usual limit</button>
+    <span class="table-meta" id="rq-mem-status" data-i18n-skip translate="no"></span>
   </div>
 </div>
 

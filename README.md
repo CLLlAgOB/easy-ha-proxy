@@ -597,6 +597,22 @@ does, so it costs no extra I/O -- but it is independent of it: requests from
 allow-listed addresses are excluded from scoring and still recorded here, and
 the explorer keeps working with adaptive protection switched off.
 
+With recording off, the page searches what the engine keeps in memory instead:
+the latest requests, the same ones the live page reads. By default that is
+100,000 requests or one hour, whichever comes first -- on real traffic the
+hour decides, at about 500 bytes a request. **Latest requests in memory** on
+the same page turns that into a memory budget: a slider in MB that says
+roughly how many hours it holds at the current traffic (measured over the last
+hour), applied only on **Apply**. With a budget the age limit becomes a day.
+The engine refuses more than 128 MB, and less when its service memory limit or
+the machine's free memory would not leave room; a smaller budget drops the
+oldest requests at once, and the page says how many hours would remain before
+anything is applied. The choice is kept in the engine's own state and outlives
+restarts and updates; after a restart the memory is filled again from the last
+16 MB of the access log, not from the whole budget. If two administrators
+change it at the same time, the second is refused and shown the setting in
+force.
+
 ### Prometheus export
 
 Off by default, because Prometheus is not a required service here. When it is

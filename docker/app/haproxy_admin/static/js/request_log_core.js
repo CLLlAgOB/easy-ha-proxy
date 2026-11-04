@@ -177,6 +177,66 @@
     return {oldest, cappedBySize: full && short};
   }
 
+  /* ---------- the latest requests in memory (07.6) ---------- */
+
+  const MIB = 1048576;
+
+  // The slider's range: from the least budget to what the gateway can give
+  // now -- never below the budget in force, since lowering is always
+  // allowed. Not usable when the gateway cannot give even the least.
+  function budgetRange(memory) {
+    const limits = (memory && memory.limits) || {};
+    const min = Number(limits.min_mib) || 16;
+    const step = Number(limits.step_mib) || 8;
+    const max = Math.max(Number(limits.max_mib) || 0, Number(memory && memory.applied_mib) || 0);
+    return {min, max, step, usable: max >= min};
+  }
+
+  // Where the slider starts: the budget in force, or -- with the usual
+  // limit -- about what is held now, so moving it right means "more".
+  function budgetStart(memory) {
+    const range = budgetRange(memory);
+    const applied = Number(memory && memory.applied_mib) || 0;
+    const held = Number(memory && memory.buffer && memory.buffer.bytes) || 0;
+    const wanted = applied || Math.ceil(held / MIB / range.step) * range.step;
+    return Math.max(range.min, Math.min(range.max, wanted));
+  }
+
+  // How long a budget holds the traffic measured over the last hour, in
+  // seconds and at most the longest kept; null with no traffic to go by.
+  function budgetReach(budgetMib, rate, maxSeconds) {
+    const perHour = Number(rate && rate.bytes_per_hour) || 0;
+    if (!(Number(budgetMib) > 0) || perHour <= 0) return null;
+    const seconds = (Number(budgetMib) * MIB / perHour) * 3600;
+    const longest = Number(maxSeconds) || Infinity;
+    return {seconds: Math.min(seconds, longest), capped: seconds >= longest};
+  }
+
+  // What a smaller budget leaves of what is held now: about the newest
+  // share of it, in seconds. Null when everything still fits.
+  function budgetKeeps(budgetMib, buffer) {
+    const held = Number(buffer && buffer.bytes) || 0;
+    const budget = Number(budgetMib) * MIB;
+    if (!(budget > 0) || held <= budget) return null;
+    const span = Math.max(0, Number(buffer.newest) - Number(buffer.oldest)) || 0;
+    return {seconds: span * budget / held, dropBytes: held - budget};
+  }
+
+  // A size in MB as the page says it: a decimal below ten.
+  function megabytes(bytes) {
+    const value = Math.max(0, Number(bytes) || 0) / MIB;
+    return value < 10 ? Math.round(value * 10) / 10 : Math.round(value);
+  }
+
+  // A duration in minutes below an hour, in hours (a decimal below ten)
+  // above it.
+  function durationParts(seconds) {
+    const value = Math.max(0, Number(seconds) || 0);
+    if (value < 3600) return {unit: "min", value: Math.max(1, Math.round(value / 60))};
+    const hours = value / 3600;
+    return {unit: "h", value: hours < 10 ? Math.round(hours * 10) / 10 : Math.round(hours)};
+  }
+
   return {
     RANGES,
     DEFAULT_RANGE,
@@ -190,6 +250,12 @@
     histogramRects,
     barAt,
     barsSpan,
-    historyReach
+    historyReach,
+    budgetRange,
+    budgetStart,
+    budgetReach,
+    budgetKeeps,
+    megabytes,
+    durationParts
   };
 });
