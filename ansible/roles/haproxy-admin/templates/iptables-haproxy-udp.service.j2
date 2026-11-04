@@ -8,7 +8,10 @@ Type=oneshot
 # The ban and authorized-IP ipsets must exist before the generator references
 # them in match-set rules (controld keeps them populated).
 ExecStartPre=/usr/sbin/ipset create {{ udp_ban_set | default('haproxy_ban') }} hash:ip family inet -exist
-ExecStartPre=/usr/sbin/ipset create {{ udp_auth_set | default('haproxy_ip_auth') }} hash:ip family inet -exist
+# Created only when missing, and with timeouts: controld renews them, so trust
+# it stops renewing runs out. "create -exist" would fail on a set from before
+# (no timeouts); controld swaps that one for a new one itself.
+ExecStartPre=/bin/sh -c '/usr/sbin/ipset list -n {{ udp_auth_set | default('haproxy_ip_auth') }} >/dev/null 2>&1 || /usr/sbin/ipset create {{ udp_auth_set | default('haproxy_ip_auth') }} hash:ip family inet timeout 0 -exist'
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-udp-forward.py
 RemainAfterExit=yes
 

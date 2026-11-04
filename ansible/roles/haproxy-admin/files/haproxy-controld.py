@@ -55,7 +55,8 @@ import shutil
 import hashlib
 import secrets
 from collections import defaultdict
-from typing import Set
+import contextlib
+from typing import Dict, Set
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -535,8 +536,19 @@ def ensure_ipset() -> None:
 _TABLE_ROW_RE = re.compile(r"key=(?P<ip>\d+\.\d+\.\d+\.\d+).*?\bgpc0=(?P<gpc0>\d+)")
 
 
+_EXP_RE = re.compile(r"\bexp=(?P<exp>\d+)")
+
+
 def _read_flagged_addresses(table: str) -> "Set[str] | None":
-    """Addresses whose gpc0 > 0 in a stick table, or None when it was not read.
+    """Addresses whose gpc0 > 0 in a stick table, or None when it was not read."""
+    flagged = _read_flagged(table)
+    return None if flagged is None else set(flagged)
+
+
+def _read_flagged(table: str) -> "Dict[str, int] | None":
+    """Addresses whose gpc0 > 0, with the seconds their entry has left.
+
+    None when the table was not read.
 
     None is not "nobody". HAProxy answers a table it does not have with "No
     such table" and a socket that worked; taken for an empty table, that --
@@ -560,11 +572,12 @@ def _read_flagged_addresses(table: str) -> "Set[str] | None":
             table, (lines[0] if lines else "")[:120],
         )
         return None
-    flagged: Set[str] = set()
+    flagged: Dict[str, int] = {}
     for line in lines[1:]:
         m = _TABLE_ROW_RE.search(line)
         if m and int(m.group("gpc0")) > 0:
-            flagged.add(m.group("ip"))
+            expiry = _EXP_RE.search(line)
+            flagged[m.group("ip")] = int(expiry.group("exp")) // 1000 if expiry else 0
     return flagged
 
 
@@ -651,17 +664,24 @@ def _ipv4_entries(addresses) -> list[str]:
     return sorted(entries)
 
 
-def _update_ipset(set_name: str, to_add, to_del) -> bool:
+def _update_ipset(set_name: str, to_add, to_del, timeouts: "Dict[str, int] | None" = None) -> bool:
     """Apply the whole difference to an ipset with one `ipset restore`.
 
     One process instead of one per address. Deletions go first, so a full
     set makes room before it takes new entries. ipset drops the whole batch
     when one line does not parse, so only valid IPv4 addresses are sent;
     with -exist, adding a present entry or deleting a missing one is no
-    error. Returns False, after logging why, when the batch was refused.
+    error, and adding one with a timeout sets its timeout anew. Returns
+    False, after logging why, when the batch was refused.
     """
     lines = [f"del {set_name} {ip}" for ip in _ipv4_entries(to_del)]
-    lines += [f"add {set_name} {ip}" for ip in _ipv4_entries(to_add)]
+    if timeouts is None:
+        lines += [f"add {set_name} {ip}" for ip in _ipv4_entries(to_add)]
+    else:
+        lines += [
+            f"add {set_name} {ip} timeout {int(timeouts.get(ip, 1))}"
+            for ip in _ipv4_entries(to_add)
+        ]
     if not lines:
         return True
     try:
@@ -704,32 +724,35 @@ def sync_bans_once() -> None:
         )
 
 
-def ensure_auth_ipset() -> None:
-    """Ensure the zero-trust authorized-IP ipset exists."""
-    run_cmd(
-        ["ipset", "create", AUTH_IPSET, "hash:ip", "family", "inet", "-exist"],
-        timeout=IPSET_TIMEOUT_SECONDS,
-    )
-    LOG.info("Ensured ipset %s exists", AUTH_IPSET)
+# The authorized set lets a signed-in address through a zero-trust UDP
+# forward (U02, 04.4b). Its entries used to carry no timeout, so a stopped
+# synchroniser -- or a HAProxy it could not read -- left every address that
+# had once signed in trusted by the kernel for good. Each entry now carries
+# a timeout, renewed on every pass: never longer than HAProxy's own entry has
+# left, and never more than AUTH_IPSET_TTL, so trust the synchroniser stops
+# renewing runs out on its own.
+AUTH_IPSET_TTL = max(30, int(os.environ.get("HAPADM_AUTH_IPSET_TTL", "900")))
 
 
-def get_authorized_ips_from_haproxy() -> "Set[str] | None":
-    """Authorized addresses (gpc0 > 0) in AUTH_TABLE, or None when not read."""
-    return _read_flagged_addresses(AUTH_TABLE)
+def _auth_ipset_listing() -> "tuple[Set[str], bool] | None":
+    """The authorized set's members and whether it keeps per-entry timeouts.
 
-
-def get_auth_ipset_members() -> Set[str]:
-    """IPs currently in the authorized-IP ipset."""
+    None when it could not be listed (missing, or ipset failed).
+    """
     try:
         proc = run_cmd(["ipset", "list", AUTH_IPSET], timeout=IPSET_TIMEOUT_SECONDS)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
         LOG.error("Failed to list ipset %s: %s", AUTH_IPSET, e)
-        return set()
+        return None
     members: Set[str] = set()
+    timeouts = False
     capture = False
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if not capture and line.startswith("Header:"):
+            timeouts = " timeout " in f" {line} "
             continue
         if line.startswith("Members:"):
             capture = True
@@ -738,18 +761,72 @@ def get_auth_ipset_members() -> Set[str]:
             parts = line.split()
             if parts and parts[0].count(".") == 3:
                 members.add(parts[0])
-    return members
+    return members, timeouts
+
+
+def ensure_auth_ipset() -> None:
+    """Ensure the zero-trust authorized-IP ipset exists, with timeouts.
+
+    A set from before keeps no timeouts and cannot be given them: a new one
+    is filled with the same addresses and swapped in under the same name,
+    which the UDP rules go on matching without a gap.
+    """
+    listing = _auth_ipset_listing()
+    if listing is None:
+        run_cmd(
+            ["ipset", "create", AUTH_IPSET, "hash:ip", "family", "inet", "timeout", "0", "-exist"],
+            timeout=IPSET_TIMEOUT_SECONDS,
+        )
+        LOG.info("Ensured ipset %s exists", AUTH_IPSET)
+        return
+    members, timeouts = listing
+    if timeouts:
+        return
+    temporary = f"{AUTH_IPSET}_t"[:31]
+    with contextlib.suppress(RuntimeError, OSError, subprocess.TimeoutExpired):
+        run_cmd(["ipset", "destroy", temporary], timeout=IPSET_TIMEOUT_SECONDS)
+    run_cmd(
+        ["ipset", "create", temporary, "hash:ip", "family", "inet", "timeout", "0"],
+        timeout=IPSET_TIMEOUT_SECONDS,
+    )
+    lines = [f"add {temporary} {ip} timeout {AUTH_IPSET_TTL}" for ip in _ipv4_entries(members)]
+    if lines:
+        run_cmd(["ipset", "-exist", "restore"], input_data="\n".join(lines) + "\n",
+                timeout=IPSET_TIMEOUT_SECONDS)
+    run_cmd(["ipset", "swap", AUTH_IPSET, temporary], timeout=IPSET_TIMEOUT_SECONDS)
+    run_cmd(["ipset", "destroy", temporary], timeout=IPSET_TIMEOUT_SECONDS)
+    LOG.warning("ipset %s now expires its entries (%d moved over)", AUTH_IPSET, len(members))
+
+
+def get_authorized_ips_from_haproxy() -> "Dict[str, int] | None":
+    """Authorized addresses (gpc0 > 0) in AUTH_TABLE with the seconds their
+    entry has left, or None when not read."""
+    return _read_flagged(AUTH_TABLE)
+
+
+def get_auth_ipset_members() -> Set[str]:
+    """IPs currently in the authorized-IP ipset."""
+    listing = _auth_ipset_listing()
+    return listing[0] if listing else set()
 
 
 def sync_auth_once() -> None:
     """One iteration of AUTH_TABLE -> AUTH_IPSET (zero-trust whitelist)."""
     authorized = get_authorized_ips_from_haproxy()
     if authorized is None:
-        return  # fetch failed; leave the authorized set untouched
-    members = get_auth_ipset_members()
-    if not authorized and not members:
+        return  # not read: the entries keep their own timeouts and run out
+    listing = _auth_ipset_listing()
+    members, timeouts = listing if listing else (set(), False)
+    wanted = set(authorized)
+    if not wanted and not members:
         return
-    _update_ipset(AUTH_IPSET, authorized - members, members - authorized)
+    if timeouts:
+        # Every authorized address is added again: that renews its timeout.
+        _update_ipset(AUTH_IPSET, wanted, members - wanted, timeouts={
+            ip: min(AUTH_IPSET_TTL, max(1, int(left or 0))) for ip, left in authorized.items()
+        })
+    else:
+        _update_ipset(AUTH_IPSET, wanted - members, members - wanted)
 
 
 def bans_loop() -> None:

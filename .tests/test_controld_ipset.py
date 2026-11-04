@@ -55,36 +55,67 @@ if os.environ.get("FAKE_IPSET_HANG") in args:
     time.sleep(60)
 with open(state_path, encoding="utf-8") as fh:
     sets = json.load(fh)
+timeouts = sets.setdefault("__timeouts__", [])
+ttl = sets.setdefault("__ttl__", {})
 
 def fail(message):
     print("ipset v7.19: " + message, file=sys.stderr)
     sys.exit(1)
 
 if args[0] == "create":
+    if args[1] in sets and "-exist" not in args:
+        fail("Set cannot be created: set with the same name already exists")
     sets.setdefault(args[1], [])
+    if "timeout" in args and args[1] not in timeouts:
+        timeouts.append(args[1])
 elif args[0] == "list":
     if args[1] not in sets:
         fail("The set with the given name does not exist")
     print("Name: " + args[1])
     print("Type: hash:ip")
+    print("Header: family inet hashsize 1024 maxelem 65536" + (" timeout 0" if args[1] in timeouts else ""))
     print("Members:")
     for member in sets[args[1]]:
-        print(member)
+        left = ttl.get(args[1], {}).get(member)
+        print(member + (" timeout %d" % left if left is not None else ""))
     sys.exit(0)
+elif args[0] == "swap":
+    if args[1] not in sets or args[2] not in sets:
+        fail("The set with the given name does not exist")
+    sets[args[1]], sets[args[2]] = sets[args[2]], sets[args[1]]
+    first, second = ttl.get(args[1], {}), ttl.get(args[2], {})
+    ttl[args[1]], ttl[args[2]] = second, first
+    one, two = args[1] in timeouts, args[2] in timeouts
+    kept = [name for name in timeouts if name not in (args[1], args[2])]
+    sets["__timeouts__"] = timeouts = kept + ([args[1]] if two else []) + ([args[2]] if one else [])
+elif args[0] == "destroy":
+    if args[1] not in sets:
+        fail("The set with the given name does not exist")
+    del sets[args[1]]
+    ttl.pop(args[1], None)
+    sets["__timeouts__"] = timeouts = [name for name in timeouts if name != args[1]]
 elif args == ["-exist", "restore"]:
-    changed = {name: list(members) for name, members in sets.items()}
+    changed = {name: list(members) for name, members in sets.items() if not name.startswith("__")}
     for number, line in enumerate(stdin.splitlines(), 1):
-        command, name, entry = line.split()
+        words = line.split()
+        command, name, entry = words[:3]
         try:
             ipaddress.IPv4Address(entry)
         except ValueError:
             fail(f"Error in line {number}: Syntax error: cannot parse {entry}")
         if name not in changed:
             fail(f"Error in line {number}: The set with the given name does not exist")
+        if len(words) == 5 and words[3] == "timeout":
+            if name not in timeouts:
+                fail(f"Error in line {number}: Timeout value specified but the set does not support it")
+            ttl.setdefault(name, {})[entry] = int(words[4])
         if command == "add" and entry not in changed[name]:
             changed[name].append(entry)
         elif command == "del" and entry in changed[name]:
             changed[name].remove(entry)
+            ttl.get(name, {}).pop(entry, None)
+    changed["__timeouts__"] = timeouts
+    changed["__ttl__"] = ttl
     sets = changed
 else:
     fail("unexpected command " + " ".join(args))
@@ -119,10 +150,14 @@ class FakeIpsetCase(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
-    def sets(self, value=None):
+    def sets(self, value=None, timeouts=()):
         if value is not None:
-            self.state.write_text(json.dumps(value), encoding="utf-8")
-        return {name: set(members) for name, members in json.loads(self.state.read_text()).items()}
+            self.state.write_text(json.dumps({**value, "__timeouts__": list(timeouts)}), encoding="utf-8")
+        return {name: set(members) for name, members in json.loads(self.state.read_text()).items()
+                if not name.startswith("__")}
+
+    def raw(self):
+        return json.loads(self.state.read_text())
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -130,8 +165,9 @@ class FakeIpsetCase(unittest.TestCase):
     def banned(self, addresses):
         return mock.patch.object(controld, "get_banned_ips_from_haproxy", return_value=set(addresses))
 
-    def authorized(self, addresses):
-        return mock.patch.object(controld, "get_authorized_ips_from_haproxy", return_value=addresses)
+    def authorized(self, addresses, left=3600):
+        found = None if addresses is None else {ip: left for ip in addresses}
+        return mock.patch.object(controld, "get_authorized_ips_from_haproxy", return_value=found)
 
 
 @unittest.skipUnless(POSIX, "runs a fake ipset as a real process")
@@ -207,6 +243,7 @@ class IpsetSync(FakeIpsetCase):
         controld.ensure_ipset()
         controld.ensure_auth_ipset()
         self.assertEqual(set(self.sets()), {controld.IPSET_NAME, controld.AUTH_IPSET})
+        self.sets({})  # a missing set is what makes it create one
         started = time.monotonic()
         with (
             mock.patch.dict(os.environ, {"FAKE_IPSET_HANG": "create"}),
@@ -215,6 +252,60 @@ class IpsetSync(FakeIpsetCase):
             with self.assertRaises(controld.subprocess.TimeoutExpired):
                 controld.ensure_auth_ipset()
         self.assertLess(time.monotonic() - started, 10)
+
+
+@unittest.skipUnless(POSIX, "runs a fake ipset as a real process")
+class TrustRunsOut(FakeIpsetCase):
+    """Every authorized entry carries a timeout the synchroniser renews (04.4b).
+
+    Without one, a stopped controld -- or a HAProxy it could not read -- left
+    every address that had once signed in trusted by the kernel for good."""
+
+    def test_a_new_set_keeps_timeouts(self):
+        controld.ensure_auth_ipset()
+        self.assertIn(controld.AUTH_IPSET, self.raw()["__timeouts__"])
+
+    def test_each_pass_renews_every_entry_never_past_haproxys_own(self):
+        auth = controld.AUTH_IPSET
+        self.sets({auth: ["192.0.2.1", "192.0.2.9"]}, timeouts=[auth])
+        with mock.patch.object(controld, "get_authorized_ips_from_haproxy",
+                               return_value={"192.0.2.1": 30000, "192.0.2.2": 40}):
+            controld.sync_auth_once()
+        self.assertEqual(self.sets()[auth], {"192.0.2.1", "192.0.2.2"})
+        self.assertEqual(self.raw()["__ttl__"][auth],
+                         {"192.0.2.1": controld.AUTH_IPSET_TTL, "192.0.2.2": 40})
+
+    def test_an_unread_table_renews_nothing(self):
+        auth = controld.AUTH_IPSET
+        self.sets({auth: ["192.0.2.1"]}, timeouts=[auth])
+        with self.authorized(None):
+            controld.sync_auth_once()
+        self.assertEqual(self.calls(), [])
+
+    def test_a_set_from_before_is_swapped_for_one_with_timeouts_keeping_its_members(self):
+        auth = controld.AUTH_IPSET
+        self.sets({auth: ["192.0.2.1", "192.0.2.2"]})
+        controld.ensure_auth_ipset()
+        raw = self.raw()
+        self.assertIn(auth, raw["__timeouts__"])
+        self.assertEqual(set(raw[auth]), {"192.0.2.1", "192.0.2.2"})
+        self.assertEqual(set(raw["__ttl__"][auth].values()), {controld.AUTH_IPSET_TTL})
+        self.assertNotIn(f"{auth}_t", raw)
+        self.assertIn(["swap", auth, f"{auth}_t"], [call["argv"] for call in self.calls()])
+
+    def test_a_set_with_timeouts_is_left_as_it_is(self):
+        auth = controld.AUTH_IPSET
+        self.sets({auth: ["192.0.2.1"]}, timeouts=[auth])
+        controld.ensure_auth_ipset()
+        self.assertEqual([call["argv"] for call in self.calls()], [["list", auth]])
+
+    def test_the_udp_service_creates_it_only_when_missing(self):
+        unit = (ROOT / "ansible/roles/haproxy-admin/templates/iptables-haproxy-udp.service.j2").read_text(
+            encoding="utf-8")
+        [line] = [line for line in unit.splitlines()
+                  if "udp_auth_set" in line and line.startswith("ExecStartPre")]
+        self.assertIn("list -n", line)
+        self.assertIn("timeout 0", line)
 
 
 FAKE_SOCAT = """\
