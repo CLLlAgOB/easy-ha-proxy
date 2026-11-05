@@ -891,6 +891,16 @@ and enforce -- and the choice made there overrides the deployed default and
 survives a restart. Start in observe, read the shadow review below, and only
 then decide.
 
+Fresh findings enter a bounded check queue, with decisive scanner findings
+given priority. Each enforcement cycle scores at most 200 addresses and
+reserves at least 50 places for a background sweep. That sweep uses indexed
+pages over a fixed time boundary, so new arrivals cannot keep pushing older
+addresses out; its position survives a restart. The queue holds at most 4096
+addresses (less when `max_tracked_ips` is lower). On overflow, the evidence
+stays in SQLite for the sweep. `/api/v1/guard/health` reports pending checks,
+overflows and the sweep position in `engine.enforcement_checks`. These are
+work budgets for the engine, separate from HAProxy's traffic limits.
+
 Enforcing bans through the same `tbl_ban` the HAProxy rules already use, with
 its own reason code, so an adaptive ban appears in the existing ban list and
 can be lifted with the existing unban button. Stick-table entries carry the

@@ -3235,6 +3235,9 @@ _SCHEMA_STATEMENTS: Tuple[str, ...] = (
         authenticated_at INTEGER NOT NULL DEFAULT 0
     ) WITHOUT ROWID
     """,
+    # Keep schedule reads proportional to bans, not to every address ever seen.
+    "CREATE INDEX IF NOT EXISTS idx_ip_state_banned ON ip_state (banned_until) WHERE banned_until > 0",
+    "CREATE INDEX IF NOT EXISTS idx_ip_state_first_seen ON ip_state (first_seen, ip)",
     # Deliberately weight-free: the score is derived when it is requested, so
     # retuning weights re-scores the whole history instead of starting over.
     # `handled` records that HAProxy already refused the request this event
@@ -3815,6 +3818,31 @@ class SecurityDatabase:
                 (since, limit),
             ).fetchall()
         return [str(row["ip"]) for row in rows]
+
+    def enforcement_addresses(self, after: Tuple[int, str], before: int,
+                              limit: int) -> List[Tuple[int, str]]:
+        """One bounded index page, including quiet addresses.
+
+        No COUNT/GROUP BY over the event history, and no OFFSET that grows
+        with the database. Filtering and scoring happen for this page only.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT first_seen, ip FROM ip_state "
+                "WHERE (first_seen, ip) > (?, ?) AND first_seen <= ? "
+                "ORDER BY first_seen, ip LIMIT ?",
+                (*after, before, int(limit)),
+            ).fetchall()
+        return [(int(row["first_seen"]), str(row["ip"])) for row in rows]
+
+    def recent_findings(self, limit: int) -> List[Dict[str, Any]]:
+        """A bounded tail for recovery; never sort the whole scoring window."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ip, ts, event_type, handled FROM security_events ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def cooldown_passed(self, fingerprint: str, ts: int, window: int) -> bool:
         """True when this fingerprint may produce an event again."""
@@ -6110,6 +6138,72 @@ class LiveBuffer:
             "diagnostic": {"source": "guardd"},
         }
 
+ENFORCEMENT_BATCH = 200
+ENFORCEMENT_SWEEP_RESERVE = 50
+ENFORCEMENT_QUEUE_LIMIT = 4096
+ENFORCEMENT_RECOVERY_EVENTS = 1000
+ENFORCEMENT_CURSOR_KEY = "enforcement_scan_after"
+
+
+class EnforcementQueue:
+    """Bounded, coalesced findings; FIFO within each urgency class.
+
+    A generation prevents an acknowledgement from losing a finding emitted
+    while the previous one was being checked. Overflow is recoverable: the
+    findings remain in SQLite and the separate sweep always gets a share.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1, int(limit))
+        self._urgent: OrderedDict = OrderedDict()
+        self._ordinary: OrderedDict = OrderedDict()
+        self._generation = 0
+        self._lock = threading.Lock()
+        self.overflows = 0
+
+    def mark(self, ip: str, urgent: bool) -> None:
+        with self._lock:
+            self._generation += 1
+            if ip in self._urgent:
+                self._urgent[ip] = self._generation
+                return
+            if ip in self._ordinary:
+                if urgent:
+                    del self._ordinary[ip]
+                else:
+                    self._ordinary[ip] = self._generation
+                    return
+            elif len(self._urgent) + len(self._ordinary) >= self.limit:
+                self.overflows += 1
+                if not urgent or not self._ordinary:
+                    return
+                # Make room for a decisive finding; the sweep recovers the
+                # displaced ordinary address, whose events are still stored.
+                self._ordinary.popitem(last=False)
+            target = self._urgent if urgent else self._ordinary
+            target[ip] = self._generation
+
+    def batch(self, limit: int) -> List[Tuple[str, int]]:
+        with self._lock:
+            # Ordinary findings keep a share even during a decisive flood.
+            urgent = list(itertools.islice(self._urgent.items(), limit - limit // 4))
+            ordinary = list(itertools.islice(self._ordinary.items(), limit - len(urgent)))
+            if len(urgent) + len(ordinary) < limit:
+                urgent = list(itertools.islice(self._urgent.items(), limit - len(ordinary)))
+            return urgent + ordinary
+
+    def acknowledge(self, ip: str, generation: int) -> None:
+        with self._lock:
+            for queue in (self._urgent, self._ordinary):
+                if queue.get(ip) == generation:
+                    del queue[ip]
+
+    def status(self) -> Dict[str, int]:
+        with self._lock:
+            return {"urgent": len(self._urgent), "ordinary": len(self._ordinary),
+                    "limit": self.limit, "overflows": self.overflows}
+
+
 class GuardEngine:
     """Collects from both sources; contains no detection rules yet."""
 
@@ -6213,6 +6307,16 @@ class GuardEngine:
         self.lines_parsed = 0
         self.events_recorded = 0
         self.excluded_observations = 0
+        self.enforcement_queue = EnforcementQueue(min(config.max_tracked_ips, ENFORCEMENT_QUEUE_LIMIT))
+        self._enforcement_scan_after: Tuple[int, str] = (0, "")
+        self._enforcement_scan_before = 0
+        with contextlib.suppress(ValueError, TypeError, AttributeError, IndexError, KeyError):
+            scan = json.loads(database.get_state(ENFORCEMENT_CURSOR_KEY, "{}") or "{}")
+            after = scan.get("after", [0, ""])
+            self._enforcement_scan_after = (int(after[0]), str(after[1]))
+            self._enforcement_scan_before = int(scan.get("before", 0))
+        self._enforcement_checked = 0
+        self._recover_enforcement_checks()
 
     # -- lifecycle --------------------------------------------------------
 
@@ -7231,6 +7335,7 @@ class GuardEngine:
                 }
             ]
         )
+        self._queue_enforcement_check(ip, event_type, handled)
         self.events_recorded += 1
         return True
 
@@ -7469,6 +7574,60 @@ class GuardEngine:
 
     # -- enforcement ------------------------------------------------------
 
+    def _queue_enforcement_check(self, ip: str, event_type: str, handled: bool) -> None:
+        if event_type not in DEFAULT_WEIGHTS:
+            return
+        if handled and event_type not in REFUSAL_DOES_NOT_EXCUSE:
+            return
+        self.enforcement_queue.mark(
+            ip, urgent=self.scoring_policy().weight(event_type) >= WOULD_BAN_SCORE,
+        )
+
+    def _recover_enforcement_checks(self) -> None:
+        since = _utc_now() - self.policy.window_seconds
+        for event in reversed(self.database.recent_findings(ENFORCEMENT_RECOVERY_EVENTS)):
+            if event["ts"] >= since:
+                self._queue_enforcement_check(event["ip"], event["event_type"], bool(event["handled"]))
+
+    def _enforcement_rows(self, now: int, scheduled: Dict[str, int]) -> Iterable[Dict[str, Any]]:
+        """Fresh findings first; every other address gets a bounded fair turn.
+
+        The page's most-talkative 200 addresses must never decide who can
+        be banned. No full history scan, unbounded queue or all-IP rescore
+        belongs in a poll. A failed check stays pending for the next poll.
+        """
+        self._enforcement_checked = 0
+        policy = self.scoring_policy()
+        pending = self.enforcement_queue.batch(ENFORCEMENT_BATCH - ENFORCEMENT_SWEEP_RESERVE)
+        seen = set()
+        for ip, generation in pending:
+            seen.add(ip)
+            self._enforcement_checked += 1
+            yield self.reputation(ip, now, policy, scheduled)
+            self.enforcement_queue.acknowledge(ip, generation)
+
+        allowance = ENFORCEMENT_BATCH - len(pending)
+        if not self._enforcement_scan_before:
+            self._enforcement_scan_before = now
+        addresses = self.database.enforcement_addresses(
+            self._enforcement_scan_after, self._enforcement_scan_before, allowance,
+        )
+        if not addresses and self._enforcement_scan_after != (0, ""):
+            self._enforcement_scan_after = (0, "")
+            self._enforcement_scan_before = now
+            addresses = self.database.enforcement_addresses((0, ""), now, allowance)
+        for first_seen, ip in addresses:
+            if ip not in seen:
+                self._enforcement_checked += 1
+                yield self.reputation(ip, now, policy, scheduled)
+            self._enforcement_scan_after = (first_seen, ip)
+        if len(addresses) < allowance:
+            self._enforcement_scan_after = (0, "")
+            self._enforcement_scan_before = 0
+        self.database.set_state(ENFORCEMENT_CURSOR_KEY, json.dumps({
+            "after": self._enforcement_scan_after, "before": self._enforcement_scan_before,
+        }))
+
     def ban_blockers(
         self,
         reputation: Dict[str, Any],
@@ -7658,6 +7817,7 @@ class GuardEngine:
 
     def _apply_enforcement(self, now: Optional[int] = None) -> Dict[str, Any]:
         now = now or _utc_now()
+        self._enforcement_checked = 0
         applied: List[str] = []
         lifted: List[str] = []
 
@@ -7733,7 +7893,7 @@ class GuardEngine:
             if self.enforcer.ban(ip):
                 LOG.info("Re-asserted the ban on %s, gone from the table", ip)
 
-        for row in self.reputation_table(now, limit=200):
+        for row in self._enforcement_rows(now, scheduled):
             ip = row["ip"]
             if row["score"] < WOULD_BAN_SCORE:
                 continue
@@ -7765,6 +7925,7 @@ class GuardEngine:
             )
             if not self.enforcer.ban(ip):
                 self.database.settle_decision(decision, "failed")
+                self.enforcement_queue.mark(ip, urgent=True)
                 continue
             categories = ", ".join(sorted(row.get("categories") or {}))
             self.database.commit_ban(
@@ -8266,6 +8427,13 @@ class GuardEngine:
                 "observations_skipped": self.excluded_observations,
             },
             "events_recorded": self.events_recorded,
+            "enforcement_checks": {
+                **self.enforcement_queue.status(),
+                "checked_last_cycle": self._enforcement_checked,
+                "batch_limit": ENFORCEMENT_BATCH,
+                "sweep_after": self._enforcement_scan_after,
+                "sweep_before": self._enforcement_scan_before,
+            },
             "rate_warnings": self.trusted_rates.summary(),
             "hard_floor": self.hard_floor.summary(),
             "ban_policy": {
