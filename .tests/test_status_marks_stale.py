@@ -35,7 +35,8 @@ class TheStatusPage(unittest.TestCase):
         self.assertIn("showFreshness(error", refresh)
         self.assertNotIn("catch(() => { })", SCRIPT)
         self.assertIn('classList.toggle("is-stale", stale)', function("showFreshness"))
-        self.assertIn(".monitoring-grid.is-stale", PAGE)
+        styles = (APP / "static/css/pages.css").read_text(encoding="utf-8")
+        self.assertIn(".monitoring-grid.is-stale { opacity: .5; }", styles)
 
     def test_the_time_healthd_took_it_is_shown(self):
         self.assertIn("status.ts_utc", function("loadStatus"))

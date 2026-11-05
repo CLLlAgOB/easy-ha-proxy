@@ -39,36 +39,36 @@
   const CHARTS = [
     {
       name: "requests",
-      series: [{ key: "requests", label: "Requests", color: "#4a86c8", rate: true }]
+      series: [{ key: "requests", label: "Requests", color: "var(--chart-info)", rate: true }]
     },
     {
       name: "traffic",
       series: [
-        { key: "bytes_in", label: "Inbound", color: "#4a86c8", rate: true, bytes: true },
-        { key: "bytes_out", label: "Outbound", color: "#2e9e5b", rate: true, bytes: true }
+        { key: "bytes_in", label: "Inbound", color: "var(--chart-info)", rate: true, bytes: true },
+        { key: "bytes_out", label: "Outbound", color: "var(--chart-success)", rate: true, bytes: true }
       ]
     },
     {
       name: "responses",
       series: [
-        { key: "resp_2xx", label: "2xx", color: "#2e9e5b", rate: true },
-        { key: "resp_3xx", label: "3xx", color: "#4a86c8", rate: true },
-        { key: "resp_4xx", label: "4xx", color: "#c8a13a", rate: true },
-        { key: "resp_5xx", label: "5xx", color: "#cc4b4b", rate: true }
+        { key: "resp_2xx", label: "2xx", color: "var(--chart-success)", rate: true },
+        { key: "resp_3xx", label: "3xx", color: "var(--chart-info)", rate: true },
+        { key: "resp_4xx", label: "4xx", color: "var(--chart-warning)", rate: true },
+        { key: "resp_5xx", label: "5xx", color: "var(--chart-error)", rate: true }
       ]
     },
     {
       name: "latency",
       series: [
-        { key: "response_ms_avg", label: "Average", color: "#4a86c8", summary: "mean" },
-        { key: "response_ms_max", label: "Peak", color: "#c8a13a", summary: "max" }
+        { key: "response_ms_avg", label: "Average", color: "var(--chart-info)", summary: "mean" },
+        { key: "response_ms_max", label: "Peak", color: "var(--chart-warning)", summary: "max" }
       ]
     },
     {
       name: "connections",
       series: [
-        { key: "conn_cur_avg", label: "Average", color: "#4a86c8", summary: "mean" },
-        { key: "conn_cur_max", label: "Peak", color: "#c8a13a", summary: "max" }
+        { key: "conn_cur_avg", label: "Average", color: "var(--chart-info)", summary: "mean" },
+        { key: "conn_cur_max", label: "Peak", color: "var(--chart-warning)", summary: "max" }
       ]
     },
     {
@@ -77,12 +77,12 @@
       name: "cpu",
       components: true,
       series: [
-        { key: "cpu_avg", label: "Average", color: "#4a86c8", percent: true, summary: "mean" },
-        { key: "cpu_max", label: "Peak", color: "#c8a13a", percent: true, summary: "max" },
-        { key: "haproxy_busy_avg", label: "HAProxy busy", color: "#8a63d2", percent: true, summary: "mean" },
-        { key: "helpers", label: "Helper services", color: "#2e9e5b", percent: true, summary: "mean" },
-        { key: "containers", label: "Containers", color: "#d0743c", percent: true, summary: "mean" },
-        { key: "other", label: "Other processes", color: "#9e9e9e", percent: true, summary: "mean", hidden: true }
+        { key: "cpu_avg", label: "Average", color: "var(--chart-info)", percent: true, summary: "mean" },
+        { key: "cpu_max", label: "Peak", color: "var(--chart-warning)", percent: true, summary: "max" },
+        { key: "haproxy_busy_avg", label: "HAProxy busy", color: "var(--chart-secondary)", percent: true, summary: "mean" },
+        { key: "helpers", label: "Helper services", color: "var(--chart-success)", percent: true, summary: "mean" },
+        { key: "containers", label: "Containers", color: "var(--chart-server-error)", percent: true, summary: "mean" },
+        { key: "other", label: "Other processes", color: "var(--text-secondary)", percent: true, summary: "mean", hidden: true }
       ]
     },
     {
@@ -91,27 +91,27 @@
       name: "memory",
       components: true,
       series: [
-        { key: "memory_avg", label: "Used", color: "#4a86c8", bytes: true, summary: "mean" },
-        { key: "memory_max", label: "Peak", color: "#c8a13a", bytes: true, summary: "max" },
-        { key: "memory_total", label: "Total", color: "#6b6b6b", bytes: true, summary: "last", dash: true },
-        { key: "helpers", label: "Helper services", color: "#2e9e5b", bytes: true, summary: "mean" },
-        { key: "containers", label: "Containers", color: "#d0743c", bytes: true, summary: "mean" },
-        { key: "other", label: "Other processes", color: "#9e9e9e", bytes: true, summary: "mean", hidden: true }
+        { key: "memory_avg", label: "Used", color: "var(--chart-info)", bytes: true, summary: "mean" },
+        { key: "memory_max", label: "Peak", color: "var(--chart-warning)", bytes: true, summary: "max" },
+        { key: "memory_total", label: "Total", color: "var(--text-secondary)", bytes: true, summary: "last", dash: true },
+        { key: "helpers", label: "Helper services", color: "var(--chart-success)", bytes: true, summary: "mean" },
+        { key: "containers", label: "Containers", color: "var(--chart-server-error)", bytes: true, summary: "mean" },
+        { key: "other", label: "Other processes", color: "var(--text-secondary)", bytes: true, summary: "mean", hidden: true }
       ]
     },
     {
       // The root filesystem, counted as df counts it.
       name: "disk",
       series: [
-        { key: "disk_used_avg", label: "Used", color: "#4a86c8", bytes: true, summary: "last" },
-        { key: "disk_total", label: "Total", color: "#6b6b6b", bytes: true, summary: "last", dash: true }
+        { key: "disk_used_avg", label: "Used", color: "var(--chart-info)", bytes: true, summary: "last" },
+        { key: "disk_total", label: "Total", color: "var(--text-secondary)", bytes: true, summary: "last", dash: true }
       ]
     },
     {
       name: "diskio",
       series: [
-        { key: "disk_read", label: "Read", color: "#4a86c8", rate: true, bytes: true },
-        { key: "disk_write", label: "Written", color: "#d0743c", rate: true, bytes: true }
+        { key: "disk_read", label: "Read", color: "var(--chart-info)", rate: true, bytes: true },
+        { key: "disk_write", label: "Written", color: "var(--chart-server-error)", rate: true, bytes: true }
       ]
     },
     {
@@ -119,15 +119,15 @@
       // not only what HAProxy proxies.
       name: "network",
       series: [
-        { key: "net_rx", label: "Received", color: "#4a86c8", rate: true, bytes: true },
-        { key: "net_tx", label: "Sent", color: "#2e9e5b", rate: true, bytes: true }
+        { key: "net_rx", label: "Received", color: "var(--chart-info)", rate: true, bytes: true },
+        { key: "net_tx", label: "Sent", color: "var(--chart-success)", rate: true, bytes: true }
       ]
     },
     {
       name: "temperature",
       series: [
-        { key: "temp_avg", label: "Average", color: "#4a86c8", unit: "°C", summary: "mean" },
-        { key: "temp_max", label: "Peak", color: "#cc4b4b", unit: "°C", summary: "max" }
+        { key: "temp_avg", label: "Average", color: "var(--chart-info)", unit: "°C", summary: "mean" },
+        { key: "temp_max", label: "Peak", color: "var(--chart-error)", unit: "°C", summary: "max" }
       ]
     },
     {
@@ -136,19 +136,19 @@
       // average barely moves for one slow request in a hundred; these do.
       name: "percentiles",
       series: [
-        { key: "p50", label: "Median", color: "#4a86c8", unit: "ms", summary: "mean" },
-        { key: "p95", label: "95th percentile", color: "#c8a13a", unit: "ms", summary: "mean" },
-        { key: "p99", label: "99th percentile", color: "#cc4b4b", unit: "ms", summary: "max" }
+        { key: "p50", label: "Median", color: "var(--chart-info)", unit: "ms", summary: "mean" },
+        { key: "p95", label: "95th percentile", color: "var(--chart-warning)", unit: "ms", summary: "mean" },
+        { key: "p99", label: "99th percentile", color: "var(--chart-error)", unit: "ms", summary: "max" }
       ]
     },
     {
       // What the gateway turned away, by reason, per minute.
       name: "refusals",
       series: [
-        { key: "refused_geo", label: "Geo blocks", color: "#8a63d2", rate: true, perMinute: true },
-        { key: "refused_banned", label: "Bans", color: "#cc4b4b", rate: true, perMinute: true },
-        { key: "refused_rate", label: "Rate limits", color: "#c8a13a", rate: true, perMinute: true },
-        { key: "refused_other", label: "Other refusals", color: "#9e9e9e", rate: true, perMinute: true }
+        { key: "refused_geo", label: "Geo blocks", color: "var(--chart-secondary)", rate: true, perMinute: true },
+        { key: "refused_banned", label: "Bans", color: "var(--chart-error)", rate: true, perMinute: true },
+        { key: "refused_rate", label: "Rate limits", color: "var(--chart-warning)", rate: true, perMinute: true },
+        { key: "refused_other", label: "Other refusals", color: "var(--text-secondary)", rate: true, perMinute: true }
       ]
     }
   ];
@@ -1706,7 +1706,7 @@
     const host = document.getElementById("mon-channels-result");
     if (!host) return;
     host.textContent = message || "";
-    host.style.color = isError ? "#cc4b4b" : "";
+    host.style.color = isError ? "var(--chart-error)" : "";
   }
 
   async function renameChannel(channel) {

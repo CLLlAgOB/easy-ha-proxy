@@ -3,160 +3,10 @@
 {% block title %}Request log{% endblock %}
 {% block header_title %}Request log{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
-<style>
-.rq-filters {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  margin-bottom: 16px;
-}
 
-.rq-filters label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.rq-filters input,
-.rq-filters select {
-  padding: 6px 10px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  min-width: 130px;
-}
-
-.rq-status {
-  display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.rq-2xx { background: rgba(46,158,91,.15); color: #2e9e5b; }
-.rq-3xx { background: rgba(var(--accent-primary-rgb), .15); color: var(--accent-primary); }
-.rq-4xx { background: rgba(200,161,58,.18); color: #c8a13a; }
-.rq-5xx { background: rgba(204,75,75,.15); color: #cc4b4b; }
-
-.rq-empty {
-  color: var(--text-secondary);
-  font-size: 13px;
-  padding: 40px 0;
-  text-align: center;
-}
-
-.rq-path {
-  font-family: 'Fira Code', 'Consolas', monospace;
-  font-size: 12px;
-  word-break: break-all;
-}
-
-.rq-more { margin-top: 14px; }
-
-.rq-filters label.rq-check {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-  padding-bottom: 7px;
-}
-
-.rq-filters label.rq-check input { min-width: 0; }
-
-.rq-link {
-  color: var(--accent-primary);
-  cursor: pointer;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  text-align: left;
-}
-
-.rq-link:hover { text-decoration: underline; }
-.rq-link.rq-status { color: inherit; }
-.rq-link.rq-2xx { color: #2e9e5b; }
-.rq-link.rq-3xx { color: var(--accent-primary); }
-.rq-link.rq-4xx { color: #c8a13a; }
-.rq-link.rq-5xx { color: #cc4b4b; }
-.rq-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-.rq-mono { font-family: 'Fira Code', 'Consolas', monospace; font-size: 12px; word-break: break-all; }
-.rq-row { cursor: pointer; }
-.rq-row.rq-open td { background: rgba(var(--accent-primary-rgb), .06); }
-.rq-details td { background: rgba(var(--accent-primary-rgb), .04); }
-.rq-details-grid {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 6px 16px;
-  margin: 4px 0;
-  font-size: 13px;
-}
-.rq-details-grid dt { color: var(--text-secondary); }
-.rq-details-grid dd { margin: 0; }
-.rq-timers { display: flex; flex-wrap: wrap; gap: 4px 14px; }
-
-.rq-overview { margin-bottom: 16px; }
-.rq-hist-wrap { position: relative; }
-.rq-hist { width: 100%; height: 80px; display: block; cursor: crosshair; user-select: none; }
-.rq-hist .ok { fill: #2e9e5b; }
-.rq-hist .client_errors { fill: #c8a13a; }
-.rq-hist .server_errors { fill: #d9822b; }
-.rq-hist .refused { fill: #cc4b4b; }
-.rq-hist .rq-pick { fill: rgba(var(--accent-primary-rgb), .18); }
-.rq-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-.rq-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
-.rq-legend i, .rq-tip i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
-.rq-tip {
-  position: absolute;
-  z-index: 5;
-  pointer-events: none;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-.rq-tip[hidden] { display: none; }
-.rq-tops { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
-.rq-tops h3 { font-size: 13px; margin: 0 0 6px; color: var(--text-secondary); font-weight: 600; }
-.rq-tops table { width: 100%; font-size: 12px; border-collapse: collapse; }
-.rq-tops td { padding: 3px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
-.rq-tops td.rq-count { text-align: right; white-space: nowrap; color: var(--text-secondary); width: 1%; }
-.rq-tops .rq-link { word-break: break-all; }
-
-.rq-mem-text { font-size: 13px; color: var(--text-secondary); margin: 0 0 10px; }
-.rq-mem-lines { font-size: 13px; line-height: 1.6; margin-bottom: 10px; }
-.rq-mem-slider { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
-.rq-mem-slider input[type="range"] { flex: 1 1 260px; max-width: 520px; }
-.rq-mem-value { font-weight: 600; font-size: 14px; }
-.rq-mem-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-
-.rq-found {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 10px;
-  min-height: 18px;
-}
-</style>
-
-<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
-     background: rgba(var(--accent-primary-rgb), .07);">
+<div class="notice-info rt-notice" >
   A bounded window over recent requests, kept so a failed request can be found
   again -- not a log pipeline. The query string is dropped before anything is
   stored; of the headers only the User-Agent is kept, as the access log writes
@@ -165,22 +15,22 @@
   reserve is touched.
 </div>
 
-<div id="rq-disabled" class="rt-notice" hidden
-     style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);">
+<div id="rq-disabled" class="notice-warning rt-notice" hidden
+     >
   <div>
     Requests are not being recorded. Turning this on stores the address, host and
     path of every request for a few days, which is why it waits to be asked for.
     The protection engine reads the same log either way; this only decides
     whether a searchable copy is kept.
   </div>
-  <button type="button" class="btn" id="rq-enable" style="margin-top:8px;">
+  <button type="button" class="u-mt-2 btn" id="rq-enable" >
     Start recording
   </button>
   <span id="rq-switch-status" class="table-meta" data-i18n-skip></span>
 </div>
 
-<div id="rq-unavailable" class="rt-notice" hidden
-     style="border-color: rgba(204,75,75,.45); background: rgba(204,75,75,.08);">
+<div id="rq-unavailable" class="notice-danger rt-notice" hidden
+     >
   The security engine is not answering, so recent requests cannot be read.
   HAProxy traffic is unaffected.
 </div>
@@ -256,12 +106,12 @@
   <div class="rq-found">
     <span id="rq-found" data-i18n-skip translate="no"></span>
     <span id="rq-searching" hidden>Searching…</span>
-    <a class="btn btn-small" id="rq-export" href="/api/security/requests/export" download
-       title="Up to 10 000 rows of this search, newest first" style="margin-left:auto;">Download CSV</a>
+    <a class="ml-auto btn btn-small" id="rq-export" href="/api/security/requests/export" download
+       title="Up to 10 000 rows of this search, newest first" >Download CSV</a>
   </div>
 
-  <div id="rq-memory" class="rt-notice" hidden data-i18n-skip translate="no"
-       style="border-color: rgba(var(--accent-primary-rgb), .45); background: rgba(var(--accent-primary-rgb), .07);"></div>
+  <div id="rq-memory" class="notice-info rt-notice" hidden data-i18n-skip translate="no"
+       ></div>
 
   <div class="rq-overview" id="rq-overview" hidden>
     <div class="rq-hist-wrap">
@@ -270,10 +120,10 @@
     </div>
     <div class="rq-axis" data-i18n-skip translate="no"><span id="rq-axis-start"></span><span id="rq-axis-end"></span></div>
     <div class="rq-legend">
-      <span><i style="background:#2e9e5b"></i>Answered</span>
-      <span><i style="background:#c8a13a"></i>Errors (4xx)</span>
-      <span><i style="background:#d9822b"></i>Server errors (5xx)</span>
-      <span><i style="background:#cc4b4b"></i>Refused by the gateway</span>
+      <span><i  class="chart-key-success"></i>Answered</span>
+      <span><i  class="chart-key-warning"></i>Errors (4xx)</span>
+      <span><i  class="chart-key-server-error"></i>Server errors (5xx)</span>
+      <span><i  class="chart-key-error"></i>Refused by the gateway</span>
       <span>Drag across the bars to look at that time only</span>
     </div>
     <div class="table-meta" id="rq-summary-partial" hidden data-i18n-skip translate="no"></div>
@@ -292,10 +142,10 @@
       </div>
     </div>
   </div>
-  <div id="rq-stopped" class="rt-notice" hidden data-i18n-skip translate="no"
-       style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);"></div>
+  <div id="rq-stopped" class="notice-warning rt-notice" hidden data-i18n-skip translate="no"
+       ></div>
 
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr>
@@ -337,8 +187,8 @@
     <span class="rq-mem-value" id="rq-mem-value" data-i18n-skip translate="no"></span>
   </div>
   <div class="table-meta" id="rq-mem-limit" hidden data-i18n-skip translate="no"></div>
-  <div class="rt-notice" id="rq-mem-warning" hidden data-i18n-skip translate="no"
-       style="border-color: rgba(200,161,58,.45); background: rgba(200,161,58,.08);"></div>
+  <div class="notice-warning rt-notice" id="rq-mem-warning" hidden data-i18n-skip translate="no"
+       ></div>
   <div class="rq-mem-actions">
     <button type="button" class="btn btn-primary" id="rq-mem-apply" disabled>Apply</button>
     <button type="button" class="btn" id="rq-mem-default" hidden>Back to the usual limit</button>

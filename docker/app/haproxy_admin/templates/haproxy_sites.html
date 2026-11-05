@@ -3,10 +3,6 @@
 {% block title %}HAProxy – HTTP sites{% endblock %}
 {% block header_title %}HTTP sites{% endblock %}
 
-{% block header_buttons %}
-{% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
 {# ───── helpers ──────────────────────────────────────────────── #}
@@ -33,22 +29,22 @@
 {%- endmacro %}
 
 {% if error %}
-<div class="card" style="border-left: 4px solid var(--error);">
+<div class="border-error card" >
   <div class="card-header">
     <h2>Error</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+  <div class="pre-wrap text-sm mono" >
     {{ error }}
   </div>
 </div>
 {% endif %}
 
 {% if message %}
-<div class="card" style="border-left: 4px solid var(--success);">
+<div class="border-success card" >
   <div class="card-header">
     <h2>Operation completed</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;">
+  <div class="pre-wrap text-sm mono" >
     {{ message }}
   </div>
 </div>
@@ -436,9 +432,9 @@
             {% endfor %}
 
             {% if ns.overrides %}
-            <details style="margin-top: 6px;">
-              <summary style="cursor:pointer; font-size: 12px; opacity: .85;">Explicitly set in YAML</summary>
-              <ul class="site-flags-list" style="margin-top: 6px;">
+            <details  class="u-mt-1">
+              <summary  class="u-cursor-pointer text-sm text-muted">Explicitly set in YAML</summary>
+              <ul class="u-mt-1 site-flags-list" >
                 {% for f in ns.overrides %}
                 <li>{{ f }}</li>
                 {% endfor %}
@@ -482,7 +478,7 @@
         {% endfor %}
         {% else %}
         <tr>
-          <td colspan="5" style="font-size: 13px; opacity: .8;">
+          <td colspan="5"  class="text-sm text-muted">
             There are no sites yet.
           </td>
         </tr>
@@ -507,8 +503,8 @@
   <form method="post" action="{{ url_for('routes.haproxy_sites_page') }}" id="add-site-form">
     <input type="hidden" name="action" value="add">
 
-    <div class="flex-container" style="gap: 20px; align-items: flex-start; padding: 0 16px 16px;">
-      <div style="flex: 1 1 300px;">
+    <div class="u-gap-5 u-p-0-16px-16px flex-container" >
+      <div  class="u-flex-1-1-300px">
         <label class="form-label" for="site_type">Site type</label>
         <select id="site_type" name="site_type" class="form-input">
           <option value="normal" selected>Normal site (proxy to a backend)</option>
@@ -516,22 +512,22 @@
         </select>
         <div class="table-meta">An access gate changes Authelia as soon as it is added: a one_factor access rule for its domain and an Authelia restart, before anything is applied in HAProxy.</div>
 
-        <label class="form-label" for="domain" style="margin-top: 10px;">Domain *</label>
+        <label class="u-mt-2 form-label" for="domain" >Domain *</label>
         <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" data-i18n-skip translate="no">
 
         <div id="add-site-backend-fields">
-          <label class="form-label" for="backend_ip" style="margin-top: 10px;">backend_ip *</label>
+          <label class="u-mt-2 form-label" for="backend_ip" >backend_ip *</label>
           <input id="backend_ip" name="backend_ip" type="text" class="form-input"
             placeholder="Backend server IP" />
 
-          <label class="form-label" for="backend_port" style="margin-top: 10px;">backend_port *</label>
+          <label class="u-mt-2 form-label" for="backend_port" >backend_port *</label>
           <input id="backend_port" name="backend_port" type="number" min="1" max="65535" class="form-input"
             placeholder="{{ site_defaults.backend_port|default(80) }}" data-i18n-skip translate="no">
         </div>
       </div>
     </div>
 
-    <div style="padding: 0 16px 16px;">
+    <div  class="u-p-0-16px-16px">
       <button type="submit" class="btn btn-primary">Add site</button>
     </div>
   </form>
@@ -546,7 +542,7 @@
     if (!typeSel || !box) return;
     function sync() {
       var gate = typeSel.value === "gate";
-      box.style.display = gate ? "none" : "";
+      box.hidden = gate;
       // Cleared + disabled fields are not submitted, so the route sees an empty
       // backend and creates the gate stub.
       [ip, port].forEach(function (el) {

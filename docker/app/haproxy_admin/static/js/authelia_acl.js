@@ -6,10 +6,10 @@
 
     groups.forEach(function (el) {
       if (el.id === targetId) {
-        el.style.display = "";
+        el.hidden = false;
         activeDomain = el.getAttribute("data-domain") || "";
       } else {
-        el.style.display = "none";
+        el.hidden = true;
       }
     });
 
@@ -76,7 +76,7 @@
     // If that group was not found, take the first visible one
     if (!initialId) {
       Array.prototype.forEach.call(groups, function (el) {
-        if (!initialId && el.style.display !== "none") {
+        if (!initialId && !el.hidden) {
           initialId = el.id;
         }
       });

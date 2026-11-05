@@ -1,23 +1,17 @@
 {% extends 'base.html' %}
 {% block title %}HAProxy – Home{% endblock %}
-{% block header_title %}Home{% endblock %}
+{% block header_title %}Dashboard{% endblock %}
+{% block header_buttons %}{% endblock %}
 
 {% block header_lead %}
 {# The site counters and the compact toggle read the list below, so they sit
    at the head of the controls rather than trailing off the right edge. #}
 <div class="header-controls">
   <div id="sites-meta" class="connection-badge"></div>
-  <button id="toggle-compact" class="btn-icon" type="button" title="Compact">≡</button>
+  <button id="toggle-compact" class="btn-icon" type="button" title="Compact site list" aria-label="Compact site list" aria-pressed="true">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M3 6h1M3 12h1M3 18h1"/></svg>
+  </button>
 </div>
-{% endblock %}
-
-{% block header_buttons %}
-{% if is_superadmin %}
-{# The same navigation every other page carries. Authelia, the HAProxy
-   section and the statistics page used to be three separate buttons here
-   and nowhere else, so the dashboard was the only way into any of them. #}
-{% include "_haproxy_nav.html" %}
-{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -34,7 +28,8 @@
   <button class="btn" id="auto-btn">Auto-refresh: off</button>
 </div>
 
-<div class="card" id="sites-panel" style="margin-bottom:20px">
+<div class="u-mb-5 card" id="sites-panel" >
+  <div class="card-header"><h2>Sites</h2></div>
   <ul id="sites-list" class="site-list">
     <li class="muted">Loading…</li>
   </ul>
@@ -64,11 +59,11 @@
   </div>
 
   <!-- the unban form -->
-  <div class="flex-container" style="margin-top:25px;gap:30px">
-    <div style="flex:1">
+  <div class="u-mt-6 u-gap-8 flex-container" >
+    <div  class="grow">
       <h3>Unban IP</h3>
-      <form id="unban-form" style="display:flex;align-items:flex-end;gap:15px">
-        <div style="flex:1">
+      <form id="unban-form"  class="flex items-end u-gap-4">
+        <div  class="grow">
           <label for="ip" class="form-label">Enter an IP address</label>
           <input type="text" id="ip" name="ip" class="form-input" placeholder="192.0.2.1" required>
         </div>

@@ -3,10 +3,6 @@
 {% block title %}Software updates{% endblock %}
 {% block header_title %}Software updates{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 <div id="updates-app"
      data-status-url="{{ url_for('system_updates.status_view') }}"

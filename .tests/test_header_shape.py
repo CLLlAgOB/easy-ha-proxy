@@ -50,10 +50,10 @@ class DashboardHeaderTests(unittest.TestCase):
         self.assertIn('id="auto-btn"', content)
         self.assertIn('class="page-toolbar"', content)
 
-    def test_the_header_carries_only_navigation(self):
+    def test_the_shell_supplies_navigation_once(self):
         buttons = header_block(self.index, "header_buttons")
-        self.assertIn("_haproxy_nav.html", buttons)
-        # Nothing else: another control here and the second row comes back.
+        self.assertNotIn("_haproxy_nav.html", buttons)
+        self.assertEqual(self.base.count('{% include "_haproxy_nav.html" %}'), 1)
         self.assertNotIn("<button", buttons)
 
     def test_the_counters_sit_at_the_head_of_the_row(self):

@@ -105,14 +105,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const panel = document.getElementById('sites-panel');
   if (!panel) return;
   // restore the previous choice, or switch it on by default
-  const saved = localStorage.getItem('sites-compact');
+  let saved = null;
+  try { saved = localStorage.getItem('sites-compact'); } catch (_error) { /* optional preference */ }
   if (saved === '1' || saved === null) panel.classList.add('compact');
 
   const btn = document.getElementById('toggle-compact');
   if (btn) {
+    btn.setAttribute('aria-pressed', String(panel.classList.contains('compact')));
     btn.addEventListener('click', () => {
       panel.classList.toggle('compact');
-      localStorage.setItem('sites-compact', panel.classList.contains('compact') ? '1' : '0');
+      btn.setAttribute('aria-pressed', String(panel.classList.contains('compact')));
+      try { localStorage.setItem('sites-compact', panel.classList.contains('compact') ? '1' : '0'); } catch (_error) { /* optional preference */ }
     });
   }
 });

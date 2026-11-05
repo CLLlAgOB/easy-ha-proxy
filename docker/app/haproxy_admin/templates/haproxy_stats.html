@@ -3,44 +3,9 @@
 {% block title %}HAProxy – statistics{% endblock %}
 {% block header_title %}HAProxy statistics{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 {# Styles for this page only #}
-<style>
-  /* On this page the outer document does not scroll,
-     so there is no second scrollbar on the right */
-  html,
-  body {
-    overflow: hidden;
-  }
 
-  .stats-page-fullscreen {
-    /* Stretch the block to the window's full width, past the container's max-width */
-    position: relative;
-    left: 50%;
-    right: 50%;
-    margin-left: -50vw;
-    margin-right: -50vw;
-    width: 100vw;
-
-    margin-top: 10px;
-
-    /* All the remaining height goes to the iframe */
-    height: calc(100vh - 120px);
-
-    background: #000;
-  }
-
-  .stats-page-fullscreen iframe {
-    width: 100%;
-    height: 100%;
-    border: 0;
-    display: block;
-  }
-</style>
 
 <div class="stats-page-fullscreen">
   <iframe src="/stats"></iframe>

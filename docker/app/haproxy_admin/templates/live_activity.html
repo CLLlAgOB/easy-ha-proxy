@@ -3,156 +3,11 @@
 {% block title %}Live activity{% endblock %}
 {% block header_title %}Live activity{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
-<style>
-.la-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 14px;
-  align-items: flex-end;
-}
-.la-toolbar label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.la-toolbar input[type="text"], .la-toolbar input[type="number"], .la-toolbar select {
-  padding: 6px 10px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  min-width: 120px;
-}
-.la-toolbar input[type="number"] { width: 90px; min-width: 0; }
-.la-check { flex-direction: row !important; align-items: center; gap: 6px !important; padding-bottom: 6px; }
-.la-group { display: inline-flex; gap: 6px; flex-wrap: wrap; }
-.la-chip {
-  padding: 6px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: rgba(var(--accent-primary-rgb), .04);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 13px;
-}
-.la-chip[aria-pressed="true"] {
-  background: rgba(var(--accent-primary-rgb), .18);
-  border-color: rgba(var(--accent-primary-rgb), .55);
-  font-weight: 600;
-}
-.la-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
-  margin-top: 16px;
-}
-.la-card {
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: rgba(var(--accent-primary-rgb), .03);
-}
-.la-card .la-label { font-size: 12px; color: var(--text-secondary); }
-.la-card .la-value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-.la-card.la-warn .la-value { color: #c8a13a; }
-.la-card.la-bad .la-value { color: #cc4b4b; }
-.la-note { font-size: 12px; color: var(--text-secondary); margin-top: 10px; min-height: 16px; }
-.la-note.la-warn { color: #c8a13a; }
-.la-timeline { width: 100%; height: 70px; margin-top: 12px; display: block; cursor: crosshair; }
-.la-timeline-wrap { position: relative; }
-.la-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-.la-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
-.la-legend i, .la-timeline-tip i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
-.la-timeline-tip {
-  position: absolute;
-  z-index: 5;
-  pointer-events: none;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-.la-timeline-tip[hidden] { display: none; }
-.la-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.la-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
-.la-table-wrap { overflow-x: auto; }
-.la-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
-.la-table th[data-sort]::after { content: " ↕"; opacity: .35; }
-.la-table th[data-sort][aria-sort="descending"]::after { content: " ↓"; opacity: 1; }
-.la-table th[data-sort][aria-sort="ascending"]::after { content: " ↑"; opacity: 1; }
-.la-table td { vertical-align: top; }
-.la-table th, .la-table td { padding: 8px 9px; }
-.la-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.la-mono { font-family: 'Fira Code', 'Consolas', monospace; font-size: 12px; word-break: break-all; }
-.la-link { color: var(--accent-primary); cursor: pointer; text-decoration: none; background: none; border: none; padding: 0; font: inherit; }
-.la-link:hover { text-decoration: underline; }
-/* Addresses and names are read whole; only paths may wrap. */
-.la-link.la-mono { word-break: normal; white-space: nowrap; }
-.la-path {
-  display: inline-block;
-  max-width: 230px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
-  word-break: normal;
-}
-.la-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  margin: 1px 4px 1px 0;
-  border-radius: 999px;
-  font-size: 11px;
-  border: 1px solid var(--border);
-  white-space: nowrap;
-}
-.la-badge.la-ban { color: #cc4b4b; border-color: rgba(204,75,75,.55); }
-.la-badge.la-limit { color: #c8a13a; border-color: rgba(200,161,58,.55); }
-.la-badge.la-allow { color: #2e9e5b; border-color: rgba(46,158,91,.55); }
-.la-badge.la-refused { color: var(--text-secondary); }
-.la-status { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-.la-s2 { background: rgba(46,158,91,.15); color: #2e9e5b; }
-.la-s3 { background: rgba(var(--accent-primary-rgb), .15); color: var(--accent-primary); }
-.la-s4 { background: rgba(200,161,58,.18); color: #c8a13a; }
-.la-s5 { background: rgba(204,75,75,.15); color: #cc4b4b; }
-.la-row-blocked { background: rgba(204,75,75,.06); }
-.la-event-row { cursor: pointer; }
-.la-event-row.la-open td { border-bottom-color: transparent; }
-.la-details td { background: var(--bg-tertiary, rgba(255,255,255,.03)); }
-.la-details-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 12px; padding: 4px 2px; }
-.la-details-grid dt { color: var(--text-secondary); }
-.la-details-grid dd { margin: 0; word-break: break-all; }
-.la-timers { display: flex; flex-wrap: wrap; gap: 4px 16px; }
-.la-held { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
-.la-spark { width: 90px; height: 22px; display: block; }
-.la-spark polyline { fill: none; stroke: var(--accent-primary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.la-link.la-mono.la-agent { white-space: normal; word-break: break-all; text-align: left; }
-.la-link.la-mono.la-path { text-align: left; }
-.la-held[hidden] { display: none; }
-.la-actions { white-space: nowrap; }
-.la-actions-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.la-actions .btn { padding: 4px 10px; font-size: 12px; box-shadow: none; }
-.la-empty { color: var(--text-secondary); font-size: 13px; padding: 30px 0; text-align: center; }
-.la-sub { font-size: 11px; color: var(--text-secondary); }
-.la-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0 10px; }
-.la-row select { padding: 5px 9px; border-radius: 9px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); }
-#la-decisions-more { margin-top: 10px; }
-</style>
 
-<div id="la-unavailable" class="rt-notice" hidden
-     style="border-color: rgba(204,75,75,.45); background: rgba(204,75,75,.08);">
+<div id="la-unavailable" class="notice-danger rt-notice" hidden
+     >
   Live activity is read from the memory of adaptive protection, and it is not
   answering right now: it is restarting, or it is switched off. HAProxy traffic
   is unaffected. The reason is shown below the summary.
@@ -190,7 +45,7 @@
     <button type="button" class="btn btn-small" id="la-pause">Pause updates</button>
   </div>
 
-  <div class="la-toolbar" style="margin-top: 12px;">
+  <div class="u-mt-3 la-toolbar" >
     <label>
       Address
       <input type="text" id="la-ip" placeholder="203.0.113.9" data-i18n-skip translate="no">
@@ -250,15 +105,15 @@
     <div class="la-axis" id="la-axis" data-i18n-skip translate="no"><span></span><span></span><span></span></div>
   </div>
   <div class="la-legend">
-    <span><i style="background:#2e9e5b"></i>Answered</span>
-    <span><i style="background:#c8a13a"></i>Errors</span>
-    <span><i style="background:#cc4b4b"></i>Refused</span>
+    <span><i  class="chart-key-success"></i>Answered</span>
+    <span><i  class="chart-key-warning"></i>Errors</span>
+    <span><i  class="chart-key-error"></i>Refused</span>
   </div>
   <div class="la-reasons" id="la-reasons" data-i18n-skip translate="no"></div>
   <div class="la-note" id="la-note" data-i18n-skip translate="no"></div>
 </div>
 
-<div class="card" style="margin-top:25px;" id="la-tables-card">
+<div class="u-mt-6 card"  id="la-tables-card">
   <div class="la-tabs" id="la-tabs" role="tablist">
     <button type="button" class="la-chip" data-tab="addresses" aria-pressed="true">Addresses</button>
     <button type="button" class="la-chip" data-tab="sites" aria-pressed="false">Sites</button>
@@ -348,7 +203,7 @@
       <tbody id="la-paths-body" data-i18n-skip translate="no"></tbody>
     </table>
     <div class="la-empty" id="la-paths-empty" hidden>Nothing in this window</div>
-    <h3 style="margin-top: 20px;">Not found most often</h3>
+    <h3  class="u-mt-5">Not found most often</h3>
     <p class="la-sub">Paths that do not exist, asked for again and again, are usually a scanner looking for a weakness.</p>
     <table class="data-table la-table">
       <thead>
@@ -414,7 +269,7 @@
     </div>
     <div class="la-empty" id="la-banned-empty" hidden>Nobody is banned</div>
 
-    <h3 style="margin-top: 20px;">Over the connection limit</h3>
+    <h3  class="u-mt-5">Over the connection limit</h3>
     <p class="la-sub" id="la-limits-note" data-i18n-skip translate="no"></p>
     <div class="la-table-wrap">
       <table class="data-table la-table">

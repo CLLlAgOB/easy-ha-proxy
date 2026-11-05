@@ -4,29 +4,25 @@
 {% block title %}Authelia users{% endblock %}
 {% block header_title %}Authelia users{% endblock %}
 
-{% block header_buttons %}
-{% include "_authelia_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
 {% if error %}
-<div class="card" style="margin-bottom:16px">
+<div class="u-mb-4 card" >
     <div class="card-header">
         <div class="table-title">Error</div>
     </div>
-    <div style="padding:12px 16px;color:var(--error);">
+    <div  class="u-p-12px-16px text-danger">
         {{ error }}
     </div>
 </div>
 {% endif %}
 
 {% if message %}
-<div class="card" style="margin-bottom:16px">
+<div class="u-mb-4 card" >
     <div class="card-header">
         <div class="table-title">Message</div>
     </div>
-    <div style="padding:12px 16px;color:var(--success);">
+    <div  class="u-p-12px-16px text-success">
         {{ message }}
     </div>
 </div>
@@ -35,15 +31,15 @@
 <div class="card">
     <div class="card-header">
         <h2>User list</h2>
-        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <div  class="flex u-gap-3 items-center flex-wrap">
             <a href="{{ url_for('routes.authelia_user_new') }}" class="btn btn-primary">
                 + New user
             </a>
             <input type="text"
                    id="user-search"
-                   class="form-input"
+                   class="u-maxw-min-260px-100 form-input"
                    placeholder="Search by username, email, or group…"
-                   style="max-width:260px;">
+                   >
             <div class="table-meta" id="users-meta">
                 {% if users %}
                 Total users: {{ users|length }}
@@ -64,7 +60,7 @@
                     <th>Email</th>
                     <th>Groups</th>
                     <th>Disabled</th>
-                    <th style="text-align:right;">Actions</th>
+                    <th  class="text-right">Actions</th>
                 </tr>
             </thead>
             <tbody id="users-tbody">
@@ -86,7 +82,7 @@
                         <span class="user-group-pill">{{ g }}</span>
                         {% endfor %}
                         {% else %}
-                        <span style="opacity:.7">no</span>
+                        <span  class="text-muted">no</span>
                         {% endif %}
                     </td>
                     <td>
@@ -96,8 +92,8 @@
                         <span class="status-normal">no</span>
                         {% endif %}
                     </td>
-                    <td style="text-align:right;">
-                        <div style="display:flex;gap:8px;justify-content:flex-end;">
+                    <td  class="text-right">
+                        <div  class="flex u-gap-2 justify-end">
                             <a href="{{ url_for('routes.authelia_user_edit', username=u.username) }}"
                                class="btn btn-icon"
                                title="Edit">
@@ -120,8 +116,8 @@
             </tbody>
         </table>
         {% else %}
-        <div style="padding:16px;">
-            <p style="opacity:.7;margin:0;">No users found.</p>
+        <div  class="u-p-16px">
+            <p  class="text-muted u-m-0">No users found.</p>
         </div>
         {% endif %}
     </div>

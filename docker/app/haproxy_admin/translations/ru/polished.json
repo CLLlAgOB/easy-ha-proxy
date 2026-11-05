@@ -38,7 +38,7 @@
     "Protection": "Защита",
     "Observation": "Наблюдение",
     "Administration sections": "Разделы администрирования",
-    "Dashboard": "Дашборд",
+    "Dashboard": "Обзор",
     "Bans": "Баны",
     "When the site has no icon of its own, the gateway answers /favicon.ico with a neutral one instead of 404.": "Если у сайта нет своей иконки, шлюз отвечает на /favicon.ico нейтральной иконкой вместо 404."
   }

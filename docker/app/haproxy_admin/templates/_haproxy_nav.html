@@ -1,38 +1,3 @@
-{# _haproxy_nav.html
-   The header navigation, shared by every administration page.
-
-   Eighteen buttons in one wrapping row took three lines and pushed the page
-   below the fold. They are grouped here by the job someone is doing, which
-   turns nineteen targets into eight and fits one line.
-
-   One nav for the whole application, not one per section: from a HAProxy
-   page there used to be no way to reach Authelia at all except by going Home
-   first, and the dashboard offered a different set of buttons again.
-
-   Two of the group names are chosen rather than obvious. Authelia is named
-   for the product, not for an idea like "Access": every page in it is an
-   Authelia page, and someone hunting for Authelia should not have to guess
-   which abstract noun it was filed under -- so the menu carries the name and
-   the items inside drop the prefix. And the GeoIP database sits under
-   Protection, not beside the certificates: a country list is not a naming
-   concern, it exists so that requests from somewhere can be refused.
-
-   The menu triggers and the dashboard link carry the same class. They were
-   two rules that had to be kept identical, and they were not: on a live
-   gateway the dashboard link came out visibly different from its
-   neighbours. What differs between them now is what should -- a menu has a
-   caret, the dashboard has a rule before it, because it is a destination
-   rather than a menu.
-
-   Built on <details>, so it opens and closes with no script; nav.js only
-   adds what a script is needed for -- closing the others, Escape, clicking
-   away. The group holding the current page is marked, so the header still
-   answers "where am I" now that the links are hidden. #}
-
-{# A dot where the updates live when the newest check found something: it
-   glows for easy-ha-proxy's own updates and stays quiet for operating-system
-   packages, which come nearly every day. updates_badge comes from
-   updates_badge.py; the updates page keeps it current while it polls. #}
 {% macro update_dot(level) -%}
 <span class="nav-update-dot nav-update-dot--{{ level }}" role="img"
       title="{{ 'Software updates are available' if level == 'product' else 'Operating-system package updates are available' }}"
@@ -103,43 +68,56 @@
   },
 ] %}
 
+
+{% set parents = {
+  'routes.haproxy_site_edit': 'routes.haproxy_sites_page',
+  'routes.haproxy_site_new': 'routes.haproxy_sites_page',
+  'routes.haproxy_tcp_edit': 'routes.haproxy_tcp_page',
+  'routes.authelia_user_edit': 'routes.authelia_users',
+  'routes.authelia_user_new': 'routes.authelia_users',
+  'routes.view_ip_logs': 'routes.adaptive_protection_page'
+} %}
+{% set current = parents.get(request.endpoint, request.endpoint) %}
+{% set icons = {
+  'Routing': 'M4 7h16M4 17h16M8 3v8m8 2v8',
+  'Configuration': 'M4 6h16M4 12h16M4 18h16M8 3v6m8 0v6m-6 0v6',
+  'Certificates': 'M7 3h10v12l-5-3-5 3V3Zm1 12-2 6 6-3 6 3-2-6',
+  'Authelia': 'M16 10V7a4 4 0 0 0-8 0v3M5 10h14v11H5V10Zm7 4v3',
+  'Protection': 'M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7l-9-4Zm-4 9 3 3 5-6',
+  'Observation': 'M3 12h4l3-7 4 14 3-7h4',
+  'Maintenance': 'm14 6 4 4M5 19l6-6m3-10a6 6 0 0 0-7 7L2 15l7 7 5-5a6 6 0 0 0 7-7l-4 4-7-7 4-4Z'
+} %}
 <nav class="nav-groups" aria-label="Administration sections">
+  <a class="nav-item nav-dashboard{% if current == 'routes.index' %} nav-item-current{% endif %}"
+     href="{{ url_for('routes.index') }}"{% if current == 'routes.index' %} aria-current="page"{% endif %}>
+    <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3V3Zm11 0h7v7h-7V3ZM3 14h7v7H3v-7Zm11 0h7v7h-7v-7Z"/></svg>
+    <span>Dashboard</span>
+  </a>
+  <span class="nav-separator" aria-hidden="true"></span>
   {% for group in nav_groups %}
-  {% set here = group["items"] | selectattr("0", "equalto", request.endpoint) | list | length > 0 %}
-  {% set holds_updates = group["label"] == "Maintenance" %}
-  <details class="nav-group"{% if holds_updates %} data-nav-group="maintenance"{% endif %}>
+  {% set here = group['items'] | selectattr('0', 'equalto', current) | list | length > 0 or (group['label'] == 'Maintenance' and request.endpoint == 'routes.debug') %}
+  {% set holds_updates = group['label'] == 'Maintenance' %}
+  <details class="nav-group" data-nav-group="{{ group['label'] | lower }}"{% if here %} open{% endif %}>
     <summary class="nav-item nav-item-menu{% if here %} nav-item-current{% endif %}">
-      <span>{{ group["label"] }}</span>
+      <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="{{ icons[group['label']] }}"/></svg>
+      <span>{{ group['label'] }}</span>
       {% if holds_updates and updates_badge %}{{ update_dot(updates_badge) }}{% endif %}
-      <svg class="nav-caret" width="10" height="10" viewBox="0 0 10 10"
-           aria-hidden="true" focusable="false">
-        <path d="M1 3.5L5 7.5L9 3.5" fill="none" stroke="currentColor"
-              stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
+      <svg class="nav-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>
     </summary>
     <div class="nav-group-items">
-      {% for endpoint, label in group["items"] %}
-      <a class="nav-group-item{% if endpoint == request.endpoint %} nav-group-item-current{% endif %}"
+      {% for endpoint, label in group['items'] %}
+      <a class="nav-group-item{% if endpoint == current %} nav-group-item-current{% endif %}"
          href="{{ url_for(endpoint) }}" data-nav-endpoint="{{ endpoint }}"
-         {% if endpoint == request.endpoint %}aria-current="page"{% endif %}>
-        {{ label }}
-        {% if endpoint == "system_updates.page" and updates_badge %}{{ update_dot(updates_badge) }}{% endif %}
+         {% if endpoint == current %}aria-current="page"{% endif %}>
+        <span>{{ label }}</span>
+        {% if endpoint == 'system_updates.page' and updates_badge %}{{ update_dot(updates_badge) }}{% endif %}
       </a>
       {% endfor %}
-      {% if group["label"] == "Maintenance" and debug_routes_enabled | default(false) %}
+      {% if group['label'] == 'Maintenance' and debug_routes_enabled | default(false) %}
       <a class="nav-group-item{% if request.endpoint == 'routes.debug' %} nav-group-item-current{% endif %}"
-         href="{{ url_for('routes.debug') }}">
-        Diagnostics
-      </a>
+         href="{{ url_for('routes.debug') }}"{% if request.endpoint == 'routes.debug' %} aria-current="page"{% endif %}>Diagnostics</a>
       {% endif %}
     </div>
   </details>
   {% endfor %}
-
-  <span class="nav-separator" aria-hidden="true"></span>
-  <a class="nav-item{% if request.endpoint == 'routes.index' %} nav-item-current{% endif %}"
-     href="{{ url_for('routes.index') }}"
-     {% if request.endpoint == 'routes.index' %}aria-current="page"{% endif %}>
-    Dashboard
-  </a>
 </nav>

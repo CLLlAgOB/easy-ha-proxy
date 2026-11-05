@@ -50,11 +50,6 @@
     return originalFetch(input, options);
   };
 
-  const savedTheme = localStorage.getItem("theme") || "dark";
-  if (savedTheme === "light") {
-    document.documentElement.classList.add("light-theme");
-  }
-
   document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll("form").forEach((form) => {
       const method = String(form.method || "get").toLowerCase();
@@ -92,13 +87,5 @@
       if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
     });
 
-    const themeToggle = document.getElementById("theme-toggle");
-    if (themeToggle) {
-      themeToggle.addEventListener("click", () => {
-        const classes = document.documentElement.classList;
-        const light = classes.toggle("light-theme");
-        localStorage.setItem("theme", light ? "light" : "dark");
-      });
-    }
   });
 })();

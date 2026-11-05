@@ -3,292 +3,8 @@
 {% block title %}Adaptive protection{% endblock %}
 {% block header_title %}Adaptive protection{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
-<style>
-.ap-banner {
-  border-radius: 12px;
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  border: 1px solid rgba(var(--accent-primary-rgb), .45);
-  background: rgba(var(--accent-primary-rgb), .07);
-  font-size: 14px;
-}
-
-.ap-banner.error {
-  border-color: rgba(204, 75, 75, .5);
-  background: rgba(204, 75, 75, .08);
-}
-
-.ap-banner[hidden] { display: none; }
-
-.ap-modes {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
-}
-
-.ap-mode {
-  flex: 1;
-  min-width: 190px;
-  text-align: left;
-  padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: rgba(var(--accent-primary-rgb), .04);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.ap-mode small {
-  display: block;
-  font-weight: 400;
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 3px;
-}
-
-.ap-mode:hover { border-color: rgba(var(--accent-primary-rgb), .45); }
-
-.ap-mode[aria-pressed="true"] {
-  background: rgba(var(--accent-primary-rgb), .18);
-  border-color: rgba(var(--accent-primary-rgb), .6);
-}
-
-.ap-mode[data-mode="enforce"][aria-pressed="true"] {
-  background: rgba(204, 75, 75, .16);
-  border-color: rgba(204, 75, 75, .6);
-}
-
-.ap-mode:disabled { opacity: .5; cursor: progress; }
-
-.ap-ladder-box {
-  margin: 14px 0 4px;
-  padding: 14px 16px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
-
-.ap-ladder-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
-}
-
-.ap-ladder {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.ap-ladder span {
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  font-size: 13px;
-}
-
-.ap-ladder-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.ap-ladder-row label { min-width: 90px; font-size: 13px; }
-.ap-ladder-row input { width: 90px; }
-
-.ap-ladder-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.ap-guardrails {
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: rgba(46, 158, 91, .07);
-  padding: 12px 15px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.ap-confirm {
-  margin-top: 14px;
-  padding: 14px 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(204, 75, 75, .5);
-  background: rgba(204, 75, 75, .08);
-  font-size: 14px;
-}
-
-.ap-confirm[hidden] { display: none; }
-
-.ap-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 16px;
-  margin-bottom: 22px;
-}
-
-.ap-card {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px 16px;
-}
-
-.ap-card .ap-label {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-  color: var(--text-secondary);
-}
-
-.ap-card .ap-value { font-size: 26px; font-weight: 600; margin-top: 6px; }
-.ap-card.danger .ap-value { color: #cc4b4b; }
-.ap-card.warn .ap-value { color: #c8a13a; }
-
-.ap-states {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  font-size: 13px;
-  margin-bottom: 20px;
-}
-
-.ap-states span { white-space: nowrap; }
-
-.ap-sim {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 12px 20px;
-  margin-bottom: 16px;
-}
-
-.ap-sim label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.ap-sim input[type="number"] {
-  width: 82px;
-  padding: 5px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-
-.ap-sim-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-
-.ap-pill {
-  display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.ap-NORMAL { background: rgba(46,158,91,.15); color: #2e9e5b; }
-.ap-WATCH { background: rgba(74,134,200,.15); color: #4a86c8; }
-.ap-SUSPICIOUS { background: rgba(200,161,58,.18); color: #c8a13a; }
-
-.ap-bands {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 10px 0 4px;
-}
-
-.ap-bands .ap-band {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  padding: 7px 11px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  font-size: 13px;
-}
-
-.ap-bands .ap-band-range { font-weight: 600; }
-
-.ap-bands .ap-band.bans {
-  border-color: rgba(204,75,75,.45);
-  background: rgba(204,75,75,.08);
-}
-.ap-HIGH_RISK { background: rgba(204,75,75,.15); color: #cc4b4b; }
-.ap-HOSTILE { background: rgba(204,75,75,.28); color: #cc4b4b; }
-
-.ap-flag {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  margin-left: 6px;
-}
-
-.ap-flag.fp { background: rgba(200,161,58,.2); color: #c8a13a; }
-.ap-flag.noenforce { background: rgba(120,120,140,.2); color: var(--text-secondary); }
-.ap-flag.ban { background: rgba(204,75,75,.18); color: #cc4b4b; }
-
-.ap-row-link { cursor: pointer; }
-
-.ap-detail { margin-top: 18px; }
-.ap-detail[hidden] { display: none; }
-
-.ap-timeline {
-  border-left: 2px solid var(--border);
-  margin: 12px 0 0 6px;
-  padding-left: 14px;
-}
-
-.ap-entry {
-  display: grid;
-  /* time · what · the tuning context · points */
-  grid-template-columns: 150px minmax(140px, auto) 1fr auto;
-  gap: 12px;
-  padding: 6px 0;
-  font-size: 13px;
-  border-bottom: 1px solid var(--border);
-}
-
-.ap-entry .ap-context {
-  color: var(--text-secondary);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.ap-entry:last-child { border-bottom: none; }
-.ap-entry .ap-points { font-weight: 600; text-align: right; white-space: nowrap; }
-.ap-entry.zero { opacity: .55; }
-
-.ap-empty {
-  color: var(--text-secondary);
-  font-size: 13px;
-  padding: 30px 0;
-  text-align: center;
-}
-
-</style>
 
 <div class="ap-banner" id="ap-mode">
   Monitor mode — findings are recorded and scored, but nothing is blocked.
@@ -369,14 +85,14 @@
     <h2>Banned right now</h2>
     <span class="mon-sub" id="ap-bans-note" data-i18n-skip translate="no"></span>
   </div>
-  <div style="padding: 12px 16px;">
-    <p class="mon-sub" style="margin-top:0;">
+  <div  class="u-p-12px-16px">
+    <p class="u-mt-0 mon-sub" >
       How long each one has left, on this engine's own schedule. The ban list
       on the HAProxy page shows the stick table's expiry instead, which is the
       table's own lifetime and says days about a ban that lifts within the
       hour.
     </p>
-    <div style="overflow-x:auto;">
+    <div  class="scroll-x">
       <table class="data-table">
         <thead>
           <tr>
@@ -398,8 +114,8 @@
     <h2>Trusted addresses over a site's limit</h2>
     <span class="mon-sub" id="ap-warnings-note" data-i18n-skip translate="no"></span>
   </div>
-  <div style="padding: 12px 16px;">
-    <p class="mon-sub" style="margin-top:0;">
+  <div  class="u-p-12px-16px">
+    <p class="u-mt-0 mon-sub" >
       These addresses are trusted: signed in, whitelisted, on the admin list or
       allowed on the site. Each row is one stretch of time in which one of them
       went over a site's request limit. This list only observes: it refuses
@@ -409,7 +125,7 @@
       The Refused column shows what the gateway's current rules did with those
       requests: 429 for the request limit, 423 for a ban.
     </p>
-    <div style="overflow-x:auto;">
+    <div  class="scroll-x">
       <table class="data-table">
         <thead>
           <tr>
@@ -477,7 +193,7 @@
   </p>
 </div>
 
-<div class="card" style="margin-top:25px;">
+<div class="u-mt-6 card" >
   <div class="card-header">
     <h2>Weight simulator</h2>
     <span class="mon-sub">Re-scores the stored history; nothing is saved</span>
@@ -508,13 +224,13 @@
   </div>
 </div>
 
-<div class="card" style="margin-top:25px;">
+<div class="u-mt-6 card" >
   <div class="card-header">
     <h2>Reputation</h2>
     <span class="mon-sub">Select a row to see why</span>
   </div>
 
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr>

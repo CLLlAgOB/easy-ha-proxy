@@ -3,18 +3,14 @@
 {% block title %}HAProxy – certificates{% endblock %}
 {% block header_title %}HAProxy certificates and certificate authorities{% endblock %}
 
-{% block header_buttons %}
-{% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
 {% if error %}
-<div class="card" style="border-left: 4px solid var(--error);">
+<div class="border-error card" >
   <div class="card-header">
     <h2>Error</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;"
+  <div class="pre-wrap text-sm mono"
        data-i18n-skip translate="no">
     {{ error }}
   </div>
@@ -22,11 +18,11 @@
 {% endif %}
 
 {% if message %}
-<div class="card" style="border-left: 4px solid var(--success);">
+<div class="border-success card" >
   <div class="card-header">
     <h2>Operation completed</h2>
   </div>
-  <div class="mono" style="white-space: pre-wrap; font-size: 13px;"
+  <div class="pre-wrap text-sm mono"
        data-i18n-skip translate="no">
     {{ message }}
   </div>
@@ -66,94 +62,94 @@
       CA private keys cannot be imported or downloaded here.
     </div>
   </div>
-  <div style="padding: 12px 16px;">
+  <div  class="u-p-12px-16px">
     <h3>Internal certificate authority</h3>
     {% if internal_ca %}
-    <table class="table mono" style="margin-top:8px;">
-      <thead><tr><th>Name</th><th>Valid until</th><th>SHA-256</th><th style="text-align:right;">Actions</th></tr></thead>
+    <table class="u-mt-2 table mono" >
+      <thead><tr><th>Name</th><th>Valid until</th><th>SHA-256</th><th  class="text-right">Actions</th></tr></thead>
       <tbody><tr>
         <td>{{ internal_ca.name }}</td>
         <td>{{ internal_ca.not_after }}</td>
         <td><code class="cert-digest" title="{{ internal_ca.sha256 }}">{{ internal_ca.sha256[:16] }}…</code></td>
-        <td style="text-align:right;">
+        <td  class="text-right">
           <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id='internal') }}">
             Download root certificate
           </a>
         </td>
       </tr></tbody>
     </table>
-    <div class="table-meta" style="margin-top:6px;">
+    <div class="u-mt-1 table-meta" >
       Install this public root certificate in client trust stores. The root private key remains on the server.
     </div>
 
-    <h4 style="margin-top:18px;">Issue or renew an internal certificate</h4>
-    <form method="post" style="margin-top:8px; max-width:720px;">
+    <h4  class="u-mt-4">Issue or renew an internal certificate</h4>
+    <form method="post"  class="u-mt-2 u-maxw-min-720px-100">
       <input type="hidden" name="action" value="issue_internal_cert">
       <label class="form-label" for="internal_domain">Primary domain</label>
       <input class="form-input" id="internal_domain" name="domain" type="text"
         placeholder="app.example.com" required data-i18n-skip translate="no">
-      <label class="form-label" for="internal_alt_names" style="margin-top:8px;">
+      <label class="u-mt-2 form-label" for="internal_alt_names" >
         Alternative domains (comma or space separated)
       </label>
       <input class="form-input" id="internal_alt_names" name="alt_names" type="text"
         placeholder="www.example.com api.example.com" data-i18n-skip translate="no">
-      <div style="margin-top:8px;">
+      <div  class="u-mt-2">
         <button class="btn" type="submit">Issue internal certificate</button>
       </div>
-      <div class="table-meta" style="margin-top:6px;">
+      <div class="u-mt-1 table-meta" >
         The certificate is installed in HAProxy immediately. Select Internal CA for the site so future renewals use the same source.
       </div>
     </form>
 
-    <details style="margin-top:18px;">
+    <details  class="u-mt-4">
       <summary>Root CA lifecycle</summary>
-      <div style="margin-top:10px; max-width:760px;">
-        <p class="table-meta" style="color:var(--error);">
+      <div  class="u-mt-2 u-maxw-min-760px-100">
+        <p class="text-danger table-meta" >
           Rotating the root creates a new root key and reissues every active HAProxy certificate signed by the old root.
           Clients will stop trusting those sites until the new root certificate is installed in their trust stores.
           Download a certificate backup before continuing.
         </p>
-        <form method="post" style="margin-top:10px;"
-          data-confirm="Rotate the internal root CA and reissue all certificates signed by it?">
+        <form method="post"
+          data-confirm="Rotate the internal root CA and reissue all certificates signed by it?" class="u-mt-2">
           <input type="hidden" name="action" value="rotate_internal_ca">
           <label class="form-label" for="rotate_confirmation">Type ROTATE to confirm</label>
-          <input class="form-input" id="rotate_confirmation" name="confirmation" type="text"
-            autocomplete="off" pattern="ROTATE" required style="max-width:220px;">
-          <button class="btn btn-danger" type="submit" style="margin-top:8px;">
+          <input class="u-maxw-min-220px-100 form-input" id="rotate_confirmation" name="confirmation" type="text"
+            autocomplete="off" pattern="ROTATE" required >
+          <button class="u-mt-2 btn btn-danger" type="submit" >
             Rotate root CA and reissue certificates
           </button>
         </form>
-        <form method="post" style="margin-top:18px;"
-          data-confirm="Delete the internal root CA?">
+        <form method="post"
+          data-confirm="Delete the internal root CA?" class="u-mt-4">
           <input type="hidden" name="action" value="delete_internal_ca">
           <label class="form-label" for="delete_ca_confirmation">Type DELETE to confirm</label>
-          <input class="form-input" id="delete_ca_confirmation" name="confirmation" type="text"
-            autocomplete="off" pattern="DELETE" required style="max-width:220px;">
-          <button class="btn btn-danger" type="submit" style="margin-top:8px;">
+          <input class="u-maxw-min-220px-100 form-input" id="delete_ca_confirmation" name="confirmation" type="text"
+            autocomplete="off" pattern="DELETE" required >
+          <button class="u-mt-2 btn btn-danger" type="submit" >
             Delete unused internal CA
           </button>
-          <div class="table-meta" style="margin-top:6px;">
+          <div class="u-mt-1 table-meta" >
             Deletion is refused while any active HAProxy certificate is signed by this root.
           </div>
         </form>
       </div>
     </details>
     {% else %}
-    <form method="post" style="margin-top:8px;">
+    <form method="post"  class="u-mt-2">
       <input type="hidden" name="action" value="create_internal_ca">
       <button class="btn" type="submit">Create internal certificate authority</button>
     </form>
     {% endif %}
 
-    <h3 style="margin-top:24px;">Import a certificate or an authority</h3>
-    <div class="table-meta" style="max-width:820px;">
+    <h3  class="u-mt-6">Import a certificate or an authority</h3>
+    <div class="u-maxw-min-820px-100 table-meta" >
       One field for all of it. Choose a PEM, a DER file, or a PKCS#12 bundle
       (.p12/.pfx) and it is read to find out what is inside:
       certificates that are authorities go to the trust store below, and an end-entity
       certificate that arrived with its private key becomes a server certificate.
       Nothing is installed until you have seen what was found.
     </div>
-    <div style="margin-top:10px; max-width:820px;">
+    <div  class="u-mt-2 u-maxw-min-820px-100">
       <div class="file-picker">
         <input id="material-file" type="file" class="file-input-hidden"
           accept=".pem,.crt,.cer,.der,.p12,.pfx,.key">
@@ -163,46 +159,46 @@
               data-i18n-skip translate="no">No file selected</span>
       </div>
 
-      <label class="form-label" for="material-password" style="margin-top:10px;">
+      <label class="u-mt-2 form-label" for="material-password" >
         Password (PKCS#12 or an encrypted key only)
       </label>
-      <input class="form-input" id="material-password" type="password"
-        autocomplete="new-password" style="max-width:420px;">
+      <input class="u-maxw-min-420px-100 form-input" id="material-password" type="password"
+        autocomplete="new-password" >
 
-      <label class="form-label" for="material-ca-name" style="margin-top:10px;">
+      <label class="u-mt-2 form-label" for="material-ca-name" >
         Name for the authority (optional)
       </label>
-      <input class="form-input" id="material-ca-name" type="text"
-        placeholder="taken from the certificate if left empty" style="max-width:420px;">
+      <input class="u-maxw-min-420px-100 form-input" id="material-ca-name" type="text"
+        placeholder="taken from the certificate if left empty" >
 
-      <label class="form-label" for="material-domain" style="margin-top:10px;">
+      <label class="u-mt-2 form-label" for="material-domain" >
         Domain for the server certificate (optional)
       </label>
-      <input class="form-input" id="material-domain" type="text"
-        placeholder="taken from the certificate if left empty" style="max-width:420px;">
+      <input class="u-maxw-min-420px-100 form-input" id="material-domain" type="text"
+        placeholder="taken from the certificate if left empty" >
 
-      <div style="margin-top:10px;">
+      <div  class="u-mt-2">
         <button type="button" class="btn" id="material-inspect">Examine the file</button>
         <button type="button" class="btn" id="material-import" hidden>Install</button>
       </div>
-      <div id="material-report" class="table-meta" style="margin-top:10px;"
+      <div id="material-report" class="u-mt-2 table-meta"
         data-i18n-skip></div>
     </div>
 
-    <h3 style="margin-top:20px;">External certificate authorities</h3>
+    <h3  class="u-mt-5">External certificate authorities</h3>
     {% if external_cas %}
-    <table class="table mono" style="margin-top:8px;">
-      <thead><tr><th>Name</th><th>Certificates</th><th>Valid until</th><th style="text-align:right;">Actions</th></tr></thead>
+    <table class="u-mt-2 table mono" >
+      <thead><tr><th>Name</th><th>Certificates</th><th>Valid until</th><th  class="text-right">Actions</th></tr></thead>
       <tbody>
       {% for ca in external_cas %}
       <tr>
         <td>{{ ca.name }}<div class="table-meta"><code>{{ ca.id }}</code></div></td>
         <td>{{ ca.certificates }}</td>
         <td>{{ ca.not_after }}</td>
-        <td style="text-align:right; white-space:nowrap;">
+        <td  class="text-right nowrap">
           <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id=ca.id) }}">Download</a>
-          <form method="post" style="display:inline;"
-            data-confirm="Delete this external certificate authority?">
+          <form method="post"
+            data-confirm="Delete this external certificate authority?" class="inline">
             <input type="hidden" name="action" value="delete_external_ca">
             <input type="hidden" name="ca_id" value="{{ ca.id }}">
             <button class="btn btn-small btn-danger" type="submit">Delete</button>
@@ -216,31 +212,31 @@
     <div class="table-meta">No external certificate authorities have been imported.</div>
     {% endif %}
 
-    <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+    <form method="post" enctype="multipart/form-data"  class="u-mt-3">
       <input type="hidden" name="action" value="import_external_ca">
       <label class="form-label" for="ca_name">Short name</label>
-      <input class="form-input" id="ca_name" name="ca_name" type="text"
-        placeholder="company-pki" style="max-width:420px;">
-      <label class="form-label" for="ca_file" style="margin-top:8px;">Root/intermediate CA bundle (PEM)</label>
+      <input class="u-maxw-min-420px-100 form-input" id="ca_name" name="ca_name" type="text"
+        placeholder="company-pki" >
+      <label class="u-mt-2 form-label" for="ca_file" >Root/intermediate CA bundle (PEM)</label>
       <input id="ca_file" name="ca_file" type="file" accept=".pem,.crt,.cer" required>
-      <div style="margin-top:8px;"><button class="btn" type="submit">Import certificate authority</button></div>
-      <div class="table-meta" style="margin-top:6px;">
+      <div  class="u-mt-2"><button class="btn" type="submit">Import certificate authority</button></div>
+      <div class="u-mt-1 table-meta" >
         Import public CA certificates here, then select this authority for a site and upload its server certificate, chain, and private key.
       </div>
     </form>
 
-    <h3 style="margin-top:24px;">Client certificate authentication</h3>
-    <div class="table-meta" style="max-width:820px;">
+    <h3  class="u-mt-6">Client certificate authentication</h3>
+    <div class="u-maxw-min-820px-100 table-meta" >
       An authority listed above only vouches for servers. Tick it here to also let it
       vouch for visitors, then choose it on a site. Nothing becomes a client authority
       on its own: the authority that signs this gateway's own certificates has no say
       in who may connect to it.
     </div>
     {% if internal_ca or external_cas %}
-    <form method="post" style="margin-top:10px;">
+    <form method="post"  class="u-mt-2">
       <input type="hidden" name="action" value="set_client_auth_cas">
-      <table class="table mono" style="max-width:820px;">
-        <thead><tr><th style="width:60px;">Trust</th><th>Authority</th><th>Issuer names matched</th></tr></thead>
+      <table class="u-maxw-min-820px-100 table mono" >
+        <thead><tr><th  class="u-w-60px">Trust</th><th>Authority</th><th>Issuer names matched</th></tr></thead>
         <tbody>
         {% for ca in ([internal_ca] if internal_ca else []) + external_cas %}
         <tr>
@@ -262,26 +258,26 @@
         {% endfor %}
         </tbody>
       </table>
-      <button class="btn" type="submit" style="margin-top:8px;">Save client authentication</button>
-      <div class="table-meta" style="margin-top:6px;">
+      <button class="u-mt-2 btn" type="submit" >Save client authentication</button>
+      <div class="u-mt-1 table-meta" >
         Turning an authority off here denies every request that relied on it, immediately.
         Sites keep their setting, so turning it back on restores them.
       </div>
     </form>
     {% else %}
-    <div class="table-meta" style="margin-top:8px;">Import or create a certificate authority first.</div>
+    <div class="u-mt-2 table-meta" >Import or create a certificate authority first.</div>
     {% endif %}
 
-    <h4 style="margin-top:20px;">Refused client certificates</h4>
-    <form method="post" style="margin-top:8px; max-width:820px;">
+    <h4  class="u-mt-5">Refused client certificates</h4>
+    <form method="post"  class="u-mt-2 u-maxw-min-820px-100">
       <input type="hidden" name="action" value="set_revoked_client_certs">
       <label class="form-label" for="fingerprints">SHA-256 fingerprints, one per line</label>
       <textarea class="form-input mono" id="fingerprints" name="fingerprints" rows="4"
         spellcheck="false" translate="no"
         placeholder="3b1f…  (openssl x509 -in client.crt -noout -fingerprint -sha256)"
       >{{ revoked_client_certs | join('\n') }}</textarea>
-      <div style="margin-top:8px;"><button class="btn" type="submit">Save refused certificates</button></div>
-      <div class="table-meta" style="margin-top:6px;">
+      <div  class="u-mt-2"><button class="btn" type="submit">Save refused certificates</button></div>
+      <div class="u-mt-1 table-meta" >
         Refuses one certificate without discarding the authority that signed it.
         Colons and upper case are accepted. Saving reloads HAProxy, because that is
         when the list takes effect.
@@ -291,7 +287,7 @@
 </div>
 
 {# ─────────────────── HAProxy certificates ─────────────────── #}
-<div class="card" style="margin-top: 20px;">
+<div class="u-mt-5 card" >
   <div class="card-header">
     <h2>HAProxy certificates ({{ haproxy_certs|length }})</h2>
     <div class="table-meta">
@@ -300,15 +296,15 @@
     </div>
   </div>
 
-  <div style="padding: 12px 16px;">
+  <div  class="u-p-12px-16px">
     {% if haproxy_certs %}
-    <table class="table mono" style="table-layout: fixed; width: 100%;">
+    <table class="table-fixed w-full table mono" >
       <colgroup>
-        <col style="width:26%;">
-        <col style="width:34%;">
-        <col style="width:18%;">
-        <col style="width:12%;">
-        <col style="width:10%;">
+        <col  class="u-w-26">
+        <col  class="u-w-34">
+        <col  class="u-w-18">
+        <col  class="u-w-12">
+        <col  class="u-w-10">
       </colgroup>
       <thead>
         <tr>
@@ -316,7 +312,7 @@
           <th>File</th>
           <th>Expiring</th>
           <th>Status</th>
-          <th style="text-align:right;">Actions</th>
+          <th  class="text-right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -340,7 +336,7 @@
 
           {# Path to the file #}
           <td>
-            <div class="mono" style="word-break: break-all;">
+            <div class="break-anywhere mono" >
               <code>{{ item.path }}</code>
             </div>
           </td>
@@ -350,14 +346,8 @@
             {% if item.not_after %}
             <div>{{ item.not_after }}</div>
             {% if days is not none %}
-            <div style="margin-top: 4px;">
-              <span style="
-                      display:inline-block;
-                      padding:2px 10px;
-                      border-radius:999px;
-                      font-size:11px;
-                      background:rgba(255,255,255,0.04);
-                    ">
+            <div  class="u-mt-1">
+              <span  class="u-p-2px-10px u-border-radius-8px text-xs u-background-var-surface-1">
                 {% if days < 0 %} expired {{ -days }} days ago {% else %} {{ days }} days remaining {% endif %} </span>
             </div>
             {% endif %}
@@ -378,8 +368,8 @@
           </td>
 
           {# Actions #}
-          <td style="text-align: right; white-space: nowrap;">
-            <form method="post" style="display:inline;" class="cert-delete-haproxy"
+          <td  class="text-right nowrap">
+            <form method="post"  class="inline cert-delete-haproxy"
               data-domain="{{ domains[0] if domains else '' }}">
               <input type="hidden" name="action" value="delete_haproxy">
               <input type="hidden" name="path" value="{{ item.path }}">
@@ -401,7 +391,7 @@
 </div>
 
 {# ─────────────────── Let's Encrypt certificates ─────────────────── #}
-<div class="card" style="margin-top: 20px;">
+<div class="u-mt-5 card" >
   <div class="card-header">
     <h2>Standby certificates</h2>
     <div class="table-meta">
@@ -410,8 +400,8 @@
     </div>
   </div>
 
-  <div style="padding: 12px 16px;">
-    <p class="mon-sub" style="margin-top:0;">
+  <div  class="u-p-12px-16px">
+    <p class="u-mt-0 mon-sub" >
       HAProxy resolves a name to exactly one certificate and never looks at
       the dates: given an expired one and a good one in the same directory it
       serves the expired one, and the site is down while the replacement sits
@@ -428,17 +418,17 @@
     </p>
 
     {% if standby_error %}
-    <div class="table-meta" style="color: var(--error);">{{ standby_error }}</div>
+    <div class="text-danger table-meta" >{{ standby_error }}</div>
     {% endif %}
 
     {% if standby_domains %}
-    <table class="table mono" style="table-layout: fixed; width: 100%;">
+    <table class="table-fixed w-full table mono" >
       <colgroup>
-        <col style="width:26%;">
-        <col style="width:22%;">
-        <col style="width:16%;">
-        <col style="width:16%;">
-        <col style="width:20%;">
+        <col  class="u-w-26">
+        <col  class="u-w-22">
+        <col  class="u-w-16">
+        <col  class="u-w-16">
+        <col  class="u-w-20">
       </colgroup>
       <thead>
         <tr>
@@ -446,7 +436,7 @@
           <th>Issued by</th>
           <th>Until</th>
           <th>Role</th>
-          <th style="text-align:right;">Actions</th>
+          <th  class="text-right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -471,10 +461,10 @@
               In service
             {% endif %}
           </td>
-          <td style="text-align:right;">
+          <td  class="text-right">
             {% if entry.pinned %}
-            <form method="post" style="display:inline;"
-                  onsubmit="return confirm('{{ entry.domain }} → Let's Encrypt?');">
+            <form method="post"
+                  onsubmit="return confirm('{{ entry.domain }} → Let's Encrypt?');" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="release_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -483,8 +473,8 @@
               </button>
             </form>
             {% elif entry.can_be_put_away %}
-            <form method="post" style="display:inline;"
-                  onsubmit="return confirm('{{ entry.domain }}?');">
+            <form method="post"
+                  onsubmit="return confirm('{{ entry.domain }}?');" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="adopt_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -497,8 +487,8 @@
           </td>
         </tr>
         {% for spare in entry.standbys %}
-        <tr style="opacity:.85;">
-          <td style="padding-left:24px;" data-i18n-skip translate="no">
+        <tr  class="text-muted">
+          <td  data-i18n-skip translate="no" class="u-pl-6">
             ↳ {{ spare.slot }}
           </td>
           <td data-i18n-skip translate="no">
@@ -510,10 +500,10 @@
               <span class="badge warn">In service</span>
             {% elif spare.usable %}Standby{% else %}Unusable{% endif %}
           </td>
-          <td style="text-align:right; white-space:nowrap;">
+          <td  class="text-right nowrap">
             {% if spare.usable and entry.pinned != spare.slot %}
-            <form method="post" style="display:inline;"
-                  onsubmit="return confirm('{{ entry.domain }} → {{ spare.slot }}?');">
+            <form method="post"
+                  onsubmit="return confirm('{{ entry.domain }} → {{ spare.slot }}?');" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="activate_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -522,8 +512,8 @@
             </form>
             {% endif %}
             {% if entry.pinned != spare.slot %}
-            <form method="post" style="display:inline;"
-                  onsubmit="return confirm('{{ spare.slot }}?');">
+            <form method="post"
+                  onsubmit="return confirm('{{ spare.slot }}?');" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="delete_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -541,8 +531,8 @@
     <div class="table-meta">No certificates are deployed yet.</div>
     {% endif %}
 
-    <h3 style="margin-top:20px;">Keep a standby</h3>
-    <form method="post" enctype="multipart/form-data" style="max-width:640px;">
+    <h3  class="u-mt-5">Keep a standby</h3>
+    <form method="post" enctype="multipart/form-data"  class="u-maxw-min-640px-100">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="action" value="store_standby">
       <div class="form-row">
@@ -581,14 +571,14 @@
         than none. A wildcard filed against every name it covers is stored
         once per name, so each can be put into service on its own.
       </div>
-      <button type="submit" class="btn primary" style="margin-top:10px;">
+      <button type="submit" class="u-mt-2 btn primary" >
         Keep it
       </button>
     </form>
   </div>
 </div>
 
-<div class="card" style="margin-top: 20px;">
+<div class="u-mt-5 card" >
   <div class="card-header">
     <h2>Let's Encrypt certificates ({{ le_certs|length }})</h2>
     <div class="table-meta">
@@ -597,15 +587,15 @@
     </div>
   </div>
 
-  <div style="padding: 12px 16px;">
+  <div  class="u-p-12px-16px">
     {% if le_certs %}
-    <table class="table mono" style="table-layout: fixed; width: 100%;">
+    <table class="table-fixed w-full table mono" >
       <colgroup>
-        <col style="width:26%;">
-        <col style="width:34%;">
-        <col style="width:18%;">
-        <col style="width:12%;">
-        <col style="width:10%;">
+        <col  class="u-w-26">
+        <col  class="u-w-34">
+        <col  class="u-w-18">
+        <col  class="u-w-12">
+        <col  class="u-w-10">
       </colgroup>
       <thead>
         <tr>
@@ -613,7 +603,7 @@
           <th>File</th>
           <th>Expiring</th>
           <th>Status</th>
-          <th style="text-align:right;">Actions</th>
+          <th  class="text-right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -637,7 +627,7 @@
 
           {# Path to fullchain + lineage #}
           <td>
-            <div class="mono" style="word-break: break-all;">
+            <div class="break-anywhere mono" >
               <code>{{ item.fullchain_path }}</code>
             </div>
             <div class="table-meta">
@@ -650,14 +640,8 @@
             {% if item.not_after %}
             <div>{{ item.not_after }}</div>
             {% if days is not none %}
-            <div style="margin-top: 4px;">
-              <span style="
-                      display:inline-block;
-                      padding:2px 10px;
-                      border-radius:999px;
-                      font-size:11px;
-                      background:rgba(255,255,255,0.04);
-                    ">
+            <div  class="u-mt-1">
+              <span  class="u-p-2px-10px u-border-radius-8px text-xs u-background-var-surface-1">
                 {% if days < 0 %} expired {{ -days }} days ago {% else %} {{ days }} days remaining {% endif %} </span>
             </div>
             {% endif %}
@@ -678,8 +662,8 @@
           </td>
 
           {# Actions #}
-          <td style="text-align: right; white-space: nowrap;">
-            <form method="post" style="display:inline;" class="cert-delete-le" data-lineage="{{ item.lineage }}">
+          <td  class="text-right nowrap">
+            <form method="post"  class="inline cert-delete-le" data-lineage="{{ item.lineage }}">
               <input type="hidden" name="action" value="delete_le">
               <input type="hidden" name="lineage" value="{{ item.lineage }}">
               <button type="submit" class="btn btn-small btn-danger">
@@ -700,30 +684,30 @@
 </div>
 
 {# ─────────────────── Backup / restore ─────────────────── #}
-<div class="card" style="margin-top: 20px;">
+<div class="u-mt-5 card" >
   <div class="card-header">
     <h2>Certificate backup / restore</h2>
   </div>
-  <div style="padding: 12px 16px;">
+  <div  class="u-p-12px-16px">
     <p class="table-meta">
       The backup contains directories
       <code>{{ haproxy_certs_dir|default('/etc/haproxy/certs') }}</code>
       and
       <code>{{ letsencrypt_root_dir|default('/etc/letsencrypt') }}</code>, including certificate authority data.
     </p>
-    <p class="table-meta" style="color:var(--error);">
+    <p class="text-danger table-meta" >
       This ZIP contains private server keys and the internal CA private key. Store it encrypted and restrict access.
     </p>
 
-    <p style="margin-top: 8px;">
+    <p  class="u-mt-2">
       <a class="btn" href="{{ url_for('routes.haproxy_certs_backup') }}">
         Download backup (.zip)
       </a>
     </p>
 
     <form id="certs-restore-form" action="{{ url_for('routes.haproxy_certs_restore') }}" method="post"
-      enctype="multipart/form-data" style="margin-top: 12px;"
-      data-confirm="WARNING: existing certificates will be overwritten. Continue?">
+      enctype="multipart/form-data"
+      data-confirm="WARNING: existing certificates will be overwritten. Continue?" class="u-mt-3">
 
       <label class="form-label" for="backup_file">
         Restore from backup (.zip)
@@ -742,13 +726,13 @@
         </span>
       </div>
 
-      <div style="margin-top: 10px;">
+      <div  class="u-mt-2">
         <button type="submit" class="btn btn-danger" id="backup_restore_btn" disabled>
           Restore from backup
         </button>
       </div>
 
-      <div class="table-meta" style="margin-top: 4px;">
+      <div class="u-mt-1 table-meta" >
         Warning: files in certificate directories will be overwritten.
       </div>
     </form>

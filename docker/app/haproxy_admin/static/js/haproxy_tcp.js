@@ -18,7 +18,7 @@
     function setSaveStatus(text, isError) {
       if (!saveStatus) return;
       saveStatus.textContent = text || "";
-      saveStatus.style.color = isError ? "#c0392b" : "";
+      saveStatus.style.color = isError ? "var(--error)" : "";
     }
 
     // -------- The TCP proxy delete block --------
@@ -28,10 +28,10 @@
 
     if (btnShowDel && deleteBox && btnCancelDel) {
       btnShowDel.addEventListener("click", function () {
-        deleteBox.style.display = "block";
+        deleteBox.hidden = false;
       });
       btnCancelDel.addEventListener("click", function () {
-        deleteBox.style.display = "none";
+        deleteBox.hidden = true;
       });
     }
 
@@ -47,8 +47,8 @@
         '<td><input type="text" class="form-input tcp-backend-name" placeholder="srv1"></td>' +
         '<td><input type="text" class="form-input tcp-backend-host" placeholder="10.0.0.10"></td>' +
         '<td><input type="number" min="1" max="65535" class="form-input tcp-backend-port" placeholder="6690"></td>' +
-        '<td style="text-align:center;"><input type="checkbox" class="tcp-backend-backup"></td>' +
-        '<td style="text-align:center;"><button type="button" class="btn btn-small btn-backend-remove" title="Delete backend">✕</button></td>';
+        '<td class="text-center"><input type="checkbox" class="tcp-backend-backup"></td>' +
+        '<td class="text-center"><button type="button" class="btn btn-small btn-backend-remove" title="Delete backend">✕</button></td>';
 
       backendsBody.appendChild(tr);
 

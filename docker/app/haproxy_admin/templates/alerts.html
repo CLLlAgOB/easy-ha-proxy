@@ -3,116 +3,15 @@
 {% block title %}Alerts{% endblock %}
 {% block header_title %}Alerts{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
-<style>
-.al-badge {
-  display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-}
 
-.al-critical { background: rgba(204,75,75,.15); color: #cc4b4b; }
-.al-warning { background: rgba(200,161,58,.18); color: #c8a13a; }
-.al-info { background: rgba(var(--accent-primary-rgb), .15); color: var(--accent-primary); }
-.al-ok { background: rgba(46,158,91,.15); color: #2e9e5b; }
-
-.al-empty {
-  color: var(--text-secondary);
-  font-size: 13px;
-  padding: 28px 0;
-  text-align: center;
-}
-
-.al-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.al-tile {
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--bg-tertiary);
-}
-
-.al-tile .al-value {
-  font-size: 22px;
-  font-weight: 600;
-}
-
-.al-form {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 14px;
-  align-items: end;
-}
-
-.al-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.al-form input,
-.al-form select {
-  padding: 6px 10px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-
-.al-rules td input {
-  width: 90px;
-  padding: 4px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-
-.al-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
-.al-row-actions { white-space: nowrap; }
-.al-quiet td:not(.al-row-actions) { opacity: .55; }
-.al-row-actions .btn { padding: 3px 9px; font-size: 12px; margin-right: 4px; }
-.al-row-actions select {
-  padding: 3px 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-size: 12px;
-  margin-right: 4px;
-}
-.al-row-actions small { display: block; color: var(--text-secondary); margin-bottom: 3px; }
-.al-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
-.al-filters select {
-  padding: 5px 9px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-</style>
-
-<div class="rt-notice" style="border-color: rgba(var(--accent-primary-rgb), .45);
-     background: rgba(var(--accent-primary-rgb), .07);">
+<div class="notice-info rt-notice" >
   Every feature reports what it sees; this page decides what is worth telling you about. A condition has to hold for its delay before anything is sent, a repeat is held back until the repeat window, and recovery is always announced. A burst is capped so one bad minute cannot become forty messages — the ones held back stay in the history below.
 </div>
 
-<div id="al-unavailable" class="rt-notice" hidden
-     style="border-color: rgba(204,75,75,.45); background: rgba(204,75,75,.08);">
+<div id="al-unavailable" class="notice-danger rt-notice" hidden
+     >
   The alert daemon is not answering. HAProxy traffic is unaffected, but nothing is being sent right now.
 </div>
 
@@ -139,7 +38,7 @@
     </div>
   </div>
 
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr>
@@ -183,7 +82,7 @@
     <button class="btn" type="button" id="al-history-clear">Clear history</button>
     {% endif %}
   </div>
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr>
@@ -247,13 +146,13 @@
     </label>
   </div>
 
-  <div class="table-meta" style="margin-top:10px;">
+  <div class="u-mt-2 table-meta" >
     Email uses the notification settings the certificate notices already use. A
     site with its own alert address keeps it: that address belongs to the site,
     not to this page.
   </div>
 
-  <h3 style="margin-top:22px;">Webhook</h3>
+  <h3  class="u-mt-5">Webhook</h3>
   <div class="table-meta">
     One JSON object per notification, over HTTPS only. The address is resolved
     once and the connection is made to exactly that address, so a name that
@@ -263,7 +162,7 @@
     value are stored root-only and are never sent back to this page.
   </div>
 
-  <div class="al-form" style="margin-top:12px;">
+  <div class="u-mt-3 al-form" >
     <label>
       URL
       <input type="url" id="al-webhook-url" placeholder="https://hooks.example.com/..." data-i18n-skip translate="no">
@@ -301,7 +200,7 @@
     how long a condition stays quiet before it says so again. A site with its
     own value in its settings overrides the delay here.
   </div>
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table al-rules">
       <thead>
         <tr>

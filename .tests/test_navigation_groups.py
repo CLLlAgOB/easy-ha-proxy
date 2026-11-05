@@ -109,11 +109,12 @@ class DestinationTests(unittest.TestCase):
         self.assertIn("authelia_acl.edit_rules", grouped_endpoints())
 
     def test_one_nav_serves_the_whole_application(self):
-        pages = ROOT / "docker" / "app" / "haproxy_admin" / "templates"
-        for name in ("index.html", "_authelia_nav.html"):
-            with self.subTest(page=name):
-                markup = (pages / name).read_text(encoding="utf-8")
-                self.assertIn("_haproxy_nav.html", markup)
+        self.assertEqual(BASE.read_text(encoding="utf-8").count('{% include "_haproxy_nav.html" %}'), 1)
+        for page in NAV.parent.glob("*.html"):
+            if page.name in ("base.html", "_haproxy_nav.html"):
+                continue
+            with self.subTest(page=page.name):
+                self.assertNotIn('{% include "_haproxy_nav.html" %}', page.read_text(encoding="utf-8"))
 
     def test_the_row_is_short_enough_to_be_worth_it(self):
         # Six menus plus Home. More than about eight and the header wraps
@@ -140,16 +141,16 @@ class BehaviourTests(unittest.TestCase):
     def test_the_script_is_loaded_for_every_page(self):
         self.assertIn("js/nav.js", BASE.read_text(encoding="utf-8"))
 
-    def test_opening_one_menu_closes_the_others(self):
+    def test_sections_remember_their_own_state(self):
         self.assertIn('addEventListener("toggle"', self.script)
-        self.assertIn("closeAll", self.script)
+        self.assertIn('localStorage.setItem("ehp-nav-sections"', self.script)
 
     def test_escape_closes_and_returns_focus(self):
-        self.assertIn('event.key !== "Escape"', self.script)
-        self.assertIn("summary.focus()", self.script)
+        self.assertIn('event.key === "Escape"', self.script)
+        self.assertIn("trigger.focus()", self.script)
 
     def test_clicking_away_closes_it(self):
-        self.assertIn('document.addEventListener("click"', self.script)
+        self.assertIn('backdrop.addEventListener("click"', self.script)
 
     def test_the_current_page_is_marked(self):
         # The row of buttons told you nothing about where you were either,
@@ -164,9 +165,9 @@ class BehaviourTests(unittest.TestCase):
         # live gateway. One class cannot drift from itself.
         source = self.source
         self.assertEqual(source.count('class="nav-item nav-item-menu'), 1)
-        self.assertIn('<a class="nav-item{%', source)
+        self.assertIn('<a class="nav-item nav-dashboard', source)
         # And exactly one rule defines the shared look.
-        self.assertEqual(self.styles.count("\n.nav-item {"), 1)
+        self.assertEqual(len(re.findall(r"\n\s*\.nav-item \{", self.styles)), 1)
 
     def test_the_dashboard_is_set_apart_deliberately(self):
         # It is a destination among menus; a rule before it says so without
@@ -177,15 +178,14 @@ class BehaviourTests(unittest.TestCase):
     def test_the_section_is_named_for_a_screen_reader(self):
         self.assertIn('aria-label="Administration sections"', self.source)
 
-    def test_the_panel_is_positioned_and_layered(self):
-        for rule in (".nav-group-items", "position: absolute", "z-index"):
+    def test_the_sidebar_is_positioned_and_its_contents_scroll(self):
+        for rule in (".sidebar", "position: fixed", "overflow-y: auto", "z-index"):
             with self.subTest(rule=rule):
                 self.assertIn(rule, self.styles)
 
-    def test_the_menus_nearest_the_edge_open_inward(self):
-        # Otherwise a right-hand panel leaves the viewport and the whole page
-        # gains a horizontal scrollbar.
-        self.assertIn(".nav-group:nth-last-of-type(-n+2) .nav-group-items", self.styles)
+    def test_mobile_navigation_disables_the_background(self):
+        self.assertIn("workspace.inert = opened", self.script)
+        self.assertIn('sidebar.setAttribute("aria-modal", "true")', self.script)
 
     def test_navigation_is_quieter_than_an_action_button(self):
         # Seven solid accent pills read as seven competing calls to action.
@@ -200,8 +200,8 @@ class BehaviourTests(unittest.TestCase):
         self.assertIn("text-decoration: none", block)
 
     def test_a_narrow_screen_gets_a_stacked_menu(self):
-        self.assertIn("@media (max-width: 720px)", self.styles)
-        narrow = self.styles.split("@media (max-width: 720px)")[1][:600]
+        self.assertIn("@media (max-width: 1023px)", self.styles)
+        narrow = self.styles.split("@media (max-width: 1023px)")[1][:900]
         self.assertIn("position: static", narrow)
 
 
