@@ -1,6 +1,6 @@
 """A decisive scanner is checked even behind thousands of noisy addresses.
 
-On Privatnet, 383 addresses competed for 200 places ordered by event count.
+On one gateway, 383 addresses competed for 200 places ordered by event count.
 Two decisive findings already warranted a ban, but both reported scanners
 waited for more zero-point findings before the executor would consider them.
 """
