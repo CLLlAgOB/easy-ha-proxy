@@ -577,8 +577,11 @@ class ThePanel(unittest.TestCase):
         self.assertIn('event.key === "Escape"', bind)
         self.assertIn('"resize"', bind)
         self.assertIn("#chart=", bind)
-        # Drawn at the size shown, not stretched from the card's frame.
-        self.assertIn('svg.closest(".mon-chart-expanded")', self.section("drawChart"))
+        # Both cards and full screen draw at their displayed size, so axis
+        # labels remain readable on phones as well as in the overlay.
+        self.assertIn("chartSize(svg)", self.section("drawChart"))
+        self.assertIn("svg.getBoundingClientRect()", self.section("chartSize"))
+        self.assertIn("redrawCharts()", bind)
 
     def test_the_memory_card_and_chart_are_on_the_page(self):
         self.assertIn('id="mon-card-memory" hidden', self.page)
