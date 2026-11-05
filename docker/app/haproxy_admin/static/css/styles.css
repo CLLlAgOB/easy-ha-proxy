@@ -815,6 +815,7 @@ a.ip-cell:hover {
 
 /* ===== Footer ===== */
 footer {
+  position: relative;
   margin-top: 40px;
   text-align: center;
   color: var(--text-secondary);
@@ -824,7 +825,42 @@ footer {
 }
 
 footer .footer-build {
+  display: inline-block;
+  vertical-align: top;
+}
+
+footer .footer-build summary {
+  cursor: pointer;
+  list-style: none;
   white-space: nowrap;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+footer .footer-build summary::-webkit-details-marker {
+  display: none;
+}
+
+footer .footer-build summary:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+
+footer .footer-build-details {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  line-height: 1.6;
+  text-align: left;
 }
 
 footer .footer-build-mismatch {

@@ -1,9 +1,9 @@
-"""Every page says which build the panel and the host run.
+"""Every page offers the panel and host builds, with a mismatch warning.
 
 The operator keeps several gateways and could not tell, from the panel,
-which had which change. The footer now names two builds -- the host's
+which had which change. The footer keeps details of two builds -- the host's
 managed source, which the update broker reads, and the panel image's, which
-CI bakes in -- each as its commit's time and short hash; the hosts hold a
+CI bakes in -- each as its commit's time and short hash, under one date. The hosts hold a
 shallow clone, so a commit count would always be 1. When the panel was
 built from other web files than the host has, the footer says so: the same
 `git ls-tree` fingerprint CI labels the image with is compared on both sides.
@@ -139,7 +139,7 @@ class TheWiring(unittest.TestCase):
         self.assertIn('--build-arg "EHP_BUILD_REVISION=${GITHUB_SHA}"', workflow)
         self.assertIn('--build-arg "EHP_SOURCE_TREE=${TREE}"', workflow)
 
-    def test_the_footer_shows_them_and_translates_whole(self):
+    def test_the_footer_keeps_details_and_translates_whole(self):
         base = (APP / "templates/base.html").read_text(encoding="utf-8")
         self.assertIn("build.host.when", base)
         self.assertIn("build.panel.revision", base)
@@ -150,8 +150,9 @@ class TheWiring(unittest.TestCase):
             spec.loader.exec_module(i18n)
         except ImportError:
             self.skipTest("the panel's dependencies are not installed here")
-        for text in ("Host build", "Panel build",
-                     "The panel was built from other web files than the host has; update the panel."):
+        for text in ("Build", "Show build details", "Date unavailable", "Host build", "Panel build",
+                     "Build comparison is unavailable.",
+                     "Host and panel versions differ. Update the panel."):
             self.assertNotEqual(i18n.translate(text, "ru"), text)
 
 

@@ -104,17 +104,33 @@
 
   <footer>
     HAProxy Security&nbsp;Dashboard © 2026 ·
-    {# Which build runs where: a commit's time orders builds, its hash names one. #}
-    {% if build and build.host %}
-    <span class="footer-build"><span>Host build</span>
-      <span class="notranslate" translate="no" data-i18n-skip>{{ build.host.when }} · {{ build.host.revision }}</span></span> ·
-    {% endif %}
-    {% if build and build.panel %}
-    <span class="footer-build"><span>Panel build</span>
-      <span class="notranslate" translate="no" data-i18n-skip>{{ build.panel.when }} · {{ build.panel.revision }}</span></span> ·
+    {% if build and (build.host or build.panel) %}
+    {% set current_build = build.host or build.panel %}
+    <details class="footer-build">
+      <summary title="Show build details"><span>Build</span>
+        {% if current_build.when %}
+        <span class="notranslate" translate="no" data-i18n-skip>{{ current_build.when }}</span>
+        {% else %}
+        <span>Date unavailable</span>
+        {% endif %}
+      </summary>
+      <div class="footer-build-details">
+        {% if build.host %}
+        <div><span>Host build</span>:
+          <span class="notranslate" translate="no" data-i18n-skip>{{ build.host.when }} · {{ build.host.revision }}</span></div>
+        {% endif %}
+        {% if build.panel %}
+        <div><span>Panel build</span>:
+          <span class="notranslate" translate="no" data-i18n-skip>{{ build.panel.when }} · {{ build.panel.revision }}</span></div>
+        {% endif %}
+        {% if build.match is none %}
+        <div>Build comparison is unavailable.</div>
+        {% endif %}
+      </div>
+    </details> ·
     {% endif %}
     {% if build and build.match is sameas false %}
-    <span class="footer-build-mismatch">The panel was built from other web files than the host has; update the panel.</span> ·
+    <span class="footer-build-mismatch">Host and panel versions differ. Update the panel.</span> ·
     {% endif %}
     <a href="https://db-ip.com" rel="noopener noreferrer">IP Geolocation by DB-IP</a>
   </footer>
