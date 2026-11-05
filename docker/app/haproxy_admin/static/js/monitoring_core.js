@@ -459,6 +459,22 @@
     return geometry.left + (index / (count - 1)) * geometry.plotWidth;
   }
 
+  // Link charts by clock time, not by their pixel width or sample number.
+  // A coarser bucket can contain the selected time; a missing bucket cannot.
+  function cursorAtTime(geometry, ts) {
+    const points = geometry.points;
+    const step = Math.max(1, Number(geometry.step) || 60);
+    const index = indexAtTime(points, step, ts);
+    if (index < 0 || Number(ts) >= Number(points[index]) + step) return null;
+    let x = xAtIndex(geometry, index);
+    if (index + 1 < points.length) {
+      const fraction = (Number(ts) - Number(points[index])) /
+        (Number(points[index + 1]) - Number(points[index]));
+      x += fraction * (xAtIndex(geometry, index + 1) - x);
+    }
+    return {index: index, x: x};
+  }
+
   /* ---------- events on the charts ---------- */
 
   // The sample a moment falls in: the last one at or before it. -1 outside
@@ -648,6 +664,7 @@
     viewFromQuery,
     indexAtX,
     xAtIndex,
+    cursorAtTime,
     rateDivisor,
     indexAtTime,
     eventMarks,

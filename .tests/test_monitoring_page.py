@@ -334,11 +334,16 @@ class DragAcrossAChartToZoom(unittest.TestCase):
 
     def test_the_pointer_reads_every_shown_line(self):
         zoom = self.section("bindZoom")
-        self.assertIn('if (start === null && event.pointerType === "mouse") showReading(svg, event);', zoom)
+        self.assertIn('if (start === null && event.pointerType === "mouse") queueReading(svg, event);', zoom)
         self.assertIn('"pointerleave"', zoom)
         reading = self.section("showReading")
-        self.assertIn("core.indexAtX(geometry, x)", reading)
-        self.assertIn("legendValue(dataset.spec, reading)", reading)
+        self.assertIn("core.indexAtX(geometry, local.x)", reading)
+        self.assertIn("getScreenCTM()", reading)
+        self.assertIn("drawReading(plot, ts)", reading)
+        self.assertIn("requestAnimationFrame", self.section("queueReading"))
+        self.assertIn("legendValue(dataset.spec, reading)", self.section("showTooltip"))
+        self.assertIn("core.cursorAtTime(geometry, ts)", self.section("drawReading"))
+        self.assertIn("node.dataset.summary", self.section("hideReading"))
 
     def test_the_selection_becomes_the_shown_period_and_can_be_undone(self):
         self.assertIn("zoomHistory.push(", self.section("zoomTo"))
@@ -350,7 +355,8 @@ class DragAcrossAChartToZoom(unittest.TestCase):
         self.assertEqual(self.script.count("zoomHistory.length = 0;"), 3)
 
     def test_a_refresh_does_not_drop_a_selection_in_progress(self):
-        self.assertIn("if (inFlight || zoomDragging) return;", self.section("loadAll"))
+        self.assertIn("if (inFlight || zoomDragging ||", self.section("loadAll"))
+        self.assertIn("options.refresh && sharedReading", self.section("loadAll"))
 
     def test_the_page_offers_it_and_says_so(self):
         self.assertIn('id="mon-zoom-out" hidden>Zoom out</button>', self.page)

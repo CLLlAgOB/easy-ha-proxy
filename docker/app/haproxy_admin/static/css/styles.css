@@ -27,12 +27,12 @@
     --accent-secondary-rgb: 8, 126, 139;
     --accent-soft: #edf3ff;
     --on-accent: #ffffff;
-    --success: #08734f;
-    --success-bg: #eaf7f0;
-    --error: #be2446;
-    --error-bg: #fff0f2;
-    --warning: #8b570b;
-    --warning-bg: #fff7e8;
+    --success: #066344;
+    --success-bg: #d9f0e3;
+    --error: #b91c35;
+    --error-bg: #fce0e3;
+    --warning: #875507;
+    --warning-bg: #f9ebc6;
     --border: #dce3ed;
     --border-strong: #bdc9da;
     --shadow: 0 6px 24px rgb(22 39 68 / 6%);
@@ -50,9 +50,9 @@
     --space-8: 32px;
     --space-10: 40px;
     --space-12: 48px;
-    --chart-success: #16815d;
-    --chart-warning: #b77812;
-    --chart-error: #c93e52;
+    --chart-success: #0b7651;
+    --chart-warning: #996600;
+    --chart-error: #bc263e;
     --chart-info: #4176df;
     --chart-secondary: #9871c6;
     --chart-server-error: #b26518;
@@ -73,19 +73,19 @@
     --accent-secondary-rgb: 108, 209, 212;
     --accent-soft: #1b3051;
     --on-accent: #102242;
-    --success: #79d9ad;
-    --success-bg: #15372e;
-    --error: #ff9fb0;
-    --error-bg: #3e2333;
-    --warning: #efc47b;
-    --warning-bg: #382e21;
+    --success: #50cf94;
+    --success-bg: #123c2b;
+    --error: #ff7387;
+    --error-bg: #46212c;
+    --warning: #efb844;
+    --warning-bg: #403117;
     --border: #2a3b52;
     --border-strong: #4a607f;
     --shadow: 0 6px 24px rgb(0 0 0 / 10%);
     --shadow-popover: 0 12px 40px rgb(0 0 0 / 35%);
-    --chart-success: #71d1a7;
-    --chart-warning: #e4b85b;
-    --chart-error: #f08b9e;
+    --chart-success: #22b477;
+    --chart-warning: #dca52b;
+    --chart-error: #ef5268;
     --chart-info: #8aaff7;
     --chart-secondary: #c2a5ef;
     --chart-server-error: #efaf74;
@@ -98,8 +98,10 @@
       --text-primary: #e7edf7; --text-secondary: #a0b1c9;
       --accent-primary: #91b6ff; --accent-secondary: #6cd1d4;
       --accent-primary-rgb: 145, 182, 255; --accent-soft: #1b3051; --on-accent: #102242;
-      --success: #79d9ad; --success-bg: #15372e; --error: #ff9fb0; --error-bg: #3e2333;
-      --warning: #efc47b; --warning-bg: #382e21; --border: #2a3b52; --border-strong: #4a607f;
+      --success: #50cf94; --success-bg: #123c2b; --error: #ff7387; --error-bg: #46212c;
+      --warning: #efb844; --warning-bg: #403117; --border: #2a3b52; --border-strong: #4a607f;
+      --chart-success: #22b477; --chart-warning: #dca52b; --chart-error: #ef5268;
+      --chart-info: #8aaff7; --chart-secondary: #c2a5ef; --chart-server-error: #efaf74;
     }
   }
 }

@@ -7,6 +7,8 @@
     "Historical monitoring is unavailable. The collector is not answering, so no history can be shown. HAProxy traffic is not affected.": "Историческая статистика недоступна. Сборщик не отвечает, поэтому историю показать нечем. Трафик HAProxy не затронут.",
     "Historical monitoring is paused because the disk free-space safety threshold was reached. HAProxy traffic is not affected.": "Запись истории приостановлена: достигнут порог безопасного запаса свободного места. Трафик HAProxy не затронут.",
     "Overview": "Обзор",
+    "Hover over a chart to compare all charts at the same time": "Наведите курсор на график, чтобы сравнить все показатели за один момент времени",
+    "Auto-refresh paused while inspecting": "Автообновление приостановлено на время просмотра",
     "Time range": "Период",
     "All sites": "Все сайты",
     "Requests per second": "Запросов в секунду",

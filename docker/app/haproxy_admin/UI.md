@@ -57,3 +57,11 @@ filters survive data refreshes; its bans-only API view avoids reading unused
 error tables. Invalidate both table caches when changing a ban. Keep the SVG
 histogram fill rules and icon stroke rules: verify computed colors with real
 bars and populated service rows, as empty fixtures cannot expose a lost rule.
+
+Monitoring charts share a cursor by timestamp, including when bucket sizes or
+SVG viewBox scaling differ. Hover updates the visible lines' legend readings;
+leaving restores period summaries. Gaps stay missing. Pointer work is limited
+to one animation frame and uses cached data. Automatic refresh pauses during
+inspection or drag selection; a manual view change clears the cursor. Verify
+linked cursors, null readings, touch inspection, drag zoom and full screen in
+both themes, with populated charts.
