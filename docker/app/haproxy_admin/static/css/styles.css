@@ -212,8 +212,8 @@
   .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; text-align: center; vertical-align: middle; }
   a.btn, .btn:link, .btn:visited { text-decoration: none; }
   button:hover:not(:disabled), .btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--text-secondary); }
-  button[type="submit"], .btn-primary, button.primary, .btn.primary { background: var(--accent-primary); color: var(--on-accent); border-color: var(--accent-primary); }
-  button[type="submit"]:hover:not(:disabled), .btn-primary:hover:not(:disabled), button.primary:hover:not(:disabled), .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-primary) 86%, var(--text-primary)); color: var(--on-accent); border-color: var(--accent-primary); }
+  :where(button)[type="submit"], .btn-primary, button.primary, .btn.primary { background: var(--accent-primary); color: var(--on-accent); border-color: var(--accent-primary); }
+  :where(button)[type="submit"]:hover:not(:disabled), .btn-primary:hover:not(:disabled), button.primary:hover:not(:disabled), .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-primary) 86%, var(--text-primary)); color: var(--on-accent); border-color: var(--accent-primary); }
   .btn-danger, button.btn-danger[type="submit"] { color: var(--error); background: var(--error-bg); border-color: color-mix(in srgb, var(--error) 32%, var(--border)); }
   .btn-danger:hover:not(:disabled) { background: var(--error); color: var(--bg-secondary); border-color: var(--error); }
   .btn-success { color: var(--success); background: var(--success-bg); }
