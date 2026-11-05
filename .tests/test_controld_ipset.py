@@ -313,6 +313,13 @@ import os, sys
 request = sys.stdin.read().split()
 table = request[2] if len(request) > 2 else ""
 mode = os.environ.get("FAKE_SOCAT_MODE", "ok")
+if request[:2] == ["show", "info"]:
+    uptime = os.environ.get("FAKE_UPTIME", "3600")
+    if uptime == "fail":
+        sys.exit(1)
+    print("Name: HAProxy")
+    print("Uptime_sec: " + uptime)
+    sys.exit(0)
 if mode == "fail":
     print("socat: connect: No such file or directory", file=sys.stderr)
     sys.exit(1)
@@ -352,6 +359,32 @@ class AnUnreadTableIsNotAnEmptyOne(FakeIpsetCase):
         self.sets({controld.IPSET_NAME: ["192.0.2.9"], controld.AUTH_IPSET: ["192.0.2.9"]})
         self.sync("empty")
         self.assertEqual(self.sets(), {controld.IPSET_NAME: set(), controld.AUTH_IPSET: set()})
+
+    def test_just_after_haproxy_starts_the_firewall_keeps_its_bans(self):
+        # A restart empties HAProxy's table; guardd puts its bans back within
+        # its cycle. Until then the firewall goes on dropping (04.3b).
+        self.sets({controld.IPSET_NAME: ["192.0.2.9"], controld.AUTH_IPSET: []})
+        with mock.patch.dict(os.environ, {"FAKE_UPTIME": "5"}):
+            self.sync("empty")
+            self.assertEqual(self.sets()[controld.IPSET_NAME], {"192.0.2.9"})
+            # Adding is never held back.
+            self.sync("ok")
+            self.assertEqual(self.sets()[controld.IPSET_NAME], {"192.0.2.1", "192.0.2.3", "192.0.2.9"})
+        with mock.patch.dict(os.environ, {"FAKE_UPTIME": str(controld.BAN_RESTART_GRACE_SECONDS)}):
+            self.sync("ok")
+        self.assertEqual(self.sets()[controld.IPSET_NAME], {"192.0.2.1", "192.0.2.3"})
+
+    def test_an_uptime_that_cannot_be_read_holds_nothing_back(self):
+        self.sets({controld.IPSET_NAME: ["192.0.2.9"], controld.AUTH_IPSET: []})
+        with mock.patch.dict(os.environ, {"FAKE_UPTIME": "fail"}):
+            self.sync("empty")
+        self.assertEqual(self.sets()[controld.IPSET_NAME], set())
+
+    def test_the_hold_is_only_asked_for_when_something_would_go(self):
+        self.sets({controld.IPSET_NAME: ["192.0.2.1", "192.0.2.3"], controld.AUTH_IPSET: []})
+        with mock.patch.object(controld, "haproxy_uptime", wraps=controld.haproxy_uptime) as asked:
+            self.sync("ok")
+        asked.assert_not_called()
 
     def test_no_such_table_or_a_failed_read_changes_nothing(self):
         for mode in ("missing", "fail"):

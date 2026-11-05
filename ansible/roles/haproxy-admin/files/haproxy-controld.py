@@ -699,6 +699,26 @@ def _update_ipset(set_name: str, to_add, to_del, timeouts: "Dict[str, int] | Non
     return True
 
 
+# A restarted HAProxy starts with an empty ban table, and the next pass used
+# to take every ban out of the firewall with it -- for the ten seconds or so
+# until guardd put its bans back (and the manual ones it remembers), banned
+# addresses got through. For this long after HAProxy starts, a pass only
+# adds; what is still missing from the table afterwards is taken out by the
+# first pass after it. A reload restarts the count too.
+BAN_RESTART_GRACE_SECONDS = max(0, int(os.environ.get("HAPADM_BAN_RESTART_GRACE_SECONDS", "60")))
+
+
+def haproxy_uptime() -> "int | None":
+    """Seconds the HAProxy answering on the socket has run; None when not known."""
+    try:
+        proc = run_cmd(["socat", SOCKET_PATH, "stdio"], input_data="show info\n", timeout=5)
+    except Exception as e:  # noqa: BLE001 - not knowing is answered below
+        LOG.debug("Failed to read HAProxy's uptime: %s", e)
+        return None
+    found = re.search(r"^Uptime_sec:\s*(\d+)", proc.stdout or "", re.MULTILINE)
+    return int(found.group(1)) if found else None
+
+
 def sync_bans_once() -> None:
     """
     One synchronisation pass of tbl_ban -> ipset.
@@ -713,6 +733,14 @@ def sync_bans_once() -> None:
 
     to_add = haproxy_banned - ipset_members
     to_del = ipset_members - haproxy_banned
+    if to_del and BAN_RESTART_GRACE_SECONDS:
+        uptime = haproxy_uptime()
+        if uptime is not None and uptime < BAN_RESTART_GRACE_SECONDS:
+            LOG.info(
+                "HAProxy has run for %ds: %d bans stay in the firewall until its table is filled again",
+                uptime, len(to_del),
+            )
+            to_del = set()
 
     if _update_ipset(IPSET_NAME, to_add, to_del) and (to_add or to_del):
         LOG.info(

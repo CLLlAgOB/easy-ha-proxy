@@ -920,6 +920,16 @@ IPv4 only: `tbl_ban` is an IPv4 stick table and the firewall ruleset is `inet`,
 so addresses that cannot be acted upon are recorded as such instead of
 accumulating a score nothing can use.
 
+Every address flagged in `tbl_ban` -- whoever banned it -- is copied every ten
+seconds into the `haproxy_ban` ipset, whose packets to ports 80 and 443 the
+firewall drops before HAProxy sees them; a lifted ban leaves it on the next
+pass, and a table that cannot be read changes nothing. A restarted HAProxy
+starts with an empty table, so for the first minute after HAProxy starts (or
+reloads) the copy only adds: the firewall goes on dropping while adaptive
+protection puts its bans and the remembered manual ones back, and whatever is
+still missing from the table after that minute is taken out on the next pass
+(`HAPADM_BAN_RESTART_GRACE_SECONDS`, 60 by default; 0 turns the hold off).
+
 Only significant events are stored, never the traffic itself. Paths are
 normalised and length-capped before they reach the database, and the
 per-address working set is bounded in both directions: a capped number of
