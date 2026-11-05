@@ -681,7 +681,7 @@ def ban_address(ip: str, client_ip: str, drop_allowlist: bool = False) -> Dict[s
         note = ("Banned in HAProxy, but the security engine did not answer: "
                 "the ban will not come back after HAProxy restarts.")
     # get_tables caches for a few seconds; the page should see the ban now.
-    services.cache_time = services.datetime.min
+    services.invalidate_table_cache()
     result = {"ok": True, "ip": ip, "code": MANUAL_BAN_CODE, "dropped_from_allowlist": bool(drop_allowlist)}
     if note:
         result["note"] = note

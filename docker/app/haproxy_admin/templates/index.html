@@ -28,54 +28,38 @@
   <button class="btn" id="auto-btn">Auto-refresh: off</button>
 </div>
 
-<div class="u-mb-5 card" id="sites-panel" >
+<div class="card dashboard-card" id="sites-panel">
   <div class="card-header"><h2>Sites</h2></div>
-  <ul id="sites-list" class="site-list">
+  <ul id="sites-list" class="site-list dashboard-sites">
     <li class="muted">Loading…</li>
   </ul>
 </div>
 
-<!-- BLOCKED / ERR -->
-<div class="card">
-  <div class="flex-container">
-    <div class="box">
-      <div class="table-header">
-        <div class="table-title">Blocked IPs</div>
-        <div id="ban-meta" class="table-meta">Loading…</div>
-      </div>
-      <div class="table-container">
-        <div id="ban">Loading…</div>
-      </div>
-    </div>
-    <div class="box">
-      <div class="table-header">
-        <div class="table-title">Failed requests</div>
-        <div id="err-meta" class="table-meta">Loading…</div>
-      </div>
-      <div class="table-container">
-        <div id="err">Loading…</div>
-      </div>
-    </div>
+<div class="dashboard-columns">
+<div class="dashboard-column">
+<!-- BLOCKED IPs -->
+<div class="card dashboard-card" id="bans-panel">
+  <div class="card-header">
+    <h2>Blocked IPs</h2>
+    <div id="ban-meta" class="table-meta">Loading…</div>
   </div>
-
-  <!-- the unban form -->
-  <div class="u-mt-6 u-gap-8 flex-container" >
-    <div  class="grow">
-      <h3>Unban IP</h3>
-      <form id="unban-form"  class="flex items-end u-gap-4">
-        <div  class="grow">
-          <label for="ip" class="form-label">Enter an IP address</label>
-          <input type="text" id="ip" name="ip" class="form-input" placeholder="192.0.2.1" required>
-        </div>
-        <button type="submit" class="btn btn-danger">Unblock</button>
-        <span id="unban-result" class="result-message"></span>
-      </form>
-    </div>
+  <input type="search" class="dashboard-filter" data-dashboard-filter="ban" aria-label="Search blocked IPs" placeholder="Search addresses">
+  <div class="dashboard-filter-result table-meta" data-dashboard-filter-result="ban" aria-live="polite" hidden></div>
+  <div class="table-container dashboard-scroll" tabindex="0" role="region" aria-label="Blocked IPs">
+    <div id="ban">Loading…</div>
   </div>
+  <form id="unban-form" class="dashboard-unban-form">
+    <div class="grow">
+      <label for="ip" class="form-label">Unban IP</label>
+      <input type="text" id="ip" name="ip" class="form-input" placeholder="192.0.2.1" required>
+    </div>
+    <button type="submit" class="btn">Unblock</button>
+    <span id="unban-result" class="result-message"></span>
+  </form>
 </div>
 
 <!-- ALLOW-LISTS -->
-<div class="card" id="whitelists-panel">
+<div class="card dashboard-card" id="whitelists-panel">
   <div class="card-header whitelist-header">
     <div>
       <h2>Allow lists</h2>
@@ -90,6 +74,11 @@
         <div class="table-title">GEO whitelist</div>
         <div class="table-meta" id="whitelist-geo-meta">Loading…</div>
       </div>
+      <input type="search" class="dashboard-filter" data-dashboard-filter="whitelist-geo-list" aria-label="Search GEO whitelist" placeholder="Search addresses">
+      <div class="dashboard-filter-result table-meta" data-dashboard-filter-result="whitelist-geo-list" aria-live="polite" hidden></div>
+      <div class="whitelist-list dashboard-scroll" id="whitelist-geo-list" tabindex="0" role="region" aria-label="GEO whitelist">
+        <div class="loading">Loading…</div>
+      </div>
       <form id="whitelist-form" class="whitelist-manage-form">
         <div class="whitelist-input">
           <label for="whitelist-ip" class="form-label">IP or CIDR network</label>
@@ -98,12 +87,9 @@
         <button type="submit" class="btn">Apply</button>
         <span id="whitelist-result" class="result-message"></span>
       </form>
-      <div class="whitelist-path" id="whitelist-geo-path">Path: …</div>
-      <div class="whitelist-list" id="whitelist-geo-list">
-        <div class="loading">Loading…</div>
-      </div>
       <details class="whitelist-runtime">
         <summary>Runtime ACL</summary>
+        <div class="whitelist-path" id="whitelist-geo-path">Path: …</div>
         <pre id="whitelist-geo-runtime">Loading…</pre>
       </details>
     </section>
@@ -112,6 +98,11 @@
       <div class="table-header">
         <div class="table-title">GLOBAL whitelist</div>
         <div class="table-meta" id="whitelist-global-meta">Loading…</div>
+      </div>
+      <input type="search" class="dashboard-filter" data-dashboard-filter="whitelist-global-list" aria-label="Search GLOBAL whitelist" placeholder="Search addresses">
+      <div class="dashboard-filter-result table-meta" data-dashboard-filter-result="whitelist-global-list" aria-live="polite" hidden></div>
+      <div class="whitelist-list dashboard-scroll" id="whitelist-global-list" tabindex="0" role="region" aria-label="GLOBAL whitelist">
+        <div class="loading">Loading…</div>
       </div>
       <form id="whitelist-global-form" class="whitelist-manage-form">
         <div class="whitelist-input">
@@ -122,38 +113,37 @@
         <button type="submit" class="btn">Apply</button>
         <span id="whitelist-global-result" class="result-message"></span>
       </form>
-      <div class="whitelist-path" id="whitelist-global-path">Path: …</div>
-      <div class="whitelist-list" id="whitelist-global-list">
-        <div class="loading">Loading…</div>
-      </div>
       <details class="whitelist-runtime">
         <summary>Runtime ACL</summary>
+        <div class="whitelist-path" id="whitelist-global-path">Path: …</div>
         <pre id="whitelist-global-runtime">Loading…</pre>
       </details>
     </section>
   </div>
 </div>
 
+</div>
+<div class="dashboard-column">
 <!-- THREAT ANALYTICS -->
-<div class="card">
+<div class="card dashboard-card" id="threats-panel">
   <div class="card-header">
     <h2>Threat analytics</h2>
     <button class="btn" data-dashboard-action="fetchAttackers">Refresh data</button>
   </div>
 
-  <div class="grid">
+  <div class="dashboard-threats">
     <div>
       <h3>Top HTTP 400 responses</h3>
-      <div id="top-400" class="loading">Analyzing data…</div>
+      <div id="top-400" class="loading dashboard-scroll" tabindex="0" role="region" aria-label="Top HTTP 400 responses">Analyzing data…</div>
     </div>
     <div>
       <h3>Top HTTP 451 geo-block responses</h3>
-      <div id="top-451" class="loading">Analyzing data…</div>
+      <div id="top-451" class="loading dashboard-scroll" tabindex="0" role="region" aria-label="Top HTTP 451 geo-block responses">Analyzing data…</div>
     </div>
   </div>
 </div>
 <!-- ───────── Authorized IPs (tbl_ip_auth) ───────── -->
-<div class="card">
+<div class="card dashboard-card" id="authorized-panel">
   <div class="card-header">
     <h2>Authorized IPs (tbl_ip_auth)</h2>
     <button class="btn" id="ip-auth-refresh" type="button">Refresh</button>
@@ -161,13 +151,15 @@
 
   <div class="card-meta" id="ip-auth-meta">Loading…</div>
 
-  <div id="ip-auth">
+  <input type="search" class="dashboard-filter" data-dashboard-filter="ip-auth" aria-label="Search authorized IPs" placeholder="Search addresses">
+  <div class="dashboard-filter-result table-meta" data-dashboard-filter-result="ip-auth" aria-live="polite" hidden></div>
+  <div id="ip-auth" class="dashboard-scroll" tabindex="0" role="region" aria-label="Authorized IPs (tbl_ip_auth)">
     <div class="loading">Loading…</div>
   </div>
 </div>
 
 <!-- ACTIVE CONNECTIONS (short view) -->
-<div class="card">
+<div class="card dashboard-card" id="connections-panel">
   <div class="card-header">
     <h2>Active connections</h2>
     <button class="btn" data-dashboard-action="fetchConnections">Refresh</button>
@@ -176,7 +168,9 @@
   <div class="table-header">
     <div id="conn-meta" class="connection-badge">Loading…</div>
   </div>
-  <div id="connections" class="loading">Loading…</div>
+  <div id="connections" class="loading dashboard-scroll" tabindex="0" role="region" aria-label="Active connections">Loading…</div>
+</div>
+</div>
 </div>
 {% endblock %}
 

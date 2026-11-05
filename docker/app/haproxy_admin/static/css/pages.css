@@ -1,5 +1,36 @@
 /* Page components share the same palette, spacing and interaction states. */
 @layer pages {
+  .dashboard-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+  .dashboard-column { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .dashboard-card { padding: 18px; }
+  .dashboard-card .card-header, .dashboard-card .table-header { margin-bottom: 12px; gap: 8px; align-items: center; }
+  .dashboard-card h2 { font-size: 15px; }
+  .dashboard-card h3 { margin-bottom: 8px; font-size: 12px; }
+  .dashboard-card .dashboard-scroll { max-height: 224px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .dashboard-card .dashboard-sites { max-height: 144px; overflow: auto; padding-right: 4px; scrollbar-gutter: stable; }
+  .dashboard-card .dashboard-scroll th { padding: 7px 8px; }
+  .dashboard-card .dashboard-scroll td { padding: 7px 8px; font-size: 11px; }
+  .dashboard-card .dashboard-scroll .ip-cell { font-size: 11px; white-space: nowrap; }
+  .dashboard-ban-reason { display: block; max-width: 170px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .dashboard-card .no-data { padding: 18px 8px; }
+  .dashboard-filter { margin-bottom: 10px; }
+  .dashboard-filter-result { margin-bottom: 8px; }
+  .dashboard-unban-form { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  .dashboard-unban-form .grow { flex: 1 1 160px; }
+  .dashboard-unban-form .result-message { flex-basis: 100%; }
+  .dashboard-card .whitelist-grid { gap: 12px; }
+  .dashboard-card .whitelist-column { padding: 12px; }
+  .dashboard-card .whitelist-list { max-height: 176px; }
+  .dashboard-card .whitelist-items li { padding: 5px 0; }
+  .dashboard-card .whitelist-remove { padding: 3px 7px; min-height: 26px; font-size: 10px; }
+  .dashboard-card .whitelist-manage-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-top: 12px; }
+  .dashboard-card .whitelist-manage-form .result-message { grid-column: 1 / -1; }
+  .dashboard-card .whitelist-input { flex-basis: 130px; }
+  .dashboard-card .whitelist-path { margin: 7px 0; }
+  .dashboard-threats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .dashboard-threats > div { min-width: 0; }
+  .dashboard-threats .dashboard-scroll { max-height: 144px; }
+  #mon-timeline, #mon-channels, #ap-ladder, .al-rules { max-height: min(520px, 65vh); overflow: auto; overscroll-behavior: contain; }
   .whitelist-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
   .whitelist-column { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-1); }
   .whitelist-column .table-title { font-size: 14px; }
@@ -290,6 +321,11 @@
   .rq-count { font-weight: 650; font-variant-numeric: tabular-nums; }
   .rq-overview { margin-top: 16px; }
   .rq-hist { width: 100%; height: 90px; display: block; cursor: crosshair; touch-action: pan-y; user-select: none; }
+  .rq-hist .ok { fill: var(--chart-success); }
+  .rq-hist .client_errors { fill: var(--chart-warning); }
+  .rq-hist .server_errors { fill: var(--chart-server-error); }
+  .rq-hist .refused { fill: var(--chart-error); }
+  .rq-axis { display: flex; justify-content: space-between; gap: 12px; color: var(--text-secondary); margin-top: 6px; }
   .rq-tops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; padding: 16px 0; }
   .rq-tops h3 { font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; }
   .rq-tops a { font-size: 11px; overflow-wrap: anywhere; }
@@ -308,7 +344,18 @@
     .monitoring-grid { grid-template-columns: 1fr; }
     .whitelist-grid { grid-template-columns: 1fr; }
   }
+  @media (max-width: 900px) {
+    .dashboard-columns { grid-template-columns: 1fr; }
+  }
   @media (max-width: 720px) {
+    .dashboard-columns, .dashboard-column { gap: 12px; }
+    .dashboard-card { padding: 14px; }
+    .dashboard-card .card-header, .dashboard-card .table-header { margin-bottom: 8px; }
+    .dashboard-card .dashboard-scroll { max-height: 128px; }
+    .dashboard-card .whitelist-list { max-height: 96px; }
+    .dashboard-card .dashboard-sites { max-height: 104px; }
+    .dashboard-threats .dashboard-scroll { max-height: 96px; }
+    .dashboard-threats { grid-template-columns: 1fr; }
     .ch-layout, .dp-profile { grid-template-columns: 1fr; }
     .rq-tops { grid-template-columns: 1fr; }
     .ap-ladder-row { grid-template-columns: 26px minmax(90px, 1fr) minmax(80px, .7fr) auto; gap: 6px; }

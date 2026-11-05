@@ -106,6 +106,8 @@ def api_whitelists():
 
 @bp.route("/api/tables")
 def api_tables():
+    if request.args.get("view") == "bans":
+        return jsonify(get_tables(include_errors=False))
     return jsonify(get_tables())
 
 

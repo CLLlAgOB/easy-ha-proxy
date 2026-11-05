@@ -32,6 +32,27 @@ const Dashboard = (() => {
     return `<span class="status-badge ${cls}">${escapeHtml(text)}</span>`;
   }
 
+  function applyListFilter(containerId) {
+    const input = document.querySelector(`[data-dashboard-filter="${containerId}"]`);
+    const box = document.getElementById(containerId);
+    if (!input || !box) return;
+    const query = input.value.trim().toLowerCase();
+    const rows = [...box.querySelectorAll('tbody > tr, .whitelist-items > li')];
+    let shown = 0;
+    rows.forEach(row => {
+      const address = row.querySelector('.ip-cell, code');
+      row.hidden = Boolean(query && !(address?.textContent || '').toLowerCase().includes(query));
+      if (!row.hidden) shown++;
+    });
+    const result = document.querySelector(`[data-dashboard-filter-result="${containerId}"]`);
+    if (result) {
+      result.hidden = !query;
+      result.textContent = typeof window.t === 'function'
+        ? window.t('{shown} of {total} entries', {shown, total: rows.length})
+        : `${shown} of ${rows.length} entries`;
+    }
+  }
+
   /* ───────────— render-helpers ─────────── */
   function renderTable(containerId, data, metaId = null) {
     const el = document.getElementById(containerId);
@@ -42,6 +63,7 @@ const Dashboard = (() => {
       if (metaId && document.getElementById(metaId)) {
         document.getElementById(metaId).textContent = '0 entries';
       }
+      applyListFilter(containerId);
       return;
     }
 
@@ -94,15 +116,6 @@ const Dashboard = (() => {
           v = badge(cell, cell === 'Blocked' ? 'status-blocked' : 'status-normal');
         }
 
-        // 3) The errors column in the common err table
-        else if (containerId === 'err' && i === 1) {
-          const n = +cell || 0;
-          v = badge(
-            `${n} errors`,
-            n > 5 ? 'status-blocked' : n > 1 ? 'status-warning' : 'status-normal'
-          );
-        }
-
         // 4) The TTL/Expires column, made human-readable
         else if (ttlIdx >= 0 && i === ttlIdx) {
           // Say where the number comes from. For an adaptive ban it is the
@@ -128,11 +141,8 @@ const Dashboard = (() => {
         ) {
           // a numeric code: try to decode it
           const num = Number(cell);
-          if (!isNaN(num) && BAN_REASON_LABELS[num]) {
-            v = BAN_REASON_LABELS[num];
-          } else {
-            v = escapeHtml(cell ?? '');
-          }
+          const reason = !isNaN(num) && BAN_REASON_LABELS[num] ? BAN_REASON_LABELS[num] : String(cell ?? '');
+          v = `<span class="dashboard-ban-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</span>`;
         }
         else {
           v = escapeHtml(v ?? '');
@@ -146,6 +156,7 @@ const Dashboard = (() => {
 
     html += '</tbody></table>';
     el.innerHTML = html;
+    applyListFilter(containerId);
 
     // For the ban table and the others: add flags by IP with one batch request
     if (Array.isArray(data?.rows) && typeof window.decorateFlags === 'function') {
@@ -258,17 +269,6 @@ const Dashboard = (() => {
     el.innerHTML = h;
   }
 
-  function prettifyErrTableName(name) {
-    const n = String(name || '');
-    // Unnamed or broken names (nosni/other)
-    if (n === 'tbl_err_nosni' || n === 'tbl_err_other') return 'No SNI / invalid name';
-    // Remove the common prefix
-    let s = n.replace(/^tbl_err_/, '');
-    // Dots instead of underscores, for domains in the form rdg_example_com
-    s = s.replace(/_/g, '.');
-    return s;
-  }
-
   function recordWord(n) {
     const abs = Math.abs(Number(n) || 0);
     const last = abs % 10;
@@ -298,11 +298,13 @@ const Dashboard = (() => {
 
     if (isMessage) {
       box.innerHTML = `<div class="no-data">${escapeHtml(text)}</div>`;
+      applyListFilter(listId);
       return entries;
     }
 
     if (!entries.length) {
       box.innerHTML = `<div class="no-data">${escapeHtml(emptyText)}</div>`;
+      applyListFilter(listId);
       return entries;
     }
 
@@ -320,6 +322,7 @@ const Dashboard = (() => {
         </li>
       `).join('')
     }</ul>`;
+    applyListFilter(listId);
     return entries;
   }
 
@@ -377,6 +380,7 @@ const Dashboard = (() => {
       ['whitelist-geo-list', 'whitelist-global-list'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.innerHTML = `<div class="error">Error: ${escapeHtml(e.message)}</div>`;
+        applyListFilter(id);
       });
       setText('whitelist-geo-runtime', 'ERROR: ' + e.message);
       setText('whitelist-global-runtime', 'ERROR: ' + e.message);
@@ -468,78 +472,11 @@ const Dashboard = (() => {
     if (manual && btn) btn.classList.add('loading');
 
     try {
-      const r = await fetch('/api/tables');
+      const r = await fetch('/api/tables?view=bans');
       const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
 
-      // as before: one combined errors table
       renderTable('ban', j.ban, 'ban-meta');
-      renderTable('err', j.err, 'err-meta');
-
-      // NEW: a separate errors table for every stick table
-      const errHost = document.getElementById('err');
-      if (errHost) {
-        // the container for the sub-tables
-        let sub = document.getElementById('err-subtables');
-        if (!sub) {
-          sub = document.createElement('div');
-          sub.id = 'err-subtables';
-          sub.style.marginTop = '10px';
-          errHost.parentElement.appendChild(sub);
-        }
-        sub.innerHTML = '';
-
-        // READ THE SITE FILTER FROM THE URL: ?site=rdg.domain.local
-        const siteFilter = (new URLSearchParams(location.search).get('site') || '').trim();
-        const toTblName = (d) => 'tbl_err_' + d.replace(/[^A-Za-z0-9_]/g, '_'); // as in backend
-
-        if (Array.isArray(j.err_multi) && j.err_multi.length) {
-          // If a site is given, work out the name of its stick table
-          const onlyName = siteFilter ? toTblName(siteFilter) : null;
-
-          let rendered = 0;
-          j.err_multi.forEach(item => {
-            const name = String(item.name || '');
-            const rows = item?.table?.rows || [];
-
-            // With the site filter on, an empty section of THIS SITE is hidden (not rendered)
-            if (onlyName && name === onlyName && rows.length === 0) {
-              // nothing is added: the section is hidden
-              return;
-            }
-
-            // With the filter on, show only the matching site (and only if it has data)
-            if (onlyName && name !== onlyName) {
-              return;
-            }
-
-            // Without a filter, show every non-empty one (empty ones could be allowed too)
-            if (!onlyName && rows.length === 0) {
-              // empty ones are skipped, so they do not clutter the UI
-              return;
-            }
-
-            const safeId = 'err_' + name.replace(/[^A-Za-z0-9_]/g, '_');
-            const h = document.createElement('h4');
-            h.textContent = prettifyErrTableName(name) || 'unknown';
-            sub.appendChild(h);
-            const div = document.createElement('div');
-            div.id = safeId;
-            sub.appendChild(div);
-            renderTable(safeId, item.table);
-            rendered++;
-          });
-
-          // If nothing was drawn for the chosen site, show a tidy placeholder
-          if (rendered === 0) {
-            const p = document.createElement('div');
-            p.className = 'no-data';
-            p.textContent = siteFilter
-              ? `No failed requests for site ${siteFilter}`
-              : 'No data by errors';
-            sub.appendChild(p);
-          }
-        }
-      }
       if (manual && btn) {
         btn.classList.remove('loading');
         btn.classList.add('success');
@@ -547,9 +484,10 @@ const Dashboard = (() => {
       }
     } catch (e) {
       console.error(e);
-      ['ban', 'err'].forEach(id => {
+      ['ban'].forEach(id => {
         const box = document.getElementById(id);
         if (box) box.innerHTML = `<div class="error">Error: ${escapeHtml(e.message)}</div>`;
+        applyListFilter(id);
       });
       if (manual && btn) btn.classList.remove('loading', 'success');
     }
@@ -616,6 +554,7 @@ const Dashboard = (() => {
         box.innerHTML = '<div class="no-data">The tbl_ip_auth table is missing or the feature is disabled.</div>';
         const metaEl = document.getElementById(metaId);
         if (metaEl) metaEl.textContent = '0 entries';
+        applyListFilter(containerId);
         return;
       }
 
@@ -623,6 +562,7 @@ const Dashboard = (() => {
         box.innerHTML = '<div class="no-data">No active entries.</div>';
         const metaEl = document.getElementById(metaId);
         if (metaEl) metaEl.textContent = '0 entries';
+        applyListFilter(containerId);
         return;
       }
 
@@ -659,6 +599,7 @@ const Dashboard = (() => {
 
       html += '</tbody></table>';
       box.innerHTML = html;
+      applyListFilter(containerId);
 
       // after rendering, add flags by IP if the function is available
       if (typeof window.decorateFlags === 'function') {
@@ -667,6 +608,7 @@ const Dashboard = (() => {
     } catch (e) {
       console.error(e);
       box.innerHTML = `<div class="error">Error: ${escapeHtml(e.message)}</div>`;
+      applyListFilter(containerId);
       const metaEl = document.getElementById(metaId);
       if (metaEl) metaEl.textContent = 'Error';
     }
@@ -776,6 +718,9 @@ const Dashboard = (() => {
 
   /* ─────────── start-up ─────────── */
   function init() {
+    document.querySelectorAll('[data-dashboard-filter]').forEach(input => {
+      input.addEventListener('input', () => applyListFilter(input.dataset.dashboardFilter));
+    });
     loadTables();
     fetchAttackers();
     fetchConnections();

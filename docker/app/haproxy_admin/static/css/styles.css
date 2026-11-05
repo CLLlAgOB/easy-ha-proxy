@@ -220,6 +220,7 @@
   .btn-small, .btn.btn-sm { min-height: 32px; padding: 6px 10px; font-size: 11px; }
   .icon-button, .btn-icon, .icon-btn { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-width: 36px; min-height: 36px; padding: 7px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-secondary); text-decoration: none; }
   .icon-button svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+  .icon-btn svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; fill: none; }
   .theme-toggle { flex-shrink: 0; }
   .theme-sun { display: none; }
   [data-theme="dark"] .theme-sun { display: block; }
@@ -237,6 +238,12 @@
   .card-header .table-meta, .table-meta { font-size: 12px; color: var(--text-secondary); }
   .table-container, .table-wrap, .site-table-wrapper { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
   .table-container:empty { display: none; }
+  .table-container, .table-wrap, .site-table-wrapper, .la-table-wrap, .scroll-x, .mon-requests-wrap, .dr-suggest-wrap {
+    max-height: min(520px, 65vh); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  }
+  :is(.table-container, .table-wrap, .site-table-wrapper, .la-table-wrap, .scroll-x, .mon-requests-wrap) thead th {
+    position: sticky; top: 0; z-index: 2;
+  }
   table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.5; }
   th { padding: 11px 13px; background: var(--surface-1); color: var(--text-secondary); text-align: left; font-size: 10px; font-weight: 650; letter-spacing: .025em; border-bottom: 1px solid var(--border); white-space: nowrap; }
   td { padding: 12px 13px; border-bottom: 1px solid var(--border); vertical-align: top; }

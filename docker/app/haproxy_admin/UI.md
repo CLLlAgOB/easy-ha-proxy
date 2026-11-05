@@ -51,3 +51,9 @@ check long tables, confirmation cancellation, conditional form sections and
 populated charts. Also check empty and unavailable states. Shared static URLs
 already include content versions, so updated styles do not need a manual cache
 version. The HAProxy statistics frame continues to display HAProxy's own UI.
+
+The dashboard uses two independent columns and bounded list regions. Address
+filters survive data refreshes; its bans-only API view avoids reading unused
+error tables. Invalidate both table caches when changing a ban. Keep the SVG
+histogram fill rules and icon stroke rules: verify computed colors with real
+bars and populated service rows, as empty fixtures cannot expose a lost rule.
