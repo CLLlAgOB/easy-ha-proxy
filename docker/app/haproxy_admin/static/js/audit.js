@@ -193,6 +193,22 @@
     }
   }
 
+  // A log that is read but not written looks complete: say when new
+  // entries are not being added, with the file and its owner.
+  async function loadWriteState() {
+    const notice = byId("au-write-problem");
+    if (!notice) return;
+    try {
+      const payload = await getJson("/api/audit/status", {});
+      const state = payload.audit || {};
+      notice.hidden = state.writable !== false;
+      const detail = byId("au-write-detail");
+      if (detail) detail.textContent = state.writable === false ? String(state.write_problem || "") : "";
+    } catch (error) {
+      /* the status is a hint; the log itself still loads */
+    }
+  }
+
   async function loadFilters() {
     try {
       const payload = await getJson("/api/audit/filters", {});
@@ -212,6 +228,7 @@
     });
     const more = byId("au-more");
     if (more) more.addEventListener("click", () => load(true));
+    loadWriteState();
     await loadFilters();
     await load(false);
   });

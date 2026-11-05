@@ -148,6 +148,43 @@
     - "{{ haproxy_admin_root_dir }}/backups"
   when: haproxy_admin_use_docker | bool
 
+# A restore can leave the database owned by root. Fix only SQLite's files:
+# a custom database path may share its parent with unrelated service state.
+- name: "haproxy-admin | Restore change log ownership after backup restore"
+  when: haproxy_admin_use_docker | bool
+  block:
+    - name: "haproxy-admin | Ensure change log directory exists"
+      ansible.builtin.file:
+        path: "{{ (audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db')) | dirname }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0770"
+
+    - name: "haproxy-admin | Inspect restored change log files"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db') }}"
+        - "{{ audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db') }}-wal"
+        - "{{ audit_database_path | default('/var/lib/easy-ha-proxy/audit/audit.db') }}-shm"
+      register: hapadm_audit_restored_files
+
+    - name: "haproxy-admin | Give restored change log files to the panel"
+      ansible.builtin.file:
+        path: "{{ item.stat.path }}"
+        state: file
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        follow: false
+      loop: "{{ hapadm_audit_restored_files.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.stat.exists | default(false)
+        - item.stat.isreg | default(false)
+
 - name: "haproxy-admin | Render docker-compose.yml"
   ansible.builtin.template:
     src: docker-compose.yml.j2

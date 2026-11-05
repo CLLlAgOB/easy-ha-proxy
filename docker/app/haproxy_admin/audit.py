@@ -8,7 +8,8 @@ log -- the values of "sensitive" keys are replaced before writing, and
 recursively, because a password usually sits in a nested structure. Second: a
 failure to write the log does not undo the operation itself. Auditing is not
 in the traffic path, and a SQLite failure must not stop a certificate from
-being renewed; the error count shows in the state instead.
+being renewed. The change-log page says instead that new changes are not
+being recorded, and why.
 """
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -158,8 +161,57 @@ class AuditLog:
         self._conn: Optional[sqlite3.Connection] = None
         self.write_failures = 0
         self.last_error: Optional[str] = None
+        self.last_write_ok_at = 0.0
+        self.last_write_failed_at = 0.0
 
     # -- storage ----------------------------------------------------------
+
+    def _drop_connection(self) -> None:
+        """Forget the connection, so the next use opens the file again.
+
+        SQLite opens a file it may not write read-only, without a word, and a
+        kept connection stays that way: once the file's owner is put right it
+        would go on refusing every entry until the panel restarted.
+        """
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def write_problem(self) -> str:
+        """Why this process cannot add to the log, or "" when it can.
+
+        Read from the files themselves rather than from the last write: the
+        panel runs several workers, each with its own connection, and one that
+        has not tried yet knows nothing. A log that is read but not written
+        looks complete on the page, which is how a month of changes went
+        unrecorded on a gateway restored from an archive.
+        """
+        wal = self.path.with_name(self.path.name + "-wal")
+        shm = self.path.with_name(self.path.name + "-shm")
+        for candidate, wanted in (
+            (self.path.parent, os.W_OK | os.X_OK),
+            (self.path, os.W_OK),
+            (wal, os.W_OK),
+            (shm, os.W_OK),
+        ):
+            try:
+                info = candidate.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return f"{candidate}: {exc.strerror or exc}"
+            if not os.access(candidate, wanted):
+                return (
+                    f"{candidate}: owner uid {info.st_uid}, group {info.st_gid}, "
+                    f"mode {stat.S_IMODE(info.st_mode):o}; "
+                    f"the panel runs as uid {os.getuid()}"
+                )
+        if self.last_write_failed_at and self.last_write_failed_at >= self.last_write_ok_at:
+            return self.last_error or "the last entry could not be written"
+        return ""
 
     def _connect(self) -> Optional[sqlite3.Connection]:
         if self._conn is not None:
@@ -214,8 +266,6 @@ class AuditLog:
     ) -> bool:
         """Record an event. Never raises."""
 
-        import time
-
         if result not in RESULTS:
             result = RESULT_SUCCESS
         payload = (
@@ -233,22 +283,32 @@ class AuditLog:
             str(detail or "")[:MAX_SUMMARY_CHARS],
         )
         with self._lock:
-            conn = self._connect()
-            if conn is None:
-                return False
-            try:
-                with conn:
-                    conn.execute(
-                        "INSERT INTO audit_events (ts, actor_type, actor, source_ip, "
-                        "action, object_type, object_id, result, summary, "
-                        "before_json, after_json, detail) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        payload,
-                    )
-                return True
-            except Exception as exc:  # pylint: disable=broad-except
-                self._note_failure(exc)
-                return False
+            # A second try only when the kept connection was opened read-only:
+            # the file may have been made writable since, and a fresh one sees it.
+            for attempt in (1, 2):
+                conn = self._connect()
+                if conn is None:
+                    self.last_write_failed_at = time.time()
+                    return False
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO audit_events (ts, actor_type, actor, source_ip, "
+                            "action, object_type, object_id, result, summary, "
+                            "before_json, after_json, detail) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            payload,
+                        )
+                    self.last_write_ok_at = time.time()
+                    return True
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._drop_connection()
+                    if attempt == 1 and "readonly" in str(exc).lower():
+                        continue
+                    self._note_failure(exc)
+                    self.last_write_failed_at = time.time()
+                    return False
+            return False
 
     # -- reading ----------------------------------------------------------
 
@@ -340,13 +400,16 @@ class AuditLog:
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
+            problem = self.write_problem()
+            writing = {
+                "writable": not problem,
+                "write_problem": problem,
+                "write_failures": self.write_failures,
+                "last_error": self.last_error,
+            }
             conn = self._connect()
             if conn is None:
-                return {
-                    "available": False,
-                    "write_failures": self.write_failures,
-                    "last_error": self.last_error,
-                }
+                return {"available": False, **writing}
             try:
                 row = conn.execute(
                     "SELECT COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest "
@@ -354,7 +417,7 @@ class AuditLog:
                 ).fetchone()
             except Exception as exc:  # pylint: disable=broad-except
                 self._note_failure(exc)
-                return {"available": False, "write_failures": self.write_failures}
+                return {"available": False, **writing}
         size = 0
         with_suffix = (self.path, self.path.with_name(self.path.name + "-wal"))
         for candidate in with_suffix:
@@ -368,8 +431,7 @@ class AuditLog:
             "oldest_ts": row["oldest"],
             "newest_ts": row["newest"],
             "bytes": size,
-            "write_failures": self.write_failures,
-            "last_error": self.last_error,
+            **writing,
         }
 
     def apply_retention(
@@ -396,6 +458,7 @@ class AuditLog:
                     removed += cursor.rowcount or 0
                 return removed
             except Exception as exc:  # pylint: disable=broad-except
+                self._drop_connection()
                 self._note_failure(exc)
                 return 0
 

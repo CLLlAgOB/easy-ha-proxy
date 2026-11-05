@@ -22,6 +22,7 @@
     "After": "После",
     "Nothing has been recorded for this period": "За этот период записей нет",
     "Show more": "Показать ещё",
-    "The change log cannot be read now": "Журнал изменений сейчас не читается"
+    "The change log cannot be read now": "Журнал изменений сейчас не читается",
+    "New changes are not being recorded: the panel cannot write the change log. The entries below are the ones written before that.": "Новые изменения не записываются: панель не может писать в журнал изменений. Ниже — записи, сделанные до этого."
   }
 }

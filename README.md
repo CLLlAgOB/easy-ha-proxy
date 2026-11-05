@@ -709,7 +709,12 @@ The log is stored at `/var/lib/easy-ha-proxy/audit/audit.db`, is included in
 the encrypted disaster-recovery archive, and is kept for a year with a hard row
 cap so it cannot grow without limit. If the log itself cannot be written the
 operation still proceeds -- auditing must not become a way to break the
-gateway -- and the failure count is visible rather than silent.
+gateway -- and the change-log page says that new changes are not being
+recorded, naming the file, its owner and its mode. Every configuration apply
+gives the log directory and its database, WAL and SHM files back to the panel,
+without changing unrelated files in a shared directory: a restore can leave the database owned by
+root, and SQLite then opens it read-only without a word. Once the owner is put
+right, the next entry is written without restarting the panel.
 
 Every administrative change made through the interface is recorded: sites, TCP
 proxies and UDP forwards; certificates, certificate authorities and DNS
