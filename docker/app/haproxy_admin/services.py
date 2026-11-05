@@ -803,18 +803,30 @@ def unban_ip(ip: str):
     # between the two steps. Best effort: an engine that is not running must
     # not stop an operator lifting a ban HAProxy placed under its own rules.
     engine_note = ""
+    answer = None
     try:
         from .guardd_client import guardd_forget_ban
 
-        guardd_forget_ban(ip)
+        answer = guardd_forget_ban(ip)
     except Exception:  # pylint: disable=broad-except
         logger.info("adaptive engine not reachable while unbanning %s", ip, exc_info=True)
         engine_note = (
             "Lifted in HAProxy, but the adaptive engine did not answer: "
             "a ban it scheduled may come back."
         )
+    global cache_time
+    if isinstance(answer, dict):
+        # The engine lifted it in HAProxy itself, under the lock its other
+        # changes to the ban table take. A write here afterwards could undo
+        # a ban placed meanwhile by another request (R09).
+        if answer.get("cleared"):
+            cache_time = datetime.min
+            return "OK", 200
+        if answer.get("refused"):
+            return f"HAProxy did not lift the ban: {str(answer['refused'])[:200]}", 502
 
-    # What HAProxy said is the result: "No such table" or an unreachable
+    # The engine is down (or older than "cleared"): HAProxy directly, as
+    # before. What HAProxy said is the result: "No such table" or an unreachable
     # socket used to be reported as OK, and recorded as a lifted ban.
     try:
         response = haproxy_runtime_command(
@@ -824,7 +836,6 @@ def unban_ip(ip: str):
         return f"HAProxy did not lift the ban: {exc}", 502
     if not runtime_ok(response):
         return f"HAProxy did not lift the ban: {response.strip()[:200]}", 502
-    global cache_time
     cache_time = datetime.min
     return (engine_note or "OK"), 200
 

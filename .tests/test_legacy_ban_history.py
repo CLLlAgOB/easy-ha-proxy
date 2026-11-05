@@ -120,10 +120,11 @@ class ItsEnd(Seen):
         self.table[IP] = {"gpc0": "1", "gpt0": "30"}
         self.cycle({IP: ban(30)}, 2000)
         self.engine.forget_ban(IP, 2005)
-        self.cycle({}, 2010)  # the panel cleared the entry right after
+        self.cycle({}, 2010)
         self.assertEqual(self.decisions(), [("observed", "haproxy", 30), ("lifted", "operator", 30)])
-        # The engine's own lift is still only ever its own code.
-        self.assertIn(IP, self.table)
+        # The operator's unban takes HAProxy's own ban off too, in the engine
+        # (R09): the entry stays with its code, without the ban flag.
+        self.assertEqual(self.table[IP], {"gpc0": "0", "gpt0": "30"})
 
     def test_the_new_policy_lifting_it_is_written_as_that(self):
         self.engine.ban_policy = guardd.BAN_POLICY_U02

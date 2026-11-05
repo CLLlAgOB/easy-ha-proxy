@@ -1007,7 +1007,14 @@ answer, the panel bans in HAProxy alone and says the ban will not come back
 after a restart. Adaptive protection also remembers each manual ban it sees
 in the table, with the end the table gave it, and puts it back if HAProxy
 started after the ban was last seen. A lift HAProxy refuses is not taken
-for one: the ban stays on the schedule and is lifted on a later cycle. A manual ban that disappears while HAProxy keeps
+for one: the ban stays on the schedule and is lifted on a later cycle.
+A ban by hand ends when the table said it would, also after a restart, and
+one placed again replaces the earlier one; a refused one leaves the earlier
+ban remembered. An unban from the panel is done by the engine as a whole,
+under the same lock; the panel writes to HAProxy itself only when the engine
+does not answer. A table the engine cannot read whole -- an error in place
+of the table, or an answer over 8 MiB -- is left out of that cycle instead
+of being taken for empty, and its health says which. A manual ban that disappears while HAProxy keeps
 running was lifted and is forgotten, so an unban never undoes itself. This
 needs adaptive protection running (Observe or Enforce).
 

@@ -132,12 +132,22 @@ class OtherLifts(Engine):
 
 
 class ABanByHand(Engine):
+    def setUp(self):
+        super().setUp()
+        # The table keeps a ban by hand for a week, as the shipped default.
+        original = guardd.runtime_command.side_effect
+        guardd.runtime_command.side_effect = (
+            lambda sock, command: original(sock, command).replace(" exp=1 ", " exp=604800000 ")
+        )
+
     def test_is_remembered_before_it_is_answered(self):
         result = self.engine.place_manual_ban(OTHER, 2000)
         self.assertTrue(result["remembered"])
         self.assertEqual(self.table[OTHER]["gpt0"], "50")
         record = self.database.manual_bans()[OTHER]
-        self.assertGreater(record["expires_at"], 2000)
+        # The end said is the end kept (R07): the table's week.
+        self.assertEqual(record["expires_at"], result["until"])
+        self.assertEqual(result["until"], 2000 + 604800)
         self.assertEqual(self.decisions(OTHER), [("applied", "operator", "applied")])
 
     def test_comes_back_after_a_restart_before_the_engine_ever_saw_it(self):

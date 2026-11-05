@@ -1570,20 +1570,56 @@ def load_config(path: str) -> GuardConfig:
 # ---------------------------------------------------------------------------
 
 
+class RuntimeAnswerTooLarge(OSError):
+    """HAProxy's answer did not fit RUNTIME_MAX_BYTES: what was read is not all."""
+
+
+class TableUnreadable(OSError):
+    """A `show table` answer that is not the table: an error, or nothing."""
+
+
 def runtime_command(socket_path: str, command: str) -> str:
+    """Send one command to the runtime socket and return the whole answer.
+
+    An answer larger than RUNTIME_MAX_BYTES raises RuntimeAnswerTooLarge
+    instead of coming back cut short: a table read in part used to be taken
+    for the whole table, and a row past the cut for a row that was not there
+    (R10).
+    """
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(RUNTIME_TIMEOUT_SECONDS)
         sock.connect(socket_path)
         sock.sendall(f"{command}\n".encode("utf-8"))
         chunks: List[bytes] = []
         total = 0
-        while total < RUNTIME_MAX_BYTES:
+        while True:
             chunk = sock.recv(65536)
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
+            if total > RUNTIME_MAX_BYTES:
+                raise RuntimeAnswerTooLarge(
+                    f"HAProxy's answer to {command.split(' key ')[0]!r} is larger than "
+                    f"{RUNTIME_MAX_BYTES // (1024 * 1024)} MiB"
+                )
     return b"".join(chunks).decode("utf-8", "replace")
+
+
+def read_table(socket_path: str, table: str, selector: str = "") -> Dict[str, Dict[str, str]]:
+    """A stick table's rows, or TableUnreadable when the answer is not it.
+
+    HAProxy opens every table answer with "# table: <name>,"; anything else
+    -- "No such table", a refusal, nothing -- used to parse as an empty
+    table, so a ban that could not be read was taken for one that was not
+    there, and its expiry dropped from the schedule (R10).
+    """
+    command = f"show table {table}{(' ' + selector) if selector else ''}"
+    payload = runtime_command(socket_path, command)
+    first = payload.split("\n", 1)[0].strip()
+    if not first.startswith(f"# table: {table},"):
+        raise TableUnreadable(f"HAProxy did not return table {table}: {first[:120]!r}")
+    return parse_table(payload)
 
 
 _TABLE_ROW = re.compile(r"^0x[0-9a-f]+:\s+key=(?P<key>\S+)\s+(?P<rest>.*)$")
@@ -1614,11 +1650,11 @@ def banned_now(socket_path: str) -> Set[str]:
     an operator filtering for "banned" means.
     """
     try:
-        payload = runtime_command(socket_path, "show table tbl_ban")
+        rows = read_table(socket_path, "tbl_ban")
     except OSError as exc:
         raise RuntimeError(f"cannot read the ban table: {exc}") from exc
     return {
-        ip for ip, fields in parse_table(payload).items()
+        ip for ip, fields in rows.items()
         if _safe_int(fields.get("gpc0")) > 0
     }
 
@@ -3650,6 +3686,26 @@ class SecurityDatabase:
                 (ip, now, expires_at, now, MANUAL_BAN_REPLACED_MARGIN),
             )
 
+    def write_manual_ban(
+        self, ip: str, placed_at: int, expires_at: int, seen_at: int, reasserted: int = 0,
+    ) -> None:
+        """Set an operator's ban exactly as given (R07/R08).
+
+        note_manual_ban is for what is seen in the table: it only ever moves
+        an end later, and leaves one restored after a restart as it was. A ban
+        an operator places anew is a new decision: its end is the one the
+        table gave it, longer or shorter, and it is no longer a restored copy.
+        Also used to put back the previous record when a new ban is refused.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO manual_bans (ip, placed_at, expires_at, seen_at, reasserted) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT (ip) DO UPDATE SET "
+                "placed_at = excluded.placed_at, expires_at = excluded.expires_at, "
+                "seen_at = excluded.seen_at, reasserted = excluded.reasserted",
+                (ip, int(placed_at), int(expires_at), int(seen_at), int(reasserted)),
+            )
+
     def mark_manual_reasserted(self, ip: str) -> None:
         with self._lock, self._conn:
             self._conn.execute("UPDATE manual_bans SET reasserted = 1 WHERE ip = ?", (ip,))
@@ -4867,6 +4923,12 @@ class LiftRefused(OSError):
     """HAProxy refused to remove a ban table entry: the ban still stands."""
 
 
+# What leaves a ban's state unknown: a lift HAProxy refused, a table read
+# that was not the table, an answer too large to have been read whole. The
+# ban is kept on the schedule and tried again, never taken for gone (R01/R10).
+BAN_TABLE_UNSURE = (LiftRefused, TableUnreadable, RuntimeAnswerTooLarge)
+
+
 class Enforcer:
     """The ban path, isolated so the monitor guarantee stays checkable.
 
@@ -4915,9 +4977,7 @@ class Enforcer:
     def active_bans(self) -> Dict[str, int]:
         """Every ban standing in the table, with its reason code."""
 
-        rows = parse_table(
-            runtime_command(self.config.haproxy_socket, "show table tbl_ban")
-        )
+        rows = read_table(self.config.haproxy_socket, "tbl_ban")
         return {
             ip: _safe_int(fields.get("gpt0"))
             for ip, fields in rows.items()
@@ -4927,9 +4987,7 @@ class Enforcer:
     def adaptive_bans(self) -> Dict[str, Dict[str, str]]:
         """Only the entries this daemon owns, identified by their reason code."""
 
-        rows = parse_table(
-            runtime_command(self.config.haproxy_socket, "show table tbl_ban")
-        )
+        rows = read_table(self.config.haproxy_socket, "tbl_ban")
         return {
             ip: fields
             for ip, fields in rows.items()
@@ -4945,11 +5003,7 @@ class Enforcer:
         before anything is removed.
         """
 
-        rows = parse_table(
-            runtime_command(
-                self.config.haproxy_socket, f"show table tbl_ban key {ip}"
-            )
-        )
+        rows = read_table(self.config.haproxy_socket, "tbl_ban", f"key {ip}")
         fields = rows.get(ip)
         if fields is None:
             return False
@@ -4996,9 +5050,7 @@ class Enforcer:
 
     def lift_code(self, ip: str, code: int) -> bool:
         """Clear the entry only while it still carries this code (re-read first)."""
-        rows = parse_table(
-            runtime_command(self.config.haproxy_socket, f"show table tbl_ban key {ip}")
-        )
+        rows = read_table(self.config.haproxy_socket, "tbl_ban", f"key {ip}")
         fields = rows.get(ip)
         if fields is None or _safe_int(fields.get("gpt0")) != code:
             return False
@@ -5021,9 +5073,7 @@ class Enforcer:
         address since the table was last read, and that ban stays.
         """
 
-        rows = parse_table(
-            runtime_command(self.config.haproxy_socket, f"show table tbl_ban key {ip}")
-        )
+        rows = read_table(self.config.haproxy_socket, "tbl_ban", f"key {ip}")
         fields = rows.get(ip)
         if fields is None or _safe_int(fields.get("gpc0")) <= 0:
             return 0
@@ -5032,6 +5082,25 @@ class Enforcer:
             return 0
         self._clear(ip)
         return code
+
+    def release(self, ip: str) -> bool:
+        """Take whatever ban stands on this address off, whoever placed it:
+        an operator's unban, done here and under the engine's lock rather than
+        by the panel after it (R09). The entry stays with its code and loses
+        its flag, as the panel's own unban always left it. Re-read first;
+        False when nothing flagged stands, LiftRefused when HAProxy refuses."""
+        rows = read_table(self.config.haproxy_socket, "tbl_ban", f"key {ip}")
+        fields = rows.get(ip)
+        if fields is None or _safe_int(fields.get("gpc0")) <= 0:
+            return False
+        code = _safe_int(fields.get("gpt0"))
+        answer = runtime_command(
+            self.config.haproxy_socket, f"set table tbl_ban key {ip} data.gpc0 0 data.gpt0 {code}"
+        )
+        if answer.strip():
+            self.failed += 1
+            raise LiftRefused(f"HAProxy refused to lift the ban on {ip}: {answer.strip()[:200]}")
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -6122,6 +6191,9 @@ class GuardEngine:
         # Where reading the log back stopped at the start, for the rest to be
         # read in the background: (inode, offset, horizon), or None.
         self._refill_resume: Optional[Tuple[int, int, float]] = None
+        # Tables the last cycle could not read whole (R10): left out, not
+        # taken for empty.
+        self.unreadable_tables: Set[str] = set()
         # Bytes the fast ticks between polls already took from this cycle's
         # read budget, so following the log closely never reads more per
         # cycle than the configured limit.
@@ -6474,10 +6546,17 @@ class GuardEngine:
             or name.startswith(("tbl_err_", "tbl_rate_"))
         ]
         result: Dict[str, Dict[str, Dict[str, str]]] = {}
+        unreadable: Set[str] = set()
         for name in wanted:
-            result[name] = parse_table(
-                runtime_command(socket_path, f"show table {name}")
-            )
+            try:
+                result[name] = read_table(socket_path, name)
+            except (TableUnreadable, RuntimeAnswerTooLarge) as exc:
+                # Left out of this cycle, not read as empty (R10): an empty
+                # ban table would end every ban seen, an empty sign-in table
+                # would take everyone's trust away. Said in health.
+                unreadable.add(name)
+                LOG.warning("%s; left out of this cycle", exc)
+        self.unreadable_tables = unreadable
         return result
 
     def _load_known_bans(self) -> Set[str]:
@@ -6570,16 +6649,20 @@ class GuardEngine:
     def ingest_tables(
         self, tables: Dict[str, Dict[str, Dict[str, str]]], now: int
     ) -> int:
-        auth_rows = tables.get("tbl_ip_auth", {})
-        self.exclusions.refresh_authenticated(auth_rows)
-        authenticated = [
-            ip
-            for ip, fields in auth_rows.items()
-            if _safe_int(fields.get("gpc0")) > 0
-        ]
-        if authenticated:
-            self.database.record_authenticated(authenticated, now)
+        if "tbl_ip_auth" not in self.unreadable_tables:
+            auth_rows = tables.get("tbl_ip_auth", {})
+            self.exclusions.refresh_authenticated(auth_rows)
+            authenticated = [
+                ip
+                for ip, fields in auth_rows.items()
+                if _safe_int(fields.get("gpc0")) > 0
+            ]
+            if authenticated:
+                self.database.record_authenticated(authenticated, now)
 
+        if "tbl_ban" in self.unreadable_tables:
+            # Unknown is not empty: nothing about bans is decided this cycle.
+            return self.ingest_rate_tables(tables, now)
         bans = tables.get("tbl_ban", {})
         active = {
             ip for ip, fields in bans.items() if _safe_int(fields.get("gpc0")) > 0
@@ -6734,7 +6817,7 @@ class GuardEngine:
 
     def snapshot_bans(self, now: int) -> str:
         """Write every entry of tbl_ban to a file next to the database."""
-        rows = parse_table(runtime_command(self.config.haproxy_socket, "show table tbl_ban"))
+        rows = read_table(self.config.haproxy_socket, "tbl_ban")
         directory = pathlib.Path(self.database.path).parent
         target = directory / f"ban-policy-u02-{now}.json"
         temporary = target.with_suffix(".tmp")
@@ -7534,7 +7617,7 @@ class GuardEngine:
             if standing.get(ip) == ADAPTIVE_BAN_CODE and ip not in scheduled:
                 try:
                     self.enforcer.lift(ip)  # its term is over, or it was never ours to keep
-                except LiftRefused as exc:
+                except BAN_TABLE_UNSURE as exc:
                     # Left pending: the next cycle tries again.
                     LOG.warning("%s", exc)
                     continue
@@ -7590,7 +7673,7 @@ class GuardEngine:
                 continue
             try:
                 taken_off = self.enforcer.lift(ip)
-            except LiftRefused as exc:
+            except BAN_TABLE_UNSURE as exc:
                 # The ban still stands: kept on the schedule, so the next
                 # cycle lifts it -- no "lifted" written, no strike (R01).
                 LOG.warning("%s; trying again next cycle", exc)
@@ -7628,7 +7711,7 @@ class GuardEngine:
                 try:
                     if self.enforcer.lift(ip):
                         lifted.append(ip)
-                except LiftRefused as exc:
+                except BAN_TABLE_UNSURE as exc:
                     LOG.warning("%s; trying again next cycle", exc)
             return {"applied": applied, "lifted": lifted, "enforcing": False}
 
@@ -7802,6 +7885,13 @@ class GuardEngine:
         right after the panel says "banned" puts it back. Raises ValueError
         for an address that cannot be banned and ManualBanRefused when
         HAProxy refuses.
+
+        A new ban is a new decision (R07): its end is exactly the one the
+        table gives it -- shorter than the default when the table keeps bans
+        for less -- and a copy restored after a restart becomes this ban.
+        A refused one, or one whose answer was lost, puts back whatever was
+        remembered before it: an earlier ban by hand still standing in the
+        table is still remembered (R08).
         """
         now = now or _utc_now()
         checked = str(ip or "").strip()
@@ -7809,25 +7899,41 @@ class GuardEngine:
             raise ValueError("only an IPv4 address can be banned")
         with self._decisions:
             remembered = True
+            previous: Optional[Dict[str, int]] = None
             try:
-                self.database.note_manual_ban(checked, now, now + MANUAL_BAN_DEFAULT_SECONDS)
+                previous = self.database.manual_bans().get(checked)
+                self.database.write_manual_ban(checked, now, now + MANUAL_BAN_DEFAULT_SECONDS, now)
             except sqlite3.Error as exc:
                 remembered = False
                 LOG.warning("Could not remember the manual ban on %s: %s", checked, exc)
-            if not self.enforcer.restore(checked, MANUAL_BAN_CODE):
-                if remembered:
-                    with contextlib.suppress(sqlite3.Error):
+
+            def put_back() -> None:
+                if not remembered:
+                    return
+                with contextlib.suppress(sqlite3.Error):
+                    if previous:
+                        self.database.write_manual_ban(
+                            checked, previous["placed_at"], previous["expires_at"],
+                            previous["seen_at"], previous["reasserted"],
+                        )
+                    else:
                         self.database.forget_manual_ban(checked)
+
+            try:
+                placed = self.enforcer.restore(checked, MANUAL_BAN_CODE)
+            except OSError:
+                put_back()  # the answer is lost: the next poll sees what HAProxy holds
+                raise
+            if not placed:
+                put_back()
                 raise ManualBanRefused(f"HAProxy refused the ban on {checked}")
             until = now + MANUAL_BAN_DEFAULT_SECONDS
             with contextlib.suppress(OSError):
-                fields = parse_table(runtime_command(
-                    self.config.haproxy_socket, f"show table tbl_ban key {checked}"
-                )).get(checked) or {}
+                fields = read_table(self.config.haproxy_socket, "tbl_ban", f"key {checked}").get(checked) or {}
                 if _safe_int(fields.get("exp")) > 0:
                     until = now + _safe_int(fields.get("exp")) // 1000
             try:
-                self.database.note_manual_ban(checked, now, until)
+                self.database.write_manual_ban(checked, now, until, now)
                 self.database.record_decision(
                     checked, now, "applied", "operator", "applied",
                     code=MANUAL_BAN_CODE, until=until, policy=self.ban_policy,
@@ -7872,13 +7978,18 @@ class GuardEngine:
         # put it back after the next restart of HAProxy.
         manual = self.database.forget_manual_ban(checked)
         # The schedule goes whatever HAProxy says: the operator means the
-        # address to be let go, and the panel clears the entry itself right
-        # after. A refusal is said, and written as one -- not as a lift.
+        # address to be let go. The table entry is taken off here too --
+        # whoever placed it -- under the same lock as every other change to
+        # the ban table, so a ban placed meanwhile by another request is not
+        # undone by a write that comes after (R09). A refusal is said, and
+        # written as one -- not as a lift.
         refused = ""
+        lifted = released = False
         try:
             lifted = self.enforcer.lift(checked)
-        except LiftRefused as exc:
-            lifted, refused = False, str(exc)
+            released = self.enforcer.release(checked)
+        except BAN_TABLE_UNSURE as exc:
+            refused = str(exc)
             LOG.warning("%s", exc)
         if held or lifted:
             self._emit(
@@ -7892,9 +8003,8 @@ class GuardEngine:
             LOG.warning(
                 "Ban on %s cleared by hand; the schedule is dropped", checked
             )
-        # HAProxy's own ban is lifted by the caller too (the panel clears the
-        # entry right after this call): written here as the operator's, not
-        # as "no longer in force" on the next cycle.
+        # HAProxy's own ban is lifted here too: written as the operator's,
+        # not as "no longer in force" on the next cycle.
         legacy = self._settle_legacy_observed(checked)
         if held or lifted or manual or legacy:
             self.database.record_decision(
@@ -7908,7 +8018,10 @@ class GuardEngine:
             "refused": refused,
             "ip": checked,
             "was_scheduled": bool(held),
-            "lifted": lifted,
+            "lifted": lifted or released,
+            # HAProxy holds no ban on the address now, by this daemon's own
+            # read and write: the panel has nothing left to write (R09).
+            "cleared": not refused,
         }
 
     def set_mode(self, mode: str, now: Optional[int] = None) -> Dict[str, Any]:
@@ -8166,6 +8279,7 @@ class GuardEngine:
                 "restored": self.manual_restored,
             },
             "live_buffer": self._live_health(),
+            "unreadable_tables": sorted(self.unreadable_tables),
         }
 
     def _live_health(self) -> Optional[Dict[str, Any]]:
