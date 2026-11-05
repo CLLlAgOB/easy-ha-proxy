@@ -21,6 +21,9 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
+
+from jinja2 import Environment, FileSystemLoader
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "docker/app/haproxy_admin"
@@ -111,8 +114,14 @@ class TheFooter(unittest.TestCase):
                               "committed_at": "2026-11-03T16:00:00+00:00", "web_tree": TREE_A})
         self.assertEqual(footer["panel"]["revision"], "0bf3ce3")
         self.assertEqual(footer["host"]["revision"], "b9ebe91")
-        self.assertRegex(footer["panel"]["when"], r"^2026-11-03 \d\d:\d\d$")
+        self.assertEqual(footer["panel"]["when"], "2026-11-03 14:16 UTC")
         self.assertIs(footer["match"], True)
+
+    def test_build_dates_are_identical_across_gateway_timezones(self):
+        for zone in ('Europe/Moscow', 'Europe/Warsaw'):
+            with self.subTest(zone=zone), mock.patch.dict(os.environ, TZ=zone):
+                self.assertEqual(build_info._when('2026-11-05T14:12:01+01:00'),
+                                 '2026-11-05 13:12 UTC')
 
     def test_other_web_files_are_a_mismatch(self):
         footer = self.footer({"revision": "b9ebe91", "committed_at": "", "web_tree": TREE_B})
@@ -130,6 +139,36 @@ class TheFooter(unittest.TestCase):
 
 
 class TheWiring(unittest.TestCase):
+    def render(self, match, *, same_revision=False):
+        environment = Environment(loader=FileSystemLoader(APP / 'templates'), autoescape=True)
+        return environment.get_template('base.html').render(
+            build=dict(match=match,
+                       host=dict(revision='aaaaaaa', when='2026-11-05 10:00 UTC'),
+                       panel=dict(revision='aaaaaaa' if same_revision else 'bbbbbbb', when='2026-11-04 10:00 UTC')),
+            g=SimpleNamespace(is_superadmin=False),
+            request=SimpleNamespace(full_path='/', endpoint='routes.index'),
+            url_for=lambda name, **kwargs: '/' + name, csrf_token=lambda: 'test',
+            i18n_config={}, supported_languages=[], current_language='en',
+        )
+
+    def test_reused_images_are_explained_without_an_update_warning(self):
+        html = self.render(True)
+        self.assertIn('Panel files match the host. The existing image was reused.', html)
+        self.assertNotIn('<span class="footer-build-mismatch">', html)
+        self.assertIn('2026-11-05 10:00 UTC', html)
+
+    def test_real_mismatches_and_unverifiable_builds_stay_distinct(self):
+        html = self.render(False)
+        self.assertIn('<span class="footer-build-mismatch">', html)
+        self.assertNotIn('The existing image was reused.', html)
+        html = self.render(None)
+        self.assertIn('Build comparison is unavailable.', html)
+        self.assertNotIn('The existing image was reused.', html)
+        self.assertNotIn('<span class="footer-build-mismatch">', html)
+
+    def test_identical_revisions_do_not_claim_image_reuse(self):
+        self.assertNotIn('The existing image was reused.', self.render(True, same_revision=True))
+
     def test_the_image_and_ci_carry_the_build(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         for name in ("EHP_BUILD_REVISION", "EHP_BUILD_DATE", "EHP_SOURCE_TREE"):
@@ -152,7 +191,9 @@ class TheWiring(unittest.TestCase):
             self.skipTest("the panel's dependencies are not installed here")
         for text in ("Build", "Show build details", "Date unavailable", "Host build", "Panel build",
                      "Build comparison is unavailable.",
-                     "Host and panel versions differ. Update the panel."):
+                     "Panel files match the host. The existing image was reused.",
+                     "Build times use UTC on every gateway.",
+                     "Host and panel files differ. Check the update status."):
             self.assertNotEqual(i18n.translate(text, "ru"), text)
 
 

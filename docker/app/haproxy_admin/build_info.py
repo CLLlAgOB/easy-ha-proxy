@@ -24,7 +24,7 @@ _TREE_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _when(value: Any) -> str:
-    """A commit time as the gateway's local "YYYY-MM-DD HH:MM", or ""."""
+    """A commit time in UTC, so builds compare the same on every gateway."""
 
     try:
         moment = dt.datetime.fromisoformat(str(value or ""))
@@ -32,7 +32,7 @@ def _when(value: Any) -> str:
         return ""
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=dt.timezone.utc)
-    return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+    return moment.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _build(revision: Any, committed_at: Any, web_tree: Any) -> Optional[dict[str, str]]:

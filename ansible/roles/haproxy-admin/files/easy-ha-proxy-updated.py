@@ -1456,6 +1456,20 @@ def validate_applied_container_digests(
             "an applied image digest differs from the reviewed update plan",
             code="verification_failed",
         )
+    component_map = plan_component_map(applied)
+    for component_id in container_components_for_selection(components):
+        images = (component_map[component_id].get("details") or {}).get("images") or []
+        for image in images:
+            if (
+                image.get("state") == "unknown"
+                or image.get("reason") in {"running-older-image", "running-unchecked", "running-image-unreadable"}
+                or image.get("running") in {"different-content", "unchecked", "unreadable", "not-running"}
+            ):
+                LOG.warning("Installed container verification failed for %s", component_id)
+                raise UpdatedError(
+                    "The container update could not be verified. Check the running containers and try again.",
+                    code="verification_failed",
+                )
 
 
 def acquire_operation(*, allow_scheduled_reboot: bool = False) -> int:

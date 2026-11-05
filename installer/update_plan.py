@@ -1365,9 +1365,39 @@ def _image_content(reference: str, runner: Runner) -> tuple[list[str], dict[str,
     return layers, runtime
 
 
+def _started_image_ids(tag: str, running: dict[str, list[str]]) -> list[str]:
+    """Resolve the running image even when Compose changed a tag to a digest."""
+    if tag in running:
+        return running[tag]
+    repository = _image_repository(tag)
+    return sorted({
+        image_id for reference, ids in running.items()
+        if repository and _image_repository(reference) == repository
+        for image_id in ids
+    })
+
+
+def _running_web_tree(image: str, running: dict[str, list[str]] | None,
+                      runner: Runner) -> str | None:
+    """The running panel's build inputs, never those of a newly downloaded tag.
+
+    A pull can move the tag while the old container keeps running. Its source
+    label must be read by immutable image ID or the host/panel pairing can be
+    bypassed. A stopped stack is still judged by its installed tag. Unknown
+    or disagreeing running labels remain unknown.
+    """
+    if running is None:
+        return None
+    if not running:
+        return _local_web_tree(image, runner)
+    started = _started_image_ids(image, running)
+    trees = [_local_web_tree(image_id, runner) for image_id in started]
+    return trees[0] if trees and all(trees) and len(set(trees)) == 1 else None
+
+
 def _check_running(detail: dict[str, Any], tag: str, running: dict[str, list[str]] | None,
                    runner: Runner) -> None:
-    """Hold a "current" image to what its container really runs.
+    """Compare installed image content with what the container really runs.
 
     The tag being current says what a restart would start, not what runs:
     after a pull, the tag names the new image while the container keeps the
@@ -1376,28 +1406,36 @@ def _check_running(detail: dict[str, Any], tag: str, running: dict[str, list[str
     kinds that do not compare (a config ID, a platform manifest, an index
     digest), and the same image can show two of them. A stack that cannot
     be listed is unknown, not current (R06).
+    Evidence is also recorded for available updates, so a newer registry
+    release cannot hide a failed recreation during the post-update check.
     """
 
-    if detail.get("state") != "current" or detail.get("reason") == "digest-pinned":
+    original_state = detail.get("state")
+    if original_state not in {"current", "available"} or detail.get("reason") == "digest-pinned":
         return
     if running is None:
-        detail.update({"state": "unknown", "reason": "running-unchecked", "running": "unchecked"})
+        detail["running"] = "unchecked"
+        if original_state == "current":
+            detail.update({"state": "unknown", "reason": "running-unchecked"})
         return
-    started = running.get(tag) or []
+    started = _started_image_ids(tag, running)
     if not started:
+        detail["running"] = "not-running"
         return
     wanted = _image_content(tag, runner)
     for image_id in started:
         content = _image_content(image_id, runner) if wanted is not None else None
         if content is None:
-            detail.update({"state": "unknown", "reason": "running-image-unreadable",
-                           "running_image": image_id})
+            detail.update({"running": "unreadable", "running_image": image_id})
+            if original_state == "current":
+                detail.update({"state": "unknown", "reason": "running-image-unreadable"})
             return
         if content != wanted:
             # The tag is current; the container is not on it. Applying the
             # update recreates it on what the tag now names.
-            detail.update({"state": "available", "reason": "running-older-image",
-                           "running_image": image_id})
+            detail.update({"running": "different-content", "running_image": image_id})
+            if original_state == "current":
+                detail.update({"state": "available", "reason": "running-older-image"})
             return
     detail["running"] = "same-content"
 
@@ -1793,9 +1831,26 @@ def _probe_admin_compose(
             details=details,
         )
 
-    # Which source each side was built from, when the images say so.
-    image_detail["current_source_tree"] = _local_web_tree(current_image, runner)
+    # A downloaded tag may already name the candidate while the container
+    # still runs an older panel. Pair with the running image, not the cache.
+    running_images = _running_images(compose_file, runner)
+    if running_images:
+        # A recreation can leave replicas using both a tag and a digest.
+        # This component selects one panel repository, so account for every
+        # running replica of it, including older reference names.
+        repository = _image_repository(current_image)
+        ids = sorted({image_id for reference, started in running_images.items()
+                      if _image_repository(reference) == repository for image_id in started})
+        if ids:
+            running_images = {current_image: ids}
+    image_detail["current_source_tree"] = _running_web_tree(current_image, running_images, runner)
     image_detail["available_source_tree"] = _remote_web_tree(target_image, runner)
+    # Record running evidence even when a newer release has appeared in the
+    # registry. The broker checks the reviewed digest and this evidence after
+    # applying; a newer candidate must neither hide an old container nor make
+    # a correctly installed reviewed image fail verification.
+    image_detail["state"] = "current" if local == candidate else "available"
+    _check_running(image_detail, current_image, running_images, runner)
 
     configured_reference = (
         _normalized_tagged_image(configured_image)
@@ -1828,8 +1883,6 @@ def _probe_admin_compose(
             available_version=candidate,
             details=details,
         )
-    image_detail["state"] = "current"
-    _check_running(image_detail, current_image, _running_images(compose_file, runner), runner)
     if image_detail["state"] == "available":
         return _component(
             "admin-container",

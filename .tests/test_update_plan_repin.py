@@ -142,6 +142,11 @@ def gateway(root: Path, *, compose_images: str, candidate_version: str):
 
     local = {OLD: OLD_DIGEST, NEW: NEW_DIGEST, REDIS: REDIS_DIGEST}
     remote = {OLD: OLD_DIGEST, NEW: NEW_DIGEST, REDIS: REDIS_DIGEST}
+    stack_images = {authelia_compose: compose_images.splitlines(),
+                    admin_compose: ['example/haproxy-admin:alpha']}
+    containers = {f'{index:064x}': image for index, image in
+                  enumerate(dict.fromkeys(image for images in stack_images.values() for image in images), 1)}
+    running = {local.get(image, ADMIN_DIGEST): image for image in containers.values()}
 
     def handler(command):
         if command[:2] == ("git", "clone"):
@@ -156,12 +161,19 @@ def gateway(root: Path, *, compose_images: str, candidate_version: str):
         if command == ("apt-get", "-s", "upgrade"):
             return CommandResult(0, "")
         if command[:3] == ("docker", "compose", "-f"):
-            if Path(command[3]) == authelia_compose:
-                return CommandResult(0, compose_images)
-            return CommandResult(0, "example/haproxy-admin:alpha\n")
+            images = stack_images[Path(command[3])]
+            if command[-2:] == ('ps', '-q'):
+                return CommandResult(0, '\n'.join(cid for cid, image in containers.items() if image in images))
+            return CommandResult(0, '\n'.join(images))
+        if command[:2] == ('docker', 'inspect'):
+            return CommandResult(0, '\n'.join(
+                json.dumps(containers[cid]) + ' ' + json.dumps(local.get(containers[cid], ADMIN_DIGEST))
+                for cid in command[4:]))
         if command[:3] == ("docker", "image", "inspect"):
-            image = command[3]
+            image = running.get(command[3], command[3])
             digest = local.get(image, ADMIN_DIGEST)
+            if command[-1] == '{{json .RootFS.Layers}}\t{{json .Config}}':
+                return CommandResult(0, json.dumps([digest]) + '\t' + '{}')
             return CommandResult(0, json.dumps([f"{image.split(':')[0]}@{digest}"]))
         if command[:4] == ("docker", "buildx", "imagetools", "inspect"):
             image = command[4]
