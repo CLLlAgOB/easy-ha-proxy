@@ -554,6 +554,8 @@ class UpdatePlanTests(unittest.TestCase):
                     "--images",
                 ):
                     return CommandResult(0, "registry.example/admin:latest\n")
+                if command[-2:] == ("ps", "-q"):
+                    return CommandResult(0, "")
                 if command[:3] == ("docker", "image", "inspect"):
                     self.assertEqual(command[3], "registry.example/admin:latest")
                     return CommandResult(

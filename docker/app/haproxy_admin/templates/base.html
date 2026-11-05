@@ -106,12 +106,15 @@
         {% endif %}
         {% if build.match is none %}
         <div>Build comparison is unavailable.</div>
+        {% elif build.match is sameas true and build.host.revision != build.panel.revision %}
+        <div>Panel files match the host. The existing image was reused.</div>
         {% endif %}
+        <div>Build times use UTC on every gateway.</div>
       </div>
     </details> ·
     {% endif %}
     {% if build and build.match is sameas false %}
-    <span class="footer-build-mismatch">Host and panel versions differ. Update the panel.</span> ·
+    <span class="footer-build-mismatch">Host and panel files differ. Check the update status.</span> ·
     {% endif %}
     <a href="https://db-ip.com" rel="noopener noreferrer">IP Geolocation by DB-IP</a>
   </footer>
