@@ -125,6 +125,7 @@
         cache_valid_time: 3600
         fail_on_autoremove: true
         policy_rc_d: 101
+      when: "'haproxy-awslc' not in ansible_facts.packages"
 
     - name: HAProxy package | Verify the installed binary
       ansible.builtin.command:
@@ -136,3 +137,6 @@
       failed_when: >-
         haproxy_package_binary.rc != 0
         or not (haproxy_package_binary.stdout is search('HAProxy version 3[.]4[.]'))
+
+- name: Protect HAProxy from incidental package updates
+  ansible.builtin.import_tasks: protection.yml

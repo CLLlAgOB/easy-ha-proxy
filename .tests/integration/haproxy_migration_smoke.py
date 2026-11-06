@@ -86,8 +86,10 @@ class ProcessHost(migration.Host):
         return Path('/var/lib/easy-ha-proxy/security/security.db')
 
     def start_seed(self, directory, unit):
+        libraries = sorted({str(p.parent) for p in (directory / 'baseline-libraries').rglob('lib*.so*')})
         self.seeds[unit + '.service'] = subprocess.Popen(
             [str(directory / 'baseline-haproxy'), '-db', '-f', str(directory / 'seed.cfg')],
+            env=dict(os.environ, LD_LIBRARY_PATH=':'.join(libraries)),
             stdout=self.output, stderr=self.output)
 
     def watchdog(self, directory, unit):

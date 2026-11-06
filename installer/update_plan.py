@@ -30,6 +30,8 @@ _INSTALLER_DIR = str(Path(__file__).resolve().parent)
 if _INSTALLER_DIR not in sys.path:
     sys.path.insert(0, _INSTALLER_DIR)
 import update_scope  # noqa: E402
+import apt_metadata  # noqa: E402
+import haproxy_update_status  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -1037,7 +1039,7 @@ def _probe_daemons(
     )
 
 
-def _probe_os(runner: Runner) -> dict[str, Any]:
+def _probe_os(runner: Runner, freshness=None, excluded=frozenset()) -> dict[str, Any]:
     result = runner.run(("apt-get", "-s", "upgrade"), timeout=APT_TIMEOUT)
     if result.returncode != 0:
         state = "blocked" if result.error == "not-found" else "unknown"
@@ -1071,10 +1073,15 @@ def _probe_os(runner: Runner) -> dict[str, Any]:
             )
         name = match.group("name")
         version = match.group("version")
+        if name.split(':', 1)[0] in excluded:
+            continue
         if name not in seen:
             packages.append(name)
             candidates.append({"name": name, "version": version})
             seen.add(name)
+    if freshness is not None and not freshness.get('fresh'):
+        return _component('os', 'unknown', 'APT metadata is stale or its refresh failed. Check for updates again.',
+                          details={'apt': freshness, 'packages': packages, 'candidates': candidates})
     if packages:
         return _component(
             "os",
@@ -2017,6 +2024,7 @@ def build_update_plan(
     now: dt.datetime | None = None,
     artifact_path: Callable[[Path], Path] | None = None,
     upstream_fetch: Callable[..., tuple[bytes, dict[str, str]]] | None = None,
+    include_haproxy: bool = False,
 ) -> dict[str, Any]:
     """Return a JSON-serializable, read-only update plan.
 
@@ -2094,6 +2102,13 @@ def build_update_plan(
         image_changes = _source_image_changes(
             Path(source_dir), candidate_source, variables
         )
+        map_path = artifact_path or (lambda path: path)
+        freshness = apt_metadata.assess(map_path(apt_metadata.STATE))
+        haproxy = (haproxy_update_status.probe(command_runner, binary=map_path(Path('/usr/sbin/haproxy')),
+                                             metadata=freshness, last_update=map_path(haproxy_update_status.LAST_UPDATE),
+                                             protection=map_path(Path('/etc/needrestart/conf.d/easy-ha-proxy-haproxy.conf')))
+                   if include_haproxy else None)
+        protected = bool(haproxy and haproxy['details'].get('qualified') and haproxy['details'].get('protected'))
         components = [
             source,
             _probe_services(
@@ -2111,7 +2126,8 @@ def build_update_plan(
                 ),
                 candidate_error=candidate_error,
             ),
-            _probe_os(command_runner),
+            _probe_os(command_runner, freshness if include_haproxy else None,
+                      haproxy_update_status.PACKAGES if protected else frozenset()),
             _probe_compose(
                 "authelia-container",
                 Path(authelia_compose),
@@ -2126,6 +2142,8 @@ def build_update_plan(
                 target_channel=resolved_image_channel,
             ),
         ]
+        if include_haproxy:
+            components.append(haproxy)
         if candidate_source is not None and components[0].get("state") == "available":
             # What a "changes only" update of this candidate would run,
             # measured against the last complete update. Part of the signed
@@ -2302,6 +2320,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-channel", choices=tuple(sorted(VALID_SOURCE_CHANNELS)))
     parser.add_argument("--image-channel", choices=tuple(sorted(VALID_IMAGE_CHANNELS)))
     parser.add_argument("--branch")
+    parser.add_argument('--haproxy-status', action='store_true', help='Negotiated by update brokers supporting controlled HAProxy patches')
     return parser
 
 
@@ -2314,6 +2333,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_channel=args.source_channel,
             image_channel=args.image_channel,
             branch=args.branch,
+            include_haproxy=args.haproxy_status,
             # The scheduled and the requested checks ask the registry; a
             # caller that passes nothing (tests, other tools) stays offline.
             upstream_fetch=_http_get,

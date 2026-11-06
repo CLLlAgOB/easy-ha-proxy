@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Least-privilege broker for asynchronous easy-ha-proxy update jobs.
 
-The web container can request only a read-only update scan or an allow-listed
+The web container can request only a bounded update check or an allow-listed
 component update.  It cannot provide commands, Ansible tags, repository URLs,
 paths, or image references.  Job and plan state lives on the host so updating
 the haproxy-admin container does not lose progress or the final result.
@@ -152,7 +152,7 @@ PLAN_TTL_SECONDS = env_int(
     "UPDATED_PLAN_TTL_SECONDS", 15 * 60, maximum=24 * 60 * 60
 )
 LIST_LIMIT = env_int("UPDATED_LIST_LIMIT", 30, maximum=100)
-# A read-only check on a schedule, so "updates are available" reaches the
+# A scheduled check, so "updates are available" reaches the
 # operator without anyone opening the page. 0 switches it off. The first one
 # waits a while after start, so a reboot does not begin with a git clone.
 AUTO_CHECK_HOURS = env_int("UPDATED_AUTO_CHECK_HOURS", 24, minimum=0, maximum=24 * 30)
@@ -190,6 +190,7 @@ ALLOWED_COMPONENTS = frozenset(
         "authelia-container",
         "admin-container",
         "os",
+        "haproxy",
     }
 )
 SOURCE_COMPONENTS = frozenset({"all", "services", "daemons", CHANGES_COMPONENT})
@@ -242,6 +243,7 @@ ALERT_COMPONENT_NAMES = {
     "authelia-container": "Authelia containers",
     "admin-container": "the web application",
     "os": "operating-system packages",
+    "haproxy": "HAProxy",
 }
 ALERT_CHANGELOG_LINES = 15
 
@@ -262,6 +264,8 @@ def availability_report(plan: dict[str, Any]) -> tuple[bool, str, str] | None:
     names = []
     for item in actionable:
         name = ALERT_COMPONENT_NAMES.get(str(item.get("id")), str(item.get("id")))
+        if item.get('id') == 'haproxy':
+            name += f" {item.get('installed') or '?'} → {item.get('available') or '?'}"
         count = (item.get("details") or {}).get("package_count") if item.get("id") == "os" else None
         names.append(f"{name} ({count})" if isinstance(count, int) and count > 0 else name)
     summary = f"Software updates are available: {', '.join(names)}"
@@ -844,6 +848,8 @@ def run_transient_command(
         "-p",
         f"TimeoutStopSec={TRANSIENT_STOP_TIMEOUT}",
     ]
+    if len(argv) > 1 and Path(argv[1]) == SOURCE_DIR / 'installer/apt_metadata.py':
+        command.extend(['-p', 'CPUQuota=100%', '-p', 'MemoryMax=512M'])
     for key, value in child_environment().items():
         command.append(f"--setenv={key}={value}")
     command.append("--")
@@ -993,6 +999,8 @@ def checker_command(
         )
     python = PYTHON_PATH if PYTHON_PATH.is_file() else Path("/usr/bin/python3")
     command = [str(python), str(checker), "--format", "json"]
+    if (SOURCE_DIR / 'installer/haproxy_update_status.py').is_file():
+        command.append('--haproxy-status')
     if image_channel:
         command.extend(("--image-channel", image_channel))
     if source_channel:
@@ -1043,6 +1051,45 @@ def parse_checker_output(raw: str) -> dict[str, Any]:
     return payload
 
 
+METADATA_CONTEXT = threading.local()
+
+
+def trusted_source(filename):
+    path = SOURCE_DIR / 'installer' / filename
+    if not path.is_file() or path.is_symlink():
+        raise UpdatedError('Update the host services before using controlled HAProxy updates')
+    return path
+
+
+def refresh_apt_metadata(job_id):
+    if not (SOURCE_DIR / 'installer/apt_metadata.py').is_file():
+        return  # Legacy checker protocol while installing the new broker.
+    descriptor = None
+    try:
+        if getattr(METADATA_CONTEXT, 'unlocked', False):
+            descriptor = os.open(MAINTENANCE_LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise UpdatedError('Another maintenance operation is active', code='busy') from error
+        update_job(job_id, progress={'phase': 'checking'})
+        python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
+        code, _ = run_command(job_id, [str(python), str(trusted_source('apt_metadata.py')), 'refresh'],
+                              timeout=130, log_prefix='Refreshing signed package metadata without installing packages…')
+        # A completed failed refresh writes a durable unknown state. A failure
+        # to launch the helper must not leave a previously current plan trusted.
+        if code:
+            raise UpdatedError('APT metadata refresh helper could not complete')
+    except Exception:
+        # An old green plan must disappear even when the privileged helper
+        # could not start and therefore could not invalidate its own record.
+        LATEST_PLAN_PATH.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def execute_checker(
     job_id: str,
     *,
@@ -1050,6 +1097,7 @@ def execute_checker(
     source_channel: str | None = None,
     branch: str | None = None,
 ) -> dict[str, Any]:
+    refresh_apt_metadata(job_id)
     command = checker_command(
         image_channel=image_channel,
         source_channel=source_channel,
@@ -1133,6 +1181,12 @@ def component_signature(component: dict[str, Any]) -> str:
             "details",
         )
     }
+    if isinstance(material.get('details'), dict):
+        details = dict(material['details'])
+        if isinstance(details.get('apt'), dict):
+            details['apt'] = {key: details['apt'].get(key) for key in ('fresh', 'sources')}
+        details.pop('last_operation', None)
+        material['details'] = details
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -1164,6 +1218,7 @@ def selected_components(value: Any) -> list[str]:
         "authelia-container": 3,
         "admin-container": 4,
         "os": 5,
+        "haproxy": 6,
     }
     return sorted(result, key=order.__getitem__)
 
@@ -1290,7 +1345,7 @@ def validate_selection(plan: dict[str, Any], components: list[str]) -> None:
                 code="stale_plan",
             )
     validate_requirements(available, components)
-    if SOURCE_COMPONENTS.intersection(components):
+    if SOURCE_COMPONENTS.intersection(components) or 'haproxy' in components:
         metadata = CONFIG_DIR / "metadata.yml"
         try:
             text = metadata.read_text(encoding="utf-8")
@@ -1475,6 +1530,8 @@ def validate_applied_container_digests(
 def acquire_operation(*, allow_scheduled_reboot: bool = False) -> int:
     if SHUTDOWN_REQUESTED.is_set():
         raise UpdatedError("the update broker is shutting down", code="conflict")
+    if haproxy_patch_active():
+        raise UpdatedError('An interrupted HAProxy update requires recovery before other maintenance', code='conflict')
     if not allow_scheduled_reboot and reboot_guard_present():
         raise UpdatedError("a server reboot is scheduled", code="conflict")
     if not OPERATION_THREAD_LOCK.acquire(blocking=False):
@@ -1615,15 +1672,10 @@ def maintenance_lock_busy() -> bool:
 
 
 def auto_check_once() -> str:
-    """One scheduled check: "done", "failed" or "busy".
-
-    It reads and never changes the host, so unlike a check from the page it
-    does not hold the maintenance lock for its minute: a nightly backup that
-    starts meanwhile must not fail for being "busy". It still steps aside for
-    anything running, and keeps the broker's own lock so the page cannot start
-    an installation underneath it.
+    """One scheduled check. Only its bounded APT refresh holds the shared lock;
+    subsequent Git/registry probes release it so backups can run meanwhile.
     """
-    if SHUTDOWN_REQUESTED.is_set() or reboot_guard_present() or ACTIVE_MARKER.exists():
+    if SHUTDOWN_REQUESTED.is_set() or reboot_guard_present() or ACTIVE_MARKER.exists() or haproxy_patch_active():
         return "busy"
     if not OPERATION_THREAD_LOCK.acquire(blocking=False):
         return "busy"
@@ -1631,7 +1683,11 @@ def auto_check_once() -> str:
         if maintenance_lock_busy():
             return "busy"
         job = new_job("check", scheduled=True)
-        done = run_check(job["id"], None, None, None, alert_on_failure=False)
+        METADATA_CONTEXT.unlocked = True
+        try:
+            done = run_check(job["id"], None, None, None, alert_on_failure=False)
+        finally:
+            METADATA_CONTEXT.unlocked = False
         return "done" if done else "failed"
     finally:
         OPERATION_THREAD_LOCK.release()
@@ -1684,7 +1740,7 @@ def settings_payload() -> dict[str, Any]:
 AUTO_INSTALL_WINDOW = (3, 5)
 AUTO_INSTALL_PATH = STATE_ROOT / "auto-install.json"
 AUTO_INSTALL_STATE: dict[str, Any] = {"night": None}
-AUTO_INSTALL_EXCLUDED = frozenset({"os"})
+AUTO_INSTALL_EXCLUDED = frozenset({"os", "haproxy"})
 
 
 def auto_install_settings() -> dict[str, Any]:
@@ -1962,6 +2018,27 @@ def request_self_restart_if_needed() -> None:
         pass
 
 
+def apply_haproxy_patch(job_id, plan, log_prefix):
+    entry = plan_component_map(plan).get('haproxy') or {}
+    details = entry.get('details') or {}
+    expected = entry.get('available_version') or entry.get('available')
+    if not isinstance(expected, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+:~_-]{1,100}', expected):
+        raise UpdatedError('The reviewed HAProxy version is unavailable', code='stale_plan')
+    python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
+    command = [str(python), str(trusted_source('haproxy_package_migrate.py')), 'patch', '--expected-version', expected]
+    if details.get('needs_reload') is True:
+        command.append('--reinstall')
+    previous = haproxy_operation()
+    code, output = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS, log_prefix=log_prefix)
+    result = haproxy_operation()
+    if result and result.get('id') != (previous or {}).get('id'):
+        update_job(job_id, result={'haproxy': result})
+    if (code or not result or result.get('id') == (previous or {}).get('id')
+            or result.get('phase') != 'committed' or result.get('target_verified') is not True):
+        raise UpdatedError('HAProxy update failed; review its recovery status and job log', code='verification_failed')
+    return result, output
+
+
 def apply_worker(
     job_id: str,
     lock_fd: int,
@@ -1969,6 +2046,8 @@ def apply_worker(
     components: list[str],
 ) -> None:
     combined_log = ""
+    haproxy_result = None
+    lock_reacquired = True
     try:
         # Ensure the HTTP 202 response reaches the browser before a selected
         # admin-container update starts recreating this web application.
@@ -1977,6 +2056,8 @@ def apply_worker(
         # before this worker starts. Recheck while holding the maintenance
         # lock before declaring the mutating update active.
         validate_selection(plan, components)
+        if 'haproxy' in components and components[-1] != 'haproxy':
+            raise UpdatedError('The controlled HAProxy update must run last')
         ACTIVE_MARKER.write_text(f"job_id={job_id}\n", encoding="utf-8")
         os.chmod(ACTIVE_MARKER, 0o600)
         update_job(
@@ -2009,18 +2090,31 @@ def apply_worker(
                 progress={"phase": "starting"},
             )
             heading = f"\n=== Applying component: {component} ==="
-            command = update_command(
-                component,
-                source_channel=source_channel,
-                image_channel=image_channel,
-                expected_source_revision=expected_source_revision,
-            )
-            returncode, output = run_command(
-                job_id,
-                command,
-                timeout=JOB_TIMEOUT_SECONDS,
-                log_prefix=sanitize_log(combined_log + heading),
-            )
+            if component == 'haproxy':
+                # HAProxy is last. Transfer custody of the common lock to the
+                # PID-1-owned child; it takes the lock itself before any work.
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_reacquired = False
+                haproxy_result, output = apply_haproxy_patch(job_id, plan, sanitize_log(combined_log + heading))
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_reacquired = True
+                except BlockingIOError:
+                    pass  # Another operation may start after the verified child exits.
+                returncode = 0
+            else:
+                command = update_command(
+                    component,
+                    source_channel=source_channel,
+                    image_channel=image_channel,
+                    expected_source_revision=expected_source_revision,
+                )
+                returncode, output = run_command(
+                    job_id,
+                    command,
+                    timeout=JOB_TIMEOUT_SECONDS,
+                    log_prefix=sanitize_log(combined_log + heading),
+                )
             combined_log = sanitize_log(output)
             if returncode != 0:
                 raise UpdatedError(
@@ -2034,8 +2128,12 @@ def apply_worker(
             # How long each part took, for the next installation's estimate.
             "component_seconds": component_seconds,
         }
+        if haproxy_result is not None:
+            result['haproxy'] = haproxy_result
         update_job(job_id, progress={"phase": "rechecking"})
         try:
+            if not lock_reacquired:
+                raise UpdatedError('The update was verified; recheck after the other maintenance operation completes')
             refreshed_payload = execute_checker(
                 job_id,
                 image_channel=image_channel,
@@ -2316,6 +2414,29 @@ def summary_response() -> dict[str, Any]:
     return {"ok": True, **summary_payload(plan)}
 
 
+HAPROXY_UPDATE_STATE = Path('/var/lib/easy-ha-proxy/haproxy-package-migration/last-update.json')
+
+
+def haproxy_operation():
+    try:
+        if HAPROXY_UPDATE_STATE.is_symlink() or HAPROXY_UPDATE_STATE.stat().st_size > 64 * 1024:
+            return None
+        data = json.loads(HAPROXY_UPDATE_STATE.read_text())
+        if not isinstance(data, dict) or not re.fullmatch(r'[0-9a-f]{32}', str(data.get('id', ''))):
+            return None
+        return {key: data.get(key) for key in ('id', 'phase', 'old_version', 'target_packages', 'updated_at',
+                                               'failure', 'target_verified', 'rollback_verified')}
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def haproxy_patch_active():
+    operation = haproxy_operation()
+    if operation is None:
+        return os.path.lexists(HAPROXY_UPDATE_STATE)
+    return operation.get('phase') not in {'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'}
+
+
 def status_response(request: dict[str, Any]) -> dict[str, Any]:
     requested = request.get("job_id")
     jobs = (
@@ -2342,6 +2463,7 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
         "settings": settings_payload(),
         "summary": summary_payload(plan),
+        'haproxy_operation': haproxy_operation(),
     }
 
 

@@ -11,6 +11,10 @@
   <button id="updates-select-none"></button><button id="updates-reboot-now"></button>
   <button id="updates-reboot-cancel"></button><button id="updates-reboot-modal-cancel"></button>
   <button id="updates-reboot-modal-close"></button>
+  <button id="updates-haproxy-install"></button>
+  <div id="updates-haproxy-installed"></div><div id="updates-haproxy-running"></div>
+  <div id="updates-haproxy-available"></div><div id="updates-haproxy-state"></div>
+  <div id="updates-haproxy-meta"></div><div id="updates-haproxy-error"></div><div id="updates-haproxy-last"></div>
   <input id="updates-impact-confirm" type="checkbox"><input id="updates-confirmation">
   <input id="updates-reboot-confirm">
   <details id="updates-log-details"><pre id="updates-job-log"></pre></details>
@@ -67,6 +71,7 @@
       });
     };
   </script>
+  <script src="../docker/app/haproxy_admin/static/js/updates_core.js"></script>
   <script src="../docker/app/haproxy_admin/static/js/system_updates.js"></script>
   <script>
     window.setTimeout(() => document.getElementById("updates-check").click(), 50);

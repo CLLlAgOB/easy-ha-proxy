@@ -34,6 +34,16 @@ backend tbl_ip_auth
 
 @unittest.skipUnless(m, 'Linux migration command')
 class Boundaries(unittest.TestCase):
+    def test_new_patch_cannot_overwrite_unfinished_recovery_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'last-update.json').write_text('{"id":"' + 'a' * 32 + '","phase":"rollback_failed"}')
+            engine = m.Engine(m.Paths(root=root))
+            with patch.object(engine, 'locked', contextlib.nullcontext), patch.object(engine, 'native_preflight') as preflight:
+                with self.assertRaisesRegex(m.MigrationError, 'unfinished HAProxy update'):
+                    engine.prepare_patch('3.4.8-1')
+                preflight.assert_not_called()
+
     def test_only_known_single_node_peers_can_be_changed(self):
         layout = m.peer_layout(CONFIG)
         self.assertEqual(set(layout['tables']), {'tbl_ban', 'tbl_ip_auth'})

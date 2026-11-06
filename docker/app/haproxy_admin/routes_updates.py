@@ -36,9 +36,10 @@ UPDATE_COMPONENTS = frozenset(
         "authelia-container",
         "admin-container",
         "os",
+        "haproxy",
     }
 )
-CONFIG_SENSITIVE_COMPONENTS = frozenset({"all", "changes", "services", "daemons"})
+CONFIG_SENSITIVE_COMPONENTS = frozenset({"all", "changes", "services", "daemons", "haproxy"})
 
 
 def _daemon_response(result: dict, *, accepted: bool = False):

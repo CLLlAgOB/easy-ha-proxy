@@ -327,10 +327,13 @@ class Host:
         return digest(Path('/proc') / str(int(pid)) / 'exe')
 
     def start_seed(self, directory: Path, unit: str):
+        libraries = directory / 'baseline-libraries'
+        environment = (['--setenv=LD_LIBRARY_PATH=' + ':'.join(sorted({str(p.parent) for p in libraries.rglob('lib*.so*')}))]
+                       if libraries.exists() else [])
         self.command(['/usr/bin/systemd-run', '--quiet', '--collect', '--unit=' + unit,
                       '--property=CPUQuota=50%', '--property=MemoryMax=256M',
                       '--property=Restart=no', '--property=NoNewPrivileges=yes',
-                      str(directory / 'baseline-haproxy'), '-db', '-f', str(directory / 'seed.cfg')])
+                      *environment, str(directory / 'baseline-haproxy'), '-db', '-f', str(directory / 'seed.cfg')])
 
     def watchdog(self, directory: Path, unit: str):
         self.command(['/usr/bin/systemd-run', '--quiet', '--collect', '--unit=' + unit,
@@ -385,14 +388,20 @@ class Engine:
     vendor = 'https://www.haproxy.com/download/haproxy/performance/ubuntu/ha34/'
     key_url = 'https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy'
 
-    def __init__(self, paths: Paths | None = None, host: Host | None = None):
+    def __init__(self, paths: Paths | None = None, host: Host | None = None, *, observer=None):
         self.paths = paths or Paths()
         self.host = host or Host()
         self.state = {}
         self.directory: Path | None = None
+        self.patch = False
+        self.observer = observer
+        self.lock_depth = 0
 
     @contextlib.contextmanager
     def locked(self):
+        if self.lock_depth:
+            yield
+            return
         self.paths.lock.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(self.paths.lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
@@ -403,7 +412,11 @@ class Engine:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise MigrationError('Another maintenance operation is running') from error
-            yield
+            self.lock_depth += 1
+            try:
+                yield
+            finally:
+                self.lock_depth -= 1
         finally:
             os.close(descriptor)
 
@@ -412,6 +425,11 @@ class Engine:
             self.state['phase'] = phase
         self.state['updated_at'] = time.time()
         atomic(self.directory / 'transaction.json', (json.dumps(self.state, indent=2) + '\n').encode())
+        if self.state.get('kind') == 'patch':
+            atomic(self.paths.root / 'last-update.json', (json.dumps(self.summary()) + '\n').encode())
+        if self.observer:
+            with contextlib.suppress(Exception):
+                self.observer(self.summary())
 
     def load(self, identifier):
         if not re.fullmatch(r'[0-9a-f]{32}', identifier):
@@ -426,6 +444,7 @@ class Engine:
         if not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or details.st_mode & 0o077:
             raise MigrationError('Unsafe transaction journal')
         self.state = json.loads(path.read_text())
+        self.patch = self.state.get('kind') == 'patch'
         if self.state.get('format') != 1 or self.state.get('id') != identifier:
             raise MigrationError('Invalid transaction journal')
         if self.state.get('machine') != self.host.machine():
@@ -573,15 +592,21 @@ class Engine:
         if architecture not in ('arm64', 'amd64'):
             raise MigrationError('Only ARM64 and AMD64 are qualified')
         packages = self.host.packages()
-        if not re.match(r'^2[.]8[.]', packages.get('haproxy', '')) or 'haproxy-awslc' in packages:
+        name = 'haproxy-awslc' if self.patch and 'haproxy-awslc' in packages else 'haproxy'
+        branch = '3.4' if name == 'haproxy-awslc' else '2.8'
+        if not re.match(r'^' + re.escape(branch) + r'[.]', packages.get(name, '')):
             raise MigrationError('Preparation requires the distribution HAProxy 2.8 package')
+        if not self.patch and 'haproxy-awslc' in packages:
+            raise MigrationError('A provider migration must start on distribution HAProxy 2.8')
         if not self.host.active('haproxy.service') or not self.host.active('haproxy-controld.service'):
             raise MigrationError('HAProxy and its control service must be healthy before preparation')
         active = info(self.paths.socket)
-        if active.get('Version') != packages['haproxy']:
+        binary_version = re.search(r'HAProxy version (\S+)', self.host.command([str(self.paths.binary), '-v']).stdout)
+        if not binary_version or active.get('Version') != binary_version[1] or self.host.worker_digest(active['Pid']) != digest(self.paths.binary):
             raise MigrationError('Running and installed HAProxy versions differ')
         variables = yaml.safe_load(self.paths.variables.read_text())
-        if not isinstance(variables, dict) or variables.get('haproxy_package_provider', 'distribution') != 'distribution':
+        provider = 'haproxy-technologies' if name == 'haproxy-awslc' else 'distribution'
+        if not isinstance(variables, dict) or variables.get('haproxy_package_provider', 'distribution') != provider:
             raise MigrationError('Installer provider and installed package differ')
         config = self.paths.config.read_text()
         if not re.search(r'^\s+server-state-file ' + re.escape(str(self.paths.server_state)) + r'\s*$', config, re.M):
@@ -605,6 +630,7 @@ class Engine:
             self.state = {'format': 1, 'id': self.directory.name, 'machine': self.host.machine(),
                           'architecture': architecture, 'created_at': time.time(), 'files': {},
                           'engine_digest': digest(Path(__file__)),
+                          'holds': sorted(self.holds() & {'haproxy', 'haproxy-awslc', 'libssl-awslc'}),
                           'old_version': packages['haproxy'], 'phase': 'preparing'}
             self.save()
             for path in (self.paths.config, self.paths.variables, self.paths.server_state, self.paths.policy,
@@ -675,6 +701,8 @@ class Engine:
             packaged = target / 'lib/systemd/system/haproxy.service'
         if not installed.exists():
             installed = Path('/lib/systemd/system/haproxy.service')
+        if digest(target / 'usr/sbin/haproxy') != digest(self.paths.binary):
+            raise MigrationError('The installed binary differs from the exact rollback package')
         if Path('/etc/systemd/system/haproxy.service').exists() or digest(installed) != digest(packaged):
             raise MigrationError('Custom HAProxy service units require a separate qualification')
         for directory in (Path('/etc/systemd/system/haproxy.service.d'), Path('/run/systemd/system/haproxy.service.d')):
@@ -689,9 +717,152 @@ class Engine:
                 raise MigrationError('Baseline package actions bypass policy-rc.d')
         shutil.rmtree(target)
 
+    def holds(self):
+        text = self.host.command(['/usr/bin/dpkg', '--get-selections']).stdout
+        return {line.split()[0].split(':', 1)[0] for line in text.splitlines()
+                if len(line.split()) == 2 and line.split()[1] == 'hold'}
+
+    def restore_holds(self, *, rollback=False):
+        installed = self.host.packages()
+        for name in ('haproxy', 'haproxy-awslc', 'libssl-awslc'):
+            if name in installed:
+                held = name in self.state.get('holds', []) if rollback else True
+                self.host.command(['/usr/bin/apt-mark', 'hold' if held else 'unhold', name])
+
+    def download_exact(self, package, version, destination):
+        """APT authenticates new downloads; retained verified archives cover retired versions."""
+        temporary = self.directory / ('old-download-' + package)
+        private_directory(temporary)
+        try:
+            self.host.command(['/usr/bin/apt-get', '-o', 'APT::Get::AllowUnauthenticated=false',
+                               'download', package + '=' + version], cwd=temporary)
+            files = list(temporary.glob('*.deb'))
+            if len(files) != 1:
+                raise MigrationError('Exact rollback package download is missing')
+            shutil.move(files[0], destination)
+        except MigrationError:
+            found = False
+            for folder in self.paths.root.iterdir():
+                if not re.fullmatch(r'[0-9a-f]{32}', folder.name) or folder.is_symlink():
+                    continue
+                journal = folder / 'transaction.json'
+                try:
+                    details = journal.lstat()
+                    if details.st_uid != 0 or not stat.S_ISREG(details.st_mode) or details.st_mode & 0o077:
+                        continue
+                    previous = json.loads(journal.read_text())
+                    for record in previous.get('target_packages', []):
+                        archive = folder / (package + '.deb')
+                        if (record.get('Package') == package and record.get('Version') == version
+                                and archive.is_file() and digest(archive) == record.get('SHA256')):
+                            shutil.copyfile(archive, destination)
+                            found = True
+                            break
+                except (OSError, ValueError):
+                    continue
+                if found:
+                    break
+            if not found:
+                raise MigrationError('The exact rollback archive is unavailable: ' + package) from None
+        self.check_deb(destination, package, version, self.state['architecture'])
+        return {'Package': package, 'Version': version, 'SHA256': digest(destination)}
+
+    def prepare_patch(self, expected_version, *, reinstall=False):
+        self.patch = True
+        try:
+            return self._prepare_patch(expected_version, reinstall=reinstall)
+        except Exception as error:
+            if self.directory and self.state.get('phase') == 'preparing':
+                self.state['failure'] = str(error)
+                self.save('aborted')
+            raise
+
+    def _prepare_patch(self, expected_version, *, reinstall):
+        with self.locked():
+            previous = self.paths.root / 'last-update.json'
+            if previous.exists():
+                if previous.is_symlink() or previous.stat().st_size > 64 * 1024:
+                    raise MigrationError('Unsafe previous HAProxy update record')
+                try:
+                    operation = json.loads(previous.read_text())
+                except (OSError, ValueError) as error:
+                    raise MigrationError('The previous HAProxy update record is unreadable') from error
+                if not isinstance(operation, dict) or operation.get('phase') not in {'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'}:
+                    raise MigrationError('Recover the unfinished HAProxy update before preparing another one')
+            architecture, packages = self.native_preflight()
+            name = 'haproxy-awslc' if 'haproxy-awslc' in packages else 'haproxy'
+            branch = '3.4' if name == 'haproxy-awslc' else '2.8'
+            if not re.fullmatch(re.escape(branch) + r'[.][0-9]+[A-Za-z0-9.+:~_-]*', expected_version):
+                raise MigrationError('The selected version is outside the installed HAProxy branch')
+            if self.host.command(['/usr/bin/dpkg', '--compare-versions', expected_version, 'lt', packages[name]], check=False).returncode == 0:
+                raise MigrationError('A patch update must not downgrade HAProxy')
+            if expected_version == packages[name] and not reinstall:
+                raise MigrationError('The selected HAProxy version is already installed')
+            held = self.holds()
+            required = {name} | ({'libssl-awslc'} if name == 'haproxy-awslc' else set())
+            if not required <= held:
+                raise MigrationError('Enable controlled HAProxy package protection before updating')
+            private_directory(self.paths.root)
+            if shutil.disk_usage(self.paths.root).free < 512 * 1024 * 1024:
+                raise MigrationError('At least 512 MiB of free disk space is required')
+            self.directory = self.paths.root / uuid.uuid4().hex
+            private_directory(self.directory)
+            self.host.log = self.directory / 'commands.jsonl'
+            self.state = {'format': 1, 'kind': 'patch', 'id': self.directory.name, 'machine': self.host.machine(),
+                          'architecture': architecture, 'created_at': time.time(), 'files': {},
+                          'engine_digest': digest(Path(__file__)), 'old_version': packages[name], 'old_package': name,
+                          'old_runtime_version': info(self.paths.socket)['Version'], 'target_branch': branch,
+                          'holds': sorted(held & required), 'phase': 'preparing', 'extra_packages': [],
+                          'extra_baseline': {key: packages.get(key) for key in self.optional_dependencies},
+                          'tls_was_installed': 'libssl-awslc' in packages, 'tls_baseline': packages.get('libssl-awslc')}
+            self.save()
+            for path in (self.paths.config, self.paths.variables, self.paths.server_state, self.paths.policy,
+                         self.paths.repository, self.paths.priorities, self.paths.signing_key):
+                self.backup(path)
+            self.state['layout'] = peer_layout(self.original(self.paths.config).decode())
+            record = self.download_exact(name, packages[name], self.directory / 'haproxy-old.deb')
+            self.state['old_digest'] = record['SHA256']
+            self.inspect_baseline()
+            atomic(self.directory / 'baseline-haproxy', self.paths.binary.read_bytes(), 0o700)
+            self.state['old_binary_digest'] = digest(self.paths.binary)
+            if name == 'haproxy-awslc':
+                self.state['old_tls'] = self.download_exact('libssl-awslc', packages['libssl-awslc'], self.directory / 'tls-old.deb')
+                libraries = self.directory / 'baseline-libraries'
+                self.host.command(['/usr/bin/dpkg-deb', '-x', str(self.directory / 'tls-old.deb'), str(libraries)])
+                self.state['baseline_library_hashes'] = {}
+                for file in libraries.rglob('*'):
+                    if file.is_file():
+                        if not file.resolve().is_relative_to(libraries.resolve()):
+                            raise MigrationError('A baseline TLS library escapes the private directory')
+                        self.state['baseline_library_hashes'][str(file.relative_to(libraries))] = digest(file)
+                self.state['target_packages'] = self.authenticated_packages(architecture)
+                if self.state['target_packages'][0]['Version'] != expected_version:
+                    raise MigrationError('HAProxy repository changed; check for updates again')
+            else:
+                record = self.download_exact(name, expected_version, self.directory / (name + '.deb'))
+                self.state['target_packages'] = [record]
+            plan = self.host.command(self.package_command(simulate=True)).stdout
+            parse_apt_plan(plan, self.allowed_packages)
+            for dependency in sorted(self.optional_dependencies):
+                match = re.search(r'^Inst ' + re.escape(dependency) + r'(?::\S+)? (?:\[[^\]]+\] )?\((\S+)', plan, re.M)
+                if match:
+                    if packages.get(dependency) is not None:
+                        raise MigrationError('Update the system dependency separately first: ' + dependency)
+                    self.state['extra_packages'].append(self.download_exact(dependency, match[1], self.directory / (dependency + '.deb')))
+            private_directory(self.directory / 'target')
+            for package in self.state['target_packages'] + self.state['extra_packages']:
+                self.host.command(['/usr/bin/dpkg-deb', '-x', str(self.directory / (package['Package'] + '.deb')), str(self.directory / 'target')])
+            self.inspect_target()
+            if digest(Path(__file__)) != self.state['engine_digest']:
+                raise MigrationError('Update implementation changed during preparation')
+            atomic(self.directory / 'recover.py', Path(__file__).read_bytes(), 0o700)
+            self.save('prepared')
+            return self.summary()
+
     def package_command(self, *, simulate=False, rollback=False):
         command = ['/usr/bin/apt-get', '--no-install-recommends', '-o', 'Dpkg::Options::=--force-confold',
-                   '-o', 'Dir::Cache::archives=' + str(self.directory / 'archives')]
+                   '-o', 'Dir::Cache::archives=' + str(self.directory / 'archives'),
+                   '--allow-change-held-packages', '--allow-downgrades']
         if simulate:
             command.append('--simulate')
         else:
@@ -699,13 +870,17 @@ class Engine:
         command.append('install')
         if rollback:
             command.extend(['--reinstall', str(self.directory / 'haproxy-old.deb')])
-            remove = ['haproxy-awslc'] + ([] if self.state['tls_was_installed'] else ['libssl-awslc'])
+            if self.patch and self.state.get('old_tls'):
+                command.append(str(self.directory / 'tls-old.deb'))
+            remove = ([] if self.patch else ['haproxy-awslc']) + ([] if self.state['tls_was_installed'] else ['libssl-awslc'])
             remove += [package['Package'] for package in self.state.get('extra_packages', [])]
             for package in remove:
                 known = self.host.command(['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Status}', package], check=False)
                 if known.returncode == 0 and known.stdout.strip() != 'not-installed':
                     command.append(package + '-')
         else:
+            if self.patch:
+                command.append('--reinstall')
             command.extend([str(self.directory / (package['Package'] + '.deb')) for package in
                             self.state['target_packages'] + self.state.get('extra_packages', [])])
         return command
@@ -724,18 +899,19 @@ class Engine:
         self.state['unit_digest'] = digest(unit)
         self.state['target_binary_digest'] = digest(target / 'usr/sbin/haproxy')
         control = self.directory / 'target-control'
-        self.host.command(['/usr/bin/dpkg-deb', '-e', str(self.directory / 'haproxy-awslc.deb'), str(control)])
-        for name in ('preinst', 'postinst', 'prerm', 'postrm'):
-            path = control / name
+        name = self.state['target_packages'][0]['Package']
+        self.host.command(['/usr/bin/dpkg-deb', '-e', str(self.directory / (name + '.deb')), str(control)])
+        for script in ('preinst', 'postinst', 'prerm', 'postrm'):
+            path = control / script
             if path.exists() and re.search(r'\bsystemctl\s+(?:--\S+\s+)*(?:stop|restart|try-restart)\b', path.read_text()):
                 raise MigrationError('Package service actions bypass policy-rc.d; review the package')
         library_directories = sorted({str(path.parent) for path in target.rglob('lib*.so*')})
-        if not library_directories:
+        if not library_directories and name == 'haproxy-awslc':
             raise MigrationError('The private TLS library is missing')
         result = self.host.command([str(target / 'usr/sbin/haproxy'), '-v'],
                                    env_extra={'LD_LIBRARY_PATH': ':'.join(library_directories)})
         match = re.search(r'HAProxy version (\S+)', result.stdout)
-        if not match or not match[1].startswith('3.4.'):
+        if not match or not match[1].startswith(self.state.get('target_branch', '3.4') + '.'):
             raise MigrationError('The private target binary has an unexpected version')
         self.state['target_runtime_version'] = match[1]
         result = self.host.command([str(target / 'usr/sbin/haproxy'), '-Ws', '-c', '-dr', '-f', str(self.paths.config)],
@@ -757,6 +933,11 @@ class Engine:
         for package in self.state['target_packages'] + self.state.get('extra_packages', []):
             if digest(self.directory / (package['Package'] + '.deb')) != package['SHA256']:
                 raise MigrationError('Target package integrity check failed')
+        if self.state.get('old_tls') and digest(self.directory / 'tls-old.deb') != self.state['old_tls']['SHA256']:
+            raise MigrationError('Rollback TLS package integrity check failed')
+        for name, expected in self.state.get('baseline_library_hashes', {}).items():
+            if digest(self.directory / 'baseline-libraries' / name) != expected:
+                raise MigrationError('Private baseline TLS library integrity check failed')
 
     def quiet(self):
         for unit in ('haproxy-state-dump.service', 'certbot.service', 'snap.certbot.renew.service'):
@@ -944,6 +1125,8 @@ class Engine:
         self.save()
 
     def repository_files(self):
+        if self.patch:
+            return
         repository = ('deb [arch=' + self.state['architecture'] + ' signed-by=' + str(self.paths.signing_key) + '] '
                       + self.vendor.rstrip('/') + ' noble main\n')
         priorities = '''Package: haproxy-awslc
@@ -967,6 +1150,8 @@ Pin-Priority: 100
         self.put(self.paths.signing_key, (self.directory / 'repository.asc').read_bytes(), 0o644)
 
     def refresh_repository(self):
+        if self.patch:
+            return
         # The switch and rollback never depend on a network request. Populate
         # only this provider's update index after committing a healthy service.
         try:
@@ -983,10 +1168,12 @@ Pin-Priority: 100
         parse_apt_plan(self.host.command(command).stdout, self.allowed_packages)
         archives = self.directory / 'archives'
         private_directory(archives)
-        packages = ([{'Package': 'haproxy', 'Version': self.state['old_version']}] if rollback
+        packages = ([{'Package': self.state.get('old_package', 'haproxy'), 'Version': self.state['old_version']}]
+                    + ([self.state['old_tls']] if self.state.get('old_tls') else []) if rollback
                     else self.state['target_packages'] + self.state.get('extra_packages', []))
         for package in packages:
-            source = self.directory / ('haproxy-old.deb' if rollback else package['Package'] + '.deb')
+            source = self.directory / (('tls-old.deb' if package['Package'] == 'libssl-awslc' else 'haproxy-old.deb')
+                                       if rollback else package['Package'] + '.deb')
             filename = f'{package["Package"]}_{package["Version"]}_{self.state["architecture"]}.deb'
             atomic(archives / filename, source.read_bytes())
         before = self.host.packages()
@@ -1002,9 +1189,12 @@ Pin-Priority: 100
         if not changed <= self.allowed_packages:
             raise MigrationError('Unexpected package mutation detected')
         if rollback:
-            if after.get('haproxy') != self.state['old_version'] or 'haproxy-awslc' in after:
+            old_name = self.state.get('old_package', 'haproxy')
+            if after.get(old_name) != self.state['old_version'] or (not self.patch and 'haproxy-awslc' in after):
                 raise MigrationError('The baseline package was not restored')
-        elif after.get('haproxy-awslc') != self.state['target_packages'][0]['Version'] or 'haproxy' in after:
+            if self.state.get('old_tls') and after.get('libssl-awslc') != self.state['old_tls']['Version']:
+                raise MigrationError('The baseline TLS package was not restored')
+        elif after.get(self.state['target_packages'][0]['Package']) != self.state['target_packages'][0]['Version']:
             raise MigrationError('The target package was not installed')
         if not rollback and any(after.get(package['Package']) != package['Version'] for package in
                                 self.state['target_packages'] + self.state.get('extra_packages', [])):
@@ -1017,6 +1207,7 @@ Pin-Priority: 100
         self.state['policy_blocked'] = False
         self.resume()
         self.health()
+        self.restore_holds(rollback=phase == 'rolled_back')
         self.save(phase)
         try:
             self.resume(timers=True)
@@ -1034,8 +1225,8 @@ Pin-Priority: 100
             self.restore(path)
         self.policy_block()
         current_packages = self.host.packages()
-        baseline_intact = (current_packages.get('haproxy') == self.state['old_version']
-                           and 'haproxy-awslc' not in current_packages
+        baseline_intact = (current_packages.get(self.state.get('old_package', 'haproxy')) == self.state['old_version']
+                           and (self.patch or 'haproxy-awslc' not in current_packages)
                            and digest(self.paths.binary) == self.state['old_binary_digest'])
         if not baseline_intact or self.state.get('packages_touched'):
             self.install(rollback=True)
@@ -1052,10 +1243,10 @@ Pin-Priority: 100
         self.store_servers()
         if not self.host.active('haproxy.service'):
             self.host.service('restart')
-            self.wait_worker(self.state['old_version'])
-        self.reload(self.state['old_version'])
+            self.wait_worker(self.state.get('old_runtime_version', self.state['old_version']))
+        self.reload(self.state.get('old_runtime_version', self.state['old_version']))
         self.restore(self.paths.config)
-        self.reload(self.state['old_version'])
+        self.reload(self.state.get('old_runtime_version', self.state['old_version']))
         self.restore(self.paths.variables)
         self.state['rollback_verified'] = True
         self.finish('rolled_back')
@@ -1070,7 +1261,7 @@ Pin-Priority: 100
                          self.paths.priorities, self.paths.signing_key):
                 self.unchanged(path)
             _, packages = self.native_preflight()
-            if packages['haproxy'] != self.state['old_version'] or digest(self.paths.binary) != self.state['old_binary_digest']:
+            if packages[self.state.get('old_package', 'haproxy')] != self.state['old_version'] or digest(self.paths.binary) != self.state['old_binary_digest']:
                 raise MigrationError('The baseline package changed after preparation')
             if any(packages.get(name) != version for name, version in self.state['extra_baseline'].items()):
                 raise MigrationError('A system dependency changed after preparation')
@@ -1089,13 +1280,13 @@ Pin-Priority: 100
                 self.snapshot()
                 self.check_guard()
                 self.dump_servers()
-                self.bootstrap_seed(self.state['old_version'])
+                self.bootstrap_seed(self.state.get('old_runtime_version', self.state['old_version']))
                 self.policy_block()
                 self.repository_files()
                 self.save('installing_target')
                 previous_pid = self.host.main_pid()
                 self.install()
-                if self.host.main_pid() != previous_pid or info(self.paths.socket).get('Version') != self.state['old_version']:
+                if self.host.main_pid() != previous_pid or info(self.paths.socket).get('Version') != self.state.get('old_runtime_version', self.state['old_version']):
                     raise MigrationError('An APT hook unexpectedly restarted the live service')
                 self.host.command(['/usr/bin/systemctl', 'daemon-reload'])
                 self.reload(self.state['target_runtime_version'])
@@ -1108,14 +1299,15 @@ Pin-Priority: 100
                 self.await_tables(self.directory / 'seed.sock')
                 self.restore(self.paths.config)
                 self.reload(self.state['target_runtime_version'])
-                variables = yaml.safe_load(self.original(self.paths.variables).decode())
-                variables.update(haproxy_package_provider='haproxy-technologies', haproxy_package_branch='3.4')
-                record = self.state['files'][str(self.paths.variables)]
-                self.put(self.paths.variables, yaml.safe_dump(variables, sort_keys=False, allow_unicode=True).encode(),
-                         record['mode'], record['uid'], record['gid'])
+                if not self.patch:
+                    variables = yaml.safe_load(self.original(self.paths.variables).decode())
+                    variables.update(haproxy_package_provider='haproxy-technologies', haproxy_package_branch='3.4')
+                    record = self.state['files'][str(self.paths.variables)]
+                    self.put(self.paths.variables, yaml.safe_dump(variables, sort_keys=False, allow_unicode=True).encode(),
+                             record['mode'], record['uid'], record['gid'])
                 self.state['committed_vars_digest'] = digest(self.paths.variables)
                 self.state['committed_repository_digests'] = {str(path): digest(path) for path in
-                    (self.paths.repository, self.paths.priorities, self.paths.signing_key)}
+                    (self.paths.repository, self.paths.priorities, self.paths.signing_key) if path.exists()}
                 self.finish('committed')
             except Exception as error:
                 if self.state['phase'] == 'committed':
@@ -1229,17 +1421,19 @@ Pin-Priority: 100
             return self.summary()
 
     def summary(self):
-        return {key: self.state.get(key) for key in ('id', 'phase', 'architecture', 'old_version', 'target_packages',
+        return {key: self.state.get(key) for key in ('id', 'kind', 'phase', 'architecture', 'old_version', 'old_runtime_version', 'target_packages',
                                                      'extra_packages',
                                                      'failure', 'rollback_verified', 'target_verified', 'table_counts',
-                                                     'cleanup_warning')}
+                                                     'cleanup_warning', 'updated_at')}
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'apply', 'rollback', 'recover', 'status'))
+    parser.add_argument('action', choices=('prepare', 'patch', 'apply', 'rollback', 'recover', 'status'))
     parser.add_argument('--id')
     parser.add_argument('--exercise-rollback', action='store_true')
+    parser.add_argument('--expected-version')
+    parser.add_argument('--reinstall', action='store_true')
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error('This operator command must run as root')
@@ -1248,6 +1442,22 @@ def main(argv=None):
     try:
         if args.action == 'prepare':
             result = engine.prepare()
+        elif args.action == 'patch':
+            if not args.expected_version:
+                parser.error('--expected-version is required')
+            previous = []
+
+            def progress(summary):
+                phase = summary.get('phase')
+                if not previous or previous[-1] != phase:
+                    previous.append(phase)
+                    value = 'prepare' if phase in ('preparing', 'prepared') else 'verifying' if phase == 'target_verified' else 'playbook'
+                    print('EHP-PROGRESS phase=' + value, flush=True)
+
+            engine.observer = progress
+            with engine.locked():
+                prepared = engine.prepare_patch(args.expected_version, reinstall=args.reinstall)
+                result = engine.apply(prepared['id'], exercise_rollback=args.exercise_rollback)
         elif not args.id:
             parser.error('--id is required')
         elif args.action == 'apply':

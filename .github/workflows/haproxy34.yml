@@ -12,6 +12,8 @@ on:
       - 'docker/app/requirements.txt'
       - 'installer/requirements.txt'
       - 'installer/haproxy_package_migrate.py'
+      - 'installer/apt_metadata.py'
+      - 'installer/haproxy_update_status.py'
       - '.tests/integration/**'
       - '.github/workflows/haproxy34.yml'
   pull_request:
@@ -24,6 +26,8 @@ on:
       - 'docker/app/requirements.txt'
       - 'installer/requirements.txt'
       - 'installer/haproxy_package_migrate.py'
+      - 'installer/apt_metadata.py'
+      - 'installer/haproxy_update_status.py'
       - '.tests/integration/**'
       - '.github/workflows/haproxy34.yml'
   workflow_dispatch:
@@ -63,6 +67,8 @@ jobs:
           ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
       - name: Exercise actual systemd reload, failed candidate and rollback
         run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_migration_smoke.py --systemd
+      - name: Qualify distribution patches against a signed disposable repository
+        run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_patch_smoke.py --systemd
 
   native-package:
     name: Native package (${{ matrix.arch }})
@@ -97,7 +103,7 @@ jobs:
           test ! -e /etc/apt/sources.list.d/easy-ha-proxy-haproxy.list
           # This runner is disposable; provider replacement on a gateway has
           # a separate backup, maintenance and rollback procedure.
-          sudo apt-get remove -y haproxy
+          sudo apt-get remove -y --allow-change-held-packages haproxy
       - name: Install the signed package using the project role
         run: ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml
       - name: Verify architecture and exercise the real configuration
@@ -117,3 +123,5 @@ jobs:
           fi
           grep -q 'Refusing to replace an installed HAProxy package' /tmp/haproxy34-rollback-guard.log
           dpkg-query --show --showformat='${Version}' haproxy-awslc | grep -Eq '^3[.]4[.]'
+      - name: Qualify vendor and TLS patches against a signed disposable repository
+        run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_patch_smoke.py --systemd
