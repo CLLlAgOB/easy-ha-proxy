@@ -189,8 +189,8 @@
     button.className = `rq-link ${className || ""}`.trim();
     button.dataset.filter = name;
     button.dataset.value = String(value);
-    button.title = t("Search for only this");
     button.textContent = text === undefined ? String(value) : text;
+    button.title = `${button.textContent} · ${t("Search for only this")}`;
     return button;
   }
 

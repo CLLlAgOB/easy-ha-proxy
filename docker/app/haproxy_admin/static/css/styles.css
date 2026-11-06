@@ -439,7 +439,7 @@
   }
   @media (max-width: 720px) {
     .app-header { align-items: flex-start; padding: 16px; gap: 14px; flex-wrap: wrap; }
-    .page-heading { flex: 1 1 160px; }
+    .page-heading { flex: 1 1 220px; }
     .page-eyebrow { font-size: 9px; }
     .controls { margin-left: auto; }
     .global-config-state { display: none; }

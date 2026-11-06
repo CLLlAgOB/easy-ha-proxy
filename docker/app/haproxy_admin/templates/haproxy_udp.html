@@ -57,6 +57,7 @@
     {% endif %}
 
     {% if udp_forwards %}
+    <div class="table-container">
     <table class="table">
       <thead>
         <tr>
@@ -96,7 +97,7 @@
             <span class="tag">no</span>
             {% endif %}
           </td>
-          <td  class="text-right">
+          <td class="text-right nowrap">
             <a class="btn btn-small"
                href="{{ url_for('routes.haproxy_udp_page', edit=u.name) }}">
               Edit
@@ -112,6 +113,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% else %}
     <p>There are no UDP forwards yet.</p>
     {% endif %}
@@ -198,7 +200,7 @@
       </div>
     </div>
 
-    <div  class="u-p-0-16px-16px">
+    <div class="form-actions">
       <button type="submit" class="btn btn-primary">Save and apply now</button>
       {% if original_name %}
       <a class="btn" href="{{ url_for('routes.haproxy_udp_page') }}">Cancel editing</a>
