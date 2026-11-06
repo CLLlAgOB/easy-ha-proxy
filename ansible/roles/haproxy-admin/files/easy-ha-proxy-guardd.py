@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easy-ha-proxy-guardd — adaptive protection engine (foundation).
+"""easy-ha-proxy-guardd — bounded log analysis and adaptive enforcement.
 
-This is the plumbing layer: it reads what HAProxy already knows, turns it into
-sanitised security events, and remembers who must never be acted upon. It does
-not yet contain detection rules, and in this release it cannot ban anything --
-`enforce` is rejected by configuration validation.
+Reads HAProxy observations, records sanitised findings and applies the selected
+policy. Trusted-address exclusions are checked independently of detection;
+HAProxy's synchronous hard ceilings remain responsible for immediate overload.
 
 Design notes that the rest of the phase depends on:
 
@@ -305,7 +304,6 @@ SCANNER_SEGMENTS: Dict[str, str] = {
     "web.config": "config",
     "docker-compose.yml": "config",
     "id_rsa": "secrets",
-    "credentials": "secrets",
 }
 # Full paths that only mean something in their entirety.
 SCANNER_PATHS: Dict[str, str] = {
@@ -342,7 +340,7 @@ DECISIVE_CATEGORIES: frozenset = frozenset({"secrets", "vcs", "backup", "scanner
 # injection shapes and were proven not to misfire on 412 query-sending
 # addresses -- absence of a hit is still evidence about false positives.
 DEFAULT_QUERY_RULES: Dict[str, str] = {
-    "fetch-and-run": r"(wget\s|curl\s|tftp\s|\bchmod\s+\+?x|\bbusybox\b)",
+    "fetch-and-run": r"(?:^|[;&|]\s*)(?:(?:wget|curl)\s+(?=[^;&|\r\n]{0,384}(?:https?|ftp)://)|tftp\s+(?:-g\b|-r\b|[0-9])|chmod\s+\+?x\b|busybox\s+(?:wget|curl|tftp)\b)",
     "traversal": r"(\.\./\.\./|%2e%2e[/%])",
     "shell-chaining": r"(;\s*(sh|bash|cat|ls|id|uname|rm)\b|\|\s*(sh|bash)\b)",
     "substitution": r"(\$\(|`[a-z/]{2,})",
@@ -450,9 +448,13 @@ def classify_query(uri: str) -> str:
     for _ in range(QUERY_DECODE_PASSES):
         with contextlib.suppress(Exception):
             query = unquote_plus(query)
-    for name, pattern in QUERY_RULES.items():
-        if pattern.search(query):
-            return name
+    for part in query.split("&", 64):
+        # Match parameter values, not prose elsewhere in the request or a
+        # parameter whose name happens to resemble a program.
+        value = part.partition("=")[2] if "=" in part else part
+        for name, pattern in QUERY_RULES.items():
+            if pattern.search(value.strip()):
+                return name
     return ""
 
 
@@ -1116,6 +1118,7 @@ class ParsedRequest:
     # access log really does contain ?token=..., and a security database is
     # the last place that belongs.
     query_flag: str = ""
+    path_flag: str = ""
     # Filled in only when the request log is on. They cost a little more
     # parsing per line, so they stay optional rather than always paid for.
     ts: int = 0
@@ -1213,6 +1216,25 @@ def is_asset(path: str) -> bool:
     return lowered.endswith(ASSET_SUFFIXES)
 
 
+def classify_raw_path(uri: str) -> str:
+    """Recognise a traversal to a sensitive target before canonicalisation.
+
+    Only the rule name survives. Ordinary parent segments are not evidence
+    of an attack; require repeated traversal and a specific sensitive target.
+    """
+    text = (uri or "").split("?", 1)[0].split("#", 1)[0][:2048]
+    if text.startswith(("http://", "https://")):
+        with contextlib.suppress(ValueError):
+            text = urlparse(text).path
+    for _ in range(2):
+        text = unquote(text).replace("\\", "/").lower()
+        if text.split("/").count("..") >= 2 and re.search(
+            r"/(?:etc/(?:passwd|shadow)|proc/(?:self|1)/environ|windows/(?:win|system)\.ini)(?:/|$)", text
+        ):
+            return "path-traversal"
+    return ""
+
+
 # The gateway's own sign-in surface. These are paths this product serves in
 # order to authenticate somebody, so a request to one is the product working,
 # never reconnaissance against it.
@@ -1246,7 +1268,8 @@ def is_authentication_endpoint(path: str) -> bool:
     """
 
     lowered = path.lower()
-    return lowered.startswith(AUTHENTICATION_PATHS)
+    return any(lowered == prefix.rstrip("/") or lowered.startswith(prefix.rstrip("/") + "/")
+               for prefix in AUTHENTICATION_PATHS)
 
 
 def _prefix_category(segment: str) -> str:
@@ -1273,15 +1296,6 @@ def classify_path(path: str) -> str:
     exact = SCANNER_PATHS.get(path)
     if exact:
         return exact
-    if is_asset(path):
-        # A stylesheet under /vendor/ that a deploy renamed is not a probe,
-        # and matching every segment would otherwise make it one.
-        return ""
-    if is_authentication_endpoint(path):
-        # Signing in is not reconnaissance. Checked after the exact table so
-        # a genuinely hostile path could still be listed there explicitly,
-        # and before the segments, which is where the damage was done.
-        return ""
     # The most confident match wins, not the leftmost. /vendor/phpunit/...
     # and /lib/phpunit/... are the same attack, and taking whichever segment
     # came first gave one of them "dependency" and the other "rce-probe".
@@ -1297,7 +1311,9 @@ def classify_path(path: str) -> str:
         if category_is_decisive(category):
             return category
         probable = probable or category
-    return probable
+    # Asset and sign-in exceptions apply to ambiguous technology names, not
+    # to sensitive files hidden under those routes or behind an extension.
+    return "" if is_asset(path) or is_authentication_endpoint(path) else probable
 
 
 def extract_host(value: str) -> str:
@@ -1386,6 +1402,7 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         path=normalize_path(uri),
         host=extract_host(uri) if not host else host[:MAX_HOST_LENGTH],
         query_flag=classify_query(uri),
+        path_flag=classify_raw_path(uri),
         ts=stamp,
         request_id=request_id,
         bytes_out=bytes_out,
@@ -7193,6 +7210,14 @@ class GuardEngine:
                 fingerprint=f"{ip}|{EVENT_QUERY_INJECTION}|{request.query_flag}",
             )
             self._check_multi_category(ip, activity, now)
+
+        if request.path_flag:
+            activity.scanner_hits += 1
+            activity.scanner_hits_denied += int(handled)
+            activity.note_category(request.path_flag, now)
+            self._emit(ip, EVENT_SCANNER_DECISIVE, now, source="haproxy-log",
+                       category=request.path_flag, detail=request.path, handled=handled,
+                       fingerprint=f"{ip}|path|{request.path_flag}|{int(handled)}")
 
         agent, agent_category = classify_user_agent(request.user_agent)
         if agent:

@@ -50,8 +50,9 @@ class WithTheShippedFile(unittest.TestCase):
                 self.assertEqual(guardd.classify_path(path), "secrets")
                 self.assertTrue(guardd.category_is_decisive("secrets"))
 
-    def test_a_static_file_named_like_it_is_still_a_static_file(self):
-        self.assertEqual(guardd.classify_path("/assets/.env.config.js"), "")
+    def test_a_secret_name_cannot_be_hidden_by_a_static_extension(self):
+        self.assertEqual(guardd.classify_path("/assets/.env.config.js"), "secrets")
+        self.assertEqual(guardd.classify_path("/assets/environment.config.js"), "")
 
     def test_other_secret_files(self):
         for path in ("/.git-credentials", "/.netrc", "/.pypirc", "/.npmrc"):

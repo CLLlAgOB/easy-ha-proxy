@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-26c",
+  "version": "2026-11-06a",
   "source": "curated, plus paths mined from 713945 requests across two live gateways",
   "notes": [
     "A category is decisive when no client has any legitimate reason to ask:",
@@ -45,7 +45,6 @@
     ".idea": "secrets",
     "id_rsa": "secrets",
     "id_ed25519": "secrets",
-    "credentials": "secrets",
     "secrets.yml": "secrets",
     "phpunit": "rce-probe",
     "eval-stdin.php": "rce-probe",
@@ -145,7 +144,7 @@
   },
   "traps": [],
   "queries": {
-    "fetch-and-run": "(wget\\s|curl\\s|tftp\\s|\\bchmod\\s+\\+?x|\\bbusybox\\b)",
+    "fetch-and-run": "(?:^|[;&|]\\s*)(?:(?:wget|curl)\\s+(?=[^;&|\\r\\n]{0,384}(?:https?|ftp)://)|tftp\\s+(?:-g\\b|-r\\b|[0-9])|chmod\\s+\\+?x\\b|busybox\\s+(?:wget|curl|tftp)\\b)",
     "traversal": "(\\.\\./\\.\\./|%2e%2e[/%])",
     "shell-chaining": "(;\\s*(sh|bash|cat|ls|id|uname|rm)\\b|\\|\\s*(sh|bash)\\b)",
     "substitution": "(\\$\\(|`[a-z/]{2,})",
