@@ -1302,12 +1302,6 @@ backend be_{{ id }}
     mode http
     balance {{ s.balance | default('roundrobin') }}
 
-{% if s.authelia_enabled | default(false) %}
-    # Pass Set-Cookie from the forward-auth answer on to the client (if any)
-    acl authelia_set_cookie var(req.auth_response_header.set_cookie) -m found
-    http-response set-header Set-Cookie %[var(req.auth_response_header.set_cookie)] if authelia_set_cookie
-{% endif %}
-
 {% if s.http_reuse is defined %}
     http-reuse {{ s.http_reuse }}
 {% endif %}
@@ -1329,6 +1323,13 @@ backend be_{{ id }}
     tcp-request content  reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
     tcp-response content reject if { src_get_gpc0(tbl_ban) gt 0 } !ip_whitelist{% if authelia_enabled %} !ip_auth_ok{% endif %}{% if admin_ips_enabled %} !allowed_admin{% endif %}
+{% if s.authelia_enabled | default(false) %}
+
+    # Pass Set-Cookie from the forward-auth answer on to the client (if any).
+    # HTTP response rules follow the TCP response checks in execution order.
+    acl authelia_set_cookie var(req.auth_response_header.set_cookie) -m found
+    http-response set-header Set-Cookie %[var(req.auth_response_header.set_cookie)] if authelia_set_cookie
+{% endif %}
 {% if s.default_favicon | default(true) %}
 
     # A site without an icon of its own answers /favicon.ico with 404 on

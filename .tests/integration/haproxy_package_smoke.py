@@ -166,6 +166,7 @@ def qualify(expected):
         assert parsed.returncode == 0, parsed.stdout + parsed.stderr
         assert 'bool-sample-conversion' not in parsed.stderr, parsed.stderr
         assert 'not supported by AWS-LC' not in parsed.stderr, parsed.stderr
+        assert 'will still be processed before' not in parsed.stderr, parsed.stderr
         checks.append('generated configuration and Lua load')
         log = base / 'process.log'
         with log.open('w') as output:
