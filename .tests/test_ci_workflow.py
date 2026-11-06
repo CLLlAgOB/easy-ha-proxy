@@ -81,7 +81,11 @@ class TheLinters(unittest.TestCase):
             if line and not line.startswith("#")
         ]
         # Each one a test fixture, added deliberately: a new one moves this.
-        self.assertEqual(len(acknowledged), 5)
+        self.assertEqual(len(acknowledged), 6)
+        self.assertIn(
+            "902907a92286c1f3830608041475fd0bebf14ecb:ansible/roles/haproxy/defaults/main.yml:generic-api-key:12",
+            acknowledged,
+        )
         self.assertTrue(all(line.split(":")[1].startswith(".tests/") for line in acknowledged))
 
     def test_the_names_come_from_a_secret(self):
