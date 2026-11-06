@@ -59,6 +59,12 @@ class Boundaries(unittest.TestCase):
         self.assertEqual(m.parse_apt_plan('Remv haproxy [2.8]\nInst haproxy-awslc:arm64 (3.4)',
                                          {'haproxy', 'haproxy-awslc'}), {'haproxy', 'haproxy-awslc'})
 
+    def test_preparation_cannot_be_applied_by_changed_migration_code(self):
+        engine = m.Engine()
+        engine.state = {'engine_digest': '0' * 64}
+        with self.assertRaisesRegex(m.MigrationError, 'implementation changed'):
+            engine.check_artifacts()
+
     def test_runtime_rejects_missing_table_wrong_type_or_missing_reason(self):
         for response in [[], ['Unknown table'], ['# table: tbl_ban, type: ipv6, size:10'],
                          ['# table: tbl_ban, type: ip, size:10', 'key=198.51.100.22 exp=1000 gpc0=1']]:

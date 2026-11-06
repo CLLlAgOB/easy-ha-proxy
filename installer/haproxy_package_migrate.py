@@ -380,7 +380,8 @@ class Engine:
     paused_units = ('easy-ha-proxy-guardd.service', 'haproxy-certd.service', 'haproxy-controld.service',
                     'haproxy-state-dump.timer', 'certbot.timer', 'snap.certbot.renew.timer',
                     'apt-daily.timer', 'apt-daily-upgrade.timer')
-    allowed_packages = {'haproxy', 'haproxy-awslc', 'libssl-awslc', 'libjemalloc2'}
+    optional_dependencies = {'libjemalloc2', 'libopentracing1', 'libopentracing-c-wrapper0t64'}
+    allowed_packages = {'haproxy', 'haproxy-awslc', 'libssl-awslc'} | optional_dependencies
     vendor = 'https://www.haproxy.com/download/haproxy/performance/ubuntu/ha34/'
     key_url = 'https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy'
 
@@ -603,6 +604,7 @@ class Engine:
             self.host.log = self.directory / 'commands.jsonl'
             self.state = {'format': 1, 'id': self.directory.name, 'machine': self.host.machine(),
                           'architecture': architecture, 'created_at': time.time(), 'files': {},
+                          'engine_digest': digest(Path(__file__)),
                           'old_version': packages['haproxy'], 'phase': 'preparing'}
             self.save()
             for path in (self.paths.config, self.paths.variables, self.paths.server_state, self.paths.policy,
@@ -631,33 +633,36 @@ class Engine:
             self.state['tls_was_installed'] = 'libssl-awslc' in packages
             self.state['tls_baseline'] = packages.get('libssl-awslc')
             self.state['extra_packages'] = []
-            self.state['extra_baseline'] = {'libjemalloc2': packages.get('libjemalloc2')}
+            self.state['extra_baseline'] = {name: packages.get(name) for name in self.optional_dependencies}
             plan = self.host.command(self.package_command(simulate=True)).stdout
             parse_apt_plan(plan, self.allowed_packages)
-            match = re.search(r'^Inst libjemalloc2(?::\S+)? (?:\[[^\]]+\] )?\((\S+)', plan, re.M)
-            if match:
-                if packages.get('libjemalloc2') is not None:
-                    raise MigrationError('Migration would upgrade the existing allocator library')
-                temporary = self.directory / 'extra-download'
+            for name in sorted(self.optional_dependencies):
+                match = re.search(r'^Inst ' + re.escape(name) + r'(?::\S+)? (?:\[[^\]]+\] )?\((\S+)', plan, re.M)
+                if not match:
+                    continue
+                if packages.get(name) is not None:
+                    raise MigrationError('Migration would upgrade an existing system dependency: ' + name)
+                temporary = self.directory / ('download-' + name)
                 private_directory(temporary)
                 self.host.command(['/usr/bin/apt-get', '-o', 'APT::Get::AllowUnauthenticated=false',
-                                   'download', 'libjemalloc2=' + match[1]], cwd=temporary)
+                                   'download', name + '=' + match[1]], cwd=temporary)
                 archives = list(temporary.glob('*.deb'))
                 if len(archives) != 1:
-                    raise MigrationError('The exact allocator dependency could not be downloaded')
-                destination = self.directory / 'libjemalloc2.deb'
+                    raise MigrationError('The exact system dependency could not be downloaded: ' + name)
+                destination = self.directory / (name + '.deb')
                 shutil.move(archives[0], destination)
-                self.check_deb(destination, 'libjemalloc2', match[1], architecture)
-                self.state['extra_packages'] = [{'Package': 'libjemalloc2', 'Version': match[1], 'SHA256': digest(destination)}]
-                parse_apt_plan(self.host.command(self.package_command(simulate=True)).stdout, self.allowed_packages)
+                self.check_deb(destination, name, match[1], architecture)
+                self.state['extra_packages'].append({'Package': name, 'Version': match[1], 'SHA256': digest(destination)})
+            parse_apt_plan(self.host.command(self.package_command(simulate=True)).stdout, self.allowed_packages)
             # Extracted binaries run with their private matching library. Nothing
             # is copied into /usr or installed until apply is explicitly invoked.
             private_directory(self.directory / 'target')
             for package in self.state['target_packages'] + self.state['extra_packages']:
                 self.host.command(['/usr/bin/dpkg-deb', '-x', str(self.directory / (package['Package'] + '.deb')), str(self.directory / 'target')])
             self.inspect_target()
-            shutil.copyfile(Path(__file__), self.directory / 'recover.py')
-            os.chmod(self.directory / 'recover.py', 0o700)
+            if digest(Path(__file__)) != self.state['engine_digest']:
+                raise MigrationError('Migration implementation changed during preparation')
+            atomic(self.directory / 'recover.py', Path(__file__).read_bytes(), 0o700)
             self.save('prepared')
             return self.summary()
 
@@ -739,6 +744,10 @@ class Engine:
             raise MigrationError('Apply the current alpha HAProxy configuration before migration')
 
     def check_artifacts(self):
+        if digest(Path(__file__)) != self.state.get('engine_digest'):
+            raise MigrationError('Migration implementation changed; use the saved recovery command or prepare afresh')
+        if digest(self.directory / 'recover.py') != self.state['engine_digest']:
+            raise MigrationError('Saved recovery command integrity check failed')
         if time.time() - self.state['created_at'] > 86400 and self.state['phase'] == 'prepared':
             raise MigrationError('Preparation expired; create a fresh transaction')
         if digest(self.directory / 'haproxy-old.deb') != self.state['old_digest']:
@@ -750,6 +759,9 @@ class Engine:
                 raise MigrationError('Target package integrity check failed')
 
     def quiet(self):
+        for unit in ('haproxy-state-dump.service', 'certbot.service', 'snap.certbot.renew.service'):
+            if self.host.active(unit):
+                raise MigrationError('A state dump or certificate renewal is running; retry after it completes')
         path = Path(self.state.get('control_journal', str(self.paths.control_state)))
         if path.exists():
             data = json.loads(path.read_text())
