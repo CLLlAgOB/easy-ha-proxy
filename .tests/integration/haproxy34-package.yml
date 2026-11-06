@@ -1,0 +1,12 @@
+---
+# Run on disposable Ubuntu 24.04 ARM64/AMD64 systems only.
+- hosts: localhost
+  connection: local
+  become: true
+  vars:
+    haproxy_package_provider: haproxy-technologies
+  tasks:
+    - name: Install only the package stage
+      ansible.builtin.import_role:
+        name: haproxy
+        tasks_from: package

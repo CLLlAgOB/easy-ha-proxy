@@ -1,0 +1,133 @@
+---
+# Kept separate from install.yml so disposable ARM64/AMD64 environments can
+# qualify the real package without configuring or restarting any host service.
+- name: HAProxy package | Validate the provider
+  ansible.builtin.assert:
+    that:
+      - haproxy_package_provider in ['distribution', 'haproxy-technologies']
+    fail_msg: "Unknown HAProxy package provider; choose distribution or haproxy-technologies."
+
+- name: HAProxy package | Read installed packages
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: HAProxy package | Require a separate provider migration
+  ansible.builtin.assert:
+    that:
+      - haproxy_package_provider != 'distribution' or 'haproxy-awslc' not in ansible_facts.packages
+      - haproxy_package_provider != 'haproxy-technologies' or 'haproxy' not in ansible_facts.packages
+    fail_msg: >-
+      Refusing to replace an installed HAProxy package with a different provider.
+      Follow HAPROXY_34_MIGRATION.md, including package/configuration backup and
+      rollback qualification. An ordinary install or update must not migrate it.
+
+- name: HAProxy package | Install the distribution package
+  ansible.builtin.apt:
+    name: haproxy
+    state: present
+    update_cache: true
+  when: haproxy_package_provider == 'distribution'
+
+- name: HAProxy package | Configure the qualified 3.4 provider
+  when: haproxy_package_provider == 'haproxy-technologies'
+  block:
+    - name: HAProxy package | Validate the platform before changing APT
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_release == 'noble'
+          - ansible_architecture in ['aarch64', 'x86_64']
+          - haproxy_package_branch == '3.4'
+          - >-
+            'haproxy-awslc' not in ansible_facts.packages
+            or ansible_facts.packages['haproxy-awslc'][0].version is match('^3[.]4[.]')
+        fail_msg: >-
+          The HAProxy Technologies provider is qualified for Ubuntu 24.04 noble,
+          ARM64 and AMD64, branch 3.4 only. Other platforms keep the distribution
+          provider until they are explicitly qualified. An installed package from
+          another branch must use a separate migration procedure.
+
+    - name: HAProxy package | Install repository prerequisites
+      ansible.builtin.apt:
+        name: ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ easy_ha_proxy_apt_cache_valid_time | default(3600) }}"
+
+    - name: HAProxy package | Create the dedicated key directory
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: HAProxy package | Install the pinned community signing key
+      ansible.builtin.get_url:
+        url: https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy
+        dest: /usr/share/keyrings/easy-ha-proxy-haproxy-community.asc
+        checksum: "sha256:{{ haproxy_community_key_sha256 }}"
+        owner: root
+        group: root
+        mode: '0644'
+      register: haproxy_package_key
+
+    - name: HAProxy package | Keep package updates within the selected branch
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/easy-ha-proxy-haproxy
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Only the explicitly selected HAProxy branch may be installed.
+          Package: haproxy-awslc
+          Pin: version {{ haproxy_package_branch }}.*
+          Pin-Priority: 990
+
+          Package: haproxy-awslc
+          Pin: version *
+          Pin-Priority: -1
+
+          # Do not let this extra repository replace unrelated system packages.
+          Package: *
+          Pin: origin "www.haproxy.com"
+          Pin-Priority: 100
+      register: haproxy_package_pin
+
+    - name: HAProxy package | Add the architecture-specific signed repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}
+          signed-by=/usr/share/keyrings/easy-ha-proxy-haproxy-community.asc]
+          https://www.haproxy.com/download/haproxy/performance/ubuntu/ha34 noble main
+        filename: easy-ha-proxy-haproxy
+        state: present
+        update_cache: false
+        mode: '0644'
+      register: haproxy_package_repository
+
+    - name: HAProxy package | Refresh APT after repository changes
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+      when: haproxy_package_key.changed or haproxy_package_pin.changed or haproxy_package_repository.changed
+
+    - name: HAProxy package | Install the selected 3.4 package without starting services
+      ansible.builtin.apt:
+        name: "haproxy-awslc={{ haproxy_package_branch }}.*"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        fail_on_autoremove: true
+        policy_rc_d: 101
+
+    - name: HAProxy package | Verify the installed binary
+      ansible.builtin.command:
+        argv: [/usr/sbin/haproxy, -v]
+      register: haproxy_package_binary
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+      failed_when: >-
+        haproxy_package_binary.rc != 0
+        or not (haproxy_package_binary.stdout is search('HAProxy version 3[.]4[.]'))

@@ -1553,12 +1553,39 @@ def _enforce_config_policy(raw: bytes) -> None:
     in_global = False
     saw_global = False
     required = {"user": False, "group": False, "chroot": False}
+    # Never accept arbitrary preprocessing: it could make the privilege-drop
+    # lines visible to this validator but invisible to the executing binary.
+    # Only the two complete, fixed compatibility blocks emitted by our
+    # template are accepted, and their bodies still pass the normal policy.
+    compatibility_blocks = {
+        ".if version_atleast(3.1)": "tune.lua.bool-sample-conversion normal",
+        ".if !feature(OPENSSL_AWSLC)": "tune.ssl.default-dh-param 2048",
+    }
+    conditional_body = None
+    conditional_body_seen = False
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         token = line.split(None, 1)[0].lower()
+        if conditional_body is not None:
+            if not raw_line[:1].isspace():
+                raise ValueError("HAProxy compatibility block must stay inside global")
+            if conditional_body_seen:
+                if line != ".endif":
+                    raise ValueError("invalid HAProxy compatibility block ending")
+                conditional_body = None
+                conditional_body_seen = False
+                continue
+            if line != conditional_body:
+                raise ValueError("invalid HAProxy compatibility block body")
+            conditional_body_seen = True
+        elif token.startswith("."):
+            if not in_global or not raw_line[:1].isspace() or line not in compatibility_blocks:
+                raise ValueError("unapproved HAProxy conditional directive")
+            conditional_body = compatibility_blocks[line]
+            continue
         if token in forbidden:
             raise ValueError(f"HAProxy directive '{token}' is not allowed")
         if token == "global":
@@ -1605,6 +1632,8 @@ def _enforce_config_policy(raw: bytes) -> None:
                     "HAProxy server state file must stay under /var/lib/haproxy"
                 )
 
+    if conditional_body is not None:
+        raise ValueError("unclosed HAProxy compatibility block")
     if not saw_global or not all(required.values()):
         raise ValueError("required HAProxy privilege-drop directives are missing")
 

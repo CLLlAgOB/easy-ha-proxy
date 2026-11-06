@@ -140,6 +140,42 @@ class HAProxyControlPolicyTests(unittest.TestCase):
     def test_accepts_privilege_drop(self) -> None:
         self.controld._enforce_config_policy(self.base)
 
+    def test_accepts_only_the_two_fixed_compatibility_blocks(self) -> None:
+        for predicate, body in (
+            ("version_atleast(3.1)", "tune.lua.bool-sample-conversion normal"),
+            ("!feature(OPENSSL_AWSLC)", "tune.ssl.default-dh-param 2048"),
+        ):
+            with self.subTest(predicate=predicate):
+                block = f"    .if {predicate}\n    {body}\n    .endif\n".encode()
+                self.controld._enforce_config_policy(self.base.replace(b"    daemon\n", block))
+
+    def test_conditionals_cannot_hide_privilege_drop_or_other_directives(self) -> None:
+        bodies = (
+            b"    .if 0\n    user haproxy\n    .endif\n",
+            b"    .if version_atleast(3.1)\n    user root\n    .endif\n",
+            b"    .if version_atleast(3.1)\n    lua-load /tmp/injected.lua\n    .endif\n",
+            b"    .if version_atleast(3.1)\n    chroot /\n    .endif\n",
+            b"    .if version_atleast(3.1)\n    .if 0\n    .endif\n    .endif\n",
+            b"    .if version_atleast(3.1)\n    tune.lua.bool-sample-conversion normal\n    .else\n    user root\n    .endif\n",
+            b"    .if !feature(OPENSSL_AWSLC)\n    tune.ssl.default-dh-param 2048\n    group root\n    .endif\n",
+        )
+        for block in bodies:
+            with self.subTest(block=block):
+                with self.assertRaises(ValueError):
+                    self.controld._enforce_config_policy(self.base.replace(b"    daemon\n", block))
+
+    def test_rejects_unbalanced_conditionals_and_conditionals_outside_global(self) -> None:
+        block = b"    .if version_atleast(3.1)\n    tune.lua.bool-sample-conversion normal\n"
+        for config in (
+            self.base + block + b"    .endif\n",
+            self.base.replace(b"    daemon\n", b"    .endif\n"),
+            self.base.split(b"defaults\n")[0] + block,
+            self.base.replace(b"    daemon\n", block + b".endif\n"),
+        ):
+            with self.subTest(config=config):
+                with self.assertRaises(ValueError):
+                    self.controld._enforce_config_policy(config)
+
     def test_rejects_program_section(self) -> None:
         with self.assertRaises(ValueError):
             self.controld._enforce_config_policy(

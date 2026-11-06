@@ -4,6 +4,10 @@
 
 Start with the [Quick Start guide](QUICKSTART.md).
 
+Alpha qualification of HAProxy 3.4 on Ubuntu 24.04 ARM64 and AMD64 is described
+in the [migration plan](HAPROXY_34_MIGRATION.md). Existing installations retain
+their distribution package; ordinary updates do not switch package providers.
+
 easy-ha-proxy is a production-oriented, single-server stack for HAProxy, Let's
 Encrypt, GeoIP ACLs, Authelia, and a web administration UI. It installs and
 maintains the host services, container workloads, certificates, access rules,

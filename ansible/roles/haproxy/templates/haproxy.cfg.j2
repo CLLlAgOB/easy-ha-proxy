@@ -110,7 +110,9 @@ global
     ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
     tune.bufsize 32768
     tune.recv_enough 16384
+    .if !feature(OPENSSL_AWSLC)
     tune.ssl.default-dh-param 2048
+    .endif
     tune.ssl.cachesize 10000
     tune.ssl.lifetime 3600
     tune.idle-pool.shared on
@@ -119,6 +121,11 @@ global
     localpeer {{ localpeer }}
 
 {% if authelia_enabled %}
+    # Let the executing binary select the syntax, including UI renders and
+    # rollback to 2.8. Lua booleans remain booleans on versions supporting it.
+    .if version_atleast(3.1)
+    tune.lua.bool-sample-conversion normal
+    .endif
     lua-prepend-path /etc/haproxy/lua/?/http.lua
     lua-prepend-path /etc/haproxy/lua/?.lua
     lua-load /etc/haproxy/lua/auth-request.lua

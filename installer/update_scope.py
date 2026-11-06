@@ -169,6 +169,7 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_HAPROXY}/templates/maintenance.http.j2", ("ha-install",)),
     (f"{_HAPROXY}/templates/update-admin-rt.*", ("ha-install",)),
     (f"{_HAPROXY}/tasks/install.yml", ("ha-install",)),
+    (f"{_HAPROXY}/tasks/package.yml", ("ha-install",)),
     (f"{_HAPROXY}/tasks/fs.yml", ("ha-install",)),
     (f"{_HAPROXY}/tasks/apparmor.yml", ("apparmor",)),
     # A default can change the rendered configuration and what install lays down.
