@@ -10,12 +10,19 @@ const path = require("node:path");
 const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/updates_core.js"));
 
 test("OS and sign-in updates warn about temporary loss of access as panel updates do", () => {
-  for (const id of ["os", "authelia-container", "admin-container", "all"]) {
+  for (const id of ["os", "haproxy", "authelia-container", "admin-container", "all"]) {
     assert.equal(core.mayInterruptAccess([id]), true);
   }
   assert.equal(core.mayInterruptAccess([]), false);
   assert.equal(core.mayInterruptAccess(["daemons"]), false);
   assert.equal(core.mayInterruptAccess(["daemons", "os"]), true);
+});
+
+test("a complete application update leaves the separately reviewed HAProxy selection intact", () => {
+  const rows = ["all", "services", "haproxy"].map((id) => ({id, checked: true, disabled: false}));
+  const result = core.selectionAfterClick(rows.map(({id}) => ({id})), rows, "all");
+  assert.deepEqual(Array.from(result.checked).sort(), ["all", "haproxy"]);
+  assert.equal(result.superseded.has("haproxy"), false);
 });
 
 const PLAN_ID = "0123456789abcdef0123456789ABCDEF";

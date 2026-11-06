@@ -70,6 +70,23 @@
     <div id="updates-service-status" class="result-message" role="status" aria-live="polite"></div>
   </section>
 
+  <section class="card" id="updates-haproxy-card" aria-labelledby="updates-haproxy-title">
+    <div class="card-header updates-card-header">
+      <h2 id="updates-haproxy-title">HAProxy</h2>
+      <button type="button" class="btn btn-small" id="updates-haproxy-install" hidden>Update HAProxy</button>
+    </div>
+    <p id="updates-haproxy-state" class="updates-hero-meta" role="status">Run an update check to verify HAProxy.</p>
+    <dl class="updates-haproxy-versions">
+      <div><dt>Installed package</dt><dd id="updates-haproxy-installed" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Running version</dt><dd id="updates-haproxy-running" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Available package</dt><dd id="updates-haproxy-available" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+    </dl>
+    <p id="updates-haproxy-meta" class="updates-hero-meta notranslate" translate="no" data-i18n-skip></p>
+    <p id="updates-haproxy-error" class="updates-hero-meta notranslate" translate="no" data-i18n-skip hidden></p>
+    <p id="updates-haproxy-last" class="updates-hero-meta" hidden></p>
+    <p class="updates-hero-meta">HAProxy updates require an explicit selection. They are excluded from automatic installation.</p>
+  </section>
+
   <section class="card updates-plan-card" id="updates-plan-card" aria-labelledby="updates-plan-title" hidden>
     <div class="card-header updates-card-header">
       <div>
@@ -129,7 +146,7 @@
         The web application or sign-in service may restart. Temporary connection errors are expected and this page will reconnect automatically.
       </p>
       <p id="updates-os-note" class="updates-confirm-note" hidden>
-        Operating-system packages are installed last. Updating Docker or HAProxy may temporarily interrupt sites and sign-in. A required server reboot is never started automatically.
+        Operating-system packages may restart system services. A selected controlled HAProxy update runs after them. A required server reboot is never started automatically.
       </p>
       <div class="config-modal-actions">
         <button type="button" class="btn btn-small updates-cancel" id="updates-confirm-cancel">Cancel</button>
@@ -211,7 +228,7 @@
         <div id="updates-auto-check-status" class="result-message" role="status" aria-live="polite"></div>
         <p id="updates-auto-check-note" class="updates-hero-meta"></p>
         <p class="updates-hero-meta">
-          A check only reads: nothing is installed without you. When it finds updates it raises
+          A check refreshes package metadata without installing packages. When it finds updates it raises
           an alert (update.available), and the alert settings decide whom to tell.
         </p>
         <p class="updates-hero-meta"><a href="{{ url_for('routes.alerts_page') }}">Alert settings</a></p>
@@ -233,7 +250,7 @@
         <div id="updates-auto-install-status" class="result-message" role="status" aria-live="polite"></div>
         <p id="updates-auto-install-last" class="updates-hero-meta"></p>
         <p class="updates-hero-meta">
-          Only easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images. Operating-system packages and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
+          Only easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images. HAProxy, operating-system packages and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
         </p>
       </div>
     </div>

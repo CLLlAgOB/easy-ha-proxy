@@ -389,6 +389,9 @@
   .job-progress-track--indeterminate .job-progress-fill { width: 35%; animation: progress 1.3s ease-in-out infinite; }
   .updates-hero-head, .updates-hero-tools, .updates-channel-row, .updates-apply-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
   .updates-hero-summary { font-size: 14px; margin: 10px 0 6px; }
+  .updates-haproxy-versions { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px 22px; margin: 16px 0; }
+  .updates-haproxy-versions dt { color: var(--text-secondary); font-size: 12px; }
+  .updates-haproxy-versions dd { margin: 5px 0 0; font-size: 13px; overflow-wrap: anywhere; }
   .updates-hero-meta, .updates-row-reason, .updates-run-step, .updates-run-note, .updates-confirm-note, .updates-row-requires, .updates-setting { color: var(--text-secondary); font-size: 12px; }
   .updates-hero-tools { padding-top: 18px; margin-top: 18px; border-top: 1px solid var(--border); align-items: center; }
   .updates-apply-bar { align-items: center; justify-content: flex-start; position: sticky; bottom: 16px; z-index: 15; margin-top: 20px; padding: 14px 16px; border: 1px solid var(--border); background: var(--bg-secondary); box-shadow: var(--shadow-popover); border-radius: 9px; }

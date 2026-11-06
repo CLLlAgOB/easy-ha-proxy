@@ -38,7 +38,8 @@
     daemons: "Auxiliary daemons",
     "authelia-container": "Authelia containers",
     "admin-container": "Web application",
-    os: "Operating-system packages"
+    os: "Operating-system packages",
+    haproxy: "HAProxy"
   };
   const COMPONENT_IMPACTS = {
     source: "Managed source, host services and application containers",
@@ -48,11 +49,12 @@
     daemons: "Auxiliary systemd services",
     "authelia-container": "Authelia and its supporting containers",
     "admin-container": "HAProxy Admin web application",
-    os: "System services and containers may restart; reboot may be required"
+    os: "System services and containers may restart; reboot may be required",
+    haproxy: "Controlled HAProxy update with state verification and automatic rollback"
   };
   function mayInterruptAccess(components) {
     return (components || []).some((id) =>
-      ["all", "admin-container", "authelia-container", "os"].includes(id)
+      ["all", "admin-container", "authelia-container", "os", "haproxy"].includes(id)
     );
   }
   // What each step of a job is called, and how far into a component it is.

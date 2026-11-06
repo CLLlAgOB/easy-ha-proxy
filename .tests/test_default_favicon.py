@@ -117,6 +117,17 @@ class NoTcpRuleBelowAnHttpRule(unittest.TestCase):
                     with self.subTest(section=name, site=site, defaults=site_defaults):
                         self.assertLess(max(tcp), min(http))
 
+    def test_tcp_response_rules_precede_http_response_rules_with_forward_auth(self):
+        for favicon in (False, True):
+            for authenticated in (False, True):
+                config = render({}, default_favicon=favicon, authelia_enabled=authenticated)
+                for name, rules in self.sections(config).items():
+                    http = [i for i, rule in enumerate(rules) if rule.startswith('http-response ')]
+                    tcp = [i for i, rule in enumerate(rules) if rule.startswith('tcp-response ')]
+                    if http and tcp:
+                        with self.subTest(section=name, favicon=favicon, authenticated=authenticated):
+                            self.assertLess(max(tcp), min(http))
+
 
 class ThePanelKeepsTheSetting(unittest.TestCase):
     """The site form builds a site from scratch, so a key it does not know is

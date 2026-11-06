@@ -69,6 +69,7 @@
   let shownJobSnapshot = null;
   let resultJobSnapshot = null;
   let planHasContent = false;
+  let haproxyOperation = null;
   let planSummaryText = "";
   let preselectedPlanId = "";
   // The job list, kept for the time estimate: how long each part took before.
@@ -384,7 +385,42 @@
     list.hidden = !list.childElementCount;
   }
 
+  function renderHaproxy(plan) {
+    const component = normalizeComponents(plan).find((item) => item.id === "haproxy");
+    const details = component?.details || {};
+    const apt = details.apt || {};
+    const outdated = Boolean(apt.last_success && Date.now() / 1000 - apt.last_success > 86400);
+    byId("updates-haproxy-installed").textContent = details.installed_version || "—";
+    byId("updates-haproxy-running").textContent = details.running_version || "—";
+    byId("updates-haproxy-available").textContent = details.candidate_version || "—";
+    const state = byId("updates-haproxy-state");
+    state.textContent = t(!component ? "Run an update check to verify HAProxy." : outdated
+      ? "APT metadata is stale or its refresh failed. Check for updates again." : component.reason);
+    state.classList.toggle("text-danger", Boolean(component && (outdated || ["unknown", "blocked"].includes(component.state))));
+    const meta = [];
+    if (details.branch) meta.push(`${t("Branch")}: ${details.branch}.x`);
+    if (details.source) meta.push(`${t("Source")}: ${details.source}`);
+    meta.push(`${t("Verified package metadata")}: ${apt.last_success ? formatDate(apt.last_success * 1000) : t("Never")}`);
+    byId("updates-haproxy-meta").textContent = meta.join(" · ");
+    const last = haproxyOperation || details.last_operation;
+    const unfinished = last && ["arming", "quiescing", "bootstrapping_peer", "peer_ready", "installing_target", "target_verified", "rolling_back", "rollback_failed", "recovery_exhausted"].includes(last.phase);
+    if (unfinished) state.textContent = t("HAProxy update or recovery is in progress. Other maintenance is blocked.");
+    const failure = byId("updates-haproxy-error");
+    failure.hidden = !apt.error;
+    failure.textContent = apt.error ? `${t("Package metadata check failed")}: ${apt.error}` : "";
+    const phases = {committed: "HAProxy update verified", rolled_back: "HAProxy rollback verified", aborted: "HAProxy update canceled before switching",
+      rollback_failed: "HAProxy recovery requires attention", recovery_exhausted: "HAProxy recovery requires attention"};
+    const note = byId("updates-haproxy-last");
+    note.hidden = !last;
+    note.textContent = last ? `${t(phases[last.phase] || "HAProxy update in progress")}${last.updated_at ? ` · ${formatDate(last.updated_at * 1000)}` : ""}` : "";
+    note.classList.toggle("text-danger", ["rollback_failed", "recovery_exhausted"].includes(last?.phase));
+    const button = byId("updates-haproxy-install");
+    button.hidden = !(component?.actionable && component.state === "available") || outdated || Boolean(plan?.stale) || Boolean(unfinished);
+    button.disabled = requestRunning || operationRunning || planForOtherChannel(plan);
+    button.textContent = t(details.needs_reload && component?.current === component?.available ? "Apply updated libraries" : "Update HAProxy");
+  }
   function renderPlan(plan) {
+    renderHaproxy(plan);
     renderUpstream(plan);
     currentPlan = plan;
     resetConfirmation();
@@ -1086,6 +1122,7 @@
       if (tracked) handleCurrentJob(tracked);
       const relevant = shown;
       const plan = extractPlan(payload, jobs);
+      haproxyOperation = payload.haproxy_operation || null;
       if (plan && (
         !currentPlan || currentPlan.id !== plan.id ||
         Boolean(currentPlan.stale) !== Boolean(plan.stale)
@@ -1099,6 +1136,7 @@
         warning.hidden = false;
         warning.textContent = t("The previous update plan is no longer valid.");
       }
+      renderHaproxy(plan);
       renderReboot(payload, relevant);
       if (connectionRestored && pendingResult !== "missing" &&
           !(tracked && isTerminal(tracked))) {
@@ -1416,6 +1454,11 @@
 
   byId("updates-check").addEventListener("click", checkUpdates);
   byId("updates-apply").addEventListener("click", openConfirm);
+  byId("updates-haproxy-install").addEventListener("click", () => {
+    document.querySelectorAll("[data-update-component]").forEach((box) => { box.checked = box.dataset.updateComponent === "haproxy"; });
+    updateSelection("haproxy");
+    openConfirm();
+  });
   byId("updates-confirm-go").addEventListener("click", applyUpdates);
   byId("updates-confirm-cancel").addEventListener("click", closeConfirm);
   byId("updates-confirm-modal").addEventListener("click", (event) => {

@@ -163,7 +163,7 @@ class ThePage(unittest.TestCase):
     def test_the_page_offers_it_and_says_its_bounds(self):
         template = (APP / "templates/system_updates.html").read_text(encoding="utf-8")
         self.assertIn('id="updates-auto-install"', template)
-        self.assertIn("Operating-system packages and reboots stay with you.", template)
+        self.assertIn("HAProxy, operating-system packages and reboots stay with you.", template)
         routes = (APP / "routes_updates.py").read_text(encoding="utf-8")
         self.assertIn('"set_auto_install": ("update.auto_install"', routes)
 

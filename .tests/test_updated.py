@@ -113,6 +113,7 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
                     "authelia-container",
                     "admin-container",
                     "os",
+                    "haproxy",
                 }
             ),
         )

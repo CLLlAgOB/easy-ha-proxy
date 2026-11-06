@@ -39,6 +39,11 @@ def checker_summaries() -> set[str]:
             and isinstance(node.args[2].value, str)
         ):
             found.add(node.args[2].value)
+    tree = ast.parse((ROOT / 'installer/haproxy_update_status.py').read_text(encoding='utf-8'))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'result' and len(node.args) == 2
+                and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)):
+            found.add(node.args[1].value)
     return found
 
 

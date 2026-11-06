@@ -26,6 +26,14 @@
   # 1. Pre-tasks: build certbot_domains.
   #################################################################
   pre_tasks:
+    # Bootstrap the protection before earlier roles can install a shared
+    # library and trigger needrestart. A status-only play stays read-only.
+    - name: Protect existing HAProxy before host or system updates
+      ansible.builtin.import_role:
+        name: haproxy
+        tasks_from: protection.yml
+      tags: [ha-install, upgrade]
+
     - name: Load easy-ha-proxy local secrets
       ansible.builtin.include_vars:
         file: "{{ easy_ha_proxy_config_dir }}/secrets.yml"

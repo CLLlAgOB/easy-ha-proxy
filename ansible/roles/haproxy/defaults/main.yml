@@ -4,6 +4,13 @@
 ###############################################################################
 
 ######## 1. Base paths ######################################################
+# Existing gateways keep their distribution package. The 3.4 provider is an
+# explicit opt-in for qualification; changing providers on an installed gateway
+# requires the separate migration/rollback procedure, never an ordinary update.
+haproxy_package_provider: distribution  # distribution | haproxy-technologies
+haproxy_package_branch: "3.4"
+haproxy_community_key_sha256: "3e4a78cc612df534a26abcb1d55bf848331a2b53a143386296cc933be1fea575"
+
 haproxy_certs_dir: "/etc/haproxy/certs"     # where the fullchain+privkey *.pem files go
 haproxy_certs_available_dir: "/etc/haproxy/certs-available"  # spares; HAProxy does not read them
 haproxy_mtls_dir: "/etc/haproxy/mtls"      # clients' public CAs, issuer lists and revocation lists

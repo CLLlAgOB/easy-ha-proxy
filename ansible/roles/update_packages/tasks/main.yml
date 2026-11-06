@@ -47,6 +47,11 @@
     name: docker
     tasks_from: live_restore
 
+- name: Protect installed HAProxy before upgrading other packages
+  ansible.builtin.import_role:
+    name: haproxy
+    tasks_from: protection
+
 - name: Update and upgrade apt packages
   become: true
   environment:

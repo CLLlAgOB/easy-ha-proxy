@@ -379,7 +379,7 @@ status_check_managed_artifacts:
 status_check_apt_packages: >-
   {{
     [
-      'haproxy',
+      status_check_haproxy_apt_package | default('haproxy'),
       'docker-ce',
       'docker-ce-cli',
       'containerd.io',
