@@ -268,10 +268,25 @@ def info_version(paths):
     return migration.info(paths.socket)['Version']
 
 
+def diagnostics(error):
+    """Expose disposable fixture failures in CI annotations, without log login."""
+    if os.environ.get('GITHUB_ACTIONS') != 'true':
+        return
+    messages = [str(error)]
+    for log in Path('/var/lib/easy-ha-proxy/haproxy-package-migration').glob('*/commands.jsonl'):
+        for line in log.read_text().splitlines():
+            record = json.loads(line)
+            if record['rc'] and record.get('err'):
+                messages.append(record['err'][-1800:])
+    for message in messages[-4:]:
+        print('::error::' + message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'), file=sys.stderr)
+
+
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
+    except Exception as error:
+        diagnostics(error)
         # These journals contain only this disposable fixture. Emit diagnostics
         # because private-host transaction logs are deliberately never exposed.
         for journal in Path('/var/lib/easy-ha-proxy/haproxy-package-migration').glob('*/transaction.json'):

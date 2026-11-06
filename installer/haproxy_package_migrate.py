@@ -881,6 +881,12 @@ class Engine:
         else:
             if self.patch:
                 command.append('--reinstall')
+            else:
+                # APT will not resolve a conflict by implicitly removing a
+                # held package, even with --allow-change-held-packages. Name
+                # the reviewed provider replacement explicitly; keep the hold
+                # active until this transaction installs the verified target.
+                command.append('haproxy-')
             command.extend([str(self.directory / (package['Package'] + '.deb')) for package in
                             self.state['target_packages'] + self.state.get('extra_packages', [])])
         return command
