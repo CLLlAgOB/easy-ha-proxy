@@ -7,17 +7,10 @@
 {% endblock %}
 
 {% block content %}
-<style>
-.ipp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
-.ipp-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }
-.ipp-allow { color: #2e9e5b; border-color: rgba(46,158,91,.55); }
-.ipp-ban { color: #cc4b4b; border-color: rgba(204,75,75,.55); }
-.ipp-muted { color: var(--text-secondary); font-size: 12px; }
-.ipp-row .btn { padding: 4px 10px; font-size: 12px; box-shadow: none; }
-</style>
+
 
 {% if status %}
-<div class="card" style="margin-bottom:20px;">
+<div class="u-mb-5 card" >
   <div class="ipp-row" id="ipp-status" data-ip="{{ ip }}">
     {% if status.allow_listed %}
       <span class="ipp-badge ipp-allow">Allow-listed</span>
@@ -45,7 +38,7 @@
 {% endif %}
 
 {% if authelia_ban %}
-<div class="card" style="margin-bottom:20px;" id="ipp-authelia">
+<div class="u-mb-5 card"  id="ipp-authelia">
   <div class="ipp-row">
     <span class="ipp-badge ipp-ban">Sign-in blocked by Authelia</span>
     <span class="ipp-muted">Until</span>
@@ -60,12 +53,12 @@
     {% endif %}
     <a class="btn" href="{{ url_for('routes.authelia_bans') }}">Authelia bans</a>
   </div>
-  <p class="ipp-muted" style="margin:8px 0 0;">Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.</p>
+  <p class="u-m-8px-0-0 ipp-muted" >Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.</p>
 </div>
 {% endif %}
 
 {% if history and history.decisions %}
-<div class="card" style="margin-bottom:20px;" id="ipp-history">
+<div class="u-mb-5 card"  id="ipp-history">
   <div class="card-header">
     {% if status and status.ban %}
     <h2>Why it is banned</h2>
@@ -75,14 +68,14 @@
   </div>
   {% if history.reason %}
   <p class="ipp-muted">The reason adaptive protection wrote down when it last banned this address. The findings behind it fade from the score within hours; this record does not.</p>
-  <div class="ipp-row" style="margin-bottom:10px;">
+  <div class="u-mb-2 ipp-row" >
     <span class="ipp-badge ipp-ban">Banned by adaptive protection</span>
     <span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.when }} → {{ history.reason.until }}</span>
     <span class="ipp-muted">Score</span><span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.score }}</span>
     <span class="ipp-muted">Strike</span><span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.strike }}</span>
   </div>
   {% if history.reason.evidence %}
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr><th>When</th><th>Finding</th><th>Site</th><th>Detail</th><th>Points</th></tr>
@@ -104,13 +97,13 @@
   {% endif %}
   {% if history.observed %}
   <p class="ipp-muted">HAProxy banned this address on its own rule. HAProxy does not record when it decided or what tipped it over; below is when the security engine first saw the ban and the site counters at that moment.</p>
-  <div class="ipp-row" style="margin-bottom:10px;">
+  <div class="u-mb-2 ipp-row" >
     <span class="ipp-badge ipp-ban">{{ history.observed.rule }}</span>
     <span class="ipp-muted">First seen</span>
     <span class="ipp-muted" data-i18n-skip translate="no">{{ history.observed.when }} → {{ history.observed.until }}</span>
   </div>
   {% if history.observed.readings %}
-  <div style="overflow-x:auto;">
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr><th>Site</th><th>Counter</th><th>Value</th><th>Limit</th></tr>
@@ -131,8 +124,8 @@
   <p class="ipp-muted">No site counter held this address when the ban was first seen.</p>
   {% endif %}
   {% endif %}
-  <h3 style="margin:14px 0 6px;font-size:15px;">Decisions</h3>
-  <div style="overflow-x:auto;">
+  <h3  class="u-m-14px-0-6px text-md">Decisions</h3>
+  <div  class="scroll-x">
     <table class="data-table">
       <thead>
         <tr><th>When</th><th>What</th><th>Code</th><th>Until</th></tr>
@@ -157,7 +150,7 @@
     <h2>Last 30 matches</h2>
   </div>
   {% if lines and lines|length %}
-    <pre style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.35;background:#0b0f14;color:#d0d6dc;padding:12px;border-radius:10px;max-height:70vh;overflow:auto;">
+    <pre  class="pre-wrap mono text-sm u-line-height-1-35 u-background-var-surface-1 u-p-12px u-border-radius-8px u-maxh-70vh u-overflow-auto">
 {{ lines|join('\n') }}
     </pre>
   {% else %}

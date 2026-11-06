@@ -60,7 +60,7 @@
     "Authelia helper daemons": "Вспомогательные демоны Authelia",
     "Not checked yet.": "Проверки ещё не было.",
     "Last check:": "Последняя проверка:",
-    "The web application restarts during this update. The page reconnects by itself.": "Во время этого обновления перезапускается веб-приложение. Страница переподключится сама.",
+    "The web application or sign-in service may restart during this update. The page reconnects by itself.": "Во время этого обновления могут перезапуститься панель или служба входа. Страница переподключится сама.",
     "Dismiss": "Скрыть",
     "Show details": "Подробности",
     "Hide details": "Скрыть подробности",

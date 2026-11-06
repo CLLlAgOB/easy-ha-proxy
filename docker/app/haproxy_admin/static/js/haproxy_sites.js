@@ -60,8 +60,8 @@ function initSiteEditPage(form) {
 
   if (btnToggleAdv && advSection) {
     btnToggleAdv.addEventListener("click", () => {
-      const visible = advSection.style.display !== "none";
-      advSection.style.display = visible ? "none" : "block";
+      const visible = !advSection.hidden;
+      advSection.hidden = visible;
       btnToggleAdv.textContent = visible
         ? "Show advanced parameters"
         : "Hide advanced parameters";

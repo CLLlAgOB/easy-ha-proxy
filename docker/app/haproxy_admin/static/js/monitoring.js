@@ -39,36 +39,36 @@
   const CHARTS = [
     {
       name: "requests",
-      series: [{ key: "requests", label: "Requests", color: "#4a86c8", rate: true }]
+      series: [{ key: "requests", label: "Requests", color: "var(--chart-info)", rate: true }]
     },
     {
       name: "traffic",
       series: [
-        { key: "bytes_in", label: "Inbound", color: "#4a86c8", rate: true, bytes: true },
-        { key: "bytes_out", label: "Outbound", color: "#2e9e5b", rate: true, bytes: true }
+        { key: "bytes_in", label: "Inbound", color: "var(--chart-info)", rate: true, bytes: true },
+        { key: "bytes_out", label: "Outbound", color: "var(--chart-success)", rate: true, bytes: true }
       ]
     },
     {
       name: "responses",
       series: [
-        { key: "resp_2xx", label: "2xx", color: "#2e9e5b", rate: true },
-        { key: "resp_3xx", label: "3xx", color: "#4a86c8", rate: true },
-        { key: "resp_4xx", label: "4xx", color: "#c8a13a", rate: true },
-        { key: "resp_5xx", label: "5xx", color: "#cc4b4b", rate: true }
+        { key: "resp_2xx", label: "2xx", color: "var(--chart-success)", rate: true },
+        { key: "resp_3xx", label: "3xx", color: "var(--chart-info)", rate: true },
+        { key: "resp_4xx", label: "4xx", color: "var(--chart-warning)", rate: true },
+        { key: "resp_5xx", label: "5xx", color: "var(--chart-error)", rate: true }
       ]
     },
     {
       name: "latency",
       series: [
-        { key: "response_ms_avg", label: "Average", color: "#4a86c8", summary: "mean" },
-        { key: "response_ms_max", label: "Peak", color: "#c8a13a", summary: "max" }
+        { key: "response_ms_avg", label: "Average", color: "var(--chart-info)", summary: "mean" },
+        { key: "response_ms_max", label: "Peak", color: "var(--chart-warning)", summary: "max" }
       ]
     },
     {
       name: "connections",
       series: [
-        { key: "conn_cur_avg", label: "Average", color: "#4a86c8", summary: "mean" },
-        { key: "conn_cur_max", label: "Peak", color: "#c8a13a", summary: "max" }
+        { key: "conn_cur_avg", label: "Average", color: "var(--chart-info)", summary: "mean" },
+        { key: "conn_cur_max", label: "Peak", color: "var(--chart-warning)", summary: "max" }
       ]
     },
     {
@@ -77,12 +77,12 @@
       name: "cpu",
       components: true,
       series: [
-        { key: "cpu_avg", label: "Average", color: "#4a86c8", percent: true, summary: "mean" },
-        { key: "cpu_max", label: "Peak", color: "#c8a13a", percent: true, summary: "max" },
-        { key: "haproxy_busy_avg", label: "HAProxy busy", color: "#8a63d2", percent: true, summary: "mean" },
-        { key: "helpers", label: "Helper services", color: "#2e9e5b", percent: true, summary: "mean" },
-        { key: "containers", label: "Containers", color: "#d0743c", percent: true, summary: "mean" },
-        { key: "other", label: "Other processes", color: "#9e9e9e", percent: true, summary: "mean", hidden: true }
+        { key: "cpu_avg", label: "Average", color: "var(--chart-info)", percent: true, summary: "mean" },
+        { key: "cpu_max", label: "Peak", color: "var(--chart-warning)", percent: true, summary: "max" },
+        { key: "haproxy_busy_avg", label: "HAProxy busy", color: "var(--chart-secondary)", percent: true, summary: "mean" },
+        { key: "helpers", label: "Helper services", color: "var(--chart-success)", percent: true, summary: "mean" },
+        { key: "containers", label: "Containers", color: "var(--chart-server-error)", percent: true, summary: "mean" },
+        { key: "other", label: "Other processes", color: "var(--text-secondary)", percent: true, summary: "mean", hidden: true }
       ]
     },
     {
@@ -91,27 +91,27 @@
       name: "memory",
       components: true,
       series: [
-        { key: "memory_avg", label: "Used", color: "#4a86c8", bytes: true, summary: "mean" },
-        { key: "memory_max", label: "Peak", color: "#c8a13a", bytes: true, summary: "max" },
-        { key: "memory_total", label: "Total", color: "#6b6b6b", bytes: true, summary: "last", dash: true },
-        { key: "helpers", label: "Helper services", color: "#2e9e5b", bytes: true, summary: "mean" },
-        { key: "containers", label: "Containers", color: "#d0743c", bytes: true, summary: "mean" },
-        { key: "other", label: "Other processes", color: "#9e9e9e", bytes: true, summary: "mean", hidden: true }
+        { key: "memory_avg", label: "Used", color: "var(--chart-info)", bytes: true, summary: "mean" },
+        { key: "memory_max", label: "Peak", color: "var(--chart-warning)", bytes: true, summary: "max" },
+        { key: "memory_total", label: "Total", color: "var(--text-secondary)", bytes: true, summary: "last", dash: true },
+        { key: "helpers", label: "Helper services", color: "var(--chart-success)", bytes: true, summary: "mean" },
+        { key: "containers", label: "Containers", color: "var(--chart-server-error)", bytes: true, summary: "mean" },
+        { key: "other", label: "Other processes", color: "var(--text-secondary)", bytes: true, summary: "mean", hidden: true }
       ]
     },
     {
       // The root filesystem, counted as df counts it.
       name: "disk",
       series: [
-        { key: "disk_used_avg", label: "Used", color: "#4a86c8", bytes: true, summary: "last" },
-        { key: "disk_total", label: "Total", color: "#6b6b6b", bytes: true, summary: "last", dash: true }
+        { key: "disk_used_avg", label: "Used", color: "var(--chart-info)", bytes: true, summary: "last" },
+        { key: "disk_total", label: "Total", color: "var(--text-secondary)", bytes: true, summary: "last", dash: true }
       ]
     },
     {
       name: "diskio",
       series: [
-        { key: "disk_read", label: "Read", color: "#4a86c8", rate: true, bytes: true },
-        { key: "disk_write", label: "Written", color: "#d0743c", rate: true, bytes: true }
+        { key: "disk_read", label: "Read", color: "var(--chart-info)", rate: true, bytes: true },
+        { key: "disk_write", label: "Written", color: "var(--chart-server-error)", rate: true, bytes: true }
       ]
     },
     {
@@ -119,15 +119,15 @@
       // not only what HAProxy proxies.
       name: "network",
       series: [
-        { key: "net_rx", label: "Received", color: "#4a86c8", rate: true, bytes: true },
-        { key: "net_tx", label: "Sent", color: "#2e9e5b", rate: true, bytes: true }
+        { key: "net_rx", label: "Received", color: "var(--chart-info)", rate: true, bytes: true },
+        { key: "net_tx", label: "Sent", color: "var(--chart-success)", rate: true, bytes: true }
       ]
     },
     {
       name: "temperature",
       series: [
-        { key: "temp_avg", label: "Average", color: "#4a86c8", unit: "°C", summary: "mean" },
-        { key: "temp_max", label: "Peak", color: "#cc4b4b", unit: "°C", summary: "max" }
+        { key: "temp_avg", label: "Average", color: "var(--chart-info)", unit: "°C", summary: "mean" },
+        { key: "temp_max", label: "Peak", color: "var(--chart-error)", unit: "°C", summary: "max" }
       ]
     },
     {
@@ -136,19 +136,19 @@
       // average barely moves for one slow request in a hundred; these do.
       name: "percentiles",
       series: [
-        { key: "p50", label: "Median", color: "#4a86c8", unit: "ms", summary: "mean" },
-        { key: "p95", label: "95th percentile", color: "#c8a13a", unit: "ms", summary: "mean" },
-        { key: "p99", label: "99th percentile", color: "#cc4b4b", unit: "ms", summary: "max" }
+        { key: "p50", label: "Median", color: "var(--chart-info)", unit: "ms", summary: "mean" },
+        { key: "p95", label: "95th percentile", color: "var(--chart-warning)", unit: "ms", summary: "mean" },
+        { key: "p99", label: "99th percentile", color: "var(--chart-error)", unit: "ms", summary: "max" }
       ]
     },
     {
       // What the gateway turned away, by reason, per minute.
       name: "refusals",
       series: [
-        { key: "refused_geo", label: "Geo blocks", color: "#8a63d2", rate: true, perMinute: true },
-        { key: "refused_banned", label: "Bans", color: "#cc4b4b", rate: true, perMinute: true },
-        { key: "refused_rate", label: "Rate limits", color: "#c8a13a", rate: true, perMinute: true },
-        { key: "refused_other", label: "Other refusals", color: "#9e9e9e", rate: true, perMinute: true }
+        { key: "refused_geo", label: "Geo blocks", color: "var(--chart-secondary)", rate: true, perMinute: true },
+        { key: "refused_banned", label: "Bans", color: "var(--chart-error)", rate: true, perMinute: true },
+        { key: "refused_rate", label: "Rate limits", color: "var(--chart-warning)", rate: true, perMinute: true },
+        { key: "refused_other", label: "Other refusals", color: "var(--text-secondary)", rate: true, perMinute: true }
       ]
     }
   ];
@@ -358,13 +358,23 @@
     while (node.firstChild) node.removeChild(node.firstChild);
   }
 
+  function chartSize(svg) {
+    const box = svg.getBoundingClientRect();
+    return {
+      width: Math.max(180, Math.round(box.width) || 600),
+      height: Math.max(160, Math.round(box.height) || 190)
+    };
+  }
+
   function drawEmpty(svg, message) {
+    hideReading(svg);
     svg.__geometry = null;
     clear(svg);
-    svg.setAttribute("viewBox", "0 0 600 190");
+    const size = chartSize(svg);
+    svg.setAttribute("viewBox", `0 0 ${size.width} ${size.height}`);
     const text = element("text", {
-      x: 300,
-      y: 95,
+      x: size.width / 2,
+      y: size.height / 2,
       "text-anchor": "middle",
       class: "mon-tick"
     });
@@ -379,15 +389,9 @@
       return;
     }
 
-    // Full screen draws at the size it is shown, so text stays text-sized;
-    // the cards keep the fixed frame the page was laid out around.
-    let width = 600;
-    let height = 190;
-    if (svg.closest(".mon-chart-expanded")) {
-      const box = svg.getBoundingClientRect();
-      width = Math.max(320, Math.round(box.width));
-      height = Math.max(200, Math.round(box.height));
-    }
+    // Render at the displayed size: fixed viewBoxes shrink axis labels to
+    // unreadable text on a phone and waste most of the chart's height.
+    const {width, height} = chartSize(svg);
     const padding = { top: 10, right: 8, bottom: 22, left: chart.series[0].bytes ? 70 : 54 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
@@ -413,6 +417,7 @@
       top: padding.top,
       plotWidth: plotWidth,
       plotHeight: plotHeight,
+      ceiling: top,
       datasets: datasets,
       spanSeconds: rangeSeconds
     };
@@ -764,12 +769,14 @@
       const item = document.createElement("button");
       item.type = "button";
       item.className = "mon-line-toggle";
+      item.dataset.series = spec.key;
       item.setAttribute("aria-pressed", visible ? "true" : "false");
       let hint = uiText(LEGEND_HINTS[spec.summary || "last"]);
       if (spec.component) {
         hint += ` · ${uiText("Peak")}: ${legendValue(spec, Number(spec.peak) || 0)}`;
       }
       item.title = `${hint}. ${uiText("Click to show or hide the line")}`;
+      item.dataset.summaryTitle = item.title;
       const swatch = document.createElement("i");
       swatch.style.background = spec.color;
       item.appendChild(swatch);
@@ -787,15 +794,17 @@
       shown.setAttribute("data-i18n-skip", "");
       shown.setAttribute("translate", "no");
       shown.textContent = legendValue(spec, value);
+      shown.dataset.summary = shown.textContent;
       item.appendChild(shown);
+      const when = document.createElement("small");
+      when.setAttribute("data-i18n-skip", "");
+      when.setAttribute("translate", "no");
       if (reading.index !== null && points[reading.index] !== undefined) {
-        const when = document.createElement("small");
-        when.setAttribute("data-i18n-skip", "");
-        when.setAttribute("translate", "no");
         const at = new Date(Number(points[reading.index]) * 1000);
         when.textContent = ` · ${(spanSeconds >= 86400 ? dateTimeFormat : timeFormat).format(at)}`;
-        item.appendChild(when);
       }
+      when.dataset.summary = when.textContent;
+      item.appendChild(when);
       item.addEventListener("click", () => {
         setLineVisible(chart, spec, !lineVisible(chart, spec));
         redrawChart(chart.name);
@@ -1706,7 +1715,7 @@
     const host = document.getElementById("mon-channels-result");
     if (!host) return;
     host.textContent = message || "";
-    host.style.color = isError ? "#cc4b4b" : "";
+    host.style.color = isError ? "var(--chart-error)" : "";
   }
 
   async function renameChannel(channel) {
@@ -1794,6 +1803,14 @@
     }
     drawChart(svg, chart, last.payload, last.seconds);
     renderLegend(chart, last.payload);
+    if (sharedReading) {
+      drawReading(svg, sharedReading.ts);
+      if (sharedReading.svg === svg) {
+        const selected = svg.__geometry && core.cursorAtTime(svg.__geometry, sharedReading.ts);
+        if (selected) showTooltip(svg, selected.index);
+        else clearReadings();
+      }
+    }
   }
 
   /* ---------- full screen ---------- */
@@ -1814,6 +1831,7 @@
   }
 
   function setExpanded(name) {
+    clearReadings();
     const overlay = byId("mon-overlay");
     if (!overlay) return;
     if (expandedChart) {
@@ -1878,11 +1896,13 @@
     });
     let pending = false;
     window.addEventListener("resize", () => {
-      if (!expandedChart || pending) return;
+      clearReadings();
+      if (pending) return;
       pending = true;
       window.requestAnimationFrame(() => {
         pending = false;
         if (expandedChart) redrawChart(expandedChart);
+        else redrawCharts();
       });
     });
     const wanted = /^#chart=([a-z_]+)$/.exec(window.location.hash || "");
@@ -1959,7 +1979,8 @@
 
   async function loadAll(options) {
     // A refresh redraws the charts, which would drop a selection in progress.
-    if (inFlight || zoomDragging) return;
+    if (inFlight || zoomDragging || (options && options.refresh && sharedReading)) return;
+    if (!options || !options.refresh) clearReadings();
     inFlight = true;
     writeAddress();
     updateLogLinks();
@@ -2121,8 +2142,12 @@
 
   /* ---------- reading at the pointer ---------- */
 
-  // What every shown line was at one sample: a vertical rule on the chart
-  // and a box beside it, as the legend would print each value.
+  // One clock time shared by every chart. Pointer moves are coalesced into a
+  // frame; the values and SVG marks only change when the selected sample does.
+  let sharedReading = null;
+  let readingFrame = null;
+  let pendingReading = null;
+
   function readingBox(svg) {
     const card = svg.closest(".mon-chart");
     if (!card) return null;
@@ -2139,34 +2164,84 @@
   }
 
   function hideReading(svg) {
-    const rule = svg.querySelector(".mon-reading-rule");
-    if (rule) rule.remove();
+    const cursor = svg.querySelector(".mon-cursor");
+    if (cursor) cursor.remove();
     const card = svg.closest(".mon-chart");
     const box = card && card.querySelector(".mon-reading");
     if (box) box.hidden = true;
+    const legend = card && card.querySelector(".mon-legend.mon-inspecting");
+    if (legend) {
+      legend.classList.remove("mon-inspecting");
+      legend.querySelectorAll("[data-summary]").forEach((node) => {
+        node.textContent = node.dataset.summary;
+      });
+      legend.querySelectorAll(".mon-line-toggle").forEach((item) => {
+        item.title = item.dataset.summaryTitle;
+      });
+    }
   }
 
-  function showReading(svg, event) {
+  function clearReadings() {
+    if (!sharedReading && readingFrame === null) return;
+    if (readingFrame !== null) window.cancelAnimationFrame(readingFrame);
+    readingFrame = null;
+    pendingReading = null;
+    sharedReading = null;
+    CHARTS.forEach((chart) => {
+      const svg = byId(`mon-plot-${chart.name}`);
+      if (svg) hideReading(svg);
+    });
+  }
+
+  function drawReading(svg, ts) {
     const geometry = svg.__geometry;
-    if (!geometry || !geometry.datasets || !geometry.points.length) return;
-    const bounds = svg.getBoundingClientRect();
-    const x = ((event.clientX - bounds.left) / Math.max(bounds.width, 1)) * geometry.width;
-    if (x < geometry.left || x > geometry.left + geometry.plotWidth) {
+    const selected = geometry && core.cursorAtTime(geometry, ts);
+    if (!selected) {
       hideReading(svg);
+      updateReadingLegend(svg, new Map(), "");
       return;
     }
-    const index = core.indexAtX(geometry, x);
-    const at = core.xAtIndex(geometry, index);
-    let rule = svg.querySelector(".mon-reading-rule");
-    if (!rule) {
-      rule = element("line", { class: "mon-reading-rule" });
-      svg.appendChild(rule);
-    }
-    rule.setAttribute("x1", at);
-    rule.setAttribute("x2", at);
-    rule.setAttribute("y1", geometry.top);
-    rule.setAttribute("y2", geometry.top + geometry.plotHeight);
+    const old = svg.querySelector(".mon-cursor");
+    if (old) old.remove();
+    const cursor = element("g", {class: "mon-cursor", "aria-hidden": "true", "data-time": ts});
+    cursor.appendChild(element("line", {
+      class: "mon-reading-rule", x1: selected.x, x2: selected.x,
+      y1: geometry.top, y2: geometry.top + geometry.plotHeight
+    }));
+    const values = new Map();
+    geometry.datasets.forEach((dataset) => {
+      const value = dataset.values[selected.index];
+      const present = value !== null && value !== undefined;
+      values.set(dataset.spec.key, present ? legendValue(dataset.spec, value) : "—");
+      if (!present) return;
+      cursor.appendChild(element("circle", {
+        class: "mon-reading-point", r: 3,
+        cx: core.xAtIndex(geometry, selected.index),
+        cy: geometry.top + geometry.plotHeight * (1 - Math.max(0, value) / geometry.ceiling),
+        stroke: dataset.spec.color
+      }));
+    });
+    svg.appendChild(cursor);
+    const format = geometry.spanSeconds >= 86400 ? dateTimeFormat : timeFormat;
+    const when = format.format(new Date(Number(geometry.points[selected.index]) * 1000));
+    updateReadingLegend(svg, values, when);
+  }
 
+  function updateReadingLegend(svg, values, when) {
+    const card = svg.closest(".mon-chart");
+    const legend = card && card.querySelector(".mon-legend");
+    if (!legend) return;
+    legend.classList.add("mon-inspecting");
+    legend.querySelectorAll(".mon-line-toggle").forEach((item) => {
+      item.querySelector("b").textContent = values.get(item.dataset.series) || "—";
+      const stamp = item.querySelector("small");
+      stamp.textContent = when && stamp.dataset.summary ? ` · ${when}` : "";
+      item.title = when || uiText("No data for this period");
+    });
+  }
+
+  function showTooltip(svg, index) {
+    const geometry = svg.__geometry;
     const box = readingBox(svg);
     if (!box) return;
     box.textContent = "";
@@ -2211,8 +2286,56 @@
       }
       box.appendChild(events);
     }
+    if (autoRefresh) {
+      const note = document.createElement("small");
+      note.className = "mon-sub";
+      note.textContent = uiText("Auto-refresh paused while inspecting");
+      box.appendChild(note);
+    }
     box.hidden = false;
+  }
+
+  function showReading(svg, event) {
+    const geometry = svg.__geometry;
+    if (!geometry || !geometry.datasets || !geometry.points.length) {
+      clearReadings();
+      return;
+    }
+    const bounds = svg.getBoundingClientRect();
+    // The SVG's default xMidYMid meet can letterbox a wide or narrow card.
+    // Convert the pointer through its actual viewBox transform, not its box.
+    const transform = svg.getScreenCTM();
+    if (!transform) return;
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    const local = point.matrixTransform(transform.inverse());
+    if (local.x < geometry.left || local.x > geometry.left + geometry.plotWidth ||
+        local.y < geometry.top || local.y > geometry.top + geometry.plotHeight ||
+        event.clientY < bounds.top || event.clientY > bounds.bottom) {
+      clearReadings();
+      return;
+    }
+    const index = core.indexAtX(geometry, local.x);
+    const ts = Number(geometry.points[index]);
+    const previous = sharedReading;
+    sharedReading = {svg: svg, ts: ts};
+    if (!previous || previous.ts !== ts) {
+      CHARTS.forEach((chart) => {
+        const plot = byId(`mon-plot-${chart.name}`);
+        if (plot && chartOn(chart.name)) drawReading(plot, ts);
+      });
+    }
+    if (!previous || previous.svg !== svg || previous.ts !== ts) {
+      if (previous && previous.svg !== svg) {
+        const oldBox = readingBox(previous.svg);
+        if (oldBox) oldBox.hidden = true;
+      }
+      showTooltip(svg, index);
+    }
     // Beside the pointer, on whichever side has the room.
+    const box = readingBox(svg);
+    if (!box) return;
     const card = svg.closest(".mon-chart");
     const cardBounds = card.getBoundingClientRect();
     const pointer = event.clientX - cardBounds.left;
@@ -2221,12 +2344,35 @@
     box.style.top = `${Math.max(4, event.clientY - cardBounds.top - box.offsetHeight / 2)}px`;
   }
 
+  function queueReading(svg, event) {
+    pendingReading = {svg: svg, clientX: event.clientX, clientY: event.clientY};
+    if (readingFrame !== null) return;
+    readingFrame = window.requestAnimationFrame(() => {
+      readingFrame = null;
+      const next = pendingReading;
+      pendingReading = null;
+      if (next) showReading(next.svg, next);
+    });
+  }
+
+  window.addEventListener("blur", clearReadings);
+  window.addEventListener("scroll", clearReadings, {passive: true});
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") clearReadings();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest(".mon-plot")) clearReadings();
+  });
+
   function bindZoom(svg) {
     let start = null;
     let band = null;
     const toX = (event, geometry) => {
-      const box = svg.getBoundingClientRect();
-      const x = ((event.clientX - box.left) / Math.max(box.width, 1)) * geometry.width;
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      const transform = svg.getScreenCTM();
+      const x = transform ? point.matrixTransform(transform.inverse()).x : geometry.left;
       return Math.min(Math.max(x, geometry.left), geometry.left + geometry.plotWidth);
     };
     const stop = () => {
@@ -2239,6 +2385,7 @@
     svg.addEventListener("pointerdown", (event) => {
       const geometry = svg.__geometry;
       if (!geometry || event.button !== 0) return;
+      clearReadings();
       start = toX(event, geometry);
       zoomDragging = true;
       // Keeps the drag ours when the pointer leaves the chart; a selection
@@ -2260,9 +2407,8 @@
     });
     svg.addEventListener("pointermove", (event) => {
       const geometry = svg.__geometry;
-      if (start === null && event.pointerType === "mouse") showReading(svg, event);
+      if (start === null && event.pointerType === "mouse") queueReading(svg, event);
       if (start === null || !geometry || !band) return;
-      hideReading(svg);
       const x = toX(event, geometry);
       band.setAttribute("x", Math.min(start, x));
       band.setAttribute("width", Math.abs(x - start));
@@ -2280,15 +2426,21 @@
       // A click or a twitch is not a selection; on a touch screen it is how
       // a reading is asked for.
       if (right - left < 6) {
-        if (event.pointerType !== "mouse") showReading(svg, event);
+        showReading(svg, event);
         return;
       }
       // The axis is spaced by sample, not by clock (see timeAtX).
       zoomTo(core.timeAtX(geometry, left), core.timeAtX(geometry, right) + geometry.step);
     });
-    svg.addEventListener("pointercancel", stop);
+    svg.addEventListener("pointercancel", () => {
+      stop();
+      clearReadings();
+    });
     svg.addEventListener("pointerleave", (event) => {
-      if (event.pointerType === "mouse") hideReading(svg);
+      if (event.pointerType === "mouse" &&
+          ((sharedReading && sharedReading.svg === svg) || (pendingReading && pendingReading.svg === svg))) {
+        clearReadings();
+      }
     });
     svg.addEventListener("dblclick", zoomOut);
   }

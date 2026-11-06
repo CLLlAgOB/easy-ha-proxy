@@ -27,10 +27,10 @@
     element.textContent = text || "";
     element.classList.remove("success", "error");
     if (!text) {
-      element.style.display = "none";
+      element.hidden = true;
       return;
     }
-    element.style.display = "inline-block";
+    element.hidden = false;
     element.classList.add(ok ? "success" : "error");
   }
 
@@ -136,7 +136,7 @@
     container.replaceChildren();
     const warnings = resultWarnings(data);
     if (!warnings.length) {
-      container.style.display = "none";
+      container.hidden = true;
       return;
     }
     const title = document.createElement("strong");
@@ -148,7 +148,7 @@
       list.appendChild(item);
     });
     container.append(title, list);
-    container.style.display = "block";
+    container.hidden = false;
   }
 
   function renderApplyResult(data, completedAt) {
@@ -171,10 +171,10 @@
         timeStyle: "medium",
       }).format(parsed);
       timeElement.textContent = uiText("Completed: {time}", { time: formatted });
-      timeElement.style.display = "block";
+      timeElement.hidden = false;
     } else {
       timeElement.textContent = "";
-      timeElement.style.display = "none";
+      timeElement.hidden = true;
     }
   }
 
@@ -186,7 +186,7 @@
     const stderrElement = document.getElementById("apply-stderr");
     if (timeElement) {
       timeElement.textContent = "";
-      timeElement.style.display = "none";
+      timeElement.hidden = true;
     }
     if (stdoutElement) stdoutElement.textContent = "";
     if (stderrElement) stderrElement.textContent = "";
@@ -250,11 +250,11 @@
         timeStyle: "medium",
       }).format(parsed);
       timeElement.textContent = uiText("Completed: {time}", { time: formatted });
-      timeElement.style.display = "block";
+      timeElement.hidden = false;
       return;
     }
     timeElement.textContent = "";
-    timeElement.style.display = "none";
+    timeElement.hidden = true;
   }
 
   function renderValidationResult(data, completedAt) {

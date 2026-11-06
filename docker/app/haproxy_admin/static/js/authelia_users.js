@@ -18,7 +18,7 @@
     rows.forEach(row => {
       const text = row.getAttribute('data-search-text') || '';
       const match = !q || text.indexOf(q) !== -1;
-      row.style.display = match ? '' : 'none';
+      row.hidden = !(match);
       if (match) visible++;
     });
 

@@ -3,31 +3,26 @@
 {% block title %}HAProxy – UDP forwarding{% endblock %}
 {% block header_title %}UDP forwarding{% endblock %}
 
-{% block header_buttons %}
-{% include "_haproxy_nav.html" %}
-{% endblock %}
-
-
 {% block content %}
 
 {% for category, flashed_message in get_flashed_messages(with_categories=true) %}
-<div class="card" style="border-left: 4px solid var(--ok);">
+<div class="border-success card" >
   <div class="card-header">
     <strong>Applied</strong>
   </div>
   <div class="card-body">
-    <p style="margin:0;">{{ flashed_message }}</p>
+    <p  class="u-m-0">{{ flashed_message }}</p>
   </div>
 </div>
 {% endfor %}
 
 {% if error %}
-<div class="card" style="border-left: 4px solid var(--error);">
+<div class="border-error card" >
   <div class="card-header">
     <strong>Error</strong>
   </div>
   <div class="card-body">
-    <pre class="mono" style="white-space: pre-wrap;">{{ error }}</pre>
+    <pre class="pre-wrap mono" >{{ error }}</pre>
   </div>
 </div>
 {% endif %}
@@ -40,7 +35,7 @@
       from config/udp.yml. Backends see the proxy address (MASQUERADE).
       Loopback addresses (127.0.0.0/8) are intentionally not supported.
     </div>
-    <div class="table-meta" style="margin-top:8px;">
+    <div class="u-mt-2 table-meta" >
       Saving waits for the systemd loader to finish. A success result means the
       complete ruleset is already active; a failed apply restores the previous
       YAML and rules automatically.
@@ -49,14 +44,14 @@
 
   <div class="card-body">
     {% if udp_status.ok %}
-    <div class="table-meta" style="margin-bottom:14px;">
+    <div class="u-mb-3 table-meta" >
       <strong>Last successful apply:</strong>
       <span class="mono" data-i18n-skip translate="no">{{ udp_status.applied_at }}</span>
       · <strong>Active forwards:</strong> {{ udp_status.forwards }}
       · <strong>Forwarded ports:</strong> {{ udp_status.ports }}
     </div>
     {% else %}
-    <div class="table-meta" style="margin-bottom:14px;">
+    <div class="u-mb-3 table-meta" >
       <strong>Runtime status unavailable:</strong> {{ udp_status.error }}
     </div>
     {% endif %}
@@ -71,7 +66,7 @@
           <th>Zero trust</th>
           <th>Ban check</th>
           <th>Enabled</th>
-          <th style="width:1%;">&nbsp;</th>
+          <th  class="u-w-1">&nbsp;</th>
         </tr>
       </thead>
       <tbody>
@@ -101,13 +96,13 @@
             <span class="tag">no</span>
             {% endif %}
           </td>
-          <td style="text-align:right;">
+          <td  class="text-right">
             <a class="btn btn-small"
                href="{{ url_for('routes.haproxy_udp_page', edit=u.name) }}">
               Edit
             </a>
             <form method="post" action="{{ url_for('routes.haproxy_udp_page') }}"
-                  style="display:inline;" data-confirm="Delete {{ u.name }}?">
+                   data-confirm="Delete {{ u.name }}?" class="inline">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="name" value="{{ u.name }}">
               <button type="submit" class="btn btn-small btn-danger">Delete</button>
@@ -125,7 +120,7 @@
 
 {% set form_udp = edit_forward or {} %}
 {# ───── Add/edit UDP forward ─────────────────────────────────────────────── #}
-<div class="card" style="margin-top:16px;">
+<div class="u-mt-4 card" >
   <div class="card-header">
     <h2>{% if original_name %}Edit UDP forward{% else %}Add UDP forward{% endif %}</h2>
     <div class="table-meta">
@@ -203,7 +198,7 @@
       </div>
     </div>
 
-    <div style="padding: 0 16px 16px;">
+    <div  class="u-p-0-16px-16px">
       <button type="submit" class="btn btn-primary">Save and apply now</button>
       {% if original_name %}
       <a class="btn" href="{{ url_for('routes.haproxy_udp_page') }}">Cancel editing</a>

@@ -3,10 +3,6 @@
 {% block title %}HAProxy – configuration{% endblock %}
 {% block header_title %}HAProxy configuration{% endblock %}
 
-{% block header_buttons %}
-{% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
 {% if error %}
@@ -129,7 +125,7 @@
     <section class="config-operation-result" aria-labelledby="validation-result-title">
       <div class="config-operation-result-header">
         <h3 id="validation-result-title">Validation result</h3>
-        <div id="check-result-time" class="apply-result-time muted"></div>
+        <div id="check-result-time" class="apply-result-time muted" hidden></div>
       </div>
       <div id="check-status" class="result-message notranslate" translate="no" data-i18n-skip
            role="status" aria-live="polite"></div>
@@ -140,7 +136,7 @@
     <section class="config-operation-result" aria-labelledby="apply-result-title">
       <div class="config-operation-result-header">
         <h3 id="apply-result-title">Apply result</h3>
-        <div id="apply-result-time" class="apply-result-time muted"></div>
+        <div id="apply-result-time" class="apply-result-time muted" hidden></div>
       </div>
       <div class="apply-safety-note">
         <strong>Automatic safety check:</strong>
@@ -149,7 +145,7 @@
       <div id="apply-status" class="result-message notranslate" translate="no" data-i18n-skip
            role="status" aria-live="polite"></div>
       <div id="apply-warnings" class="config-apply-warnings notranslate" translate="no" data-i18n-skip
-           role="status" aria-live="polite"></div>
+           role="status" aria-live="polite" hidden></div>
       <div id="apply-stdout" class="mono notranslate config-technical-output" translate="no" data-i18n-skip></div>
       <div id="apply-stderr" class="mono notranslate config-technical-output" translate="no" data-i18n-skip></div>
     </section>

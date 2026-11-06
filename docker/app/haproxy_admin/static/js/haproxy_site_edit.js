@@ -21,14 +21,14 @@
 
     if (btnShow && box) {
       btnShow.addEventListener("click", function () {
-        box.style.display = "block";
+        box.hidden = false;
         box.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     }
 
     if (btnCancel && box) {
       btnCancel.addEventListener("click", function () {
-        box.style.display = "none";
+        box.hidden = true;
       });
     }
 
@@ -234,7 +234,7 @@
     function setSaveStatus(text, isError) {
       if (!saveStatus) return;
       saveStatus.textContent = text || "";
-      saveStatus.style.color = isError ? "#c0392b" : "";
+      saveStatus.style.color = isError ? "var(--error)" : "";
     }
 
     function collectServers() {
@@ -996,13 +996,13 @@ delete site.geo_countries;
       if (certModeExternal && certModeExternal.checked) mode = "external";
       if (certModeInternal && certModeInternal.checked) mode = "internal";
       if (certBlockLe) {
-        certBlockLe.style.display = mode === "letsencrypt" ? "" : "none";
+        certBlockLe.hidden = !(mode === "letsencrypt");
       }
       if (certBlockExternal) {
-        certBlockExternal.style.display = mode === "external" ? "" : "none";
+        certBlockExternal.hidden = !(mode === "external");
       }
       if (certBlockInternal) {
-        certBlockInternal.style.display = mode === "internal" ? "" : "none";
+        certBlockInternal.hidden = !(mode === "internal");
       }
     }
 
@@ -1021,7 +1021,7 @@ delete site.geo_countries;
     function updateChallengeUI() {
       if (!blockDns) return;
       var useDns = !!(challengeDns && challengeDns.checked);
-      blockDns.style.display = useDns ? "" : "none";
+      blockDns.hidden = !(useDns);
     }
 
     if (challengeHttp) challengeHttp.addEventListener("change", updateChallengeUI);
@@ -1050,7 +1050,7 @@ delete site.geo_countries;
       issueDot.style.backgroundColor = color;
       issueDot.style.opacity = "1";
 
-      if (blinking) {
+      if (blinking && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         var visible = true;
         issueDotTimer = setInterval(function () {
           visible = !visible;
@@ -1061,7 +1061,7 @@ delete site.geo_countries;
 
     function openModal(title) {
       if (!modal) return;
-      modal.style.display = "flex";
+      modal.hidden = false;
       if (modalLog) {
         modalLog.textContent = title ? title + "\n\n" : "";
         modalLog.scrollTop = modalLog.scrollHeight;
@@ -1070,7 +1070,7 @@ delete site.geo_countries;
 
     function closeModal() {
       if (!modal) return;
-      modal.style.display = "none";
+      modal.hidden = true;
       // Keep the indicator color as the final operation result.
     }
 
@@ -1257,7 +1257,7 @@ delete site.geo_countries;
     function setUploadStatus(msg, isError) {
       if (!uploadStatus) return;
       uploadStatus.textContent = msg || "";
-      uploadStatus.style.color = isError ? "#c0392b" : "";
+      uploadStatus.style.color = isError ? "var(--error)" : "";
     }
 
     if (uploadBtn && certFileInput && siteNameInput) {
@@ -1344,14 +1344,14 @@ delete site.geo_countries;
 
   // TCP passthrough: show the TCP/SSL check choice, hide HTTP L4/L7
   if (isTcpMode) {
-    if (rowHttpTcpCheck) rowHttpTcpCheck.style.display = "none";
+    if (rowHttpTcpCheck) rowHttpTcpCheck.hidden = true;
     if (selHttp) selHttp.disabled = true;
 
-    if (rowTcpPassCheck) rowTcpPassCheck.style.display = "";
+    if (rowTcpPassCheck) rowTcpPassCheck.hidden = false;
     if (selTcp) selTcp.disabled = false;
 
-    if (rowUri) rowUri.style.display = "none";
-    if (rowStatus) rowStatus.style.display = "none";
+    if (rowUri) rowUri.hidden = true;
+    if (rowStatus) rowStatus.hidden = true;
 
     if (inputUri) inputUri.disabled = true;
     if (inputStatus) inputStatus.disabled = true;
@@ -1359,10 +1359,10 @@ delete site.geo_countries;
   }
 
   // HTTP mode: show the L4/L7 selector and drive health_uri/health_status
-  if (rowHttpTcpCheck) rowHttpTcpCheck.style.display = "";
+  if (rowHttpTcpCheck) rowHttpTcpCheck.hidden = false;
   if (selHttp) selHttp.disabled = false;
 
-  if (rowTcpPassCheck) rowTcpPassCheck.style.display = "none";
+  if (rowTcpPassCheck) rowTcpPassCheck.hidden = true;
   if (selTcp) selTcp.disabled = true;
 
   if (!selHttp) return;
@@ -1371,8 +1371,8 @@ delete site.geo_countries;
   var effective = (selHttp.value && selHttp.value.length) ? selHttp.value : (selHttp.dataset.effDefault || "false");
   var isL4 = (effective === "true");
 
-  if (rowUri) rowUri.style.display = isL4 ? "none" : "";
-  if (rowStatus) rowStatus.style.display = isL4 ? "none" : "";
+  if (rowUri) rowUri.hidden = isL4;
+  if (rowStatus) rowStatus.hidden = isL4;
 
   if (inputUri) inputUri.disabled = isL4;
   if (inputStatus) inputStatus.disabled = isL4;
@@ -1383,7 +1383,7 @@ delete site.geo_countries;
     // ------------------------------------------------------------------
     function setBlockVisible(block, visible) {
       if (!block) return;
-      block.style.display = visible ? "" : "none";
+      block.hidden = !(visible);
     }
 
     function setInputsDisabled(container, disabled) {

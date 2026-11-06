@@ -255,7 +255,7 @@ class HiddenMeansHidden(unittest.TestCase):
     CSS = (APP / "static/css/styles.css").read_text(encoding="utf-8")
 
     def test_a_hidden_button_is_hidden_on_every_page(self):
-        self.assertRegex(self.CSS, r"(?m)^\.btn\[hidden\] \{\s*display: none;")
+        self.assertRegex(self.CSS, r"\[hidden\] \{\s*display: none !important;")
         hidden_buttons = []
         for template in sorted((APP / "templates").glob("*.html")):
             for tag in re.findall(r"<button[^>]*>", template.read_text(encoding="utf-8")):
@@ -264,7 +264,8 @@ class HiddenMeansHidden(unittest.TestCase):
         self.assertTrue(hidden_buttons)  # the rule has buttons to hide
 
     def test_an_empty_note_is_not_a_dot(self):
-        self.assertRegex(self.CSS, r"(?m)^\.table-meta:empty \{\s*display: none;")
+        styles = (APP / "static/css/pages.css").read_text(encoding="utf-8")
+        self.assertRegex(styles, r"\.table-meta:empty[^{}]*\{\s*display: none;")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Authelia — settings{% endblock %}
 
-{% block header_buttons %}
-{% include "_authelia_nav.html" %}
-{% endblock %}
-
 {% block content %}
 <div class="container">
   <div class="card">
@@ -35,7 +31,7 @@
     </p>
 
     {% if settings_load_error %}
-    <div class="alert alert-error" style="margin:16px;">
+    <div class="u-m-16px alert alert-error" >
       <strong>Cannot load Authelia settings.</strong>
       Editing is disabled to prevent accidental overwrite.
       <span class="notranslate" translate="no" data-i18n-skip>{{ settings_load_error }}</span>
@@ -220,7 +216,7 @@
         </div>
       </div>
 
-      <div style="margin-top: 24px; display:flex; gap:10px; flex-wrap:wrap;">
+      <div  class="u-mt-6 flex u-gap-2 flex-wrap">
         <!-- Just save (validate and write, without a restart) -->
         <button type="submit" class="btn" name="submit_action" value="save">
           Save settings

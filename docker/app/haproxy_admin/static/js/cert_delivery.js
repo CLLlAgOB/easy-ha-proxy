@@ -29,7 +29,7 @@
     const host = byId("cd-result");
     if (!host) return;
     host.textContent = message || "";
-    host.style.color = isError ? "#cc4b4b" : "";
+    host.style.color = isError ? "var(--error)" : "";
   }
 
   function cell(row, text, verbatim) {

@@ -111,7 +111,8 @@ class ThePageOffersBothViews(unittest.TestCase):
         # sort order stood beside the availability bars, sorting nothing.
         self.assertIn('id="mon-backends-sort-wrap" hidden', self.page)
         self.assertIn("sortWrap.hidden = !traffic;", self.script)
-        self.assertIn(".mon-toolbar label[hidden] { display: none; }", self.page)
+        styles = (APP_DIR / "static/css/styles.css").read_text(encoding="utf-8")
+        self.assertIn("[hidden] { display: none !important; }", styles)
 
     def test_traffic_is_only_fetched_when_it_is_shown(self):
         load = self.script.split("async function loadAll(")[1].split("\n  }\n")[0]

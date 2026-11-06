@@ -253,10 +253,11 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
     def setUpClass(cls):
         cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
         cls.page = (APP_DIR / "templates/monitoring.html").read_text(encoding="utf-8")
+        cls.styles = (APP_DIR / "static/css/pages.css").read_text(encoding="utf-8")
         cls.render = cls.script.split("function renderTimeline(")[1].split("\n  function ")[0]
 
     def test_an_outage_keeps_a_visible_width_and_up_time_gives_way(self):
-        self.assertRegex(self.page, r"\.mon-span-down, \.mon-span-other \{ min-width: \d+px; \}")
+        self.assertRegex(self.styles, r"\.mon-span-down, \.mon-span-other \{ min-width: \d+px; \}")
         self.assertIn('span.state === "UP" ? `1 1 ${width}%` : `0 0 ${width}%`', self.render)
         self.assertNotIn("piece.style.width", self.render)
 
@@ -273,7 +274,7 @@ class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
         self.assertIn('t("outages: {count}", {count: part.outages})', flap)
         self.assertIn("formatDuration(part.down)", flap)
         self.assertRegex(
-            self.page,
+            self.styles,
             r"\.mon-span-flap \{\s*min-width: \d+px;\s*background: repeating-linear-gradient\(",
         )
 
@@ -333,11 +334,16 @@ class DragAcrossAChartToZoom(unittest.TestCase):
 
     def test_the_pointer_reads_every_shown_line(self):
         zoom = self.section("bindZoom")
-        self.assertIn('if (start === null && event.pointerType === "mouse") showReading(svg, event);', zoom)
+        self.assertIn('if (start === null && event.pointerType === "mouse") queueReading(svg, event);', zoom)
         self.assertIn('"pointerleave"', zoom)
         reading = self.section("showReading")
-        self.assertIn("core.indexAtX(geometry, x)", reading)
-        self.assertIn("legendValue(dataset.spec, reading)", reading)
+        self.assertIn("core.indexAtX(geometry, local.x)", reading)
+        self.assertIn("getScreenCTM()", reading)
+        self.assertIn("drawReading(plot, ts)", reading)
+        self.assertIn("requestAnimationFrame", self.section("queueReading"))
+        self.assertIn("legendValue(dataset.spec, reading)", self.section("showTooltip"))
+        self.assertIn("core.cursorAtTime(geometry, ts)", self.section("drawReading"))
+        self.assertIn("node.dataset.summary", self.section("hideReading"))
 
     def test_the_selection_becomes_the_shown_period_and_can_be_undone(self):
         self.assertIn("zoomHistory.push(", self.section("zoomTo"))
@@ -349,12 +355,14 @@ class DragAcrossAChartToZoom(unittest.TestCase):
         self.assertEqual(self.script.count("zoomHistory.length = 0;"), 3)
 
     def test_a_refresh_does_not_drop_a_selection_in_progress(self):
-        self.assertIn("if (inFlight || zoomDragging) return;", self.section("loadAll"))
+        self.assertIn("if (inFlight || zoomDragging ||", self.section("loadAll"))
+        self.assertIn("options.refresh && sharedReading", self.section("loadAll"))
 
     def test_the_page_offers_it_and_says_so(self):
         self.assertIn('id="mon-zoom-out" hidden>Zoom out</button>', self.page)
         self.assertIn("Drag across a chart to zoom in, double-click to zoom out", self.page)
-        self.assertIn("touch-action: pan-y", self.page)
+        styles = (APP_DIR / "static/css/pages.css").read_text(encoding="utf-8")
+        self.assertIn("touch-action: pan-y", styles)
         catalogue = json.loads(
             (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
         )["messages"]

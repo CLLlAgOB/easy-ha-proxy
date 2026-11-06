@@ -117,6 +117,8 @@ SOCKET_RE = re.compile(rf"^{re.escape(SOCKET_BASIS)}(\.\d+)?$")
 # caches
 table_cache: dict = {"ban": None, "err": None}
 cache_time: datetime = datetime.min
+ban_table_cache: dict = {"ban": None}
+ban_cache_time: datetime = datetime.min
 
 _cfg_disp_cache = {"mtime": -1.0, "map": {}}
 logger = logging.getLogger("haproxy-admin")
@@ -323,11 +325,34 @@ def _apply_adaptive_expiry(ban: dict | None) -> None:
     ban.setdefault("meta", {})["expiry_from_schedule"] = from_schedule
 
 
-def get_tables():
+def invalidate_table_cache() -> None:
+    global cache_time, ban_cache_time
+    cache_time = ban_cache_time = datetime.min
+
+
+def get_tables(*, include_errors: bool = True):
     """
     Cached read of tbl_ban plus the totals of every tbl_err_*.
     """
-    global table_cache, cache_time
+    global table_cache, cache_time, ban_table_cache, ban_cache_time
+    if not include_errors:
+        # The compact dashboard needs only bans. Do not enumerate or dump
+        # every error table on a busy gateway for a panel it no longer shows.
+        now = datetime.now()
+        if now - cache_time <= timedelta(seconds=5):
+            return {"ban": table_cache.get("ban")}
+        if now - ban_cache_time <= timedelta(seconds=5):
+            return ban_table_cache
+        try:
+            raw = haproxy_runtime_command("show table tbl_ban", SOCKET, timeout=2)
+            ban = parse_table_output(raw)
+            _apply_adaptive_expiry(ban)
+            ban_table_cache = {"ban": ban}
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("parse ban table: %s", exc)
+            ban_table_cache = {"ban": None}
+        ban_cache_time = now
+        return ban_table_cache
     if datetime.now() - cache_time <= timedelta(seconds=5):
         return table_cache
     try:
@@ -814,13 +839,12 @@ def unban_ip(ip: str):
             "Lifted in HAProxy, but the adaptive engine did not answer: "
             "a ban it scheduled may come back."
         )
-    global cache_time
     if isinstance(answer, dict):
         # The engine lifted it in HAProxy itself, under the lock its other
         # changes to the ban table take. A write here afterwards could undo
         # a ban placed meanwhile by another request (R09).
         if answer.get("cleared"):
-            cache_time = datetime.min
+            invalidate_table_cache()
             return "OK", 200
         if answer.get("refused"):
             return f"HAProxy did not lift the ban: {str(answer['refused'])[:200]}", 502
@@ -836,7 +860,7 @@ def unban_ip(ip: str):
         return f"HAProxy did not lift the ban: {exc}", 502
     if not runtime_ok(response):
         return f"HAProxy did not lift the ban: {response.strip()[:200]}", 502
-    cache_time = datetime.min
+    invalidate_table_cache()
     return (engine_note or "OK"), 200
 
 

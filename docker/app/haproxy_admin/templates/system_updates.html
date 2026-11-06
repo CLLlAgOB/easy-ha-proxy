@@ -3,10 +3,6 @@
 {% block title %}Software updates{% endblock %}
 {% block header_title %}Software updates{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 <div id="updates-app"
      data-status-url="{{ url_for('system_updates.status_view') }}"
@@ -53,7 +49,7 @@
       </div>
       <div id="updates-progress-step" class="updates-run-step mono notranslate" translate="no" data-i18n-skip></div>
       <p id="updates-self-restart-running" class="updates-run-note" hidden>
-        The web application restarts during this update. The page reconnects by itself.
+        The web application or sign-in service may restart during this update. The page reconnects by itself.
       </p>
     </div>
 
@@ -123,17 +119,17 @@
   <div id="updates-confirm-modal" class="config-modal" hidden
        role="dialog" aria-modal="true" aria-labelledby="updates-confirm-title">
     <div class="config-modal-backdrop"></div>
-    <div class="config-modal-panel updates-confirm-dialog" tabindex="-1">
+    <div class="config-modal-panel" tabindex="-1">
       <h2 id="updates-confirm-title">Install these updates?</h2>
       <ul id="updates-confirm-list" class="updates-confirm-list"></ul>
       <p class="updates-confirm-note">
         Services listed above may restart. Keep console or SSH access available, and take a backup first if you may need to roll back.
       </p>
       <p id="updates-self-restart-note" class="updates-confirm-note" hidden>
-        The web application will restart. Temporary connection errors are expected and this page will reconnect automatically.
+        The web application or sign-in service may restart. Temporary connection errors are expected and this page will reconnect automatically.
       </p>
       <p id="updates-os-note" class="updates-confirm-note" hidden>
-        Operating-system packages are installed last. A required server reboot is never started automatically.
+        Operating-system packages are installed last. Updating Docker or HAProxy may temporarily interrupt sites and sign-in. A required server reboot is never started automatically.
       </p>
       <div class="config-modal-actions">
         <button type="button" class="btn btn-small updates-cancel" id="updates-confirm-cancel">Cancel</button>

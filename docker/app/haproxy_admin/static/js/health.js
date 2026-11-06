@@ -106,19 +106,19 @@
   function showControlMsg(text, ok) {
     if (!controlMsg) return;
     if (!text) {
-      controlMsg.style.display = "none";
+      controlMsg.hidden = true;
       controlMsg.textContent = "";
       controlMsg.className = "tag";
       return;
     }
-    controlMsg.style.display = "";
+    controlMsg.hidden = false;
     controlMsg.textContent = text;
     controlMsg.className = ok ? "tag tag-ok" : "tag tag-bad";
   }
 
   function showResult(obj) {
     if (!controlResult) return;
-    controlResult.style.display = "block";
+    controlResult.hidden = false;
     controlResult.textContent = JSON.stringify(obj, null, 2);
   }
 
@@ -649,7 +649,7 @@
     logsText.textContent = "loading…";
     logsMeta.textContent = "…";
     logsMeta.className = "tag";
-    cardLogs.style.display = "";
+    cardLogs.hidden = false;
     loadLogs();
   }
 
@@ -718,7 +718,7 @@
 
     if (btnLogsClose) {
       btnLogsClose.addEventListener("click", () => {
-        if (cardLogs) cardLogs.style.display = "none";
+        if (cardLogs) cardLogs.hidden = true;
         selectedLogs = null;
       });
     }

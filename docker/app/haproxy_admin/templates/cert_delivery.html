@@ -3,36 +3,8 @@
 {% block title %}Certificate delivery{% endblock %}
 {% block header_title %}Certificate delivery{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
-<style>
-.cd-banner {
-  border-radius: 12px;
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  border: 1px solid rgba(204, 75, 75, .5);
-  background: rgba(204, 75, 75, .08);
-  font-size: 14px;
-}
-
-.cd-banner[hidden] { display: none; }
-
-/* The actions column holds three buttons; without this they wrap under
-   each other on a narrow screen and the row grows to three lines. */
-#cd-body td:last-child { white-space: nowrap; }
-
-.cd-actions {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  align-items: center;
-  margin-top: 14px;
-}
-</style>
 
 <div class="cd-banner" id="cd-unavailable" hidden>
   The certificate daemon is not answering, so delivery targets cannot be
@@ -91,7 +63,7 @@
   </div>
 </div>
 
-<div class="card" style="margin-top:25px;">
+<div class="u-mt-6 card" >
   <div class="card-header">
     <h2>Add or edit a target</h2>
     <span class="mon-sub" id="cd-editing" data-i18n-skip translate="no"></span>

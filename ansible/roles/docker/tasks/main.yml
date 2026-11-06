@@ -108,6 +108,8 @@
     enabled: yes
   when: ansible_os_family == "Debian"
 
+- name: Configure container continuity during Docker maintenance
+  ansible.builtin.import_tasks: live_restore.yml
 
 # ---- 2. Test access to Docker Hub ----
 

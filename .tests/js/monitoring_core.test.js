@@ -10,6 +10,30 @@ const path = require("node:path");
 
 const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/monitoring_core.js"));
 
+test("linked cursors follow clock time across different bucket sizes and widths", () => {
+  const minute = {points: [600, 660, 720, 780, 840, 900], step: 60, left: 50, plotWidth: 500};
+  const coarse = {points: [600, 900], step: 300, left: 70, plotWidth: 200};
+  assert.deepEqual(core.cursorAtTime(minute, 720), {index: 2, x: 250});
+  assert.deepEqual(core.cursorAtTime(coarse, 720), {index: 0, x: 150});
+  assert.equal(core.timeAtX(coarse, core.cursorAtTime(coarse, 720).x), 720);
+});
+
+test("linked cursors do not borrow readings from a missing bucket or another period", () => {
+  const geometry = {points: [600, 660, 900], step: 60, left: 50, plotWidth: 400};
+  for (const ts of [599, 720, 800, 960, NaN]) {
+    assert.equal(core.cursorAtTime(geometry, ts), null);
+  }
+  assert.deepEqual(core.cursorAtTime(geometry, 900), {index: 2, x: 450});
+  assert.equal(core.cursorAtTime({...geometry, points: []}, 600), null);
+});
+
+test("linked cursors retain the last or only bucket without inventing another sample", () => {
+  const single = {points: [600], step: 60, left: 50, plotWidth: 400};
+  assert.deepEqual(core.cursorAtTime(single, 600), {index: 0, x: 250});
+  assert.deepEqual(core.cursorAtTime(single, 659), {index: 0, x: 250});
+  assert.equal(core.cursorAtTime(single, 660), null);
+});
+
 test("a missing value stays missing instead of becoming zero", () => {
   assert.equal(core.reading(null), null);
   assert.equal(core.reading(undefined), null);

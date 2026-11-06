@@ -3,31 +3,26 @@
 {% block title %}HAProxy – TCP proxies{% endblock %}
 {% block header_title %}TCP proxies{% endblock %}
 
-{% block header_buttons %}
-{% include "_haproxy_nav.html" %}
-{% endblock %}
-
-
 {% block content %}
 
 {% if error %}
-<div class="card" style="border-left: 4px solid var(--error);">
+<div class="border-error card" >
   <div class="card-header">
     <strong>Error</strong>
   </div>
   <div class="card-body">
-    <pre class="mono" style="white-space: pre-wrap;">{{ error }}</pre>
+    <pre class="pre-wrap mono" >{{ error }}</pre>
   </div>
 </div>
 {% endif %}
 
 {% if message %}
-<div class="card" style="border-left: 4px solid var(--ok);">
+<div class="border-success card" >
   <div class="card-header">
     <strong>Message</strong>
   </div>
   <div class="card-body">
-    <pre class="mono" style="white-space: pre-wrap;">{{ message }}</pre>
+    <pre class="pre-wrap mono" >{{ message }}</pre>
   </div>
 </div>
 {% endif %}
@@ -50,7 +45,7 @@
           <th>Zero trust</th>
           <th>Ban check</th>
           <th>Backend(s)</th>
-          <th style="width:1%;">&nbsp;</th>
+          <th  class="u-w-1">&nbsp;</th>
         </tr>
       </thead>
       <tbody>
@@ -89,13 +84,13 @@
             —
             {% endif %}
           </td>
-          <td style="text-align:right;">
+          <td  class="text-right">
             <a class="btn btn-small"
                href="{{ url_for('routes.haproxy_tcp_edit', name=t.name) }}">
               Edit
             </a>
             <form method="post" action="{{ url_for('routes.haproxy_tcp_page') }}"
-                  style="display:inline;" data-confirm="Delete {{ t.name }}?">
+                   data-confirm="Delete {{ t.name }}?" class="inline">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="name" value="{{ t.name }}">
               <button type="submit" class="btn btn-small btn-danger">
@@ -114,7 +109,7 @@
 </div>
 
 {# ───── The short form for adding a TCP proxy ──────────────────────────── #}
-<div class="card" style="margin-top:16px;">
+<div class="u-mt-4 card" >
   <div class="card-header">
     <h2>Add TCP proxy</h2>
     <div class="table-meta">
@@ -187,7 +182,7 @@
       </div>
     </div>
 
-    <div style="padding: 0 16px 16px;">
+    <div  class="u-p-0-16px-16px">
       <button type="submit" class="btn btn-primary">Add TCP proxy</button>
     </div>
   </form>

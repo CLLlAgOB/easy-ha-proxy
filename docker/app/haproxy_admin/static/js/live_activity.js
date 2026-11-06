@@ -218,7 +218,7 @@
       });
   }
 
-  const TIMELINE_COLOURS = { ok: "#2e9e5b", errors: "#c8a13a", blocked: "#cc4b4b" };
+  const TIMELINE_COLOURS = { ok: "var(--chart-success)", errors: "var(--chart-warning)", blocked: "var(--chart-error)" };
 
   function renderTimeline(data) {
     const svg = byId("la-timeline");

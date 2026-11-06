@@ -2,15 +2,11 @@
 {% block title %}Authelia – bans{% endblock %}
 {% block header_title %}Authelia bans{% endblock %}
 
-{% block header_buttons %}
-  {% include "_authelia_nav.html" %}
-{% endblock %}
-
 {% block content %}
 
 {% for category, flashed_message in get_flashed_messages(with_categories=true) %}
-  <div class="alert {% if category == 'error' %}alert-error{% else %}alert-success{% endif %}"
-       style="margin-bottom:12px;">
+  <div class="u-mb-3 alert {% if category == 'error' %}alert-error{% else %}alert-success{% endif %}"
+       >
     <span {% if category == 'error' %}class="notranslate" translate="no" data-i18n-skip{% endif %}>{{ flashed_message }}</span>
   </div>
 {% endfor %}
@@ -22,13 +18,13 @@
   </div>
 
   {% if bans_error %}
-    <div class="alert alert-error" style="margin:12px 16px 0;">
+    <div class="u-m-12px-16px-0 alert alert-error" >
       <strong>Cannot load current bans:</strong>
       <span class="notranslate" translate="no" data-i18n-skip>{{ bans_error }}</span>
     </div>
   {% endif %}
 
-  <div class="grid" style="padding:16px 16px 8px;">
+  <div class="u-p-16px-16px-8px grid" >
     <div>
       <div class="table-header">
         <div class="table-title">By user</div>
@@ -66,10 +62,10 @@
             </tbody>
           </table>
         {% elif bans.users_raw %}
-          <pre class="mono notranslate" translate="no" data-i18n-skip
-               style="font-size:12px; padding:8px; margin:0; white-space:pre-wrap;">{{ bans.users_raw }}</pre>
+          <pre class="text-sm u-p-8px u-m-0 pre-wrap mono notranslate" translate="no" data-i18n-skip
+               >{{ bans.users_raw }}</pre>
         {% else %}
-          <div class="no-data" style="padding:8px 0;">
+          <div class="u-p-8px-0 no-data" >
             There are no active user bans.
           </div>
         {% endif %}
@@ -113,10 +109,10 @@
             </tbody>
           </table>
         {% elif bans.ips_raw %}
-          <pre class="mono notranslate" translate="no" data-i18n-skip
-               style="font-size:12px; padding:8px; margin:0; white-space:pre-wrap;">{{ bans.ips_raw }}</pre>
+          <pre class="text-sm u-p-8px u-m-0 pre-wrap mono notranslate" translate="no" data-i18n-skip
+               >{{ bans.ips_raw }}</pre>
         {% else %}
-          <div class="no-data" style="padding:8px 0;">
+          <div class="u-p-8px-0 no-data" >
             There are no active IP bans.
           </div>
         {% endif %}
@@ -131,11 +127,11 @@
     <h2>Unban</h2>
   </div>
 
-  <div style="padding:16px;display:flex;flex-direction:column;gap:16px;">
+  <div  class="u-p-16px flex u-direction-column u-gap-4">
 
     <form method="post" id="authelia-unban-user-form"
-          style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;">
-      <div style="min-width:220px;flex:1;">
+           class="flex items-end u-gap-4 flex-wrap">
+      <div  class="u-minw-min-220px-100 grow">
         <label class="form-label" for="unban-username">User</label>
         <input
           type="text"
@@ -152,8 +148,8 @@
     </form>
 
     <form method="post" id="authelia-unban-ip-form"
-          style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;">
-      <div style="min-width:220px;flex:1;">
+           class="flex items-end u-gap-4 flex-wrap">
+      <div  class="u-minw-min-220px-100 grow">
         <label class="form-label" for="unban-ip">IP / CIDR</label>
         <input
           type="text"
@@ -178,9 +174,9 @@
     <h2>Authelia logs</h2>
   </div>
 
-  <div style="padding:16px 16px 8px;">
-    <form method="get" style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;">
-      <div style="min-width:180px;">
+  <div  class="u-p-16px-16px-8px">
+    <form method="get"  class="flex flex-wrap u-gap-4 items-end">
+      <div  class="u-minw-min-180px-100">
         <label class="form-label" for="log_ip">IP</label>
         <input
           type="text"
@@ -191,7 +187,7 @@
           placeholder="203.0.113.201"
         >
       </div>
-      <div style="min-width:180px;">
+      <div  class="u-minw-min-180px-100">
         <label class="form-label" for="log_user">User</label>
         <input
           type="text"
@@ -202,7 +198,7 @@
           placeholder="username"
         >
       </div>
-      <div style="min-width:180px;">
+      <div  class="u-minw-min-180px-100">
         <label class="form-label" for="log_level">Level</label>
         <input
           type="text"
@@ -213,14 +209,14 @@
           placeholder="error / warning / info"
         >
       </div>
-      <div style="display:flex;gap:9px;">
+      <div  class="flex u-gap-2">
         <button type="submit" class="btn">Apply</button>
         <a href="{{ url_for('routes.authelia_bans') }}" class="btn btn-secondary">Reset</a>
       </div>
     </form>
 
     {% if logs_error %}
-      <div class="alert alert-error" style="margin-top:12px;">
+      <div class="u-mt-3 alert alert-error" >
         <span class="notranslate" translate="no" data-i18n-skip>{{ logs_error }}</span>
       </div>
     {% endif %}
@@ -273,7 +269,7 @@
                 <div class="authelia-log-error">{{ e.error }}</div>
               {% endif %}
               {% if not e.msg and not e.error %}
-                <pre class="mono" style="margin:0;white-space:pre-wrap;">{{ e.raw }}</pre>
+                <pre class="u-m-0 pre-wrap mono" >{{ e.raw }}</pre>
               {% endif %}
               {% if e.msg or e.error %}
                 <details class="authelia-log-details">
@@ -297,7 +293,7 @@
       </table>
     </div>
   {% else %}
-    <div class="no-data" style="padding:12px 16px 16px;">
+    <div class="u-p-12px-16px-16px no-data" >
       {% if log_ip or log_user or log_level %}
         No logs match the selected filters.
       {% else %}

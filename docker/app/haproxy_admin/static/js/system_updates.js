@@ -627,7 +627,7 @@
     const components = jobComponents(active);
     byId("updates-self-restart-running").hidden = !(
       jobOperation(active) === "apply" &&
-      (components.includes("admin-container") || components.includes("all"))
+      core.mayInterruptAccess(components)
     );
     renderElapsed();
     renderView();
@@ -1225,7 +1225,7 @@
       `<span>${escape(t(componentImpacts[id] || "Managed component restart"))}</span></li>`
     ).join("");
     byId("updates-self-restart-note").hidden = !(
-      components.includes("admin-container") || components.includes("all")
+      core.mayInterruptAccess(components)
     );
     byId("updates-os-note").hidden = !components.includes("os");
     byId("updates-confirm-modal").hidden = false;

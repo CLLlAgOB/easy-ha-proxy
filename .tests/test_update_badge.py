@@ -146,11 +146,12 @@ class TheNavigation(unittest.TestCase):
         self.assertIn("def inject_updates_badge():", init)
         self.assertIn('{"updates_badge": updates_badge.current_level()}', init)
 
-    def test_the_glow_respects_reduced_motion(self):
+    def test_the_update_dot_is_still_and_motion_can_be_reduced(self):
         css = (APP / "static/css/styles.css").read_text(encoding="utf-8")
-        self.assertIn("@keyframes nav-update-glow", css)
-        reduced = css.split("@media (prefers-reduced-motion: reduce)")
-        self.assertTrue(any(".nav-update-dot--product" in part.split("}\n}")[0] for part in reduced[1:]))
+        for selector in (".nav-update-dot {", ".nav-update-dot--product {"):
+            self.assertNotIn("animation", css.split(selector)[1].split("}")[0])
+        reduced = css.split("@media (prefers-reduced-motion: reduce)")[1]
+        self.assertIn("animation-iteration-count: 1 !important", reduced)
 
     def test_the_updates_page_moves_the_dot_with_its_polls(self):
         script = (APP / "static/js/system_updates.js").read_text(encoding="utf-8")

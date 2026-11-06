@@ -213,8 +213,10 @@ class TranslationCatalogTests(unittest.TestCase):
         self.assertIn('id="recentUnitOptions"', template)
         self.assertIn('"haproxy.service"', javascript)
         self.assertIn('"haproxy-healthd.service"', javascript)
-        self.assertIn("max-height: 430px", template)
-        self.assertIn("scrollbar-gutter: stable", template)
+        styles = (APP_DIR / "static/css/pages.css").read_text(encoding="utf-8")
+        recent = styles.split(".recent-table-wrap {")[1].split("}")[0]
+        self.assertIn("max-height: 430px", recent)
+        self.assertIn("scrollbar-gutter: stable", recent)
 
         messages = load_catalog(CATALOG_DIR / "ru.json")["messages"]
         self.assertEqual(

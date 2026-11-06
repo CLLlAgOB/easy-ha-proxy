@@ -70,7 +70,7 @@
     server_errors: "Server errors (5xx)",
     refused: "Refused by the gateway"
   };
-  const KIND_COLOURS = { ok: "#2e9e5b", client_errors: "#c8a13a", server_errors: "#d9822b", refused: "#cc4b4b" };
+  const KIND_COLOURS = { ok: "var(--chart-success)", client_errors: "var(--chart-warning)", server_errors: "var(--chart-server-error)", refused: "var(--chart-error)" };
 
   function byId(id) {
     return document.getElementById(id);

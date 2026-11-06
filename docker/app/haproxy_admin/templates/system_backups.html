@@ -3,10 +3,6 @@
 {% block title %}Full backup and restore{% endblock %}
 {% block header_title %}Full backup and restore{% endblock %}
 
-{% block header_buttons %}
-  {% include "_haproxy_nav.html" %}
-{% endblock %}
-
 {% block content %}
 <div id="backup-app"
      data-status-url="{{ url_for('system_backups.status_view') }}"
@@ -361,8 +357,8 @@
       </label>
 
       <label class="form-label" for="schedule-time">Time of day</label>
-      <input id="schedule-time" class="form-input" type="time" value="03:20" required
-             style="max-width:160px;">
+      <input id="schedule-time" class="u-maxw-min-160px-100 form-input" type="time" value="03:20" required
+             >
       <p class="vars-field-help">
         Server local time. A few minutes of jitter are added so a fleet of
         gateways does not call on the same destination at the same second.
@@ -374,8 +370,8 @@
       </div>
 
       <label class="form-label" for="schedule-keep-local">Keep on this server</label>
-      <input id="schedule-keep-local" class="form-input" type="number"
-             min="1" max="50" step="1" value="3" required style="max-width:120px;">
+      <input id="schedule-keep-local" class="u-maxw-min-120px-100 form-input" type="number"
+             min="1" max="50" step="1" value="3" required >
       <p class="vars-field-help">
         How many of the newest backups stay on this server. Older ones are
         removed only after every destination holds a verified copy of the new
@@ -401,7 +397,7 @@
         empty to keep the passphrase already stored.
       </p>
 
-      <div class="backup-actions" style="justify-content:flex-start;">
+      <div class="justify-start backup-actions" >
         <button type="submit" class="btn" id="schedule-save">Save schedule</button>
         <button type="button" class="btn" id="schedule-run">Run it now</button>
       </div>

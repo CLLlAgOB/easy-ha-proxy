@@ -414,6 +414,22 @@ blocked while HAProxy configuration changes are pending, and update jobs share
 a maintenance lock with full backup/restore. OS packages run last; a required
 reboot is reported but never started automatically from the browser.
 
+Docker live restore is enabled by default (`docker_live_restore_enabled: true`).
+The Docker role merges it into the existing `daemon.json`, validates the result,
+and reloads Docker without restarting containers. The OS upgrade role applies
+the same setting **before** APT can update Docker. A failed apply restores the
+previous configuration and stops the upgrade. Existing Docker settings and file
+permissions are preserved. Set `docker_live_restore_enabled: false` in the
+gateway's `vars.yml` to disable it. Active Swarm nodes must use that setting;
+a command-line live-restore option is verified rather than duplicated in JSON.
+
+Live restore reduces downtime during short daemon restarts and supported patch
+upgrades. Host reboots, container recreation, major Docker upgrades and changes
+to daemon network/storage settings still require planning for interruption.
+The update page warns that OS updates can interrupt sites and sign-in even
+when live restore is enabled. See the
+[Docker live-restore documentation](https://docs.docker.com/engine/daemon/live-restore/).
+
 An installation that predates this page needs one normal full controller/CLI
 update first so the host broker and its socket are installed. A locally
 synchronized source tree cannot be copied from a workstation by the web page;

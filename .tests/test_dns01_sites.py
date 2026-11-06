@@ -447,11 +447,11 @@ class SiteEditorUiTests(unittest.TestCase):
 
     def test_the_dns_block_is_hidden_until_dns_is_chosen(self):
         self.assertIn(
-            '{% if not current_dns_profile %} display:none;{% endif %}',
+            '{% if not current_dns_profile %}hidden{% endif %}',
             self.template,
         )
         self.assertIn("function updateChallengeUI()", self.javascript)
-        self.assertIn('blockDns.style.display = useDns ? "" : "none";', self.javascript)
+        self.assertIn('blockDns.hidden = !(useDns);', self.javascript)
 
     def test_a_profile_name_is_never_run_through_the_translator(self):
         # It is an operator-chosen identifier, not interface text.
