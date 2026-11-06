@@ -198,7 +198,8 @@ def main():
     host.service('restart')
     paths = migration.Paths(source=ROOT)
     engine = migration.Engine(paths, host)
-    old = host.packages()['haproxy']
+    baseline_packages = host.packages()
+    old = baseline_packages['haproxy']
     engine.wait_worker(old)
     engine.health()
     migration.runtime(paths.socket, 'set table tbl_ban key 198.51.100.22 data.gpc0 1 data.gpt0 40')
@@ -217,6 +218,8 @@ def main():
         assert paths.variables.read_bytes() == original_variables
         assert paths.variables.stat().st_mode & 0o777 == 0o600
         assert paths.server_state.stat().st_mode & 0o777 == 0o600
+        assert {name: host.packages().get(name) for name in engine.allowed_packages} == {
+            name: baseline_packages.get(name) for name in engine.allowed_packages}
 
         class ColdFailure(migration.Engine):
             fired = False
@@ -249,6 +252,8 @@ def main():
         assert results['manual_rollback']['rollback_verified'] and info_version(paths) == old
         assert paths.variables.read_bytes() == original_variables
         assert paths.config.read_bytes() == baseline
+        assert {name: host.packages().get(name) for name in engine.allowed_packages} == {
+            name: baseline_packages.get(name) for name in engine.allowed_packages}
         for table in ('tbl_ban', 'tbl_ip_auth'):
             assert len(list(migration.table_rows(paths.socket, table))) == 1
         print(json.dumps(results, indent=2))
@@ -262,4 +267,18 @@ def info_version(paths):
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception:
+        # These journals contain only this disposable fixture. Emit diagnostics
+        # because private-host transaction logs are deliberately never exposed.
+        for journal in Path('/var/lib/easy-ha-proxy/haproxy-package-migration').glob('*/transaction.json'):
+            state = json.loads(journal.read_text())
+            print({key: state.get(key) for key in ('id', 'phase', 'failure', 'rollback_failure')}, file=sys.stderr)
+            log = journal.with_name('commands.jsonl')
+            if log.exists():
+                for line in log.read_text().splitlines():
+                    record = json.loads(line)
+                    if record['rc']:
+                        print(record, file=sys.stderr)
+        raise

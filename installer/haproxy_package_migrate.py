@@ -380,7 +380,7 @@ class Engine:
     paused_units = ('easy-ha-proxy-guardd.service', 'haproxy-certd.service', 'haproxy-controld.service',
                     'haproxy-state-dump.timer', 'certbot.timer', 'snap.certbot.renew.timer',
                     'apt-daily.timer', 'apt-daily-upgrade.timer')
-    allowed_packages = {'haproxy', 'haproxy-awslc', 'libssl-awslc'}
+    allowed_packages = {'haproxy', 'haproxy-awslc', 'libssl-awslc', 'libjemalloc2'}
     vendor = 'https://www.haproxy.com/download/haproxy/performance/ubuntu/ha34/'
     key_url = 'https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy'
 
@@ -612,7 +612,8 @@ class Engine:
             if self.paths.socket != Path('/run/haproxy/admin.sock'):
                 raise MigrationError('Custom Runtime API socket is not qualified')
             private_directory(self.directory / 'old')
-            self.host.command(['/usr/bin/apt-get', 'download', 'haproxy=' + packages['haproxy']], cwd=self.directory / 'old')
+            self.host.command(['/usr/bin/apt-get', '-o', 'APT::Get::AllowUnauthenticated=false',
+                               'download', 'haproxy=' + packages['haproxy']], cwd=self.directory / 'old')
             old = list((self.directory / 'old').glob('*.deb'))
             if len(old) != 1:
                 raise MigrationError('The exact rollback package could not be downloaded')
@@ -628,12 +629,31 @@ class Engine:
             if packages.get('libssl-awslc') not in (None, tls):
                 raise MigrationError('Migration would upgrade an existing TLS library')
             self.state['tls_was_installed'] = 'libssl-awslc' in packages
+            self.state['tls_baseline'] = packages.get('libssl-awslc')
+            self.state['extra_packages'] = []
+            self.state['extra_baseline'] = {'libjemalloc2': packages.get('libjemalloc2')}
             plan = self.host.command(self.package_command(simulate=True)).stdout
             parse_apt_plan(plan, self.allowed_packages)
+            match = re.search(r'^Inst libjemalloc2(?::\S+)? (?:\[[^\]]+\] )?\((\S+)', plan, re.M)
+            if match:
+                if packages.get('libjemalloc2') is not None:
+                    raise MigrationError('Migration would upgrade the existing allocator library')
+                temporary = self.directory / 'extra-download'
+                private_directory(temporary)
+                self.host.command(['/usr/bin/apt-get', '-o', 'APT::Get::AllowUnauthenticated=false',
+                                   'download', 'libjemalloc2=' + match[1]], cwd=temporary)
+                archives = list(temporary.glob('*.deb'))
+                if len(archives) != 1:
+                    raise MigrationError('The exact allocator dependency could not be downloaded')
+                destination = self.directory / 'libjemalloc2.deb'
+                shutil.move(archives[0], destination)
+                self.check_deb(destination, 'libjemalloc2', match[1], architecture)
+                self.state['extra_packages'] = [{'Package': 'libjemalloc2', 'Version': match[1], 'SHA256': digest(destination)}]
+                parse_apt_plan(self.host.command(self.package_command(simulate=True)).stdout, self.allowed_packages)
             # Extracted binaries run with their private matching library. Nothing
             # is copied into /usr or installed until apply is explicitly invoked.
             private_directory(self.directory / 'target')
-            for package in self.state['target_packages']:
+            for package in self.state['target_packages'] + self.state['extra_packages']:
                 self.host.command(['/usr/bin/dpkg-deb', '-x', str(self.directory / (package['Package'] + '.deb')), str(self.directory / 'target')])
             self.inspect_target()
             shutil.copyfile(Path(__file__), self.directory / 'recover.py')
@@ -675,12 +695,14 @@ class Engine:
         if rollback:
             command.extend(['--reinstall', str(self.directory / 'haproxy-old.deb')])
             remove = ['haproxy-awslc'] + ([] if self.state['tls_was_installed'] else ['libssl-awslc'])
+            remove += [package['Package'] for package in self.state.get('extra_packages', [])]
             for package in remove:
                 known = self.host.command(['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Status}', package], check=False)
                 if known.returncode == 0 and known.stdout.strip() != 'not-installed':
                     command.append(package + '-')
         else:
-            command.extend([str(self.directory / (package['Package'] + '.deb')) for package in self.state['target_packages']])
+            command.extend([str(self.directory / (package['Package'] + '.deb')) for package in
+                            self.state['target_packages'] + self.state.get('extra_packages', [])])
         return command
 
     def inspect_target(self):
@@ -723,7 +745,7 @@ class Engine:
             raise MigrationError('Rollback package integrity check failed')
         if digest(self.directory / 'baseline-haproxy') != self.state['old_binary_digest']:
             raise MigrationError('Baseline binary integrity check failed')
-        for package in self.state['target_packages']:
+        for package in self.state['target_packages'] + self.state.get('extra_packages', []):
             if digest(self.directory / (package['Package'] + '.deb')) != package['SHA256']:
                 raise MigrationError('Target package integrity check failed')
 
@@ -949,12 +971,14 @@ Pin-Priority: 100
         archives = self.directory / 'archives'
         private_directory(archives)
         packages = ([{'Package': 'haproxy', 'Version': self.state['old_version']}] if rollback
-                    else self.state['target_packages'])
+                    else self.state['target_packages'] + self.state.get('extra_packages', []))
         for package in packages:
             source = self.directory / ('haproxy-old.deb' if rollback else package['Package'] + '.deb')
             filename = f'{package["Package"]}_{package["Version"]}_{self.state["architecture"]}.deb'
             atomic(archives / filename, source.read_bytes())
         before = self.host.packages()
+        self.state['packages_touched'] = True
+        self.save()
         self.host.command(self.package_command(rollback=rollback), timeout=120)
         after = self.host.packages()
         changed = {package for package in before.keys() | after.keys() if before.get(package) != after.get(package)}
@@ -965,6 +989,9 @@ Pin-Priority: 100
                 raise MigrationError('The baseline package was not restored')
         elif after.get('haproxy-awslc') != self.state['target_packages'][0]['Version'] or 'haproxy' in after:
             raise MigrationError('The target package was not installed')
+        if not rollback and any(after.get(package['Package']) != package['Version'] for package in
+                                self.state['target_packages'] + self.state.get('extra_packages', [])):
+            raise MigrationError('A target dependency version differs from the authenticated preparation')
 
     def finish(self, phase):
         seed, watchdog = self.units()
@@ -992,7 +1019,7 @@ Pin-Priority: 100
         baseline_intact = (current_packages.get('haproxy') == self.state['old_version']
                            and 'haproxy-awslc' not in current_packages
                            and digest(self.paths.binary) == self.state['old_binary_digest'])
-        if not baseline_intact:
+        if not baseline_intact or self.state.get('packages_touched'):
             self.install(rollback=True)
         self.host.command(['/usr/bin/systemctl', 'daemon-reload'])
         # Keep the seed in the restored configuration until the restored worker
@@ -1027,6 +1054,10 @@ Pin-Priority: 100
             _, packages = self.native_preflight()
             if packages['haproxy'] != self.state['old_version'] or digest(self.paths.binary) != self.state['old_binary_digest']:
                 raise MigrationError('The baseline package changed after preparation')
+            if any(packages.get(name) != version for name, version in self.state['extra_baseline'].items()):
+                raise MigrationError('A system dependency changed after preparation')
+            if packages.get('libssl-awslc') != self.state['tls_baseline']:
+                raise MigrationError('The TLS dependency changed after preparation')
             self.health()
             self.arm('apply')
             _, watchdog = self.units()
@@ -1167,6 +1198,7 @@ Pin-Priority: 100
 
     def summary(self):
         return {key: self.state.get(key) for key in ('id', 'phase', 'architecture', 'old_version', 'target_packages',
+                                                     'extra_packages',
                                                      'failure', 'rollback_verified', 'target_verified', 'table_counts',
                                                      'cleanup_warning')}
 
