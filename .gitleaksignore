@@ -1,5 +1,5 @@
 # gitleaks runs over the whole history with its default rules (the "Secrets"
-# job in CI). These four findings are test fixtures, acknowledged one by one --
+# job in CI). Fixtures and public checksums are acknowledged one by one --
 # commit:file:rule:line -- so anything new, even in the same files, still fails.
 
 # PEM markers the standby-certificate tests split and join
@@ -14,3 +14,7 @@ bd59647a46a4b7d32414ccd5f4969c57b29f0bc8:.tests/test_destination_key_material.py
 
 # a made-up TSIG secret (base64 of "secret-tsig-key") a DNS profile test keeps across an edit
 1e476c8d525e40c9d32ee710fc346acd31dbd2a7:.tests/test_dns_profile_partial_edit.py:generic-api-key:27
+
+# Public SHA-256 of the HAProxy community repository signing key, downloaded
+# from https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy.
+902907a92286c1f3830608041475fd0bebf14ecb:ansible/roles/haproxy/defaults/main.yml:generic-api-key:12
