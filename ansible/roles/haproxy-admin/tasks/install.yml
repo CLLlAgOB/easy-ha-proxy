@@ -1,22 +1,7 @@
 # -------------------------------------------------------------------
 # 1) Packages
 # -------------------------------------------------------------------
-- name: Install required packages
-  apt:
-    name:
-      - python3
-      - python3-pip
-      - python3-venv
-      - python3-yaml
-      - python3-cryptography
-      - openssl
-      - haproxy
-      - socat
-      - ipset
-      - iptables
-      - iptables-persistent
-    state: present
-    update_cache: yes
+- import_tasks: packages.yml
   tags: restore-network
 
 - import_tasks: fs.yml

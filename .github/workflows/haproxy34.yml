@@ -7,6 +7,8 @@ on:
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
       - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
+      - 'ansible/roles/haproxy-admin/tasks/packages.yml'
+      - 'ansible/roles/haproxy-admin/tasks/install.yml'
       - 'docker/app/haproxy_admin/services_haproxy_config.py'
       - 'docker/app/haproxy_admin/utils.py'
       - 'docker/app/requirements.txt'
@@ -21,6 +23,8 @@ on:
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
       - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
+      - 'ansible/roles/haproxy-admin/tasks/packages.yml'
+      - 'ansible/roles/haproxy-admin/tasks/install.yml'
       - 'docker/app/haproxy_admin/services_haproxy_config.py'
       - 'docker/app/haproxy_admin/utils.py'
       - 'docker/app/requirements.txt'
@@ -67,6 +71,8 @@ jobs:
           ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
       - name: Exercise actual systemd reload, failed candidate and rollback
         run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_migration_smoke.py --systemd
+      - name: Qualify distribution prerequisites for the panel
+        run: ansible-playbook -i localhost, .tests/integration/haproxy34-admin-packages.yml -e haproxy_package_provider=distribution
       - name: Qualify distribution patches against a signed disposable repository
         run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_patch_smoke.py --systemd
 
@@ -110,6 +116,8 @@ jobs:
         run: |
           test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
           sudo "$(command -v python)" .tests/integration/haproxy_package_smoke.py
+      - name: Qualify panel prerequisites without replacing the selected provider
+        run: ansible-playbook -i localhost, .tests/integration/haproxy34-admin-packages.yml
       - name: Verify a second installation changes nothing
         run: |
           ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml > /tmp/haproxy34-repeat.log
