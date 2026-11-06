@@ -37,6 +37,7 @@
 
   <div class="card-body">
     {% if tcp_proxies %}
+    <div class="table-container">
     <table class="table">
       <thead>
         <tr>
@@ -84,7 +85,7 @@
             —
             {% endif %}
           </td>
-          <td  class="text-right">
+          <td class="text-right nowrap">
             <a class="btn btn-small"
                href="{{ url_for('routes.haproxy_tcp_edit', name=t.name) }}">
               Edit
@@ -102,6 +103,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% else %}
     <p>There are no TCP proxy entries yet.</p>
     {% endif %}
@@ -182,7 +184,7 @@
       </div>
     </div>
 
-    <div  class="u-p-0-16px-16px">
+    <div class="form-actions">
       <button type="submit" class="btn btn-primary">Add TCP proxy</button>
     </div>
   </form>
