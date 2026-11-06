@@ -38,28 +38,32 @@
           <p class="table-meta">The archive is encrypted before it becomes available for download.</p>
         </div>
       </div>
-      <form id="backup-create-form" autocomplete="off">
-        <label class="form-label" for="backup-passphrase">Backup passphrase</label>
-        <input id="backup-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
-               autocomplete="new-password" required>
-        <label class="backup-option" for="backup-passphrase-show">
-          <input id="backup-passphrase-show" type="checkbox">
-          Show passphrase
-        </label>
-        <p class="vars-field-help">Check the passphrase visually before creating the backup. It is never saved by easy-ha-proxy and cannot be recovered.</p>
-        <p class="vars-field-help">Store this passphrase separately.</p>
+      <form id="backup-create-form" class="backup-form" autocomplete="off">
+        <div class="form-group">
+          <label class="form-label" for="backup-passphrase">Backup passphrase</label>
+          <input id="backup-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
+                 autocomplete="new-password" aria-describedby="backup-passphrase-help" required>
+          <label class="backup-option backup-option-inline" for="backup-passphrase-show">
+            <input id="backup-passphrase-show" type="checkbox">
+            Show passphrase
+          </label>
+          <p class="vars-field-help" id="backup-passphrase-help">Check the passphrase visually before creating the backup. It is never saved by easy-ha-proxy and cannot be recovered.</p>
+          <p class="vars-field-help">Store this passphrase separately.</p>
+        </div>
 
         <label class="backup-option" for="backup-quiesce">
           <input id="backup-quiesce" type="checkbox" checked>
           Pause managed services briefly for a consistent snapshot
         </label>
-        <label class="backup-option backup-option-danger" for="backup-include-ssh">
-          <input id="backup-include-ssh" type="checkbox">
-          Include SSH host and private keys
-        </label>
-        <p class="vars-field-help">
-          SSH identity is excluded by default. Restoring host keys on another server duplicates its SSH fingerprint.
-        </p>
+        <div class="form-group">
+          <label class="backup-option backup-option-danger" for="backup-include-ssh">
+            <input id="backup-include-ssh" type="checkbox" aria-describedby="backup-ssh-help">
+            Include SSH host and private keys
+          </label>
+          <p class="vars-field-help" id="backup-ssh-help">
+            SSH identity is excluded by default. Restoring host keys on another server duplicates its SSH fingerprint.
+          </p>
+        </div>
 
         <button type="submit" class="btn" id="backup-create-button">Create encrypted backup</button>
         <div id="backup-create-status" class="result-message" role="status" aria-live="polite"></div>
@@ -79,19 +83,23 @@
         empty Debian or Ubuntu server must first be restored with the controller installer.
       </div>
 
-      <form id="backup-inspect-form" autocomplete="off">
-        <label class="form-label" for="backup-restore-file">Encrypted backup archive</label>
-        <input id="backup-restore-file" class="form-input" type="file" accept=".enc,application/octet-stream" required>
-        <p class="vars-field-help">Maximum upload size on this server: {{ max_upload_gib }} GiB.</p>
+      <form id="backup-inspect-form" class="backup-form" autocomplete="off">
+        <div class="form-group">
+          <label class="form-label" for="backup-restore-file">Encrypted backup archive</label>
+          <input id="backup-restore-file" class="form-input" type="file" accept=".enc,application/octet-stream" aria-describedby="backup-upload-limit" required>
+          <p class="vars-field-help" id="backup-upload-limit">Maximum upload size on this server: {{ max_upload_gib }} GiB.</p>
+        </div>
 
-        <label class="form-label" for="backup-restore-passphrase">Backup passphrase</label>
-        <input id="backup-restore-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
-               autocomplete="current-password" required>
+        <div class="form-group">
+          <label class="form-label" for="backup-restore-passphrase">Backup passphrase</label>
+          <input id="backup-restore-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
+                 autocomplete="current-password" required>
+        </div>
         <button type="submit" class="btn" id="backup-inspect-button">Upload and verify backup</button>
         <div id="backup-upload-status" class="result-message" role="status" aria-live="polite"></div>
       </form>
 
-      <div id="backup-inspection" class="backup-inspection" hidden>
+      <div id="backup-inspection" class="backup-inspection backup-form" hidden>
         <h3>Verified backup</h3>
         <dl class="backup-manifest-list">
           <div><dt>Source server</dt><dd id="backup-source-host">—</dd></div>
@@ -131,9 +139,11 @@
           <input id="backup-replace-confirm" type="checkbox">
           I understand that all managed state on this server will be replaced
         </label>
-        <label class="form-label" for="backup-restore-confirmation">Type RESTORE to continue</label>
-        <input id="backup-restore-confirmation" class="form-input mono notranslate" translate="no" data-i18n-skip
-               type="text" autocomplete="off" spellcheck="false" placeholder="RESTORE">
+        <div class="form-group">
+          <label class="form-label" for="backup-restore-confirmation">Type RESTORE to continue</label>
+          <input id="backup-restore-confirmation" class="form-input mono notranslate" translate="no" data-i18n-skip
+                 type="text" autocomplete="off" spellcheck="false" placeholder="RESTORE">
+        </div>
         <button type="button" class="btn btn-danger" id="backup-restore-button" disabled>Restore and reconcile server</button>
         <div id="backup-restore-status" class="result-message" role="status" aria-live="polite"></div>
       </div>
@@ -216,7 +226,7 @@
       </table>
     </div>
 
-    <form id="backup-destination-form" autocomplete="off">
+    <form id="backup-destination-form" class="backup-form" autocomplete="off">
       <div class="form-grid">
         <label>Name
           <input id="dest-name" class="form-input" type="text" required
@@ -350,33 +360,39 @@
       </div>
     </div>
 
-    <form id="backup-schedule-form" autocomplete="off">
+    <form id="backup-schedule-form" class="backup-form" autocomplete="off">
       <label class="backup-option" for="schedule-enabled">
         <input id="schedule-enabled" type="checkbox">
         Run the backup on a schedule
       </label>
 
-      <label class="form-label" for="schedule-time">Time of day</label>
-      <input id="schedule-time" class="u-maxw-min-160px-100 form-input" type="time" value="03:20" required
-             >
-      <p class="vars-field-help">
-        Server local time. A few minutes of jitter are added so a fleet of
-        gateways does not call on the same destination at the same second.
-      </p>
-
-      <label class="form-label" for="schedule-destinations">Send each copy to</label>
-      <div id="schedule-destinations" data-i18n-skip translate="no">
-        <p class="vars-field-help">Loading…</p>
+      <div class="form-group">
+        <label class="form-label" for="schedule-time">Time of day</label>
+        <input id="schedule-time" class="u-maxw-min-160px-100 form-input" type="time" value="03:20" required
+               >
+        <p class="vars-field-help">
+          Server local time. A few minutes of jitter are added so a fleet of
+          gateways does not call on the same destination at the same second.
+        </p>
       </div>
 
-      <label class="form-label" for="schedule-keep-local">Keep on this server</label>
-      <input id="schedule-keep-local" class="u-maxw-min-120px-100 form-input" type="number"
-             min="1" max="50" step="1" value="3" required >
-      <p class="vars-field-help">
-        How many of the newest backups stay on this server. Older ones are
-        removed only after every destination holds a verified copy of the new
-        one; if any copy fails, nothing is removed.
-      </p>
+      <div class="form-group">
+        <label class="form-label" for="schedule-destinations">Send each copy to</label>
+        <div id="schedule-destinations" data-i18n-skip translate="no">
+          <p class="vars-field-help">Loading…</p>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="schedule-keep-local">Keep on this server</label>
+        <input id="schedule-keep-local" class="u-maxw-min-120px-100 form-input" type="number"
+               min="1" max="50" step="1" value="3" required >
+        <p class="vars-field-help">
+          How many of the newest backups stay on this server. Older ones are
+          removed only after every destination holds a verified copy of the new
+          one; if any copy fails, nothing is removed.
+        </p>
+      </div>
 
       <label class="backup-option" for="schedule-quiesce">
         <input id="schedule-quiesce" type="checkbox" checked>
@@ -387,15 +403,17 @@
         Include SSH host and private keys
       </label>
 
-      <label class="form-label" for="schedule-passphrase">Backup passphrase</label>
-      <input id="schedule-passphrase" class="form-input" type="password"
-             autocomplete="new-password" minlength="12" maxlength="1024">
-      <p class="vars-field-help">
-        Stored root-only so an unattended run can encrypt without anyone
-        present. It is the only thing that can open these archives afterwards,
-        so keep it somewhere that survives losing this server. Leave the field
-        empty to keep the passphrase already stored.
-      </p>
+      <div class="form-group">
+        <label class="form-label" for="schedule-passphrase">Backup passphrase</label>
+        <input id="schedule-passphrase" class="form-input" type="password"
+               autocomplete="new-password" minlength="12" maxlength="1024">
+        <p class="vars-field-help">
+          Stored root-only so an unattended run can encrypt without anyone
+          present. It is the only thing that can open these archives afterwards,
+          so keep it somewhere that survives losing this server. Leave the field
+          empty to keep the passphrase already stored.
+        </p>
+      </div>
 
       <div class="justify-start backup-actions" >
         <button type="submit" class="btn" id="schedule-save">Save schedule</button>
