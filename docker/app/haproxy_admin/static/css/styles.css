@@ -355,8 +355,29 @@
   .geoip-country-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-1); font-size: 11px; }
   .geoip-selection-note, .geoip-force-option { color: var(--text-secondary); font-size: 12px; margin-top: 12px; }
   .backup-option-danger { border-color: var(--error); }
+  .backup-workflow-grid { align-items: start; }
+  .backup-workflow-grid > section { margin-top: 0; }
+  .backup-form { display: flex; flex-direction: column; gap: 18px; }
+  .backup-form .form-label { margin-bottom: 0; }
+  .backup-form .form-group { gap: 8px; }
+  .backup-form label:has(> :is(input:not([type="checkbox"], [type="radio"]), select, textarea)) { display: flex; flex-direction: column; gap: 7px; min-width: 0; font-size: 12px; }
+  #backup-destination-form { margin-top: 20px; }
+  #dest-sftp-fields, #dest-s3-fields { display: flex; flex-direction: column; gap: 16px; }
+  #dest-s3-fields > .form-checkbox-inline { display: flex; align-items: center; gap: 8px; }
+  .backup-form .vars-field-help { margin: 0; }
+  .backup-form > .btn { align-self: flex-start; max-width: 100%; }
+  .backup-option { cursor: pointer; }
+  .backup-option > input { margin-top: 2px; }
+  .backup-option-inline { align-items: center; padding: 0; border: 0; font-size: 12px; }
+  .backup-option-inline > input { margin-top: 0; }
+  .backup-option-inline:has(input:checked) { background: none; }
+  .backup-restore-card > .alert { margin: 0 0 20px; }
+  input[type="file"] { padding: 4px 7px; }
+  input[type="file"]::file-selector-button { margin-inline-end: 12px; padding: 4px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface-2); color: var(--text-primary); font: inherit; line-height: 1.25; cursor: pointer; }
   .backup-option p { color: var(--text-secondary); font-size: 12px; }
   .backup-inspection, .backup-manifest-list { padding: 16px; margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; }
+  .backup-inspection > h3 { margin-bottom: 0; }
+  .backup-inspection .backup-manifest-list { margin: 0; }
   .backup-job-state { color: var(--text-secondary); font-size: 11px; font-weight: 600; }
   .backup-job-state--completed { color: var(--success); }
   .backup-job-state--failed, .backup-job-state--rollback_failed, .backup-job-state--interrupted { color: var(--error); }

@@ -1619,7 +1619,7 @@
       where.setAttribute("data-i18n-skip", "");
       where.setAttribute("translate", "no");
       where.textContent = channel.host;
-      row.appendChild(where);
+      name.insertBefore(where, rename);
 
       const traffic = document.createElement("div");
       traffic.className = "mon-channel-traffic";
@@ -1665,8 +1665,7 @@
     box.textContent = "";
     hiddenState.forEach((channel) => {
       const row = document.createElement("div");
-      row.className = "mon-channel";
-      row.style.opacity = ".6";
+      row.className = "mon-channel mon-channel-hidden";
 
       const name = document.createElement("div");
       name.className = "mon-channel-name";
@@ -1688,7 +1687,7 @@
       where.setAttribute("data-i18n-skip", "");
       where.setAttribute("translate", "no");
       where.textContent = channel.host;
-      row.appendChild(where);
+      name.insertBefore(where, back);
 
       const traffic = document.createElement("div");
       traffic.className = "mon-channel-traffic";
