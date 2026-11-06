@@ -34,6 +34,14 @@ backend tbl_ip_auth
 
 @unittest.skipUnless(m, 'Linux migration command')
 class Boundaries(unittest.TestCase):
+    def test_manual_rollback_cannot_discard_a_later_package_revision_with_same_runtime_version(self):
+        engine = m.Engine(host=Mock(spec=m.Host))
+        engine.state = {'target_packages': [{'Package': 'haproxy-awslc', 'Version': '3.4.8-1'}]}
+        engine.host.packages.return_value = {'haproxy-awslc': '3.4.8-2'}
+        with self.assertRaisesRegex(m.MigrationError, 'target packages changed'):
+            engine.committed_unchanged()
+        engine.host.command.assert_not_called()
+
     def test_new_patch_cannot_overwrite_unfinished_recovery_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

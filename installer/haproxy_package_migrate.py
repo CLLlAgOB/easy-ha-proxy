@@ -1348,6 +1348,10 @@ Pin-Priority: 100
             return self.summary()
 
     def committed_unchanged(self):
+        packages = self.host.packages()
+        if (any(packages.get(package['Package']) != package['Version'] for package in self.state['target_packages'])
+                or digest(self.paths.binary) != self.state['target_binary_digest']):
+            raise MigrationError('The installed target packages changed; qualify a fresh downgrade')
         if digest(self.paths.config) != self.state['files'][str(self.paths.config)]['digest']:
             raise MigrationError('Configuration changed since migration; qualify a fresh downgrade')
         if digest(self.paths.variables) != self.state['committed_vars_digest']:
