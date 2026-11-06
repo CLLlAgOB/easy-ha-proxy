@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if sys.platform == 'linux':
@@ -64,6 +64,48 @@ class Boundaries(unittest.TestCase):
         engine.state = {'engine_digest': '0' * 64}
         with self.assertRaisesRegex(m.MigrationError, 'implementation changed'):
             engine.check_artifacts()
+
+    def test_ui_change_during_quiescence_is_preserved_before_any_package_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = m.Paths(**{name: root / name for name in
+                              ('config', 'variables', 'policy', 'repository', 'priorities', 'signing_key', 'binary')})
+            files = {}
+            for path in (paths.config, paths.variables, paths.policy, paths.repository, paths.priorities, paths.signing_key, paths.binary):
+                path.write_bytes(b'baseline')
+                files[str(path)] = {'exists': True, 'digest': m.digest(path)}
+            host = Mock(spec=m.Host)
+            host.active.return_value = False
+            engine = m.Engine(paths, host)
+            engine.directory = root
+            engine.state = {'id': 'a' * 32, 'phase': 'prepared', 'files': files, 'old_version': '2.8',
+                            'old_binary_digest': m.digest(paths.binary), 'extra_baseline': {}, 'tls_baseline': None}
+
+            def save(phase=None):
+                if phase:
+                    engine.state['phase'] = phase
+
+            with patch.object(engine, 'locked', contextlib.nullcontext), patch.object(engine, 'load'), \
+                    patch.object(engine, 'check_artifacts'), patch.object(engine, 'native_preflight', return_value=('amd64', {'haproxy': '2.8'})), \
+                    patch.object(engine, 'health'), patch.object(engine, 'arm'), patch.object(engine, 'save', side_effect=save), \
+                    patch.object(engine, 'pause', side_effect=lambda: paths.config.write_bytes(b'new UI configuration')), \
+                    patch.object(engine, 'snapshot') as snapshot, patch.object(engine, 'resume'):
+                with self.assertRaisesRegex(m.MigrationError, 'aborted before the package switch'):
+                    engine.apply('a' * 32)
+                self.assertEqual(paths.config.read_bytes(), b'new UI configuration')
+                self.assertEqual(engine.state['phase'], 'aborted')
+                snapshot.assert_not_called()
+                host.command.assert_not_called()
+
+    def test_aborting_an_unstarted_downgrade_does_not_restore_over_a_ui_change(self):
+        engine = m.Engine()
+        engine.state = {'config_modified': False}
+        with patch.object(engine, 'restore') as restore, patch.object(engine, 'reload') as reload, \
+                patch.object(engine, 'finish') as finish:
+            engine.abort_downgrade()
+            restore.assert_not_called()
+            reload.assert_not_called()
+            finish.assert_called_once_with('committed')
 
     def test_runtime_rejects_missing_table_wrong_type_or_missing_reason(self):
         for response in [[], ['Unknown table'], ['# table: tbl_ban, type: ipv6, size:10'],

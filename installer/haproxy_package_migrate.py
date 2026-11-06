@@ -900,14 +900,14 @@ class Engine:
         return 'easy-ha-proxy-haproxy-seed-' + suffix, 'easy-ha-proxy-haproxy-watchdog-' + suffix
 
     def arm(self, operation):
-        self.state.update(operation=operation, seed_ready=False, recovery_attempts=0,
+        self.state.update(operation=operation, seed_ready=False, config_modified=False, recovery_attempts=0,
                           generation=self.state.get('generation', 0) + 1)
         self.save('arming')
         _, watchdog = self.units()
         self.host.watchdog(self.directory, watchdog)
 
     def abort_downgrade(self):
-        if digest(self.paths.config) != self.state['files'][str(self.paths.config)]['digest']:
+        if self.state.get('config_modified') and digest(self.paths.config) != self.state['files'][str(self.paths.config)]['digest']:
             self.restore(self.paths.config)
             self.reload(self.state['target_runtime_version'])
         self.finish('committed')
@@ -928,6 +928,7 @@ class Engine:
         atomic(temporary, candidate.encode(), 0o600)
         self.host.command([str(self.paths.binary), '-c', '-f', str(temporary)])
         original = self.state['files'][str(self.paths.config)]
+        self.state['config_modified'] = True
         self.put(self.paths.config, candidate.encode(), original['mode'], original['uid'], original['gid'])
         self.reload(expected_version)
         # A new empty peer must not participate in the live worker's initial
@@ -1011,7 +1012,8 @@ Pin-Priority: 100
 
     def finish(self, phase):
         seed, watchdog = self.units()
-        self.restore(self.paths.policy)
+        if self.state.get('policy_blocked'):
+            self.restore(self.paths.policy)
         self.state['policy_blocked'] = False
         self.resume()
         self.health()
@@ -1079,6 +1081,11 @@ Pin-Priority: 100
             _, watchdog = self.units()
             try:
                 self.pause()
+                # A UI transaction can finish between the first check and
+                # stopping controld. Recheck under the quiesced control plane.
+                for path in (self.paths.config, self.paths.variables, self.paths.policy, self.paths.repository,
+                             self.paths.priorities, self.paths.signing_key):
+                    self.unchanged(path)
                 self.snapshot()
                 self.check_guard()
                 self.dump_servers()
@@ -1124,7 +1131,8 @@ Pin-Priority: 100
                     if 'server_state' in self.state:
                         self.rollback_locked()
                     else:
-                        self.restore(self.paths.policy)
+                        if self.state.get('policy_blocked'):
+                            self.restore(self.paths.policy)
                         self.resume()
                         self.resume(timers=True)
                         self.save('aborted')
@@ -1134,10 +1142,22 @@ Pin-Priority: 100
                     self.save('rollback_failed')
                     raise MigrationError('Automatic rollback needs operator recovery; preserve the transaction directory') from rollback_error
                 if not isinstance(error, RollbackExercise):
+                    if self.state['phase'] == 'aborted':
+                        raise MigrationError('Migration aborted before the package switch; existing configuration preserved') from error
                     raise MigrationError('Migration failed; the baseline was restored and verified') from error
             if self.state['phase'] == 'committed':
                 self.refresh_repository()
             return self.summary()
+
+    def committed_unchanged(self):
+        if digest(self.paths.config) != self.state['files'][str(self.paths.config)]['digest']:
+            raise MigrationError('Configuration changed since migration; qualify a fresh downgrade')
+        if digest(self.paths.variables) != self.state['committed_vars_digest']:
+            raise MigrationError('Installer variables changed since migration; qualify a fresh downgrade')
+        for name, expected in self.state['committed_repository_digests'].items():
+            if digest(Path(name)) != expected:
+                raise MigrationError('Repository configuration changed since migration')
+        self.unchanged(self.paths.policy)
 
     def rollback(self, identifier):
         with self.locked():
@@ -1149,13 +1169,7 @@ Pin-Priority: 100
             if self.state['phase'] == 'committed':
                 # A later downgrade is allowed only while the managed source
                 # files still match this transaction; never discard later edits.
-                if digest(self.paths.config) != self.state['files'][str(self.paths.config)]['digest']:
-                    raise MigrationError('Configuration changed since migration; qualify a fresh downgrade')
-                if digest(self.paths.variables) != self.state['committed_vars_digest']:
-                    raise MigrationError('Installer variables changed since migration; qualify a fresh downgrade')
-                for name, expected in self.state['committed_repository_digests'].items():
-                    if digest(Path(name)) != expected:
-                        raise MigrationError('Repository configuration changed since migration')
+                self.committed_unchanged()
                 if info(self.paths.socket).get('Version') != self.state['target_runtime_version']:
                     raise MigrationError('The target was upgraded since this transaction; qualify a fresh downgrade')
                 self.check_artifacts()
@@ -1163,6 +1177,7 @@ Pin-Priority: 100
                 self.arm('rollback')
                 try:
                     self.pause()
+                    self.committed_unchanged()
                     self.snapshot()
                     self.check_guard()
                     self.dump_servers()
@@ -1202,7 +1217,8 @@ Pin-Priority: 100
             if self.state.get('operation') == 'rollback' and not self.state.get('seed_ready'):
                 self.abort_downgrade()
             elif 'server_state' not in self.state:
-                self.restore(self.paths.policy)
+                if self.state.get('policy_blocked'):
+                    self.restore(self.paths.policy)
                 self.resume()
                 self.resume(timers=True)
                 self.save('aborted')
