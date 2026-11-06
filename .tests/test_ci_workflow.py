@@ -80,13 +80,15 @@ class TheLinters(unittest.TestCase):
             line for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
-        # Each one a test fixture, added deliberately: a new one moves this.
-        self.assertEqual(len(acknowledged), 6)
-        self.assertIn(
-            "902907a92286c1f3830608041475fd0bebf14ecb:ansible/roles/haproxy/defaults/main.yml:generic-api-key:12",
-            acknowledged,
+        # Five fixtures and one exact public checksum; additions require review.
+        public_checksum = (
+            "902907a92286c1f3830608041475fd0bebf14ecb:ansible/roles/haproxy/defaults/main.yml:generic-api-key:12"
         )
-        self.assertTrue(all(line.split(":")[1].startswith(".tests/") for line in acknowledged))
+        self.assertEqual(len(acknowledged), 6)
+        self.assertIn(public_checksum, acknowledged)
+        fixtures = [line for line in acknowledged if line != public_checksum]
+        self.assertEqual(len(fixtures), 5)
+        self.assertTrue(all(line.split(":")[1].startswith(".tests/") for line in fixtures))
 
     def test_the_names_come_from_a_secret(self):
         guard = step("secrets", "Names of installations")
