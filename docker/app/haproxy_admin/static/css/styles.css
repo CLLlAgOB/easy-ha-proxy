@@ -383,10 +383,11 @@
   .updates-result { border: 1px solid var(--border); padding: 14px 16px; border-radius: 8px; margin-top: 16px; }
   .updates-result--ok { color: var(--success); background: var(--success-bg); }
   .updates-result--failed { color: var(--error); background: var(--error-bg); }
-  .updates-confirm-dialog { border: 0; padding: 0; background: transparent; max-width: calc(100vw - 32px); color: var(--text-primary); }
-  .updates-confirm-dialog::backdrop { background: rgb(6 15 30 / 58%); }
   .updates-log { max-height: 420px; white-space: pre-wrap; }
   .updates-changelog-list, .updates-confirm-list { font-size: 12px; line-height: 1.8; }
+  .updates-confirm-list { margin: 0 0 16px; padding-left: 20px; }
+  .updates-confirm-list strong, .updates-confirm-list span { display: block; }
+  .updates-confirm-list span { color: var(--text-secondary); }
   .updates-upstream { padding-left: 18px; }
   .updates-link-button, .mon-link-button { padding: 0; min-height: 24px; color: var(--accent-primary); border: 0; background: none; text-align: left; font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
   .updates-empty { padding: 24px 16px; text-align: center; color: var(--text-secondary); }

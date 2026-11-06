@@ -42,6 +42,11 @@
       $nrconf{override_rc}{qr(^easy-ha-proxy-backupd\.service$)} = 0;
   when: update_packages_needrestart.stat.exists
 
+- name: Keep Docker containers running before system packages can restart Docker
+  ansible.builtin.import_role:
+    name: docker
+    tasks_from: live_restore
+
 - name: Update and upgrade apt packages
   become: true
   environment:

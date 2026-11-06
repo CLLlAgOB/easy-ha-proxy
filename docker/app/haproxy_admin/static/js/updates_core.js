@@ -48,8 +48,13 @@
     daemons: "Auxiliary systemd services",
     "authelia-container": "Authelia and its supporting containers",
     "admin-container": "HAProxy Admin web application",
-    os: "Operating-system packages; reboot may be required"
+    os: "System services and containers may restart; reboot may be required"
   };
+  function mayInterruptAccess(components) {
+    return (components || []).some((id) =>
+      ["all", "admin-container", "authelia-container", "os"].includes(id)
+    );
+  }
   // What each step of a job is called, and how far into a component it is.
   // The playbook itself reports done/total tasks; the share before it covers
   // downloading the source and the checks around it.
@@ -433,6 +438,7 @@
     CHANGES_SUPERSEDES,
     COMPONENT_LABELS,
     COMPONENT_IMPACTS,
+    mayInterruptAccess,
     PHASE_LABELS,
     PHASE_SHARE,
     jobId,

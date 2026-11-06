@@ -9,6 +9,15 @@ const path = require("node:path");
 
 const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/updates_core.js"));
 
+test("OS and sign-in updates warn about temporary loss of access as panel updates do", () => {
+  for (const id of ["os", "authelia-container", "admin-container", "all"]) {
+    assert.equal(core.mayInterruptAccess([id]), true);
+  }
+  assert.equal(core.mayInterruptAccess([]), false);
+  assert.equal(core.mayInterruptAccess(["daemons"]), false);
+  assert.equal(core.mayInterruptAccess(["daemons", "os"]), true);
+});
+
 const PLAN_ID = "0123456789abcdef0123456789ABCDEF";
 
 // The host services cannot go without the web application they were built
