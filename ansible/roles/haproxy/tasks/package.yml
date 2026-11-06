@@ -88,6 +88,11 @@
           Pin: version *
           Pin-Priority: -1
 
+          # A distribution update must not replace this provider implicitly.
+          Package: haproxy
+          Pin: version *
+          Pin-Priority: -1
+
           # Do not let this extra repository replace unrelated system packages.
           Package: *
           Pin: origin "www.haproxy.com"

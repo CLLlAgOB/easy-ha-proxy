@@ -11,6 +11,7 @@ on:
       - 'docker/app/haproxy_admin/utils.py'
       - 'docker/app/requirements.txt'
       - 'installer/requirements.txt'
+      - 'installer/haproxy_package_migrate.py'
       - '.tests/integration/**'
       - '.github/workflows/haproxy34.yml'
   pull_request:
@@ -22,6 +23,7 @@ on:
       - 'docker/app/haproxy_admin/utils.py'
       - 'docker/app/requirements.txt'
       - 'installer/requirements.txt'
+      - 'installer/haproxy_package_migrate.py'
       - '.tests/integration/**'
       - '.github/workflows/haproxy34.yml'
   workflow_dispatch:
@@ -34,6 +36,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-migration:
+    name: Native migration and rollback (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      ANSIBLE_ROLES_PATH: ansible/roles
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install migration dependencies
+        run: pip install -r installer/requirements.txt -r docker/app/requirements.txt
+      - name: Install the distribution baseline
+        run: |
+          test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
+          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
+      - name: Exercise actual systemd reload, failed candidate and rollback
+        run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_migration_smoke.py --systemd
+
   native-package:
     name: Native package (${{ matrix.arch }})
     strategy:
