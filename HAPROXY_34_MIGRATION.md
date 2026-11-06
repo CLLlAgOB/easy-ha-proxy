@@ -117,6 +117,9 @@ libjemalloc2, libopentracing1 и libopentracing-c-wrapper0t64 заранее з�
 Любая другая новая зависимость требует отдельной проверки и останавливает
 подготовку. Временный policy-rc.d предотвращает
 остановку HAProxy скриптами пакета; его прежнее содержимое восстанавливается.
+На время конкретной установки и отката также задаётся NEEDRESTART_SUSPEND=1:
+в Ubuntu 24.04 этот APT hook может вызывать systemctl независимо от policy-rc.d.
+Постоянные настройки needrestart не меняются; HAProxy переключается явно.
 
 Для `tbl_ban` и `tbl_ip_auth` временно запускается дополнительный HAProxy 2.8
 без публичных слушателей. Он принимает таблицы по штатному peer-протоколу,
@@ -211,3 +214,4 @@ reload/restart. Проверить CSV-метрики, Runtime API, вес и MA
 - [Изменения 3.4](https://www.haproxy.com/blog/announcing-haproxy-3-4).
 - [Конфигурация 3.4](https://docs.haproxy.org/3.4/configuration.html).
 - [Управление 3.4](https://docs.haproxy.org/3.4/management.html).
+- [Автоматические перезапуски в Ubuntu 24.04](https://documentation.ubuntu.com/release-notes/24.04/).

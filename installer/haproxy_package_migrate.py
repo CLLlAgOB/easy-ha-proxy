@@ -991,7 +991,11 @@ Pin-Priority: 100
         before = self.host.packages()
         self.state['packages_touched'] = True
         self.save()
-        self.host.command(self.package_command(rollback=rollback), timeout=120)
+        # Noble's needrestart APT hook invokes systemctl directly, independently
+        # of policy-rc.d. Suspend that hook only for this bounded transaction;
+        # the qualified worker is reexecuted and checked explicitly below.
+        self.host.command(self.package_command(rollback=rollback), timeout=120,
+                          env_extra={'NEEDRESTART_SUSPEND': '1', 'NEEDRESTART_MODE': 'l'})
         after = self.host.packages()
         changed = {package for package in before.keys() | after.keys() if before.get(package) != after.get(package)}
         if not changed <= self.allowed_packages:
@@ -1085,7 +1089,7 @@ Pin-Priority: 100
                 previous_pid = self.host.main_pid()
                 self.install()
                 if self.host.main_pid() != previous_pid or info(self.paths.socket).get('Version') != self.state['old_version']:
-                    raise MigrationError('Package scripts unexpectedly restarted the live service')
+                    raise MigrationError('An APT hook unexpectedly restarted the live service')
                 self.host.command(['/usr/bin/systemctl', 'daemon-reload'])
                 self.reload(self.state['target_runtime_version'])
                 self.health()
