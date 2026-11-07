@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import contextlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -34,6 +35,26 @@ backend tbl_ip_auth
 
 @unittest.skipUnless(m, 'Linux migration command')
 class Boundaries(unittest.TestCase):
+    def test_web_summary_is_durable_without_private_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = m.Engine(m.Paths(root=root))
+            engine.directory = root / ('a' * 32)
+            engine.state = {'id': 'a' * 32, 'kind': 'migration', 'created_at': time.time(),
+                            'old_version': '2.8.30-1', 'target_runtime_version': '3.4.7',
+                            'files': {'private-config': {'data': 'PRIVATE_CONFIGURATION_VALUE'}}}
+            # The test runs without root; file contents and mode use the real
+            # atomic writer, without changing ownership on the test machine.
+            with patch.object(m.os, 'fchown'):
+                engine.save('prepared')
+                published = json.loads((root / 'last-migration.json').read_text())
+                self.assertEqual(published['phase'], 'prepared')
+                self.assertEqual(published['target_runtime_version'], '3.4.7')
+                self.assertNotIn('PRIVATE_CONFIGURATION_VALUE', json.dumps(published))
+                engine.state['target_verified'] = True
+                engine.save('committed')
+            self.assertTrue(json.loads((root / 'last-migration.json').read_text())['target_verified'])
+
     def test_manual_rollback_cannot_discard_a_later_package_revision_with_same_runtime_version(self):
         engine = m.Engine(host=Mock(spec=m.Host))
         engine.state = {'target_packages': [{'Package': 'haproxy-awslc', 'Version': '3.4.8-1'}]}
@@ -45,12 +66,16 @@ class Boundaries(unittest.TestCase):
     def test_new_patch_cannot_overwrite_unfinished_recovery_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'last-update.json').write_text('{"id":"' + 'a' * 32 + '","phase":"rollback_failed"}')
-            engine = m.Engine(m.Paths(root=root))
-            with patch.object(engine, 'locked', contextlib.nullcontext), patch.object(engine, 'native_preflight') as preflight:
-                with self.assertRaisesRegex(m.MigrationError, 'unfinished HAProxy update'):
-                    engine.prepare_patch('3.4.8-1')
-                preflight.assert_not_called()
+            for name in ('last-update.json', 'last-migration.json'):
+                previous = root / name
+                previous.write_text('{"id":"' + 'a' * 32 + '","phase":"rollback_failed"}')
+                for action in ('patch', 'migration'):
+                    engine = m.Engine(m.Paths(root=root))
+                    with self.subTest(name=name, action=action), patch.object(engine, 'locked', contextlib.nullcontext), patch.object(engine, 'native_preflight') as preflight:
+                        with self.assertRaisesRegex(m.MigrationError, 'unfinished HAProxy update'):
+                            engine.prepare_patch('3.4.8-1') if action == 'patch' else engine.prepare()
+                        preflight.assert_not_called()
+                previous.unlink()
 
     def test_only_known_single_node_peers_can_be_changed(self):
         layout = m.peer_layout(CONFIG)

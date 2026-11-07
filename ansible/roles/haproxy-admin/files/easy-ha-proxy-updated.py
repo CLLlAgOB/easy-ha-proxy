@@ -350,6 +350,8 @@ REQUEST_FIELDS = {
         {"action", "confirmation", "expected_boot_id", "actor"}
     ),
     "cancel_reboot": frozenset({"action", "expected_boot_id", "actor"}),
+    "prepare_haproxy_migration": frozenset({"action", "target_branch"}),
+    "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -2415,26 +2417,223 @@ def summary_response() -> dict[str, Any]:
 
 
 HAPROXY_UPDATE_STATE = Path('/var/lib/easy-ha-proxy/haproxy-package-migration/last-update.json')
+HAPROXY_MIGRATION_STATE = HAPROXY_UPDATE_STATE.with_name('last-migration.json')
+HAPROXY_MIGRATION_PLAN = STATE_ROOT / 'haproxy-migration-plan.json'
+HAPROXY_MIGRATION_CONFIRMATION = 'MIGRATE 3.4'
+HAPROXY_SETTLED_PHASES = frozenset({'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'})
 
 
-def haproxy_operation():
+def read_haproxy_operation(path):
     try:
-        if HAPROXY_UPDATE_STATE.is_symlink() or HAPROXY_UPDATE_STATE.stat().st_size > 64 * 1024:
+        if path.is_symlink() or path.stat().st_size > 64 * 1024:
             return None
-        data = json.loads(HAPROXY_UPDATE_STATE.read_text())
+        data = json.loads(path.read_text())
         if not isinstance(data, dict) or not re.fullmatch(r'[0-9a-f]{32}', str(data.get('id', ''))):
             return None
-        return {key: data.get(key) for key in ('id', 'phase', 'old_version', 'target_packages', 'updated_at',
+        if not isinstance(data.get('phase'), str):
+            return None
+        if any(data.get(key) is not None and not isinstance(data[key], list) for key in ('target_packages', 'extra_packages')):
+            return None
+        return {key: data.get(key) for key in ('id', 'kind', 'phase', 'architecture', 'created_at', 'engine_digest',
+                                               'old_version', 'target_runtime_version', 'target_packages', 'extra_packages', 'updated_at',
                                                'failure', 'target_verified', 'rollback_verified')}
     except (OSError, ValueError, TypeError):
         return None
 
 
+def haproxy_operation():
+    operations = [op for path in (HAPROXY_UPDATE_STATE, HAPROXY_MIGRATION_STATE)
+                  if (op := read_haproxy_operation(path)) is not None]
+    # Never hide a required recovery behind a newer completed operation.
+    operations.sort(key=lambda op: (op.get('phase') not in HAPROXY_SETTLED_PHASES,
+                                   op.get('updated_at') if isinstance(op.get('updated_at'), (float, int)) else 0), reverse=True)
+    return operations[0] if operations else None
+
+
 def haproxy_patch_active():
-    operation = haproxy_operation()
-    if operation is None:
-        return os.path.lexists(HAPROXY_UPDATE_STATE)
-    return operation.get('phase') not in {'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'}
+    for path in (HAPROXY_UPDATE_STATE, HAPROXY_MIGRATION_STATE):
+        operation = read_haproxy_operation(path)
+        if operation is None:
+            if os.path.lexists(path):
+                return True
+        elif operation.get('phase') not in HAPROXY_SETTLED_PHASES:
+            return True
+    return False
+
+
+def migration_tool_digest():
+    tool = trusted_source('haproxy_package_migrate.py')
+    if tool.stat().st_size > 1024 * 1024:
+        raise UpdatedError('Update host services before preparing a HAProxy migration', code='dependency')
+    source = tool.read_bytes()
+    if b'WEB_MIGRATION_PROTOCOL = 1' not in source:
+        raise UpdatedError('Update host services before preparing a HAProxy migration', code='dependency')
+    return hashlib.sha256(source).hexdigest()
+
+
+def migration_offer(plan):
+    result = {'target_branch': '3.4', 'state': 'blocked', 'reason': ''}
+    try:
+        migration_tool_digest()
+    except (OSError, UpdatedError):
+        return {**result, 'reason': 'Update host services before preparing a HAProxy migration'}
+    if not plan or plan_is_expired(plan):
+        return {**result, 'state': 'check_required', 'reason': 'Check for updates before preparing a HAProxy migration'}
+    entry = plan_component_map(plan).get('haproxy') or {}
+    details = entry.get('details') or {}
+    if details.get('branch') == '3.4' and details.get('binary_matches') is True:
+        return {**result, 'state': 'current', 'reason': 'HAProxy 3.4 is already installed; use updates within its branch'}
+    if details.get('qualified') is not True:
+        return {**result, 'reason': 'Migration requires Ubuntu 24.04 on AMD64 or ARM64'}
+    if (details.get('package') != 'haproxy' or not str(details.get('installed_version', '')).startswith('2.8.')
+            or not str(details.get('running_version', '')).startswith('2.8.') or details.get('binary_matches') is not True):
+        return {**result, 'reason': 'Migration requires a verified distribution HAProxy 2.8 installation'}
+    return {**result, 'state': 'available', 'reason': 'Prepare and review the transition from HAProxy 2.8 to 3.4 LTS'}
+
+
+def migration_fingerprint(operation):
+    material = {key: operation.get(key) for key in
+                ('id', 'kind', 'architecture', 'created_at', 'engine_digest', 'old_version',
+                 'target_runtime_version', 'target_packages', 'extra_packages')}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def migration_review(*, require_fresh=False):
+    if not os.path.lexists(HAPROXY_MIGRATION_PLAN):
+        if require_fresh:
+            raise UpdatedError('Prepare a new HAProxy migration plan first', code='stale_plan')
+        return None
+    plan = safe_json_file(HAPROXY_MIGRATION_PLAN)
+    identifier(plan.get('id'), 'migration plan id')
+    identifier(plan.get('transaction_id'), 'migration transaction id')
+    operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+    fresh = (not plan_is_expired(plan) and not plan.get('consumed_by') and operation
+             and operation.get('kind') == 'migration' and operation.get('phase') == 'prepared'
+             and operation.get('id') == plan['transaction_id']
+             and migration_fingerprint(operation) == plan.get('fingerprint')
+             and migration_tool_digest() == plan.get('source_digest'))
+    if require_fresh and not fresh:
+        raise UpdatedError('The HAProxy migration plan is stale; prepare it again', code='stale_plan')
+    return {**plan, 'stale': not bool(fresh)}
+
+
+def public_migration_operation(operation):
+    if not operation:
+        return None
+    result = {key: operation.get(key) for key in ('id', 'phase', 'old_version', 'architecture', 'target_runtime_version',
+                                                  'target_verified', 'rollback_verified', 'updated_at')}
+    result['packages'] = [{'name': str(p.get('Package', ''))[:80], 'version': str(p.get('Version', ''))[:120]}
+                          for p in (operation.get('target_packages') or [])[:8] if isinstance(p, dict)]
+    result['dependencies'] = [{'name': str(p.get('Package', ''))[:80], 'version': str(p.get('Version', ''))[:120]}
+                              for p in (operation.get('extra_packages') or [])[:8] if isinstance(p, dict)]
+    return result
+
+
+def migration_status(plan):
+    offer = migration_offer(plan)
+    recovery_blocked = haproxy_patch_active()
+    if recovery_blocked:
+        offer.update(state='blocked', reason='HAProxy update or recovery is in progress. Other maintenance is blocked.')
+    operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+    try:
+        review = migration_review()
+    except (UpdatedError, OSError, ValueError, TypeError):
+        review = None
+    public = None
+    if review:
+        public = {key: review.get(key) for key in ('id', 'transaction_id', 'expires_at', 'stale', 'consumed_by')}
+        public['stale'] = public['stale'] or recovery_blocked
+        public['operation'] = public_migration_operation(operation)
+    return {**offer, 'plan': public, 'last_operation': public_migration_operation(operation)}
+
+
+def migration_worker(job_id, lock_fd, review=None):
+    """A fixed root child owns maintenance custody through switch/recovery."""
+    log = ''
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
+        update_job(job_id, status='running', started_at=utc_now(), current_component='haproxy',
+                   progress={'phase': 'prepare' if review is None else 'starting'})
+        ACTIVE_MARKER.write_text(f'job_id={job_id}\n', encoding='utf-8')
+        os.chmod(ACTIVE_MARKER, 0o600)
+        python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
+        command = [str(python), str(trusted_source('haproxy_package_migrate.py'))]
+        previous = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+        if review is None:
+            HAPROXY_MIGRATION_PLAN.unlink(missing_ok=True)
+            command.extend(['prepare', '--web-progress'])
+        else:
+            # Revalidate after queueing, before handing control to the child.
+            operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+            if (not operation or operation.get('phase') != 'prepared'
+                    or migration_fingerprint(operation) != review['fingerprint']
+                    or migration_tool_digest() != review['source_digest'] or plan_is_expired(review)):
+                raise UpdatedError('The HAProxy migration plan is stale; prepare it again', code='stale_plan')
+            LATEST_PLAN_PATH.unlink(missing_ok=True)
+            command.extend(['apply', '--id', review['transaction_id'], '--web-progress'])
+        # As with patch updates, the PID-1-owned child takes the same lock.
+        # A racing backup can only refuse preparation/apply before changes.
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        code, log = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS)
+        operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+        if review is None:
+            if (code or not operation or operation.get('id') == (previous or {}).get('id')
+                    or operation.get('phase') != 'prepared' or operation.get('kind') != 'migration'
+                    or not str(operation.get('target_runtime_version', '')).startswith('3.4.')
+                    or operation.get('engine_digest') != migration_tool_digest()):
+                raise UpdatedError('HAProxy migration preparation failed; review the job log', code='verification_failed')
+            review = {'id': uuid.uuid4().hex, 'transaction_id': identifier(operation['id'], 'migration transaction id'),
+                      'expires_at': (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PLAN_TTL_SECONDS)).isoformat(),
+                      'fingerprint': migration_fingerprint(operation), 'source_digest': migration_tool_digest()}
+            atomic_json(HAPROXY_MIGRATION_PLAN, review)
+            message = 'HAProxy migration prepared; review the target version before confirming'
+        else:
+            if operation:
+                update_job(job_id, result={'haproxy': public_migration_operation(operation)})
+            if (code or not operation or operation.get('id') != review['transaction_id']
+                    or operation.get('phase') != 'committed' or operation.get('target_verified') is not True):
+                raise UpdatedError('HAProxy migration failed; review its recovery status and job log', code='verification_failed')
+            message = 'HAProxy migration verified'
+        update_job(job_id, status='completed', completed_at=utc_now(),
+                   result={'message': message, 'haproxy': public_migration_operation(operation)},
+                   output={'log': log})
+    except Exception as exc:
+        finish_failed(job_id, exc, log)
+    finally:
+        ACTIVE_MARKER.unlink(missing_ok=True)
+        release_operation(lock_fd)
+
+
+def start_haproxy_migration(request, *, apply=False):
+    if apply:
+        if request.get('confirmation') != HAPROXY_MIGRATION_CONFIRMATION:
+            raise UpdatedError('Type MIGRATE 3.4 to confirm the HAProxy transition')
+        plan_id = identifier(request.get('plan_id'), 'migration plan id')
+    elif request.get('target_branch') != '3.4':
+        raise UpdatedError('Only the qualified HAProxy 3.4 LTS migration is supported')
+    lock_fd = acquire_operation()
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
+        review = None
+        if apply:
+            review = migration_review(require_fresh=True)
+            if review['id'] != plan_id:
+                raise UpdatedError('The HAProxy migration plan is stale; prepare it again', code='stale_plan')
+        else:
+            offer = migration_offer(load_latest_plan())
+            if offer['state'] != 'available':
+                raise UpdatedError(offer['reason'], code='dependency')
+        job = new_job('haproxy-migrate' if apply else 'haproxy-prepare', components=['haproxy'],
+                      plan_id=review['id'] if review else None)
+        if review:
+            atomic_json(HAPROXY_MIGRATION_PLAN, {**review, 'consumed_by': job['id']})
+        start_thread(migration_worker, job['id'], lock_fd, review)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
 
 
 def status_response(request: dict[str, Any]) -> dict[str, Any]:
@@ -2464,6 +2663,7 @@ def status_response(request: dict[str, Any]) -> dict[str, Any]:
         "settings": settings_payload(),
         "summary": summary_payload(plan),
         'haproxy_operation': haproxy_operation(),
+        'haproxy_migration': migration_status(plan),
     }
 
 
@@ -2735,6 +2935,10 @@ def dispatch(request: Any) -> dict[str, Any]:
         return request_reboot(request)
     if action == "cancel_reboot":
         return cancel_reboot(request)
+    if action == 'prepare_haproxy_migration':
+        return start_haproxy_migration(request)
+    if action == 'apply_haproxy_migration':
+        return start_haproxy_migration(request, apply=True)
     return start_apply(request)
 
 
