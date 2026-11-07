@@ -16,6 +16,8 @@ test("HAProxy transition jobs show their own progress without a guessed percent"
   const migrate = core.progressModel({operation: "haproxy-migrate", progress: {phase: "verifying"}});
   assert.equal(migrate.percent, null);
   assert.equal(migrate.label, "Switching HAProxy to 3.4 LTS…");
+  assert.equal(core.progressModel({operation: "haproxy-transition", progress: {phase: "prepare"}}).label,
+    "Switching HAProxy to 3.4 LTS…");
 });
 
 test("OS security jobs keep their own labels and do not invent progress percentages", () => {

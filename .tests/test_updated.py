@@ -102,6 +102,7 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
                 ),
                 "prepare_haproxy_migration": frozenset({"action", "target_branch"}),
                 "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
+                "start_haproxy_transition": frozenset({"action", "target_branch", "confirmed"}),
                 "os_security_status": frozenset({"action", "job_id"}),
                 "os_security_check": frozenset({"action"}),
                 "os_security_install": frozenset({"action", "confirmation"}),

@@ -352,6 +352,7 @@ REQUEST_FIELDS = {
     "cancel_reboot": frozenset({"action", "expected_boot_id", "actor"}),
     "prepare_haproxy_migration": frozenset({"action", "target_branch"}),
     "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
+    "start_haproxy_transition": frozenset({"action", "target_branch", "confirmed"}),
     "os_security_status": frozenset({"action", "job_id"}),
     "os_security_check": frozenset({"action"}),
     "os_security_install": frozenset({"action", "confirmation"}),
@@ -2559,23 +2560,69 @@ def migration_status(plan):
         public = {key: review.get(key) for key in ('id', 'transaction_id', 'expires_at', 'stale', 'consumed_by')}
         public['stale'] = public['stale'] or recovery_blocked
         public['operation'] = public_migration_operation(operation)
-    return {**offer, 'plan': public, 'last_operation': public_migration_operation(operation)}
+    return {**offer, 'plan': public, 'last_operation': public_migration_operation(operation),
+            'automatic': automatic_migration_offer(plan, operation, recovery_blocked)}
 
 
-def migration_worker(job_id, lock_fd, review=None):
+def migration_platform_supported():
+    try:
+        release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+        return (release.get('ID', '').strip('"') == 'ubuntu' and release.get('VERSION_ID', '').strip('"') == '24.04'
+                and os.uname().machine in {'aarch64', 'x86_64'})
+    except OSError:
+        return False
+
+
+def automatic_migration_tool():
+    migration_tool_digest()
+    tool = trusted_source('haproxy_package_migrate.py')
+    if b'AUTOMATIC_MIGRATION_PROTOCOL = 1' not in tool.read_bytes():
+        raise UpdatedError('Update host services before using the automatic HAProxy transition', code='dependency')
+    trusted_source('apt_metadata.py')
+    return tool
+
+
+def automatic_migration_offer(plan, operation, recovery_blocked):
+    result = {'can_start': False, 'current': False, 'reason': ''}
+    try:
+        automatic_migration_tool()
+    except (OSError, UpdatedError):
+        return {**result, 'reason': 'Update host services before using the automatic HAProxy transition'}
+    if recovery_blocked:
+        return {**result, 'reason': 'HAProxy update or recovery is in progress. Other maintenance is blocked.'}
+    if not migration_platform_supported():
+        return {**result, 'reason': 'Migration requires Ubuntu 24.04 on AMD64 or ARM64'}
+    # This cached display hint never authorizes execution. The native worker
+    # verifies the current package, running binary and configuration itself.
+    details = ((plan_component_map(plan).get('haproxy') or {}).get('details') or {}) if plan else {}
+    if plan and not plan_is_expired(plan) and details.get('binary_matches') is True:
+        current = details.get('branch') == '3.4'
+    else:
+        current = bool(operation and operation.get('phase') == 'committed' and operation.get('target_verified') is True)
+    return {**result, 'can_start': not current, 'current': current,
+            'reason': 'HAProxy 3.4 is already installed; use updates within its branch' if current else
+            'Configuration checks, package preparation and the transition run automatically after confirmation.'}
+
+
+def migration_worker(job_id, lock_fd, review=None, automatic=False):
     """A fixed root child owns maintenance custody through switch/recovery."""
     log = ''
     try:
         if haproxy_transaction_active():
             raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
         update_job(job_id, status='running', started_at=utc_now(), current_component='haproxy',
-                   progress={'phase': 'prepare' if review is None else 'starting'})
+                   progress={'phase': 'checking' if automatic else 'prepare' if review is None else 'starting'})
         ACTIVE_MARKER.write_text(f'job_id={job_id}\n', encoding='utf-8')
         os.chmod(ACTIVE_MARKER, 0o600)
         python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
         command = [str(python), str(trusted_source('haproxy_package_migrate.py'))]
         previous = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
-        if review is None:
+        if automatic:
+            automatic_migration_tool()
+            HAPROXY_MIGRATION_PLAN.unlink(missing_ok=True)
+            LATEST_PLAN_PATH.unlink(missing_ok=True)
+            command.extend(['migrate', '--web-progress'])
+        elif review is None:
             HAPROXY_MIGRATION_PLAN.unlink(missing_ok=True)
             command.extend(['prepare', '--web-progress'])
         else:
@@ -2592,7 +2639,7 @@ def migration_worker(job_id, lock_fd, review=None):
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         code, log = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS)
         operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
-        if review is None:
+        if review is None and not automatic:
             if (code or not operation or operation.get('id') == (previous or {}).get('id')
                     or operation.get('phase') != 'prepared' or operation.get('kind') != 'migration'
                     or not str(operation.get('target_runtime_version', '')).startswith('3.4.')
@@ -2606,7 +2653,12 @@ def migration_worker(job_id, lock_fd, review=None):
         else:
             if operation:
                 update_job(job_id, result={'haproxy': public_migration_operation(operation)})
-            if (code or not operation or operation.get('id') != review['transaction_id']
+            wrong_transaction = (operation and operation.get('id') == (previous or {}).get('id')) if automatic else (
+                not operation or operation.get('id') != review['transaction_id'])
+            if (code or not operation or wrong_transaction
+                    or automatic and (operation.get('kind') != 'migration'
+                                      or not str(operation.get('target_runtime_version', '')).startswith('3.4.')
+                                      or operation.get('engine_digest') != migration_tool_digest())
                     or operation.get('phase') != 'committed' or operation.get('target_verified') is not True):
                 raise UpdatedError('HAProxy migration failed; review its recovery status and job log', code='verification_failed')
             message = 'HAProxy migration verified'
@@ -2645,6 +2697,24 @@ def start_haproxy_migration(request, *, apply=False):
         if review:
             atomic_json(HAPROXY_MIGRATION_PLAN, {**review, 'consumed_by': job['id']})
         start_thread(migration_worker, job['id'], lock_fd, review)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+def start_haproxy_transition(request):
+    if request.get('target_branch') != '3.4' or request.get('confirmed') is not True:
+        raise UpdatedError('Confirm the transition to HAProxy 3.4 LTS')
+    automatic_migration_tool()
+    if not migration_platform_supported():
+        raise UpdatedError('Migration requires Ubuntu 24.04 on AMD64 or ARM64', code='dependency')
+    lock_fd = acquire_operation()
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
+        job = new_job('haproxy-transition', components=['haproxy'])
+        start_thread(migration_worker, job['id'], lock_fd, None, True)
         return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
     except Exception:
         release_operation(lock_fd)
@@ -3132,6 +3202,8 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_haproxy_migration(request)
     if action == 'apply_haproxy_migration':
         return start_haproxy_migration(request, apply=True)
+    if action == 'start_haproxy_transition':
+        return start_haproxy_transition(request)
     if action == 'os_security_status':
         return os_security_response(request)
     if action in {'os_security_check', 'os_security_install', 'os_security_configure'}:

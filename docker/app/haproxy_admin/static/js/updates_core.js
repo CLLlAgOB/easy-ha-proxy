@@ -395,7 +395,7 @@
         "security-cycle": "Scheduled security maintenance", "security-configure": "Security policy change"};
       return {percent: null, label: t(labels[jobOperation(job)] || "OS security"), step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};
     }
-    if (["haproxy-prepare", "haproxy-migrate"].includes(jobOperation(job))) {
+    if (["haproxy-prepare", "haproxy-migrate", "haproxy-transition"].includes(jobOperation(job))) {
       return {percent: null, label: t(jobOperation(job) === "haproxy-prepare" ? "Preparing the HAProxy transition…" : "Switching HAProxy to 3.4 LTS…"),
         step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};
     }

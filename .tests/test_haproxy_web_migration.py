@@ -25,7 +25,8 @@ class WebMigrationBroker(unittest.TestCase):
         self.source = self.root / 'source'
         (self.source / 'installer').mkdir(parents=True)
         self.tool = self.source / 'installer/haproxy_package_migrate.py'
-        self.tool.write_text('WEB_MIGRATION_PROTOCOL = 1\n', encoding='utf-8')
+        self.tool.write_text('WEB_MIGRATION_PROTOCOL = 1\nAUTOMATIC_MIGRATION_PROTOCOL = 1\n', encoding='utf-8')
+        (self.source / 'installer/apt_metadata.py').touch()
         self.addCleanup(patch.stopall)
         for name, value in {
             'SOURCE_DIR': self.source, 'HAPROXY_UPDATE_STATE': self.root / 'patch.json',
@@ -37,6 +38,7 @@ class WebMigrationBroker(unittest.TestCase):
             patch.object(broker, name, value).start()
         patch.object(broker, 'reboot_guard_present', return_value=False).start()
         patch.object(broker, 'haproxy_transaction_active', return_value=False).start()
+        patch.object(broker, 'migration_platform_supported', return_value=True).start()
         # Production's root ownership and atomic-file checks have their own
         # tests; these fixtures exercise the state machine without root.
         patch.object(broker, 'safe_json_file', side_effect=lambda p: json.loads(p.read_text())).start()
@@ -87,6 +89,56 @@ class WebMigrationBroker(unittest.TestCase):
         self.assertEqual(broker.migration_offer(None)['state'], 'check_required')
         self.tool.write_text('old migrator', encoding='utf-8')
         self.assertIn('host services', broker.migration_offer(self.plan)['reason'])
+
+    def test_automatic_offer_does_not_depend_on_expired_or_absent_plans(self):
+        self.review(expires_at=self.expiry(-1))
+        self.plan['expires_at'] = self.expiry(-1)
+        snapshot = broker.migration_status(self.plan)
+        self.assertTrue(snapshot['plan']['stale'])
+        self.assertTrue(snapshot['automatic']['can_start'])
+        self.assertTrue(broker.migration_status(None)['automatic']['can_start'])
+        with patch.object(broker, 'migration_platform_supported', return_value=False):
+            self.assertFalse(broker.migration_status(None)['automatic']['can_start'])
+        self.operation('rollback_failed')
+        self.assertFalse(broker.migration_status(None)['automatic']['can_start'])
+
+    def test_one_confirmation_starts_a_fresh_combined_native_job_without_a_check_plan(self):
+        self.review(expires_at=self.expiry(-1), consumed_by='f'*32)
+        broker.LATEST_PLAN_PATH.unlink()
+        response = broker.dispatch({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True})
+        self.assertEqual(response['job']['operation'], 'haproxy-transition')
+
+        def child(*args, **kwargs):
+            with broker.MAINTENANCE_LOCK_PATH.open('a') as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.operation('committed', identifier='e'*32, target_verified=True)
+            return 0, 'verified'
+
+        run = self.queued_worker(child)
+        self.assertEqual(run.call_args.args[1][1:], [str(self.tool), 'migrate', '--web-progress'])
+        self.assertFalse(broker.HAPROXY_MIGRATION_PLAN.exists())
+        self.assertEqual(self.updated.call_args.kwargs['status'], 'completed')
+        self.failed.assert_not_called()
+
+    def test_automatic_transition_requires_exact_confirmation_target_and_supported_tool(self):
+        for fields in ({'confirmed': False}, {'confirmed': 'true'}, {'confirmed': 1}, {'target_branch': '3.5'}, {'command': 'id'}):
+            with self.subTest(fields=fields), self.assertRaises(broker.UpdatedError):
+                broker.dispatch({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True, **fields})
+        self.tool.write_text('WEB_MIGRATION_PROTOCOL = 1\n')
+        with self.assertRaises(broker.UpdatedError):
+            broker.dispatch({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True})
+        self.thread.assert_not_called()
+
+    def test_automatic_transition_does_not_accept_old_success_or_a_verified_rollback(self):
+        self.operation('committed', target_verified=True)
+        broker.dispatch({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True})
+        self.queued_worker(lambda *a, **k: (0, 'old result'))
+        self.failed.assert_called_once()
+        self.failed.reset_mock()
+        self.operation('prepared')
+        broker.dispatch({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True})
+        self.queued_worker(lambda *a, **k: (self.operation('rolled_back', identifier='e'*32, rollback_verified=True) and 0, 'rolled back'))
+        self.failed.assert_called_once()
 
     def test_protocol_only_accepts_fixed_target_and_confirmation(self):
         for data in ({'action': 'prepare_haproxy_migration', 'target_branch': '3.5'},
@@ -219,6 +271,18 @@ class WebMigrationRoutes(unittest.TestCase):
         self.assertEqual(ROUTES.prepare_haproxy_migration()[1], 202)
         self.rpc.assert_called_once_with({'action': 'prepare_haproxy_migration', 'target_branch': '3.4'})
         self.assertEqual(self.audit.call_args.args[0], 'update.haproxy_prepare')
+
+    def test_simple_transition_is_audited_and_accepts_only_one_explicit_boolean_confirmation(self):
+        for values in ({'confirmed': False}, {'confirmed': 1}, {'confirmed': 'yes'}, {'target_branch': '3.5'}, {'plan_id': 'a'*32}):
+            self.body({'target_branch': '3.4', 'confirmed': True, **values})
+            with self.assertRaises(AbortCalled): ROUTES.start_haproxy_transition()
+        self.rpc.assert_not_called()
+        self.body({'target_branch': '3.4', 'confirmed': True})
+        self.assertEqual(ROUTES.start_haproxy_transition()[1], 202)
+        self.rpc.assert_called_once_with({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True})
+        self.assertEqual(self.audit.call_args.args[0], 'update.haproxy_transition')
+        CONFIG_STATE.return_value = {'state': 'pending'}
+        self.assertEqual(ROUTES.start_haproxy_transition()[1], 409)
 
     def test_apply_requires_exact_review_and_confirmation(self):
         for value in ({'plan_id': '../x', 'confirmation': 'MIGRATE 3.4'}, {'plan_id': 'a' * 32, 'confirmation': 'UPDATE'},

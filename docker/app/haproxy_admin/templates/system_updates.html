@@ -12,8 +12,7 @@
      data-settings-url="{{ url_for('system_updates.save_settings') }}"
      data-auto-install-url="{{ url_for('system_updates.save_auto_install') }}"
      data-reboot-url="{{ url_for('system_updates.reboot') }}"
-     data-migration-prepare-url="{{ url_for('system_updates.prepare_haproxy_migration') }}"
-     data-migration-apply-url="{{ url_for('system_updates.apply_haproxy_migration') }}"
+     data-migration-start-url="{{ url_for('system_updates.start_haproxy_transition') }}"
      data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}">
 
   {# One card says where things stand. While a job runs it holds only the
@@ -90,23 +89,8 @@
     <div class="updates-migration" id="updates-migration">
       <h3>Transition to HAProxy 3.4 LTS</h3>
       <p class="updates-hero-meta" id="updates-migration-state" role="status" data-i18n-skip translate="no"></p>
-      <p class="updates-hero-meta">Preparation downloads verified packages and rollback files and checks the configuration. It does not switch the running HAProxy.</p>
-      <button class="btn btn-small" type="button" id="updates-migration-prepare" disabled>Prepare transition to 3.4</button>
-      <div id="updates-migration-plan" hidden>
-        <dl class="updates-haproxy-versions">
-          <div><dt>Current package</dt><dd id="updates-migration-old" class="mono" data-i18n-skip translate="no"></dd></div>
-          <div><dt>Target HAProxy version</dt><dd id="updates-migration-target" class="mono" data-i18n-skip translate="no"></dd></div>
-          <div><dt>Plan valid until</dt><dd id="updates-migration-expires" data-i18n-skip translate="no"></dd></div>
-        </dl>
-        <ul id="updates-migration-packages" class="updates-hero-meta" data-i18n-skip translate="no"></ul>
-        <p class="updates-confirm-note">The transition changes the HAProxy package and its TLS library. Connections may need to reconnect. The switch is verified; failure triggers an automatic rollback attempt.</p>
-        <p id="updates-migration-review-state" class="updates-hero-meta" role="status" data-i18n-skip translate="no"></p>
-        <label class="updates-migration-confirm" for="updates-migration-confirm">Type MIGRATE 3.4 to confirm the HAProxy transition</label>
-        <div class="config-modal-actions">
-          <input id="updates-migration-confirm" class="form-input mono" maxlength="20" autocomplete="off" spellcheck="false" placeholder="MIGRATE 3.4" data-i18n-skip translate="no">
-          <button class="btn" type="button" id="updates-migration-apply" disabled>Switch to HAProxy 3.4 LTS</button>
-        </div>
-      </div>
+      <p class="updates-hero-meta" id="updates-migration-description">The server prepares current packages and rollback files, checks the configuration and verifies the switch. Connections may need to reconnect.</p>
+      <button class="btn btn-small" type="button" id="updates-migration-start" disabled>Switch to HAProxy 3.4 LTS</button>
     </div>
   </section>
 
