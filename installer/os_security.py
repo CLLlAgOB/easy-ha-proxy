@@ -388,6 +388,14 @@ def maintenance_guard():
             fcntl.lockf(lock, fcntl.LOCK_UN)
 
 
+def reload_apt_config(apt_pkg):
+    # Configuration.clear needs a key; an empty key does not clear the root.
+    for key in apt_pkg.config.list():
+        apt_pkg.config.clear(key)
+    apt_pkg.init_config()
+    apt_pkg.init_system()
+
+
 def run(action, root, requested=None):
     distro, codename = platform()
     try:
@@ -395,16 +403,12 @@ def run(action, root, requested=None):
         import apt_pkg
     except ImportError:
         raise SecurityError('Update host services to install python3-apt before using OS security management') from None
-    apt_pkg.config.clear()
-    apt_pkg.init_config()
-    apt_pkg.init_system()
+    reload_apt_config(apt_pkg)
     maintenance_guard()
     cache = apt.Cache()
     if action == 'configure':
         configure(root, requested, cache, distro, codename)
-        apt_pkg.config.clear()
-        apt_pkg.init_config()
-        apt_pkg.init_system()
+        reload_apt_config(apt_pkg)
         path = root / 'status.json'
         status = read_json(path) if path.exists() else {'state': 'unverified'}
         status.update(native_timer=native_timer(), native_policy={

@@ -32,6 +32,13 @@ def origin(**values):
 
 @unittest.skipUnless(s, 'Linux security worker')
 class SecurityOrigins(unittest.TestCase):
+    def test_configuration_reload_uses_the_actual_distribution_python_apt_api(self):
+        code = ('import sys; sys.path.insert(0, sys.argv[1]); import apt_pkg; import os_security as s; '
+                'apt_pkg.init_config(); apt_pkg.config.set("EHPFixture::Sentinel", "old"); '
+                's.reload_apt_config(apt_pkg); assert not apt_pkg.config.find("EHPFixture::Sentinel"); '
+                'assert apt_pkg.config.find("Dir::State::status")')
+        subprocess.run(['/usr/bin/python3', '-c', code, str(ROOT / 'installer')], check=True, capture_output=True, text=True)
+
     def test_only_trusted_distribution_security_origins(self):
         self.assertTrue(s.security_origin(origin(), 'ubuntu', 'noble'))
         for fields in ({'trusted': False}, {'origin': 'LP-PPA-test'}, {'archive': 'noble-updates'}, {'archive': 'jammy-security'}):
@@ -216,6 +223,7 @@ class SecurityExecution(unittest.TestCase):
         patch.object(s, 'native_timer', return_value={'enabled': 'disabled', 'active': False}).start()
         self.command = patch.object(s, 'command', return_value=(0, 'native fixture')).start()
         config = Mock()
+        config.list.return_value = ['APT', 'Dir', 'DPkg']
         config.find.return_value = '0'; config.find_b.return_value = False
         self.cache = Mock()
         patch.dict(sys.modules, {'apt': NS(Cache=lambda: self.cache), 'apt_pkg': NS(config=config,
