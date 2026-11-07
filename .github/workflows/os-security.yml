@@ -1,0 +1,65 @@
+name: OS security updates
+
+on:
+  push:
+    branches: [alpha, main]
+    paths:
+      - 'installer/os_security.py'
+      - 'installer/apt_metadata.py'
+      - '.tests/integration/os_security_smoke.py'
+      - '.github/workflows/os-security.yml'
+  pull_request:
+    paths:
+      - 'installer/os_security.py'
+      - 'installer/apt_metadata.py'
+      - '.tests/integration/os_security_smoke.py'
+      - '.github/workflows/os-security.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: os-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu:
+    name: Native security updates (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare disposable native tools
+        run: |
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer
+          sudo apt-get update
+          sudo env NEEDRESTART_MODE=l apt-get install -y --no-install-recommends python3-apt unattended-upgrades needrestart gnupg
+      - name: Verify signed security origins, actual installation and timer restoration
+        run: sudo env EHP_SECURITY_DISPOSABLE=1 /usr/bin/python3 .tests/integration/os_security_smoke.py --systemd
+
+  debian:
+    name: Native APT (Debian ${{ matrix.release }})
+    runs-on: ubuntu-24.04
+    container: debian:${{ matrix.release }}-slim
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [bookworm, trixie]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare disposable native tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends python3 python3-apt unattended-upgrades needrestart gnupg ca-certificates
+      - name: Verify native APT with the container timer adapter
+        run: EHP_SECURITY_DISPOSABLE=1 /usr/bin/python3 .tests/integration/os_security_smoke.py

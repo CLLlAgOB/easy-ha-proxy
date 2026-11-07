@@ -63,6 +63,7 @@ from .routes_authelia_settings import bp_authelia_settings
 from .authelia_acl import bp_authelia_acl
 from .routes_backup import bp_system_backups
 from .routes_updates import bp_system_updates
+from .routes_os_security import bp_os_security
 from . import build_info, updates_badge
 
 logger = logging.getLogger("haproxy-admin")
@@ -377,5 +378,6 @@ def create_app() -> Flask:
     app.register_blueprint(bp_authelia_acl)
     app.register_blueprint(bp_system_backups)
     app.register_blueprint(bp_system_updates)
+    app.register_blueprint(bp_os_security)
 
     return app

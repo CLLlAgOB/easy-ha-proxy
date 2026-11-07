@@ -352,6 +352,10 @@ REQUEST_FIELDS = {
     "cancel_reboot": frozenset({"action", "expected_boot_id", "actor"}),
     "prepare_haproxy_migration": frozenset({"action", "target_branch"}),
     "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
+    "os_security_status": frozenset({"action", "job_id"}),
+    "os_security_check": frozenset({"action"}),
+    "os_security_install": frozenset({"action", "confirmation"}),
+    "os_security_configure": frozenset({"action", "mode", "interval", "start", "end", "confirmation"}),
 }
 
 STATE_LOCK = threading.RLock()
@@ -1529,11 +1533,13 @@ def validate_applied_container_digests(
                 )
 
 
-def acquire_operation(*, allow_scheduled_reboot: bool = False) -> int:
+def acquire_operation(*, allow_scheduled_reboot: bool = False, allow_security_recovery: bool = False) -> int:
     if SHUTDOWN_REQUESTED.is_set():
         raise UpdatedError("the update broker is shutting down", code="conflict")
     if haproxy_patch_active():
         raise UpdatedError('An interrupted HAProxy update requires recovery before other maintenance', code='conflict')
+    if not allow_security_recovery and security_recovery_pending():
+        raise UpdatedError('Restore system management after the interrupted OS security policy change', code='conflict')
     if not allow_scheduled_reboot and reboot_guard_present():
         raise UpdatedError("a server reboot is scheduled", code="conflict")
     if not OPERATION_THREAD_LOCK.acquire(blocking=False):
@@ -1933,6 +1939,11 @@ def seconds_until_auto_check(now: float) -> float | None:
 def auto_check_loop() -> None:
     started = time.time()
     while True:
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                os_security_tick()
+        except Exception:
+            LOG.exception('Scheduled OS security maintenance failed')
         try:
             now = time.time()
             wait = seconds_until_auto_check(now)
@@ -2636,6 +2647,182 @@ def start_haproxy_migration(request, *, apply=False):
         raise
 
 
+OS_SECURITY_ROOT = STATE_ROOT / 'os-security'
+OS_SECURITY_MODES = frozenset({'system', 'notify', 'auto', 'window'})
+OS_SECURITY_INTERVALS = (1, 2, 4, 6, 12, 24)
+OS_SECURITY_DEFAULT = {'mode': 'system', 'interval': 4, 'start': 3, 'end': 5}
+
+
+def security_recovery_pending():
+    path = OS_SECURITY_ROOT / 'policy.json'
+    if not os.path.lexists(path):
+        return False
+    try:
+        return safe_json_file(path).get('phase') != 'ready'
+    except (OSError, ValueError, UpdatedError):
+        return True
+
+
+def os_security_policy(request):
+    value = {key: request.get(key) for key in ('mode', 'interval', 'start', 'end')}
+    if (not isinstance(value['mode'], str) or value['mode'] not in OS_SECURITY_MODES or type(value['interval']) is not int or value['interval'] not in OS_SECURITY_INTERVALS
+            or any(type(value[key]) is not int or not 0 <= value[key] <= 23 for key in ('start', 'end'))
+            or value['start'] == value['end']):
+        raise UpdatedError('Invalid OS security policy')
+    return value
+
+
+def os_security_tool():
+    tool = trusted_source('os_security.py')
+    if tool.stat().st_size > 1024 * 1024 or b'PROTOCOL = 1' not in tool.read_bytes():
+        raise UpdatedError('Update host services before using OS security management', code='dependency')
+    return tool
+
+
+def os_security_snapshot():
+    result = {'policy': dict(OS_SECURITY_DEFAULT), 'status': None, 'recovery_required': False, 'available': False}
+    try:
+        os_security_tool()
+        result['available'] = True
+        path = OS_SECURITY_ROOT / 'policy.json'
+        if os.path.lexists(path):
+            record = safe_json_file(path)
+            result['policy'] = os_security_policy(record.get('policy') or {})
+            result['recovery_required'] = record.get('phase') != 'ready'
+        path = OS_SECURITY_ROOT / 'status.json'
+        if os.path.lexists(path):
+            status = safe_json_file(path)
+            result['status'] = {key: status.get(key) for key in (
+                'state', 'error', 'last_attempt', 'checked_at', 'last_success', 'platform', 'packages',
+                'package_count', 'eligible_count', 'restart', 'native_timer', 'native_policy', 'installed_count', 'last_install_at')}
+    except (UpdatedError, OSError, ValueError, TypeError) as error:
+        result['error'] = str(error)
+        result['recovery_required'] = security_recovery_pending()
+    return result
+
+
+def os_security_notifications(snapshot):
+    if _ALERTS is None:
+        return
+    status = snapshot.get('status') or {}
+    if status.get('state') not in {'ready', 'unknown'}:
+        return
+    try:
+        _ALERTS.observe("os.security_check_failed", 'host', active=status.get('state') == 'unknown',
+                        summary='OS security updates could not be checked', detail=str(status.get('error') or ''))
+        if status.get('state') != 'ready':
+            return  # Unknown never resolves an existing security incident.
+        count = status.get('package_count')
+        if type(count) is int:
+            _ALERTS.observe("os.security_updates", 'host', active=count > 0,
+                            summary='OS security updates are available', detail=f'{count} package(s) require a security update.')
+        restart = status.get('restart') or {}
+        if not restart.get('error'):
+            _ALERTS.observe("os.security_restart", 'host', active=bool(restart.get('reboot_required') or restart.get('services')),
+                            summary='Security updates require a restart', detail=', '.join(restart.get('services') or []))
+    except Exception:
+        LOG.debug('OS security alert reporting failed', exc_info=True)
+
+
+def os_security_worker(job_id, lock_fd, action, policy=None):
+    log = ''
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before OS maintenance', code='config_pending')
+        tool = os_security_tool()
+        update_job(job_id, status='running', started_at=utc_now(), current_component='os', progress={'phase': 'checking'})
+        ACTIVE_MARKER.write_text(f'job_id={job_id}\n', encoding='utf-8')
+        os.chmod(ACTIVE_MARKER, 0o600)
+        command = ['/usr/bin/python3', str(tool), action, '--state-root', str(OS_SECURITY_ROOT),
+                   '--maintenance-lock', str(MAINTENANCE_LOCK_PATH), '--request-id', job_id]
+        if policy:
+            for key in ('mode', 'interval', 'start', 'end'):
+                command.extend(['--' + key, str(policy[key])])
+        # The PID-1-owned worker holds custody even if this broker dies.
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        code, log = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS)
+        try:
+            result = json.loads(log.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        if code or result.get('ok') is not True or result.get('request_id') != job_id:
+            raise UpdatedError(str(result.get('error') or 'OS security operation failed; review the job log'), code='verification_failed')
+        if action in {'install', 'cycle', 'configure'}:
+            LATEST_PLAN_PATH.unlink(missing_ok=True)
+        update_job(job_id, status='completed', completed_at=utc_now(), result={'message': str(result.get('message') or '')}, output={'log': log})
+    except Exception as error:
+        finish_failed(job_id, error, log)
+    finally:
+        os_security_notifications(os_security_snapshot())
+        ACTIVE_MARKER.unlink(missing_ok=True)
+        release_operation(lock_fd)
+
+
+def start_os_security(request, *, scheduled=False):
+    action = {'os_security_check': 'check', 'os_security_install': 'install',
+              'os_security_configure': 'configure', 'os_security_cycle': 'cycle'}[request['action']]
+    policy = os_security_policy(request) if action == 'configure' else None
+    if action in {'install', 'configure'} and request.get('confirmation') != 'SECURITY':
+        raise UpdatedError('Type SECURITY to confirm OS security management')
+    os_security_tool()
+    lock_fd = acquire_operation(allow_security_recovery=bool(policy and policy['mode'] == 'system'))
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before OS maintenance', code='config_pending')
+        if action in {'install', 'cycle'} and os_security_snapshot()['policy']['mode'] == 'system':
+            raise UpdatedError('Enable OS security management before installing updates', code='dependency')
+        job = new_job('security-' + action, components=['os'], scheduled=scheduled)
+        start_thread(os_security_worker, job['id'], lock_fd, action, policy)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+def os_security_tick(now=None):
+    snapshot = os_security_snapshot()
+    policy, status = snapshot['policy'], snapshot.get('status') or {}
+    if not snapshot['available'] or snapshot['recovery_required'] or policy['mode'] == 'system':
+        return 'disabled'
+    local = now or dt.datetime.now().astimezone()
+    stamp = local.timestamp()
+    last_attempt = status.get('last_attempt') or 0
+    last_success = status.get('last_success') or 0
+    # Persisted timestamps prevent a broker restart or a failure from making
+    # a new APT job every minute. A busy operation does not consume the turn.
+    if stamp - last_attempt < 1800:
+        return 'waiting'
+    due = stamp - last_success >= policy['interval'] * 3600
+    last_install = status.get('last_install_at') or 0
+    installed_night = install_night(dt.datetime.fromtimestamp(last_install).astimezone(), policy['start'], policy['end']) if last_install else None
+    install_due = (policy['mode'] == 'window' and in_install_window(local, policy['start'], policy['end'])
+                   and installed_night != install_night(local, policy['start'], policy['end']))
+    if not due and not install_due:
+        return 'waiting'
+    try:
+        start_os_security({'action': 'os_security_cycle'}, scheduled=True)
+    except UpdatedError as error:
+        return error.code
+    return 'started'
+
+
+def os_security_response(request):
+    result = {'ok': True, **os_security_snapshot()}
+    result['jobs'] = [job for job in list_jobs() if job.get('operation', '').startswith('security-')][:10]
+    active = active_job()
+    result['active_job'] = public_job(active, include_log=False) if active else None
+    if request.get('job_id'):
+        job = load_job(identifier(request['job_id'], 'job id'))
+        if not job.get('operation', '').startswith('security-'):
+            raise UpdatedError('OS security job was not found', code='not_found')
+        result['job'] = job
+    result['server_time'] = utc_now()
+    result['server_timezone'] = dt.datetime.now().astimezone().strftime('%Z %z')
+    return result
+
+
 def status_response(request: dict[str, Any]) -> dict[str, Any]:
     requested = request.get("job_id")
     jobs = (
@@ -2939,6 +3126,10 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_haproxy_migration(request)
     if action == 'apply_haproxy_migration':
         return start_haproxy_migration(request, apply=True)
+    if action == 'os_security_status':
+        return os_security_response(request)
+    if action in {'os_security_check', 'os_security_install', 'os_security_configure'}:
+        return start_os_security(request)
     return start_apply(request)
 
 

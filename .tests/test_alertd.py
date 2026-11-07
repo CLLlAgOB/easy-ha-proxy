@@ -547,6 +547,7 @@ class CatalogueTests(unittest.TestCase):
             "certificate.renewal_failed", "backup.failed", "restore.failed",
             "update.failed", "authelia.unavailable", "config.apply_failed",
             "backup.space_low", "update.available", "mail.delivery_failed",
+            "os.security_updates", "os.security_restart", "os.security_check_failed",
         }
         self.assertEqual(set(alertd.RULES_BY_NAME), expected)
 
@@ -924,7 +925,7 @@ class ProducerWiringTests(unittest.TestCase):
         "easy-ha-proxy-guardd.py": ("security.hostile_ip", "security.burst",
                                     "security.engine_failing"),
         "easy-ha-proxy-backupd.py": ("backup.failed", "restore.failed"),
-        "easy-ha-proxy-updated.py": ("update.failed", "update.available"),
+        "easy-ha-proxy-updated.py": ("update.failed", "update.available", "os.security_updates", "os.security_restart", "os.security_check_failed"),
         "haproxy-controld.py": ("config.apply_failed",),
         "haproxy-certd.py": ("certificate.renewal_failed",),
         "haproxy-healthd.py": ("site.down",),

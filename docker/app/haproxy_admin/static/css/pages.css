@@ -487,3 +487,18 @@
   .inline-block { display: inline-block; }
   [class*="u-grid-template-columns"] { display: grid; }
 }
+/* Distribution security maintenance. */
+.os-security-page { display: grid; gap: 20px; }
+.os-security-page .card { margin: 0; min-width: 0; }
+.os-security-page .card-header, .oss-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.os-security-page .card-header { justify-content: space-between; }
+.oss-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 18px; margin: 20px 0; }
+.oss-policy-grid label, .oss-hours { display: grid; gap: 8px; min-width: 0; }
+.oss-hours { grid-template-columns: 1fr 1fr; gap: 12px; }
+.oss-actions { margin-top: 12px; }
+.oss-actions input { width: min(100%, 270px); min-width: 0; }
+.oss-packages { max-height: 420px; overflow: auto; margin-top: 18px; }
+.oss-packages th { position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; }
+.oss-packages td { overflow-wrap: anywhere; }
+.oss-dialog { width: min(560px, calc(100% - 32px)); padding: 24px; border: 1px solid var(--border); border-radius: 16px; background: var(--bg-secondary); color: var(--text-primary); }
+.oss-dialog::backdrop { background: rgb(0 0 0 / 55%); }

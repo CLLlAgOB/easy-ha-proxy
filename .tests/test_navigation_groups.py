@@ -46,6 +46,7 @@ EXPECTED_ENDPOINTS = {
     "routes.audit_page",
     "routes.system_health_page",
     "system_updates.page",
+    "os_security.page",
     "system_backups.page",
     "routes.haproxy_stats_page",
     "authelia_acl.edit_rules",

@@ -82,6 +82,8 @@ AUDITED_ACTIONS = {
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
     "prepare_haproxy_migration": ("update.haproxy_prepare", ("target_branch",)),
     "apply_haproxy_migration": ("update.haproxy_migrate", ("plan_id",)),
+    "os_security_configure": ("os.security_policy", ("mode", "interval", "start", "end")),
+    "os_security_install": ("os.security_install", ()),
 }
 
 

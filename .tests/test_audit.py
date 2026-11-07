@@ -307,6 +307,7 @@ class InstrumentationTests(unittest.TestCase):
             "update.channels", "update.apply", "system.reboot",
             "system.reboot_cancel",
         ),
+        "routes_os_security.py": ("os.security_policy", "os.security_install"),
         "routes_runtime.py": ("backend.state", "backend.weight"),
         "routes_config_history.py": ("config.restore",),
         "routes_dns_providers.py": ("dns_provider.save", "dns_provider.delete"),
@@ -316,6 +317,12 @@ class InstrumentationTests(unittest.TestCase):
     def test_every_mutating_module_records_its_actions(self):
         for module, actions in sorted(self.EXPECTED.items()):
             text = self.source(module)
+            if module == "routes_os_security.py":
+                # These structured actions use the same success/failure audit
+                # boundary as the other host update actions.
+                self.assertIn("from .routes_updates import _call_daemon", text)
+                self.assertIn("_call_daemon(", text)
+                text = self.source("routes_updates.py")
             self.assertIn("record_request", text, module)
             for action in actions:
                 self.assertIn(f'"{action}"', text, f"{module}: {action}")

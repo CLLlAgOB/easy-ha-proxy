@@ -203,6 +203,9 @@
     });
   }
   function operationLabel(value) {
+    const security = {"security-check": "Security update check", "security-install": "Security update installation",
+      "security-cycle": "Scheduled security maintenance", "security-configure": "Security policy change"};
+    if (security[value]) return t(security[value]);
     if (value === "check") return t("Update check");
     if (value === "apply") return t("Install updates");
     if (value === "haproxy-prepare") return t("Prepare HAProxy migration");

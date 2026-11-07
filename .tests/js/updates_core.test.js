@@ -18,6 +18,17 @@ test("HAProxy transition jobs show their own progress without a guessed percent"
   assert.equal(migrate.label, "Switching HAProxy to 3.4 LTS…");
 });
 
+test("OS security jobs keep their own labels and do not invent progress percentages", () => {
+  for (const [operation, label] of [["security-check", "Security update check"],
+    ["security-configure", "Security policy change"], ["security-install", "Security update installation"],
+    ["security-cycle", "Scheduled security maintenance"]]) {
+    const model = core.progressModel({operation, progress: {phase: "checking"}});
+    assert.equal(model.label, label);
+    assert.equal(model.percent, null);
+    assert.equal(model.eta, "");
+  }
+});
+
 test("OS and sign-in updates warn about temporary loss of access as panel updates do", () => {
   for (const id of ["os", "haproxy", "authelia-container", "admin-container", "all"]) {
     assert.equal(core.mayInterruptAccess([id]), true);

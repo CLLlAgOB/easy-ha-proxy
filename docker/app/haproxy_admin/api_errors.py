@@ -13,7 +13,7 @@ back to a generic message when that fails.
 from __future__ import annotations
 
 # Everything under these answers machines, not browsers looking at pages.
-API_PREFIXES = ("/api/", "/system/backups/api/", "/system/updates/api/")
+API_PREFIXES = ("/api/", "/system/backups/api/", "/system/updates/api/", "/system/os-security/api/")
 
 
 def caller_parses_json(path: str, is_json: bool = False) -> bool:

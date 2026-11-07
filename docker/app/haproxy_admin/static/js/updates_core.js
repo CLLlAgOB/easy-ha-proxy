@@ -390,6 +390,11 @@
   // the polls arrive in.
   function progressModel(job, {history = [], highest = {}, now = Date.now(), t = identity} = {}) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {};
+    if (jobOperation(job).startsWith("security-")) {
+      const labels = {"security-check": "Security update check", "security-install": "Security update installation",
+        "security-cycle": "Scheduled security maintenance", "security-configure": "Security policy change"};
+      return {percent: null, label: t(labels[jobOperation(job)] || "OS security"), step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};
+    }
     if (["haproxy-prepare", "haproxy-migrate"].includes(jobOperation(job))) {
       return {percent: null, label: t(jobOperation(job) === "haproxy-prepare" ? "Preparing the HAProxy transition…" : "Switching HAProxy to 3.4 LTS…"),
         step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};

@@ -21,6 +21,7 @@ SUPERADMIN_PREFIXES = (
     "/authelia",
     "/system/backups",
     "/system/updates",
+    "/system/os-security",
 )
 SUPERADMIN_EXACT = frozenset({"/api/health/control"})
 CONTROL_PLANE_HEALTHCHECK_PATH = "/api/control-plane-health"
@@ -52,7 +53,7 @@ def normalized_groups(value: str) -> FrozenSet[str]:
 def _json_error(message: str, status: int):
     message = translate(message)
     if request.path.startswith(
-        ("/api/", "/system/backups/api/", "/system/updates/api/")
+        ("/api/", "/system/backups/api/", "/system/updates/api/", "/system/os-security/api/")
     ) or request.is_json:
         return jsonify({"ok": False, "error": message}), status
     abort(status, description=message)

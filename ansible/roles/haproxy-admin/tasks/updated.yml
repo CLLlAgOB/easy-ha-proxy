@@ -2,6 +2,12 @@
 # A dedicated root broker exposes only structured update checks and a fixed
 # component allowlist to the unprivileged web application.
 
+- name: "easy-ha-proxy-updated | Install the distribution APT reader"
+  ansible.builtin.apt:
+    name: python3-apt
+    state: present
+  when: ansible_os_family == 'Debian'
+
 - name: "easy-ha-proxy-updated | Ensure persistent job directories"
   ansible.builtin.file:
     path: "{{ item }}"

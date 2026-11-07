@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}OS security{% endblock %}
+{% block header_title %}OS security{% endblock %}
+{% block content %}
+<div id="os-security-app" class="os-security-page"
+     data-status-url="{{ url_for('os_security.status') }}" data-check-url="{{ url_for('os_security.check') }}"
+     data-policy-url="{{ url_for('os_security.policy') }}" data-install-url="{{ url_for('os_security.install') }}">
+  <section class="card">
+    <div class="card-header"><h2>Security updates for Linux</h2><button type="button" class="btn" id="oss-check">Check security updates</button></div>
+    <p>Install security fixes from trusted Ubuntu or Debian repositories. Container images and HAProxy use their own update controls.</p>
+    <div id="oss-message" role="status" aria-live="polite"></div>
+    <dl class="updates-haproxy-versions">
+      <div><dt>Last successful security check</dt><dd id="oss-checked">—</dd></div>
+      <div><dt>Security updates pending</dt><dd id="oss-count">—</dd></div>
+      <div><dt>Last security installation attempt</dt><dd id="oss-installed">—</dd></div>
+    </dl>
+    <p id="oss-state" class="text-muted" role="status" data-i18n-skip translate="no"></p>
+    <p id="oss-native" class="text-muted" data-i18n-skip translate="no"></p>
+  </section>
+  <section class="card">
+    <h2>Security update policy</h2>
+    <p>System settings remain in effect until you explicitly enable panel management. Managed modes pause the native APT upgrade timer; system mode restores its previous state.</p>
+    <form id="oss-policy-form">
+      <div class="oss-policy-grid">
+        <label for="oss-mode">Update mode<select id="oss-mode" class="form-input">
+          <option value="system">Use existing system settings</option><option value="notify">Notify only</option>
+          <option value="auto">Automatically after each check</option><option value="window">Automatically in a time window</option>
+        </select></label>
+        <label for="oss-interval">Security check interval in hours<select id="oss-interval" class="form-input">
+          {% for hour in [1, 2, 4, 6, 12, 24] %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}
+        </select></label>
+        <div class="oss-hours" id="oss-hours" hidden>
+          <label for="oss-start">Install from<select id="oss-start" class="form-input">{% for hour in range(24) %}<option value="{{ hour }}">{{ '%02d:00'|format(hour) }}</option>{% endfor %}</select></label>
+          <label for="oss-end">Install until<select id="oss-end" class="form-input">{% for hour in range(24) %}<option value="{{ hour }}">{{ '%02d:00'|format(hour) }}</option>{% endfor %}</select></label>
+        </div>
+      </div>
+      <p class="text-muted">The installation window uses the server's local time. Saving a managed policy may install the distribution security tools. It does not install pending security updates immediately.</p>
+      <p class="text-muted"><span>Server time zone</span>: <span id="oss-timezone" data-i18n-skip translate="no">—</span></p>
+      <p class="updates-confirm-note">The server never reboots automatically in managed modes. Package updates may restart other affected services. HAProxy, Docker and active maintenance services require a controlled restart.</p>
+      <label for="oss-confirm">Type SECURITY to confirm OS security management</label>
+      <div class="oss-actions"><input id="oss-confirm" class="form-input mono" maxlength="12" autocomplete="off" placeholder="SECURITY" data-i18n-skip translate="no"><button class="btn" id="oss-save" disabled>Save security policy</button></div>
+    </form>
+  </section>
+  <section class="card">
+    <div class="card-header"><h2>Available security fixes</h2><button class="btn" type="button" id="oss-install" disabled>Install security fixes now</button></div>
+    <p>Protected and held packages remain visible here. Install their fixes through the appropriate controlled update process.</p>
+    <div class="table-scroll oss-packages"><table><thead><tr><th>Package</th><th>Installed</th><th>Security version</th><th>State</th></tr></thead><tbody id="oss-packages"></tbody></table></div>
+    <p id="oss-package-note" class="text-muted" data-i18n-skip translate="no"></p>
+    <dialog id="oss-install-dialog" class="oss-dialog" aria-labelledby="oss-install-title">
+      <h2 id="oss-install-title">Install security fixes now</h2><p>Refresh package lists and install available security fixes now, outside the configured window. A server reboot remains manual.</p>
+      <label for="oss-install-confirm">Type SECURITY to confirm OS security management</label>
+      <input id="oss-install-confirm" class="form-input mono" maxlength="12" autocomplete="off" placeholder="SECURITY" data-i18n-skip translate="no">
+      <div class="oss-actions"><button type="button" class="btn" id="oss-install-cancel">Cancel</button><button type="button" class="btn" id="oss-install-go" disabled>Install security fixes now</button></div>
+    </dialog>
+  </section>
+  <section class="card">
+    <h2>Updates awaiting activation</h2><p id="oss-restart" role="status" data-i18n-skip translate="no">Not checked yet.</p>
+    <ul id="oss-services" data-i18n-skip translate="no"></ul>
+    <p>Installed files do not replace libraries already in use. A pending restart means the running service or kernel may still need the security fix.</p>
+    <a class="btn btn-small" href="{{ url_for('system_updates.page') }}">Open software updates</a>
+  </section>
+  <section class="card"><h2>Security maintenance jobs</h2><p id="oss-job" role="status" data-i18n-skip translate="no"></p>
+    <details id="oss-log-details"><summary>Job details</summary><pre id="oss-log" class="config-technical-output mono" data-i18n-skip translate="no"></pre></details>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ url_for('static', filename='js/os_security.js') }}"></script>{% endblock %}
