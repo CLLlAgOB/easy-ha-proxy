@@ -35,6 +35,25 @@ backend tbl_ip_auth
 
 @unittest.skipUnless(m, 'Linux migration command')
 class Boundaries(unittest.TestCase):
+    def test_historical_master_socket_launch_is_qualified_without_allowing_arbitrary_exec(self):
+        command = '/usr/sbin/haproxy -Ws -S /run/haproxy/master.sock,mode,660,user,root,group,haproxy -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid'
+        text = '[Service]\nExecStart=\nExecStart=' + command + '\n'
+        self.assertTrue(m.qualified_service_dropin(text, Path('/etc/haproxy/haproxy.cfg')))
+        self.assertTrue(m.qualified_service_dropin(text.replace(' -S ', ' \\\n    -S '), Path('/etc/haproxy/haproxy.cfg')))
+        for changed in (text.replace('660', '666'), text.replace('-Ws', '-W'), text.replace('/usr/sbin/haproxy', '/bin/sh'),
+                        text.replace('/etc/haproxy/haproxy.cfg', '$CONFIG'), text + 'ExecStartPre=/bin/true\n',
+                        text + 'User=another-user\n', text.replace('[Service]', '[Unit]'), text.replace('ExecStart=\n', '')):
+            with self.subTest(changed=changed):
+                self.assertFalse(m.qualified_service_dropin(changed, Path('/etc/haproxy/haproxy.cfg')))
+
+    def test_service_override_drift_refuses_apply_before_arming_recovery(self):
+        engine = m.Engine(host=Mock(spec=m.Host))
+        engine.state = {'service_dropins': {'override.conf': 'original'}}
+        with patch.object(engine, 'inspect_service_dropins', return_value={'override.conf': 'changed'}):
+            with self.assertRaisesRegex(m.MigrationError, 'changed after preparation'):
+                engine.unchanged_service_dropins()
+        engine.host.command.assert_not_called()
+
     def test_web_summary_is_durable_without_private_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

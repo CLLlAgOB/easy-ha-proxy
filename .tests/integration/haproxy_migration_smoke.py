@@ -178,6 +178,11 @@ backend be_admin
     server fixture 127.0.0.1:19999
 ''')
     if systemd:
+        # Historical gateways expose the master CLI through this exact
+        # override. Retain it through native reload, rollback and recovery.
+        dropins = Path('/etc/systemd/system/haproxy.service.d')
+        dropins.mkdir(parents=True, exist_ok=True)
+        (dropins / 'override.conf').write_text('[Service]\nExecStart=\nExecStart=/usr/sbin/haproxy -Ws \\\n    -S /run/haproxy/master.sock,mode,660,user,root,group,haproxy \\\n    -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid\n')
         for name in ('haproxy-controld', 'easy-ha-proxy-guardd', 'haproxy-certd'):
             (Path('/etc/systemd/system') / (name + '.service')).write_text(
                 '[Unit]\nDescription=Disposable migration qualification fixture\n[Service]\nExecStart=/bin/sleep infinity\n')

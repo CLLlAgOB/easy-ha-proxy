@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import socket
 import sqlite3
@@ -37,6 +38,40 @@ import yaml
 
 
 WEB_MIGRATION_PROTOCOL = 1
+SERVICE_DROPIN_DIRS = tuple(Path(path) for path in ('/etc/systemd/system/haproxy.service.d',
+    '/run/systemd/system/haproxy.service.d', '/usr/lib/systemd/system/haproxy.service.d', '/lib/systemd/system/haproxy.service.d'))
+
+
+def qualified_service_dropin(text, config):
+    """Qualify only the historical fixed master-socket launch contract.
+
+    systemd continuations are allowed, but shells, environment expansions,
+    arbitrary socket permissions and other execution overrides remain refused.
+    """
+    section, execution = '', []
+    for line in re.sub(r'\\\r?\n\s*', ' ', text).splitlines():
+        line = line.strip()
+        if not line or line.startswith(('#', ';')):
+            continue
+        if line.startswith('['):
+            section = line
+            continue
+        match = re.match(r'(Exec\w*|Type|RootDirectory|User|Group)\s*=(.*)$', line)
+        if match:
+            if section != '[Service]':
+                return False
+            execution.append((match[1], match[2].strip()))
+    if not execution:
+        return True
+    if len(execution) != 2 or execution[0] != ('ExecStart', '') or execution[1][0] != 'ExecStart':
+        return False
+    try:
+        command = shlex.split(execution[1][1])
+    except ValueError:
+        return False
+    return command == ['/usr/sbin/haproxy', '-Ws', '-S',
+                       '/run/haproxy/master.sock,mode,660,user,root,group,haproxy',
+                       '-f', str(config), '-p', '/run/haproxy.pid']
 
 
 class MigrationError(RuntimeError):
@@ -725,10 +760,7 @@ class Engine:
             raise MigrationError('The installed binary differs from the exact rollback package')
         if Path('/etc/systemd/system/haproxy.service').exists() or digest(installed) != digest(packaged):
             raise MigrationError('Custom HAProxy service units require a separate qualification')
-        for directory in (Path('/etc/systemd/system/haproxy.service.d'), Path('/run/systemd/system/haproxy.service.d')):
-            for dropin in directory.glob('*.conf'):
-                if re.search(r'^\s*(?:Exec\w*|Type|RootDirectory|User|Group)\s*=', dropin.read_text(), re.M):
-                    raise MigrationError('Custom HAProxy execution overrides require a separate qualification')
+        self.state['service_dropins'] = self.inspect_service_dropins()
         control = self.directory / 'baseline-control'
         self.host.command(['/usr/bin/dpkg-deb', '-e', str(self.directory / 'haproxy-old.deb'), str(control)])
         for name in ('preinst', 'postinst', 'prerm', 'postrm'):
@@ -736,6 +768,24 @@ class Engine:
             if path.exists() and re.search(r'\bsystemctl\s+(?:--\S+\s+)*(?:stop|restart|try-restart)\b', path.read_text()):
                 raise MigrationError('Baseline package actions bypass policy-rc.d')
         shutil.rmtree(target)
+
+    def inspect_service_dropins(self):
+        result, visited = {}, set()
+        for directory in SERVICE_DROPIN_DIRS:
+            if directory.resolve() in visited:
+                continue
+            visited.add(directory.resolve())
+            for dropin in directory.glob('*.conf'):
+                metadata = dropin.lstat()
+                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022
+                        or not qualified_service_dropin(dropin.read_text(), self.paths.config)):
+                    raise MigrationError('Custom HAProxy execution overrides require a separate qualification: ' + dropin.name)
+                result[str(dropin)] = digest(dropin)
+        return result
+
+    def unchanged_service_dropins(self):
+        if 'service_dropins' in self.state and self.inspect_service_dropins() != self.state['service_dropins']:
+            raise MigrationError('HAProxy service overrides changed after preparation; prepare a new transaction')
 
     def holds(self):
         text = self.host.command(['/usr/bin/dpkg', '--get-selections']).stdout
@@ -1274,6 +1324,7 @@ Pin-Priority: 100
             if self.state['phase'] != 'prepared':
                 raise MigrationError('Apply requires a freshly prepared transaction')
             self.check_artifacts()
+            self.unchanged_service_dropins()
             for path in (self.paths.config, self.paths.variables, self.paths.policy, self.paths.repository,
                          self.paths.priorities, self.paths.signing_key):
                 self.unchanged(path)
@@ -1289,6 +1340,7 @@ Pin-Priority: 100
             _, watchdog = self.units()
             try:
                 self.pause()
+                self.unchanged_service_dropins()
                 # A UI transaction can finish between the first check and
                 # stopping controld. Recheck under the quiesced control plane.
                 for path in (self.paths.config, self.paths.variables, self.paths.policy, self.paths.repository,
