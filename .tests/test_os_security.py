@@ -33,6 +33,9 @@ def origin(**values):
 @unittest.skipUnless(s, 'Linux security worker')
 class SecurityOrigins(unittest.TestCase):
     def test_configuration_reload_uses_the_actual_distribution_python_apt_api(self):
+        available = subprocess.run(['/usr/bin/python3', '-c', 'import apt_pkg'], capture_output=True)
+        if available.returncode:
+            self.skipTest('python3-apt is exercised by the dedicated native security workflow')
         code = ('import sys; sys.path.insert(0, sys.argv[1]); import apt_pkg; import os_security as s; '
                 'apt_pkg.init_config(); apt_pkg.config.set("EHPFixture::Sentinel", "old"); '
                 's.reload_apt_config(apt_pkg); assert not apt_pkg.config.find("EHPFixture::Sentinel"); '
@@ -222,6 +225,7 @@ class SecurityExecution(unittest.TestCase):
         patch.object(s, 'restart_status', return_value={'reboot_required': True, 'services': ['haproxy.service'], 'error': None}).start()
         patch.object(s, 'native_timer', return_value={'enabled': 'disabled', 'active': False}).start()
         self.command = patch.object(s, 'command', return_value=(0, 'native fixture')).start()
+        self.installer = patch.object(s, 'installer_available', return_value=True).start()
         config = Mock()
         config.list.return_value = ['APT', 'Dir', 'DPkg']
         config.find.return_value = '0'; config.find_b.return_value = False
@@ -264,6 +268,13 @@ class SecurityExecution(unittest.TestCase):
         self.assertEqual(result['last_success'], 1000)
         self.assertEqual(result['package_count'], 1)
         self.command.assert_not_called()
+
+    def test_missing_installer_never_reports_success_or_starts_an_install_command(self):
+        self.installer.return_value = False
+        with self.assertRaisesRegex(s.SecurityError, 'installer is not installed'):
+            s.run('install', self.root)
+        self.command.assert_not_called()
+        self.assertEqual(json.loads((self.root / 'status.json').read_text())['state'], 'unknown')
 
     def test_a_configuration_change_refreshes_native_state_without_faking_a_security_check(self):
         with patch.object(s, 'configure'):

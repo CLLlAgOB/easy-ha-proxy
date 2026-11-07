@@ -396,6 +396,10 @@ def reload_apt_config(apt_pkg):
     apt_pkg.init_system()
 
 
+def installer_available():
+    return Path('/usr/bin/unattended-upgrade').is_file()
+
+
 def run(action, root, requested=None):
     distro, codename = platform()
     try:
@@ -440,7 +444,7 @@ def run(action, root, requested=None):
         install = action == 'install' or (action == 'cycle' and (value['mode'] == 'auto' or value['mode'] == 'window' and window_open(value)))
         if install:
             assert_managed(policy)
-            if not Path('/usr/bin/unattended-upgrade').is_file():
+            if not installer_available():
                 raise SecurityError('The security installer is not installed; save the policy again')
             if any(not row['protected'] and not row['held'] for row in before):
                 print('EHP-PROGRESS phase=playbook', flush=True)
