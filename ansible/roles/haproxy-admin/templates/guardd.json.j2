@@ -4,7 +4,8 @@
   "maintenance_interval_seconds": {{ guardd_maintenance_interval | default(300) }},
   "sources": {
     "haproxy_socket": {{ (guardd_haproxy_socket | default(socket_path | default('/run/haproxy/admin.sock'))) | tojson }},
-    "log_file": {{ (guardd_log_file | default(haproxy_log | default('/var/log/haproxy.log'))) | tojson }}
+    "log_file": {{ (guardd_log_file | default(haproxy_log | default('/var/log/haproxy.log'))) | tojson }},
+    "authelia_log_file": {{ (guardd_authelia_log_file | default(authelia_log_file | default('/opt/authelia/logs/authelia.log'))) | tojson }}
   },
   "exclusions": {
     "whitelist_files": {{ (guardd_whitelist_files | default([

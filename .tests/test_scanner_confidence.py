@@ -103,7 +103,7 @@ class ServedPathTests(unittest.TestCase):
                 self.assertFalse(guardd.is_served(status))
 
     def test_the_rule_is_applied_before_a_finding_is_emitted(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = GUARDD.read_text(encoding="utf-8").split("    def observe_request(", 1)[1]
         # Up to the branch that emits the finding, however much sits between.
         block = source.split("category = classify_path(request.path)")[1].split(
             "        if category:\n"
@@ -119,7 +119,7 @@ class ServedPathTests(unittest.TestCase):
         # everything alike -- one gateway returned the same 1477 bytes for
         # /.env, /backup.sql and /phpinfo.php -- or a genuine leak. Neither
         # is a reason to stop scoring the client that asked.
-        source = GUARDD.read_text(encoding="utf-8")
+        source = GUARDD.read_text(encoding="utf-8").split("    def observe_request(", 1)[1]
         # Up to the branch that emits the finding, however much sits between.
         block = source.split("category = classify_path(request.path)")[1].split(
             "        if category:\n"

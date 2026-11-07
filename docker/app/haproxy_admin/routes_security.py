@@ -54,6 +54,50 @@ def api_traps():
         return jsonify(security.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/security/detection-rules/context")
+def api_detection_context():
+    try:
+        return jsonify(security.detection_context())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules/context")
+def api_set_detection_context():
+    if not getattr(g, "is_superadmin", False):
+        record_request("adaptive.rules", object_type="detection_context", result=RESULT_DENIED,
+                       detail="superadmin required")
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    if request.content_length and request.content_length > 131072:
+        return jsonify({"ok": False, "error": "settings too large"}), 413
+    try:
+        before = security.detection_context()["config"]
+        result = security.set_detection_context(request.get_json(silent=True))
+        record_request("adaptive.rules", object_type="detection_context", before=before,
+                       after=result["config"], result=RESULT_SUCCESS, detail="contextual detection settings")
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules/preview")
+def api_detection_preview():
+    # Do not audit this request, even on failure: its query can contain a
+    # password-reset token. CSRF is enforced by the application as usual.
+    if not getattr(g, "is_superadmin", False):
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    if request.content_length and request.content_length > 8192:
+        return jsonify({"ok": False, "error": "request too large"}), 413
+    try:
+        return jsonify(security.detection_preview(request.get_json(silent=True)))
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid request fields"}), 400
+    except GuarddUnavailable:
+        return jsonify({"ok": False, "unavailable": True, "error": "detection engine unavailable"}), 503
+
+
 @bp.post("/api/security/traps")
 def api_set_traps():
     """Replace the trap names. A request for one bans the address that made it."""

@@ -27,6 +27,7 @@ import contextlib
 import grp
 import heapq
 import hmac
+import hashlib
 import ipaddress
 import itertools
 import json
@@ -42,6 +43,7 @@ import threading
 import time
 import zlib
 from collections import Counter, OrderedDict, deque
+from array import array
 from datetime import datetime
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
@@ -716,12 +718,14 @@ def _dismissed_candidates(database: "SecurityDatabase") -> List[str]:
 
 
 def dismiss_candidate(database: "SecurityDatabase", path: str,
-                      restore: bool = False) -> Dict[str, Any]:
+                      restore: bool = False, host: str = "") -> Dict[str, Any]:
     """Hide a suggestion for good, or bring a hidden one back."""
 
     text = (path or "").strip()
     if not text.startswith("/") or len(text) > CANDIDATE_MAX_PATH_LENGTH:
         raise ValueError("expected a path")
+    if host:
+        text = json.dumps([detection_host(host), text], separators=(",", ":"))
     dismissed = [item for item in _dismissed_candidates(database) if item != text]
     if not restore:
         dismissed.append(text)
@@ -1119,6 +1123,7 @@ class ParsedRequest:
     # the last place that belongs.
     query_flag: str = ""
     path_flag: str = ""
+    observation_flags: Tuple[str, ...] = ()
     # Filled in only when the request log is on. They cost a little more
     # parsing per line, so they stay optional rather than always paid for.
     ts: int = 0
@@ -1223,6 +1228,9 @@ def classify_raw_path(uri: str) -> str:
     of an attack; require repeated traversal and a specific sensitive target.
     """
     text = (uri or "").split("?", 1)[0].split("#", 1)[0][:2048]
+    lower = text.lower()
+    if ".." not in text and "%2e" not in lower and "%25" not in lower:
+        return ""
     if text.startswith(("http://", "https://")):
         with contextlib.suppress(ValueError):
             text = urlparse(text).path
@@ -1403,6 +1411,7 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         host=extract_host(uri) if not host else host[:MAX_HOST_LENGTH],
         query_flag=classify_query(uri),
         path_flag=classify_raw_path(uri),
+        observation_flags=observation_flags(uri),
         ts=stamp,
         request_id=request_id,
         bytes_out=bytes_out,
@@ -1452,6 +1461,7 @@ class GuardConfig:
     poll_interval_seconds: int = 10
     haproxy_socket: str = "/run/haproxy/admin.sock"
     log_file: str = "/var/log/haproxy.log"
+    authelia_log_file: str = ""
     log_read_bytes_per_cycle: int = 4 * 1024 * 1024
     # The live activity page keeps the latest requests in memory. Bounded by
     # count and by age, whichever bites first; 0 records turns it off.
@@ -1525,6 +1535,7 @@ def load_config(path: str) -> GuardConfig:
         log_file=str(
             sources.get("log_file") or "/var/log/haproxy.log"
         ).strip(),
+        authelia_log_file=str(sources.get("authelia_log_file") or "").strip(),
         log_read_bytes_per_cycle=_clamp_int(
             limits.get("log_read_bytes_per_cycle"),
             default=4 * 1024 * 1024,
@@ -2947,13 +2958,581 @@ def _address_key(ip: str) -> int:
     return zlib.crc32(ip.encode("utf-8", "replace"))
 
 
+DETECTION_CONFIG_KEY = "detection_context_v1"
+DETECTION_STATS_KEY = "detection_observations_v1"
+DETECTION_SLOW_KEY = "detection_slow_v1"
+DETECTION_MAX_RULES = 128
+DETECTION_MAX_EXCEPTIONS = 128
+DETECTION_MAX_TRACKED = 256
+DETECTION_MAX_STATS = 128
+DETECTION_TTL = 24 * 3600
+DETECTION_PROFILES = {
+    "web": {"methods": ["GET", "HEAD", "POST"], "routes": []},
+    "api": {"methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], "routes": ["/api"]},
+    "webdav": {"methods": ["PROPFIND", "PROPPATCH", "REPORT", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"],
+               "routes": ["/remote.php/dav", "/ocs/v2.php", "/.well-known"]},
+    "1c": {"methods": ["GET", "POST", "OPTIONS"], "routes": []},
+    "docker": {"methods": ["GET", "POST", "DELETE"], "routes": ["/v1.47", "/containers", "/images", "/info", "/version", "/v2"]},
+}
+DETECTION_NEW_RULES = {
+    "observe:sql-injection": "SQL query structure in a parameter; observation by default",
+    "observe:script-injection": "Script or event-handler markup in a parameter; observation by default",
+    "observe:encoded-sensitive-path": "A sensitive path appears after a second decode; observation by default",
+    "observe:service-api-probe": "Container, cloud metadata or diagnostic API route; observation by default",
+    "behavior:slow-enumeration": "24 distinct missing paths, 90% failures, three half-hour windows within six hours",
+}
+DETECTION_WARNING_RULES = {
+    "auth:credential-spray": "Ten different usernames from one IP within fifteen minutes; warning only",
+    "auth:distributed-login": "Ten different IPs target one username within fifteen minutes; warning only",
+    "auth:failed-login-burst": "Twenty failed first-factor logins from one IP within fifteen minutes; warning only",
+}
+# No nested quantifiers, arbitrary user regexes or request bodies. Values are
+# examined transiently by the log parser and only these names survive it.
+OBSERVATION_QUERIES = {
+    "observe:sql-injection": re.compile(r"\bunion\s+(?:all\s+)?select\b|['\"]\s*(?:or|and)\s+['\"\d]+\s*=|\b(?:sleep|benchmark)\s*\(", re.I),
+    "observe:script-injection": re.compile(r"<\s*script\b|<[^>\r\n]{0,160}\bon(?:error|load)\s*=|javascript\s*:", re.I),
+}
+SERVICE_API_PROBE = re.compile(
+    r"^/(?:v[0-9]{1,2}(?:\.[0-9]{1,2})?/(?:containers/(?:json|[^/]{1,80}/json)|images/json|info|version)"
+    r"|v2/_catalog|latest/meta-data(?:/[^?]*)?|computemetadata/v1(?:/[^?]*)?"
+    r"|actuator/(?:env|heapdump|configprops|mappings))(?:/|$)", re.I)
+
+
+def observation_flags(uri: str) -> Tuple[str, ...]:
+    """Privacy boundary: return identifiers, never an input value."""
+    text = uri[:4096]
+    flags = []
+    query = text.partition("?")[2].partition("#")[0][:2048]
+    for part in query.split("&", 64) if query else ():
+        value = part.partition("=")[2] if "=" in part else part
+        for _ in range(2):
+            value = unquote_plus(value)
+        for name, pattern in OBSERVATION_QUERIES.items():
+            if name not in flags and pattern.search(value):
+                flags.append(name)
+    raw_path = text.partition("?")[0].partition("#")[0]
+    # Absolute HTTP/2 request targets are common in HAProxy's log format.
+    path = raw_path
+    if path.startswith(("http://", "https://")):
+        with contextlib.suppress(ValueError):
+            path = urlparse(path).path
+    if SERVICE_API_PROBE.search(path[:200]):
+        flags.append("observe:service-api-probe")
+    if "%25" in raw_path.lower():
+        first = normalize_path(raw_path)
+        second = normalize_path(unquote(raw_path))
+        if second != first and category_is_decisive(classify_path(second)):
+            flags.append("observe:encoded-sensitive-path")
+    return tuple(flags)
+
+
+def detection_host(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 253:
+        raise ValueError("expected a host name without a port")
+    host = value.lower().rstrip(".")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host) or ".." in host:
+        raise ValueError("expected a host name without a port")
+    return host
+
+
+def detection_scope(row: Dict[str, Any]) -> Dict[str, Any]:
+    hosts = row.get("hosts")
+    methods = row.get("methods", [])
+    statuses = row.get("statuses", [])
+    if not isinstance(hosts, list) or not 1 <= len(hosts) <= 8:
+        raise ValueError("choose one to eight exact host names")
+    if not isinstance(methods, list) or len(methods) > 16:
+        raise ValueError("expected at most sixteen methods")
+    if any(not isinstance(m, str) or not re.fullmatch(r"[A-Z]{3,16}", m) for m in methods):
+        raise ValueError("expected uppercase HTTP methods")
+    if not isinstance(statuses, list) or len(statuses) > 16 or any(type(s) is not int or not 100 <= s <= 599 for s in statuses):
+        raise ValueError("expected at most sixteen HTTP status codes")
+    match = row.get("match", "exact")
+    value = row.get("value")
+    if match not in ("exact", "prefix", "segment"):
+        raise ValueError("match must be exact, prefix or segment")
+    if not isinstance(value, str) or not 1 <= len(value) <= 200 or any(c in value for c in "?#%\\ ") or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("expected a plain path without parameters or escapes")
+    if match == "segment":
+        if "/" in value or value in (".", ".."):
+            raise ValueError("expected one path segment")
+    elif not value.startswith("/") or normalize_path(value) != value:
+        raise ValueError("expected a canonical path starting with a slash")
+    if match == "prefix" and value == "/":
+        raise ValueError("a prefix must name a route")
+    return {"hosts": sorted(set(detection_host(h) for h in hosts)), "methods": sorted(set(methods)),
+            "match": match, "value": value.rstrip("/") or "/", "statuses": sorted(set(statuses))}
+
+
+def scope_matches(row: Dict[str, Any], request: ParsedRequest) -> bool:
+    if request.host.lower().rstrip(".") not in row["hosts"]:
+        return False
+    if row["methods"] and request.method not in row["methods"]:
+        return False
+    if row["statuses"] and request.status not in row["statuses"]:
+        return False
+    path, value = request.path, row["value"]
+    if row["match"] == "exact":
+        return path == value
+    if row["match"] == "segment":
+        return value in path.split("/")
+    return path == value or path.startswith(value + "/")
+
+
+def builtin_detection_ids() -> Set[str]:
+    return ({"path:" + c for c in set(SCANNER_SEGMENTS.values()) | set(SCANNER_PATHS.values())}
+            | {"query:" + c for c in QUERY_RULES}
+            | {"ua:" + token for token, _ in USER_AGENTS.values()}
+            | {"raw:path-traversal"} | set(DETECTION_NEW_RULES) | set(DETECTION_WARNING_RULES))
+
+
+class DetectionSettings(dict):
+    """JSON document plus private indexes; not another persisted format."""
+
+    def __init__(self, data: Dict[str, Any]) -> None:
+        super().__init__(data)
+        self.rules_by_host: Dict[str, List[Dict[str, Any]]] = {}
+        self.exceptions_by_scope: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for row in self.get("rules", []):
+            for host in row["hosts"]:
+                self.rules_by_host.setdefault(host, []).append(row)
+        for row in self.get("exceptions", []):
+            for host in row["hosts"]:
+                self.exceptions_by_scope.setdefault((row["rule"], host), []).append(row)
+
+
+def validate_detection_config(data: Any) -> DetectionSettings:
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        raise ValueError("expected detection configuration version 1")
+    rules, exceptions, modes, profiles = (data.get(k, default) for k, default in
+                                          (("rules", []), ("exceptions", []), ("modes", {}), ("profiles", {})))
+    if not isinstance(rules, list) or len(rules) > DETECTION_MAX_RULES:
+        raise ValueError("too many contextual rules")
+    if not isinstance(exceptions, list) or len(exceptions) > DETECTION_MAX_EXCEPTIONS:
+        raise ValueError("too many exceptions")
+    if not isinstance(modes, dict) or len(modes) > DETECTION_MAX_RULES:
+        raise ValueError("too many rule modes")
+    checked, ids = [], set()
+    for row in rules:
+        if not isinstance(row, dict) or not re.fullmatch(r"custom:[a-z0-9-]{1,48}", str(row.get("id", ""))):
+            raise ValueError("expected a stable custom rule identifier")
+        name = row["id"]
+        if name in ids:
+            raise ValueError("duplicate rule identifier")
+        ids.add(name)
+        category = row.get("category", "custom")
+        if not isinstance(category, str) or category not in set(SCANNER_SEGMENTS.values()) | set(SCANNER_PATHS.values()) | {"custom"}:
+            raise ValueError("unknown category")
+        mode = row.get("mode", "observe")
+        if mode not in ("observe", "enforce"):
+            raise ValueError("mode must be observe or enforce")
+        checked.append({"id": name, **detection_scope(row), "category": category, "mode": mode})
+    known = builtin_detection_ids() | ids
+
+    def supported_id(value: Any) -> bool:
+        # A shipped rule can disappear in an update. Keep its scoped settings
+        # dormant so an update cannot resurrect an old false positive.
+        return isinstance(value, str) and (value in known or bool(re.fullmatch(
+            r"(?:path|query|ua|raw|observe|behavior|auth):[A-Za-z0-9_. /+:-]{1,100}", value)))
+
+    if any(not supported_id(k) or v not in ("observe", "enforce") for k, v in modes.items()):
+        raise ValueError("unknown rule or mode")
+    if any(v == "enforce" and (k in DETECTION_WARNING_RULES or k.startswith("auth:")) for k, v in modes.items()):
+        raise ValueError("login correlations are warning-only")
+    exclusions, exclusion_ids = [], set()
+    for row in exceptions:
+        if not isinstance(row, dict) or not re.fullmatch(r"exception:[a-z0-9-]{1,48}", str(row.get("id", ""))):
+            raise ValueError("expected an exception identifier")
+        if row["id"] in exclusion_ids or not supported_id(row.get("rule")):
+            raise ValueError("duplicate exception or unknown rule")
+        reason, expires = row.get("reason"), row.get("expires", 0)
+        if not isinstance(reason, str) or not 3 <= len(reason.strip()) <= 200:
+            raise ValueError("an exception needs a reason of 3 to 200 characters")
+        if type(expires) is not int or not 0 <= expires <= 4102444800:
+            raise ValueError("expected an expiry timestamp or zero")
+        exclusion_ids.add(row["id"])
+        exclusions.append({"id": row["id"], "rule": row["rule"], **detection_scope(row),
+                           "reason": reason.strip(), "expires": expires})
+    if not isinstance(profiles, dict) or len(profiles) > 64 or any(not isinstance(v, str) or v not in DETECTION_PROFILES for v in profiles.values()):
+        raise ValueError("unknown site profile or too many sites")
+    revision = data.get("revision", 0)
+    if type(revision) is not int or not 0 <= revision < 2**53:
+        raise ValueError("invalid settings revision")
+    return DetectionSettings({"version": 1, "revision": revision, "rules": checked, "exceptions": exclusions, "modes": dict(modes),
+                              "profiles": {detection_host(k): v for k, v in profiles.items()}})
+
+
+class DetectionContext:
+    """One bounded, non-scoring observation store; settings swap atomically.
+
+    Trusted observations never enter security_events. Changing a mode affects
+    future requests only: there is no replay from these aggregates into bans.
+    """
+
+    def __init__(self, database: "SecurityDatabase") -> None:
+        self.database = database
+        self._lock = threading.RLock()
+        self.config = DetectionSettings({"version": 1, "revision": 0, "rules": [], "exceptions": [], "modes": {}, "profiles": {}})
+        self.stats: OrderedDict = OrderedDict()
+        self.slow: OrderedDict = OrderedDict()
+        self.evictions = 0
+        self.state_errors = 0
+        self.last_saved = 0
+        raw_config = database.get_state(DETECTION_CONFIG_KEY, "")
+        if raw_config:
+            try:
+                self.config = validate_detection_config(json.loads(raw_config))
+            except (ValueError, TypeError, RecursionError):
+                self.state_errors += 1
+                LOG.warning("ignoring invalid saved contextual detection settings")
+        now = _utc_now()
+        known = builtin_detection_ids() | {r["id"] for r in self.config["rules"]}
+        for row in self._saved_rows(DETECTION_STATS_KEY, DETECTION_MAX_STATS):
+            try:
+                name, first, last = row["id"], int(row["first"]), int(row["last"])
+                if not isinstance(name, str) or name not in known or not now - DETECTION_TTL <= last <= now + 60 or first > last:
+                    continue
+                counts = {k: int(row[k]) for k in ("hits", "trusted", "excepted", "observe", "enforce")}
+                if any(not 0 <= n <= 10**12 for n in counts.values()):
+                    raise ValueError("invalid counter")
+                ips = {int(v) for v in row["ips"][:64]}
+                hosts = {detection_host(k): int(v) for k, v in list(row["hosts"].items())[:8]}
+                if any(not 0 <= v < 2**32 for v in ips) or any(v < 0 for v in hosts.values()):
+                    raise ValueError("invalid aggregate")
+                self.stats[name] = {"id": name, "first": first, "last": last, **counts, "ips": ips, "hosts": hosts}
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                self.state_errors += 1
+        for row in self._saved_rows(DETECTION_SLOW_KEY, DETECTION_MAX_TRACKED):
+            try:
+                key, last, buckets = row
+                ip, host = key
+                ipaddress.ip_address(ip)
+                host = detection_host(host)
+                restored = {}
+                for slot, missing, total, good, paths in buckets[:12]:
+                    if now // 1800 - 11 <= int(slot) <= now // 1800:
+                        counts = [int(missing), int(total), int(good)]
+                        if any(not 0 <= n <= 10**12 for n in counts) or counts[0] + counts[2] > counts[1]:
+                            raise ValueError("invalid bucket")
+                        restored[int(slot)] = [*counts, array("I", (int(v) for v in paths[:32]))]
+                if restored and now - 6 * 3600 <= int(last) <= now + 60:
+                    self.slow[(ip, host)] = {"last": int(last), "buckets": restored}
+            except (ValueError, TypeError, KeyError, OverflowError):
+                self.state_errors += 1
+
+    def _saved_rows(self, key: str, limit: int) -> List[Any]:
+        try:
+            rows = json.loads(self.database.get_state(key, "[]"))
+            if isinstance(rows, list):
+                return rows[:limit]
+        except (ValueError, TypeError, RecursionError):
+            pass
+        self.state_errors += 1
+        return []
+
+    def replace(self, data: Any) -> Dict[str, Any]:
+        checked = validate_detection_config(data)
+        with self._lock:
+            if checked["revision"] != self.config["revision"]:
+                raise ValueError("settings changed; reload before saving")
+            checked["revision"] += 1
+            reset_slow = (checked["modes"].get("behavior:slow-enumeration", "observe") == "enforce"
+                          and self.config["modes"].get("behavior:slow-enumeration", "observe") != "enforce")
+            states = {DETECTION_CONFIG_KEY: json.dumps(checked)}
+            if reset_slow:
+                states[DETECTION_SLOW_KEY] = "[]"
+            self.database.set_states(states)
+            if reset_slow:
+                self.slow.clear()
+            self.config = checked
+        return self.summary()
+
+    def _action(self, rule: str, request: ParsedRequest, now: int, config: DetectionSettings, default: str) -> Tuple[str, str]:
+        for exception in config.exceptions_by_scope.get((rule, request.host.lower().rstrip(".")), ()):
+            if exception["rule"] == rule and (not exception["expires"] or exception["expires"] > now) and scope_matches(exception, request):
+                return "excepted", exception["id"]
+        return config["modes"].get(rule, default), ""
+
+    def inspect(self, request: ParsedRequest, now: int, trusted: bool = False, record: bool = True,
+                catch_all: bool = False) -> List[Dict[str, Any]]:
+        config = self.config
+        found = []
+        category = classify_path(request.path)
+        if category and (category_is_decisive(category) or not is_served(request.status) or catch_all):
+            found.append(("path:" + category, category, "enforce", EVENT_SCANNER_DECISIVE if category_is_decisive(category) else EVENT_SCANNER_PATH))
+        if request.query_flag:
+            found.append(("query:" + request.query_flag, request.query_flag, "enforce", EVENT_QUERY_INJECTION))
+        if request.path_flag:
+            found.append(("raw:path-traversal", request.path_flag, "enforce", EVENT_SCANNER_DECISIVE))
+        agent, category = classify_user_agent(request.user_agent)
+        if agent:
+            found.append(("ua:" + agent, category, "enforce", EVENT_SCANNER_DECISIVE if category_is_decisive(category) else EVENT_SCANNER_PATH))
+        for name in request.observation_flags:
+            if name in DETECTION_NEW_RULES:
+                event = (EVENT_SCANNER_PATH if name == "observe:service-api-probe" else
+                         EVENT_SCANNER_DECISIVE if name == "observe:encoded-sensitive-path" else EVENT_QUERY_INJECTION)
+                found.append((name, name.split(":", 1)[1], "observe", event))
+        for rule in config.rules_by_host.get(request.host.lower().rstrip("."), ()):
+            if scope_matches(rule, request):
+                found.append((rule["id"], rule["category"], rule["mode"], EVENT_SCANNER_DECISIVE if category_is_decisive(rule["category"]) else EVENT_SCANNER_PATH))
+        results = []
+        for rule, category, default, event in found:
+            mode, exception = self._action(rule, request, now, config, default)
+            action = mode if mode == "excepted" else "trusted" if trusted else mode
+            row = {"id": rule, "category": category, "action": action, "exception": exception,
+                   "event_type": event, "points": DEFAULT_WEIGHTS.get(event, 0) if action == "enforce" else 0}
+            results.append(row)
+            if record:
+                self.note(rule, request, now, action)
+        return results
+
+    def note(self, rule: str, request: ParsedRequest, now: int, action: str) -> None:
+        with self._lock:
+            row = self.stats.get(rule)
+            if row is None or now - row["first"] >= DETECTION_TTL:
+                row = {"id": rule, "first": now, "last": now, "hits": 0, "trusted": 0, "excepted": 0,
+                       "observe": 0, "enforce": 0, "ips": set(), "hosts": {}}
+                self.stats[rule] = row
+            row["last"] = now
+            row["hits"] += 1
+            row[action] += 1
+            if len(row["ips"]) < 64:
+                row["ips"].add(_address_key(request.client_ip))
+            if request.host in row["hosts"] or len(row["hosts"]) < 8:
+                row["hosts"][request.host[:253]] = row["hosts"].get(request.host[:253], 0) + 1
+            self.stats.move_to_end(rule)
+            while len(self.stats) > DETECTION_MAX_STATS:
+                self.stats.popitem(last=False)
+                self.evictions += 1
+
+    def observe_slow(self, request: ParsedRequest, now: int, handled: bool) -> str:
+        # No 401 authentication failures, gateway denials, assets or same-size
+        # guesses. A NAT full of useful traffic also fails the ratio test.
+        if handled or not request.host or is_asset(request.path) or request.path in ("", "/"):
+            return ""
+        key, slot = (request.client_ip, request.host[:253]), now // 1800
+        with self._lock:
+            config = self.config
+            entry = self.slow.setdefault(key, {"last": now, "buckets": {}})
+            entry["last"] = max(entry["last"], now)
+            newest_slot = entry["last"] // 1800
+            if slot < newest_slot - 11:
+                return ""
+            self.slow.move_to_end(key)
+            while len(self.slow) > DETECTION_MAX_TRACKED:
+                self.slow.popitem(last=False)
+                self.evictions += 1
+            buckets = entry["buckets"]
+            for old in [b for b in buckets if b < newest_slot - 11]:
+                del buckets[old]
+            bucket = buckets.setdefault(slot, [0, 0, 0, array("I")])
+            bucket[1] += 1
+            if request.status in (404, 410):
+                bucket[0] += 1
+                digest = _address_key(request.path)
+                if len(bucket[3]) < 32 and digest not in bucket[3]:
+                    bucket[3].append(digest)
+            elif is_served(request.status):
+                bucket[2] += 1
+            missing = sum(b[0] for b in buckets.values())
+            total = sum(b[1] for b in buckets.values())
+            if missing < 24 or missing * 10 < total * 9:
+                return ""
+            distinct = set().union(*(b[3] for b in buckets.values()))
+            windows = sum(bool(b[3]) for b in buckets.values())
+            if len(distinct) < 24 or windows < 3:
+                return ""
+        rule = "behavior:slow-enumeration"
+        action, _ = self._action(rule, request, now, config, "observe")
+        self.note(rule, request, now, action)
+        return action
+
+    def persist(self, now: int, force: bool = False) -> None:
+        if not force and now - self.last_saved < 60:
+            return
+        with self._lock:
+            self.stats = OrderedDict((k, v) for k, v in self.stats.items() if v["last"] >= now - DETECTION_TTL)
+            self.slow = OrderedDict((k, v) for k, v in self.slow.items() if v["last"] >= now - 6 * 3600)
+            stats = [{**v, "ips": sorted(v["ips"])} for v in self.stats.values()]
+            slow = [[list(k), v["last"], [[s, *b[:3], sorted(b[3])] for s, b in v["buckets"].items()]] for k, v in self.slow.items()]
+            self.database.set_states({DETECTION_STATS_KEY: json.dumps(stats), DETECTION_SLOW_KEY: json.dumps(slow)})
+            self.last_saved = now
+
+    def summary(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"ok": True, "config": json.loads(json.dumps(self.config)),
+                    "profiles": DETECTION_PROFILES, "builtin_ids": sorted(builtin_detection_ids()),
+                    "new_rules": {**DETECTION_NEW_RULES, **DETECTION_WARNING_RULES},
+                    "existing_behavior": [
+                        {"id": EVENT_SCANNER_MULTI, "categories": MULTI_CATEGORY_MIN, "hours": MULTI_CATEGORY_WINDOW // 3600},
+                        {"id": EVENT_LOW_AND_SLOW, "hits": LOW_AND_SLOW_MIN_HITS, "categories": LOW_AND_SLOW_MIN_CATEGORIES,
+                         "hours": LOW_AND_SLOW_WINDOW // 3600},
+                        {"id": EVENT_NOT_FOUND_ENUM, "paths": NOT_FOUND_MIN_DISTINCT, "minutes": NOT_FOUND_WINDOW // 60},
+                        {"id": EVENT_WIDE_ENUM, "paths": WIDE_ENUM_MIN, "minutes": WIDE_ENUM_WINDOW // 60},
+                        {"id": EVENT_MASS_ENUM, "paths": MASS_ENUM_MIN, "minutes": WIDE_ENUM_WINDOW // 60},
+                        {"id": EVENT_RECURRING, "gap_hours": RECURRING_GAP // 3600, "days": RECURRING_WINDOW // 86400},
+                    ],
+                    "warning_only": sorted(DETECTION_WARNING_RULES),
+                    "stats": [{**{k: v for k, v in row.items() if k != "ips"}, "unique_ips": len(row["ips"]),
+                               "unique_ips_capped": len(row["ips"]) >= 64} for row in self.stats.values()],
+                    "limits": {"tracked": DETECTION_MAX_TRACKED, "tracked_now": len(self.slow),
+                               "evictions": self.evictions, "window_hours": 24,
+                               "stats_capacity": DETECTION_MAX_STATS, "state_errors": self.state_errors}}
+
+    def preview(self, data: Any, exclusions: "ExclusionModel", now: int,
+                policy: Optional[ScoringPolicy] = None) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+        uri, method, status = data.get("url", "/"), data.get("method", "GET"), data.get("status", 404)
+        agent = data.get("user_agent", "")
+        host = detection_host(data.get("host", ""))
+        if not isinstance(uri, str) or len(uri) > 4096 or not uri.startswith("/") or uri.startswith("//"):
+            raise ValueError("expected a request path of at most 4096 characters")
+        if type(status) is not int or not 100 <= status <= 599 or not isinstance(method, str) or not re.fullmatch(r"[A-Z]{3,16}", method):
+            raise ValueError("invalid HTTP method or status")
+        if not isinstance(agent, str) or len(agent) > 512:
+            raise ValueError("User-Agent must be at most 512 characters")
+        try:
+            ip = str(ipaddress.ip_address(data.get("ip") or "203.0.113.254"))
+        except ValueError:
+            raise ValueError("invalid client IP") from None
+        verdict = exclusions.verdict(ip)
+        request = ParsedRequest(client_ip=ip, status=status, frontend="preview", backend="preview/srv1", method=method,
+                                path=normalize_path(uri), host=host, query_flag=classify_query(uri),
+                                path_flag=classify_raw_path(uri), observation_flags=observation_flags(uri), user_agent=agent)
+        matches = self.inspect(request, now, trusted=verdict.excluded, record=False)
+        categories: Dict[str, int] = {}
+        for row in matches:
+            if policy is not None and row["action"] == "enforce":
+                row["points"] = policy.weight(row["event_type"])
+            categories[row["category"]] = max(categories.get(row["category"], 0), row["points"])
+        return {"ok": True, "matches": matches, "path": request.path, "trusted": verdict.excluded,
+                "trust_reason": verdict.reason, "profile": self.config["profiles"].get(host, "web"),
+                "nominal_points": sum(categories.values()), "engine_mode": "preview",
+                "note": "Single request only; live score also depends on policy, cooldowns, history and gateway refusals. Nothing was saved."}
+
+
+class LoginCorrelations:
+    """Read existing JSON failure logs once; never duplicate Authelia bans.
+
+    Only a final failed 1FA line counts, not MFA, detail/error lines or login
+    successes. Unknown usernames stay unknown. No account can be locked by a
+    forged attempt here. Raw messages and usernames are not retained.
+    """
+
+    KEY = "detection_login_correlations_v1"
+
+    def __init__(self, path: str, context: DetectionContext, database: "SecurityDatabase") -> None:
+        self.context, self.database = context, database
+        self._lock = threading.RLock()
+        self.entries: OrderedDict = OrderedDict()
+        saved: Dict[str, Any] = {}
+        with contextlib.suppress(ValueError, TypeError):
+            saved = json.loads(database.get_state(self.KEY, "{}"))
+        if not isinstance(saved, dict):
+            saved = {}
+        cursor = saved.get("cursor", {})
+        self.cursor = LogCursor(path, cursor if isinstance(cursor, dict) else {})
+        self.enabled = bool(path)
+        self.dropped = 0
+        self.last_saved = 0
+        now = _utc_now()
+        with contextlib.suppress(ValueError, TypeError, KeyError, OverflowError):
+            for key, buckets in saved.get("entries", [])[:256]:
+                clean = {int(slot): [int(count), array("I", (int(v) for v in peers[:32]))]
+                         for slot, count, peers in buckets[:3] if now // 300 - 2 <= int(slot) <= now // 300}
+                if clean and isinstance(key, str) and len(key) <= 80 and key.startswith(("ip:", "user:")):
+                    self.entries[key] = clean
+
+    def observe(self, line: str, now: int, exclusions: "ExclusionModel") -> None:
+        with self._lock:
+            self._observe(line, now, exclusions)
+
+    def _observe(self, line: str, now: int, exclusions: "ExclusionModel") -> None:
+        if len(line) > 16384:
+            self.dropped += 1
+            return
+        try:
+            data = json.loads(line)
+            if not isinstance(data, dict) or data.get("path") != "/api/firstfactor" or data.get("method") != "POST":
+                return
+            msg = str(data.get("msg", ""))
+            match = re.match(r"Unsuccessful 1FA authentication attempt by user '([^']{0,256})'", msg)
+            if not match:
+                return
+            ip = str(ipaddress.ip_address(data.get("remote_ip", "")))
+            stamp = int(datetime.fromisoformat(str(data["time"]).replace("Z", "+00:00")).timestamp())
+            if not now - 900 <= stamp <= now + 30:
+                return
+            username = str(data.get("username") or match.group(1))[:256]
+            stamp = min(now, stamp)
+        except (ValueError, TypeError, KeyError):
+            self.dropped += 1
+            return
+        keys = [("ip:" + ip, _address_key(username) if username else None)]
+        if username:
+            keys.append(("user:" + hashlib.sha256(username.encode("utf-8")).hexdigest(), _address_key(ip)))
+        slot = stamp // 300
+        for key, peer in keys:
+            buckets = self.entries.setdefault(key, {})
+            self.entries.move_to_end(key)
+            while len(self.entries) > 256:
+                self.entries.popitem(last=False)
+                self.dropped += 1
+            for old in [s for s in buckets if s < now // 300 - 2 or s > now // 300]:
+                del buckets[old]
+            count, peers = buckets.setdefault(slot, [0, array("I")])
+            buckets[slot][0] = count + 1
+            if peer is not None and peer not in peers and len(peers) < 32:
+                peers.append(peer)
+            distinct = len(set().union(*(b[1] for b in buckets.values())))
+            count = sum(b[0] for b in buckets.values())
+            rules = []
+            if key.startswith("ip:"):
+                if distinct >= 10:
+                    rules.append("auth:credential-spray")
+                if count >= 20:
+                    rules.append("auth:failed-login-burst")
+            elif distinct >= 10:
+                rules.append("auth:distributed-login")
+            if rules:
+                request = ParsedRequest(ip, 401, "authelia", "authelia/srv1", "POST", "/api/firstfactor", "authelia")
+                for rule in rules:
+                    action, _ = self.context._action(rule, request, now, self.context.config, "observe")
+                    if action != "excepted" and exclusions.verdict(ip).excluded:
+                        action = "trusted"
+                    self.context.note(rule, request, now, action)
+
+    def poll(self, now: int, exclusions: "ExclusionModel") -> None:
+        if not self.enabled:
+            return
+        for line in self.cursor.read(256 * 1024):
+            self.observe(line, now, exclusions)
+        if now - self.last_saved >= 60:
+            self.persist(now)
+
+    def persist(self, now: int) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self.entries = OrderedDict((k, b) for k, b in self.entries.items() if b and max(b) >= now // 300 - 2)
+            rows = [[k, [[slot, b[0], list(b[1])] for slot, b in buckets.items()]] for k, buckets in self.entries.items()]
+            self.database.set_state(self.KEY, json.dumps({"cursor": self.cursor.state(), "entries": rows}))
+            self.last_saved = now
+
+    def health(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"enabled": self.enabled, "error": "log unavailable" if self.cursor.last_error else "",
+                    "lag_bytes": self.cursor.lag_bytes, "tracked": len(self.entries), "dropped": self.dropped}
+
+
 class PathCandidates:
     """Paths refused to many addresses that no signature matches."""
 
     def __init__(self) -> None:
-        # path -> {"first", "last", "ips": set, "clients": set,
+        # (host, path) -> {"first", "last", "ips": set, "clients": set,
         #          "status": {code: n}, "hosts": {host: n}}
-        self._paths: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._paths: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
         self._served: "OrderedDict[int, int]" = OrderedDict()
         self._lock = threading.Lock()
 
@@ -2961,26 +3540,28 @@ class PathCandidates:
              client: bool, ts: int) -> None:
         if len(path) > CANDIDATE_MAX_PATH_LENGTH:
             return
-        digest = hash(path)
+        host = host.lower().rstrip(".")
+        key = (host, path)
+        digest = hash(key)
         with self._lock:
             if served:
                 self._served[digest] = ts
                 self._served.move_to_end(digest)
                 while len(self._served) > CANDIDATE_MAX_SERVED:
                     self._served.popitem(last=False)
-                self._paths.pop(path, None)
+                self._paths.pop(key, None)
                 return
             if status not in ENUMERATION_STATUSES or digest in self._served:
                 return
-            entry = self._paths.get(path)
+            entry = self._paths.get(key)
             if entry is None:
-                entry = self._paths[path] = {
+                entry = self._paths[key] = {
                     "first": ts, "last": ts, "ips": set(), "clients": set(),
                     "status": {}, "hosts": {},
                 }
                 while len(self._paths) > CANDIDATE_MAX_PATHS:
                     self._paths.popitem(last=False)
-            self._paths.move_to_end(path)
+            self._paths.move_to_end(key)
             entry["last"] = ts
             key = _address_key(ip)
             if len(entry["ips"]) < CANDIDATE_MAX_ADDRESSES:
@@ -2997,13 +3578,16 @@ class PathCandidates:
             stale = [path for path, entry in self._paths.items() if entry["last"] < before]
             for path in stale:
                 del self._paths[path]
+            for digest in [k for k, stamp in self._served.items() if stamp < before]:
+                del self._served[digest]
         return len(stale)
 
     def suggestions(self, dismissed: Set[str], limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
             rows = [
                 {
-                    "path": path,
+                    "path": key[1],
+                    "host": key[0],
                     "addresses": len(entry["ips"]),
                     "clients": len(entry["clients"]),
                     "first": entry["first"],
@@ -3011,9 +3595,10 @@ class PathCandidates:
                     "status": dict(entry["status"]),
                     "hosts": sorted(entry["hosts"], key=lambda h: -entry["hosts"][h]),
                 }
-                for path, entry in self._paths.items()
+                for key, entry in self._paths.items()
                 if len(entry["ips"]) >= CANDIDATE_MIN_ADDRESSES
-                and path not in dismissed
+                and key[1] not in dismissed
+                and json.dumps(list(key), separators=(",", ":")) not in dismissed
             ]
         # A rule added since is already doing the job.
         rows = [row for row in rows if not classify_path(row["path"])]
@@ -3025,9 +3610,9 @@ class PathCandidates:
         with self._lock:
             ranked = sorted(self._paths.items(), key=lambda kv: -len(kv[1]["ips"]))[:limit]
             return [
-                [path, e["first"], e["last"], sorted(e["ips"]), sorted(e["clients"]),
+                [key[1], e["first"], e["last"], sorted(e["ips"]), sorted(e["clients"]),
                  e["status"], e["hosts"]]
-                for path, e in ranked if len(e["ips"]) >= 2
+                for key, e in ranked if len(e["ips"]) >= 2
             ]
 
     def restore(self, rows: Any) -> None:
@@ -3037,7 +3622,15 @@ class PathCandidates:
             for row in rows[:CANDIDATE_MAX_PATHS]:
                 try:
                     path, first, last, ips, clients, status, hosts = row
-                    self._paths[str(path)] = {
+                    # Old multi-host aggregates cannot prove which addresses
+                    # visited which site. Relearn these instead of inventing
+                    # host-specific evidence during migration.
+                    if not isinstance(hosts, dict) or len(hosts) != 1:
+                        continue
+                    host = next(iter(hosts))
+                    if len(str(path)) > CANDIDATE_MAX_PATH_LENGTH:
+                        continue
+                    self._paths[(host, str(path))] = {
                         "first": int(first), "last": int(last),
                         "ips": {int(x) for x in ips}, "clients": {int(x) for x in clients},
                         "status": {str(k): int(v) for k, v in dict(status).items()},
@@ -3446,6 +4039,15 @@ class SecurityDatabase:
                 "INSERT INTO guard_state (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 (key, value),
+            )
+
+    def set_states(self, values: Dict[str, str]) -> None:
+        """Persist related observations and settings in one transaction."""
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT INTO guard_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                list(values.items()),
             )
 
     def observe_ip(
@@ -6222,7 +6824,7 @@ class EnforcementQueue:
 
 
 class GuardEngine:
-    """Collects from both sources; contains no detection rules yet."""
+    """Collect observations and apply the selected adaptive policy."""
 
     def __init__(
         self,
@@ -6259,6 +6861,8 @@ class GuardEngine:
             database.get_state(BAN_DURATIONS_CHANGED_KEY, "0")
         )
         self.policy = ScoringPolicy()
+        self.detection = DetectionContext(database)
+        self.login_correlations = LoginCorrelations(config.authelia_log_file, self.detection, database)
         self.digests = MinuteDigests()
         self.trusted_rates = TrustedRates()
         self.hard_floor = HardFloorWatch()
@@ -6352,6 +6956,8 @@ class GuardEngine:
         self.trusted_rates.finish_all()
         with contextlib.suppress(sqlite3.Error):
             self.database.record_rate_warnings(self.trusted_rates.take_finished())
+            self.detection.persist(_utc_now(), force=True)
+            self.login_correlations.persist(_utc_now())
 
     def refill_live(self, now: float) -> int:
         """After a restart, the live page's last hour from the log's tail.
@@ -6647,6 +7253,8 @@ class GuardEngine:
         self.consecutive_failures = 0
         self.last_error = None
         self.database.set_state("log_cursor", json.dumps(self.cursor.state()))
+        self.login_correlations.poll(now, self.exclusions)
+        self.detection.persist(now)
         return {
             "table_events": from_tables,
             "log_lines": from_log,
@@ -6903,6 +7511,13 @@ class GuardEngine:
         """The weights the policy HAProxy runs calls for."""
         return u02_policy(self.policy) if self.ban_policy == BAN_POLICY_U02 else self.policy
 
+    def detection_state(self) -> Dict[str, Any]:
+        policy = self.scoring_policy()
+        return {**self.detection.summary(), "login_source": self.login_correlations.health(),
+                "active_mode": self.enforcer.mode,
+                "scoring": {"window_hours": policy.window_seconds / 3600,
+                            "decay_hours": policy.decay_seconds / 3600, "ban_score": WOULD_BAN_SCORE}}
+
     def ban_policy_state(self) -> Dict[str, Any]:
         try:
             state = json.loads(self.database.get_state(BAN_POLICY_STATE_KEY, "") or "{}")
@@ -7157,6 +7772,16 @@ class GuardEngine:
         elif verdict.reason == "whitelisted":
             trust = verdict.source or "whitelist"
         self.trusted_rates.observe(request, trust, now, stamp)
+        matches = self.detection.inspect(request, now, trusted=verdict.excluded,
+                                         catch_all=self.catch_all.known(request.host, request.bytes_out))
+        actions = {row["id"]: row["action"] for row in matches}
+
+        def permitted(rule: str) -> bool:
+            action = actions.get(rule)
+            if action is None:
+                action, _ = self.detection._action(rule, request, now, self.detection.config, "enforce")
+            return action == "enforce"
+
         if verdict.excluded:
             self.excluded_observations += 1
             return
@@ -7174,6 +7799,29 @@ class GuardEngine:
             activity.reached_backend = True
 
         handled = refusal_is_a_shield(request, activity)
+        observed_at = int(min(now, stamp)) if stamp is not None else now
+        slow_action = self.detection.observe_slow(request, observed_at, handled) if observed_at >= now - 6 * 3600 else ""
+        if slow_action == "enforce":
+            self._emit(ip, EVENT_SCANNER_PATH, now, source="haproxy-log",
+                       category="slow-enumeration", site=request.host, detail=request.path, handled=False,
+                       fingerprint=f"{ip}|behavior:slow-enumeration|{request.host}")
+        emitted_context = set()
+        for match in matches:
+            if match["id"].startswith(("custom:", "observe:")) and match["action"] == "enforce":
+                finding = (match["event_type"], match["category"])
+                if finding in emitted_context:
+                    continue
+                emitted_context.add(finding)
+                activity.scanner_hits += 1
+                activity.scanner_hits_denied += int(handled)
+                self._emit(ip, match["event_type"], now, source="haproxy-log", category=match["category"], site=request.host,
+                           detail=f"{match['id']} {request.path}"[:300], handled=handled,
+                           fingerprint=f"{ip}|{match['event_type']}|{match['category']}|{int(handled)}")
+                activity.note_category(match["category"], now)
+                self._check_multi_category(ip, activity, now)
+                if match["id"].startswith("custom:"):
+                    self._check_low_and_slow(ip, activity, now)
+                    self._check_recurring(ip, activity, now)
         if request.status == 404:
             activity.not_found += 1
         elif request.denied_by_gateway:
@@ -7188,7 +7836,7 @@ class GuardEngine:
         if request.host and len(activity.hosts) < 16:
             activity.hosts.add(request.host)
 
-        if request.query_flag:
+        if request.query_flag and permitted("query:" + request.query_flag):
             # Deliberately not gated on is_served. A path the site answers
             # is evidence the path is real; an injection the site answered
             # 200 is evidence it may have worked, which is the opposite of
@@ -7203,6 +7851,7 @@ class GuardEngine:
                 now,
                 source="haproxy-log",
                 category=request.query_flag,
+                site=request.host,
                 # The path, never the query. The rule name above already
                 # says what was in it.
                 detail=request.path,
@@ -7211,16 +7860,16 @@ class GuardEngine:
             )
             self._check_multi_category(ip, activity, now)
 
-        if request.path_flag:
+        if request.path_flag and permitted("raw:path-traversal"):
             activity.scanner_hits += 1
             activity.scanner_hits_denied += int(handled)
             activity.note_category(request.path_flag, now)
             self._emit(ip, EVENT_SCANNER_DECISIVE, now, source="haproxy-log",
-                       category=request.path_flag, detail=request.path, handled=handled,
+                       category=request.path_flag, site=request.host, detail=request.path, handled=handled,
                        fingerprint=f"{ip}|path|{request.path_flag}|{int(handled)}")
 
         agent, agent_category = classify_user_agent(request.user_agent)
-        if agent:
+        if agent and permitted("ua:" + agent):
             # The client said what it is. Not gated on is_served either: a
             # sqlmap run the site answers 200 is the worse case, not a
             # better one.
@@ -7239,6 +7888,7 @@ class GuardEngine:
                 now,
                 source="haproxy-log",
                 category=agent_category,
+                site=request.host,
                 detail=f"user agent {agent}",
                 handled=handled,
                 fingerprint=f"{ip}|ua|{agent}|{int(bool(handled))}",
@@ -7278,7 +7928,7 @@ class GuardEngine:
             # for /.env, /backup.sql and /phpinfo.php -- or a real leak.
             # Neither is a reason to trust the client asking.
             category = ""
-        if category:
+        if category and permitted("path:" + category):
             activity.scanner_hits += 1
             if handled:
                 activity.scanner_hits_denied += 1
@@ -7294,6 +7944,7 @@ class GuardEngine:
                 now,
                 source="haproxy-log",
                 category=category,
+                site=request.host,
                 detail=request.path,
                 handled=handled,
                 # Refused and answered findings cool down apart: a refused
@@ -7304,7 +7955,7 @@ class GuardEngine:
             self._check_multi_category(ip, activity, now)
             self._check_low_and_slow(ip, activity, now)
             self._check_recurring(ip, activity, now)
-        elif request.status in ENUMERATION_STATUSES and not is_asset(request.path):
+        elif not category and request.status in ENUMERATION_STATUSES and not is_asset(request.path):
             # Enumeration without a known signature: only distinct, non-asset
             # paths count, which is what separates a scanner from a stale link
             # or a monitor that keeps asking for the same one.
@@ -8396,6 +9047,7 @@ class GuardEngine:
         pruned = self.memory.prune(now - 6 * 3600)
         self.candidates.prune(now - CANDIDATE_TTL)
         self.unknown_hosts.prune(now - UNKNOWN_HOSTS_TTL)
+        self.detection.persist(now, force=True)
         with contextlib.suppress(sqlite3.Error):
             self.database.set_state(
                 CANDIDATES_KEY, json.dumps(self.candidates.snapshot())
@@ -8789,6 +9441,10 @@ class GuardHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **signature_summary()})
             return
 
+        if path == "/api/v1/guard/detection-context":
+            self._send_json(200, engine.detection_state())
+            return
+
         if path == "/api/v1/guard/traps":
             self._send_json(200, {
                 "ok": True,
@@ -8929,6 +9585,33 @@ class GuardHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "trap_hosts": hosts})
             return
 
+        if path in ("/api/v1/guard/detection-context", "/api/v1/guard/detection-preview"):
+            if not self._control_auth_ok():
+                self._send_json(403, {"ok": False, "error": "forbidden"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                if not 0 < length <= (8192 if path.endswith("preview") else 131072):
+                    raise ValueError("invalid Content-Length")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if path.endswith("preview"):
+                    result = engine.detection.preview(payload, engine.exclusions, _utc_now(), engine.scoring_policy())
+                    result["active_mode"] = engine.enforcer.mode
+                else:
+                    engine.detection.replace(payload)
+                    result = engine.detection_state()
+            except (ValueError, UnicodeError, TypeError, RecursionError) as exc:
+                # A preview can contain a reset token. Never echo its payload
+                # or parser exception into diagnostics or the audit trail.
+                detail = "invalid request fields" if path.endswith("preview") else str(exc)
+                self._send_json(400, {"ok": False, "error": detail})
+                return
+            except sqlite3.Error:
+                self._send_json(503, {"ok": False, "error": "detection storage unavailable"})
+                return
+            self._send_json(200, result)
+            return
+
         if path == "/api/v1/guard/signatures/candidates/dismiss":
             if not self._control_auth_ok():
                 self._send_json(403, {"ok": False, "error": "forbidden"})
@@ -8941,6 +9624,7 @@ class GuardHandler(BaseHTTPRequestHandler):
                 result = dismiss_candidate(
                     engine.database, str(payload.get("path", "")),
                     restore=bool(payload.get("restore")),
+                    host=str(payload.get("host", "")),
                 )
             except ValueError as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
