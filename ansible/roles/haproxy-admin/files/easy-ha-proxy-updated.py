@@ -817,6 +817,10 @@ def read_file_tail(path: Path) -> str:
         os.close(descriptor)
 
 
+def transient_job_unit_name():
+    return f"easy-ha-proxy-updated-job-{uuid.uuid4().hex[:12]}.service"
+
+
 def run_transient_command(
     job_id: str,
     argv: list[str],
@@ -824,7 +828,7 @@ def run_transient_command(
     timeout: int,
     log_prefix: str = "",
 ) -> tuple[int, str]:
-    unit = f"easy-ha-proxy-updated-job-{uuid.uuid4().hex[:12]}.service"
+    unit = transient_job_unit_name()
     output_path = JOBS_DIR / f".{identifier(job_id, 'job id')}.output"
     descriptor = os.open(
         output_path,
@@ -2658,7 +2662,9 @@ def security_recovery_pending():
     if not os.path.lexists(path):
         return False
     try:
-        return safe_json_file(path).get('phase') != 'ready'
+        record = safe_json_file(path)
+        os_security_policy(record.get('policy') or {})
+        return record.get('phase') != 'ready'
     except (OSError, ValueError, UpdatedError):
         return True
 

@@ -32,6 +32,16 @@ def origin(**values):
 
 @unittest.skipUnless(s, 'Linux security worker')
 class SecurityOrigins(unittest.TestCase):
+    def test_needrestart_cannot_restart_the_active_update_executor(self):
+        if not Path('/usr/bin/perl').is_file():
+            self.skipTest('the native needrestart workflow supplies Perl')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'restart.conf'; path.write_text(s.RESTART_CONFIG)
+            units = ['haproxy.service', 'docker.service', 'easy-ha-proxy-updated.service',
+                     broker.transient_job_unit_name(), 'unrelated.service']
+            code = 'our %nrconf; do $ARGV[0]; die $@ if $@; for my $unit (@ARGV[1..$#ARGV]) { my $blocked=0; for my $rx (keys %{$nrconf{override_rc}}) { $blocked=1 if $unit =~ $rx; } print "$blocked\\n"; }'
+            result = subprocess.run(['/usr/bin/perl', '-e', code, str(path), *units], capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), ['1', '1', '1', '1', '0'])
     def test_configuration_reload_uses_the_actual_distribution_python_apt_api(self):
         available = subprocess.run(['/usr/bin/python3', '-c', 'import apt_pkg'], capture_output=True)
         if available.returncode:
@@ -164,6 +174,14 @@ class NativePolicyCustody(unittest.TestCase):
         self.timer.update(enabled='disabled', active=False)
         s.RESTART_DROPIN.write_text('externally changed')
         with self.assertRaises(s.SecurityError): self.configure(mode='system')
+
+    def test_resaving_upgrades_the_known_previous_guard_but_install_does_not_use_it(self):
+        self.configure()
+        s.RESTART_DROPIN.write_text(s.PREVIOUS_RESTART_CONFIG)
+        record = json.loads((self.root / 'policy.json').read_text())
+        with self.assertRaises(s.SecurityError): s.assert_managed(record)
+        self.configure(mode='auto')
+        self.assertEqual(s.RESTART_DROPIN.read_text(), s.RESTART_CONFIG)
 
 
 @unittest.skipUnless(s, 'Linux security broker')

@@ -35,7 +35,8 @@ APT_GUARD = Path('/etc/apt/apt.conf.d/99-easy-ha-proxy-os-security')
 APT_GUARD_CONFIG = ('// Managed by easy-ha-proxy OS security.\nAPT::Periodic::Unattended-Upgrade "0";\n'
                     'Unattended-Upgrade::InstallOnShutdown "false";\nUnattended-Upgrade::Automatic-Reboot "false";\n')
 RESTART_CONFIG = ("# Managed by easy-ha-proxy OS security; deferred services remain visible.\n"
-                  "$nrconf{override_rc}{qr(^(haproxy|docker|containerd|easy-ha-proxy-updated|easy-ha-proxy-backupd)\\.service$)} = 0;\n")
+                  "$nrconf{override_rc}{qr(^(haproxy|docker|containerd|easy-ha-proxy-updated|easy-ha-proxy-updated-job-[0-9a-f]{12}|easy-ha-proxy-backupd)\\.service$)} = 0;\n")
+PREVIOUS_RESTART_CONFIG = RESTART_CONFIG.replace('|easy-ha-proxy-updated-job-[0-9a-f]{12}', '')
 PKG = re.compile(r'^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?$')
 
 
@@ -184,13 +185,14 @@ def assert_native_idle():
         raise SecurityError('Native automatic upgrades are active; wait before changing the policy')
 
 
-def assert_managed(record):
+def assert_managed(record, *, allow_previous_guard=False):
     if record.get('phase') != 'ready' or record.get('policy', {}).get('mode') == 'system':
         raise SecurityError('Enable OS security management before installing updates')
     timer = native_timer()
     if timer['active'] or timer['enabled'] not in {'disabled', 'masked', 'masked-runtime', 'static', 'indirect'}:
         raise SecurityError('Native APT timer settings changed; review the OS security policy')
-    if RESTART_DROPIN.is_symlink() or not RESTART_DROPIN.is_file() or RESTART_DROPIN.read_text() != RESTART_CONFIG:
+    allowed_guards = {RESTART_CONFIG, PREVIOUS_RESTART_CONFIG} if allow_previous_guard else {RESTART_CONFIG}
+    if RESTART_DROPIN.is_symlink() or not RESTART_DROPIN.is_file() or RESTART_DROPIN.read_text() not in allowed_guards:
         raise SecurityError('OS security restart protection changed; review the policy')
     if APT_GUARD.is_symlink() or not APT_GUARD.is_file() or APT_GUARD.read_text() != APT_GUARD_CONFIG:
         raise SecurityError('OS security APT protection changed; review the policy')
@@ -249,7 +251,8 @@ def configure(root, value, cache, distro, codename):
             atomic(path, {**old, 'phase': 'configuring'})
             for guard_path, expected in ((RESTART_DROPIN, RESTART_CONFIG), (APT_GUARD, APT_GUARD_CONFIG)):
                 if os.path.lexists(guard_path):
-                    if guard_path.is_symlink() or guard_path.read_text() != expected:
+                    allowed = {expected, PREVIOUS_RESTART_CONFIG} if guard_path == RESTART_DROPIN else {expected}
+                    if guard_path.is_symlink() or guard_path.read_text() not in allowed:
                         raise SecurityError('OS security protection changed; review the policy')
                     guard_path.unlink()
             try:
@@ -260,7 +263,7 @@ def configure(root, value, cache, distro, codename):
         atomic(path, {'phase': 'ready', 'policy': policy, 'updated_at': time.time()})
         return
     if old and old.get('policy', {}).get('mode') != 'system' and old.get('phase') == 'ready':
-        assert_managed(old)
+        assert_managed(old, allow_previous_guard=True)
     if not baseline:
         if os.path.lexists(RESTART_DROPIN) or os.path.lexists(APT_GUARD):
             raise SecurityError('The OS security configuration already exists outside panel management')
