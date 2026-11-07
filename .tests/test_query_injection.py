@@ -116,7 +116,7 @@ class TheValueNeverLeaves(unittest.TestCase):
 
     def test_the_emitted_detail_is_the_path(self):
         source = GUARDD.read_text(encoding="utf-8")
-        block = source.split("if request.query_flag:")[1].split(
+        block = source.split("    def observe_request(", 1)[1].split("if request.query_flag and permitted(", 1)[1].split(
             "category = classify_path")[0]
         self.assertIn("detail=request.path", block)
         self.assertNotIn("detail=request.query", block)
@@ -132,7 +132,7 @@ class HowItScores(unittest.TestCase):
         # the site answered 200 is evidence it may have worked, which is the
         # opposite of a reason to let the client alone.
         source = GUARDD.read_text(encoding="utf-8")
-        block = source.split("if request.query_flag:")[1].split(
+        block = source.split("    def observe_request(", 1)[1].split("if request.query_flag and permitted(", 1)[1].split(
             "category = classify_path")[0]
         code = " ".join(
             line for line in block.splitlines()

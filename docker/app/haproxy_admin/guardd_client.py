@@ -104,17 +104,29 @@ def guardd_set_signatures(overrides: Dict[str, Any]) -> Dict[str, Any]:
     return _change("/api/v1/guard/signatures", overrides, timeout=30)
 
 
+def guardd_detection_context() -> Dict[str, Any]:
+    return _get_json("/api/v1/guard/detection-context")
+
+
+def guardd_set_detection_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _change("/api/v1/guard/detection-context", payload)
+
+
+def guardd_detection_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _change("/api/v1/guard/detection-preview", payload)
+
+
 def guardd_signature_candidates() -> Dict[str, Any]:
     """Paths refused to many addresses that no rule matches yet."""
 
     return _get_json("/api/v1/guard/signatures/candidates")
 
 
-def guardd_dismiss_candidate(path: str, restore: bool = False) -> Dict[str, Any]:
+def guardd_dismiss_candidate(path: str, restore: bool = False, host: str = "") -> Dict[str, Any]:
     """Hide a suggested signature for good, or bring a hidden one back."""
 
     return _change("/api/v1/guard/signatures/candidates/dismiss",
-                   {"path": path, "restore": bool(restore)})
+                   {"path": path, "restore": bool(restore), "host": host})
 
 
 def guardd_traps() -> Dict[str, Any]:

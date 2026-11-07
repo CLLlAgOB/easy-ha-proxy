@@ -100,6 +100,8 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
                 "cancel_reboot": frozenset(
                     {"action", "expected_boot_id", "actor"}
                 ),
+                "prepare_haproxy_migration": frozenset({"action", "target_branch"}),
+                "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
             },
         )
         self.assertEqual(

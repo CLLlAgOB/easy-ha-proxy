@@ -9,6 +9,15 @@ const path = require("node:path");
 
 const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/updates_core.js"));
 
+test("HAProxy transition jobs show their own progress without a guessed percent", () => {
+  const prepare = core.progressModel({operation: "haproxy-prepare", progress: {phase: "prepare"}});
+  assert.equal(prepare.percent, null);
+  assert.equal(prepare.label, "Preparing the HAProxy transition…");
+  const migrate = core.progressModel({operation: "haproxy-migrate", progress: {phase: "verifying"}});
+  assert.equal(migrate.percent, null);
+  assert.equal(migrate.label, "Switching HAProxy to 3.4 LTS…");
+});
+
 test("OS and sign-in updates warn about temporary loss of access as panel updates do", () => {
   for (const id of ["os", "haproxy", "authelia-container", "admin-container", "all"]) {
     assert.equal(core.mayInterruptAccess([id]), true);

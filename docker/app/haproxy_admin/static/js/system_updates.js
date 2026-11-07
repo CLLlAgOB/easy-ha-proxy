@@ -14,7 +14,9 @@
     settings: app.dataset.settingsUrl,
     autoInstall: app.dataset.autoInstallUrl,
     reboot: app.dataset.rebootUrl,
-    rebootCancel: app.dataset.rebootCancelUrl
+    rebootCancel: app.dataset.rebootCancelUrl,
+    migrationPrepare: app.dataset.migrationPrepareUrl,
+    migrationApply: app.dataset.migrationApplyUrl
   };
   let rebootPending = false;
   let rebootWatchTimer = null;
@@ -70,6 +72,8 @@
   let resultJobSnapshot = null;
   let planHasContent = false;
   let haproxyOperation = null;
+  let currentMigration = null;
+  let migrationReviewId = "";
   let planSummaryText = "";
   let preselectedPlanId = "";
   // The job list, kept for the time estimate: how long each part took before.
@@ -105,9 +109,9 @@
       const knownJobIds = Array.isArray(value?.knownJobIds)
         ? value.knownJobIds.map(String).filter((item) => /^[a-f0-9]{32}$/i.test(item)).slice(0, 100)
         : [];
-      if (!["check", "apply"].includes(operation) || !Number.isFinite(startedAt) ||
+      if (!["check", "apply", "haproxy-prepare", "haproxy-migrate"].includes(operation) || !Number.isFinite(startedAt) ||
           startedAt <= 0 || startedAt > Date.now() + 60 * 1000 ||
-          (operation === "apply" && !/^[a-f0-9]{32}$/i.test(planId))) {
+          (["apply", "haproxy-migrate"].includes(operation) && !/^[a-f0-9]{32}$/i.test(planId))) {
         throw new Error("invalid pending update start");
       }
       return {operation, startedAt, components, planId, knownJobIds};
@@ -201,6 +205,8 @@
   function operationLabel(value) {
     if (value === "check") return t("Update check");
     if (value === "apply") return t("Install updates");
+    if (value === "haproxy-prepare") return t("Prepare HAProxy migration");
+    if (value === "haproxy-migrate") return t("Migrate HAProxy to 3.4 LTS");
     return t(value || "—");
   }
 
@@ -214,7 +220,7 @@
       const createdAt = new Date(job?.created_at || job?.started_at || 0).getTime();
       if (!Number.isFinite(createdAt) || createdAt < pendingStart.startedAt - 30000) return false;
     }
-    if (pendingStart.operation !== "apply") return true;
+    if (!["apply", "haproxy-migrate"].includes(pendingStart.operation)) return true;
     if (String(job?.plan_id || "") !== pendingStart.planId) return false;
     const actual = jobComponents(job).slice().sort();
     const expected = pendingStart.components.slice().sort();
@@ -412,12 +418,83 @@
       rollback_failed: "HAProxy recovery requires attention", recovery_exhausted: "HAProxy recovery requires attention"};
     const note = byId("updates-haproxy-last");
     note.hidden = !last;
-    note.textContent = last ? `${t(phases[last.phase] || "HAProxy update in progress")}${last.updated_at ? ` · ${formatDate(last.updated_at * 1000)}` : ""}` : "";
+    note.textContent = last ? `${t(last.kind === "migration" && last.phase === "prepared" ? "HAProxy migration prepared; review the target version before confirming" : phases[last.phase] || "HAProxy update in progress")}${last.updated_at ? ` · ${formatDate(last.updated_at * 1000)}` : ""}` : "";
     note.classList.toggle("text-danger", ["rollback_failed", "recovery_exhausted"].includes(last?.phase));
     const button = byId("updates-haproxy-install");
     button.hidden = !(component?.actionable && component.state === "available") || outdated || Boolean(plan?.stale) || Boolean(unfinished);
     button.disabled = requestRunning || operationRunning || planForOtherChannel(plan);
     button.textContent = t(details.needs_reload && component?.current === component?.available ? "Apply updated libraries" : "Update HAProxy");
+  }
+
+  function renderMigration() {
+    if (!byId("updates-migration")) return;
+    const migration = currentMigration;
+    const review = migration?.plan;
+    const operation = review?.operation || migration?.last_operation;
+    const planId = String(review?.id || "");
+    if (planId !== migrationReviewId) {
+      migrationReviewId = planId;
+      byId("updates-migration-confirm").value = "";
+    }
+    // Freshness is authoritative on the host, independent of browser clock skew.
+    const fresh = Boolean(review && !review.stale && !review.consumed_by && operation?.phase === "prepared");
+    const state = byId("updates-migration-state");
+    state.textContent = t(migration?.reason || "Update host services before preparing a HAProxy migration");
+    if (operation?.phase === "committed" && operation.target_verified) state.textContent = t("HAProxy migration verified");
+    if (operation?.phase === "rolled_back" && operation.rollback_verified) state.textContent = t("HAProxy rollback verified");
+    const prepare = byId("updates-migration-prepare");
+    prepare.hidden = migration?.state === "current";
+    prepare.disabled = requestRunning || operationRunning || migration?.state !== "available";
+    byId("updates-migration-plan").hidden = !review || !operation || operation.phase !== "prepared";
+    byId("updates-migration-old").textContent = operation?.old_version || "—";
+    byId("updates-migration-target").textContent = operation?.target_runtime_version || "—";
+    byId("updates-migration-expires").textContent = review?.expires_at ? formatDate(review.expires_at) : "—";
+    const packages = byId("updates-migration-packages");
+    packages.replaceChildren(...[...(operation?.packages || []), ...(operation?.dependencies || [])].map((entry) => {
+      const item = document.createElement("li"); item.textContent = `${entry.name}: ${entry.version}`; return item;
+    }));
+    byId("updates-migration-review-state").textContent = t(fresh
+      ? "The prepared version and rollback files are ready. Confirm to switch HAProxy."
+      : "This migration plan is consumed, expired or changed. Prepare a new plan before switching.");
+    byId("updates-migration-apply").disabled = requestRunning || operationRunning || !fresh ||
+      byId("updates-migration-confirm").value !== "MIGRATE 3.4";
+  }
+
+  async function startMigration(apply) {
+    if (requestRunning || operationRunning) return;
+    const review = currentMigration?.plan;
+    if (apply && (!review || review.stale || review.consumed_by || byId("updates-migration-confirm").value !== "MIGRATE 3.4")) return;
+    const operation = apply ? "haproxy-migrate" : "haproxy-prepare";
+    const planId = apply ? review.id : "";
+    setBusy(true);
+    beginPendingStart(operation, ["haproxy"], planId);
+    try {
+      const payload = await postJson(apply ? endpoints.migrationApply : endpoints.migrationPrepare,
+        apply ? {plan_id: planId, confirmation: "MIGRATE 3.4"} : {target_branch: "3.4"});
+      currentJobId = String(payload.job_id || "");
+      currentJobOperation = operation;
+      currentApplyComponents = ["haproxy"];
+      operationRunning = true;
+      storageSet(ACTIVE_JOB_KEY, currentJobId);
+      storePendingStart(null);
+      focusJobLog(currentJobId);
+      schedulePoll(600);
+    } catch (error) {
+      if (isTransientRequestError(error)) {
+        markConnectionLost();
+        operationRunning = true;
+        setMessage("updates-service-status", t("The connection was interrupted while starting the update. Checking whether the job was accepted…"));
+        schedulePoll(reconnectDelay());
+      } else {
+        storePendingStart(null);
+        setMessage("updates-service-status", t(error.message), false, true);
+        schedulePoll(1000);
+      }
+    } finally {
+      setBusy(false);
+      renderMigration();
+      renderView();
+    }
   }
   function renderPlan(plan) {
     renderHaproxy(plan);
@@ -604,7 +681,7 @@
       html = jobs.map((job) => {
         const state = jobState(job);
         const components = jobComponents(job);
-        const result = job.error || job.message || job.result?.message || (state === "completed" ? t("Completed successfully") : "—");
+        const result = t(job.error || job.message || job.result?.message || (state === "completed" ? "Completed successfully" : "—"));
         return `<tr data-update-job="${escape(jobId(job))}" tabindex="0">
           <td>${escape(formatDate(job.started_at || job.created_at))}</td>
           <td>${escape(job.scheduled ? t("Scheduled check") : operationLabel(jobOperation(job)))}</td>
@@ -662,7 +739,7 @@
     byId("updates-progress-step").textContent = model.step;
     const components = jobComponents(active);
     byId("updates-self-restart-running").hidden = !(
-      jobOperation(active) === "apply" &&
+      ["apply", "haproxy-migrate"].includes(jobOperation(active)) &&
       core.mayInterruptAccess(components)
     );
     renderElapsed();
@@ -674,7 +751,7 @@
   }
   // The newest installation, if it finished recently and was not dismissed.
   function recentResult(jobs) {
-    const job = jobs.find((item) => jobOperation(item) === "apply");
+    const job = jobs.find((item) => ["apply", "haproxy-prepare", "haproxy-migrate"].includes(jobOperation(item)));
     if (!job || !isTerminal(job)) return null;
     const finished = new Date(job.completed_at || job.started_at || 0).getTime();
     if (!Number.isFinite(finished) || Date.now() - finished > RESULT_VISIBLE_MS) return null;
@@ -698,9 +775,9 @@
     setMessage(
       "updates-result-text",
       ok
-        ? t("Updates installed in {time}.", {time: took}) +
+        ? (jobOperation(job).startsWith("haproxy-") ? t(job.result?.message || operationLabel(jobOperation(job))) : t("Updates installed in {time}.", {time: took})) +
           (reboot ? ` ${t("A server reboot is required.")}` : "")
-        : `${t("The update failed")}: ${job.error || job.message || jobState(job)}`,
+        : `${t("The update failed")}: ${t(job.error || job.message || jobState(job))}`,
       undefined,
       !ok
     );
@@ -1044,7 +1121,7 @@
       if (state !== "completed") {
         setMessage(
           "updates-service-status",
-          `${t("Update operation failed")}: ${job.error || job.message || state}`,
+          `${t("Update operation failed")}: ${t(job.error || job.message || state)}`,
           false,
           true
         );
@@ -1066,6 +1143,7 @@
 
   function setBusy(busy) {
     requestRunning = busy;
+    renderMigration();
     byId("updates-check").disabled = busy || operationRunning;
     byId("updates-release-channel").disabled = busy || operationRunning;
     byId("updates-check").classList.toggle("loading", busy);
@@ -1123,6 +1201,7 @@
       const relevant = shown;
       const plan = extractPlan(payload, jobs);
       haproxyOperation = payload.haproxy_operation || null;
+      currentMigration = payload.haproxy_migration || null;
       if (plan && (
         !currentPlan || currentPlan.id !== plan.id ||
         Boolean(currentPlan.stale) !== Boolean(plan.stale)
@@ -1137,6 +1216,7 @@
         warning.textContent = t("The previous update plan is no longer valid.");
       }
       renderHaproxy(plan);
+      renderMigration();
       renderReboot(payload, relevant);
       if (connectionRestored && pendingResult !== "missing" &&
           !(tracked && isTerminal(tracked))) {
@@ -1459,6 +1539,9 @@
     updateSelection("haproxy");
     openConfirm();
   });
+  byId("updates-migration-prepare")?.addEventListener("click", () => startMigration(false));
+  byId("updates-migration-apply")?.addEventListener("click", () => startMigration(true));
+  byId("updates-migration-confirm")?.addEventListener("input", renderMigration);
   byId("updates-confirm-go").addEventListener("click", applyUpdates);
   byId("updates-confirm-cancel").addEventListener("click", closeConfirm);
   byId("updates-confirm-modal").addEventListener("click", (event) => {

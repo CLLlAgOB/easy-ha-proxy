@@ -80,6 +80,8 @@ AUDITED_ACTIONS = {
     "set_auto_install": ("update.auto_install", ("enabled", "start", "end")),
     "reboot": ("system.reboot", ("expected_boot_id",)),
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
+    "prepare_haproxy_migration": ("update.haproxy_prepare", ("target_branch",)),
+    "apply_haproxy_migration": ("update.haproxy_migrate", ("plan_id",)),
 }
 
 
@@ -300,6 +302,42 @@ def start_apply():
         },
         accepted=True,
     )
+
+
+def _migration_configuration_error():
+    try:
+        state = get_haproxy_configuration_state()
+    except Exception:  # pylint: disable=broad-except
+        return jsonify({"ok": False, "error": "HAProxy configuration state is unavailable",
+                        "error_code": "configuration_state_unavailable"}), 503
+    if state.get("state") != "clean":
+        return jsonify({"ok": False, "error": "Resolve pending HAProxy configuration changes before migration",
+                        "error_code": "configuration_not_clean"}), 409
+    return None
+
+
+@bp_system_updates.post("/api/haproxy/migration/prepare")
+def prepare_haproxy_migration():
+    payload = _json_payload({"target_branch"})
+    if payload["target_branch"] != "3.4":
+        abort(400, description="Only the qualified HAProxy 3.4 LTS migration is supported")
+    error = _migration_configuration_error()
+    if error is not None:
+        return error
+    return _call_daemon({"action": "prepare_haproxy_migration", "target_branch": "3.4"}, accepted=True)
+
+
+@bp_system_updates.post("/api/haproxy/migration/apply")
+def apply_haproxy_migration():
+    payload = _json_payload({"plan_id", "confirmation"})
+    if payload["confirmation"] != "MIGRATE 3.4":
+        abort(400, description="Type MIGRATE 3.4 to confirm the HAProxy transition")
+    plan_id = _identifier(payload["plan_id"], "migration plan id")
+    error = _migration_configuration_error()
+    if error is not None:
+        return error
+    return _call_daemon({"action": "apply_haproxy_migration", "plan_id": plan_id,
+                         "confirmation": "MIGRATE 3.4"}, accepted=True)
 
 
 @bp_system_updates.post("/api/reboot")

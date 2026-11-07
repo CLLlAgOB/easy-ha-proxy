@@ -24,6 +24,9 @@ from .guardd_client import (
     guardd_traps,
     guardd_set_traps,
     guardd_set_signatures,
+    guardd_detection_context,
+    guardd_set_detection_context,
+    guardd_detection_preview,
     guardd_requests,
     guardd_requests_status,
     guardd_requests_summary,
@@ -265,6 +268,23 @@ def detection_rules() -> Dict[str, Any]:
     return guardd_signatures()
 
 
+def detection_context() -> Dict[str, Any]:
+    return guardd_detection_context()
+
+
+def set_detection_context(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    return guardd_set_detection_context(payload)
+
+
+def detection_preview(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    # Transient input only: this function must never use the audit service.
+    return guardd_detection_preview(payload)
+
+
 def signature_candidates() -> Dict[str, Any]:
     return guardd_signature_candidates()
 
@@ -275,7 +295,8 @@ def dismiss_candidate(payload: Any) -> Dict[str, Any]:
     path = str(payload.get("path") or "").strip()
     if not path.startswith("/"):
         raise ValueError("expected a path")
-    return guardd_dismiss_candidate(path, restore=bool(payload.get("restore")))
+    return guardd_dismiss_candidate(path, restore=bool(payload.get("restore")),
+                                   host=str(payload.get("host") or ""))
 
 
 def traps() -> Dict[str, Any]:

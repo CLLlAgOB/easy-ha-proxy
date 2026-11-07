@@ -36,6 +36,9 @@ import uuid
 import yaml
 
 
+WEB_MIGRATION_PROTOCOL = 1
+
+
 class MigrationError(RuntimeError):
     pass
 
@@ -427,6 +430,8 @@ class Engine:
         atomic(self.directory / 'transaction.json', (json.dumps(self.state, indent=2) + '\n').encode())
         if self.state.get('kind') == 'patch':
             atomic(self.paths.root / 'last-update.json', (json.dumps(self.summary()) + '\n').encode())
+        elif self.state.get('kind') == 'migration':
+            atomic(self.paths.root / 'last-migration.json', (json.dumps(self.summary()) + '\n').encode())
         if self.observer:
             with contextlib.suppress(Exception):
                 self.observer(self.summary())
@@ -618,8 +623,23 @@ class Engine:
             raise MigrationError('At least 384 MiB of available RAM is required for the temporary handoff')
         return architecture, packages
 
+    def check_previous_operations(self):
+        for name in ('last-update.json', 'last-migration.json'):
+            previous = self.paths.root / name
+            if not os.path.lexists(previous):
+                continue
+            if previous.is_symlink() or not previous.is_file() or previous.stat().st_size > 64 * 1024:
+                raise MigrationError('Unsafe previous HAProxy update record')
+            try:
+                operation = json.loads(previous.read_text())
+            except (OSError, ValueError) as error:
+                raise MigrationError('The previous HAProxy update record is unreadable') from error
+            if not isinstance(operation, dict) or operation.get('phase') not in {'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'}:
+                raise MigrationError('Recover the unfinished HAProxy update before preparing another one')
+
     def prepare(self):
         with self.locked():
+            self.check_previous_operations()
             architecture, packages = self.native_preflight()
             private_directory(self.paths.root)
             if shutil.disk_usage(self.paths.root).free < 512 * 1024 * 1024:
@@ -627,7 +647,7 @@ class Engine:
             self.directory = self.paths.root / uuid.uuid4().hex
             private_directory(self.directory)
             self.host.log = self.directory / 'commands.jsonl'
-            self.state = {'format': 1, 'id': self.directory.name, 'machine': self.host.machine(),
+            self.state = {'format': 1, 'kind': 'migration', 'id': self.directory.name, 'machine': self.host.machine(),
                           'architecture': architecture, 'created_at': time.time(), 'files': {},
                           'engine_digest': digest(Path(__file__)),
                           'holds': sorted(self.holds() & {'haproxy', 'haproxy-awslc', 'libssl-awslc'}),
@@ -779,16 +799,7 @@ class Engine:
 
     def _prepare_patch(self, expected_version, *, reinstall):
         with self.locked():
-            previous = self.paths.root / 'last-update.json'
-            if previous.exists():
-                if previous.is_symlink() or previous.stat().st_size > 64 * 1024:
-                    raise MigrationError('Unsafe previous HAProxy update record')
-                try:
-                    operation = json.loads(previous.read_text())
-                except (OSError, ValueError) as error:
-                    raise MigrationError('The previous HAProxy update record is unreadable') from error
-                if not isinstance(operation, dict) or operation.get('phase') not in {'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'}:
-                    raise MigrationError('Recover the unfinished HAProxy update before preparing another one')
+            self.check_previous_operations()
             architecture, packages = self.native_preflight()
             name = 'haproxy-awslc' if 'haproxy-awslc' in packages else 'haproxy'
             branch = '3.4' if name == 'haproxy-awslc' else '2.8'
@@ -1431,7 +1442,8 @@ Pin-Priority: 100
             return self.summary()
 
     def summary(self):
-        return {key: self.state.get(key) for key in ('id', 'kind', 'phase', 'architecture', 'old_version', 'old_runtime_version', 'target_packages',
+        return {key: self.state.get(key) for key in ('id', 'kind', 'phase', 'architecture', 'created_at', 'engine_digest',
+                                                     'old_version', 'old_runtime_version', 'target_runtime_version', 'target_packages',
                                                      'extra_packages',
                                                      'failure', 'rollback_verified', 'target_verified', 'table_counts',
                                                      'cleanup_warning', 'updated_at')}
@@ -1444,11 +1456,18 @@ def main(argv=None):
     parser.add_argument('--exercise-rollback', action='store_true')
     parser.add_argument('--expected-version')
     parser.add_argument('--reinstall', action='store_true')
+    parser.add_argument('--web-progress', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error('This operator command must run as root')
     os.umask(0o077)
     engine = Engine()
+    if args.web_progress:
+        def web_progress(summary):
+            phase = summary.get('phase')
+            value = 'prepare' if phase in ('preparing', 'prepared') else 'verifying' if phase in ('target_verified', 'committed') else 'playbook'
+            print('EHP-PROGRESS phase=' + value, flush=True)
+        engine.observer = web_progress
     try:
         if args.action == 'prepare':
             result = engine.prepare()
