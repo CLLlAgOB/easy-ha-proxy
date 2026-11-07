@@ -333,12 +333,12 @@
       add.type = "button";
       add.className = "btn";
       add.textContent = uiText("Add");
-      add.addEventListener("click", () => addSuggestion(item.path));
+      add.addEventListener("click", () => addSuggestion(item));
       const hide = document.createElement("button");
       hide.type = "button";
       hide.className = "btn";
       hide.textContent = uiText("Hide");
-      hide.addEventListener("click", () => hideSuggestion(item.path));
+      hide.addEventListener("click", () => hideSuggestion(item.path, item.host));
       actions.appendChild(add);
       actions.appendChild(hide);
       row.appendChild(actions);
@@ -361,20 +361,20 @@
     }
   }
 
-  function addSuggestion(path) {
+  function addSuggestion(item) {
     const select = byId("dr-suggest-category");
-    const next = current();
-    next.added[path] = select ? select.value : (latest || {}).custom_category;
-    save(next, `${uiText("Added")}: ${path}`).then((ok) => { if (ok) loadSuggestions(); });
+    if (window.detectionContextSuggestion) {
+      window.detectionContextSuggestion(item, select ? select.value : (latest || {}).custom_category);
+    }
   }
 
-  async function hideSuggestion(path) {
+  async function hideSuggestion(path, host) {
     try {
       const response = await fetch("/api/security/detection-rules/candidates/dismiss", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken() },
-        body: JSON.stringify({ path: path })
+        body: JSON.stringify({ path: path, host: host || "" })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.ok === false) {

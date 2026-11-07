@@ -11,6 +11,78 @@
   shown. HAProxy traffic is not affected.
 </div>
 
+<section class="card dc-card" aria-labelledby="dc-title">
+  <div class="card-header"><h2 id="dc-title">Request tester</h2></div>
+  <p class="mon-sub">Check a request without banning anyone. Parameters are analysed temporarily and are not saved. History, cooldowns and gateway decisions can change the live score.</p>
+  <form id="dc-preview" class="dc-grid">
+    <label>Site<input class="form-input" id="dc-host" required maxlength="253" placeholder="app.example.com" autocomplete="off"></label>
+    <label>Method<input class="form-input" id="dc-method" value="GET" required maxlength="16"></label>
+    <label class="dc-wide">Path and parameters<input class="form-input" id="dc-url" value="/" required maxlength="4096" autocomplete="off" spellcheck="false"></label>
+    <label>Status code<input class="form-input" id="dc-status" type="number" min="100" max="599" value="404" required></label>
+    <label>Client IP (optional)<input class="form-input" id="dc-ip" maxlength="45" autocomplete="off" placeholder="203.0.113.9"></label>
+    <label>User-Agent (optional)<input class="form-input" id="dc-agent" maxlength="512" autocomplete="off"></label>
+    <div class="dc-actions"><button class="btn" type="submit">Check request</button></div>
+  </form>
+  <div id="dc-preview-result" class="dc-results" role="status" aria-live="polite" data-i18n-skip translate="no"></div>
+</section>
+
+<section class="card dc-card" id="dc-settings" aria-labelledby="dc-settings-title">
+  <div class="card-header"><h2 id="dc-settings-title">Context and observation</h2><button class="btn" type="button" id="dc-refresh">Refresh statistics</button></div>
+  <p class="mon-sub">New rules start in observation. Trusted addresses only produce warnings; observations never turn into old ban points after a mode change. HAProxy hard limits stay active.</p>
+  <p class="dr-result" id="dc-message" role="status" aria-live="polite" data-i18n-skip translate="no"></p>
+  <details class="dc-section"><summary>Site rules</summary>
+    <form class="dc-grid" id="dc-rule-form">
+      <label>Site<input class="form-input" id="dc-rule-host" required maxlength="253" placeholder="app.example.com"></label>
+      <label>Methods (empty means all)<input class="form-input" id="dc-rule-methods" maxlength="160" placeholder="GET, HEAD"></label>
+      <label>Status codes (empty means all)<input class="form-input" id="dc-rule-statuses" maxlength="80" placeholder="404, 410" pattern="[0-9, ]*"></label>
+      <label>Match<select class="form-input" id="dc-rule-match"><option value="exact">Exact path</option><option value="prefix">Route and children</option><option value="segment">Path segment</option></select></label>
+      <label>Path<input class="form-input" id="dc-rule-value" required maxlength="200" placeholder="/admin-backup"></label>
+      <label>Category<select class="form-input" id="dc-rule-category"></select></label>
+      <label>Mode<select class="form-input" id="dc-rule-mode"><option value="observe">Observation</option><option value="enforce">Count towards bans</option></select></label>
+      <div class="dc-actions"><button class="btn" type="submit">Add site rule</button></div>
+    </form>
+    <div class="dc-scroll" id="dc-rules" data-i18n-skip translate="no"></div>
+  </details>
+  <details class="dc-section" id="dc-exception-section"><summary>Narrow exceptions</summary>
+    <p class="mon-sub">An exception only skips its selected rule on the chosen site, methods and route. Other attack rules still apply.</p>
+    <form class="dc-grid" id="dc-exception-form">
+      <label>Rule<select class="form-input" id="dc-ex-rule"></select></label>
+      <label>Site<input class="form-input" id="dc-ex-host" required maxlength="253"></label>
+      <label>Methods (empty means all)<input class="form-input" id="dc-ex-methods" maxlength="160" placeholder="GET, HEAD"></label>
+      <label>Status codes (empty means all)<input class="form-input" id="dc-ex-statuses" maxlength="80" placeholder="200" pattern="[0-9, ]*"></label>
+      <label>Match<select class="form-input" id="dc-ex-match"><option value="exact">Exact path</option><option value="prefix">Route and children</option><option value="segment">Path segment</option></select></label>
+      <label>Path<input class="form-input" id="dc-ex-value" required maxlength="200"></label>
+      <label>Reason<input class="form-input" id="dc-ex-reason" required minlength="3" maxlength="200"></label>
+      <label>Expires (optional)<input class="form-input" id="dc-ex-expires" type="date"></label>
+      <div class="dc-actions"><button class="btn" type="submit">Add exception</button></div>
+    </form>
+    <div class="dc-scroll" id="dc-exceptions" data-i18n-skip translate="no"></div>
+  </details>
+  <details class="dc-section"><summary>Rule modes and statistics</summary>
+    <p class="mon-sub">Counters cover up to 24 hours. Unique IP counts are capped at 64 per rule. Capacity evictions mean some observations were lost.</p>
+    <form class="dc-grid" id="dc-mode-form">
+      <label class="dc-wide">Rule<select class="form-input" id="dc-mode-rule"></select></label>
+      <label>Mode<select class="form-input" id="dc-mode-value"><option value="observe">Observation</option><option value="enforce">Count towards bans</option></select></label>
+      <div class="dc-actions"><button class="btn" type="submit">Apply rule mode</button></div>
+    </form>
+    <div id="dc-capacity" class="mon-sub" data-i18n-skip translate="no"></div>
+    <p id="dc-scoring" class="mon-sub" data-i18n-skip translate="no"></p>
+    <div class="dc-scroll" id="dc-stats" data-i18n-skip translate="no"></div>
+    <div id="dc-behavior" class="dr-rules" data-i18n-skip translate="no"></div>
+    <h3>Existing behavioral rules</h3>
+    <div class="dc-scroll" id="dc-existing" data-i18n-skip translate="no"></div>
+  </details>
+  <details class="dc-section"><summary>Application profiles</summary>
+    <p class="mon-sub">Profiles explain expected methods and routes. They do not bypass protection; use a narrow exception for a verified false positive.</p>
+    <form class="dc-grid" id="dc-profile-form">
+      <label>Site<input class="form-input" id="dc-profile-host" required maxlength="253"></label>
+      <label>Profile<select class="form-input" id="dc-profile-name"><option value="web">Web</option><option value="api">API</option><option value="webdav">Nextcloud / WebDAV</option><option value="1c">1C</option><option value="docker">Docker API / Registry</option></select></label>
+      <div class="dc-actions"><button class="btn" type="submit">Save profile</button></div>
+    </form>
+    <div class="dc-scroll" id="dc-profiles" data-i18n-skip translate="no"></div>
+  </details>
+</section>
+
 <div class="card">
   <div class="card-header">
     <h2>Your rules</h2>
@@ -140,5 +212,6 @@
 </div>
 
 <script src="{{ url_for('static', filename='js/detection_rules.js') }}"></script>
+<script src="{{ url_for('static', filename='js/detection_context.js') }}"></script>
 
 {% endblock %}
