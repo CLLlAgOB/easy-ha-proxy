@@ -390,7 +390,7 @@
   // the polls arrive in.
   function progressModel(job, {history = [], highest = {}, now = Date.now(), t = identity} = {}) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {};
-    if (["haproxy-prepare", "haproxy-migrate"].includes(jobOperation(job))) {
+    if (["haproxy-prepare", "haproxy-migrate", "haproxy-transition"].includes(jobOperation(job))) {
       return {percent: null, label: t(jobOperation(job) === "haproxy-prepare" ? "Preparing the HAProxy transition…" : "Switching HAProxy to 3.4 LTS…"),
         step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};
     }

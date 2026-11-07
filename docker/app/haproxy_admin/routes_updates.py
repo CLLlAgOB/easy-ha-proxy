@@ -82,6 +82,7 @@ AUDITED_ACTIONS = {
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
     "prepare_haproxy_migration": ("update.haproxy_prepare", ("target_branch",)),
     "apply_haproxy_migration": ("update.haproxy_migrate", ("plan_id",)),
+    "start_haproxy_transition": ("update.haproxy_transition", ("target_branch",)),
 }
 
 
@@ -314,6 +315,17 @@ def _migration_configuration_error():
         return jsonify({"ok": False, "error": "Resolve pending HAProxy configuration changes before migration",
                         "error_code": "configuration_not_clean"}), 409
     return None
+
+
+@bp_system_updates.post("/api/haproxy/migration/start")
+def start_haproxy_transition():
+    payload = _json_payload({"target_branch", "confirmed"})
+    if payload['target_branch'] != '3.4' or payload['confirmed'] is not True:
+        abort(400, description='Confirm the transition to HAProxy 3.4 LTS')
+    error = _migration_configuration_error()
+    if error is not None:
+        return error
+    return _call_daemon({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True}, accepted=True)
 
 
 @bp_system_updates.post("/api/haproxy/migration/prepare")

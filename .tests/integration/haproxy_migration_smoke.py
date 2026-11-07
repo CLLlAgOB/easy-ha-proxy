@@ -217,8 +217,7 @@ def main():
     original_variables = paths.variables.read_bytes()
     results = {}
     try:
-        prepared = engine.prepare()
-        results['exercise'] = engine.apply(prepared['id'], exercise_rollback=True)
+        results['exercise'] = engine.migrate(exercise_rollback=True)
         assert results['exercise']['target_verified'] and results['exercise']['rollback_verified']
         assert info_version(paths) == old
         assert paths.config.read_bytes() == baseline
@@ -251,11 +250,10 @@ def main():
         results['cold_rollback'] = cold.summary()
 
         engine = migration.Engine(paths, host)
-        prepared = engine.prepare()
-        results['apply'] = engine.apply(prepared['id'])
+        results['apply'] = engine.migrate()
         assert results['apply']['phase'] == 'committed'
         assert info_version(paths).startswith('3.4.')
-        results['manual_rollback'] = engine.rollback(prepared['id'])
+        results['manual_rollback'] = engine.rollback(results['apply']['id'])
         assert results['manual_rollback']['rollback_verified'] and info_version(paths) == old
         assert paths.variables.read_bytes() == original_variables
         assert paths.config.read_bytes() == baseline

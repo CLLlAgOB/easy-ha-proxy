@@ -1,6 +1,11 @@
 {
   "meta": {"code": "ru", "label": "Русский"},
   "messages": {
+    "Switch to HAProxy 3.4 LTS? Connections may need to reconnect.": "Перейти на HAProxy 3.4 LTS? Соединениям может потребоваться переподключение.",
+    "Confirm the transition to HAProxy 3.4 LTS": "Подтвердите переход на HAProxy 3.4 LTS",
+    "Update host services before using the automatic HAProxy transition": "Для перехода обновите службы хоста",
+    "Configuration checks, package preparation and the transition run automatically after confirmation.": "Проверки, подготовка пакетов и переход выполняются автоматически после подтверждения.",
+    "The server prepares current packages and rollback files, checks the configuration and verifies the switch. Connections may need to reconnect.": "Сервер подготовит актуальные пакеты и файлы отката, проверит конфигурацию и результат перехода. Возможны переподключения клиентов.",
     "Transition to HAProxy 3.4 LTS": "Переход на HAProxy 3.4 LTS",
     "Preparation downloads verified packages and rollback files and checks the configuration. It does not switch the running HAProxy.": "Подготовка загружает проверенные пакеты и файлы отката и проверяет конфигурацию. Работающий HAProxy при этом не переключается.",
     "Prepare transition to 3.4": "Подготовить переход на 3.4",

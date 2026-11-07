@@ -35,6 +35,38 @@ backend tbl_ip_auth
 
 @unittest.skipUnless(m, 'Linux migration command')
 class Boundaries(unittest.TestCase):
+    def test_combined_transition_holds_the_actual_lock_across_refresh_prepare_and_apply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / 'maintenance.lock'
+            engine = m.Engine(m.Paths(lock=lock_path, source=ROOT), host=Mock(spec=m.Host))
+            actual_fstat = os.fstat
+            def root_owned(descriptor):
+                metadata = list(actual_fstat(descriptor)); metadata[4] = 0
+                return os.stat_result(metadata)
+            calls = []
+            def assert_locked(stage):
+                with lock_path.open('a') as other:
+                    with self.assertRaises(BlockingIOError):
+                        m.fcntl.flock(other.fileno(), m.fcntl.LOCK_EX | m.fcntl.LOCK_NB)
+                calls.append(stage)
+            engine.host.command.side_effect = lambda *a, **k: (assert_locked('refresh') or Mock(stdout='{"fresh":true}'))
+            with patch.object(m.os, 'fstat', side_effect=root_owned), \
+                    patch.object(engine, 'prepare', side_effect=lambda: (assert_locked('prepare') or {'id': 'a'*32})), \
+                    patch.object(engine, 'apply', side_effect=lambda identifier, **kwargs: (assert_locked('apply') or {'id': identifier, 'phase': 'committed'})) as apply:
+                result = engine.migrate()
+            self.assertEqual(calls, ['refresh', 'prepare', 'apply'])
+            self.assertEqual(result['phase'], 'committed')
+            apply.assert_called_once_with('a'*32, exercise_rollback=False)
+            self.assertEqual(engine.host.command.call_args.args[0][-1], 'refresh')
+
+    def test_failed_metadata_refresh_does_not_prepare_or_switch_the_running_service(self):
+        engine = m.Engine(host=Mock(spec=m.Host))
+        engine.host.command.return_value = Mock(stdout='{"fresh":false}')
+        with patch.object(engine, 'locked', contextlib.nullcontext), patch.object(engine, 'prepare') as prepare, patch.object(engine, 'apply') as apply:
+            with self.assertRaisesRegex(m.MigrationError, 'metadata refresh failed'):
+                engine.migrate()
+        prepare.assert_not_called(); apply.assert_not_called()
+
     def test_historical_master_socket_launch_is_qualified_without_allowing_arbitrary_exec(self):
         command = '/usr/sbin/haproxy -Ws -S /run/haproxy/master.sock,mode,660,user,root,group,haproxy -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid'
         text = '[Service]\nExecStart=\nExecStart=' + command + '\n'

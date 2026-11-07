@@ -393,10 +393,6 @@
   .updates-haproxy-versions dt { color: var(--text-secondary); font-size: 12px; }
   .updates-migration { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--border); }
   .updates-migration h3 { margin: 0 0 12px; }
-  #updates-migration-plan { margin-top: 20px; }
-  .updates-migration-confirm { display: block; margin: 18px 0 8px; font-size: 12px; }
-  .updates-migration .config-modal-actions { justify-content: flex-start; margin-top: 0; }
-  #updates-migration-confirm { width: min(100%, 280px); flex: 0 1 280px; min-width: 0; }
   .updates-haproxy-versions dd { margin: 5px 0 0; font-size: 13px; overflow-wrap: anywhere; }
   .updates-hero-meta, .updates-row-reason, .updates-run-step, .updates-run-note, .updates-confirm-note, .updates-row-requires, .updates-setting { color: var(--text-secondary); font-size: 12px; }
   .updates-hero-tools { padding-top: 18px; margin-top: 18px; border-top: 1px solid var(--border); align-items: center; }

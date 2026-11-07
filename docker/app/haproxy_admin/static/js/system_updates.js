@@ -15,8 +15,7 @@
     autoInstall: app.dataset.autoInstallUrl,
     reboot: app.dataset.rebootUrl,
     rebootCancel: app.dataset.rebootCancelUrl,
-    migrationPrepare: app.dataset.migrationPrepareUrl,
-    migrationApply: app.dataset.migrationApplyUrl
+    migrationStart: app.dataset.migrationStartUrl
   };
   let rebootPending = false;
   let rebootWatchTimer = null;
@@ -73,7 +72,7 @@
   let planHasContent = false;
   let haproxyOperation = null;
   let currentMigration = null;
-  let migrationReviewId = "";
+  let statusBaselineLoaded = false;
   let planSummaryText = "";
   let preselectedPlanId = "";
   // The job list, kept for the time estimate: how long each part took before.
@@ -109,12 +108,12 @@
       const knownJobIds = Array.isArray(value?.knownJobIds)
         ? value.knownJobIds.map(String).filter((item) => /^[a-f0-9]{32}$/i.test(item)).slice(0, 100)
         : [];
-      if (!["check", "apply", "haproxy-prepare", "haproxy-migrate"].includes(operation) || !Number.isFinite(startedAt) ||
+      if (!["check", "apply", "haproxy-prepare", "haproxy-migrate", "haproxy-transition"].includes(operation) || !Number.isFinite(startedAt) ||
           startedAt <= 0 || startedAt > Date.now() + 60 * 1000 ||
           (["apply", "haproxy-migrate"].includes(operation) && !/^[a-f0-9]{32}$/i.test(planId))) {
         throw new Error("invalid pending update start");
       }
-      return {operation, startedAt, components, planId, knownJobIds};
+      return {operation, startedAt, components, planId, knownJobIds, baselineKnown: value.baselineKnown === true};
     } catch (_error) {
       storageSet(PENDING_START_KEY, "");
       return null;
@@ -130,6 +129,7 @@
       components: Array.isArray(components) ? components.map(String) : [],
       planId: String(planId || ""),
       knownJobIds: Array.from(knownJobIds).slice(0, 100),
+      baselineKnown: statusBaselineLoaded,
       startedAt: Date.now()
     });
   }
@@ -207,6 +207,7 @@
     if (value === "apply") return t("Install updates");
     if (value === "haproxy-prepare") return t("Prepare HAProxy migration");
     if (value === "haproxy-migrate") return t("Migrate HAProxy to 3.4 LTS");
+    if (value === "haproxy-transition") return t("Migrate HAProxy to 3.4 LTS");
     return t(value || "—");
   }
 
@@ -216,7 +217,7 @@
     if (!/^[a-f0-9]{32}$/i.test(id) || pendingStart.knownJobIds.includes(id)) return false;
     // A persisted baseline is immune to browser/server clock skew. The time
     // check is only a fallback for a click that raced the very first status poll.
-    if (!pendingStart.knownJobIds.length) {
+    if (!pendingStart.baselineKnown && !pendingStart.knownJobIds.length) {
       const createdAt = new Date(job?.created_at || job?.started_at || 0).getTime();
       if (!Number.isFinite(createdAt) || createdAt < pendingStart.startedAt - 30000) return false;
     }
@@ -417,7 +418,7 @@
     const phases = {committed: "HAProxy update verified", rolled_back: "HAProxy rollback verified", aborted: "HAProxy update canceled before switching",
       rollback_failed: "HAProxy recovery requires attention", recovery_exhausted: "HAProxy recovery requires attention"};
     const note = byId("updates-haproxy-last");
-    note.hidden = !last;
+    note.hidden = !last || (last.kind === "migration" && last.phase === "prepared");
     note.textContent = last ? `${t(last.kind === "migration" && last.phase === "prepared" ? "HAProxy migration prepared; review the target version before confirming" : phases[last.phase] || "HAProxy update in progress")}${last.updated_at ? ` · ${formatDate(last.updated_at * 1000)}` : ""}` : "";
     note.classList.toggle("text-danger", ["rollback_failed", "recovery_exhausted"].includes(last?.phase));
     const button = byId("updates-haproxy-install");
@@ -429,48 +430,24 @@
   function renderMigration() {
     if (!byId("updates-migration")) return;
     const migration = currentMigration;
-    const review = migration?.plan;
-    const operation = review?.operation || migration?.last_operation;
-    const planId = String(review?.id || "");
-    if (planId !== migrationReviewId) {
-      migrationReviewId = planId;
-      byId("updates-migration-confirm").value = "";
-    }
-    // Freshness is authoritative on the host, independent of browser clock skew.
-    const fresh = Boolean(review && !review.stale && !review.consumed_by && operation?.phase === "prepared");
+    const automatic = migration?.automatic;
     const state = byId("updates-migration-state");
-    state.textContent = t(migration?.reason || "Update host services before preparing a HAProxy migration");
-    if (operation?.phase === "committed" && operation.target_verified) state.textContent = t("HAProxy migration verified");
-    if (operation?.phase === "rolled_back" && operation.rollback_verified) state.textContent = t("HAProxy rollback verified");
-    const prepare = byId("updates-migration-prepare");
-    prepare.hidden = migration?.state === "current";
-    prepare.disabled = requestRunning || operationRunning || migration?.state !== "available";
-    byId("updates-migration-plan").hidden = !review || !operation || operation.phase !== "prepared";
-    byId("updates-migration-old").textContent = operation?.old_version || "—";
-    byId("updates-migration-target").textContent = operation?.target_runtime_version || "—";
-    byId("updates-migration-expires").textContent = review?.expires_at ? formatDate(review.expires_at) : "—";
-    const packages = byId("updates-migration-packages");
-    packages.replaceChildren(...[...(operation?.packages || []), ...(operation?.dependencies || [])].map((entry) => {
-      const item = document.createElement("li"); item.textContent = `${entry.name}: ${entry.version}`; return item;
-    }));
-    byId("updates-migration-review-state").textContent = t(fresh
-      ? "The prepared version and rollback files are ready. Confirm to switch HAProxy."
-      : "This migration plan is consumed, expired or changed. Prepare a new plan before switching.");
-    byId("updates-migration-apply").disabled = requestRunning || operationRunning || !fresh ||
-      byId("updates-migration-confirm").value !== "MIGRATE 3.4";
+    state.textContent = t(automatic?.reason || "Update host services before using the automatic HAProxy transition");
+    state.hidden = automatic?.can_start === true;
+    byId("updates-migration-description").hidden = automatic?.current === true;
+    const button = byId("updates-migration-start");
+    button.hidden = automatic?.current === true;
+    button.disabled = requestRunning || operationRunning || Boolean(pendingStart) || automatic?.can_start !== true;
   }
 
-  async function startMigration(apply) {
-    if (requestRunning || operationRunning) return;
-    const review = currentMigration?.plan;
-    if (apply && (!review || review.stale || review.consumed_by || byId("updates-migration-confirm").value !== "MIGRATE 3.4")) return;
-    const operation = apply ? "haproxy-migrate" : "haproxy-prepare";
-    const planId = apply ? review.id : "";
+  async function startMigration() {
+    if (requestRunning || operationRunning || pendingStart || !currentMigration?.automatic?.can_start) return;
+    if (!window.confirm(t("Switch to HAProxy 3.4 LTS? Connections may need to reconnect."))) return;
+    const operation = "haproxy-transition";
     setBusy(true);
-    beginPendingStart(operation, ["haproxy"], planId);
+    beginPendingStart(operation, ["haproxy"], "");
     try {
-      const payload = await postJson(apply ? endpoints.migrationApply : endpoints.migrationPrepare,
-        apply ? {plan_id: planId, confirmation: "MIGRATE 3.4"} : {target_branch: "3.4"});
+      const payload = await postJson(endpoints.migrationStart, {target_branch: "3.4", confirmed: true});
       currentJobId = String(payload.job_id || "");
       currentJobOperation = operation;
       currentApplyComponents = ["haproxy"];
@@ -739,7 +716,7 @@
     byId("updates-progress-step").textContent = model.step;
     const components = jobComponents(active);
     byId("updates-self-restart-running").hidden = !(
-      ["apply", "haproxy-migrate"].includes(jobOperation(active)) &&
+      ["apply", "haproxy-migrate", "haproxy-transition"].includes(jobOperation(active)) &&
       core.mayInterruptAccess(components)
     );
     renderElapsed();
@@ -751,7 +728,7 @@
   }
   // The newest installation, if it finished recently and was not dismissed.
   function recentResult(jobs) {
-    const job = jobs.find((item) => ["apply", "haproxy-prepare", "haproxy-migrate"].includes(jobOperation(item)));
+    const job = jobs.find((item) => ["apply", "haproxy-prepare", "haproxy-migrate", "haproxy-transition"].includes(jobOperation(item)));
     if (!job || !isTerminal(job)) return null;
     const finished = new Date(job.completed_at || job.started_at || 0).getTime();
     if (!Number.isFinite(finished) || Date.now() - finished > RESULT_VISIBLE_MS) return null;
@@ -1168,6 +1145,7 @@
       const active = renderJobs(jobs);
       const pendingResult = reconcilePendingStart(jobs);
       knownJobIds = new Set(jobs.map(jobId).filter((id) => /^[a-f0-9]{32}$/i.test(id)));
+      statusBaselineLoaded = true;
       operationRunning = active || Boolean(pendingStart);
       setBusy(requestRunning);
       const activeJob = jobs.find((job) => !isTerminal(job));
@@ -1539,9 +1517,7 @@
     updateSelection("haproxy");
     openConfirm();
   });
-  byId("updates-migration-prepare")?.addEventListener("click", () => startMigration(false));
-  byId("updates-migration-apply")?.addEventListener("click", () => startMigration(true));
-  byId("updates-migration-confirm")?.addEventListener("input", renderMigration);
+  byId("updates-migration-start")?.addEventListener("click", startMigration);
   byId("updates-confirm-go").addEventListener("click", applyUpdates);
   byId("updates-confirm-cancel").addEventListener("click", closeConfirm);
   byId("updates-confirm-modal").addEventListener("click", (event) => {

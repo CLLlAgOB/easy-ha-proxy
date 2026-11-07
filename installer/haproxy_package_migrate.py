@@ -38,6 +38,7 @@ import yaml
 
 
 WEB_MIGRATION_PROTOCOL = 1
+AUTOMATIC_MIGRATION_PROTOCOL = 1
 SERVICE_DROPIN_DIRS = tuple(Path(path) for path in ('/etc/systemd/system/haproxy.service.d',
     '/run/systemd/system/haproxy.service.d', '/usr/lib/systemd/system/haproxy.service.d', '/lib/systemd/system/haproxy.service.d'))
 
@@ -671,6 +672,18 @@ class Engine:
                 raise MigrationError('The previous HAProxy update record is unreadable') from error
             if not isinstance(operation, dict) or operation.get('phase') not in {'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'}:
                 raise MigrationError('Recover the unfinished HAProxy update before preparing another one')
+
+    def migrate(self, *, exercise_rollback=False):
+        """One confirmed operation retains custody from refresh to verification."""
+        with self.locked():
+            checker = self.paths.source / 'installer/apt_metadata.py'
+            if not checker.is_file() or checker.is_symlink():
+                raise MigrationError('The package metadata checker is unavailable; update host services')
+            metadata = json.loads(self.host.command([sys.executable, str(checker), 'refresh'], timeout=120).stdout)
+            if not isinstance(metadata, dict) or metadata.get('fresh') is not True:
+                raise MigrationError('Package metadata refresh failed before the HAProxy transition')
+            prepared = self.prepare()
+            return self.apply(prepared['id'], exercise_rollback=exercise_rollback)
 
     def prepare(self):
         with self.locked():
@@ -1503,7 +1516,7 @@ Pin-Priority: 100
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'patch', 'apply', 'rollback', 'recover', 'status'))
+    parser.add_argument('action', choices=('prepare', 'migrate', 'patch', 'apply', 'rollback', 'recover', 'status'))
     parser.add_argument('--id')
     parser.add_argument('--exercise-rollback', action='store_true')
     parser.add_argument('--expected-version')
@@ -1523,6 +1536,8 @@ def main(argv=None):
     try:
         if args.action == 'prepare':
             result = engine.prepare()
+        elif args.action == 'migrate':
+            result = engine.migrate(exercise_rollback=args.exercise_rollback)
         elif args.action == 'patch':
             if not args.expected_version:
                 parser.error('--expected-version is required')
