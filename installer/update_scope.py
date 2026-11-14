@@ -68,6 +68,8 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (".github/*", ()),
     ("LICENSES/*", ()),
     ("LICENSE", ()),
+    # Read live by the update broker for the footer; nothing to deploy.
+    ("VERSION", ()),
     ("*.md", ()),
     ("docs/*", ()),
     (".gitignore", ()),

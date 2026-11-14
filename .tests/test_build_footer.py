@@ -90,6 +90,14 @@ class TheHostBuild(unittest.TestCase):
         self.assertEqual(read.call_count, 1)
         self.assertEqual(first["revision"], git(self.root, "rev-parse", "HEAD").strip())
 
+    def test_it_names_the_release_from_the_version_file(self):
+        self.assertEqual(self.broker._read_host_build()["version"], "")
+        for text, expected in (("1.0.0\n", "1.0.0"), ("1.1.0-alpha\n", "1.1.0-alpha"),
+                               ("v1\n", ""), ("1.0.0; rm -rf /\n", "")):
+            with self.subTest(text=text):
+                (self.root / "VERSION").write_text(text, encoding="utf-8")
+                self.assertEqual(self.broker._read_host_build()["version"], expected)
+
     def test_no_checkout_is_no_build(self):
         with mock.patch.object(self.broker, "SOURCE_DIR", self.root / "absent"):
             self.assertIsNone(self.broker._read_host_build())
@@ -106,8 +114,33 @@ class TheFooter(unittest.TestCase):
         env = {"EHP_BUILD_REVISION": "0bf3ce31f3841e86dcb2bb682861f7d895365217",
                "EHP_BUILD_DATE": "2026-11-03T15:16:44+01:00", "EHP_SOURCE_TREE": tree}
         with mock.patch.dict(os.environ, {**env, 'EHP_SERVER_TIMEZONE': 'UTC'}), \
-                mock.patch.object(build_info.updates_badge, "host_build", return_value=host):
+                mock.patch.object(build_info.updates_badge, "host_build", return_value=host), \
+                mock.patch.object(build_info, "haproxy_version", return_value=None):
             return build_info.footer()
+
+    def test_the_release_comes_from_the_host_source(self):
+        footer = self.footer({"revision": "b9ebe91", "committed_at": "", "web_tree": TREE_A,
+                              "version": "1.2.3"})
+        self.assertEqual(footer["version"], "1.2.3")
+        self.assertEqual(self.footer({"revision": "b9ebe91", "version": "<b>"})["version"], "")
+        self.assertEqual(self.footer(None)["version"], "")
+
+    def test_the_haproxy_version_is_read_from_show_info_and_cached(self):
+        reply = "Name: HAProxy\nVersion: 3.4.7-0+ha34+ubuntu24.04u2\nRelease_date: 2026/10/31\n"
+        build_info._HAPROXY_VERSION.update(at=None, value=None)
+        self.addCleanup(build_info._HAPROXY_VERSION.update, at=None, value=None)
+        with mock.patch("haproxy_admin.utils.haproxy_runtime_command", return_value=reply) as ask:
+            first = build_info.haproxy_version()
+            build_info.haproxy_version()
+        self.assertEqual(first, {"short": "3.4.7", "full": "3.4.7-0+ha34+ubuntu24.04u2"})
+        self.assertEqual(ask.call_count, 1)
+
+    def test_an_unreachable_or_odd_haproxy_is_no_version(self):
+        with mock.patch("haproxy_admin.utils.haproxy_runtime_command", side_effect=OSError("gone")):
+            self.assertIsNone(build_info._read_haproxy_version())
+        with mock.patch("haproxy_admin.utils.haproxy_runtime_command",
+                        return_value="Version: <script>\n"):
+            self.assertIsNone(build_info._read_haproxy_version())
 
     def test_both_builds_and_a_match(self):
         footer = self.footer({"revision": "b9ebe91648a0227fbbe4da629896b64c5cf3ac9b",
@@ -139,10 +172,10 @@ class TheFooter(unittest.TestCase):
 
 
 class TheWiring(unittest.TestCase):
-    def render(self, match, *, same_revision=False):
+    def render(self, match, *, same_revision=False, version='', haproxy=None):
         environment = Environment(loader=FileSystemLoader(APP / 'templates'), autoescape=True)
         return environment.get_template('base.html').render(
-            build=dict(match=match,
+            build=dict(match=match, version=version, haproxy=haproxy,
                        host=dict(revision='aaaaaaa', when='2026-11-05 10:00 UTC'),
                        panel=dict(revision='aaaaaaa' if same_revision else 'bbbbbbb', when='2026-11-04 10:00 UTC')),
             g=SimpleNamespace(is_superadmin=False),
@@ -165,6 +198,17 @@ class TheWiring(unittest.TestCase):
         self.assertIn('Build comparison is unavailable.', html)
         self.assertNotIn('The existing image was reused.', html)
         self.assertNotIn('<span class="footer-build-mismatch">', html)
+
+    def test_the_product_release_and_haproxy_stand_untranslated(self):
+        html = self.render(True, version='1.0.0',
+                           haproxy={'short': '3.4.7', 'full': '3.4.7-0+ha34+ubuntu24.04u2'})
+        self.assertIn('data-i18n-skip>easy-ha-proxy 1.0.0</span>', html)
+        self.assertIn('title="3.4.7-0+ha34+ubuntu24.04u2">HAProxy 3.4.7</span>', html)
+        self.assertIn('class="page-eyebrow notranslate" translate="no" data-i18n-skip>easy-ha-proxy</p>', html)
+        self.assertIn('aaaaaaa</span>', html)  # the build names its commit, not only a date
+        bare = self.render(True)
+        self.assertIn('data-i18n-skip>easy-ha-proxy</span>', bare)
+        self.assertNotIn('HAProxy version', bare)
 
     def test_identical_revisions_do_not_claim_image_reuse(self):
         self.assertNotIn('The existing image was reused.', self.render(True, same_revision=True))
@@ -190,6 +234,7 @@ class TheWiring(unittest.TestCase):
         except ImportError:
             self.skipTest("the panel's dependencies are not installed here")
         for text in ("Build", "Show build details", "Date unavailable", "Host build", "Panel build",
+                     "Version", "HAProxy version",
                      "Build comparison is unavailable.",
                      "Panel files match the host. The existing image was reused.",
                      "All interface times use the server time zone.",

@@ -1005,6 +1005,8 @@
     "The container update could not be verified. Check the running containers and try again.": "Не удалось подтвердить обновление контейнеров. Проверьте, какие контейнеры работают, и повторите попытку.",
     "Host and panel versions differ. Update the panel.": "Версии хоста и панели различаются. Обновите панель.",
     "Host build": "Сборка хоста",
+    "Version": "Версия",
+    "HAProxy version": "Версия HAProxy",
     "Panel build": "Сборка панели",
     "Checked at": "Проверено в",
     "Not updated since": "Не обновлялось с",

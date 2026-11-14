@@ -2389,6 +2389,19 @@ def _source_git(*args: str) -> str | None:
     return result.stdout.decode("utf-8", "replace")
 
 
+# The release the source says it is: one line, MAJOR.MINOR.PATCH with an
+# optional pre-release tag such as 1.1.0-alpha. Anything else is no version.
+SOURCE_VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,24})?$")
+
+
+def _read_source_version() -> str:
+    try:
+        text = (SOURCE_DIR / "VERSION").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return text if SOURCE_VERSION_RE.fullmatch(text) else ""
+
+
 def _read_host_build() -> dict[str, str] | None:
     if not (SOURCE_DIR / ".git").exists():
         return None
@@ -2404,6 +2417,7 @@ def _read_host_build() -> dict[str, str] | None:
         "revision": head[0],
         "committed_at": committed.astimezone(dt.timezone.utc).isoformat(timespec="seconds"),
         "web_tree": hashlib.sha256(listing.encode("utf-8")).hexdigest() if listing else "",
+        "version": _read_source_version(),
     }
 
 
