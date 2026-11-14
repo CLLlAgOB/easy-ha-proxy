@@ -381,8 +381,15 @@ def apt_environment(directory, distro, codename):
 
 
 def restart_status():
+    """What still runs on replaced files, and whether the kernel needs a reboot.
+
+    ``error`` means the service list itself cannot be trusted. An unknown
+    kernel state (needrestart reports 0, or nothing) is ``kernel_warning``
+    instead: shown, never taken as leave to reboot, and no reason to hold
+    back restarts of services that were listed correctly.
+    """
     reboot = Path('/run/reboot-required').exists()
-    services, error = [], None
+    services, error, kernel_warning = [], None, None
     if Path('/usr/sbin/needrestart').is_file():
         code, text = command(['/usr/sbin/needrestart', '-b', '-r', 'l'], timeout=60, check=False)
         if code:
@@ -393,7 +400,7 @@ def restart_status():
             if match and int(match[1]) in {1, 2, 3}:
                 reboot = reboot or int(match[1]) > 1
             else:
-                error = 'The kernel restart state is unknown'
+                kernel_warning = 'The kernel restart state is unknown'
     else:
         error = 'The restart checker is not installed'
     # needrestart's override_rc can omit deliberately deferred services from
@@ -407,7 +414,8 @@ def restart_status():
                     services.append(service + '.service')
             except OSError:
                 error = 'A running service could not be checked for replaced libraries'
-    return {'reboot_required': reboot, 'services': sorted(set(services)), 'error': error, 'checked_at': time.time()}
+    return {'reboot_required': reboot, 'services': sorted(set(services)), 'error': error,
+            'kernel_warning': kernel_warning, 'checked_at': time.time()}
 
 
 def maintenance_guard(*, allow_web_reboot=False):

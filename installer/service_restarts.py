@@ -38,6 +38,23 @@ def policy(root):
     return value
 
 
+def last_install(root):
+    """When security packages were last installed (or an installation began).
+
+    A pass that finished before then has not seen what that installation
+    replaced, so tonight's window is not done yet.
+    """
+    path = root / 'status.json'
+    if not path.exists():
+        return 0
+    try:
+        status = read_json(path)
+    except (OSError, ValueError, SecurityError):
+        return 0
+    values = [status.get(key) for key in ('last_install_at', 'last_install_attempt')]
+    return max([value for value in values if type(value) in (int, float)] or [0])
+
+
 def window(local, text):
     hour, minute = map(int, text.split(':'))
     anchor = local.replace(hour=hour, minute=minute, second=0, microsecond=0, fold=0)
@@ -47,13 +64,19 @@ def window(local, text):
     return anchor, anchor.strftime('%Y-%m-%d') + ' ' + text
 
 
-def due(value, status, local, boot_id):
+def done(value, status, key, installed_at):
+    """Tonight's window already has a pass that saw the latest installation."""
+    return (status.get('policy_id') == value['id'] and status.get('window') == key and status.get('state') == 'ready'
+            and bool(status.get('applied')) and status.get('completed_at', 0) >= installed_at)
+
+
+def due(value, status, local, boot_id, installed_at=0):
     anchor, key = window(local, value['time'])
     same = status.get('policy_id') == value['id'] and status.get('boot_id') == boot_id
     retry = 900 if status.get('state') == 'running' else 300
     return (value['enabled'] and 0 <= local.timestamp() - anchor.timestamp() < 3600
             and value['updated_at'] <= anchor.timestamp()
-            and not (status.get('policy_id') == value['id'] and status.get('window') == key and status.get('state') == 'ready' and status.get('applied'))
+            and not done(value, status, key, installed_at)
             and (not same or local.timestamp() - status.get('last_attempt', 0) >= retry)), key
 
 
@@ -89,6 +112,8 @@ def fallback_services(root, *, now=None, restart=None):
             or status.get('window') != key or value['updated_at'] > anchor.timestamp()
             or not anchor.timestamp() <= status.get('completed_at', 0) <= local.timestamp()
             or local.timestamp() - status.get('completed_at', 0) > 24 * 3600
+            or status.get('completed_at', 0) < last_install(root)
+            or status.get('kernel_warning')
             or status.get('failed_services') or status.get('unresolved')):
         return []
     deferred = status.get('deferred') or []
@@ -96,7 +121,7 @@ def fallback_services(root, *, now=None, restart=None):
         return []
     fresh = restart if restart is not None else checked_restart()
     services = fresh.get('services') or []
-    if fresh.get('error') or not services or not set(services).issubset(deferred):
+    if fresh.get('error') or fresh.get('kernel_warning') or not services or not set(services).issubset(deferred):
         return []
     return sorted(set(services))
 
@@ -116,7 +141,7 @@ def execute(action, root, *, now=None):
     local = now or local_time()
     boot_id = BOOT.read_text().strip()
     _, key = window(local, value['time'])
-    if action == 'restart-cycle' and not due(value, previous, local, boot_id)[0]:
+    if action == 'restart-cycle' and not due(value, previous, local, boot_id, last_install(root))[0]:
         return {'message': 'The service restart window is not due'}
     # A read-only check must not erase a successful application or consume
     # tonight's scheduled pass. Keep its result separate from the attempt.
@@ -159,9 +184,12 @@ def execute(action, root, *, now=None):
                     failed.append(unit)
             deferred = [unit for unit in after['services'] if classification(unit) in {'protected', 'deferred'}]
             unresolved = sorted(set(after['services']) - set(deferred))
+            # An unknown kernel state stays visible and blocks the reboot
+            # fallback; the listed services were restarted all the same.
+            kernel_warning = after.get('kernel_warning') or before.get('kernel_warning')
             state.update(state='ready', completed_at=time.time(), applied=True, verified=not failed and not unresolved,
                          before=before['services'], restart=after, restarted=sorted(set(automatic) - set(after['services']) - set(failed)),
-                         deferred=deferred, unresolved=unresolved, failed_services=failed)
+                         deferred=deferred, unresolved=unresolved, failed_services=failed, kernel_warning=kernel_warning)
             atomic(path, state)
             if failed:
                 raise SecurityError('Some services did not become active after their restart')

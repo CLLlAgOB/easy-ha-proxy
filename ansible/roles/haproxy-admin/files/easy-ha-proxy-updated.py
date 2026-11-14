@@ -2843,13 +2843,33 @@ def service_restart_record():
     return value
 
 
-def service_restart_due(value, status, local):
+def os_security_last_install():
+    """When security packages were last installed (or an installation began).
+
+    Mirrors service_restarts.last_install: a restart pass that finished before
+    then has not seen what the installation replaced.
+    """
+    path = OS_SECURITY_ROOT / 'status.json'
+    try:
+        status = safe_json_file(path) if os.path.lexists(path) else {}
+    except (OSError, ValueError, TypeError, UpdatedError):
+        return 0
+    values = [status.get(key) for key in ('last_install_at', 'last_install_attempt')]
+    return max([value for value in values if type(value) in (int, float)] or [0])
+
+
+def service_restart_due(value, status, local, installed_at=None):
     anchor, key = auto_reboot_window(local, value['time'])
+    installed_at = os_security_last_install() if installed_at is None else installed_at
     same = status.get('policy_id') == value['id'] and status.get('boot_id') == current_boot_id()
     retry = 900 if status.get('state') == 'running' else 300
+    # Done for tonight only once a pass has seen the latest installation: one
+    # that installs inside the window gets its own pass, in the same window.
+    done = (status.get('policy_id') == value['id'] and status.get('window') == key and status.get('state') == 'ready'
+            and bool(status.get('applied')) and status.get('completed_at', 0) >= installed_at)
     return (value['enabled'] and 0 <= local.timestamp() - anchor.timestamp() < 3600
             and value['updated_at'] <= anchor.timestamp()
-            and not (status.get('policy_id') == value['id'] and status.get('window') == key and status.get('state') == 'ready' and status.get('applied'))
+            and not done
             and (not same or local.timestamp() - status.get('last_attempt', 0) >= retry)), key
 
 

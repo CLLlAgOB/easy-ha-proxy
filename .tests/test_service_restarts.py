@@ -194,6 +194,101 @@ class ServiceRestarts(unittest.TestCase):
         self.assertFalse(s.due(self.policy,{**status,'boot_id':'previous-boot'},first,BOOT)[0])
 
 
+    def test_an_unknown_kernel_state_does_not_hold_back_listed_service_restarts(self):
+        warning = 'The kernel restart state is unknown'
+        self.scan.side_effect = [{**self.restart('cron.service'), 'kernel_warning': warning},
+                                 {**self.restart(), 'kernel_warning': warning}]
+        result = s.run('restart-cycle', self.root, now=self.now)
+        self.assertEqual(result['restarted'], ['cron.service'])
+        self.assertTrue(result['verified'])
+        self.assertEqual(self.state()['kernel_warning'], warning)
+        self.assertTrue(any(call.args[0][0] == '/usr/sbin/needrestart' for call in self.command.call_args_list))
+
+    def test_an_unknown_kernel_state_never_supplies_reboot_evidence(self):
+        warning = 'The kernel restart state is unknown'
+        self.scan.return_value = self.restart('dbus.service')
+        s.run('restart-cycle', self.root, now=self.now)
+        self.assertEqual(s.fallback_services(self.root, now=self.now), ['dbus.service'])
+        saved = self.state()
+        (self.root / 'restart-status.json').write_text(json.dumps({**saved, 'kernel_warning': warning}))
+        self.assertEqual(s.fallback_services(self.root, now=self.now), [])
+        (self.root / 'restart-status.json').write_text(json.dumps(saved))
+        self.scan.return_value = {**self.restart('dbus.service'), 'kernel_warning': warning}
+        self.assertEqual(s.fallback_services(self.root, now=self.now), [])
+
+    def test_an_installation_inside_the_window_gets_its_own_pass(self):
+        # 02:20: nothing to restart, the pass succeeds.
+        self.scan.return_value = self.restart()
+        s.run('restart-cycle', self.root, now=self.now)
+        self.assertFalse(s.due(self.policy, self.state(), self.now, BOOT, s.last_install(self.root))[0])
+        # 02:30: an installation replaces files cron still uses.
+        installed = self.now + dt.timedelta(minutes=10)
+        (self.root / 'status.json').write_text(json.dumps({'last_install_at': installed.timestamp()}))
+        later = self.now + dt.timedelta(minutes=15)
+        installed_at = s.last_install(self.root)
+        self.assertEqual(installed_at, installed.timestamp())
+        self.assertTrue(s.due(self.policy, self.state(), later, BOOT, installed_at)[0])
+        self.assertTrue(broker.service_restart_due(self.policy, self.state(), later, installed_at)[0])
+        self.scan.side_effect = [self.restart('cron.service', 'dbus.service'), self.restart('dbus.service')]
+        with patch.object(s.time, 'time', return_value=later.timestamp()):
+            result = s.run('restart-cycle', self.root, now=later)
+        self.assertEqual(result['restarted'], ['cron.service'])
+        # Seen now: done for tonight, by both schedulers.
+        self.assertFalse(s.due(self.policy, self.state(), later, BOOT, installed_at)[0])
+        self.assertFalse(broker.service_restart_due(self.policy, self.state(), later, installed_at)[0])
+        # A pass that finished before the latest installation is no reboot evidence.
+        self.scan.side_effect = None
+        self.scan.return_value = self.restart('dbus.service')
+        checked = later + dt.timedelta(minutes=2)
+        self.assertEqual(s.fallback_services(self.root, now=checked), ['dbus.service'])
+        (self.root / 'status.json').write_text(json.dumps({'last_install_attempt': later.timestamp() + 60}))
+        self.assertEqual(s.fallback_services(self.root, now=checked), [])
+
+    def test_an_installation_outside_the_window_waits_for_the_next_one(self):
+        s.run('restart-cycle', self.root, now=self.now)
+        noon = self.now.replace(hour=12)
+        (self.root / 'status.json').write_text(json.dumps({'last_install_at': noon.timestamp()}))
+        self.assertFalse(s.due(self.policy, self.state(), noon + dt.timedelta(minutes=5), BOOT, s.last_install(self.root))[0])
+
+
+@unittest.skipUnless(s, 'Linux service restart executor')
+class KernelState(unittest.TestCase):
+    """needrestart's kernel state apart from its service list."""
+
+    def scan(self, output, code=0):
+        import os_security
+
+        def command(argv, **kwargs):
+            if argv[0] == '/usr/sbin/needrestart':
+                return code, output
+            return 0, '0\n'  # no MainPID: the protected services are not running here
+
+        with patch.object(os_security, 'command', side_effect=command), \
+                patch.object(os_security.Path, 'is_file', return_value=True):
+            return os_security.restart_status()
+
+    def test_kernel_state_zero_is_a_warning_and_keeps_the_services(self):
+        result = self.scan('NEEDRESTART-KSTA: 0\nNEEDRESTART-SVC: cron.service\n')
+        self.assertIsNone(result['error'])
+        self.assertEqual(result['kernel_warning'], 'The kernel restart state is unknown')
+        self.assertEqual(result['services'], ['cron.service'])
+
+    def test_a_missing_kernel_state_is_a_warning_too(self):
+        result = self.scan('NEEDRESTART-SVC: cron.service\n')
+        self.assertIsNone(result['error'])
+        self.assertTrue(result['kernel_warning'])
+
+    def test_a_known_kernel_state_has_no_warning(self):
+        result = self.scan('NEEDRESTART-KSTA: 3\nNEEDRESTART-SVC: cron.service\n')
+        self.assertIsNone(result['kernel_warning'])
+        self.assertTrue(result['reboot_required'])
+
+    def test_a_failed_scan_is_still_an_error(self):
+        result = self.scan('', code=1)
+        self.assertEqual(result['error'], 'The restart check failed')
+        self.assertEqual(result['services'], [])
+
+
 @unittest.skipUnless(s, 'Linux restart broker')
 class RestartBroker(reboot_tests.RebootBroker if s else unittest.TestCase):
     def setUp(self):

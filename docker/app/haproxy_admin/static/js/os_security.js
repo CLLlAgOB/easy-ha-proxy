@@ -261,7 +261,9 @@
     const restart = status.restart;
     el("restart").textContent = t(!restart ? "Not checked yet." : restart.error || (restart.reboot_required
       ? "A server reboot is required to activate installed updates." : restart.services?.length
-        ? "Some services still use replaced files. Apply their controlled restart." : "No pending restart was found in the last check."));
+        ? "Some services still use replaced files. Apply their controlled restart." : "No pending restart was found in the last check."))
+      // An unknown kernel state no longer stops service restarts; it is shown as its own sentence.
+      + (restart && !restart.error && restart.kernel_warning ? " " + t(restart.kernel_warning) : "");
     const actionLabels = {automatic: "Automatic restart in the maintenance window", protected: "Controlled maintenance required",
       deferred: "Deferred; scheduled reboot only with explicit permission", unknown: "Review this service before restarting it",
       unresolved: "Restart remains unresolved; automatic reboot fallback is blocked"};
