@@ -189,7 +189,11 @@
         });
       }
 
-      if (servers.length > 0) {
+      var setChoice = window.backendSetChoice ? window.backendSetChoice() : null;
+      if (setChoice) {
+        tcp.servers_preset = setChoice.name;
+        tcp.servers_preset_port = setChoice.port;
+      } else if (servers.length > 0) {
         tcp.servers = servers;
       }
 

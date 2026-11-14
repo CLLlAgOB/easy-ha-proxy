@@ -187,6 +187,9 @@
             </div>
             {% endif %}
 
+            {% if eff.servers_preset %}
+            <div class="site-backend-meta">Backend set: <span data-i18n-skip translate="no">{{ eff.servers_preset }}</span></div>
+            {% endif %}
             {% if eff.backend_host %}
             <div class="site-backend-meta">
               Host: {{ eff.backend_host }}
@@ -507,9 +510,20 @@
         <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" data-i18n-skip translate="no">
 
         <div id="add-site-backend-fields">
+          <label class="u-mt-2 form-label" for="add-site-backend-set">Backend set</label>
+          <select id="add-site-backend-set" name="servers_preset" class="form-input js-backend-set-quick"
+            data-host-field="backend_ip">
+            <option value="">Type the address</option>
+            {% for p in backend_presets_list() %}
+            <option value="{{ p.name }}" data-i18n-skip translate="no">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+
+          <div id="backend_ip-group">
           <label class="u-mt-2 form-label" for="backend_ip" >backend_ip *</label>
           <input id="backend_ip" name="backend_ip" type="text" class="form-input" required
             placeholder="Backend server IP" />
+          </div>
 
           <label class="u-mt-2 form-label" for="backend_port" >backend_port *</label>
           <input id="backend_port" name="backend_port" type="number" min="1" max="65535" class="form-input" required
@@ -547,4 +561,5 @@
   })();
 </script>
 
+<script src="{{ url_for('static', filename='js/backend_sets.js') }}" nonce="{{ csp_nonce }}"></script>
 {% endblock %}

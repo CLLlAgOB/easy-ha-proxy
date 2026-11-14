@@ -1,0 +1,42 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Name *": "Название *",
+    "weight": "вес",
+    "HAProxy – Backend sets": "HAProxy – Наборы бэкендов",
+    "Backend sets": "Наборы бэкендов",
+    "Backend set": "Набор бэкендов",
+    "Backend set:": "Набор бэкендов:",
+    "A backend set is a named list of backend addresses, each with its role: primary or backup.": "Набор бэкендов — это именованный список адресов бэкендов, у каждого своя роль: основной или резервный.",
+    "Sites, TCP proxies and UDP forwards can pick a set instead of typing the addresses again.": "Сайты, TCP-прокси и UDP-пробросы могут выбрать набор, а не вписывать адреса заново.",
+    "Changing a set changes every entry that uses it. Sites and TCP proxies take the change when the HAProxy configuration is validated and applied; UDP forwards are applied at once.": "Изменение набора меняет все записи, которые его используют. Сайты и TCP-прокси получают изменение после проверки и применения конфигурации HAProxy; UDP-пробросы применяются сразу.",
+    "Used by": "Используется в",
+    "HTTP site": "HTTP-сайт",
+    "TCP proxy": "TCP-прокси",
+    "UDP forward": "UDP-проброс",
+    "Not used": "Не используется",
+    "No backend sets yet. Create the first one below.": "Наборов бэкендов пока нет. Создайте первый ниже.",
+    "Edit backend set": "Изменить набор бэкендов",
+    "New backend set": "Новый набор бэкендов",
+    "Several primary addresses share the load; a backup takes traffic only when no primary answers.": "Несколько основных адресов делят нагрузку; резервный получает трафик, только когда не отвечает ни один основной.",
+    "The port is chosen in each site, TCP proxy or UDP forward, so one set serves different services.": "Порт выбирается в каждом сайте, TCP-прокси или UDP-пробросе, поэтому один набор подходит для разных сервисов.",
+    "for example: Two uplinks": "например: Два провайдера",
+    "for example: first uplink": "например: первый провайдер",
+    "Note": "Примечание",
+    "Remove address": "Удалить адрес",
+    "+ Add address": "+ Добавить адрес",
+    "Save backend set": "Сохранить набор бэкендов",
+    "Manual addresses": "Адреса вручную",
+    "The backend set this entry names no longer exists. Pick another set or switch to manual addresses.": "Набора бэкендов, указанного в этой записи, больше нет. Выберите другой набор или перейдите на адреса вручную.",
+    "With a set, the addresses and their roles come from it, and a change to the set reaches this entry too.": "С набором адреса и их роли берутся из него, и изменение набора доходит и до этой записи.",
+    "Switching to manual addresses keeps the current list so it can be edited here.": "При переходе на адреса вручную текущий список сохраняется, и его можно править здесь.",
+    "Manage backend sets": "Управление наборами бэкендов",
+    "Set the backend port for the backend set (1-65535)": "Укажите порт бэкенда для набора бэкендов (1–65535)",
+    "Type the address": "Указать адрес",
+    "Type the addresses": "Указать адреса",
+    "A forward takes the set's first primary address as the backend and its first backup address as the backup.": "Проброс берёт первый основной адрес набора как бэкенд, а первый резервный — как резерв."
+  }
+}

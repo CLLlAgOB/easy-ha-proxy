@@ -74,6 +74,7 @@ def haproxy_udp_page():
                 "backup_port": (request.form.get("backup_port") or "").strip(),
                 "health_check": (request.form.get("health_check") or "ping").strip(),
                 "health_port": (request.form.get("health_port") or "").strip(),
+                "servers_preset": (request.form.get("servers_preset") or "").strip(),
             }
             before = _stored_udp(original_name)
             try:

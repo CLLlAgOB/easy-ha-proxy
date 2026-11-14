@@ -177,6 +177,11 @@
                     </ul>
                 </div>
 
+                {% set picker_current = site.servers_preset or '' %}
+                {% set picker_port = site.servers_preset_port or ((site.servers or [{}])[0].port) or site.backend_port or eff.backend_port or site_defaults.backend_port or 80 %}
+                {% include "_backend_set_picker.html" %}
+
+                <div id="backend-manual">
                 <div class="scroll-x"><table class="u-mt-2 table mono backend-edit-table">
                     <thead>
                         <tr>
@@ -262,6 +267,7 @@
                 <button type="button" class="u-mt-1 btn" id="btn-add-backend" >
                     + Add backend server
                 </button>
+                </div>
 
                 {# ───── HTTP-only: SAN + certificates + load balancing/sticky ───── #}
                 <div id="block-http-left">

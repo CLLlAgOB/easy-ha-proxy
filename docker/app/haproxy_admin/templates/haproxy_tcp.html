@@ -84,6 +84,7 @@
             {% else %}
             —
             {% endif %}
+            {% if t.servers_preset %}<div class="table-meta">Backend set: <span data-i18n-skip translate="no">{{ t.servers_preset }}</span></div>{% endif %}
           </td>
           <td class="text-right nowrap">
             <a class="btn btn-small"
@@ -146,6 +147,17 @@
 
       <div class="form-grid">
         <div class="form-group">
+          <label class="form-label" for="field-new-backend-set">Backend set</label>
+          <select id="field-new-backend-set" name="servers_preset" class="form-input js-backend-set-quick"
+            data-host-field="field-new-backend-host">
+            <option value="">Type the address</option>
+            {% for p in backend_presets_list() %}
+            <option value="{{ p.name }}" data-i18n-skip translate="no">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-group" id="field-new-backend-host-group">
           <label class="form-label" for="field-new-backend-host">backend_host *</label>
           <input id="field-new-backend-host" name="backend_host" type="text" class="form-input" required
             placeholder="10.0.0.10">
@@ -190,4 +202,5 @@
   </form>
 </div>
 
+<script src="{{ url_for('static', filename='js/backend_sets.js') }}" nonce="{{ csp_nonce }}"></script>
 {% endblock %}

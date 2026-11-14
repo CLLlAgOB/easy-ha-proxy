@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from . import backend_presets
 from .services_haproxy_config import (
     UDP_YAML,
     StaleEntry,
@@ -86,6 +87,13 @@ def _normalize_udp_entry(
     if not isinstance(raw, dict):
         return False, "Invalid UDP forward format (expected a JSON object)", None
 
+    # A backend set, when named, supplies the main and backup host.
+    raw = dict(raw)
+    try:
+        backend_presets.apply_to_udp(raw, backend_presets.load_presets())
+    except ValueError as exc:
+        return False, str(exc), None
+
     out: Dict[str, Any] = {}
     try:
         out["name"] = validate_identifier(raw.get("name"), "name")
@@ -123,6 +131,8 @@ def _normalize_udp_entry(
         _normalize_backup(raw, out, backend_start, backend_end)
     except ValueError as exc:
         return False, str(exc), None
+    if raw.get(backend_presets.PRESET_FIELD):
+        out[backend_presets.PRESET_FIELD] = raw[backend_presets.PRESET_FIELD]
 
     return True, "", out
 

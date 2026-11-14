@@ -1568,6 +1568,10 @@ def _add_site_minimal(
         for k, v in extra.items():
             if v is not None:
                 new_site[k] = v
+    # A site that came with its server list (a backend set) has no single backend.
+    if new_site.get("servers"):
+        new_site.pop("backend_ip", None)
+        new_site.pop("backend_port", None)
 
     conflict = site_identity_conflict(new_site, sites)
     if conflict:

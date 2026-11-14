@@ -275,6 +275,9 @@ class InstrumentationTests(unittest.TestCase):
         "routes_haproxy_udp.py": (
             "udp_forward.create", "udp_forward.update", "udp_forward.delete",
         ),
+        "routes_backend_presets.py": (
+            "backend_set.create", "backend_set.update", "backend_set.delete",
+        ),
         "routes_geoip.py": ("geoip.update", "geoip.countries", "geoip.schedule"),
         "routes_health.py": ("service.control",),
         "routes_security.py": (

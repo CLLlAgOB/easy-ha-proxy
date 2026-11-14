@@ -16,6 +16,7 @@ import yaml
 from pathlib import Path
 import ssl
 from datetime import datetime, timezone
+from . import backend_presets
 from .services_haproxy_config import (
     WEBSITES_YAML,
     CONFIG_YAML,
@@ -774,6 +775,12 @@ def _save_site_from_json(
         site_out["external_ca_id"] = external_ca_id
     else:
         site_out.pop("external_ca_id", None)
+
+    # --- a backend set named instead of addresses ---------------------------
+    try:
+        backend_presets.apply_to_site(site_out, backend_presets.presets_from(_load_yaml(CONFIG_YAML)))
+    except ValueError as exc:
+        return False, str(exc)
 
     # --- backend servers -----------------------------------------------------
     cleaned_servers: List[Dict[str, Any]] = []

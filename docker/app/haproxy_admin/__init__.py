@@ -48,6 +48,7 @@ from . import routes_haproxy_config  # noqa: F401
 from . import routes_haproxy_sites  # noqa: F401
 from . import routes_haproxy_tcp  # noqa: F401
 from . import routes_haproxy_udp  # noqa: F401
+from . import routes_backend_presets  # noqa: F401
 from . import routes_health  # noqa: F401
 from . import routes_geoip  # noqa: F401
 from . import routes_monitoring  # noqa: F401

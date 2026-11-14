@@ -7,6 +7,7 @@
 from typing import Any, Dict, List, Tuple, Optional
 import yaml
 
+from . import backend_presets
 from .services_haproxy_config import (
     TCP_YAML,
     _load_yaml,
@@ -99,6 +100,12 @@ def _normalize_tcp_entry(raw: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[
             out.pop("inter", None)
 
     out["ssl_check"] = bool(out.get("ssl_check", False))
+
+    # --- a backend set named instead of addresses ---------------------------
+    try:
+        backend_presets.apply_to_tcp(out, backend_presets.load_presets())
+    except ValueError as exc:
+        return False, str(exc), None
 
     # --- backend servers -----------------------------------------------------
     cleaned_servers: List[Dict[str, Any]] = []

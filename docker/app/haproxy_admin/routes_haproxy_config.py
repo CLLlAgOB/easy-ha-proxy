@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from .i18n import translate
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
+from . import backend_presets
 from .services_haproxy_config import (
     render_haproxy_cfg,
     check_cfg,
@@ -1146,6 +1147,20 @@ def haproxy_sites_page():
             site_type = (request.form.get("site_type") or "normal").strip()
             backend_ip = (request.form.get("backend_ip") or "").strip()
             backend_port_str = (request.form.get("backend_port") or "").strip()
+            set_name = (request.form.get("servers_preset") or "").strip()
+            set_extra = None
+            if set_name and site_type != "gate":
+                # A backend set stands for the address; the port stays the site's.
+                set_extra = {
+                    backend_presets.PRESET_FIELD: set_name,
+                    backend_presets.PORT_FIELD: backend_port_str,
+                }
+                try:
+                    backend_presets.apply_to_site(set_extra, backend_presets.load_presets())
+                except ValueError as exc:
+                    error = str(exc)
+                else:
+                    backend_ip = set_extra["servers"][0]["host"]
 
             # An access gate is an Authelia-protected site with no upstream that
             # authorizes the visitor IP and serves a static welcome page. It is
@@ -1155,7 +1170,9 @@ def haproxy_sites_page():
             if is_gate:
                 backend_ip = ""
                 backend_port_str = ""
-            if not domain:
+            if error:
+                pass
+            elif not domain:
                 error = 'The Domain field is required'
             elif is_gate:
                 pass
@@ -1178,7 +1195,8 @@ def haproxy_sites_page():
                     domain,           # name
                     domain,           # domain
                     backend_ip,
-                    backend_port_str  # a string, as add_site_minimal expects
+                    backend_port_str,  # a string, as add_site_minimal expects
+                    set_extra,
                 )
                 record_request(
                     "site.create",
@@ -2061,6 +2079,7 @@ def haproxy_tcp_page():
             bind_port_str = (request.form.get("bind_port") or "").strip()
             backend_host = (request.form.get("backend_host") or "").strip()
             backend_port_str = (request.form.get("backend_port") or "").strip()
+            set_name = (request.form.get("servers_preset") or "").strip()
             balance = (request.form.get("balance") or "").strip() or "source"
             zero_trust = bool(request.form.get("zero_trust"))
             ban_check = bool(request.form.get("ban_check"))
@@ -2069,7 +2088,7 @@ def haproxy_tcp_page():
                 error = 'The TCP proxy Name field is required'
             elif not bind_port_str:
                 error = 'The Bind port field is required'
-            elif not backend_host or not backend_port_str:
+            elif (not backend_host and not set_name) or not backend_port_str:
                 error = 'The backend_host and backend_port fields are required'
             else:
                 try:
@@ -2092,6 +2111,9 @@ def haproxy_tcp_page():
                     "zero_trust": zero_trust,
                     "ban_check": ban_check,
                 }
+                if set_name:
+                    tcp_obj[backend_presets.PRESET_FIELD] = set_name
+                    tcp_obj[backend_presets.PORT_FIELD] = backend_port
                 ok, msg = save_tcp_from_json(tcp_obj, original_name=None)
                 record_request(
                     "tcp_proxy.create",

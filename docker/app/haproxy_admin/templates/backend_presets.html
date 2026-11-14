@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – Backend sets{% endblock %}
+{% block header_title %}Backend sets{% endblock %}
+
+{% block content %}
+
+{% for category, flashed_message in get_flashed_messages(with_categories=true) %}
+<div class="border-success card">
+  <div class="card-header"><strong>Saved</strong></div>
+  <div class="card-body"><p class="u-m-0">{{ flashed_message }}</p></div>
+</div>
+{% endfor %}
+
+{% if error %}
+<div class="border-error card">
+  <div class="card-header"><strong>Error</strong></div>
+  <div class="card-body"><pre class="pre-wrap mono">{{ error }}</pre></div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Backend sets</h2>
+    <div class="table-meta">
+      A backend set is a named list of backend addresses, each with its role: primary or backup.
+      Sites, TCP proxies and UDP forwards can pick a set instead of typing the addresses again.
+    </div>
+    <div class="u-mt-2 table-meta">
+      Changing a set changes every entry that uses it. Sites and TCP proxies take the change when
+      the HAProxy configuration is validated and applied; UDP forwards are applied at once.
+    </div>
+  </div>
+  <div class="card-body">
+    {% if presets %}
+    <div class="table-container">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Addresses</th>
+            <th>Used by</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in presets %}
+          {% set users = used.get(p.name, []) %}
+          <tr>
+            <td><strong data-i18n-skip translate="no">{{ p.name }}</strong></td>
+            <td>
+              {% for s in p.servers %}
+              <div>
+                <span class="mono" data-i18n-skip translate="no">{{ s.host }}</span>
+                {% if s.role == 'backup' %}<span class="tag tag-warn">Backup</span>{% else %}<span class="tag">Primary</span>{% endif %}
+                {% if s.weight %}<span class="table-meta">weight <span data-i18n-skip translate="no">{{ s.weight }}</span></span>{% endif %}
+                {% if s.note %}<span class="table-meta" data-i18n-skip translate="no">{{ s.note }}</span>{% endif %}
+              </div>
+              {% endfor %}
+            </td>
+            <td>
+              {% if users %}
+              {% for u in users %}
+              <div>
+                {% if u.kind == 'site' %}<a href="{{ url_for('routes.haproxy_site_edit', name=u.name) }}">
+                {% elif u.kind == 'tcp' %}<a href="{{ url_for('routes.haproxy_tcp_edit', name=u.name) }}">
+                {% else %}<a href="{{ url_for('routes.haproxy_udp_page', edit=u.name) }}">{% endif %}
+                <span class="mono" data-i18n-skip translate="no">{{ u.name }}</span></a>
+                <span class="table-meta">{% if u.kind == 'site' %}HTTP site{% elif u.kind == 'tcp' %}TCP proxy{% else %}UDP forward{% endif %}</span>
+              </div>
+              {% endfor %}
+              {% else %}
+              <span class="table-meta">Not used</span>
+              {% endif %}
+            </td>
+            <td>
+              <a class="btn btn-small" href="{{ url_for('routes.backend_presets_page', edit=p.name) }}">Edit</a>
+              {% if not users %}
+              <form method="post" action="{{ url_for('routes.backend_presets_page') }}" data-confirm="Delete {{ p.name }}?" class="inline">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="name" value="{{ p.name }}">
+                <button type="submit" class="btn btn-small btn-danger">Delete</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="table-meta u-m-0">No backend sets yet. Create the first one below.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>{% if original_name %}Edit backend set{% else %}New backend set{% endif %}</h2>
+    <div class="table-meta">
+      Several primary addresses share the load; a backup takes traffic only when no primary answers.
+      The port is chosen in each site, TCP proxy or UDP forward, so one set serves different services.
+    </div>
+  </div>
+  <form method="post" action="{{ url_for('routes.backend_presets_page') }}" id="backend-set-form">
+    <input type="hidden" name="action" value="save">
+    {% if original_name %}
+    <input type="hidden" name="original_name" value="{{ original_name }}">
+    <input type="hidden" name="revision" value="{{ revision or '' }}">
+    {% endif %}
+    <div class="card-body">
+      <div class="form-group">
+        <label class="form-label" for="field-set-name">Name *</label>
+        <input id="field-set-name" name="name" type="text" class="form-input" required maxlength="48"
+          value="{{ form_preset.name }}" placeholder="for example: Two uplinks">
+      </div>
+
+      <div class="scroll-x"><table class="u-mt-2 table backend-edit-table">
+        <thead>
+          <tr>
+            <th class="u-w-35">host/IP</th>
+            <th class="u-w-15">role</th>
+            <th class="u-w-10">weight</th>
+            <th class="u-w-35">Note</th>
+            <th class="u-w-5"></th>
+          </tr>
+        </thead>
+        <tbody id="backend-set-rows">
+          {% set rows = form_preset.servers if form_preset.servers else [{'role': 'primary'}, {'role': 'backup'}] %}
+          {% for s in rows %}
+          <tr class="backend-set-row">
+            <td><input type="text" name="server_host" class="form-input mono" value="{{ s.host or '' }}"
+                placeholder="10.0.0.10" data-i18n-skip translate="no"></td>
+            <td>
+              <select name="server_role" class="form-input">
+                <option value="primary" {% if s.role != 'backup' %}selected{% endif %}>Primary</option>
+                <option value="backup" {% if s.role == 'backup' %}selected{% endif %}>Backup</option>
+              </select>
+            </td>
+            <td><input type="number" name="server_weight" min="1" max="256" class="form-input"
+                value="{{ s.weight or '' }}" placeholder="100"></td>
+            <td><input type="text" name="server_note" maxlength="64" class="form-input"
+                value="{{ s.note or '' }}" placeholder="for example: first uplink"></td>
+            <td class="text-center">
+              <button type="button" class="btn btn-small backend-set-remove" title="Remove address">✕</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
+      <button type="button" class="u-mt-1 btn" id="backend-set-add" data-max="{{ max_servers }}">+ Add address</button>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Save backend set</button>
+      {% if original_name %}
+      <a class="btn" href="{{ url_for('routes.backend_presets_page') }}">Cancel editing</a>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+<script nonce="{{ csp_nonce }}">
+  (function () {
+    var body = document.getElementById("backend-set-rows");
+    var add = document.getElementById("backend-set-add");
+    if (!body || !add) return;
+    var max = parseInt(add.getAttribute("data-max"), 10) || 16;
+    add.addEventListener("click", function () {
+      var rows = body.querySelectorAll("tr.backend-set-row");
+      if (rows.length >= max) return;
+      var row = rows[rows.length - 1].cloneNode(true);
+      row.querySelectorAll("input").forEach(function (input) { input.value = ""; });
+      body.appendChild(row);
+    });
+    body.addEventListener("click", function (event) {
+      var button = event.target.closest(".backend-set-remove");
+      if (!button) return;
+      var rows = body.querySelectorAll("tr.backend-set-row");
+      var row = button.closest("tr");
+      if (rows.length > 1) {
+        row.remove();
+      } else {
+        row.querySelectorAll("input").forEach(function (input) { input.value = ""; });
+      }
+    });
+  })();
+</script>
+
+{% endblock %}

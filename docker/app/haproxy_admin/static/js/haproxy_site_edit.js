@@ -721,10 +721,16 @@ if (effTcpPassForCheck === true) {
         site.key_types = ktArr;
       }
 
-      // servers from table
-      var servers = collectServers();
-      if (servers && servers.length) {
-        site.servers = servers;
+      // servers from a backend set, or from the table
+      var setChoice = window.backendSetChoice ? window.backendSetChoice() : null;
+      if (setChoice) {
+        site.servers_preset = setChoice.name;
+        site.servers_preset_port = setChoice.port;
+      } else {
+        var servers = collectServers();
+        if (servers && servers.length) {
+          site.servers = servers;
+        }
       }
 
       // err_exclude (per-site)
@@ -838,8 +844,9 @@ delete site.geo_countries;
         var backendPortSet = typeof payload.site.backend_port === "number";
 
         var hasSingleBackend = backendIpSet && backendPortSet;
+        var hasBackendSet = !!payload.site.servers_preset;
 
-        if (!hasServers && !hasSingleBackend) {
+        if (!hasServers && !hasSingleBackend && !hasBackendSet) {
           if (backendIpSet && !backendPortSet) {
             setSaveStatus(
               "backend_ip is set, but backend_port is missing. " +

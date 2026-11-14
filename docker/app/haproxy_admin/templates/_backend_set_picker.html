@@ -1,0 +1,50 @@
+{# Pick a backend set instead of typing addresses. Expects:
+   picker_current  -- the set the entry names now ('' for manual addresses)
+   picker_port     -- the port to show
+   The manual table must sit inside an element with id="backend-manual". #}
+{% set sets = backend_presets_list() %}
+{% set known = sets | selectattr('name', 'equalto', picker_current) | list %}
+<div class="backend-set-picker u-mt-3" id="backend-set-picker">
+  <div class="form-grid">
+    <div class="form-group">
+      <label class="form-label" for="field-servers-preset">Backend set</label>
+      <select id="field-servers-preset" class="form-input">
+        <option value="">Manual addresses</option>
+        {% for p in sets %}
+        <option value="{{ p.name }}" {% if picker_current == p.name %}selected{% endif %} data-i18n-skip translate="no">{{ p.name }}</option>
+        {% endfor %}
+        {% if picker_current and not known %}
+        <option value="{{ picker_current }}" selected data-i18n-skip translate="no">{{ picker_current }}</option>
+        {% endif %}
+      </select>
+    </div>
+    <div class="form-group" id="backend-set-port-group">
+      <label class="form-label" for="field-servers-preset-port">Backend port</label>
+      <input id="field-servers-preset-port" type="number" min="1" max="65535" class="form-input"
+        value="{{ picker_port }}">
+    </div>
+  </div>
+  {% if picker_current and not known %}
+  <div class="table-meta u-mb-2">The backend set this entry names no longer exists. Pick another set or switch to manual addresses.</div>
+  {% endif %}
+  <div class="table-meta">
+    With a set, the addresses and their roles come from it, and a change to the set reaches this entry too.
+    Switching to manual addresses keeps the current list so it can be edited here.
+    <a href="{{ url_for('routes.backend_presets_page') }}">Manage backend sets</a>
+  </div>
+  <div id="backend-set-preview" class="u-mt-2">
+    {% for p in sets %}
+    <div class="backend-set-preview" data-set="{{ p.name }}" hidden>
+      {% for s in p.servers %}
+      <div>
+        <span class="mono" data-i18n-skip translate="no">{{ s.host }}</span>
+        {% if s.role == 'backup' %}<span class="tag tag-warn">Backup</span>{% else %}<span class="tag">Primary</span>{% endif %}
+        {% if s.weight %}<span class="table-meta">weight <span data-i18n-skip translate="no">{{ s.weight }}</span></span>{% endif %}
+        {% if s.note %}<span class="table-meta" data-i18n-skip translate="no">{{ s.note }}</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+<script src="{{ url_for('static', filename='js/backend_sets.js') }}" nonce="{{ csp_nonce }}"></script>
