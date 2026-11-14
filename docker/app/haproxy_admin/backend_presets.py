@@ -549,45 +549,63 @@ def _write_follow(state: Dict[str, Any]) -> None:
 
 
 def mark_udp_follow(where: str) -> None:
-    """Record that the UDP forwards owe a reconciliation -- before vars.yml moves."""
-    state = _read_follow()
-    state.update({"where": where, "since": state.get("since") or int(time.time()), "next": 0})
-    try:
-        _write_follow(state)
-    except OSError as exc:
-        logger.warning("Could not record a pending UDP reconciliation after %s: %s", where, exc)
+    """Record that the UDP forwards owe a reconciliation.
+
+    Each record gets a fresh token. An attempt clears the record only if it
+    is still the one the attempt started from: vars.yml may have moved
+    again, and been recorded again, while the attempt was reading it.
+    """
+    with source_lock("udp"):
+        state = _read_follow()
+        state.update({
+            "where": where,
+            "since": state.get("since") or int(time.time()),
+            "next": 0,
+            "token": secrets.token_hex(8),
+        })
+        try:
+            _write_follow(state)
+        except OSError as exc:
+            logger.warning("Could not record a pending UDP reconciliation after %s: %s", where, exc)
 
 
 def follow_udp(*, force: bool = False) -> str:
     """Run the reconciliation owed, if any; a line to report, or ''.
 
-    Cleared only once the forwards agree with the sets. A failure keeps the
-    record with its error for the UDP page and is tried again on a later
-    call, at most once a minute unless ``force``.
+    Cleared only once the forwards agree with the sets and nobody recorded a
+    newer debt meanwhile. A failure keeps the record with its error for the
+    UDP page and is tried again on a later call, at most once a minute
+    unless ``force``.
     """
     state = _read_follow()
     if not state:
         return ""
     if not force and time.time() < float(state.get("next") or 0):
         return f"The UDP forwards have not followed the backend sets yet: {state.get('error') or 'waiting'}"
+    token = state.get("token")
     try:
         ok, count, msg = reconcile_udp()
     except Exception as exc:  # noqa: BLE001 -- a status poll or revert must still answer
         ok, count, msg = False, 0, f"{type(exc).__name__}: {exc}"
-    if ok:
+    with source_lock("udp"):
+        current = _read_follow()
+        if current.get("token") != token:
+            # Recorded again while this attempt ran: the next call goes on.
+            return f"{count} UDP forward(s) followed the backend sets and were applied again." if ok and count else ""
+        if ok:
+            try:
+                _follow_path().unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("Could not clear the pending UDP reconciliation: %s", exc)
+            return f"{count} UDP forward(s) followed the backend sets and were applied again." if count else ""
+        logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", current.get("where"), msg)
+        current.update({"error": str(msg)[:500], "next": time.time() + FOLLOW_RETRY_SECONDS})
         try:
-            _follow_path().unlink()
-        except FileNotFoundError:
+            _write_follow(current)
+        except OSError:
             pass
-        except OSError as exc:
-            logger.warning("Could not clear the pending UDP reconciliation: %s", exc)
-        return f"{count} UDP forward(s) followed the backend sets and were applied again." if count else ""
-    logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", state.get("where"), msg)
-    state.update({"error": str(msg)[:500], "next": time.time() + FOLLOW_RETRY_SECONDS})
-    try:
-        _write_follow(state)
-    except OSError:
-        pass
     return f"The UDP forwards could not follow the backend sets: {msg}"
 
 

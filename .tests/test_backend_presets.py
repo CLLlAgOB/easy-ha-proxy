@@ -431,6 +431,42 @@ class UdpStaysInStep(_Files):
         self.assertTrue(sets.follow_udp_error())
 
 
+    def test_a_status_poll_during_a_revert_does_not_lose_the_debt(self):
+        # Another worker's header poll runs between the first record and the
+        # restored files: it finds vars.yml and udp.yml still agreeing (both
+        # on the new name) and settles that record.
+        self.applied_now()
+        self.assertTrue(sets.save_preset(self.renamed(), "Two uplinks", self.revision())[0])
+        real_mark = config_service._mark_backend_sets
+        polls = []
+
+        def mark_then_poll(where):
+            real_mark(where)
+            if not polls:
+                polls.append(self.status())
+                self.assertEqual(sets.follow_udp_error(), "")  # the poll settled it
+
+        with mock.patch.object(config_service, "_mark_backend_sets", side_effect=mark_then_poll):
+            ok, message = config_service.revert_to_last_applied_state()
+        self.assertTrue(ok, message)
+        forward = self.forward()
+        self.assertEqual((forward["servers_preset"], forward["backend_host"]), ("Two uplinks", "198.51.100.10"))
+        self.assertEqual(sets.follow_udp_error(), "")
+
+    def test_a_debt_recorded_during_an_attempt_outlives_it(self):
+        sets.mark_udp_follow("first")
+
+        def recorded_again():
+            sets.mark_udp_follow("vars.yml moved again")
+            return True, 0, ""
+
+        with mock.patch.object(sets, "reconcile_udp", side_effect=recorded_again):
+            sets.follow_udp(force=True)
+        self.assertTrue(sets.follow_udp_error())  # still owed
+        self.assertEqual(sets.follow_udp(force=True), "")
+        self.assertEqual(sets.follow_udp_error(), "")
+
+
 @unittest.skipIf(WINDOWS, "the admin package needs fcntl")
 class ThePages(_Files):
     """The real pages render with sets in them, and the set form saves."""

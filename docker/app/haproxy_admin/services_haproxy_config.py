@@ -1941,6 +1941,10 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
 
     any_restored = False
     errors = []
+    # Recorded before the files move, so a crash in between still leaves the
+    # debt -- and recorded again once they have moved (below): a status poll
+    # from another worker can settle the first record against the files as
+    # they were, before this revert wrote them.
     _mark_backend_sets("discarded changes")
 
     mapping = [
@@ -1965,14 +1969,18 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
             except OSError as e:
                 errors.append(f"{label}: {e}")
 
+    # Even a partial revert moved vars.yml, or may have: the UDP forwards
+    # follow whatever is there now.
+    note = _follow_backend_sets("discarded changes") if any_restored else ""
+    suffix = f" {note}" if note else ""
+
     if errors:
-        return False, "Failed to revert some files: " + "; ".join(errors)
+        return False, "Failed to revert some files: " + "; ".join(errors) + suffix
 
     if not any_restored:
         return False, 'YAML backup files were not found'
 
-    note = _follow_backend_sets("discarded changes", mark=False) if any_restored else ""
-    return True, 'YAML files reverted to the last applied state' + (f" {note}" if note else "")
+    return True, 'YAML files reverted to the last applied state' + suffix
 
 
 def get_server_cfg_text() -> str:
