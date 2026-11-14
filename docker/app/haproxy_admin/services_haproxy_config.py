@@ -208,6 +208,22 @@ def _clear_pending_transaction_marker() -> None:
         pass
 
 
+def _follow_backend_sets(where: str, result: Optional[Dict[str, Any]] = None) -> str:
+    """Re-expand the UDP forwards after vars.yml may have changed under them.
+
+    vars.yml holds the backend sets and goes back with the HAProxy sources;
+    udp.yml does not, its rules were applied at once. Called wherever the
+    sources settle -- a transaction confirmed or rolled back, unapplied
+    changes discarded. The note, if any, goes into ``result``.
+    """
+    from .backend_presets import reconcile_udp_quietly
+
+    note = reconcile_udp_quietly(where)
+    if note and result is not None:
+        result["backend_sets_note"] = note
+    return note
+
+
 def _read_pending_transaction_marker() -> Dict[str, Any]:
     try:
         value = json.loads(
@@ -403,6 +419,10 @@ def get_config_transaction_status(
         result_id = str(result.get("transaction_id") or result.get("id") or "")
         if not marker_id or not result_id or marker_id == result_id:
             _clear_pending_transaction_marker()
+            # Only once, when a transaction this panel started has settled
+            # -- the timeout rollback happens on the host with nobody asking.
+            if marker:
+                _follow_backend_sets(f"a transaction that ended {state}", result)
     return result
 
 
@@ -927,6 +947,8 @@ def begin_cfg_confirmation(
     if result.get("ok") and state in {"pending", "pending_confirmation"}:
         result["pending_confirmation"] = True
         _write_pending_transaction_marker(result, candidate_generation)
+    elif state == "rolled_back" or result.get("rolled_back"):
+        _follow_backend_sets("an apply that was rolled back", result)
     result["baseline_source"] = baseline_source
     result["baseline_reconciled"] = baseline_source in {
         "legacy_snapshot_metadata",
@@ -963,6 +985,9 @@ def confirm_cfg_transaction(
     )
     if result.get("ok") and _transaction_state(result) == "confirmed":
         _clear_pending_transaction_marker()
+        _follow_backend_sets("a confirmed transaction", result)
+    elif _transaction_state(result) == "rolled_back":
+        _follow_backend_sets("a late confirmation that was rolled back", result)
     return result
 
 
@@ -976,6 +1001,7 @@ def rollback_cfg_transaction(transaction_id: str) -> Dict[str, Any]:
     )
     if _transaction_state(result) == "rolled_back":
         _clear_pending_transaction_marker()
+        _follow_backend_sets("a transaction rollback", result)
     return result
 
 
@@ -1918,7 +1944,8 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
     if not any_restored:
         return False, 'YAML backup files were not found'
 
-    return True, 'YAML files reverted to the last applied state'
+    note = _follow_backend_sets("discarded changes")
+    return True, 'YAML files reverted to the last applied state' + (f" {note}" if note else "")
 
 
 def get_server_cfg_text() -> str:

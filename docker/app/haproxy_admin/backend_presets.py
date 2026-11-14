@@ -15,7 +15,9 @@ configuration is applied. Typing addresses by hand keeps working as before.
 
 from __future__ import annotations
 
+import logging
 import re
+import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -35,9 +37,17 @@ from .services_haproxy_config import (
 )
 from .validation import validate_config_data, validate_host, validate_port
 
+logger = logging.getLogger(__name__)
+
 PRESETS_KEY = "backend_presets"
 PRESET_FIELD = "servers_preset"
 PORT_FIELD = "servers_preset_port"
+# A UDP forward also keeps the set's id. Its rules are applied at once, while
+# vars.yml is rolled back with the HAProxy sources (discarding unapplied
+# changes, a transaction that is rolled back, a restored history version);
+# by the id a forward still finds its set when that took a rename back.
+ID_FIELD = "servers_preset_id"
+ID_RE = re.compile(r"^[0-9a-f]{12}$")
 # Letters or digits first, then also spaces, dots, dashes and underscores.
 # \w is Unicode here, so a name in Cyrillic is fine too.
 NAME_RE = re.compile(r"^[^\W_][\w .-]{0,47}$")
@@ -66,6 +76,17 @@ def load_presets() -> List[Dict[str, Any]]:
 def find(presets: List[Dict[str, Any]], name: Any) -> Optional[Dict[str, Any]]:
     wanted = str(name or "").strip()
     return next((p for p in presets if str(p.get("name")) == wanted), None)
+
+
+def find_by_id(presets: List[Dict[str, Any]], preset_id: Any) -> Optional[Dict[str, Any]]:
+    wanted = str(preset_id or "").strip()
+    if not ID_RE.fullmatch(wanted):
+        return None
+    return next((p for p in presets if str(p.get("id") or "") == wanted), None)
+
+
+def new_id() -> str:
+    return secrets.token_hex(6)
 
 
 def preset_revision(preset: Dict[str, Any]) -> str:
@@ -145,13 +166,17 @@ def expand_servers(preset: Dict[str, Any], port: int, *, weights: bool = True) -
 
 
 def _reference(entry: Dict[str, Any], presets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The set an entry names, or None when it names none; ValueError when it is gone."""
+    """The set an entry names, or None when it names none; ValueError when it is gone.
+
+    The name decides; a UDP forward's id finds its set under another name,
+    when a rollback of vars.yml took a rename back.
+    """
     name = str(entry.get(PRESET_FIELD) or "").strip()
     if not name:
-        entry.pop(PRESET_FIELD, None)
-        entry.pop(PORT_FIELD, None)
+        for field in (PRESET_FIELD, PORT_FIELD, ID_FIELD):
+            entry.pop(field, None)
         return None
-    preset = find(presets, name)
+    preset = find(presets, name) or find_by_id(presets, entry.get(ID_FIELD))
     if preset is None:
         raise ValueError(f"Backend set {name!r} does not exist")
     entry[PRESET_FIELD] = preset["name"]
@@ -192,6 +217,10 @@ def apply_to_udp(entry: Dict[str, Any], presets: List[Dict[str, Any]]) -> None:
     entry.pop(PORT_FIELD, None)
     if preset is None:
         return
+    if preset.get("id"):
+        entry[ID_FIELD] = preset["id"]
+    else:
+        entry.pop(ID_FIELD, None)
     servers = preset.get("servers") or []
     primary = next((s["host"] for s in servers if s.get("role") != "backup"), "")
     backup = next((s["host"] for s in servers if s.get("role") == "backup"), "")
@@ -222,17 +251,28 @@ def usage(
     websites: Optional[Dict[str, Any]] = None,
     tcp: Optional[Dict[str, Any]] = None,
     udp: Optional[Dict[str, Any]] = None,
+    presets: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, List[Dict[str, str]]]:
-    """{set name: [{"kind": "site"|"tcp"|"udp", "name": entry}]} for every reference."""
+    """{set name: [{"kind": "site"|"tcp"|"udp", "name": entry}]} for every reference.
+
+    A UDP forward counts for the set its id names, whatever name it still
+    carries after a rollback of vars.yml.
+    """
     websites = _load_yaml(WEBSITES_YAML) if websites is None else websites
     tcp = _load_yaml(TCP_YAML) if tcp is None else tcp
     udp = _load_yaml(UDP_YAML) if udp is None else udp
+    presets = load_presets() if presets is None else presets
     found: Dict[str, List[Dict[str, str]]] = {}
     for kind, entries in (("site", _sites(websites)), ("tcp", _tcp(tcp)), ("udp", _udp(udp))):
         for entry in entries:
             name = str(entry.get(PRESET_FIELD) or "").strip()
-            if name:
-                found.setdefault(name, []).append({"kind": kind, "name": str(entry.get("name") or "")})
+            if not name:
+                continue
+            if kind == "udp":
+                by_id = find_by_id(presets, entry.get(ID_FIELD))
+                if by_id is not None:
+                    name = str(by_id["name"])
+            found.setdefault(name, []).append({"kind": kind, "name": str(entry.get("name") or "")})
     return found
 
 
@@ -249,6 +289,73 @@ def _repoint(entries: List[Dict[str, Any]], old: Optional[str], new: str) -> Lis
     return touched
 
 
+def _repoint_udp(
+    forwards: List[Dict[str, Any]], old: Optional[str], preset: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Forwards that use the set -- by its old or new name, or by its id."""
+    touched = []
+    for forward in forwards:
+        name = str(forward.get(PRESET_FIELD) or "").strip()
+        if not name:
+            continue
+        same_id = bool(preset.get("id")) and forward.get(ID_FIELD) == preset["id"]
+        if same_id or name == preset["name"] or (old and name == old):
+            forward[PRESET_FIELD] = preset["name"]
+            touched.append(forward)
+    return touched
+
+
+def _expand_udp(
+    data: Dict[str, Any], touched: List[Dict[str, Any]], presets: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """udp.yml with the touched forwards expanded against ``presets``.
+
+    Raises ValueError naming the forward that the sets no longer fit.
+    """
+    from .services_haproxy_udp import _normalize_udp_entry
+
+    normalized: List[Dict[str, Any]] = []
+    for forward in _udp(data):
+        if any(forward is item for item in touched):
+            ok, msg, clean = _normalize_udp_entry(forward, presets)
+            if not ok or clean is None:
+                raise ValueError(f"UDP forward {forward.get('name')}: {msg}")
+            normalized.append(clean)
+        else:
+            normalized.append(forward)
+    out = dict(data)
+    out.pop("udp", None)
+    out["udp_forwards"] = normalized
+    return out
+
+
+def _snapshot(*paths) -> List[Tuple[Any, Optional[bytes], int]]:
+    """The bytes and mode of each source, to put them back exactly."""
+    taken = []
+    for path in paths:
+        try:
+            taken.append((path, path.read_bytes(), path.stat().st_mode & 0o777))
+        except FileNotFoundError:
+            taken.append((path, None, 0o640))
+    return taken
+
+
+def _put_back(snapshot: List[Tuple[Any, Optional[bytes], int]]) -> List[str]:
+    """Restore a snapshot; the files that could not be restored."""
+    from .services_haproxy_config import _atomic_write_snapshot
+
+    failed = []
+    for path, raw, mode in snapshot:
+        try:
+            if raw is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_write_snapshot(path, raw, mode=mode)
+        except OSError as exc:
+            failed.append(f"{path.name}: {exc}")
+    return failed
+
+
 def save_preset(
     raw: Any, original_name: Optional[str] = None, expected_revision: Optional[str] = None
 ) -> Tuple[bool, str]:
@@ -257,7 +364,16 @@ def save_preset(
     Sites and TCP proxies change in websites.yml and tcp.yml like any other
     edit and take effect when the HAProxy configuration is applied. UDP
     forwards are applied at once, as their own page does.
+
+    All or nothing: every entry is expanded and checked against the new set
+    before a file is written, all four sources stay locked to the end, and
+    when the UDP rules cannot be applied vars.yml, websites.yml and tcp.yml
+    go back to what they were. A rename half done -- the new name in vars.yml,
+    the forwards still on the old one -- made the next save of the same form
+    fail with "not found".
     """
+    from . import services_haproxy_udp as udp_service
+
     try:
         preset = normalize_preset(raw)
     except ValueError as exc:
@@ -268,7 +384,7 @@ def save_preset(
     original = (original_name or "").strip() or None
 
     try:
-        with source_lock("websites"), source_lock("tcp"), source_lock("vars"):
+        with source_lock("websites"), source_lock("tcp"), source_lock("vars"), source_lock("udp"):
             vars_data = _load_yaml(CONFIG_YAML)
             presets = presets_from(vars_data)
             if original:
@@ -278,24 +394,30 @@ def save_preset(
                 check_entry_revision(presets[index], expected_revision, "This backend set")
                 if preset["name"] != original and find(presets, preset["name"]):
                     return False, f"Backend set {preset['name']!r} already exists"
+                stored_id = str(presets[index].get("id") or "")
+                preset = {"id": stored_id if ID_RE.fullmatch(stored_id) else new_id(), **preset}
                 presets[index] = preset
             else:
                 if find(presets, preset["name"]):
                     return False, f"Backend set {preset['name']!r} already exists"
                 if len(presets) >= MAX_PRESETS:
                     return False, f"At most {MAX_PRESETS} backend sets"
+                preset = {"id": new_id(), **preset}
                 presets.append(preset)
             vars_data[PRESETS_KEY] = presets
 
             websites = _load_yaml(WEBSITES_YAML)
             tcp = _load_yaml(TCP_YAML)
+            udp = _load_yaml(UDP_YAML)
             sites = _repoint(_sites(websites), original, preset["name"])
             proxies = _repoint(_tcp(tcp), original, preset["name"])
+            forwards = _repoint_udp(_udp(udp), original, preset)
             try:
                 for site in sites:
                     apply_to_site(site, presets)
                 for proxy in proxies:
                     apply_to_tcp(proxy, presets)
+                new_udp = _expand_udp(udp, forwards, presets) if forwards else None
                 validate_config_data("vars", vars_data)
                 if sites:
                     validate_config_data("websites", websites)
@@ -304,76 +426,117 @@ def save_preset(
             except ValueError as exc:
                 return False, str(exc)
 
-            ok, msg = update_yaml_file("vars", _dump(vars_data))
-            if not ok:
-                return False, msg
+            before = _snapshot(CONFIG_YAML, WEBSITES_YAML, TCP_YAML)
+            writes = [("vars", vars_data)]
             if sites:
-                ok, msg = update_yaml_file("websites", _dump(websites))
-                if not ok:
-                    return False, msg
+                writes.append(("websites", websites))
             if proxies:
-                ok, msg = update_yaml_file("tcp", _dump(tcp))
+                writes.append(("tcp", tcp))
+            for kind, data in writes:
+                ok, msg = update_yaml_file(kind, _dump(data))
                 if not ok:
-                    return False, msg
+                    failed = _put_back(before)
+                    return False, msg + (f" Restoring failed: {'; '.join(failed)}" if failed else "")
+            if new_udp is not None:
+                ok, msg = udp_service._write_and_apply(new_udp)
+                if not ok:
+                    failed = _put_back(before)
+                    if failed:
+                        return False, (
+                            f"The UDP forwards were not updated: {msg} Restoring the other "
+                            f"sources also failed: {'; '.join(failed)}"
+                        )
+                    return False, f"The UDP forwards were not updated, so the set was not saved: {msg}"
     except StaleEntry as exc:
         return False, str(exc)
 
-    udp_ok, udp_count, udp_msg = _reapply_udp(original, preset["name"])
     parts = [f"Backend set {preset['name']!r} saved."]
     if sites or proxies:
         parts.append(
             f"Updated {len(sites)} site(s) and {len(proxies)} TCP proxy(ies); "
             "validate and apply the HAProxy configuration to put them in effect."
         )
-    if udp_count:
-        parts.append(f"{udp_count} UDP forward(s) updated and applied.")
-    if not udp_ok:
-        return False, " ".join(parts) + f" The UDP forwards were not updated: {udp_msg}"
+    if forwards:
+        parts.append(f"{len(forwards)} UDP forward(s) updated and applied.")
     return True, " ".join(parts)
 
 
-def _reapply_udp(original: Optional[str], name: str) -> Tuple[bool, int, str]:
-    """Expand the set again in the UDP forwards that name it, and apply them."""
-    from .services_haproxy_udp import _normalize_udp_entry, _write_and_apply
+def reconcile_udp() -> Tuple[bool, int, str]:
+    """Bring the UDP forwards back in line with the sets in vars.yml.
+
+    vars.yml goes back with the HAProxy sources -- discarded changes, a
+    transaction rolled back, a history version restored -- but the UDP rules
+    were applied at once and stay. Each forward finds its set by id (then by
+    name), takes its current name and addresses, and is applied again; a
+    forward whose set is gone keeps its addresses and loses the reference.
+    Nothing is written or applied when everything already agrees.
+    """
+    from . import services_haproxy_udp as udp_service
 
     with source_lock("udp"):
+        presets = load_presets()
         data = _load_yaml(UDP_YAML)
         forwards = _udp(data)
-        touched = _repoint(forwards, original, name)
-        if not touched:
-            return True, 0, ""
-        presets = load_presets()
-        normalized: List[Dict[str, Any]] = []
+        touched: List[Dict[str, Any]] = []
+        dropped = 0
         for forward in forwards:
-            if any(forward is item for item in touched):
-                try:
-                    apply_to_udp(forward, presets)
-                except ValueError as exc:
-                    return False, 0, str(exc)
-                ok, msg, clean = _normalize_udp_entry(forward)
-                if not ok or clean is None:
-                    return False, 0, f"{forward.get('name')}: {msg}"
-                normalized.append(clean)
-            else:
-                normalized.append(forward)
-        data.pop("udp", None)
-        data["udp_forwards"] = normalized
-        ok, msg = _write_and_apply(data)
-        return ok, len(touched), msg
+            name = str(forward.get(PRESET_FIELD) or "").strip()
+            if not name:
+                continue
+            preset = find_by_id(presets, forward.get(ID_FIELD)) or find(presets, name)
+            if preset is None:
+                for field in (PRESET_FIELD, ID_FIELD):
+                    forward.pop(field, None)
+                dropped += 1
+                continue
+            before = {key: forward.get(key) for key in (PRESET_FIELD, ID_FIELD, "backend_host", "backup_host")}
+            candidate = dict(forward, **{PRESET_FIELD: preset["name"]})
+            apply_to_udp(candidate, presets)
+            after = {key: candidate.get(key) for key in before}
+            if after != before:
+                forward[PRESET_FIELD] = preset["name"]
+                touched.append(forward)
+        if not touched and not dropped:
+            return True, 0, ""
+        try:
+            new_udp = _expand_udp(data, touched, presets)
+        except ValueError as exc:
+            return False, 0, str(exc)
+        ok, msg = udp_service._write_and_apply(new_udp)
+        return ok, len(touched) + dropped, msg
+
+
+def reconcile_udp_quietly(where: str) -> str:
+    """reconcile_udp for a caller that must not fail on it; a line to report, or ''."""
+    try:
+        ok, count, msg = reconcile_udp()
+    except Exception as exc:  # noqa: BLE001 -- a status poll or revert must still answer
+        logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", where, exc)
+        return "The UDP forwards could not be checked against the backend sets."
+    if not count:
+        return ""
+    if ok:
+        return f"{count} UDP forward(s) followed the backend sets and were applied again."
+    logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", where, msg)
+    return f"The UDP forwards could not follow the backend sets: {msg}"
 
 
 def delete_preset(name: str) -> Tuple[bool, str]:
-    """Remove a set nobody names any more."""
+    """Remove a set nobody names any more.
+
+    udp.yml stays locked from the check to the write: a UDP forward saved
+    alongside used to pass the check and keep naming the deleted set.
+    """
     name = (name or "").strip()
     pending, message = config_transaction_is_pending()
     if pending:
         return False, message
-    with source_lock("websites"), source_lock("tcp"), source_lock("vars"):
+    with source_lock("websites"), source_lock("tcp"), source_lock("vars"), source_lock("udp"):
         vars_data = _load_yaml(CONFIG_YAML)
         presets = presets_from(vars_data)
         if find(presets, name) is None:
             return False, f"Backend set {name!r} was not found"
-        users = usage().get(name) or []
+        users = usage(presets=presets).get(name) or []
         if users:
             listed = ", ".join(u["name"] for u in users[:5])
             return False, (

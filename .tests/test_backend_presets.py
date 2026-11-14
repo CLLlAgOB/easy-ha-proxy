@@ -222,6 +222,159 @@ class SavingASet(_Files):
 
 
 @unittest.skipIf(WINDOWS, "the admin package needs fcntl")
+class UdpStaysInStep(_Files):
+    """UDP rules are applied at once; vars.yml goes back with the HAProxy sources.
+
+    A review found three ways the two drifted apart: a rename whose UDP apply
+    failed, a rename or address change taken back by a rollback of vars.yml,
+    and a set deleted while a UDP forward naming it was saved alongside.
+    """
+
+    def setUp(self):
+        self.fail_udp = False
+        super().setUp()
+        self.assertTrue(sets.save_preset(UPLINKS)[0])
+        self.assertTrue(sites_service.save_site_from_json({
+            "name": "app.example.test", "domain": "app.example.test",
+            "servers_preset": "Two uplinks", "servers_preset_port": 80})[0])
+        ok, message = udp_service.save_udp_from_json({
+            "name": "wg", "listen_port": "51820", "backend_port": "51820", "servers_preset": "Two uplinks"})
+        self.assertTrue(ok, message)
+
+    def fake_udp_apply(self, data):
+        if self.fail_udp:
+            return False, "nft refused the rules"
+        return super().fake_udp_apply(data)
+
+    def renamed(self):
+        return {"name": "Uplinks", "servers": [
+            {"host": "198.51.100.77", "role": "primary"}, {"host": "203.0.113.20", "role": "backup"}]}
+
+    def forward(self, name="wg"):
+        return next(f for f in self.load(self.udp)["udp_forwards"] if f["name"] == name)
+
+    def revision(self):
+        return sets.preset_revision(sets.load_presets()[0])
+
+    def test_a_forward_keeps_the_id_of_its_set(self):
+        preset_id = sets.load_presets()[0]["id"]
+        self.assertRegex(preset_id, r"^[0-9a-f]{12}$")
+        self.assertEqual(self.forward()["servers_preset_id"], preset_id)
+
+    def test_a_rename_whose_udp_apply_fails_changes_nothing(self):
+        before = {path: path.read_bytes() for path in (self.vars, self.websites, self.tcp, self.udp)}
+        revision = self.revision()
+        self.fail_udp = True
+        ok, message = sets.save_preset(self.renamed(), "Two uplinks", revision)
+        self.assertFalse(ok)
+        self.assertIn("nft refused the rules", message)
+        for path, raw in before.items():
+            self.assertEqual(path.read_bytes(), raw, path.name)
+        # The same form saves once the rules can be applied again.
+        self.fail_udp = False
+        ok, message = sets.save_preset(self.renamed(), "Two uplinks", revision)
+        self.assertTrue(ok, message)
+        self.assertEqual((self.forward()["servers_preset"], self.forward()["backend_host"]),
+                         ("Uplinks", "198.51.100.77"))
+
+    def test_a_forward_the_new_set_does_not_fit_stops_the_save_before_any_write(self):
+        before = {path: path.read_bytes() for path in (self.vars, self.websites, self.udp)}
+        revision = self.revision()
+        with mock.patch.object(udp_service, "_normalize_udp_entry", return_value=(False, "no room", None)):
+            ok, message = sets.save_preset(self.renamed(), "Two uplinks", revision)
+        self.assertFalse(ok)
+        self.assertIn("wg", message)
+        for path, raw in before.items():
+            self.assertEqual(path.read_bytes(), raw, path.name)
+
+    def applied_now(self):
+        """Record the current sources as the last applied state."""
+        state = self.vars.parent.parent / "applied"
+        state.mkdir(exist_ok=True)
+        targets = {
+            "HAPROXY_STATE_PATH": state / "state.json",
+            "HAPROXY_STATE_VARS": state / "vars.yml",
+            "HAPROXY_STATE_WEBSITES": state / "websites.yml",
+            "HAPROXY_STATE_TCP": state / "tcp.yml",
+        }
+        targets["HAPROXY_STATE_PATH"].write_text("{}", encoding="utf-8")
+        targets["HAPROXY_STATE_VARS"].write_bytes(self.vars.read_bytes())
+        targets["HAPROXY_STATE_WEBSITES"].write_bytes(self.websites.read_bytes())
+        targets["HAPROXY_STATE_TCP"].write_bytes(self.tcp.read_bytes())
+        for name, value in targets.items():
+            patcher = mock.patch.object(config_service, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_discarding_a_rename_takes_the_forward_back_to_the_old_name_and_address(self):
+        self.applied_now()
+        self.assertTrue(sets.save_preset(self.renamed(), "Two uplinks", self.revision())[0])
+        self.assertEqual(self.forward()["servers_preset"], "Uplinks")
+
+        ok, message = config_service.revert_to_last_applied_state()
+        self.assertTrue(ok, message)
+        self.assertIn("UDP forward", message)
+        forward = self.forward()
+        self.assertEqual((forward["servers_preset"], forward["backend_host"]), ("Two uplinks", "198.51.100.10"))
+        ok, message = sets.delete_preset("Two uplinks")
+        self.assertFalse(ok)
+        self.assertIn("wg", message)
+        # Nothing to follow the second time round: no write, no apply.
+        applied = len(self.applied)
+        self.assertEqual(sets.reconcile_udp(), (True, 0, ""))
+        self.assertEqual(len(self.applied), applied)
+
+    def test_a_forward_whose_set_was_taken_back_keeps_its_addresses(self):
+        self.applied_now()
+        self.assertTrue(sets.save_preset({"name": "Spare", "servers": [{"host": "192.0.2.9", "role": "primary"}]})[0])
+        ok, message = udp_service.save_udp_from_json({
+            "name": "dns", "listen_port": "5353", "backend_port": "53", "servers_preset": "Spare"})
+        self.assertTrue(ok, message)
+        self.assertTrue(config_service.revert_to_last_applied_state()[0])
+        dns = self.forward("dns")
+        self.assertEqual(dns["backend_host"], "192.0.2.9")
+        self.assertNotIn("servers_preset", dns)
+        self.assertNotIn("servers_preset_id", dns)
+
+    def test_a_forward_named_by_a_stale_name_still_counts_for_its_set(self):
+        forward = self.forward()
+        forward["servers_preset"] = "Old name"
+        self.udp.write_text(yaml.safe_dump({"udp_forwards": [forward]}), encoding="utf-8")
+        users = sets.usage()["Two uplinks"]
+        self.assertEqual([u["name"] for u in users if u["kind"] == "udp"], ["wg"])
+
+    def test_deleting_checks_the_forwards_with_udp_yml_locked(self):
+        held = []
+        real_usage = sets.usage
+
+        def watching(*args, **kwargs):
+            held.append(set(getattr(config_service._SOURCE_LOCKS_HELD, "kinds", set())))
+            return real_usage(*args, **kwargs)
+
+        with mock.patch.object(sets, "usage", side_effect=watching):
+            ok, _message = sets.delete_preset("Two uplinks")
+        self.assertFalse(ok)
+        self.assertIn("udp", held[0])
+
+    def test_a_transaction_that_settles_brings_the_forwards_along(self):
+        transaction = "a" * 20
+        settled = {"ok": True, "state": "rolled_back", "transaction_id": transaction}
+        with mock.patch.object(config_service, "_read_pending_transaction_marker",
+                               return_value={"transaction_id": transaction}), \
+                mock.patch.object(config_service, "_clear_pending_transaction_marker"), \
+                mock.patch.object(config_service, "_controld_json_request", return_value=settled), \
+                mock.patch.object(sets, "reconcile_udp_quietly", return_value="") as follow:
+            config_service.get_config_transaction_status(transaction)
+        follow.assert_called_once()
+        with mock.patch.object(config_service, "_read_pending_transaction_marker", return_value={}), \
+                mock.patch.object(config_service, "_controld_json_request",
+                                  return_value={"ok": True, "state": "none"}), \
+                mock.patch.object(sets, "reconcile_udp_quietly", return_value="") as follow:
+            config_service.get_config_transaction_status()
+        follow.assert_not_called()
+
+
+@unittest.skipIf(WINDOWS, "the admin package needs fcntl")
 class ThePages(_Files):
     """The real pages render with sets in them, and the set form saves."""
 

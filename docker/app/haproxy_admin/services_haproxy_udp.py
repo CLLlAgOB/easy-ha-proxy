@@ -81,16 +81,23 @@ def _boolean(raw: Dict[str, Any], field: str, default: bool) -> bool:
 
 
 def _normalize_udp_entry(
-    raw: Dict[str, Any]
+    raw: Dict[str, Any], presets: Optional[List[Dict[str, Any]]] = None
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    """Validate one UDP forward into a normalized, injection-safe record."""
+    """Validate one UDP forward into a normalized, injection-safe record.
+
+    ``presets`` are the backend sets to expand against; by default the ones
+    in vars.yml. Saving a set checks the forwards against its new version
+    before anything is written.
+    """
     if not isinstance(raw, dict):
         return False, "Invalid UDP forward format (expected a JSON object)", None
 
     # A backend set, when named, supplies the main and backup host.
     raw = dict(raw)
     try:
-        backend_presets.apply_to_udp(raw, backend_presets.load_presets())
+        backend_presets.apply_to_udp(
+            raw, backend_presets.load_presets() if presets is None else presets
+        )
     except ValueError as exc:
         return False, str(exc), None
 
@@ -133,6 +140,8 @@ def _normalize_udp_entry(
         return False, str(exc), None
     if raw.get(backend_presets.PRESET_FIELD):
         out[backend_presets.PRESET_FIELD] = raw[backend_presets.PRESET_FIELD]
+        if raw.get(backend_presets.ID_FIELD):
+            out[backend_presets.ID_FIELD] = raw[backend_presets.ID_FIELD]
 
     return True, "", out
 
