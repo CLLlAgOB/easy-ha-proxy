@@ -10,6 +10,8 @@
     "Backend sets": "Наборы бэкендов",
     "Backend set": "Набор бэкендов",
     "Backend set:": "Набор бэкендов:",
+    "(primary server)": "(основной)",
+    "(backup server)": "(резервный)",
     "A backend set is a named list of backend addresses, each with its role: primary or backup.": "Набор бэкендов — это именованный список адресов бэкендов, у каждого своя роль: основной или резервный.",
     "Sites, TCP proxies and UDP forwards can pick a set instead of typing the addresses again.": "Сайты, TCP-прокси и UDP-пробросы могут выбрать набор, а не вписывать адреса заново.",
     "Changing a set changes every entry that uses it. Sites and TCP proxies take the change when the HAProxy configuration is validated and applied; UDP forwards are applied at once.": "Изменение набора меняет все записи, которые его используют. Сайты и TCP-прокси получают изменение после проверки и применения конфигурации HAProxy; UDP-пробросы применяются сразу.",

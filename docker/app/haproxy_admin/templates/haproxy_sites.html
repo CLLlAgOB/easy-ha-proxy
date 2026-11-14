@@ -147,49 +147,26 @@
           <td class="mono">
             {% set servers = raw.servers or [] %}
 
-            {% if servers %}
-            {# pick the primary server: the first without backup=true, otherwise the first #}
-            {% set primary = None %}
-            {% for srv in servers %}
-            {% if not primary and not srv.backup %}
-            {% set primary = srv %}
+            {# One line per server; the set's name heads the list when the entry uses one.
+               A single server without a set is shown on its own, never twice. #}
+            {% if eff.servers_preset %}
+            <div class="site-backend-main"><span>Backend set:</span> <span data-i18n-skip translate="no">{{ eff.servers_preset }}</span></div>
             {% endif %}
-            {% endfor %}
-            {% if not primary %}
-            {% set primary = servers[0] %}
-            {% endif %}
-
-            <div class="site-backend-main">
-              {{ primary.host }}:{{ primary.port }}
-              {% if primary.backup %}
-              (backup)
-              {% else %}
-              (primary)
-              {% endif %}
-            </div>
-
+            {% if servers and (eff.servers_preset or servers|length > 1) %}
             <div class="site-backend-meta">
               {% for srv in servers %}
               <div>
-                {{ srv.name|default('srv' ~ loop.index) }}:
-                {{ srv.host }}:{{ srv.port }}
-                {% if srv.backup %}
-                (backup)
-                {% else %}
-                (primary)
-                {% endif %}
+                <span data-i18n-skip translate="no">{{ srv.name|default('srv' ~ loop.index) }}: {{ srv.host }}:{{ srv.port }}</span>
+                {% if srv.backup %}<span>(backup server)</span>{% else %}<span>(primary server)</span>{% endif %}
               </div>
               {% endfor %}
             </div>
+            {% elif servers %}
+            <div class="site-backend-main" data-i18n-skip translate="no">{{ servers[0].host }}:{{ servers[0].port }}</div>
             {% else %}
-            <div class="site-backend-main">
-              {{ eff.backend_ip }}:{{ eff.backend_port }}
-            </div>
+            <div class="site-backend-main" data-i18n-skip translate="no">{{ eff.backend_ip }}:{{ eff.backend_port }}</div>
             {% endif %}
 
-            {% if eff.servers_preset %}
-            <div class="site-backend-meta">Backend set: <span data-i18n-skip translate="no">{{ eff.servers_preset }}</span></div>
-            {% endif %}
             {% if eff.backend_host %}
             <div class="site-backend-meta">
               Host: {{ eff.backend_host }}
@@ -507,7 +484,7 @@
     <div class="u-gap-5 u-p-0-16px-16px flex-container" >
       <div  class="u-flex-1-1-300px">
         <label class="u-mt-2 form-label" for="domain" >Domain *</label>
-        <input id="domain" name="domain" type="text" class="form-input" required placeholder="for example: example.com" data-i18n-skip translate="no">
+        <input id="domain" name="domain" type="text" class="form-input" required placeholder="example.com" data-i18n-skip translate="no">
 
         <div id="add-site-backend-fields">
           <label class="u-mt-2 form-label" for="add-site-backend-set">Backend set</label>

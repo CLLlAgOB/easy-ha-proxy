@@ -160,7 +160,8 @@
                     <input id="field-backend-host" name="backend_host" type="text" class="form-input"
                         value="{{ site.backend_host or '' }}" placeholder="{{ eff.backend_host or eff.domain }}" data-i18n-skip translate="no">
                     <div class="table-meta">
-                        If omitted, the request <code>Host</code> is used ({{ eff.domain }}).
+                        If omitted, the Host header of the request is used:
+                        <code data-i18n-skip translate="no">{{ eff.domain }}</code>
                     </div>
                 </div>
 
@@ -169,11 +170,9 @@
                 <div class="table-meta">
                     You can define several backend servers for one site.
                     <ul>
-                        <li>Multiple <strong>Primary</strong> servers use load balancing
-                            (the algorithm is configured in the <code>balance</code> field
-                            in section «Load balancing / sticky / sessions»).</li>
-                        <li>A <strong>Backup</strong> is marked as <code>backup</code> and is used
-                            only when all primary servers are unavailable.</li>
+                        <li>Several primary servers share the load; the algorithm is set in the balance field
+                            under «Load balancing / sticky / sessions».</li>
+                        <li>A backup server takes traffic only when no primary server answers.</li>
                     </ul>
                 </div>
 
@@ -278,7 +277,7 @@
                             (SAN)</label>
                         {% set alt_list = site.alt_names or [] %}
                         <textarea id="field-alt-names" name="alt_names" class="form-input mono" rows="4"
-                            placeholder="alternative domains, one per line">{{ alt_list | join("\n") }}</textarea>
+                            placeholder="www.example.com">{{ alt_list | join("\n") }}</textarea>
                         <div class="table-meta" id="alt-names-help">
                             Enter one domain per line. In HTTP mode it is added as a SAN to the Let's Encrypt certificate;
                             in TCP passthrough it is used for SNI routing.
@@ -516,8 +515,8 @@
                             <option value="never" {% if raw_http_reuse=='never' %}selected{% endif %}>never</option>
                         </select>
                         <div class="table-meta">
-                            Controls reuse of HTTP connections to the backend
-                            (the <code>http-reuse</code> option). Empty — value from <code>site_defaults</code>.
+                            Controls reuse of HTTP connections to the backend (the http-reuse option).
+                            Empty means the value from site_defaults.
                         </div>
 
                         <label class="u-mt-2 form-label" for="session_timeout"
@@ -755,7 +754,7 @@
                         Maximum request rate per IP for this site.
                         If value &gt; 0, then when exceeding limit:
                         <ul>
-                            <li>the client receives <code>429</code> (Too Many Requests);</li>
+                            <li>the client receives the answer 429 Too Many Requests;</li>
                             <li>if <code>rate_ban=true</code>, IP may be added in <code>tbl_ban</code>.</li>
                         </ul>
                         Empty — the default value (from <code>site_defaults</code>); 0 — no limit for this site.
@@ -943,7 +942,7 @@
                             Leave empty to use the global country selection. A custom list must be a subset of the
                             globally selected countries.
                             {% if geoip_country_codes %}
-                            Available: <code class="notranslate" translate="no" data-i18n-skip>{{ geoip_country_codes | join(', ') }}</code>.
+                            <span>Available:</span> <code class="notranslate" translate="no" data-i18n-skip>{{ geoip_country_codes | join(', ') }}</code>.
                             {% else %}
                             No countries are selected globally.
                             <a href="{{ url_for('routes.haproxy_geoip_page') }}">Open GeoIP database</a>.

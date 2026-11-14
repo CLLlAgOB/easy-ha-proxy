@@ -20,6 +20,14 @@
     return typeof window.t === "function" ? window.t(value, params) : String(value);
   }
 
+  // A phrase from the alert service is looked up whole; the general
+  // translator would replace the words it knows one by one.
+  function known(text) {
+    const value = String(text == null ? "" : text);
+    const messages = (window.HAPROXY_ADMIN_I18N && window.HAPROXY_ADMIN_I18N.messages) || {};
+    return Object.prototype.hasOwnProperty.call(messages, value) ? messages[value] : value;
+  }
+
   function short(text) {
     const value = String(text || "");
     return value.length > LABEL_CHARS ? `${value.slice(0, LABEL_CHARS - 1)}…` : value;
@@ -39,10 +47,10 @@
     badge.dataset.level = Number(payload.critical) > 0 ? "critical" : "warning";
     // One alert says what it is; several say how many.
     const text = total === 1
-      ? short(items[0] && (items[0].summary || items[0].title))
+      ? short(known(items[0] && (items[0].summary || items[0].title)))
       : t("Alerts: {count}", { count: total });
     if (label) label.textContent = text;
-    badge.title = items.slice(0, 5).map((item) => `• ${item.summary || item.title}`).join("\n");
+    badge.title = items.slice(0, 5).map((item) => `• ${known(item.summary || item.title)}`).join("\n");
   }
 
   function renderSilent(badge) {

@@ -107,7 +107,9 @@
 }
 
 @layer base {
-  html { min-width: 320px; scrollbar-gutter: stable; scroll-padding-top: 104px; }
+  /* Mobile Safari inflates some text blocks and not others (a <details> keeps
+     its size), so one line could mix two sizes. The layout is already responsive. */
+  html { min-width: 320px; scrollbar-gutter: stable; scroll-padding-top: 104px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   body { background: var(--bg-primary); color: var(--text-primary); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; line-height: 1.55; }
   a { color: var(--accent-primary); text-underline-offset: 3px; }
   a:hover { text-decoration-thickness: 2px; }
@@ -447,13 +449,18 @@
     .app-header { align-items: flex-start; padding: 16px; gap: 14px; flex-wrap: wrap; }
     .page-heading { flex: 1 1 220px; }
     .page-eyebrow { font-size: 9px; }
-    .controls { margin-left: auto; }
+    /* A long alert phrase in the header badge pushed the language picker and
+       the theme button off a phone screen, so the browser zoomed the whole
+       page out. The badge shrinks and ends in an ellipsis instead. */
+    .controls { margin-left: auto; min-width: 0; max-width: 100%; }
+    .global-alerts { min-width: 0; max-width: 100%; }
+    #global-alerts-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .global-config-state { display: none; }
     .container { padding: 18px 14px; gap: 18px; }
     .card { padding: 18px 16px; border-radius: 10px; }
     .card-header { gap: 12px; margin-bottom: 16px; }
     .flex-container { gap: 20px; }
-    .app-footer { margin: 0 14px; padding: 16px 0 20px; font-size: 10px; }
+    .app-footer { margin: 0 14px; padding: 16px 0 20px; font-size: 11px; }
     .form-grid { grid-template-columns: 1fr; }
     .config-modal { padding: 14px; }
     .config-modal-panel, .updates-confirm-panel { padding: 20px; max-height: calc(100dvh - 28px); }

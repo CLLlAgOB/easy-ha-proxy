@@ -165,6 +165,37 @@ test("code, preformatted text and form fields are never translated", () => {
 
 /* ---------- with the real catalogue ---------- */
 
+test("a phrase is replaced only where it stands as whole words", () => {
+  // "1 day" matched inside "21 days" and gave "21 деньs"; "7 days" inside
+  // "27 days" read as a sentence of its own.
+  const phrases = i18n.createTranslator({"1 day": "1 день", "7 days": "7 дней", "days": "дн"});
+  assert.equal(phrases("21 days"), "21 дн");
+  assert.equal(phrases("27 days"), "27 дн");
+  assert.equal(phrases("1 day"), "1 день");
+  for (const count of [1, 11, 21, 27, 31]) {
+    assert.doesNotMatch(real(`${count} days`), /[А-Яа-яЁё]s/u);
+  }
+});
+
+test("a translation passed through again comes back unchanged", () => {
+  // The page is translated as it is parsed and again on DOMContentLoaded.
+  // The second pass replaced the English words a translation keeps on purpose:
+  // "DB-IP Country Lite" turned into "DB-IP Страна Lite", "host keys" into
+  // "ключа хостаs".
+  for (const key of [
+    "The local DB-IP Country Lite database is used for country lookups and HAProxy access rules.",
+    "SSH identity is excluded by default. Restoring host keys on another server duplicates its SSH fingerprint."
+  ]) {
+    const once = real(key);
+    assert.notEqual(once, key);
+    assert.equal(real(once), once);
+  }
+  const fresh = i18n.createTranslator({"limit": "лимит", "ban": "бан"});
+  const replaced = fresh("limit, ban");
+  assert.equal(replaced, "лимит, бан");
+  assert.equal(fresh(replaced), replaced);
+});
+
 test("the real catalogue is loaded", () => {
   assert.ok(Object.keys(RUSSIAN).length > 1000);
   assert.equal(real("The update failed"), "Обновление не удалось");

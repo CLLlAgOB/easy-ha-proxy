@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "If omitted, the Host header of the request is used:": "Если не указан, используется заголовок Host из запроса:",
+    "Several primary servers share the load; the algorithm is set in the balance field under «Load balancing / sticky / sessions».": "Несколько основных серверов делят нагрузку; алгоритм задаётся в поле balance в разделе «Балансировка / sticky / сессии».",
+    "A backup server takes traffic only when no primary server answers.": "Резервный сервер получает трафик, только когда не отвечает ни один основной.",
+    "Controls reuse of HTTP connections to the backend (the http-reuse option). Empty means the value from site_defaults.": "Управляет повторным использованием HTTP-соединений с бэкендом (параметр http-reuse). Пусто — значение из site_defaults.",
+    ", then come back.": ", затем вернитесь сюда.",
+    "the client receives the answer 429 Too Many Requests;": "клиент получает ответ 429 Too Many Requests;",
+    "— errors matching paths/methods in": "— ошибки по путям и методам из",
+    "are excluded from": "исключаются из",
+    "and therefore do not trigger an error-based ban.": "и поэтому не приводят к бану по ошибкам.",
+    "Alt names (SAN)": "Альтернативные имена (SAN)",
+    ", including certificate authority data.": ", включая данные центров сертификации.",
+    "the backend port": "порт бэкенда",
+    "Blocked": "Заблокирован",
+    "Container": "Контейнер",
+    "Health": "Здоровье",
+    "Sub": "Подсостояние",
+    "Created": "Создан",
+    "host/IP": "хост/IP",
+    "Issuer": "Издатель",
+    "Send each copy to": "Отправлять каждую копию в"
+  }
+}

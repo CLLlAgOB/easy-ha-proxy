@@ -38,6 +38,19 @@
   const PLACEHOLDER = /\{[A-Za-z0-9_]+\}/g;
   // A value quoted into a sentence is what someone typed, not a word of it.
   const QUOTED = /(^|[\s([:=,])(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|«[^»\n]*»)/g;
+  const WORD_EDGE = /[\p{L}\p{N}_]/u;
+
+  // The expression a catalogue entry is replaced with inside a longer text.
+  // The first group is what stood before the entry and is kept.
+  function boundedPattern(source) {
+    if (/^[\p{L}\p{N}_-]+$/u.test(source)) {
+      return new RegExp(`${WORD_BEFORE}${escapeRegex(source)}${WORD_AFTER}`, "gu");
+    }
+    const before = WORD_EDGE.test(source.charAt(0));
+    const after = WORD_EDGE.test(source.charAt(source.length - 1));
+    if (!before && !after) return null;
+    return new RegExp(`${before ? WORD_BEFORE : "()"}${escapeRegex(source)}${after ? WORD_AFTER : ""}`, "gu");
+  }
 
   function createTranslator(catalogue) {
     const messages = catalogue || {};
@@ -50,10 +63,10 @@
         // A token-aware expression prevents short entries such as "and" from
         // changing letters in the middle of another word, a hyphenated
         // technical identifier, a machine-readable key=value fragment, a
-        // path or a domain.
-        pattern: /^[\p{L}\p{N}_-]+$/u.test(source)
-          ? new RegExp(`${WORD_BEFORE}${escapeRegex(source)}${WORD_AFTER}`, "gu")
-          : null
+        // path or a domain. A phrase gets the same edge on each side that
+        // starts or ends with a letter or digit: "1 day" used to match inside
+        // "21 days" and left an English "s" after the Russian word.
+        pattern: boundedPattern(source)
       }));
     // English words a translation keeps on purpose -- a product's name,
     // "backend" -- may stay in a translated sentence.
@@ -72,10 +85,17 @@
       return false;
     }
     const translationCache = new Map();
+    // Text that already is a translation is left alone. The page is
+    // translated as it is parsed and once more on DOMContentLoaded, so a
+    // translated sentence came back here and the English words it keeps on
+    // purpose were replaced one by one (the word "Country" inside the
+    // product name "DB-IP Country Lite" was translated).
+    const translated = new Set(Object.values(messages).map(String));
 
     return function translate(value, params) {
       if (value == null) return "";
       const source = String(value);
+      if (!params && translated.has(source)) return source;
       if (!params) {
         const cached = translationCache.get(source);
         if (cached !== undefined) return cached;
@@ -100,6 +120,7 @@
       if (!params) {
         if (translationCache.size >= TRANSLATION_CACHE_LIMIT) translationCache.clear();
         translationCache.set(source, result);
+        if (result !== source && translated.size < TRANSLATION_CACHE_LIMIT * 4) translated.add(result);
       }
 
       if (params) {
