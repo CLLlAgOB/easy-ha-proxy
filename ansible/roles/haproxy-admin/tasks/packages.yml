@@ -1,0 +1,23 @@
+---
+# The core role owns provider selection, repository trust and package holds.
+# Asking APT for the distribution name here conflicts with haproxy-awslc.
+- name: Ensure the selected HAProxy provider for panel prerequisites
+  ansible.builtin.import_role:
+    name: haproxy
+    tasks_from: package.yml
+
+- name: Install required panel packages
+  ansible.builtin.apt:
+    name:
+      - python3
+      - python3-pip
+      - python3-venv
+      - python3-yaml
+      - python3-cryptography
+      - openssl
+      - socat
+      - ipset
+      - iptables
+      - iptables-persistent
+    state: present
+    update_cache: true

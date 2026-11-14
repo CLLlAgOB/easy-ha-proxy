@@ -1,0 +1,75 @@
+---
+# 10 -- switch NAT on if needed (and only if there are ready targets)
+
+- name: Collect service facts
+  service_facts:
+
+- name: Detect HAProxy presence
+  set_fact:
+    haproxy_present: "{{ 'haproxy.service' in ansible_facts.services }}"
+
+# acme_bootstrap: null -> automatic: DNAT is needed if there is no HAProxy; true/false -> by hand
+- name: Decide if DNAT bootstrap is needed
+  set_fact:
+    _enable_bootstrap_dnat: true
+    
+
+# ss runs on its own and lists only listeners on :8000. Piped into grep with
+# "|| echo FREE", an ss that failed read as a free port, and certbot then
+# failed to bind it; now that failure stops the run here.
+- name: Ensure port 8000 is FREE (only if we have issue targets)
+  ansible.builtin.command: ss -Hltn sport = :8000
+  register: _p8000
+  changed_when: false
+  when: (issue_targets_count | default(0) | int) > 0
+
+- name: Fail if 8000 is BUSY
+  fail:
+    msg: "Port 8000 is in use -- standalone Certbot cannot listen on :8000."
+  when:
+    - (issue_targets_count | default(0) | int) > 0
+    - _p8000.stdout | trim | length > 0
+
+# IPv4
+- name: Add IPv4 DNAT 80->8000 (check)
+  command: iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  register: ipt4_chk
+  failed_when: ipt4_chk.rc not in [0,1]
+  changed_when: false
+  when: _enable_bootstrap_dnat and (issue_targets_count | default(0) | int) > 0
+
+- name: Add IPv4 DNAT 80->8000
+  command: iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  changed_when: true  # runs only when the check above found the rule missing
+  when:
+    - _enable_bootstrap_dnat
+    - (issue_targets_count | default(0) | int) > 0
+    - ipt4_chk.rc == 1
+
+# IPv6 (if available and allowed)
+- name: Check ip6tables available
+  command: bash -lc 'command -v ip6tables >/dev/null && echo yes || echo no'
+  register: ip6_avail
+  changed_when: false
+  when: _enable_bootstrap_dnat and (issue_targets_count | default(0) | int) > 0
+
+- name: Add IPv6 DNAT 80->8000 (check)
+  command: ip6tables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  register: ipt6_chk
+  failed_when: ipt6_chk.rc not in [0,1]
+  changed_when: false
+  when:
+    - _enable_bootstrap_dnat
+    - (issue_targets_count | default(0) | int) > 0
+    - ip6_avail.stdout == 'yes'
+    - (acme_ipv6 | default(true))
+
+- name: Add IPv6 DNAT 80->8000
+  command: ip6tables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8000
+  changed_when: true  # runs only when the check above found the rule missing
+  when:
+    - _enable_bootstrap_dnat
+    - (issue_targets_count | default(0) | int) > 0
+    - ip6_avail.stdout == 'yes'
+    - (acme_ipv6 | default(true))
+    - ipt6_chk.rc == 1

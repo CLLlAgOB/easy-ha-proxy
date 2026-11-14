@@ -1,0 +1,180 @@
+---
+# 00 -- normalising and choosing the targets
+
+# 1. Make sure sites is a list (possibly empty)
+- name: Ensure sites is a list
+  set_fact:
+    sites: "{{ sites | default([], true) | list }}"
+
+# 2. A LOCAL list for the cert role:
+#    the real sites + the service domains from certbot_domains
+#    (the global sites is NOT touched!)
+- name: Build local cert_sites (sites + certbot_domains)
+  set_fact:
+    cert_sites: "{{ _cert_sites_json | from_json }}"
+  vars:
+    _cert_sites_json: >-
+      {%- set out = [] -%}
+      {%- set existing = [] -%}
+
+      {# 2.1. Copy every real site as it is -- except a site whose
+         renewal is paused in the panel: that pause means "do not issue",
+         and its name may point somewhere a challenge cannot reach. It still
+         counts as existing, so its name is not re-added below. #}
+      {%- for s in (sites | default([], true)) -%}
+        {%- if s.cert_renewal_paused is not defined or s.cert_renewal_paused is not sameas true -%}
+          {%- set _ = out.append(s) -%}
+        {%- endif -%}
+        {%- if s.domain is defined -%}
+          {%- set _ = existing.append(s.domain) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# 2.2. Add the domains from certbot_domains as "service sites",
+         BUT only to cert_sites, NOT to sites #}
+      {%- for d in (certbot_domains | default([])) -%}
+        {%- if d not in existing -%}
+          {%- set _ = out.append({'name': d, 'domain': d}) -%}
+          {%- set _ = existing.append(d) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {{ out | to_json }}
+
+# Defaults for the mode and the key type
+- name: Defaults for mode and key type
+  set_fact:
+    _cert_issue_mode: "{{ cert_issue_mode | default('all') }}"
+    _cert_key_type: "{{ cert_key_type   | default('ecdsa') }}"
+
+# Find the current renewal lineages
+- name: Find existing renewal lineages
+  ansible.builtin.find:
+    paths: /etc/letsencrypt/renewal
+    patterns: "*.conf"
+    file_type: file
+  register: renewal_files
+  failed_when: false
+  changed_when: false
+
+- name: Build list of existing lineage names
+  set_fact:
+    existing_lineages: "{{ _existing_json | from_json }}"
+  vars:
+    _existing_json: >-
+      {%- set out = [] -%}
+      {%- for f in (renewal_files.files | default([])) -%}
+        {%- set b = (f.path | basename) -%}
+        {%- if b.endswith('.conf') -%}
+          {%- set name = b[:-5] -%}
+        {%- else -%}
+          {%- set name = b -%}
+        {%- endif -%}
+        {%- set _ = out.append(name) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: debug existing_lineages
+  debug:
+    var: existing_lineages
+
+# -----------------------------
+# Build every potential lineage (as strings) from cert_sites
+# -----------------------------
+
+# Sites with explicit key_types -> base-ecdsa/base-rsa (with more than one key), otherwise base
+- name: Build all_explicit targets (lineage names)
+  when: (cert_sites | selectattr('key_types','defined') | list | length) > 0
+  set_fact:
+    all_explicit_lineages: "{{ _all_explicit_json | from_json }}"
+  vars:
+    _all_explicit_json: >-
+      {%- set out = [] -%}
+      {%- for s in (cert_sites | selectattr('key_types','defined') | list) -%}
+        {%- set multi = (s.key_types | length) | int > 1 -%}
+        {%- for kt in s.key_types -%}
+          {%- if multi -%}
+            {%- set _ = out.append(s.domain ~ '-' ~ kt) -%}
+          {%- else -%}
+            {%- set _ = out.append(s.domain) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+# If there were none, still create an empty list
+- name: Build all_explicit targets (lineage names, no external filters)
+  set_fact:
+    all_explicit_lineages: "{{ all_explicit_lineages | default([]) }}"
+
+# Sites without key_types -> just base
+- name: Build all_single targets (lineage names)
+  set_fact:
+    all_single_lineages: "{{ _all_single_json | from_json }}"
+  vars:
+    _all_single_json: >-
+      {%- set out = [] -%}
+      {%- for s in (cert_sites | rejectattr('key_types','defined') | list) -%}
+        {%- if s.domain is defined -%}
+          {%- set _ = out.append(s.domain) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+# (optional) sites_include -- filter by the base domain
+- name: Apply sites_include filter (if provided)
+  when: (vars.get('sites_include', []) | length) > 0
+  set_fact:
+    _sites_include: "{{ vars.get('sites_include', []) }}"
+    all_explicit_lineages: "{{ _filtered_explicit_json | from_json }}"
+    all_single_lineages: "{{ _filtered_single_json   | from_json }}"
+  vars:
+    _filtered_explicit_json: >-
+      {%- set out = [] -%}
+      {%- for lin in all_explicit_lineages -%}
+        {%- set base = lin | regex_replace('(-rsa|-ecdsa)$','') -%}
+        {%- if base in _sites_include -%}
+          {%- set _ = out.append(lin) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+    _filtered_single_json: >-
+      {%- set out = [] -%}
+      {%- for lin in all_single_lineages -%}
+        {%- if lin in _sites_include -%}
+          {%- set _ = out.append(lin) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+# Mode: all -> everything; new -> only the missing ones
+- name: Select final targets by mode
+  set_fact:
+    targets_explicit: >-
+      {{
+        ((_cert_issue_mode | default('all')) == 'new')
+        | ternary(
+            (all_explicit_lineages | reject('in', existing_lineages | default([])) | list),
+            (all_explicit_lineages | list)
+          )
+      }}
+    targets_single: >-
+      {{
+        ((_cert_issue_mode | default('all')) == 'new')
+        | ternary(
+            (all_single_lineages | reject('in', existing_lineages | default([])) | list),
+            (all_single_lineages | list)
+          )
+      }}
+
+- name: Count targets
+  set_fact:
+    targets_count: "{{ (targets_explicit | default([]) | length) + (targets_single | default([]) | length) }}"
+
+- name: debug
+  debug:
+    msg:
+      - "targets_explicit: {{ targets_explicit }}"
+      - "targets_single  : {{ targets_single }}"
+      - "current_lineages: {{ existing_lineages }}"
+      - "mode: {{ _cert_issue_mode }}, total targets: {{ targets_count }}"

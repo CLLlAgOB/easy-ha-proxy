@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}New Authelia user{% endblock %}
+{% block header_title %}New Authelia user{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="u-mb-4 card" >
+    <div class="card-header">
+        <div class="table-title">Error</div>
+    </div>
+    <div  class="u-p-12px-16px text-danger">
+        {{ error }}
+    </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="u-mb-4 card" >
+    <div class="card-header">
+        <div class="table-title">Message</div>
+    </div>
+    <div  class="u-p-12px-16px text-success">
+        {{ message }}
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>Create user</h2>
+    </div>
+
+    <div  class="u-p-16px u-maxw-min-620px-100">
+        <form method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <div class="form-row">
+                <label for="username" class="form-label">
+                    Username <span  class="text-danger">*</span>
+                </label>
+                <input type="text"
+                       id="username"
+                       name="username"
+                       class="form-input"
+                       required
+                       value="{{ form.username if form is defined else '' }}">
+            </div>
+
+            <div class="form-row">
+                <label for="displayname" class="form-label">
+                    Display name <span  class="text-danger">*</span>
+                </label>
+                <input type="text"
+                       id="displayname"
+                       name="displayname"
+                       class="form-input"
+                       required
+                       value="{{ form.displayname if form is defined else '' }}">
+            </div>
+
+            <div class="form-row">
+                <label for="email" class="form-label">
+                    Email <span  class="text-danger">*</span>
+                </label>
+                <input type="email"
+                       id="email"
+                       name="email"
+                       class="form-input"
+                       required
+                       value="{{ form.email if form is defined else '' }}">
+            </div>
+
+            {# Groups: the existing ones + extra groups typed by hand #}
+            <div class="form-row">
+                <div class="u-mb-1 form-label" >Groups</div>
+
+                {% if all_groups is defined and all_groups %}
+                {% set groups_list = all_groups %}
+                {% else %}
+                {% set groups_list = [] %}
+                {% endif %}
+
+                {% if form is defined and form.selected_groups is defined %}
+                {% set selected_groups = form.selected_groups %}
+                {% else %}
+                {% set selected_groups = [] %}
+                {% endif %}
+
+                {% if groups_list %}
+                <div class="group-grid">
+                    {% for g in groups_list %}
+                    <label class="checkbox-pill">
+                        <input type="checkbox"
+                               name="groups"
+                               value="{{ g }}"
+                               {% if g in selected_groups %}checked{% endif %}>
+                        <span>{{ g }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p  class="text-muted u-m-4px-0-0">
+                    The group list is empty; you can enter groups below.
+                </p>
+                {% endif %}
+
+                <div  class="u-mt-2">
+                    <label for="groups_extra" class="form-label">
+                        Additional groups (comma-separated)
+                    </label>
+                    <input type="text"
+                           id="groups_extra"
+                           name="groups_extra"
+                           class="form-input"
+                           placeholder="for example: powerusers,devops"
+                           value="{{ form.groups_extra if form is defined else '' }}" data-i18n-skip translate="no">
+                    <p  class="text-muted text-sm u-mt-1">
+                        Checked groups will be merged with the groups entered manually.
+                    </p>
+                </div>
+            </div>
+
+            <div class="flex u-gap-3 flex-wrap form-row" >
+                <div  class="grow u-minw-min-220px-100">
+                    <label for="password" class="form-label">
+                        Password <span  class="text-danger">*</span>
+                    </label>
+                    <input type="password"
+                           id="password"
+                           name="password"
+                           class="form-input"
+                           required>
+                </div>
+                <div  class="grow u-minw-min-220px-100">
+                    <label for="password2" class="form-label">
+                        Repeat password <span  class="text-danger">*</span>
+                    </label>
+                    <input type="password"
+                           id="password2"
+                           name="password2"
+                           class="form-input"
+                           required>
+                </div>
+            </div>
+
+            <div  class="u-mt-4 flex u-gap-3 items-center flex-wrap">
+                <button type="submit" class="btn">
+                    Create
+                </button>
+                {% if form and form.username %}
+                <span class="text-muted mono" >Username: {{ form.username }}</span>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock %}

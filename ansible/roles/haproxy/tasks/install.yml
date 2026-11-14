@@ -1,0 +1,160 @@
+# HAProxy can be started automatically by apt immediately after installation.
+# Its restored configuration already references this socket group, so create
+# the group before the package is allowed to start on a fresh server.
+- name: Ensure HAProxy runtime socket group exists before package installation
+  ansible.builtin.group:
+    name: "{{ haproxy_socket_group }}"
+    system: true
+    state: present
+
+# 1) Select and install the package without silently changing its provider.
+- name: Install the selected HAProxy package
+  ansible.builtin.import_tasks: package.yml
+  tags:
+    - install
+    - restore-network
+
+# 2) Check whether the "first start" has been done
+- name: Check if HAProxy was initialized before
+  stat:
+    path: /var/lib/haproxy/.first_start_done
+  register: haproxy_first
+  
+- import_tasks: fs.yml
+
+# 4) Validate the configuration before any start (if the file is already there)
+- name: Validate HAProxy config if present
+  command: haproxy -c -f /etc/haproxy/haproxy.cfg
+  changed_when: false
+  failed_when: false   # on the very first run the configuration may not exist yet
+  tags: install
+
+# 5) A one-off warm-up of the runtime: start -> stop, and mark the success
+- block:
+    - name: Start HAProxy (bootstrap)
+      service:
+        name: haproxy
+        state: started
+
+    - name: Stop HAProxy (bootstrap)
+      service:
+        name: haproxy
+        state: stopped
+
+    - name: Mark HAProxy initialized
+      file:
+        path: /var/lib/haproxy/.first_start_done
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+  when: not haproxy_first.stat.exists
+  rescue:
+    - name: Explain bootstrap failure in logs
+      debug:
+        msg: "HAProxy bootstrap failed; not marking initialized."
+  tags: install
+
+# 6) The rest, now without the risk of a missing package or a skipped bootstrap
+- block:
+    - name: Deploy maintenance error page
+      template:
+        src: maintenance.http.j2
+        dest: /etc/haproxy/errors/maintenance.http
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
+    - name: Deploy access granted page
+      template:
+        src: access_granted.http.j2
+        dest: /etc/haproxy/errors/access_granted.http
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
+    # The page the first step of an adaptive ban is answered with. HAProxy
+    # reads it as a log-format when the configuration is loaded, so it has
+    # to be in place before the configuration that names it.
+    - name: Deploy the first-step ban page
+      template:
+        src: ban_first_step.html.j2
+        dest: /etc/haproxy/errors/ban-first-step.html
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
+    # Served in place of a site's 404 for /favicon.ico. HAProxy loads it when
+    # the configuration is checked, so it has to be in place before the
+    # configuration that names it -- the same as the two pages above.
+    - name: Deploy the default favicon
+      copy:
+        src: default-favicon.ico
+        dest: /etc/haproxy/errors/default-favicon.ico
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apply haproxy
+
+    - name: Ensure admin IPs file exists with static admin_allowed_ips
+      copy:
+        content: |
+          {% for ip in admin_allowed_ips %}
+          {{ ip }}
+          {% endfor %}
+        dest: "{{ admin_ips_file }}"
+        owner: root
+        group: haproxy
+        mode: "0640"
+
+    - name: Ensure socat is present (for runtime socket ops)
+      package:
+        name: socat
+        state: present
+      when: admin_dyn_enabled | default(false)
+      tags: restore-network
+
+    - name: Install runtime update script (no reload)
+      template:
+        src: update-admin-rt.sh.j2
+        dest: /usr/local/sbin/update-admin-rt.sh
+        mode: "0755"
+        owner: root
+        group: root
+      when: admin_dyn_enabled | default(false)
+
+    - name: Install systemd service
+      template:
+        src: update-admin-rt.service.j2
+        dest: /etc/systemd/system/update-admin-rt.service
+        mode: "0644"
+      when: admin_dyn_enabled | default(false)
+
+    - name: Install systemd timer
+      template:
+        src: update-admin-rt.timer.j2
+        dest: /etc/systemd/system/update-admin-rt.timer
+        mode: "0644"
+      when: admin_dyn_enabled | default(false)
+
+    - name: systemd daemon-reload
+      systemd:
+        daemon_reload: true
+      when: admin_dyn_enabled | default(false)
+
+    - name: Enable & start timer
+      systemd:
+        name: update-admin-rt.timer
+        enabled: true
+        state: started
+      when: admin_dyn_enabled | default(false)
+
+    - name: Run once now to populate runtime ACL
+      command: /usr/local/sbin/update-admin-rt.sh
+      changed_when: false
+      failed_when: false
+      when: admin_dyn_enabled | default(false)
+  tags: install

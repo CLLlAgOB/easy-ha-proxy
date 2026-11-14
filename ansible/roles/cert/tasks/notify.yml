@@ -1,0 +1,78 @@
+---
+- name: Ensure the managed configuration directory exists
+  ansible.builtin.file:
+    path: "{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Write the dynamic certificate notification state
+  ansible.builtin.template:
+    src: mail-notify.json.j2
+    dest: "{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}/mail-notify.json"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Inspect the legacy managed msmtp configuration
+  ansible.builtin.stat:
+    path: /etc/msmtprc
+    follow: false
+  register: cert_legacy_msmtprc_stat
+
+- name: Read the legacy managed msmtp configuration
+  ansible.builtin.slurp:
+    path: /etc/msmtprc
+  register: cert_legacy_msmtprc
+  when:
+    - cert_legacy_msmtprc_stat.stat.exists | default(false)
+    - cert_legacy_msmtprc_stat.stat.isreg | default(false)
+  no_log: true
+
+- name: Recognize the legacy role-owned msmtp configuration
+  ansible.builtin.set_fact:
+    cert_remove_legacy_msmtprc: >-
+      {{
+        cert_legacy_msmtprc is defined
+        and 'content' in cert_legacy_msmtprc
+        and cert_legacy_msmtprc_stat.stat.pw_name | default('') == 'root'
+        and cert_legacy_msmtprc_stat.stat.gr_name | default('') == 'root'
+        and cert_legacy_msmtprc_stat.stat.mode | default('') == '0600'
+        and (
+          'Ansible managed' in (cert_legacy_msmtprc.content | b64decode)
+          or 'managed by Ansible' in (cert_legacy_msmtprc.content | b64decode)
+        )
+        and ('\ndefaults\n' in (cert_legacy_msmtprc.content | b64decode))
+        and ('\nsyslog          LOG_MAIL\n' in (cert_legacy_msmtprc.content | b64decode))
+        and ('\naccount         default\n' in (cert_legacy_msmtprc.content | b64decode))
+        and ('\nset_from_header on\n' in (cert_legacy_msmtprc.content | b64decode))
+      }}
+  no_log: true
+
+- name: Remove the recognized legacy role-owned msmtp configuration
+  ansible.builtin.file:
+    path: /etc/msmtprc
+    state: absent
+  when: cert_remove_legacy_msmtprc | default(false) | bool
+  no_log: true
+
+- name: Ensure deploy-hooks directory exists
+  file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# This hook is always present. It reads the current web-managed state at run
+# time and becomes a no-op when notifications are disabled.
+- name: Deploy the dynamic Certbot e-mail notification hook
+  template:
+    src: 910-mail-notify.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/910-mail-notify.sh
+    mode: "0755"
+    owner: root
+    group: root

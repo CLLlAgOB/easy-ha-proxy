@@ -1,0 +1,88 @@
+---
+- name: Safely migrate the legacy container-layer mail relay spool
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    lock_file=/run/easy-ha-proxy/authelia-mail.lock
+    install -d -m 0750 "${lock_file%/*}"
+    umask 077
+    exec 9>"${lock_file}"
+    flock --exclusive --wait 30 9
+
+    if ! docker inspect mail_relay >/dev/null 2>&1; then
+      count="$(docker ps -a --filter name='^/mail_relay$' --format '{{ '{{' }}.Names{{ '}}' }}' | wc -l)"
+      [ "${count}" -eq 0 ] || exit 20
+      exit 0
+    fi
+
+    relay_was_running="$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' mail_relay)"
+    spool_name="$(docker inspect --format '{{ '{{' }}range .Mounts{{ '}}' }}{{ '{{' }}if eq .Destination "/var/spool/postfix"{{ '}}' }}{{ '{{' }}.Name{{ '}}' }}{{ '{{' }}end{{ '}}' }}{{ '{{' }}end{{ '}}' }}' mail_relay)"
+    [ "${spool_name}" != easy-ha-proxy-mail-relay-spool ] || exit 0
+
+    authelia_was_running="$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' "{{ authelia_container_name }}")"
+    migrated=no
+
+    recover() {
+      rc=$?
+      [ "${rc}" -ne 0 ] || return 0
+      set +e
+      recovery_failed=no
+      if [ "${relay_was_running}" = true ]; then
+        docker start mail_relay >/dev/null 2>&1 || recovery_failed=yes
+        [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' mail_relay 2>/dev/null)" = true ] || recovery_failed=yes
+      else
+        docker stop mail_relay >/dev/null 2>&1 || true
+      fi
+      if [ "${authelia_was_running}" = true ]; then
+        docker start "{{ authelia_container_name }}" >/dev/null 2>&1 || recovery_failed=yes
+        [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' "{{ authelia_container_name }}" 2>/dev/null)" = true ] || recovery_failed=yes
+      fi
+      [ "${recovery_failed}" = no ] || exit 90
+      exit "${rc}"
+    }
+    trap recover EXIT
+
+    if [ "${relay_was_running}" != true ]; then
+      docker start mail_relay >/dev/null
+    fi
+    docker exec --env LC_ALL=C mail_relay postqueue -p 2>/dev/null | grep -Fq 'Mail queue is empty'
+
+    if [ "${authelia_was_running}" = true ]; then
+      docker stop "{{ authelia_container_name }}" >/dev/null
+    fi
+    docker exec --env LC_ALL=C mail_relay postqueue -p 2>/dev/null | grep -Fq 'Mail queue is empty'
+
+    docker compose --profile mail-relay up --detach --force-recreate{% if easy_ha_proxy_offline_restore | default(false) | bool %} --pull never{% endif %} mail_relay >/dev/null
+    spool_name="$(docker inspect --format '{{ '{{' }}range .Mounts{{ '}}' }}{{ '{{' }}if eq .Destination "/var/spool/postfix"{{ '}}' }}{{ '{{' }}.Name{{ '}}' }}{{ '{{' }}end{{ '}}' }}{{ '{{' }}end{{ '}}' }}' mail_relay)"
+    [ "${spool_name}" = easy-ha-proxy-mail-relay-spool ]
+
+    ready=no
+    for _attempt in $(seq 1 60); do
+      running="$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' mail_relay 2>/dev/null || true)"
+      health="$(docker inspect --format '{{ '{{' }}if .State.Health{{ '}}' }}{{ '{{' }}.State.Health.Status{{ '}}' }}{{ '{{' }}else{{ '}}' }}none{{ '{{' }}end{{ '}}' }}' mail_relay 2>/dev/null || true)"
+      if [ "${running}" = true ] && { [ "${health}" = healthy ] || [ "${health}" = none ]; }; then
+        ready=yes
+        break
+      fi
+      sleep 1
+    done
+    [ "${ready}" = yes ]
+
+    if [ "${authelia_was_running}" = true ]; then
+      docker start "{{ authelia_container_name }}" >/dev/null
+      [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' "{{ authelia_container_name }}")" = true ]
+    fi
+    if [ "${relay_was_running}" != true ] && [ "{{ ((mail_notify_enabled | default(false) | bool) or (mail_relay_server | default(false) | bool)) | ternary('true', 'false') }}" != true ]; then
+      docker stop mail_relay >/dev/null
+    fi
+
+    migrated=yes
+    trap - EXIT
+    echo migrated
+  args:
+    chdir: "{{ authelia_root_dir }}"
+    executable: /bin/bash
+  register: authelia_mail_relay_spool_migration
+  changed_when: authelia_mail_relay_spool_migration.stdout | trim == 'migrated'
+  when: not ansible_check_mode
+  no_log: true

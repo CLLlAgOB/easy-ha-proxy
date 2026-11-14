@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The Authelia container's name (by default the one in docker-compose: container_name: authelia)
+CONTAINER="${AUTHELIA_CONTAINER:-{{ authelia_container_name | default('authelia') }}}"
+
+# Path to configuration.yml inside the container (if it must be given explicitly).
+# Authelia looks for its configuration in /config by default, so it can stay empty.
+CONFIG_PATH="${AUTHELIA_CONFIG_PATH:-{{ authelia_cli_config_path | default('') }}}"
+
+CONFIG_ARGS=()
+if [[ -n "$CONFIG_PATH" ]]; then
+  CONFIG_ARGS=(--config "$CONFIG_PATH")
+fi
+
+# The base command: authelia storage bans ...
+BASE_CMD=(docker exec -i "$CONTAINER" authelia "${CONFIG_ARGS[@]}" storage bans)
+
+usage() {
+  cat >&2 <<EOF
+Usage:
+  $0 list-users           # list the user bans
+  $0 list-ips             # list the IP bans
+  $0 revoke-user USER     # unban a user (by name)
+  $0 revoke-ip IP         # unban an IP (IPv4/IPv6/CIDR)
+
+Environment variables:
+  AUTHELIA_CONTAINER    - the container's name (default '{{ authelia_container_name | default("authelia") }}')
+  AUTHELIA_CONFIG_PATH  - path to configuration.yml inside the container
+EOF
+  exit 1
+}
+
+cmd="${1:-}"
+[[ -z "$cmd" ]] && usage
+
+case "$cmd" in
+  list-users)
+    "${BASE_CMD[@]}" user list
+    ;;
+
+  list-ips)
+    "${BASE_CMD[@]}" ip list
+    ;;
+
+  revoke-user)
+    user="${2:-}"
+    if [[ -z "$user" ]]; then
+      echo "ERROR: USER is missing" >&2
+      usage
+    fi
+    # A simple check of the user name
+    if [[ ! "$user" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+      echo "ERROR: the user name '$user' has characters that are not allowed" >&2
+      exit 1
+    fi
+    "${BASE_CMD[@]}" user revoke "$user"
+    ;;
+
+  revoke-ip)
+    ip="${2:-}"
+    if [[ -z "$ip" ]]; then
+      echo "ERROR: IP is missing" >&2
+      usage
+    fi
+    # IPv4/IPv6/CIDR are allowed
+    if [[ ! "$ip" =~ ^[0-9a-fA-F:./]+$ ]]; then
+      echo "ERROR: not a valid IP/CIDR '$ip'" >&2
+      exit 1
+    fi
+    "${BASE_CMD[@]}" ip revoke "$ip"
+    ;;
+
+  *)
+    echo "ERROR: unknown command '$cmd'" >&2
+    usage
+    ;;
+esac

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="{{ current_language }}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>{{ _('Access granted') }}</title>
+<style>
+:root{color-scheme:light dark;--bg:#f1f5f9;--card:#fff;--text:#18283b;--muted:#52657d;--line:#d7e0eb;--accent:#1d4ed8;--ok:#15803d}
+@media(prefers-color-scheme:dark){:root{--bg:#0b1421;--card:#132136;--text:#e5edf8;--muted:#a6b8d1;--line:#30435d;--accent:#9abaff;--ok:#55d396}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,sans-serif}main{max-width:860px;margin:6vh auto;padding:24px}section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:30px;margin-bottom:22px}h1{font-size:28px;line-height:1.2;margin:10px 0}h2{font-size:19px;margin:0 0 12px}p{margin:10px 0}a{color:var(--accent)}.mark{color:var(--ok);font-size:34px}.muted{color:var(--muted);font-size:14px}.instructions,.description{white-space:pre-wrap;overflow-wrap:anywhere}.downloads{display:grid;gap:16px}.file{padding:20px;border:1px solid var(--line);border-radius:12px;min-width:0}.file h3{margin:0;overflow-wrap:anywhere}.download{display:inline-flex;padding:9px 18px;border:1px solid var(--accent);border-radius:8px;font-weight:650;text-decoration:none;margin:10px 0}.download:hover{background:var(--bg)}small{display:block;overflow-wrap:anywhere}code{font-size:11px;overflow-wrap:anywhere}details{margin-top:10px}summary{cursor:pointer;color:var(--muted)}@media(max-width:540px){main{padding:14px;margin:2vh auto}section{padding:22px}.download{display:flex;justify-content:center}}
+.downloads{grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))}
+</style></head>
+<body><main>
+<section><span class="mark" aria-hidden="true">✓</span><h1>{{ _('Access granted') }}</h1><p>{{ _('You have successfully authenticated with Authelia.') }}</p><p class="muted">{{ _('This device is now trusted. You can close this page and open the service you need using your bookmarks or the main menu.') }}</p></section>
+{% if portal.enabled %}
+{% if portal.text %}<section><h2>{{ _('Instructions') }}</h2><div class="instructions" data-i18n-skip translate="no">{{ portal.text }}</div></section>{% endif %}
+{% if portal.files %}<section><h2>{{ _('Downloads') }}</h2><div class="downloads">
+{% for file in portal.files %}<article class="file"><h3 data-i18n-skip translate="no">{{ file.title or file.filename }}</h3>{% if file.description %}<p class="description" data-i18n-skip translate="no">{{ file.description }}</p>{% endif %}
+<a class="download" href="/downloads/{{ file.id }}">{{ _('Download') }}</a><small class="muted">{{ file.filename }} · {{ file_size(file.size) }}</small>
+<details><summary>SHA-256</summary><code>{{ file.sha256 }}</code></details></article>{% endfor %}
+</div></section>{% endif %}
+{% endif %}
+</main></body></html>

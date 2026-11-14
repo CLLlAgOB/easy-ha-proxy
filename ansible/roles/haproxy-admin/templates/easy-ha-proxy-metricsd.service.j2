@@ -1,0 +1,59 @@
+# /etc/systemd/system/easy-ha-proxy-metricsd.service
+[Unit]
+Description=easy-ha-proxy-metricsd (root, historical HAProxy metrics collector)
+After=network.target haproxy.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group | default('hadmin') }}
+
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-{{ haproxy_admin_env_file }}
+Environment="METRICSD_SOCKET_PATH={{ metricsd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-metricsd.sock') }}"
+Environment="METRICSD_SOCKET_GROUP={{ metricsd_socket_group | default(app_group | default('hadmin')) }}"
+Environment="METRICSD_CONFIG={{ metricsd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/metricsd.json') }}"
+Environment="METRICSD_DATABASE={{ metricsd_database_path | default('/var/lib/easy-ha-proxy/metrics/metrics.db') }}"
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-metricsd.py', rstrip=false) | hash('sha256') }}"
+
+ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-metricsd.py
+
+Restart=always
+RestartSec=5
+
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+StateDirectory=easy-ha-proxy/metrics
+StateDirectoryMode=0750
+UMask=0007
+
+# The collector only ever reads the HAProxy runtime socket and writes its own
+# state directory, so it can afford a tighter sandbox than the helpers that
+# have to manage services and configuration.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+ReadOnlyPaths=/run/haproxy
+
+# Historical data is worth less than a responsive gateway: cap the collector so
+# a pathological database cannot squeeze HAProxy out of memory.
+MemoryMax={{ metricsd_memory_max | default('256M') }}
+
+[Install]
+WantedBy=multi-user.target

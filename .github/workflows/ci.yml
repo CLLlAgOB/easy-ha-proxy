@@ -1,0 +1,376 @@
+name: CI
+
+on:
+  push:
+    branches: [main, alpha]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  udp-forwarding:
+    name: UDP forwarding through Docker filters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Exercise mixed legacy and nft filters in a disposable gateway
+        run: |
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/src:ro" python:3.12 \
+            bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq iptables iproute2 ipset python3-yaml >/dev/null && /usr/bin/python3 /src/.tests/integration/udp_forward_smoke.py'
+
+  server-state:
+    name: HAProxy server-state restoration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install isolated runtime test dependencies
+        run: |
+          # Keep the HAProxy 2.8 baseline, using the official image. Runtime
+          # dependencies use Debian, as in the UDP test, rather than relying
+          # on this runner's unavailable Ubuntu archive DNS/mirror list.
+          docker build --tag ehp-server-state-ci - <<'EOF'
+          FROM haproxy:2.8-bookworm
+          USER root
+          RUN apt-get -o Acquire::Retries=3 update -qq && \
+              apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3 socat openssl && \
+              rm -rf /var/lib/apt/lists/*
+          EOF
+      - name: Exercise configuration changes against real HAProxy
+        run: >-
+          docker run --rm --entrypoint python3
+          -v "$GITHUB_WORKSPACE:/src:ro" -w /src ehp-server-state-ci
+          .tests/integration/server_state_settings_smoke.py
+          --template ansible/roles/haproxy/templates/haproxy-state-dump.sh.j2
+
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # The host daemons run on the platform interpreter rather than a
+        # bundled one, so every supported release is exercised: 3.10 is
+        # Ubuntu 22.04, 3.11 is Debian 12, 3.12 is Ubuntu 24.04 and the
+        # admin UI image, 3.13 is Debian 13, 3.14 is Ubuntu 26.04. The
+        # newer ones are where the standard library loses modules (cgi went
+        # in 3.13).
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            docker/app/requirements.txt
+            installer/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r docker/app/requirements.txt -r installer/requirements.txt
+
+      - name: Byte-compile the installer, the UI and every daemon
+        run: |
+          python -m py_compile installer/easy_ha_proxy.py
+          python -m compileall -q docker/app ansible/roles/authelia/files ansible/roles/haproxy-admin/files
+
+      # Everything lives in .tests/, so one discovery covers the installer,
+      # the helper daemons and the admin UI.
+      - name: Regression tests
+        env:
+          PYTHONPATH: installer
+        run: |
+          set -o pipefail
+          python -m unittest discover -s .tests -p 'test_*.py' 2>&1 | tee /tmp/easy-ha-proxy-unittest.log
+
+      - name: Summarize regression failures
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('/tmp/easy-ha-proxy-unittest.log')
+          text = path.read_text(errors='replace') if path.exists() else ''
+          blocks = re.findall(r'\n(?:ERROR|FAIL): ([^\n]+)\n-+\n(.*?)(?=\n=+\n|\n-+\nRan |\Z)', text, re.S)
+          for title, detail in blocks[:20]:
+              message = detail[-1800:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title={title[:150]}::{message}')
+          PY
+
+  shell:
+    name: Shell syntax and ShellCheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse the installer and helper scripts
+        run: >-
+          bash -n
+          install.sh
+          install-local.sh
+          install-remote.sh
+          easy-ha-proxy-helper.sh
+          installer/easy-ha-proxy
+
+      # Warnings and up: unquoted expansions, unused variables, tildes that do
+      # not expand. Style notes are left alone.
+      - name: ShellCheck
+        run: >-
+          shellcheck -S warning
+          install.sh
+          install-local.sh
+          install-remote.sh
+          easy-ha-proxy-helper.sh
+          installer/easy-ha-proxy
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Only what is certainly a mistake (see ruff.toml): an undefined name,
+      # an unused import, a dictionary key given twice.
+      - name: Ruff
+        run: |
+          pip install ruff==0.6.9
+          ruff check --output-format=github .
+
+  # A public repository: no secret in any commit, and no name of a real
+  # installation in the tree or in the messages being pushed.
+  secrets:
+    name: Secrets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The default rules over the whole history. The test fixtures it reports
+      # are acknowledged one by one in .gitleaksignore.
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD":/repo --entrypoint sh ghcr.io/gitleaks/gitleaks:v8.28.0 -c \
+            'git config --global --add safe.directory /repo &&
+             gitleaks git /repo --gitleaks-ignore-path /repo/.gitleaksignore --no-banner --redact --verbose'
+
+      # The names live in a repository secret, one per line, never in the
+      # repository; without it the step says so and passes.
+      - name: Names of installations
+        env:
+          NAME_GUARD_WORDS: ${{ secrets.NAME_GUARD_WORDS }}
+          NAME_GUARD_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+          NAME_GUARD_HEAD: ${{ github.sha }}
+        run: python3 .github/scripts/name_guard.py
+
+  # The admin pages' scripts: every one must parse, and the logic kept apart
+  # from the page (the *_core.js scripts, the rules in i18n.js)
+  # is tested by behaviour.
+  javascript:
+    name: JavaScript
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Parse every script
+        run: |
+          for script in docker/app/haproxy_admin/static/js/*.js; do
+            node --check "$script"
+          done
+
+      - name: Behaviour tests
+        run: node --test .tests/js/*.test.js
+
+      # The recommended rules (see eslint.config.mjs): a name nothing defines,
+      # a variable nothing reads. Versions pinned, nothing saved to the tree.
+      - name: ESLint
+        run: |
+          npm install --no-save --no-package-lock eslint@9.39.1 @eslint/js@9.39.1 globals@16.4.0
+          npx --no-install eslint docker/app/haproxy_admin/static/js .tests/js
+
+  ansible:
+    name: Ansible syntax
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: installer/requirements.txt
+
+      # Galaxy keeps failing to serve GitHub's runners now and then (the same
+      # commit passes on one branch and fails on the other minutes later), so
+      # the job must not depend on it: the collections are cached, and when
+      # Galaxy does not answer they are built from the same tagged versions on
+      # GitHub. --no-deps there because community.docker's dependency comes
+      # from Galaxy again, and a syntax check does not need it.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.ansible/collections
+          key: ansible-collections-${{ hashFiles('ansible/requirements.yml') }}
+
+      - name: Install Ansible and the pinned collections
+        run: |
+          pip install -r installer/requirements.txt
+          for attempt in 1 2; do
+            ansible-galaxy collection install -r ansible/requirements.yml && exit 0
+            echo "Galaxy download failed (attempt $attempt)"
+            sleep 10
+          done
+          echo "Galaxy is not answering; installing from the GitHub tags instead"
+          ansible-galaxy collection install --no-deps --force \
+            "git+https://github.com/ansible-collections/ansible.posix.git,2.2.2" \
+            "git+https://github.com/ansible-collections/community.docker.git,5.4.0"
+
+      # vars.yml, the inventories and group_vars are deliberately untracked, so
+      # the playbook is parsed against a throwaway inventory. This validates
+      # task and role structure, not host-specific variable resolution.
+      - name: Syntax-check the playbook
+        run: ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
+
+  # A pull request is built, not published: a new base image or a new pin
+  # that will not install shows up here, before it is merged, rather than in
+  # the publish job afterwards. One platform is enough for that.
+  image-check:
+    name: Build the web application image (pull requests)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: docker build --tag haproxy-admin-ui:check .
+
+      # The packages must agree with each other and the application must
+      # start; the warnings about host paths it cannot see are expected.
+      - name: Smoke test
+        run: >-
+          docker run --rm haproxy-admin-ui:check
+          sh -c 'pip check && python -c "import app"'
+
+  # The web application image, published from the commit CI has just tested.
+  # Each image is labelled with the fingerprint of its build inputs (the
+  # sha256 of `git ls-tree` over Dockerfile, .dockerignore and docker/app):
+  # gateways pair the host with the web application by it, and hold a host
+  # update back until the matching image exists. Publishing here, on every
+  # push, is what keeps that wait short.
+  image:
+    name: Publish the web application image
+    # Every check gates publication, the secret scan and the server-state
+    # test included: an image must not go out beside a commit that leaks a
+    # key or breaks the state HAProxy restores from.
+    needs: [python, shell, ansible, lint, javascript, udp-forwarding, server-state, secrets]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    env:
+      REPOSITORY: clllagob/haproxy-admin-ui
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fingerprint the web application
+        id: tree
+        run: |
+          tree="$(git ls-tree -r --full-tree HEAD -- Dockerfile .dockerignore docker/app | sha256sum | cut -d' ' -f1)"
+          echo "tree=${tree}" >> "$GITHUB_OUTPUT"
+          # The footer's build: the commit's time, which a shallow checkout has.
+          echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "channel=latest" >> "$GITHUB_OUTPUT"
+            echo "key=source-${tree}" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=alpha" >> "$GITHUB_OUTPUT"
+            echo "key=alpha-${tree}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Without the secrets (a fork, say) the job says so and stops quietly.
+      - name: Check for registry credentials
+        id: credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set; the image was not published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+
+      # An image built from these exact web files is reused, not rebuilt: the
+      # channel is just pointed at it. main is usually alpha promoted, so its
+      # build is normally there already under the alpha key.
+      - name: Publish
+        if: steps.credentials.outputs.ready == 'true'
+        env:
+          TREE: ${{ steps.tree.outputs.tree }}
+          BUILT_AT: ${{ steps.tree.outputs.date }}
+          KEY: ${{ steps.tree.outputs.key }}
+          CHANNEL: ${{ steps.tree.outputs.channel }}
+        run: |
+          key_image="${REPOSITORY}:${KEY}"
+          channel_image="${REPOSITORY}:${CHANNEL}"
+          alpha_image="${REPOSITORY}:alpha-${TREE}"
+          if docker buildx imagetools inspect "${key_image}" >/dev/null 2>&1; then
+            echo "Already built: ${key_image}"
+            docker buildx imagetools create --tag "${channel_image}" "${key_image}"
+          elif [ "${CHANNEL}" = "latest" ] && docker buildx imagetools inspect "${alpha_image}" >/dev/null 2>&1; then
+            echo "Promoting ${alpha_image}"
+            docker buildx imagetools create --tag "${key_image}" --tag "${channel_image}" "${alpha_image}"
+          else
+            # Tried on each platform before anything is pushed. A push straight
+            # to alpha or main never went through the pull-request build, and
+            # an image whose packages disagree, or that cannot even import the
+            # application, would have reached the gateways as it was.
+            for platform in linux/amd64 linux/arm64; do
+              docker buildx build --platform "${platform}" --load --tag haproxy-admin-ui:check . || exit 1
+              docker run --rm --platform "${platform}" haproxy-admin-ui:check \
+                sh -c 'pip check && python -c "import app"' || exit 1
+            done
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --label "org.opencontainers.image.version=${CHANNEL}" \
+              --label "io.easy-ha-proxy.source-tree=${TREE}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --build-arg "EHP_BUILD_REVISION=${GITHUB_SHA}" \
+              --build-arg "EHP_BUILD_DATE=${BUILT_AT}" \
+              --build-arg "EHP_SOURCE_TREE=${TREE}" \
+              --tag "${key_image}" \
+              --tag "${channel_image}" \
+              --push \
+              .
+          fi
+          echo "Published ${channel_image} (web files ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"

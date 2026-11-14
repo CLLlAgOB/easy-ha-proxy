@@ -1,0 +1,8 @@
+[Unit]
+Description=Vacuum systemd journal (rotate + vacuum-time)
+Documentation=man:journalctl(1)
+After=systemd-journald.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/journalctl --rotate --vacuum-time={{ journald_vacuum_time | default('10days') }}

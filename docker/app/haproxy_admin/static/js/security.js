@@ -1,0 +1,91 @@
+/* Shared CSRF plumbing and small page-wide security helpers. */
+(function () {
+  "use strict";
+
+  window.escapeHtml = function escapeHtml(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+  };
+
+  window.countryFlagMarkup = function countryFlagMarkup(value) {
+    const code = String(value || "").trim().toLowerCase();
+    if (!/^[a-z]{2}$/.test(code)) {
+      return '<span class="country-flag country-flag-unknown"></span>';
+    }
+    const base = String(window.HAPROXY_ADMIN_FLAG_BASE || "");
+    const source = `${base}${encodeURIComponent(code)}.svg`;
+    // Not lazy on purpose: a flag is a few hundred bytes and always inside a
+    // visible table, while the tables re-render every few seconds. A deferred
+    // load was regularly cancelled mid-flight (NS_BINDING_ABORTED), leaving an
+    // empty box where the flag should be.
+    return `<img class="country-flag" src="${window.escapeHtml(source)}" alt="" decoding="async">`;
+  };
+
+  const token = () => {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute("content") || "" : "";
+  };
+
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const options = Object.assign({}, init || {});
+    const method = String(options.method || "GET").toUpperCase();
+    const url = typeof input === "string" ? input : input.url;
+    const target = new URL(url, window.location.href);
+
+    if (
+      target.origin === window.location.origin &&
+      !["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)
+    ) {
+      const headers = new Headers(options.headers || {});
+      headers.set("X-CSRFToken", token());
+      options.headers = headers;
+      options.credentials = options.credentials || "same-origin";
+    }
+    return originalFetch(input, options);
+  };
+
+  document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll("form").forEach((form) => {
+      const method = String(form.method || "get").toLowerCase();
+      if (method !== "post" || form.querySelector('input[name="csrf_token"]')) {
+        return;
+      }
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = "csrf_token";
+      hidden.value = token();
+      form.appendChild(hidden);
+    });
+
+    document.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement) || !form.dataset.confirm) {
+        return;
+      }
+      if (!window.confirm(form.dataset.confirm)) {
+        event.preventDefault();
+      }
+    });
+
+    // Replaces inline onchange="this.form.submit()" so the CSP does not need
+    // 'unsafe-inline' for scripts.
+    document.addEventListener("change", (event) => {
+      const control = event.target;
+      if (
+        !(control instanceof HTMLElement)
+        || !control.hasAttribute("data-submit-on-change")
+      ) {
+        return;
+      }
+      const form = control.closest("form");
+      if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+    });
+
+  });
+})();

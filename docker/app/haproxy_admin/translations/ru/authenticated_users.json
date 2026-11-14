@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "IP authorized now": "IP сейчас авторизован",
+    "Username not yet observed": "Имя пользователя пока неизвестно",
+    "Authenticated user": "Авторизованный пользователь",
+    "Users observed (last 24 hours)": "Пользователи за последние 24 часа",
+    "Confirmed users observed at this IP in the last 24 hours; a shared IP is not a user session": "Пользователи, подтверждённые для запросов с этого IP за последние 24 часа. Общий IP не означает одну пользовательскую сессию."
+  }
+}

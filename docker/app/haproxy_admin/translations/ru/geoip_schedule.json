@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Update frequency": "Частота обновления",
+    "Daily": "Ежедневно",
+    "Weekly (recommended)": "Раз в неделю (рекомендуется)",
+    "Monthly": "Раз в месяц",
+    "Save frequency": "Сохранить частоту",
+    "DB-IP publishes a new database monthly, so weekly is plenty. The most frequent option is daily.": "DB-IP публикует новую базу раз в месяц, поэтому раз в неделю достаточно. Самый частый вариант — раз в день.",
+    "Saving update frequency…": "Сохранение частоты обновления…",
+    "Update frequency saved.": "Частота обновления сохранена.",
+    "Failed to save update frequency": "Не удалось сохранить частоту обновления"
+  }
+}

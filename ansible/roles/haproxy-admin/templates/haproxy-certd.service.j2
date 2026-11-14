@@ -1,0 +1,56 @@
+# /etc/systemd/system/haproxy-certd.service
+[Unit]
+Description=HAProxy certificate helper (root, Unix socket)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group={{ app_group }}
+# The daemon is self-contained and does not require a working directory.
+# WorkingDirectory=/opt/haproxy-admin
+
+Environment="PYTHONUNBUFFERED=1"
+Environment="HAPROXY_CERTD_DRY_RUN={{ haproxy_certd_dry_run | default('0') }}"
+Environment="HAPROXY_CERTD_SOCKET={{ certd_socket_path }}"
+Environment="HAPROXY_CERTD_SOCKET_GROUP={{ app_group }}"
+Environment="HAPROXY_CERTS_DIR={{ haproxy_certs_dir | default('/etc/haproxy/certs') }}"
+# Standby certificates, kept out of the directory above on purpose: one file
+# there that is not a certificate is a fatal HAProxy configuration error.
+Environment="HAPROXY_CERTS_AVAILABLE_DIR={{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}"
+Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
+Environment="HAPROXY_CA_ROOT_DIR={{ haproxy_ca_root_dir | default('/etc/haproxy/certificate-authorities') }}"
+Environment="HAPROXY_MTLS_DIR={{ haproxy_mtls_dir | default('/etc/haproxy/mtls') }}"
+Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
+# Reporting to the alert engine is optional and best effort; without
+# the token this daemon simply keeps its observations to itself.
+Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
+Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-certd.py', rstrip=false) | hash('sha256') }}"
+
+ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py
+
+Restart=always
+RestartSec=3
+RuntimeDirectory=easy-ha-proxy
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+PrivateTmp=yes
+# tmpfs rather than yes. This daemon runs snap-confined certbot, and snapd
+# insists on a per-user data directory under the home of the account it runs
+# as -- /root here -- taken from the passwd entry, not from $HOME, so pointing
+# HOME elsewhere does not help. ProtectHome=yes mounts /root read-only, which
+# certbot reports as
+#   cannot create snap home dir: mkdir /root/snap: read-only file system
+# and then refuses to start, so no certificate can be issued from the web
+# interface. A tmpfs still hides every real home directory from this service;
+# it just lets snapd create the scratch directory it wants. Nothing certbot
+# keeps lives there -- the account and the certificates are under
+# /etc/letsencrypt -- so losing it on restart costs nothing.
+ProtectHome=tmpfs
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

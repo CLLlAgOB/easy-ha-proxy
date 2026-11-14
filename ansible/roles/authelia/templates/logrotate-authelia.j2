@@ -1,0 +1,11 @@
+{{ authelia_logs_dir }}/authelia.log {
+    daily
+    rotate {{ authelia_logrotate_rotate }}
+    maxsize {{ authelia_logrotate_maxsize }}
+    maxage {{ authelia_logrotate_maxage }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

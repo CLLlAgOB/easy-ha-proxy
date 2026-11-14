@@ -1,0 +1,262 @@
+# -*- coding: utf-8 -*-
+"""Client of the root service easy-ha-proxy-guardd over a Unix socket.
+
+Reads the engine's state and changes its settings (the mode, ban durations,
+signatures, traps, the request log). The daemon validates every change again.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, Optional
+
+from .daemon_transport import UnixHttp
+
+
+GUARDD_SOCKET_PATH = os.environ.get(
+    "GUARDD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-guardd.sock"
+).strip()
+# The daemon requires this token for every call that changes something.
+GUARDD_TOKEN = os.environ.get("GUARDD_TOKEN", "").strip()
+
+DEFAULT_TIMEOUT = 15
+
+
+class GuarddUnavailable(RuntimeError):
+    """The engine does not answer: the page degrades rather than fails."""
+
+
+def _guardd() -> UnixHttp:
+    return UnixHttp("guardd", GUARDD_SOCKET_PATH, GuarddUnavailable,
+                    token_header="X-Guardd-Token", token=GUARDD_TOKEN)
+
+
+def _get_json(
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> Dict[str, Any]:
+    return _guardd().get(path, params=params, timeout=timeout)
+
+
+def _change(path: str, body: Dict[str, Any], timeout: int = 15) -> Dict[str, Any]:
+    """A setting the operator typed: the daemon may refuse it with a reason.
+
+    A 400 is the operator's mistake, not an outage, and comes back as
+    ValueError carrying the daemon's words.
+    """
+
+    return _guardd().post(path, body, timeout=timeout, with_token=True, rejected_status=400)
+
+
+def guardd_ban_schedule() -> Dict[str, Any]:
+    """When the engine intends each adaptive ban to end.
+
+    Short timeout on purpose: the dashboard's ban list asks on every refresh,
+    and an engine that is down must cost that list nothing more than falling
+    back to the stick table's own expiry.
+    """
+
+    return _get_json("/api/v1/guard/bans/schedule", timeout=2)
+
+
+def guardd_health() -> Dict[str, Any]:
+    return _get_json("/api/v1/guard/health")
+
+
+def guardd_quality(days: int = 7) -> Dict[str, Any]:
+    """How the protection did in the last days, from its own records."""
+
+    return _get_json("/api/v1/guard/quality", params={"days": days})
+
+
+def guardd_shadow(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return _get_json("/api/v1/guard/shadow", params=params)
+
+
+def guardd_rate_warnings(limit: int = 100) -> Dict[str, Any]:
+    """Trusted addresses that went over a site's limit: observed only."""
+
+    return _get_json("/api/v1/guard/rate-warnings", params={"limit": limit})
+
+
+def guardd_decisions(address: str, limit: int = 20) -> Dict[str, Any]:
+    """Every ban decision about one address, newest first, with its reason."""
+
+    return _get_json("/api/v1/guard/decisions", params={"ip": address, "limit": limit}, timeout=3)
+
+
+def guardd_decision_feed(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Every address's ban decisions, newest first, a page at a time."""
+
+    return _get_json("/api/v1/guard/decisions/feed", params=params, timeout=5)
+
+
+def guardd_ip(address: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    query: Dict[str, Any] = {"ip": address}
+    query.update(params or {})
+    return _get_json("/api/v1/guard/ip", params=query)
+
+
+def guardd_signatures() -> Dict[str, Any]:
+    """The detection rules as the running daemon has them loaded."""
+
+    return _get_json("/api/v1/guard/signatures")
+
+
+def guardd_set_signatures(overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Store the operator's own rules and apply them without a restart."""
+
+    return _change("/api/v1/guard/signatures", overrides, timeout=30)
+
+
+def guardd_detection_context() -> Dict[str, Any]:
+    return _get_json("/api/v1/guard/detection-context")
+
+
+def guardd_set_detection_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _change("/api/v1/guard/detection-context", payload)
+
+
+def guardd_detection_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _change("/api/v1/guard/detection-preview", payload)
+
+
+def guardd_signature_candidates() -> Dict[str, Any]:
+    """Paths refused to many addresses that no rule matches yet."""
+
+    return _get_json("/api/v1/guard/signatures/candidates")
+
+
+def guardd_dismiss_candidate(path: str, restore: bool = False, host: str = "") -> Dict[str, Any]:
+    """Hide a suggested signature for good, or bring a hidden one back."""
+
+    return _change("/api/v1/guard/signatures/candidates/dismiss",
+                   {"path": path, "restore": bool(restore), "host": host})
+
+
+def guardd_traps() -> Dict[str, Any]:
+    """Trap names, and the names that get traffic without serving a site."""
+
+    return _get_json("/api/v1/guard/traps")
+
+
+def guardd_set_traps(hosts: Any) -> Dict[str, Any]:
+    """Replace the trap names."""
+
+    return _change("/api/v1/guard/traps", {"hosts": hosts})
+
+
+def guardd_set_first_step_page(enabled: bool) -> Dict[str, Any]:
+    """Answer the first step of an adaptive ban with a page, or cut it off."""
+
+    return _change("/api/v1/guard/first-step-page", {"enabled": enabled})
+
+
+def guardd_set_shield(enabled: bool) -> Dict[str, Any]:
+    """Switch HAProxy's own refusal of decisive signatures on or off."""
+
+    return _change("/api/v1/guard/shield", {"enabled": enabled})
+
+
+def guardd_set_ban_durations(durations: Any) -> Dict[str, Any]:
+    """Replace the escalating ban ladder."""
+
+    return _change("/api/v1/guard/ban-durations", {"durations": durations})
+
+
+def guardd_forget_ban(ip: str) -> Dict[str, Any]:
+    """Tell the engine to drop its hold on an address the operator unbanned."""
+
+    return _guardd().post("/api/v1/guard/ban/forget", {"ip": (ip or "").strip()},
+                          timeout=15, with_token=True)
+
+
+def guardd_manual_ban(ip: str) -> Dict[str, Any]:
+    """Have the engine place an operator's ban and remember it.
+
+    The body comes back whatever the status: ok=false carries HAProxy's or
+    the engine's refusal. GuarddUnavailable when the engine does not answer.
+    """
+
+    return _guardd().post("/api/v1/guard/ban/manual", {"ip": (ip or "").strip()},
+                          timeout=15, with_token=True, check_status=False,
+                          require_object=True)
+
+
+def guardd_set_mode(mode: str) -> Dict[str, Any]:
+    """Switch between observing and enforcing.
+
+    Changing this changes what happens to traffic.
+    """
+
+    return _guardd().post("/api/v1/guard/mode", {"mode": mode}, timeout=30, with_token=True)
+
+
+def _request_log_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Read a request-log endpoint.
+
+    The daemon answers 404 with a body when the log is switched off, which is
+    a different thing from the daemon being unreachable. Raising on status
+    here would turn "the feature is off" into "guardd is down" on the page.
+    """
+    return _guardd().get(path, params=params, timeout=DEFAULT_TIMEOUT,
+                         check_status=False, require_object=True)
+
+
+def guardd_live(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The live activity snapshot, answered from guardd's memory."""
+    return _request_log_get("/api/v1/guard/live", params=params)
+
+
+def guardd_identities() -> Dict[str, Any]:
+    """Recent verified usernames, independent of the selected traffic window."""
+    return _get_json("/api/v1/guard/identities", timeout=2)
+
+
+def guardd_attackers() -> Dict[str, Any]:
+    """Top addresses answered 400 and 451 over the last day, from memory."""
+    return _request_log_get("/api/v1/guard/attackers")
+
+
+def guardd_requests(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Search the bounded request log."""
+    return _request_log_get("/api/v1/guard/requests", params=params)
+
+
+def guardd_requests_summary(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """What a search of the request log finds, over time and most common."""
+    return _request_log_get("/api/v1/guard/requests/summary", params=params)
+
+
+def guardd_set_request_log(enabled: bool) -> Dict[str, Any]:
+    """Start or stop recording requests.
+
+    This one decides whether the gateway keeps a record of what every visitor
+    asked for, so it carries the token like every other change.
+    """
+    return _guardd().post("/api/v1/guard/requests/enabled", {"enabled": bool(enabled)},
+                          timeout=30, with_token=True, check_status=False,
+                          require_object=True)
+
+
+def guardd_requests_status() -> Dict[str, Any]:
+    return _request_log_get("/api/v1/guard/requests/status")
+
+
+def guardd_live_memory() -> Dict[str, Any]:
+    """What the live buffer holds, its budget and the traffic it is measured
+    against. A body with ok=false when the buffer is off."""
+    return _request_log_get("/api/v1/guard/live/memory")
+
+
+def guardd_set_live_memory(budget_mib: int, revision: int) -> Dict[str, Any]:
+    """Give the live buffer a memory budget in MiB, or 0 for its profile.
+
+    The body comes back whatever the status: a refusal carries the reason,
+    and a conflict (conflict=true) carries the setting now in force.
+    """
+    return _guardd().post("/api/v1/guard/live/memory",
+                          {"budget_mib": budget_mib, "revision": revision},
+                          timeout=15, with_token=True, check_status=False,
+                          require_object=True)

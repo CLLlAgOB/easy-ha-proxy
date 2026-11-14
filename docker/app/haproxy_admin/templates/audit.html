@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Change log{% endblock %}
+{% block header_title %}Change log{% endblock %}
+
+{% block content %}
+
+
+<div class="notice-info rt-notice" >
+  Records are written when an action is taken and are never edited afterwards. Secrets are replaced before anything is stored, so a password change is recorded as having happened, never as a value.
+</div>
+
+<div class="rt-notice error" id="au-write-problem" hidden>
+  <div>New changes are not being recorded: the panel cannot write the change log. The entries below are the ones written before that.</div>
+  <div class="mon-sub" id="au-write-detail" data-i18n-skip translate="no"></div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Changes</h2>
+    <span class="mon-sub" id="au-status" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="au-filters">
+    <label>
+      Period
+      <select id="au-range">
+        {% for key in ranges %}
+          <option value="{{ key }}" {% if key == default_range %}selected{% endif %}>{{ key }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Who
+      <select id="au-actor"><option value="">Anyone</option></select>
+    </label>
+    <label>
+      Action
+      <select id="au-action"><option value="">Any action</option></select>
+    </label>
+    <label>
+      Object
+      <select id="au-object"><option value="">Any object</option></select>
+    </label>
+    <label>
+      Outcome
+      <select id="au-result"><option value="">Any outcome</option></select>
+    </label>
+  </div>
+
+  <div  class="scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Who</th>
+          <th>Action</th>
+          <th>Object</th>
+          <th>Change</th>
+          <th>Outcome</th>
+        </tr>
+      </thead>
+      <tbody id="au-body" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+
+  <div class="au-empty" id="au-empty">Nothing has been recorded for this period</div>
+
+  <div class="au-more">
+    <button class="btn" type="button" id="au-more" hidden>Show more</button>
+  </div>
+
+  <div class="au-detail" id="au-detail" hidden>
+    <h3 id="au-detail-title" data-i18n-skip translate="no"></h3>
+    <div id="au-detail-meta" data-i18n-skip translate="no"></div>
+    <div id="au-detail-bodies"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/audit.js') }}"></script>
+{% endblock %}

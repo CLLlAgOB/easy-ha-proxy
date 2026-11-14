@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+
+{% block title %}Detection rules{% endblock %}
+{% block header_title %}Detection rules{% endblock %}
+
+{% block content %}
+
+
+<div class="dr-banner" id="dr-unavailable" hidden>
+  The adaptive protection engine is not answering, so the rules cannot be
+  shown. HAProxy traffic is not affected.
+</div>
+
+<section class="card dc-card" aria-labelledby="dc-title">
+  <div class="card-header"><h2 id="dc-title">Request tester</h2></div>
+  <p class="mon-sub">Check a request without banning anyone. Parameters are analysed temporarily and are not saved. History, cooldowns and gateway decisions can change the live score.</p>
+  <form id="dc-preview" class="dc-grid">
+    <label>Site<input class="form-input" id="dc-host" required maxlength="253" placeholder="app.example.com" autocomplete="off"></label>
+    <label>Method<input class="form-input" id="dc-method" value="GET" required maxlength="16"></label>
+    <label class="dc-wide">Path and parameters<input class="form-input" id="dc-url" value="/" required maxlength="4096" autocomplete="off" spellcheck="false"></label>
+    <label>Status code<input class="form-input" id="dc-status" type="number" min="100" max="599" value="404" required></label>
+    <label>Client IP (optional)<input class="form-input" id="dc-ip" maxlength="45" autocomplete="off" placeholder="203.0.113.9"></label>
+    <label>User-Agent (optional)<input class="form-input" id="dc-agent" maxlength="512" autocomplete="off"></label>
+    <div class="dc-actions"><button class="btn" type="submit">Check request</button></div>
+  </form>
+  <div id="dc-preview-result" class="dc-results" role="status" aria-live="polite" data-i18n-skip translate="no"></div>
+</section>
+
+<section class="card dc-card" id="dc-settings" aria-labelledby="dc-settings-title">
+  <div class="card-header"><h2 id="dc-settings-title">Context and observation</h2><button class="btn" type="button" id="dc-refresh">Refresh statistics</button></div>
+  <p class="mon-sub">New rules start in observation. Trusted addresses only produce warnings; observations never turn into old ban points after a mode change. HAProxy hard limits stay active.</p>
+  <p class="dr-result" id="dc-message" role="status" aria-live="polite" data-i18n-skip translate="no"></p>
+  <details class="dc-section"><summary>Site rules</summary>
+    <form class="dc-grid" id="dc-rule-form">
+      <label>Site<input class="form-input" id="dc-rule-host" required maxlength="253" placeholder="app.example.com"></label>
+      <label>Methods (empty means all)<input class="form-input" id="dc-rule-methods" maxlength="160" placeholder="GET, HEAD"></label>
+      <label>Status codes (empty means all)<input class="form-input" id="dc-rule-statuses" maxlength="80" placeholder="404, 410" pattern="[0-9, ]*"></label>
+      <label>Match<select class="form-input" id="dc-rule-match"><option value="exact">Exact path</option><option value="prefix">Route and children</option><option value="segment">Path segment</option></select></label>
+      <label>Path<input class="form-input" id="dc-rule-value" required maxlength="200" placeholder="/admin-backup"></label>
+      <label>Category<select class="form-input" id="dc-rule-category"></select></label>
+      <label>Mode<select class="form-input" id="dc-rule-mode"><option value="observe">Observation</option><option value="enforce">Count towards bans</option></select></label>
+      <div class="dc-actions"><button class="btn" type="submit">Add site rule</button></div>
+    </form>
+    <div class="dc-scroll" id="dc-rules" data-i18n-skip translate="no"></div>
+  </details>
+  <details class="dc-section" id="dc-exception-section"><summary>Narrow exceptions</summary>
+    <p class="mon-sub">An exception only skips its selected rule on the chosen site, methods and route. Other attack rules still apply.</p>
+    <form class="dc-grid" id="dc-exception-form">
+      <label>Rule<select class="form-input" id="dc-ex-rule"></select></label>
+      <label>Site<input class="form-input" id="dc-ex-host" required maxlength="253"></label>
+      <label>Methods (empty means all)<input class="form-input" id="dc-ex-methods" maxlength="160" placeholder="GET, HEAD"></label>
+      <label>Status codes (empty means all)<input class="form-input" id="dc-ex-statuses" maxlength="80" placeholder="200" pattern="[0-9, ]*"></label>
+      <label>Match<select class="form-input" id="dc-ex-match"><option value="exact">Exact path</option><option value="prefix">Route and children</option><option value="segment">Path segment</option></select></label>
+      <label>Path<input class="form-input" id="dc-ex-value" required maxlength="200"></label>
+      <label>Reason<input class="form-input" id="dc-ex-reason" required minlength="3" maxlength="200"></label>
+      <label>Expires (optional)<input class="form-input" id="dc-ex-expires" type="date"></label>
+      <div class="dc-actions"><button class="btn" type="submit">Add exception</button></div>
+    </form>
+    <div class="dc-scroll" id="dc-exceptions" data-i18n-skip translate="no"></div>
+  </details>
+  <details class="dc-section"><summary>Rule modes and statistics</summary>
+    <p class="mon-sub">Counters cover up to 24 hours. Unique IP counts are capped at 64 per rule. Capacity evictions mean some observations were lost.</p>
+    <form class="dc-grid" id="dc-mode-form">
+      <label class="dc-wide">Rule<select class="form-input" id="dc-mode-rule"></select></label>
+      <label>Mode<select class="form-input" id="dc-mode-value"><option value="observe">Observation</option><option value="enforce">Count towards bans</option></select></label>
+      <div class="dc-actions"><button class="btn" type="submit">Apply rule mode</button></div>
+    </form>
+    <div id="dc-capacity" class="mon-sub" data-i18n-skip translate="no"></div>
+    <p id="dc-scoring" class="mon-sub" data-i18n-skip translate="no"></p>
+    <div class="dc-scroll" id="dc-stats" data-i18n-skip translate="no"></div>
+    <div id="dc-behavior" class="dr-rules" data-i18n-skip translate="no"></div>
+    <h3>Existing behavioral rules</h3>
+    <div class="dc-scroll" id="dc-existing" data-i18n-skip translate="no"></div>
+  </details>
+  <details class="dc-section"><summary>Application profiles</summary>
+    <p class="mon-sub">Profiles explain expected methods and routes. They do not bypass protection; use a narrow exception for a verified false positive.</p>
+    <form class="dc-grid" id="dc-profile-form">
+      <label>Site<input class="form-input" id="dc-profile-host" required maxlength="253"></label>
+      <label>Profile<select class="form-input" id="dc-profile-name"><option value="web">Web</option><option value="api">API</option><option value="webdav">Nextcloud / WebDAV</option><option value="1c">1C</option><option value="docker">Docker API / Registry</option></select></label>
+      <div class="dc-actions"><button class="btn" type="submit">Save profile</button></div>
+    </form>
+    <div class="dc-scroll" id="dc-profiles" data-i18n-skip translate="no"></div>
+  </details>
+</section>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Your rules</h2>
+    <span class="mon-sub" id="dr-version" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Rules added here are kept separately from the list that ships with the
+    software, and are applied on top of it. That matters both ways: a deploy
+    replaces the shipped list and cannot take yours with it, and a shipped
+    signature you switch off stays off when the list is next updated. A
+    signature that caused a false ban must not come back with a release.
+  </p>
+
+  <div class="dr-add">
+    <label>
+      <span class="form-label">Signature</span>
+      <input type="text" class="form-input" id="dr-token"
+             placeholder="/admin-backup.zip or acme-console"
+             autocomplete="off" spellcheck="false">
+    </label>
+    <label>
+      <span class="form-label">Category</span>
+      <select class="form-input" id="dr-category"
+              data-i18n-skip translate="no"></select>
+    </label>
+    <button class="btn" type="button" id="dr-add">Add</button>
+  </div>
+
+  <p class="mon-sub">
+    A signature that begins with a slash matches the whole path. Anything else
+    matches one path segment wherever it appears, so a signature of
+    acme-console also catches /x/acme-console/login.
+  </p>
+
+  <div class="dr-rules" id="dr-mine" data-i18n-skip translate="no"></div>
+
+  <p class="dr-result" id="dr-result" data-i18n-skip translate="no"></p>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Trap names</h2>
+    <span class="mon-sub" id="dr-trap-meta" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Names that point at this gateway but serve no site. Nobody with a reason to
+    be here asks for one; scanners find them in public certificate logs. A
+    request for a trap name bans the address at once, unless that address
+    otherwise uses the gateway like an ordinary client: an old bookmark is
+    spared and only counted.
+  </p>
+
+  <div class="dr-rules" id="dr-traps" data-i18n-skip translate="no"></div>
+
+  <div class="dr-suggest-wrap" id="dr-unknown-hosts"></div>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Suggested by traffic</h2>
+    <span class="mon-sub" id="dr-suggest-meta" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Paths that no rule matches, refused to at least three different addresses
+    and never served to anyone. Add one as a signature, or hide it. Paths that
+    ordinary clients asked for too are listed last and marked: those are more
+    likely a broken link than a probe.
+  </p>
+
+  <div class="dr-add">
+    <label>
+      <span class="form-label">Add as</span>
+      <select class="form-input" id="dr-suggest-category"
+              data-i18n-skip translate="no"></select>
+    </label>
+  </div>
+
+  <div class="dr-suggest-wrap" id="dr-suggestions"></div>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Shipped rules</h2>
+    <span class="mon-sub" id="dr-counts" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    What the engine looks for in a request. A decisive category is one no
+    client has any business asking for, so a single hit is enough on its own.
+    The rest are only probable: a site may genuinely run WordPress or serve
+    something under /vendor, so one hit there is not enough by itself.
+  </p>
+
+  <p class="mon-sub">
+    Switch off any signature that is matching your own traffic. It stays off
+    across updates, and you can switch it back on here.
+  </p>
+
+  {# Everything below is written by the script, which has already put its own
+     prose through the translator. Leaving it translatable a second time
+     rewrites the signatures themselves: "backup" and "database" are ordinary
+     words in the catalogue, so backup.sql came out as бэкап.sql and
+     database.sql as БД.sql -- a rule the operator cannot act on. #}
+  <div class="dr-rules" id="dr-shipped" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub" id="dr-query-note" data-i18n-skip translate="no"></p>
+
+  <p class="mon-sub">
+    Programs that name themselves in the User-Agent header. Attack tools ban
+    on one request; internet-wide surveys only count towards a ban. Generic
+    libraries such as curl are not listed, because monitors use them too.
+    These come with the shipped list and are not switched off here.
+  </p>
+  <div class="dr-rules" id="dr-agents" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub">
+    The shipped list is a file on the gateway, replaceable without rebuilding
+    anything. A broken or missing one keeps the built-in rules rather than
+    switching detection off.
+  </p>
+  <p class="mon-sub" data-i18n-skip translate="no">
+    <code id="dr-source"></code>
+  </p>
+</div>
+
+<script src="{{ url_for('static', filename='js/detection_rules.js') }}"></script>
+<script src="{{ url_for('static', filename='js/detection_context.js') }}"></script>
+
+{% endblock %}

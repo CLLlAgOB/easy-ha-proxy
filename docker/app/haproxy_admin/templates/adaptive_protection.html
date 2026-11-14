@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+
+{% block title %}Adaptive protection{% endblock %}
+{% block header_title %}Adaptive protection{% endblock %}
+
+{% block content %}
+
+
+<div class="ap-banner" id="ap-mode">
+  Monitor mode — findings are recorded and scored, but nothing is blocked.
+  HAProxy keeps enforcing its own rules unchanged.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Mode</h2>
+    <span class="mon-sub" id="ap-mode-source"></span>
+  </div>
+
+  <div class="ap-modes" id="ap-mode-switch" role="group" aria-label="Protection mode">
+    <button type="button" class="ap-mode" data-mode="off">
+      Off
+      <small>Nothing is collected</small>
+    </button>
+    <button type="button" class="ap-mode" data-mode="monitor">
+      Observe
+      <small>Record and score, never block</small>
+    </button>
+    <button type="button" class="ap-mode" data-mode="enforce">
+      Enforce
+      <small>Ban what crosses the threshold</small>
+    </button>
+  </div>
+
+  <p class="mon-sub" id="ap-mode-effect"></p>
+
+  <div class="ap-ladder-box" id="ap-ladder-box">
+    <div class="ap-ladder-head">
+      <strong>How long a ban lasts</strong>
+      <button type="button" class="btn-small" id="ap-ladder-edit">Change the ladder</button>
+    </div>
+    <p class="mon-sub">
+      Each repeat finding within the strike window moves the address one step
+      down this list. The first step is the one a mistake lands on, so it is
+      kept short on purpose; the steps after it assume the address came back
+      and did it again.
+    </p>
+    <div class="ap-ladder" id="ap-ladder"></div>
+    <div class="ap-ladder-edit" id="ap-ladder-editor" hidden>
+      <div id="ap-ladder-rows"></div>
+      <div class="ap-ladder-actions">
+        <button type="button" class="btn-small" id="ap-ladder-add">Add a step</button>
+        <button type="button" class="btn-small primary" id="ap-ladder-save">Save</button>
+        <button type="button" class="btn-small" id="ap-ladder-cancel">Cancel</button>
+        <span class="mon-sub" id="ap-ladder-result" data-i18n-skip translate="no"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="ap-guardrails">
+    These are never banned, whatever the score: addresses that have
+    authenticated before, the global whitelist, the admin allow-list, the GeoIP
+    whitelist, and IPv6 — the ban path is IPv4 only. Turning enforcement back
+    off lifts every ban it applied.
+  </div>
+
+  <div class="ap-ladder-box" id="ap-page-box">
+    <div class="card-header">
+      <h3>First step: a page instead of silence</h3>
+      <button type="button" class="btn-small" id="ap-page-toggle" hidden></button>
+    </div>
+    <p class="mon-sub">On the first step of the ladder HAProxy answers the address with a page that names it, the time and a request code, instead of dropping its connections, so a person taken for a scanner can tell you and you can lift the ban. An address that goes on to signatures on two different paths while it is shown the page is taken to the next step at once; from the second step on the address is cut off before HAProxy, as before.</p>
+    <div id="ap-page-state"></div>
+    <div class="mon-sub" id="ap-page-detail" data-i18n-skip translate="no"></div>
+  </div>
+
+  <div class="ap-ladder-box" id="ap-shield-box">
+    <div class="card-header">
+      <h3>First-request shield</h3>
+      <button type="button" class="btn-small" id="ap-shield-toggle" hidden></button>
+    </div>
+    <p class="mon-sub">A ban arrives after the request that earned it has been answered. With the shield, HAProxy itself answers 404 to the signatures one request is banned for — an .env file, a git store, a database dump — so the first request gets nothing either. It acts only in Enforce mode, follows the same rules and exceptions as the bans, and never refuses a signed-in, whitelisted or admin address.</p>
+    <div id="ap-shield-state"></div>
+    <div class="mon-sub" id="ap-shield-detail" data-i18n-skip translate="no"></div>
+  </div>
+
+  <div class="ap-confirm" id="ap-confirm" hidden>
+    <p id="ap-confirm-text"></p>
+    <div class="ap-sim-actions">
+      <button class="btn" type="button" id="ap-confirm-yes">Confirm</button>
+      <button class="btn" type="button" id="ap-confirm-no">Cancel</button>
+    </div>
+  </div>
+
+  <div class="mon-sub" id="ap-mode-result" data-i18n-skip translate="no"></div>
+</div>
+
+<div class="ap-banner error" id="ap-unavailable" hidden>
+  The adaptive protection engine is not answering, so no findings can be shown.
+  HAProxy traffic is not affected.
+</div>
+
+<div class="card" id="ap-quality-card" hidden>
+  <div class="card-header">
+    <h2>How the protection is doing</h2>
+    <span class="mon-sub" id="ap-quality-period" data-i18n-skip translate="no"></span>
+  </div>
+  <div class="ap-cards" id="ap-quality"></div>
+  <div class="mon-sub" id="ap-quality-networks" data-i18n-skip translate="no"></div>
+  <div class="mon-sub" id="ap-quality-waiting"></div>
+</div>
+
+<div class="card" id="ap-bans-card" hidden>
+  <div class="card-header">
+    <h2>Banned right now</h2>
+    <span class="mon-sub" id="ap-bans-note" data-i18n-skip translate="no"></span>
+  </div>
+  <div  class="u-p-12px-16px">
+    <p class="u-mt-0 mon-sub" >
+      How long each one has left, on this engine's own schedule. The ban list
+      on the HAProxy page shows the stick table's expiry instead, which is the
+      table's own lifetime and says days about a ban that lifts within the
+      hour.
+    </p>
+    <div  class="scroll-x">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th>Lifts in</th>
+            <th>Strike</th>
+            <th>Score</th>
+            <th>What it did</th>
+          </tr>
+        </thead>
+        <tbody id="ap-bans"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card" id="ap-warnings-card" hidden>
+  <div class="card-header">
+    <h2>Trusted addresses over a site's limit</h2>
+    <span class="mon-sub" id="ap-warnings-note" data-i18n-skip translate="no"></span>
+  </div>
+  <div  class="u-p-12px-16px">
+    <p class="u-mt-0 mon-sub" >
+      These addresses are trusted: signed in, whitelisted, on the admin list or
+      allowed on the site. Each row is one stretch of time in which one of them
+      went over a site's request limit. This list only observes: it refuses
+      nothing and adds nothing to any score.
+    </p>
+    <p class="mon-sub">
+      The Refused column shows what the gateway's current rules did with those
+      requests: 429 for the request limit, 423 for a ban.
+    </p>
+    <div  class="scroll-x">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th>Trusted as</th>
+            <th>Site</th>
+            <th>Peak and limit</th>
+            <th>Requests over the limit</th>
+            <th>Refused</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody id="ap-warnings"></tbody>
+      </table>
+    </div>
+    <div class="ap-empty" id="ap-warnings-empty" hidden>No trusted address has gone over a site's limit</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2 id="ap-review-title">Shadow review</h2>
+    <span class="mon-sub" id="ap-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="ap-cards">
+    <div class="ap-card">
+      <div class="ap-label">Addresses scored</div>
+      <div class="ap-value" id="ap-scored" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card danger">
+      <div class="ap-label" id="ap-wouldban-label">Would be banned</div>
+      <div class="ap-value" id="ap-wouldban" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card warn">
+      <div class="ap-label">Likely false positives</div>
+      <div class="ap-value" id="ap-falsepos" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card">
+      <div class="ap-label">Cannot be banned</div>
+      <div class="ap-value" id="ap-unenforceable" data-i18n-skip translate="no">—</div>
+    </div>
+    <div class="ap-card">
+      <div class="ap-label">Exempt</div>
+      <div class="ap-value" id="ap-excluded" data-i18n-skip translate="no">—</div>
+    </div>
+  </div>
+
+  <div class="ap-states" id="ap-states" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub">
+    What a score means. The engine bans an address once it reaches the marked
+    band; below it the score only ranks how much attention the address
+    deserves.
+  </p>
+  <div class="ap-bands" id="ap-bands" data-i18n-skip translate="no"></div>
+
+  <p class="mon-sub">
+    A likely false positive is an address the engine scored that later
+    completed authentication. Review those before enabling enforcement.
+  </p>
+
+  <p class="mon-sub">
+    <a href="{{ url_for('routes.detection_rules_page') }}">See what each finding means, and what it is worth</a>
+  </p>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Weight simulator</h2>
+    <span class="mon-sub">Re-scores the stored history; nothing is saved</span>
+  </div>
+
+  <div class="ap-sim" id="ap-weights">
+    {% for event_type in event_types %}
+      <label>
+        <span data-i18n-skip translate="no">{{ event_type }}</span>
+        <input type="number" min="0" max="100" step="1"
+               data-weight="{{ event_type }}" placeholder="—">
+      </label>
+    {% endfor %}
+    <label>
+      Category cap
+      <input type="number" min="1" max="100" step="1" id="ap-cap" placeholder="—">
+    </label>
+    <label>
+      Decay (hours)
+      <input type="number" min="0" max="720" step="1" id="ap-decay" placeholder="—">
+    </label>
+  </div>
+
+  <div class="ap-sim-actions">
+    <button class="btn" type="button" id="ap-apply">Apply</button>
+    <button class="btn" type="button" id="ap-reset">Reset to configured</button>
+    <span class="mon-sub" id="ap-sim-note"></span>
+  </div>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Reputation</h2>
+    <span class="mon-sub">Select a row to see why</span>
+  </div>
+
+  <div  class="scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th>Country</th>
+          <th>Score</th>
+          <th>State</th>
+          <th>Findings</th>
+          <th>Events</th>
+          <th>Last seen</th>
+        </tr>
+      </thead>
+      <tbody id="ap-table" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+
+  <div class="ap-empty" id="ap-table-empty">No addresses have been scored yet</div>
+
+  <div class="ap-detail" id="ap-detail" hidden>
+    <h3 id="ap-detail-title" data-i18n-skip translate="no"></h3>
+    <div class="mon-sub" id="ap-detail-summary"></div>
+    <div class="ap-timeline" id="ap-detail-timeline" data-i18n-skip translate="no"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/adaptive_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/adaptive_protection.js') }}"></script>
+{% endblock %}

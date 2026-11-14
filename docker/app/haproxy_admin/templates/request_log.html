@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+
+{% block title %}Request log{% endblock %}
+{% block header_title %}Request log{% endblock %}
+
+{% block content %}
+
+
+<div class="notice-info rt-notice" >
+  A bounded window over recent requests, kept so a failed request can be found
+  again -- not a log pipeline. The query string is dropped before anything is
+  stored; of the headers only the User-Agent is kept, as the access log writes
+  it, and no cookie or body. Verified usernames are also kept for authenticated
+  requests. The size cap is what actually holds the store
+  down, not the retention window, and writing stops before the filesystem
+  reserve is touched.
+</div>
+
+<div id="rq-disabled" class="notice-warning rt-notice" hidden
+     >
+  <div>
+    Requests are not being recorded. Turning this on stores the address, host and
+    path of every request for a few days, which is why it waits to be asked for.
+    The protection engine reads the same log either way; this only decides
+    whether a searchable copy is kept.
+  </div>
+  <button type="button" class="u-mt-2 btn" id="rq-enable" >
+    Start recording
+  </button>
+  <span id="rq-switch-status" class="table-meta" data-i18n-skip></span>
+</div>
+
+<div id="rq-unavailable" class="notice-danger rt-notice" hidden
+     >
+  The security engine is not answering, so recent requests cannot be read.
+  HAProxy traffic is unaffected.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Search</h2>
+    <span class="mon-sub" id="rq-store" data-i18n-skip translate="no"></span>
+    <button type="button" class="btn btn-small" id="rq-disable" hidden>Stop recording</button>
+  </div>
+
+  <div class="rq-filters">
+    <label>
+      Period
+      <select id="rq-range">
+        <option value="3600">Last hour</option>
+        <option value="21600">Last 6 hours</option>
+        <option value="86400" selected>Last day</option>
+        <option value="259200">Last 3 days</option>
+        <option value="0">Everything kept</option>
+      </select>
+    </label>
+    <label>
+      Status
+      <input type="text" id="rq-status" placeholder="4xx, 500" data-i18n-skip translate="no">
+    </label>
+    <label>
+      Client address
+      <input type="text" id="rq-client" placeholder="203.0.113.9">
+    </label>
+    <label>
+      Host
+      <input type="text" id="rq-host" placeholder="shop.example.com" data-i18n-skip translate="no">
+    </label>
+    <label>
+      Backend
+      <input type="text" id="rq-backend" placeholder="be_shop">
+    </label>
+    <label>
+      Method
+      <select id="rq-method">
+        <option value="">Any method</option>
+      </select>
+    </label>
+    <label>
+      Path starts with
+      <input type="text" id="rq-path" placeholder="/api">
+    </label>
+    <label>
+      Client contains
+      <input type="text" id="rq-agent" placeholder="curl" data-i18n-skip translate="no">
+    </label>
+    <label>
+      Server answer slower than, ms
+      <input type="number" id="rq-slower" min="1" step="1" placeholder="1000">
+    </label>
+    <label>
+      Request ID
+      <input type="text" id="rq-request-id" placeholder="from X-Request-ID">
+    </label>
+    <label class="rq-check">
+      <input type="checkbox" id="rq-refused">
+      Only refused by the gateway
+    </label>
+    <label class="rq-check">
+      <input type="checkbox" id="rq-admin">
+      Show the admin panel's own requests
+    </label>
+    <button class="btn btn-primary" type="button" id="rq-search">Search</button>
+    <button class="btn" type="button" id="rq-reset">Reset</button>
+  </div>
+
+  <div class="rq-found">
+    <span id="rq-found" data-i18n-skip translate="no"></span>
+    <span id="rq-searching" hidden>Searching…</span>
+    <a class="ml-auto btn btn-small" id="rq-export" href="/api/security/requests/export" download
+       title="Up to 10 000 rows of this search, newest first" >Download CSV</a>
+  </div>
+
+  <div id="rq-memory" class="notice-info rt-notice" hidden data-i18n-skip translate="no"
+       ></div>
+
+  <div class="rq-overview" id="rq-overview" hidden>
+    <div class="rq-hist-wrap">
+      <svg class="rq-hist" id="rq-hist" viewBox="0 0 720 80" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="rq-tip" id="rq-hist-tip" hidden data-i18n-skip translate="no"></div>
+    </div>
+    <div class="rq-axis" data-i18n-skip translate="no"><span id="rq-axis-start"></span><span id="rq-axis-end"></span></div>
+    <div class="rq-legend">
+      <span><i  class="chart-key-success"></i>Answered</span>
+      <span><i  class="chart-key-warning"></i>Errors (4xx)</span>
+      <span><i  class="chart-key-server-error"></i>Server errors (5xx)</span>
+      <span><i  class="chart-key-error"></i>Refused by the gateway</span>
+      <span>Drag across the bars to look at that time only</span>
+    </div>
+    <div class="table-meta" id="rq-summary-partial" hidden data-i18n-skip translate="no"></div>
+    <div class="rq-tops">
+      <div>
+        <h3>Addresses</h3>
+        <table><tbody id="rq-top-clients" data-i18n-skip translate="no"></tbody></table>
+      </div>
+      <div>
+        <h3>Paths</h3>
+        <table><tbody id="rq-top-paths" data-i18n-skip translate="no"></tbody></table>
+      </div>
+      <div>
+        <h3>Statuses</h3>
+        <table><tbody id="rq-top-statuses" data-i18n-skip translate="no"></tbody></table>
+      </div>
+    </div>
+  </div>
+  <div id="rq-stopped" class="notice-warning rt-notice" hidden data-i18n-skip translate="no"
+       ></div>
+
+  <div  class="scroll-x">
+    <table class="data-table rq-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Status</th>
+          <th>Method</th>
+          <th>Host</th>
+          <th>Path</th>
+          <th>Backend</th>
+          <th>Client</th>
+          <th title="How soon the server answered; the whole request is in the tooltip">Server answer</th>
+          <th>Request ID</th>
+        </tr>
+      </thead>
+      <tbody id="rq-body" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+
+  <div class="rq-empty" id="rq-empty">Nothing matches these filters</div>
+
+  <div class="rq-more">
+    <button class="btn" type="button" id="rq-more" hidden>Show more</button>
+  </div>
+</div>
+
+<div class="card" id="rq-mem" hidden>
+  <div class="card-header">
+    <h2>Latest requests in memory</h2>
+  </div>
+  <p class="rq-mem-text">
+    The security engine keeps the latest requests in memory: the live page reads them, and so does
+    this search while recording is off. More memory reaches further back and takes more of the
+    gateway's memory.
+  </p>
+  <div class="rq-mem-lines" id="rq-mem-now" data-i18n-skip translate="no"></div>
+  <div class="rq-mem-slider">
+    <input type="range" id="rq-mem-range" min="16" max="128" step="8" value="16"
+           aria-label="Memory for the latest requests, MB">
+    <span class="rq-mem-value" id="rq-mem-value" data-i18n-skip translate="no"></span>
+  </div>
+  <div class="table-meta" id="rq-mem-limit" hidden data-i18n-skip translate="no"></div>
+  <div class="notice-warning rt-notice" id="rq-mem-warning" hidden data-i18n-skip translate="no"
+       ></div>
+  <div class="rq-mem-actions">
+    <button type="button" class="btn btn-primary" id="rq-mem-apply" disabled>Apply</button>
+    <button type="button" class="btn" id="rq-mem-default" hidden>Back to the usual limit</button>
+    <span class="table-meta" id="rq-mem-status" data-i18n-skip translate="no"></span>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/live_activity_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/request_log_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/request_log.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,386 @@
+"""Superadmin software-update workflow backed by a fixed root broker."""
+
+from __future__ import annotations
+
+import re
+
+from flask import Blueprint, abort, g, jsonify, render_template, request
+
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request
+from .services_haproxy_config import get_haproxy_configuration_state
+from . import updates_badge
+from .updated_client import UpdatedError, updated_request
+
+
+bp_system_updates = Blueprint(
+    "system_updates",
+    __name__,
+    url_prefix="/system/updates",
+)
+
+IDENTIFIER_RE = re.compile(r"^[a-f0-9]{32}$")
+BOOT_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
+IMAGE_CHANNELS = frozenset({"latest", "alpha"})
+SOURCE_CHANNELS = frozenset({"github", "local"})
+RELEASE_CHANNELS = frozenset({"stable", "alpha", "local"})
+UPDATE_COMPONENTS = frozenset(
+    {
+        "all",
+        # The source update with only the steps its changed files need.
+        "changes",
+        "services",
+        "daemons",
+        "authelia-container",
+        "admin-container",
+        "os",
+        "haproxy",
+    }
+)
+CONFIG_SENSITIVE_COMPONENTS = frozenset({"all", "changes", "services", "daemons", "haproxy"})
+
+
+def _daemon_response(result: dict, *, accepted: bool = False):
+    if result.get("ok"):
+        return jsonify(result), (202 if accepted else 200)
+    code = str(result.get("error_code") or "")
+    if code in {
+        "busy",
+        "conflict",
+        "config_pending",
+        "operation_active",
+        "stale_plan",
+        "stale_boot",
+        "not_required",
+        "dependency",
+    } or result.get("conflict"):
+        status_code = 409
+    elif code in {"not_found", "missing"}:
+        status_code = 404
+    elif code in {"invalid", "validation", "bad_request"} or result.get(
+        "validation_error"
+    ):
+        status_code = 400
+    else:
+        status_code = 502
+    return jsonify(result), status_code
+
+
+# One audit point for every action that changes the host. The update broker
+# payloads hold no secrets, but the summary still lists only what is useful.
+AUDITED_ACTIONS = {
+    "set_channels": (
+        "update.channels",
+        ("release_channel", "image_channel", "source_channel"),
+    ),
+    "start_apply": ("update.apply", ("plan_id", "components")),
+    "set_settings": ("update.settings", ("auto_check_hours",)),
+    "set_auto_install": ("update.auto_install", ("enabled", "start", "end")),
+    "reboot": ("system.reboot", ("expected_boot_id",)),
+    "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
+    "prepare_haproxy_migration": ("update.haproxy_prepare", ("target_branch",)),
+    "apply_haproxy_migration": ("update.haproxy_migrate", ("plan_id",)),
+    "start_haproxy_transition": ("update.haproxy_transition", ("target_branch",)),
+    "os_security_configure": ("os.security_policy", ("mode", "interval", "start", "end")),
+    "os_security_install": ("os.security_install", ()),
+    "set_auto_reboot": ("os.automatic_reboot", ("enabled", "time", "allow_service_reboot")),
+    "set_service_restarts": ("os.service_restart_policy", ("enabled", "time")),
+    "os_security_restart": ("os.service_restart", ()),
+}
+
+
+def _call_daemon(payload: dict, *, accepted: bool = False):
+    entry = AUDITED_ACTIONS.get(str(payload.get("action") or ""))
+    try:
+        result = updated_request(payload)
+    except UpdatedError as exc:
+        if entry:
+            record_request(
+                entry[0],
+                object_type="system",
+                object_id="updates",
+                result=RESULT_FAILURE,
+                detail=str(exc)[:500],
+            )
+        return jsonify({"ok": False, "error": str(exc)}), 503
+    if entry:
+        action, fields = entry
+        ok = bool(result.get("ok"))
+        record_request(
+            action,
+            object_type="system",
+            object_id=str(result.get("job_id") or "updates"),
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=", ".join(
+                f"{field}: {payload[field]}" for field in fields if field in payload
+            ),
+            detail="" if ok else str(result.get("error") or "")[:500],
+        )
+    return _daemon_response(result, accepted=accepted)
+
+
+def _json_payload(required: set[str], optional: set[str] | None = None) -> dict:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400, description="a JSON object is required")
+    allowed = required | (optional or set())
+    if set(payload) - allowed or not required.issubset(payload):
+        abort(400, description="invalid request fields")
+    return payload
+
+
+def _identifier(value, label: str) -> str:
+    text = str(value or "").strip().lower()
+    if not IDENTIFIER_RE.fullmatch(text):
+        abort(400, description=f"invalid {label}")
+    return text
+
+
+def _boot_id(value) -> str:
+    text = str(value or "").strip().lower()
+    if not BOOT_ID_RE.fullmatch(text):
+        abort(400, description="invalid boot id")
+    return text
+
+
+def _actor() -> str:
+    value = str(getattr(g, "remote_user", "") or "").strip()
+    if not ACTOR_RE.fullmatch(value):
+        abort(403, description="authenticated actor is unavailable")
+    return value
+
+
+def _components(value) -> list[str]:
+    if not isinstance(value, list) or not value:
+        abort(400, description="components must be a non-empty list")
+    if any(not isinstance(item, str) or item not in UPDATE_COMPONENTS for item in value):
+        abort(400, description="unsupported update component")
+    if len(value) != len(set(value)):
+        abort(400, description="duplicate update component")
+    return list(value)
+
+
+@bp_system_updates.get("/")
+def page():
+    return render_template("system_updates.html")
+
+
+@bp_system_updates.get("/api/status")
+def status_view():
+    payload = {"action": "status"}
+    job_id = (request.args.get("job_id") or "").strip().lower()
+    if job_id:
+        payload["job_id"] = _identifier(job_id, "job id")
+    response = _call_daemon(payload)
+    # Every poll of the page keeps the navigation's dot in step with it.
+    body = response[0] if isinstance(response, tuple) else response
+    data = body.get_json(silent=True) if hasattr(body, "get_json") else None
+    if isinstance(data, dict) and data.get("ok") and isinstance(data.get("summary"), dict):
+        updates_badge.remember(data["summary"])
+    return response
+
+
+def _channel(payload: dict, key: str, allowed: frozenset) -> str:
+    value = payload[key]
+    if not isinstance(value, str) or value not in allowed:
+        abort(
+            400,
+            description=f"{key} must be one of: " + ", ".join(sorted(allowed)),
+        )
+    return value
+
+
+@bp_system_updates.post("/api/check")
+def start_check():
+    payload = _json_payload(
+        set(), {"image_channel", "source_channel", "release_channel"}
+    )
+    command = {"action": "start_check"}
+    if "release_channel" in payload:
+        command["release_channel"] = _channel(
+            payload, "release_channel", RELEASE_CHANNELS
+        )
+    if "image_channel" in payload:
+        command["image_channel"] = _channel(payload, "image_channel", IMAGE_CHANNELS)
+    if "source_channel" in payload:
+        command["source_channel"] = _channel(
+            payload, "source_channel", SOURCE_CHANNELS
+        )
+    return _call_daemon(command, accepted=True)
+
+
+@bp_system_updates.post("/api/channels")
+def save_channels():
+    payload = _json_payload(
+        set(), {"image_channel", "source_channel", "release_channel"}
+    )
+    command = {"action": "set_channels"}
+    if "release_channel" in payload:
+        command["release_channel"] = _channel(
+            payload, "release_channel", RELEASE_CHANNELS
+        )
+    if "image_channel" in payload:
+        command["image_channel"] = _channel(payload, "image_channel", IMAGE_CHANNELS)
+    if "source_channel" in payload:
+        command["source_channel"] = _channel(
+            payload, "source_channel", SOURCE_CHANNELS
+        )
+    if len(command) == 1:
+        abort(400, description="select a channel to persist")
+    return _call_daemon(command)
+
+
+AUTO_CHECK_HOURS = frozenset({0, 6, 12, 24, 72, 168})
+
+
+@bp_system_updates.post("/api/settings")
+def save_settings():
+    """How often the broker checks for updates by itself; 0 switches it off."""
+    payload = _json_payload({"auto_check_hours"})
+    value = payload["auto_check_hours"]
+    if isinstance(value, bool) or not isinstance(value, int) or value not in AUTO_CHECK_HOURS:
+        abort(400, description="choose one of the offered check intervals")
+    return _call_daemon({"action": "set_settings", "auto_check_hours": value})
+
+
+@bp_system_updates.post("/api/auto-install")
+def save_auto_install():
+    """Whether easy-ha-proxy's own updates install themselves, and in which
+    hours of the night; the broker refuses anything else as well."""
+    payload = _json_payload({"enabled", "start", "end"})
+    enabled, start, end = payload["enabled"], payload["start"], payload["end"]
+    if not isinstance(enabled, bool):
+        abort(400, description="enabled must be true or false")
+    for value in (start, end):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
+            abort(400, description="the window is given in whole hours, 0 to 23")
+    if start == end:
+        abort(400, description="the window must not start and end at the same hour")
+    return _call_daemon({"action": "set_auto_install", "enabled": enabled, "start": start, "end": end})
+
+
+@bp_system_updates.post("/api/apply")
+def start_apply():
+    payload = _json_payload({"plan_id", "components", "confirmation"})
+    if payload["confirmation"] != "UPDATE":
+        abort(400, description="type UPDATE to confirm software updates")
+
+    plan_id = _identifier(payload["plan_id"], "plan id")
+    components = _components(payload["components"])
+    sensitive = sorted(CONFIG_SENSITIVE_COMPONENTS.intersection(components))
+    if sensitive:
+        try:
+            config_state = get_haproxy_configuration_state()
+        except Exception:  # pylint: disable=broad-except
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        "HAProxy configuration state is unavailable; "
+                        "source and host-service updates are blocked"
+                    ),
+                    "error_code": "configuration_state_unavailable",
+                }
+            ), 503
+        state = str(config_state.get("state") or "unknown")
+        if state != "clean":
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        "Resolve pending HAProxy configuration changes before "
+                        "updating source or host services"
+                    ),
+                    "error_code": "configuration_not_clean",
+                    "configuration_state": state,
+                    "blocked_components": sensitive,
+                }
+            ), 409
+
+    return _call_daemon(
+        {
+            "action": "start_apply",
+            "plan_id": plan_id,
+            "components": components,
+            "confirmation": "UPDATE",
+        },
+        accepted=True,
+    )
+
+
+def _migration_configuration_error():
+    try:
+        state = get_haproxy_configuration_state()
+    except Exception:  # pylint: disable=broad-except
+        return jsonify({"ok": False, "error": "HAProxy configuration state is unavailable",
+                        "error_code": "configuration_state_unavailable"}), 503
+    if state.get("state") != "clean":
+        return jsonify({"ok": False, "error": "Resolve pending HAProxy configuration changes before migration",
+                        "error_code": "configuration_not_clean"}), 409
+    return None
+
+
+@bp_system_updates.post("/api/haproxy/migration/start")
+def start_haproxy_transition():
+    payload = _json_payload({"target_branch", "confirmed"})
+    if payload['target_branch'] != '3.4' or payload['confirmed'] is not True:
+        abort(400, description='Confirm the transition to HAProxy 3.4 LTS')
+    error = _migration_configuration_error()
+    if error is not None:
+        return error
+    return _call_daemon({'action': 'start_haproxy_transition', 'target_branch': '3.4', 'confirmed': True}, accepted=True)
+
+
+@bp_system_updates.post("/api/haproxy/migration/prepare")
+def prepare_haproxy_migration():
+    payload = _json_payload({"target_branch"})
+    if payload["target_branch"] != "3.4":
+        abort(400, description="Only the qualified HAProxy 3.4 LTS migration is supported")
+    error = _migration_configuration_error()
+    if error is not None:
+        return error
+    return _call_daemon({"action": "prepare_haproxy_migration", "target_branch": "3.4"}, accepted=True)
+
+
+@bp_system_updates.post("/api/haproxy/migration/apply")
+def apply_haproxy_migration():
+    payload = _json_payload({"plan_id", "confirmation"})
+    if payload["confirmation"] != "MIGRATE 3.4":
+        abort(400, description="Type MIGRATE 3.4 to confirm the HAProxy transition")
+    plan_id = _identifier(payload["plan_id"], "migration plan id")
+    error = _migration_configuration_error()
+    if error is not None:
+        return error
+    return _call_daemon({"action": "apply_haproxy_migration", "plan_id": plan_id,
+                         "confirmation": "MIGRATE 3.4"}, accepted=True)
+
+
+@bp_system_updates.post("/api/reboot")
+def reboot():
+    payload = _json_payload({"confirmation", "expected_boot_id"})
+    if payload["confirmation"] != "REBOOT":
+        abort(400, description="type REBOOT to confirm the server reboot")
+    # The broker owns the delayed systemd timer and serializes it with every
+    # update/backup operation through the shared maintenance lock.
+    return _call_daemon(
+        {
+            "action": "reboot",
+            "confirmation": "REBOOT",
+            "expected_boot_id": _boot_id(payload["expected_boot_id"]),
+            "actor": _actor(),
+        }
+    )
+
+
+@bp_system_updates.post("/api/reboot/cancel")
+def cancel_reboot():
+    payload = _json_payload({"expected_boot_id"})
+    return _call_daemon(
+        {
+            "action": "cancel_reboot",
+            "expected_boot_id": _boot_id(payload["expected_boot_id"]),
+            "actor": _actor(),
+        }
+    )

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Hand the renewed certificate to the machines configured to receive it.
+#
+# 906, so it runs after 905 has rebuilt the local PEMs and reloaded HAProxy.
+# The order is the point: a machine that is switched off must never be able
+# to leave this gateway serving an expired certificate. Whatever happens
+# here, the gateway itself is already correct.
+#
+# Everything else -- which targets exist, which domains each wants, the
+# format, the transport, the remote path -- is in
+# /etc/easy-ha-proxy/cert-destinations and edited from the interface. There
+# is deliberately nothing to configure in this file.
+set -uo pipefail
+
+exec /usr/local/sbin/easy-ha-proxy-cert-deliver \
+  --lineage "${RENEWED_LINEAGE:-}" \
+  --domains "${RENEWED_DOMAINS:-}"

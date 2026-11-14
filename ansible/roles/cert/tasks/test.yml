@@ -1,0 +1,22 @@
+- name: Ensure certs dir {{ haproxy_certs_dir }} exists
+  file:
+    path: "{{ haproxy_certs_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Show certbot domains
+  debug:
+    var: certbot_domains
+
+- name: Deploy existing assembled PEM files to HAProxy
+  copy:
+    src: "{{ item }}.pem"
+    dest: "{{ haproxy_certs_dir }}/{{ item }}.pem"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ certbot_domains }}"
+  loop_control:
+    label: "{{ item }}"

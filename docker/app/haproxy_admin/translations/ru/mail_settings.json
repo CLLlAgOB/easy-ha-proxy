@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Default (mail settings recipient)": "По умолчанию (получатель из настроек почты)"
+  }
+}

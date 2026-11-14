@@ -1,0 +1,439 @@
+{% extends "base.html" %}
+
+{% block title %}Monitoring{% endblock %}
+{% block header_title %}Monitoring{% endblock %}
+
+{% block content %}
+{% macro expand_button() -%}
+<button type="button" class="mon-expand" title="Full screen" aria-label="Full screen" aria-pressed="false"><svg class="mon-icon-open" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><svg class="mon-icon-close" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2v4H2M14 6h-4V2M10 14v-4h4M2 10h4v4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+{%- endmacro %}
+
+
+<div class="mon-attention" id="mon-attention" hidden>
+  <div class="mon-attention-head">
+    <b>Needs attention</b>
+    <span class="mon-sub" id="mon-attention-more" data-i18n-skip translate="no" hidden></span>
+    <a href="/system/alerts">All alerts</a>
+  </div>
+  <ul id="mon-attention-list"></ul>
+</div>
+
+<div class="mon-notice error" id="mon-unavailable" hidden>
+  Historical monitoring is unavailable. The collector is not answering, so no
+  history can be shown. HAProxy traffic is not affected.
+</div>
+
+<div class="mon-notice warn" id="mon-paused" hidden>
+  Historical monitoring is paused because the disk free-space safety threshold
+  was reached. HAProxy traffic is not affected.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Overview</h2>
+    <span class="mon-sub" id="mon-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="mon-toolbar">
+    <div class="mon-ranges" id="mon-ranges" role="group" aria-label="Time range">
+      {% for value in ranges %}
+        <button type="button" class="mon-range" data-range="{{ value }}"
+                aria-pressed="{{ 'true' if value == default_range else 'false' }}">{{ value }}</button>
+      {% endfor %}
+      <button type="button" class="mon-range" id="mon-range-custom"
+              aria-pressed="false">Period…</button>
+      <button type="button" class="mon-range" id="mon-zoom-out" hidden>Zoom out</button>
+    </div>
+
+    {# A preset answers "how are things". It cannot answer "what happened
+       during the incident on Tuesday morning", which is the question an
+       operator actually arrives with. #}
+    <div class="mon-window" id="mon-window" hidden>
+      <label>Period start
+        <input type="datetime-local" id="mon-window-from" class="form-input">
+      </label>
+      <label>Period end
+        <input type="datetime-local" id="mon-window-to" class="form-input">
+      </label>
+      <button type="button" class="btn btn-small" id="mon-window-apply">Show</button>
+      <button type="button" class="btn btn-small" id="mon-window-clear">Back to presets</button>
+      <span class="mon-sub" id="mon-window-note" data-i18n-skip translate="no"></span>
+    </div>
+
+    <label for="mon-site">
+      Site
+      <select id="mon-site">
+        <option value="">All sites</option>
+      </select>
+    </label>
+
+    {# Off while reading a chart closely, or to keep a slow link quiet. #}
+    <label for="mon-auto-refresh">
+      <input type="checkbox" id="mon-auto-refresh" checked>
+      Auto-refresh
+    </label>
+  </div>
+
+  <div class="mon-cards">
+    <div class="mon-card">
+      <div class="mon-label">Requests per second</div>
+      <div class="mon-value" id="mon-rps" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-requests-total"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Current connections</div>
+      <div class="mon-value" id="mon-conns" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-conns-peak"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Traffic</div>
+      <div class="mon-value" id="mon-traffic" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-traffic-split"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Responses</div>
+      <div class="mon-classes" id="mon-classes" data-i18n-skip translate="no"></div>
+      <div class="mon-sub" id="mon-error-ratio"></div>
+    </div>
+    <div class="mon-card" id="mon-card-cpu" hidden>
+      <div class="mon-label">Processor</div>
+      <div class="mon-value" id="mon-cpu" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-cpu-detail" data-i18n-skip translate="no"></div>
+    </div>
+    <div class="mon-card" id="mon-card-memory" hidden>
+      <div class="mon-label">Memory</div>
+      <div class="mon-value" id="mon-memory" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-memory-detail" data-i18n-skip translate="no"></div>
+    </div>
+    <div class="mon-card">
+      <div class="mon-label">Backend health</div>
+      <div class="mon-value" id="mon-health" data-i18n-skip translate="no">—</div>
+      <div class="mon-sub" id="mon-health-servers"></div>
+    </div>
+  </div>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Graphs</h2>
+    <span class="mon-sub">Hover over a chart to compare all charts at the same time</span>
+    <span class="mon-sub">Drag across a chart to zoom in, double-click to zoom out</span>
+    <a class="mon-sub" id="mon-log-link" href="/security/requests">Requests of this period in the Request log</a>
+    {# Changes and alerts of the period, as marks across every chart. Off
+       until a viewer turns them on: a flapping alert can fill a chart. #}
+    <label class="mon-sub mon-events-toggle" for="mon-events">
+      <input type="checkbox" id="mon-events">
+      Events on charts
+      <span id="mon-events-count" data-i18n-skip translate="no"></span>
+    </label>
+    <button type="button" class="mon-link-button" id="mon-events-filter-toggle"
+            aria-controls="mon-events-filter" aria-expanded="false" hidden>Filter</button>
+    <span class="mon-sub" id="mon-resolution"></span>
+  </div>
+
+  <div class="mon-events-filter" id="mon-events-filter" hidden>
+    <div class="mon-filter-row">
+      <b>Show</b>
+      <label><input type="checkbox" data-event-kind="change"> Changes</label>
+      <label><input type="checkbox" data-event-kind="alert"> Alerts</label>
+      <label><input type="checkbox" data-event-kind="recovered"> Recoveries</label>
+    </div>
+    <div class="mon-filter-row">
+      <b>Importance</b>
+      <label><input type="checkbox" data-event-severity="critical"> Critical</label>
+      <label><input type="checkbox" data-event-severity="warning"> Warning</label>
+      <label><input type="checkbox" data-event-severity="info"> Info</label>
+    </div>
+    <div class="mon-filter-row">
+      <b>Alerts in this period</b>
+      <span id="mon-events-rules"><span class="mon-sub">No alerts in this period</span></span>
+    </div>
+  </div>
+
+  <div class="mon-charts">
+    <div class="mon-chart" data-chart="requests">
+      <div class="mon-chart-head">
+        <h3>Requests</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Requests per second</div>
+      <svg class="mon-plot" id="mon-plot-requests" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-requests"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="traffic">
+      <div class="mon-chart-head">
+        <h3>Traffic</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Bytes per second</div>
+      <svg class="mon-plot" id="mon-plot-traffic" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-traffic"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="responses">
+      <div class="mon-chart-head">
+        <h3>Response classes</h3>
+        <span class="mon-log-links">
+          <a class="mon-sub" data-log-status="4xx" href="/security/requests?status=4xx">4xx</a>
+          <a class="mon-sub" data-log-status="5xx" href="/security/requests?status=5xx">5xx</a>
+        </span>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Responses per second</div>
+      <svg class="mon-plot" id="mon-plot-responses" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-responses"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="latency">
+      <div class="mon-chart-head">
+        <h3>Response time</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Milliseconds</div>
+      <svg class="mon-plot" id="mon-plot-latency" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-latency"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="connections">
+      <div class="mon-chart-head">
+        <h3>Connections</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Concurrent connections</div>
+      <svg class="mon-plot" id="mon-plot-connections" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-connections"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="cpu">
+      <div class="mon-chart-head">
+        <h3>Processor</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Percent of the machine</div>
+      <svg class="mon-plot" id="mon-plot-cpu" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-cpu"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="memory">
+      <div class="mon-chart-head">
+        <h3>Memory</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Memory of the machine and who uses it</div>
+      <svg class="mon-plot" id="mon-plot-memory" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-memory"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="disk">
+      <div class="mon-chart-head">
+        <h3>Disk space</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Root filesystem</div>
+      <svg class="mon-plot" id="mon-plot-disk" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-disk"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="diskio">
+      <div class="mon-chart-head">
+        <h3>Disk activity</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Read and written per second</div>
+      <svg class="mon-plot" id="mon-plot-diskio" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-diskio"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="network">
+      <div class="mon-chart-head">
+        <h3>Network</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Network cards of the machine, per second</div>
+      <svg class="mon-plot" id="mon-plot-network" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-network"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="temperature">
+      <div class="mon-chart-head">
+        <h3>Temperature</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Warmest sensor of the machine</div>
+      <svg class="mon-plot" id="mon-plot-temperature" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-temperature"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="percentiles">
+      <div class="mon-chart-head">
+        <h3>Response time percentiles</h3>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">From the access log: how soon the server answered half, 95 and 99 of every hundred requests</div>
+      <svg class="mon-plot" id="mon-plot-percentiles" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-percentiles"></div>
+    </div>
+
+    <div class="mon-chart" data-chart="refusals">
+      <div class="mon-chart-head">
+        <h3>Refused at the gateway</h3>
+        <a class="mon-sub mon-log-links" href="/monitoring/live?blocked=1&amp;window=900">Refused requests now</a>
+        {{ expand_button() }}
+      </div>
+      <div class="mon-sub">Requests turned away, per minute, for the whole gateway</div>
+      <svg class="mon-plot" id="mon-plot-refusals" preserveAspectRatio="none"></svg>
+      <div class="mon-legend" id="mon-legend-refusals"></div>
+    </div>
+  </div>
+</div>
+
+<div class="u-mt-6 card"  id="mon-channels-card" hidden>
+  <div class="card-header">
+    <h2>Uplinks</h2>
+    <span class="mon-sub" id="mon-channels-note" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Worked out from the backends: every server on the same address is the same
+    link, so a gateway reaching its sites through a main connection and a
+    reserve shows up as two. Traffic is counted per link as well as in total,
+    which is what says how much actually went out through each.
+  </p>
+
+  <div id="mon-channels"></div>
+
+  <div id="mon-channels-hidden-wrap" hidden>
+    <button type="button" class="mon-hidden-toggle" id="mon-channels-toggle">
+      Show hidden
+    </button>
+    <div id="mon-channels-hidden" hidden></div>
+  </div>
+
+  <div class="mon-sub" id="mon-channels-result" data-i18n-skip translate="no"></div>
+</div>
+
+<div class="u-mt-6 card"  id="mon-backends-card">
+  <div class="card-header">
+    <h2 id="mon-backends-title">Backend availability</h2>
+    <span class="mon-sub" id="mon-timeline-note"></span>
+  </div>
+
+  {# The same list of backends answers two questions: was it up, and how
+     much went through it. #}
+  <div class="mon-toolbar">
+    <div class="mon-ranges" id="mon-backends-view" role="group" aria-label="Show">
+      <button type="button" class="mon-range" data-view="availability"
+              aria-pressed="true">Availability</button>
+      <button type="button" class="mon-range" data-view="traffic"
+              aria-pressed="false">Traffic</button>
+      <button type="button" class="mon-range" data-view="requests"
+              aria-pressed="false">Requests and errors</button>
+    </div>
+    <label for="mon-backends-sort" id="mon-backends-sort-wrap" hidden>
+      Sort
+      <select id="mon-backends-sort">
+        <option value="desc">Most traffic first</option>
+        <option value="asc">Least traffic first</option>
+        <option value="name">By name</option>
+      </select>
+    </label>
+    <label for="mon-requests-sort" id="mon-requests-sort-wrap" hidden>
+      Sort
+      <select id="mon-requests-sort">
+        <option value="requests">Most requests first</option>
+        <option value="errors5xx">Most server errors first</option>
+        <option value="errors4xx">Most client errors first</option>
+        <option value="slowest">Slowest first</option>
+        <option value="name">By name</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="mon-timeline">
+    <div class="mon-empty">No state changes recorded for this period</div>
+  </div>
+  <div id="mon-backend-traffic" hidden></div>
+  <div id="mon-backend-requests" class="mon-requests-wrap" hidden></div>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Monitoring storage</h2>
+    <span class="mon-sub" id="mon-storage-state" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="mon-bar" id="mon-storage-bar"><i  class="u-w-0"></i></div>
+
+  <div class="mon-storage-grid">
+    <div><span>Database</span><b id="mon-st-db" data-i18n-skip translate="no">—</b></div>
+    <div><span>Write-ahead log</span><b id="mon-st-wal" data-i18n-skip translate="no">—</b></div>
+    <div><span>Total</span><b id="mon-st-total" data-i18n-skip translate="no">—</b></div>
+    <div><span>Size limit</span><b id="mon-st-limit" data-i18n-skip translate="no">—</b></div>
+    <div><span>Filesystem free</span><b id="mon-st-free" data-i18n-skip translate="no">—</b></div>
+    <div><span>Free-space reserve</span><b id="mon-st-reserve" data-i18n-skip translate="no">—</b></div>
+    <div><span>Growth last 7 days</span><b id="mon-st-growth" data-i18n-skip translate="no">—</b></div>
+    <div><span>Trend</span><b id="mon-st-trend">—</b></div>
+    <div><span>Minute retention</span><b id="mon-st-ret-minute">—</b></div>
+    <div><span>Hourly retention</span><b id="mon-st-ret-hour">—</b></div>
+  </div>
+
+  <div class="u-mt-3 mon-sub" >
+    Growth is the measured change over the period, not a prediction.
+  </div>
+</div>
+
+<div class="u-mt-6 card"  id="mon-monitors-card"
+     data-editable="{{ 'true' if can_switch_monitors else 'false' }}">
+  <div class="card-header">
+    <h2>Monitors</h2>
+    <span class="mon-sub" id="mon-monitors-result" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Gathered by the collector beside the HAProxy counters. Switched off, they
+    are no longer gathered and their charts are hidden; what was gathered
+    before is kept.
+  </p>
+  <div class="mon-monitors">
+    <label><input type="checkbox" data-monitor="machine"> Processor and memory of the machine</label>
+    <label><input type="checkbox" data-monitor="components"> Usage per component: services and containers</label>
+    <label><input type="checkbox" data-monitor="disk"> Disk: space and activity</label>
+    <label><input type="checkbox" data-monitor="network"> Network cards of the machine</label>
+    <label>
+      <input type="checkbox" data-monitor="temperature"> Temperature
+      <small class="mon-sub" id="mon-temperature-note" hidden>No sensor on this machine</small>
+    </label>
+    <label><input type="checkbox" data-monitor="percentiles"> Response time percentiles, from the access log</label>
+    <label><input type="checkbox" data-monitor="refusals"> Requests refused at the gateway, by reason</label>
+  </div>
+  <p class="mon-sub" id="mon-log-digests-note" hidden>
+    The access log is read by adaptive protection. It is switched off and the
+    request log is off too, so nothing reads it: the percentiles and the
+    refusals have nothing to show.
+  </p>
+
+  <p class="mon-sub">
+    Drawn from the counters HAProxy keeps anyway, which are read either way:
+    switched off, they are only hidden.
+  </p>
+  <div class="mon-monitors">
+    <label><input type="checkbox" data-monitor="requests"> Requests</label>
+    <label><input type="checkbox" data-monitor="traffic"> Traffic</label>
+    <label><input type="checkbox" data-monitor="responses"> Response classes</label>
+    <label><input type="checkbox" data-monitor="latency"> Response time</label>
+    <label><input type="checkbox" data-monitor="connections"> Connections</label>
+    <label><input type="checkbox" data-monitor="uplinks"> Uplinks</label>
+    <label><input type="checkbox" data-monitor="availability"> Backend availability</label>
+  </div>
+
+  {% if not can_switch_monitors %}
+  <div class="mon-sub">Only a superadmin can switch monitors.</div>
+  {% endif %}
+</div>
+
+<div class="mon-overlay" id="mon-overlay" hidden></div>
+
+<script src="{{ url_for('static', filename='js/monitoring_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/monitoring.js') }}"></script>
+{% endblock %}

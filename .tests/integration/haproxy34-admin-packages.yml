@@ -1,0 +1,11 @@
+---
+- hosts: localhost
+  connection: local
+  become: true
+  vars:
+    haproxy_package_provider: haproxy-technologies
+  tasks:
+    - name: Verify panel prerequisites use the selected HAProxy provider
+      ansible.builtin.import_role:
+        name: haproxy-admin
+        tasks_from: packages.yml

@@ -1,0 +1,7 @@
+{
+  "enabled": {{ (alertd_enabled | default(true)) | tojson }},
+  "email_enabled": {{ (alertd_email_enabled | default(true)) | tojson }},
+  "recipient": {{ (alertd_recipient | default('')) | tojson }},
+  "min_severity": {{ (alertd_min_severity | default('info')) | tojson }},
+  "rules": {{ (alertd_rules | default({})) | tojson }}
+}

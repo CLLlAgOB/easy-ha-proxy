@@ -1,0 +1,38 @@
+---
+# A selected HAProxy patch is installed by the broker's state-preserving path.
+- name: HAProxy updates | protect qualified installed packages
+  when:
+    - ansible_distribution == 'Ubuntu'
+    - ansible_distribution_version is match('^24[.]04')
+    - ansible_architecture in ['aarch64', 'x86_64']
+  block:
+    - name: HAProxy updates | read actual installed packages
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: HAProxy updates | hold core packages outside explicit updates
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: ['haproxy', 'haproxy-awslc', 'libssl-awslc']
+      when: item in ansible_facts.packages
+
+    - name: HAProxy updates | create needrestart configuration directory
+      ansible.builtin.file:
+        path: /etc/needrestart/conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: "'haproxy' in ansible_facts.packages or 'haproxy-awslc' in ansible_facts.packages"
+
+    - name: HAProxy updates | defer core restart to the controlled update
+      ansible.builtin.copy:
+        dest: /etc/needrestart/conf.d/easy-ha-proxy-haproxy.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Managed by easy-ha-proxy. The update page detects replaced libraries.
+          $nrconf{override_rc}{qr(^haproxy\.service$)} = 0;
+      when: "'haproxy' in ansible_facts.packages or 'haproxy-awslc' in ansible_facts.packages"

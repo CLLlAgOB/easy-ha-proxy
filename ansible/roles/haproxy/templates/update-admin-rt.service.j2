@@ -1,0 +1,8 @@
+[Unit]
+Description=Update runtime admin IP from DNS (no reload)
+After=network-online.target haproxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/update-admin-rt.sh

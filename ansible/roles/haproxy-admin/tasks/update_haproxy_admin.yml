@@ -1,0 +1,71 @@
+---
+- name: Ensure Docker daemon is running (classic docker.service)
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  register: docker_service_result
+  failed_when: false
+  changed_when: docker_service_result is changed
+
+- name: Ensure Docker daemon is running (snap.docker.dockerd.service)
+  ansible.builtin.service:
+    name: snap.docker.dockerd
+    state: started
+    enabled: true
+  register: docker_snap_service_result
+  failed_when: false
+  changed_when: docker_snap_service_result is changed
+
+- name: Pull images
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "{{ haproxy_admin_compose_pull_timeout | int | string }}"
+      - docker
+      - compose
+      - pull
+      - --quiet
+    chdir: "{{ app_dir }}"
+  environment:
+    COMPOSE_PROGRESS: plain
+    DOCKER_CLI_HINTS: "false"
+  register: pull_result
+  changed_when: false
+  retries: 3
+  delay: 20
+  until: pull_result.rc == 0
+
+- name: Up -d (recreate if needed)
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "{{ haproxy_admin_compose_up_timeout | int | string }}"
+      - docker
+      - compose
+      - up
+      - --detach
+      - --remove-orphans
+    chdir: "{{ app_dir }}"
+  environment:
+    COMPOSE_PROGRESS: plain
+    DOCKER_CLI_HINTS: "false"
+  register: haproxy_admin_compose_up
+  changed_when: >-
+    (
+      (haproxy_admin_compose_up.stdout | default(''))
+      ~
+      (haproxy_admin_compose_up.stderr | default(''))
+    )
+    is regex('(?i)(creating|created|recreating|recreated|starting|started|removing|removed)')
+  retries: 2
+  delay: 10
+  until: haproxy_admin_compose_up.rc == 0
+
+- name: Verify the updated application container health
+  ansible.builtin.include_tasks: wait_haproxy_admin_healthy.yml
+
+- name: Remove the legacy external GeoIP JSON cache
+  ansible.builtin.file:
+    path: "{{ haproxy_admin_root_dir }}/backups/country_cache.json"
+    state: absent

@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+
+{% block title %}Software updates{% endblock %}
+{% block header_title %}Software updates{% endblock %}
+
+{% block content %}
+<div id="updates-app"
+     data-status-url="{{ url_for('system_updates.status_view') }}"
+     data-check-url="{{ url_for('system_updates.start_check') }}"
+     data-apply-url="{{ url_for('system_updates.start_apply') }}"
+     data-channels-url="{{ url_for('system_updates.save_channels') }}"
+     data-settings-url="{{ url_for('system_updates.save_settings') }}"
+     data-auto-install-url="{{ url_for('system_updates.save_auto_install') }}"
+     data-reboot-url="{{ url_for('system_updates.reboot') }}"
+     data-migration-start-url="{{ url_for('system_updates.start_haproxy_transition') }}"
+     data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}">
+
+  {# One card says where things stand. While a job runs it holds only the
+     progress bar; the log is one click away, never in the way. #}
+  <section class="card updates-hero" aria-labelledby="updates-hero-title">
+    <div class="updates-hero-head">
+      <div class="updates-hero-text">
+        <h2 id="updates-hero-title">Software updates</h2>
+        <p id="updates-hero-summary" class="updates-hero-summary">Not checked yet.</p>
+        <p class="updates-hero-meta" id="updates-hero-meta">
+          <span>Last check:</span> <span id="updates-checked-at">Never</span><span id="updates-next-check"></span>
+        </p>
+        {# Newer releases upstream that the project has not taken up yet:
+           information only, nothing here installs them. #}
+        <ul id="updates-upstream" class="updates-hero-meta updates-upstream" hidden></ul>
+      </div>
+      <button type="button" class="btn btn-refresh" id="updates-check">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="icon">Check for updates</span>
+      </button>
+    </div>
+
+    <div id="updates-progress" class="updates-run" hidden>
+      <div class="updates-run-meta">
+        <strong id="updates-progress-label">Working…</strong>
+        <span>
+          <span id="updates-progress-eta"></span>
+          <span id="updates-progress-percent" class="mono notranslate" translate="no" data-i18n-skip></span>
+          <span id="updates-progress-elapsed" class="mono notranslate" translate="no" data-i18n-skip>0:00</span>
+        </span>
+      </div>
+      <div id="updates-progress-track" class="job-progress-track updates-run-track"
+           role="progressbar" aria-labelledby="updates-progress-label" aria-valuemin="0" aria-valuemax="100">
+        <div id="updates-progress-fill" class="job-progress-fill"></div>
+      </div>
+      <div id="updates-progress-step" class="updates-run-step mono notranslate" translate="no" data-i18n-skip></div>
+      <p id="updates-self-restart-running" class="updates-run-note" hidden>
+        The web application or sign-in service may restart during this update. The page reconnects by itself.
+      </p>
+    </div>
+
+    <div id="updates-result" class="updates-result" role="status" aria-live="polite" hidden>
+      <span id="updates-result-text"></span>
+      <button type="button" class="updates-link-button" id="updates-result-dismiss">Dismiss</button>
+    </div>
+
+    <div class="updates-hero-tools">
+      <button type="button" class="updates-link-button" id="updates-details-toggle"
+              aria-expanded="false" aria-controls="updates-log-wrap" hidden>Show details</button>
+    </div>
+    <div id="updates-log-wrap" class="updates-log-wrap" hidden>
+      <div id="updates-log-title" class="updates-log-title"></div>
+      <pre id="updates-job-log" class="mono notranslate config-technical-output updates-log" translate="no" data-i18n-skip>No job selected.</pre>
+    </div>
+
+    <div id="updates-service-status" class="result-message" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card updates-plan-card" id="updates-plan-card" aria-labelledby="updates-plan-title" hidden>
+    <div class="card-header updates-card-header">
+      <div>
+        <h2 id="updates-plan-title">Available updates</h2>
+        <p id="updates-plan-summary" class="updates-hero-meta"></p>
+      </div>
+      <div class="updates-plan-actions">
+        <button type="button" class="updates-link-button" id="updates-select-all" disabled>Select all</button>
+        <button type="button" class="updates-link-button" id="updates-select-none" disabled>Clear selection</button>
+      </div>
+    </div>
+
+    <div id="updates-plan-warning" class="alert alert-warning" hidden></div>
+    {# The host and the web application come from one source; what is held
+       back for that is said here, not filed under skipped checks. #}
+    <div id="updates-pairing-note" class="alert alert-info" hidden></div>
+
+    {# Commit subjects are the repository's own words: shown as they are. #}
+    <details id="updates-changelog" class="updates-changelog" hidden>
+      <summary id="updates-changelog-summary">What's new</summary>
+      <ul id="updates-changelog-list" class="updates-changelog-list notranslate" translate="no" data-i18n-skip></ul>
+    </details>
+
+    <div id="updates-components-wrap" hidden>
+      <table class="updates-table updates-choice-table">
+        <tbody id="updates-components-body"></tbody>
+      </table>
+    </div>
+
+    <details id="updates-unknown-details" class="updates-details" hidden>
+      <summary><span id="updates-unknown-summary">Some components could not be checked</span></summary>
+      <ul id="updates-unknown-list"></ul>
+    </details>
+
+    <details id="updates-skipped-details" class="updates-details" hidden>
+      <summary><span id="updates-skipped-summary">Some checks were skipped by design</span></summary>
+      <ul id="updates-skipped-list"></ul>
+    </details>
+
+    <div id="updates-apply-bar" class="updates-apply-bar" hidden>
+      <button type="button" class="btn" id="updates-apply" disabled>Install selected</button>
+      <div id="updates-apply-status" class="result-message" role="status" aria-live="polite"></div>
+    </div>
+  </section>
+
+  {# The one confirmation: what will restart, and the way back. #}
+  <div id="updates-confirm-modal" class="config-modal" hidden
+       role="dialog" aria-modal="true" aria-labelledby="updates-confirm-title">
+    <div class="config-modal-backdrop"></div>
+    <div class="config-modal-panel" tabindex="-1">
+      <h2 id="updates-confirm-title">Install these updates?</h2>
+      <ul id="updates-confirm-list" class="updates-confirm-list"></ul>
+      <p class="updates-confirm-note">
+        Services listed above may restart. Keep console or SSH access available, and take a backup first if you may need to roll back.
+      </p>
+      <p id="updates-self-restart-note" class="updates-confirm-note" hidden>
+        The web application or sign-in service may restart. Temporary connection errors are expected and this page will reconnect automatically.
+      </p>
+      <p id="updates-os-note" class="updates-confirm-note" hidden>
+        Operating-system packages may restart system services. A selected controlled HAProxy update runs after them. Required server reboots follow the separate OS security reboot policy.
+      </p>
+      <div class="config-modal-actions">
+        <button type="button" class="btn btn-small updates-cancel" id="updates-confirm-cancel">Cancel</button>
+        <button type="button" class="btn" id="updates-confirm-go">Install</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="updates-reboot-modal" class="config-modal" hidden
+       role="dialog" aria-modal="true" aria-labelledby="updates-reboot-modal-title">
+    <div class="config-modal-backdrop"></div>
+    <div class="config-modal-panel" tabindex="-1">
+      <div class="config-confirm-icon" aria-hidden="true">↻</div>
+      <h2 id="updates-reboot-modal-title">Reboot scheduled</h2>
+      <p id="updates-reboot-modal-text">The server will restart in a moment. You can still cancel.</p>
+      <div class="config-countdown" aria-live="polite">
+        <span>Maximum wait time</span>
+        <strong id="updates-reboot-modal-timer">10:00</strong>
+      </div>
+      <div class="config-modal-actions">
+        <button type="button" class="btn" id="updates-reboot-modal-cancel">Cancel reboot</button>
+        <button type="button" class="btn" id="updates-reboot-modal-close" hidden>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <details class="card updates-fold" id="updates-settings">
+    <summary>
+      <span>Settings</span>
+      <strong id="updates-channel-summary" class="updates-fold-value">—</strong>
+    </summary>
+    <div class="updates-fold-body">
+      <label class="updates-field-label" for="updates-release-channel">Release channel</label>
+      <div class="updates-channel-line">
+        <select id="updates-release-channel" class="form-input">
+          <option value="stable">Stable — main branch + release image</option>
+          <option value="alpha">Alpha — development branch + test image</option>
+          <option value="local">Local — synchronized source</option>
+        </select>
+        <button type="button" class="btn btn-small" id="updates-save-channels" disabled>Save channel</button>
+      </div>
+      <div id="updates-channels-status" class="result-message" role="status" aria-live="polite"></div>
+      <p id="updates-release-note" class="updates-hero-meta" hidden></p>
+      <p id="updates-local-source-note" class="updates-hero-meta" hidden>
+        This installation uses locally synchronized source. The web interface cannot copy uncommitted files from your workstation; synchronize them with install.sh before checking again.
+      </p>
+
+      <div class="updates-setting">
+        <label class="updates-field-label" for="updates-auto-check">Automatic check</label>
+        <div class="updates-channel-line">
+          <select id="updates-auto-check" class="form-input"></select>
+          <button type="button" class="btn btn-small" id="updates-save-auto-check" disabled>Save</button>
+        </div>
+        <div id="updates-auto-check-status" class="result-message" role="status" aria-live="polite"></div>
+        <p id="updates-auto-check-note" class="updates-hero-meta"></p>
+        <p class="updates-hero-meta">
+          A check refreshes package metadata without installing packages. When it finds updates it raises
+          an alert (update.available), and the alert settings decide whom to tell.
+        </p>
+        <p class="updates-hero-meta"><a href="{{ url_for('routes.alerts_page') }}">Alert settings</a></p>
+      </div>
+
+      {# Off until turned on, per gateway. #}
+      <div class="updates-setting" id="updates-auto-install-block">
+        <label class="updates-field-label">
+          <input type="checkbox" id="updates-auto-install">
+          Install easy-ha-proxy updates automatically
+        </label>
+        <div class="updates-channel-line">
+          <span>Install window from</span>
+          <select id="updates-auto-install-start" class="form-input" data-i18n-skip translate="no"></select>
+          <span>until</span>
+          <select id="updates-auto-install-end" class="form-input" data-i18n-skip translate="no"></select>
+          <button type="button" class="btn btn-small" id="updates-save-auto-install" disabled>Save</button>
+        </div>
+        <div id="updates-auto-install-status" class="result-message" role="status" aria-live="polite"></div>
+        <p id="updates-auto-install-last" class="updates-hero-meta"></p>
+        <p class="updates-hero-meta">
+          Only easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images. HAProxy, operating-system packages and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
+        </p>
+      </div>
+    </div>
+  </details>
+
+  <details class="card updates-fold" id="updates-history">
+    <summary>
+      <span>History</span>
+      <span id="updates-history-count" class="updates-fold-value muted"></span>
+    </summary>
+    <div class="updates-fold-body">
+      <p class="updates-hero-meta">Kept on the host, so it survives the web application restarting. Click a row to see its log above.</p>
+      <div class="table-wrap">
+        <table class="updates-table">
+          <thead><tr><th>Started</th><th>Operation</th><th>Components</th><th>Status</th><th>Result</th></tr></thead>
+          <tbody id="updates-jobs-body">
+            <tr><td colspan="5" class="muted">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  {# Shown only when HAProxy needs a look: an update, a stale or failed
+     package check, an unfinished or failed operation, or a move to 3.4 on
+     offer. A current HAProxy stays out of the way. #}
+  <section class="card" id="updates-haproxy-card" aria-labelledby="updates-haproxy-title" hidden>
+    <div class="card-header updates-card-header">
+      <h2 id="updates-haproxy-title">HAProxy</h2>
+      <button type="button" class="btn btn-small" id="updates-haproxy-install" hidden>Update HAProxy</button>
+    </div>
+    <p id="updates-haproxy-state" class="updates-hero-meta" role="status">Run an update check to verify HAProxy.</p>
+    <dl class="updates-haproxy-versions">
+      <div><dt>Package on disk</dt><dd id="updates-haproxy-installed" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Serving connections</dt><dd id="updates-haproxy-running" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+      <div><dt>Available package</dt><dd id="updates-haproxy-available" class="mono notranslate" translate="no" data-i18n-skip>—</dd></div>
+    </dl>
+    <p class="updates-hero-meta">The package is installed on disk; the running process serves connections. After replacing files, HAProxy may need a reload to use them.</p>
+    <p id="updates-haproxy-meta" class="updates-hero-meta notranslate" translate="no" data-i18n-skip></p>
+    <p id="updates-haproxy-error" class="updates-hero-meta notranslate" translate="no" data-i18n-skip hidden></p>
+    <p id="updates-haproxy-last" class="updates-hero-meta" hidden></p>
+    <p class="updates-hero-meta">HAProxy updates require an explicit selection. They are excluded from automatic installation.</p>
+    <div class="updates-migration" id="updates-migration" hidden>
+      <h3>Transition to HAProxy 3.4 LTS</h3>
+      <p class="updates-hero-meta" id="updates-migration-state" role="status" data-i18n-skip translate="no"></p>
+      <p class="updates-hero-meta" id="updates-migration-description">The server prepares current packages and rollback files, checks the configuration and verifies the switch. Connections may need to reconnect.</p>
+      <button class="btn btn-small" type="button" id="updates-migration-start" disabled>Switch to HAProxy 3.4 LTS</button>
+    </div>
+  </section>
+
+  <section id="updates-reboot-card" class="card updates-reboot-card" aria-labelledby="updates-reboot-title" hidden>
+    <div class="card-header">
+      <div>
+        <h2 id="updates-reboot-title">Server reboot</h2>
+        <p id="updates-reboot-reason" class="table-meta" data-i18n-skip translate="no"></p>
+        <p class="table-meta"><a href="{{ url_for('os_security.page') }}">Check pending service restarts and automatic reboot settings</a></p>
+      </div>
+    </div>
+    <div class="card-body">
+      <div id="updates-reboot-idle">
+        <label class="form-label" for="updates-reboot-confirm">Type <code class="notranslate" translate="no">REBOOT</code> to confirm</label>
+        <div class="updates-reboot-controls">
+          <input id="updates-reboot-confirm" type="text" class="form-input" autocomplete="off"
+                 spellcheck="false" placeholder="REBOOT">
+          <button type="button" class="btn btn-danger" id="updates-reboot-now" disabled>Reboot now</button>
+        </div>
+        <p class="vars-field-help">The reboot is delayed about a minute and can be canceled. The server will be briefly unreachable; if it does not return, use your provider console.</p>
+      </div>
+      <div id="updates-reboot-pending" hidden>
+        <p id="updates-reboot-pending-text" class="mono">Reboot scheduled — the server will restart shortly and this page will reconnect.</p>
+        <button type="button" class="btn" id="updates-reboot-cancel">Cancel reboot</button>
+      </div>
+      <div id="updates-reboot-status" class="result-message" role="status" aria-live="polite"></div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/updates_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/system_updates.js') }}"></script>
+{% endblock %}

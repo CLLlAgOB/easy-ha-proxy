@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Service sites{% endblock %}
+{% block header_title %}Service sites{% endblock %}
+{% block content %}
+{% if error %}<p class="card border-error">{{ error }}</p>{% endif %}
+{% for message in get_flashed_messages() %}<p class="card border-success">{{ message }}</p>{% endfor %}
+<section class="card">
+  <h2>Access and support pages</h2>
+  <p>These local pages sign visitors in with Authelia and authorize their IP for zero-trust services. Each page has its own DNS name, language, instructions and downloads. You can create more than one.</p>
+  <div class="site-table-wrapper"><table class="table"><thead><tr><th>DNS name</th><th>Publication</th><th>Certificate</th><th>Actions</th></tr></thead><tbody>
+    {% for item in sites %}<tr><td data-i18n-skip translate="no">{{ item.raw.domain }}</td><td>{{ 'Paused' if item.raw.paused else 'Published' }}</td><td>{{ item.cert.short }}{% if item.cert.haproxy_not_after %}<small class="text-muted">{{ item.cert.haproxy_not_after }}</small>{% endif %}</td><td><a class="btn btn-small" href="{{ url_for('access_portal.edit', name=item.raw.name) }}">Edit</a></td></tr>
+    {% else %}<tr><td colspan="4">No service sites yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+<section class="card service-site-identity"><h2>Add service site</h2>
+  <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-group"><label for="service-domain">DNS name</label><input id="service-domain" name="domain" type="text" required placeholder="support.example.com" data-i18n-skip translate="no"></div>
+    <p class="text-muted">Point this DNS name to the gateway. HTTPS certificates use the gateway's certificate management. Adding a service site ensures its Authelia login rule and may restart Authelia immediately; existing MFA rules are kept. Apply the HAProxy configuration to publish it.</p>
+    {% include "_access_site_auth_note.html" %}
+    <div class="portal-actions"><button class="btn btn-primary" type="submit">Add service site</button></div>
+  </form>
+</section>
+{% endblock %}

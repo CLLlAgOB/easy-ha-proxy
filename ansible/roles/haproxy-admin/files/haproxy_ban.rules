@@ -1,0 +1,5 @@
+*filter
+:HP_BAN - [0:0]
+-A HP_BAN -p tcp -m set --match-set haproxy_ban src -m set ! --match-set haproxy_ban_page src --dport 80  -j DROP
+-A HP_BAN -p tcp -m set --match-set haproxy_ban src -m set ! --match-set haproxy_ban_page src --dport 443 -j DROP
+COMMIT

@@ -1,0 +1,24 @@
+# The relay image runs every file in /scripts.d after its own set-up; these
+# set what its variables cannot (see files/mail_relay.d/10-trust.sh).
+- name: Create the mail relay start-up scripts directory
+  ansible.builtin.file:
+    path: "{{ authelia_root_dir }}/mail_relay.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the mail relay trust settings
+  ansible.builtin.copy:
+    src: mail_relay.d/10-trust.sh
+    dest: "{{ authelia_root_dir }}/mail_relay.d/10-trust.sh"
+    owner: root
+    group: root
+    mode: "0644"
+  register: authelia_mail_relay_trust
+
+# A script is read only when the container starts. Its checksum goes into the
+# Compose file, so a changed script recreates the relay like any other change.
+- name: Remember the mail relay scripts' checksum
+  ansible.builtin.set_fact:
+    authelia_mail_relay_scripts_digest: "{{ authelia_mail_relay_trust.checksum | default('') }}"

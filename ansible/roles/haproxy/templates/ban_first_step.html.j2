@@ -1,0 +1,61 @@
+{# The page HAProxy answers with while an address serves the first step of an
+   adaptive ban (reason code 41). Served by "http-request return ... lf-file":
+   HAProxy reads this file as a log-format, so %[src], %[unique-id] and
+   %[date,http_date] are filled in for each request, and a literal percent
+   sign would have to be written twice -- the styles below use none.
+   The language follows the HAProxy Admin UI, as the access-granted page does. #}
+{%- set _lang = (haproxy_admin_default_language | default('en'))[:2] | lower -%}
+{%- set _pages = {
+  'en': {
+    'title': 'Access temporarily restricted',
+    'lead': 'Requests from your address were taken for an automated scan, so this server answers them with this page for a while.',
+    'mistake': 'If you were only using the site, this is a mistake. Send the details below to the administrator of this site; they can lift the restriction at once.',
+    'wait': 'Otherwise the restriction ends on its own.',
+    'address': 'Your address',
+    'time': 'Time',
+    'code': 'Request code',
+  },
+  'ru': {
+    'title': 'Доступ временно ограничен',
+    'lead': 'Запросы с вашего адреса приняты за автоматическое сканирование, поэтому сервер некоторое время отвечает на них этой страницей.',
+    'mistake': 'Если вы просто пользовались сайтом, это ошибка. Отправьте данные ниже администратору сайта: он может снять ограничение сразу.',
+    'wait': 'Иначе ограничение закончится само.',
+    'address': 'Ваш адрес',
+    'time': 'Время',
+    'code': 'Код запроса',
+  },
+} -%}
+{%- set p = _pages[_lang] if _lang in _pages else _pages['en'] -%}
+<!doctype html>
+<html lang="{{ _lang if _lang in _pages else 'en' }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{ p.title }}</title>
+<style>
+body{margin:0;background:#f1f5f9;color:#18283b;font:16px/1.6 system-ui,-apple-system,sans-serif}
+main{max-width:640px;margin:10vh auto;padding:0 20px}
+section{background:#fff;border:1px solid #d7e0eb;border-radius:14px;padding:28px}
+h1{font-size:24px;line-height:1.25;margin:0 0 12px}
+p{margin:10px 0}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:20px 0 0;padding:16px;background:#f8fafc;border-radius:10px}
+dt{color:#52657d}
+dd{margin:0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
+@media(prefers-color-scheme:dark){body{background:#0b1421;color:#e5edf8}section{background:#132136;border-color:#30435d}dl{background:#0f1a2b}dt{color:#a6b8d1}}
+</style>
+</head>
+<body>
+<main><section>
+<h1>{{ p.title }}</h1>
+<p>{{ p.lead }}</p>
+<p>{{ p.mistake }}</p>
+<p>{{ p.wait }}</p>
+<dl>
+<dt>{{ p.address }}</dt><dd>%[src]</dd>
+<dt>{{ p.time }}</dt><dd>%[date,http_date]</dd>
+<dt>{{ p.code }}</dt><dd>%[unique-id]</dd>
+</dl>
+</section></main>
+</body>
+</html>

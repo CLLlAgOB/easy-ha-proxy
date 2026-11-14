@@ -1,0 +1,150 @@
+name: HAProxy 3.4 packages
+
+on:
+  push:
+    branches: [alpha]
+    paths:
+      - 'ansible/roles/haproxy/**'
+      - 'ansible/roles/authelia/files/lua/**'
+      - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
+      - 'ansible/roles/haproxy-admin/tasks/packages.yml'
+      - 'ansible/roles/haproxy-admin/tasks/install.yml'
+      - 'docker/app/haproxy_admin/services_haproxy_config.py'
+      - 'docker/app/haproxy_admin/utils.py'
+      - 'docker/app/requirements.txt'
+      - 'installer/requirements.txt'
+      - 'installer/haproxy_package_migrate.py'
+      - 'installer/haproxy_server_state.py'
+      - 'installer/apt_metadata.py'
+      - 'installer/haproxy_update_status.py'
+      - '.tests/integration/**'
+      - '.github/workflows/haproxy34.yml'
+  pull_request:
+    paths:
+      - 'ansible/roles/haproxy/**'
+      - 'ansible/roles/authelia/files/lua/**'
+      - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
+      - 'ansible/roles/haproxy-admin/tasks/packages.yml'
+      - 'ansible/roles/haproxy-admin/tasks/install.yml'
+      - 'docker/app/haproxy_admin/services_haproxy_config.py'
+      - 'docker/app/haproxy_admin/utils.py'
+      - 'docker/app/requirements.txt'
+      - 'installer/requirements.txt'
+      - 'installer/haproxy_package_migrate.py'
+      - 'installer/haproxy_server_state.py'
+      - 'installer/apt_metadata.py'
+      - 'installer/haproxy_update_status.py'
+      - '.tests/integration/**'
+      - '.github/workflows/haproxy34.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: haproxy34-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-migration:
+    name: Native migration and rollback (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      ANSIBLE_ROLES_PATH: ansible/roles
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install migration dependencies
+        run: pip install -r installer/requirements.txt -r docker/app/requirements.txt
+      - name: Install the distribution baseline
+        run: |
+          test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
+          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
+      - name: Exercise actual systemd reload, failed candidate and rollback
+        run: |
+          set -o pipefail
+          sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_migration_smoke.py --systemd 2>&1 | tee /tmp/native-migration-smoke.log
+      - name: Annotate migration qualification failure
+        if: failure()
+        run: python3 .github/scripts/annotate_native_failure.py /tmp/native-migration-smoke.log
+      - name: Qualify distribution prerequisites for the panel
+        run: ansible-playbook -i localhost, .tests/integration/haproxy34-admin-packages.yml -e haproxy_package_provider=distribution
+      - name: Qualify distribution patches against a signed disposable repository
+        run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_patch_smoke.py --systemd
+
+  native-package:
+    name: Native package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      ANSIBLE_ROLES_PATH: ansible/roles
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: pip install -r installer/requirements.txt -r docker/app/requirements.txt
+      - name: Qualify the distribution baseline and refuse an implicit migration
+        run: |
+          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
+          sudo "$(command -v python)" .tests/integration/haproxy_package_smoke.py --expected-branch 2.8
+          if ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml > /tmp/haproxy34-guard.log 2>&1; then
+            echo 'An ordinary install must not replace the installed provider'
+            exit 1
+          fi
+          grep -q 'Refusing to replace an installed HAProxy package' /tmp/haproxy34-guard.log
+          test ! -e /etc/apt/sources.list.d/easy-ha-proxy-haproxy.list
+          # This runner is disposable; provider replacement on a gateway has
+          # a separate backup, maintenance and rollback procedure.
+          sudo apt-get remove -y --allow-change-held-packages haproxy
+      - name: Install the signed package using the project role
+        run: ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml
+      - name: Verify architecture and exercise the real configuration
+        run: |
+          test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
+          sudo "$(command -v python)" .tests/integration/haproxy_package_smoke.py
+      - name: Audit server-state restoration on the selected HAProxy 3.4 package
+        run: |
+          set -o pipefail
+          sudo apt-get install -y --no-install-recommends socat
+          python3 .tests/integration/server_state_settings_smoke.py --template ansible/roles/haproxy/templates/haproxy-state-dump.sh.j2 2>&1 | tee /tmp/native-state-smoke.log
+      - name: Annotate server-state qualification failure
+        if: failure()
+        run: python3 .github/scripts/annotate_native_failure.py /tmp/native-state-smoke.log
+      - name: Qualify panel prerequisites without replacing the selected provider
+        run: ansible-playbook -i localhost, .tests/integration/haproxy34-admin-packages.yml
+      - name: Verify a second installation changes nothing
+        run: |
+          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml > /tmp/haproxy34-repeat.log
+          cat /tmp/haproxy34-repeat.log
+          grep -Eq 'changed=0[[:space:]]+unreachable=0[[:space:]]+failed=0' /tmp/haproxy34-repeat.log
+      - name: Refuse a silent return to the distribution provider
+        run: |
+          if ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution > /tmp/haproxy34-rollback-guard.log 2>&1; then
+            echo 'A missing provider setting must not replace the vendor package'
+            exit 1
+          fi
+          grep -q 'Refusing to replace an installed HAProxy package' /tmp/haproxy34-rollback-guard.log
+          dpkg-query --show --showformat='${Version}' haproxy-awslc | grep -Eq '^3[.]4[.]'
+      - name: Qualify vendor and TLS patches against a signed disposable repository
+        run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_patch_smoke.py --systemd

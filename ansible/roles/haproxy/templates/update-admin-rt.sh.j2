@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOSTNAME_DNS="{{ admin_dyn_hostname | default('', true) }}"
+ACL_FILE="{{ admin_ips_file | default('/etc/haproxy/admin.allow') }}"
+SOCK="{{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
+STATE="{{ admin_dyn_state | default('/var/lib/haproxy/admin-dyn-ip.state') }}"
+LOCK="/var/lock/update-admin-rt.lock"
+
+sudo install -d -m 0755 -o root -g root "$(dirname "$STATE")" "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+# the socket must exist (one initial reload is needed after switching to -f)
+[[ -S "$SOCK" ]] || { echo "ERROR: socket $SOCK not found"; exit 1; }
+
+# resolve the IPv4 address from DNS
+NEW_IP="$(getent ahostsv4 "$HOSTNAME_DNS" | awk '{print $1; exit}')"
+[[ -n "${NEW_IP:-}" ]] || { echo "ERROR: cannot resolve $HOSTNAME_DNS"; exit 1; }
+[[ "$NEW_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "ERROR: got non-IPv4: $NEW_IP"; exit 1; }
+
+# address the ACL by its file name (the most compatible way)
+ACL_REF="$ACL_FILE"
+echo "show acl $ACL_REF" | sudo socat - "$SOCK" >/dev/null 2>&1 || {
+  echo "ERROR: runtime ACL for $ACL_REF not found (did you reload HAProxy once after switching to -f?)"
+  exit 1
+}
+
+# the static entries from the file -- one IPv4 address per line
+mapfile -t STATIC_IPS < <(grep -Eo '^[[:space:]]*([0-9]{1,3}(\.[0-9]{1,3}){3})[[:space:]]*$' "$ACL_FILE" | tr -d ' ' || true)
+
+# runtime ACL: the second field is the IP itself (the first is the entry id)
+mapfile -t RT_IPS < <(echo "show acl $ACL_REF" | sudo socat - "$SOCK" | awk '{print $2}' | sed '/^$/d')
+
+is_static() {
+  local x="$1"
+  for s in "${STATIC_IPS[@]}"; do
+    [[ "$s" == "$x" ]] && return 0
+  done
+  return 1
+}
+
+# ===== If the IP is there already, leave the ACL alone =====
+NEW_COUNT=0
+for ip in "${RT_IPS[@]}"; do
+  [[ "$ip" == "$NEW_IP" ]] && ((NEW_COUNT++))
+done
+
+if (( NEW_COUNT >= 1 )); then
+  echo "$NEW_IP" | sudo tee "$STATE" >/dev/null
+  echo "No change: $NEW_IP already present."
+  exit 0
+fi
+# ===== End of that block =====
+
+# remove all the old "dynamic" entries (anything not from the file and not NEW_IP)
+declare -A seen=()
+for ip in "${RT_IPS[@]}"; do
+  [[ -n "${seen[$ip]:-}" ]] && continue
+  seen[$ip]=1
+  if ! is_static "$ip" && [[ "$ip" != "$NEW_IP" ]]; then
+    echo "del acl $ACL_REF $ip" | sudo socat - "$SOCK" || true
+  fi
+done
+
+# add NEW_IP unless it is among the static entries
+if ! is_static "$NEW_IP"; then
+  echo "add acl $ACL_REF $NEW_IP" | sudo socat - "$SOCK"
+fi
+
+echo "$NEW_IP" | sudo tee "$STATE" >/dev/null
+echo "Updated runtime ACL: dynamic IP -> $NEW_IP"

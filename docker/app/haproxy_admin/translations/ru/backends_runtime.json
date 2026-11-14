@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Backends": "Бэкенды",
+    "Read-only: changing a server state requires the superadmin role.": "Только чтение: смена состояния сервера требует роли superadmin.",
+    "No backends are currently defined": "Бэкендов сейчас нет",
+    "Ready": "В работе",
+    "Drain": "Вывод из-под нагрузки",
+    "Maintenance": "Обслуживание",
+    "Weight": "Вес",
+    "These controls change the running HAProxy immediately. The state is saved and restored across reloads and restarts, so a server left in maintenance stays in maintenance until you put it back — including after a reboot.": "Эти переключатели меняют работающий HAProxy сразу. Состояние сохраняется и восстанавливается при reload и перезапуске, поэтому сервер, оставленный на обслуживании, останется на обслуживании, пока вы не вернёте его сами — в том числе после перезагрузки машины."
+  }
+}

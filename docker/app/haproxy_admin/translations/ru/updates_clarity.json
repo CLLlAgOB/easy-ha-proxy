@@ -1,0 +1,8 @@
+{
+  "meta": {"code": "ru", "label": "Русский"},
+  "messages": {
+    "Package on disk": "Пакет на диске",
+    "Serving connections": "Обслуживает соединения",
+    "The package is installed on disk; the running process serves connections. After replacing files, HAProxy may need a reload to use them.": "Пакет — это файлы на диске, а соединения обслуживает запущенный процесс. После замены файлов может потребоваться перезапуск HAProxy, чтобы он начал их использовать."
+  }
+}

@@ -1,0 +1,316 @@
+{% extends "base.html" %}
+
+{% block title %}Live activity{% endblock %}
+{% block header_title %}Live activity{% endblock %}
+
+{% block content %}
+
+
+<div id="la-unavailable" class="notice-danger rt-notice" hidden
+     >
+  Live activity is read from the memory of adaptive protection, and it is not
+  answering right now: it is restarting, or it is switched off. HAProxy traffic
+  is unaffected. The reason is shown below the summary.
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>What is happening now</h2>
+    <span class="mon-sub" id="la-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  <div class="la-toolbar">
+    <label>
+      Time window
+      <span class="la-group" id="la-windows" role="group">
+        {% for seconds in windows %}
+        <button type="button" class="la-chip" data-window="{{ seconds }}"
+                aria-pressed="{{ 'true' if seconds == 60 else 'false' }}">{{ seconds if seconds < 60 else (seconds // 60) }} {{ 'sec' if seconds < 60 else 'min' }}</button>
+        {% endfor %}
+      </span>
+    </label>
+    <label>
+      Window in seconds
+      <input type="number" id="la-window-custom" min="5" max="3600" step="5" placeholder="60">
+    </label>
+    <label>
+      Refresh
+      <select id="la-refresh">
+        <option value="2">every 2 s</option>
+        <option value="5" selected>every 5 s</option>
+        <option value="10">every 10 s</option>
+        <option value="30">every 30 s</option>
+      </select>
+    </label>
+    <button type="button" class="btn btn-small" id="la-pause">Pause updates</button>
+  </div>
+
+  <div class="u-mt-3 la-toolbar" >
+    <label>
+      Address
+      <input type="text" id="la-ip" placeholder="203.0.113.9" data-i18n-skip translate="no">
+    </label>
+    <label>
+      Site
+      <select id="la-host"><option value="">All sites</option></select>
+    </label>
+    <label>
+      Country
+      <select id="la-country"><option value="">All countries</option></select>
+    </label>
+    <label>
+      Status
+      <select id="la-status">
+        <option value="">Any status</option>
+        <option value="2xx">2xx</option>
+        <option value="3xx">3xx</option>
+        <option value="4xx">4xx</option>
+        <option value="5xx">5xx</option>
+      </select>
+    </label>
+    <label>
+      Path or site contains
+      <input type="text" id="la-q" placeholder="/login" data-i18n-skip translate="no">
+    </label>
+    <label>
+      Client contains
+      <input type="text" id="la-agent" placeholder="curl" data-i18n-skip translate="no">
+    </label>
+    <label class="la-check" title="Requests the gateway refused itself: a ban, a geo block, a limit, an address rule. A request it let through to the site is not one of them, even from an address banned later.">
+      <input type="checkbox" id="la-blocked"> Only refused by the gateway
+    </label>
+    <label class="la-check" title="Addresses in the ban table right now, with everything they sent in the window -- including requests from before the ban.">
+      <input type="checkbox" id="la-banned-only"> Only banned now
+    </label>
+    <label class="la-check" title="The page you are looking at polls the gateway, as does every other page of the panel. On a quiet gateway that is most of the traffic.">
+      <input type="checkbox" id="la-admin"> Show the admin panel's own requests
+    </label>
+    <button type="button" class="btn btn-small" id="la-reset">Reset filters</button>
+  </div>
+
+  <div class="la-cards">
+    <div class="la-card"><div class="la-label">Requests per second</div><div class="la-value" id="la-rate" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card"><div class="la-label">Requests in the window</div><div class="la-value" id="la-requests" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card" id="la-card-errors"><div class="la-label">Errors (4xx/5xx)</div><div class="la-value" id="la-errors" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card" id="la-card-blocked"><div class="la-label">Refused by the gateway</div><div class="la-value" id="la-blocked-count" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card"><div class="la-label">Addresses</div><div class="la-value" id="la-addresses" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card" id="la-card-banned"><div class="la-label">Banned now</div><div class="la-value" id="la-banned" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card" id="la-card-limited"><div class="la-label">Over the connection limit</div><div class="la-value" id="la-limited" data-i18n-skip translate="no">—</div></div>
+    <div class="la-card"><div class="la-label">Open connections</div><div class="la-value" id="la-connections" data-i18n-skip translate="no">—</div></div>
+  </div>
+
+  <div class="la-timeline-wrap">
+    <svg class="la-timeline" id="la-timeline" preserveAspectRatio="none" aria-hidden="true"></svg>
+    <div class="la-timeline-tip" id="la-timeline-tip" data-i18n-skip translate="no" hidden></div>
+    <div class="la-axis" id="la-axis" data-i18n-skip translate="no"><span></span><span></span><span></span></div>
+  </div>
+  <div class="la-legend">
+    <span><i  class="chart-key-success"></i>Answered</span>
+    <span><i  class="chart-key-warning"></i>Errors</span>
+    <span><i  class="chart-key-error"></i>Refused</span>
+  </div>
+  <div class="la-reasons" id="la-reasons" data-i18n-skip translate="no"></div>
+  <div class="la-note" id="la-note" data-i18n-skip translate="no"></div>
+</div>
+
+<div class="u-mt-6 card"  id="la-tables-card">
+  <div class="la-tabs" id="la-tabs" role="tablist">
+    <button type="button" class="la-chip" data-tab="addresses" aria-pressed="true">Addresses</button>
+    <button type="button" class="la-chip" data-tab="sites" aria-pressed="false">Sites</button>
+    <button type="button" class="la-chip" data-tab="events" aria-pressed="false">Requests</button>
+    <button type="button" class="la-chip" data-tab="paths" aria-pressed="false">Paths</button>
+    <button type="button" class="la-chip" data-tab="agents" aria-pressed="false">Clients</button>
+    <button type="button" class="la-chip" data-tab="slow" aria-pressed="false">Slow</button>
+    <button type="button" class="la-chip" data-tab="banned" aria-pressed="false">Banned and limited</button>
+    <button type="button" class="la-chip" data-tab="decisions" aria-pressed="false">Ban decisions</button>
+  </div>
+  <span class="la-held" id="la-held" role="status" aria-hidden="true">Updates wait while you read the table</span>
+
+  <div data-panel="addresses" class="la-table-wrap">
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th data-sort="requests" class="la-num">Requests</th>
+          <th data-sort="rate" class="la-num">Rate, req/s</th>
+          <th data-sort="errors" class="la-num">Errors</th>
+          <th data-sort="server_errors" class="la-num">5xx</th>
+          <th data-sort="blocked" class="la-num">Refused</th>
+          <th data-sort="bytes" class="la-num">Traffic</th>
+          <th>Site</th>
+          <th data-sort="last">Last request</th>
+          <th>State</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="la-addresses-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-addresses-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="sites" class="la-table-wrap" hidden>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th data-sort="requests" class="la-num">Requests</th>
+          <th data-sort="errors" class="la-num">Errors</th>
+          <th data-sort="server_errors" class="la-num">5xx</th>
+          <th data-sort="blocked" class="la-num">Refused</th>
+          <th data-sort="addresses" class="la-num">Addresses</th>
+          <th data-sort="p50_ms" class="la-num" title="How soon the server answered half of the requests">Median</th>
+          <th data-sort="p95_ms" class="la-num" title="How soon the server answered 95 of every 100 requests">p95</th>
+          <th>Over the window</th>
+          <th>Backend</th>
+        </tr>
+      </thead>
+      <tbody id="la-sites-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-sites-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="events" class="la-table-wrap" hidden>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Address</th>
+          <th>Site</th>
+          <th>Request</th>
+          <th>Status</th>
+          <th class="la-num" title="How soon the server answered; the whole request is in the tooltip">Server answer</th>
+          <th>Refused because</th>
+        </tr>
+      </thead>
+      <tbody id="la-events-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-events-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="paths" class="la-table-wrap" hidden>
+    <h3>Most requested</h3>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Path</th>
+          <th class="la-num">Requests</th>
+          <th class="la-num">4xx</th>
+          <th class="la-num">5xx</th>
+          <th class="la-num">Refused</th>
+        </tr>
+      </thead>
+      <tbody id="la-paths-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-paths-empty" hidden>Nothing in this window</div>
+    <h3  class="u-mt-5">Not found most often</h3>
+    <p class="la-sub">Paths that do not exist, asked for again and again, are usually a scanner looking for a weakness.</p>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Path</th>
+          <th class="la-num">404</th>
+          <th class="la-num">Requests</th>
+        </tr>
+      </thead>
+      <tbody id="la-not-found-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-not-found-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="agents" class="la-table-wrap" hidden>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Client (user agent)</th>
+          <th class="la-num">Requests</th>
+          <th class="la-num">Addresses</th>
+          <th class="la-num">Refused</th>
+        </tr>
+      </thead>
+      <tbody id="la-agents-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-agents-empty" hidden>No client names in this window: the log records them when the user agent is logged</div>
+  </div>
+
+  <div data-panel="slow" class="la-table-wrap" hidden>
+    <p class="la-sub">The slowest answers of the window, by how soon the server answered.</p>
+    <table class="data-table la-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Address</th>
+          <th>Site</th>
+          <th>Request</th>
+          <th>Status</th>
+          <th class="la-num">Server answer</th>
+          <th>Refused because</th>
+        </tr>
+      </thead>
+      <tbody id="la-slow-body" data-i18n-skip translate="no"></tbody>
+    </table>
+    <div class="la-empty" id="la-slow-empty" hidden>Nothing in this window</div>
+  </div>
+
+  <div data-panel="banned" hidden>
+    <h3>Banned</h3>
+    <p class="la-sub">
+      A banned address is refused before HTTP, so its attempts do not appear
+      among the requests at all.
+    </p>
+    <div class="la-table-wrap">
+      <table class="data-table la-table">
+        <thead>
+          <tr><th>Address</th><th>Reason</th><th class="la-num">Ends in</th><th class="la-num">Requests in the window</th><th></th></tr>
+        </thead>
+        <tbody id="la-banned-body" data-i18n-skip translate="no"></tbody>
+      </table>
+    </div>
+    <div class="la-empty" id="la-banned-empty" hidden>Nobody is banned</div>
+
+    <h3  class="u-mt-5">Over the connection limit</h3>
+    <p class="la-sub" id="la-limits-note" data-i18n-skip translate="no"></p>
+    <div class="la-table-wrap">
+      <table class="data-table la-table">
+        <thead>
+          <tr><th>Address</th><th class="la-num">New connections</th><th class="la-num">Open connections</th><th></th></tr>
+        </thead>
+        <tbody id="la-limited-body" data-i18n-skip translate="no"></tbody>
+      </table>
+    </div>
+    <div class="la-empty" id="la-limited-empty" hidden>Nobody is over the connection limit</div>
+  </div>
+
+  <div data-panel="decisions" hidden>
+    <p class="la-sub">
+      Every ban and lift the security engine has recorded, newest first: by adaptive
+      protection, by hand, by HAProxy's own rules (as the engine saw them) and by the new
+      ban policy. Kept in the engine's database, not in the stream of requests, so a busy
+      hour does not push them out. Authelia's sign-in bans are not among them: Authelia
+      keeps only its current list, shown on its own page and on each address's page.
+    </p>
+    <div class="la-row">
+      <select id="la-decisions-kind" aria-label="Which decisions">
+        <option value="all">All decisions</option>
+        <option value="bans">Bans</option>
+        <option value="lifts">Lifts</option>
+      </select>
+      <span class="la-sub" id="la-decisions-note" data-i18n-skip translate="no"></span>
+    </div>
+    <div class="la-table-wrap">
+      <table class="data-table la-table">
+        <thead>
+          <tr><th>Time</th><th>Address</th><th>What</th><th class="la-num">Code</th><th>Until</th><th>Why</th></tr>
+        </thead>
+        <tbody id="la-decisions-body" data-i18n-skip translate="no"></tbody>
+      </table>
+    </div>
+    <div class="la-empty" id="la-decisions-empty" hidden>No decisions recorded yet</div>
+    <button type="button" class="btn btn-small" id="la-decisions-more" hidden>Show older</button>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/live_activity_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/live_activity.js') }}"></script>
+{% endblock %}

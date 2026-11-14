@@ -1,0 +1,162 @@
+{% extends 'base.html' %}
+{% block title %}Logs by {{ ip }} — HAProxy{% endblock %}
+{% block header_title %}Logs by IP {{ ip }}{% endblock %}
+
+{% block header_buttons %}
+  <a class="btn" href="{{ url_for('routes.index') }}">← Home</a>
+{% endblock %}
+
+{% block content %}
+
+
+{% if status %}
+<div class="u-mb-5 card" >
+  <div class="ipp-row" id="ipp-status" data-ip="{{ ip }}">
+    {% if status.allow_listed %}
+      <span class="ipp-badge ipp-allow">Allow-listed</span>
+    {% endif %}
+    {% if status.ban %}
+      <span class="ipp-badge ipp-ban" title="{{ status.ban.label }}">Banned</span>
+      <span class="ipp-muted">{{ status.ban.label }}</span>
+    {% elif status.ban_known %}
+      <span class="ipp-muted">Not banned</span>
+    {% endif %}
+
+    {% if status.ipv4 %}
+      {% if status.ban %}
+        <button type="button" class="btn" data-ipp-action="unban">Unban</button>
+      {% elif status.allow_entry == "host" %}
+        <button type="button" class="btn btn-danger" data-ipp-action="drop-ban" title="Remove from the allow list, then ban">Drop &amp; ban</button>
+      {% elif status.allow_entry == "range" %}
+        <span class="ipp-muted">Allowed by a network range: edit the allow list to ban it</span>
+      {% else %}
+        <button type="button" class="btn btn-danger" data-ipp-action="ban">Ban address</button>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if authelia_ban %}
+<div class="u-mb-5 card"  id="ipp-authelia">
+  <div class="ipp-row">
+    <span class="ipp-badge ipp-ban">Sign-in blocked by Authelia</span>
+    <span class="ipp-muted">Until</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ authelia_ban.expires or "—" }}</span>
+    {% if authelia_ban.network %}
+    <span class="ipp-muted">Network</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ authelia_ban.subject }}</span>
+    {% endif %}
+    {% if authelia_ban.reason %}
+    <span class="ipp-muted">Reason</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ authelia_ban.reason }}</span>
+    {% endif %}
+    <a class="btn" href="{{ url_for('routes.authelia_bans') }}">Authelia bans</a>
+  </div>
+  <p class="u-m-8px-0-0 ipp-muted" >Only signing in is blocked, after too many failed attempts: HAProxy does not refuse this address, and sites that need no sign-in still answer it.</p>
+</div>
+{% endif %}
+
+{% if history and history.decisions %}
+<div class="u-mb-5 card"  id="ipp-history">
+  <div class="card-header">
+    {% if status and status.ban %}
+    <h2>Why it is banned</h2>
+    {% else %}
+    <h2>Ban history</h2>
+    {% endif %}
+  </div>
+  {% if history.reason %}
+  <p class="ipp-muted">The reason adaptive protection wrote down when it last banned this address. The findings behind it fade from the score within hours; this record does not.</p>
+  <div class="u-mb-2 ipp-row" >
+    <span class="ipp-badge ipp-ban">Banned by adaptive protection</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.when }} → {{ history.reason.until }}</span>
+    <span class="ipp-muted">Score</span><span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.score }}</span>
+    <span class="ipp-muted">Strike</span><span class="ipp-muted" data-i18n-skip translate="no">{{ history.reason.strike }}</span>
+  </div>
+  {% if history.reason.evidence %}
+  <div  class="scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr><th>When</th><th>Finding</th><th>Site</th><th>Detail</th><th>Points</th></tr>
+      </thead>
+      <tbody data-i18n-skip translate="no">
+        {% for entry in history.reason.evidence %}
+        <tr>
+          <td>{{ entry.when }}</td>
+          <td>{{ entry.finding }}</td>
+          <td>{{ entry.site or "—" }}</td>
+          <td class="ip-cell">{{ entry.detail or "—" }}</td>
+          <td>{{ entry.points }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% endif %}
+  {% if history.observed %}
+  <p class="ipp-muted">HAProxy banned this address on its own rule. HAProxy does not record when it decided or what tipped it over; below is when the security engine first saw the ban and the site counters at that moment.</p>
+  <div class="u-mb-2 ipp-row" >
+    <span class="ipp-badge ipp-ban">{{ history.observed.rule }}</span>
+    <span class="ipp-muted">First seen</span>
+    <span class="ipp-muted" data-i18n-skip translate="no">{{ history.observed.when }} → {{ history.observed.until }}</span>
+  </div>
+  {% if history.observed.readings %}
+  <div  class="scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr><th>Site</th><th>Counter</th><th>Value</th><th>Limit</th></tr>
+      </thead>
+      <tbody>
+        {% for entry in history.observed.readings %}
+        <tr>
+          <td>{% if entry.unknown %}Unknown names{% else %}<span data-i18n-skip translate="no">{{ entry.site }}</span>{% endif %}</td>
+          <td>{{ entry.counter }}</td>
+          <td data-i18n-skip translate="no">{% if entry.over %}<strong>{{ entry.value }}</strong>{% else %}{{ entry.value }}{% endif %}</td>
+          <td data-i18n-skip translate="no">{{ entry.limit if entry.limit is not none else "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="ipp-muted">No site counter held this address when the ban was first seen.</p>
+  {% endif %}
+  {% endif %}
+  <h3  class="u-m-14px-0-6px text-md">Decisions</h3>
+  <div  class="scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr><th>When</th><th>What</th><th>Code</th><th>Until</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history.decisions %}
+        <tr>
+          <td data-i18n-skip translate="no">{{ row.when }}</td>
+          <td><span>{{ row.label }}</span>{% if row.outcome %} <span class="ipp-muted">{{ row.outcome }}</span>{% endif %}</td>
+          <td data-i18n-skip translate="no">{{ row.code or "—" }}</td>
+          <td data-i18n-skip translate="no">{{ row.until or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Last 30 matches</h2>
+  </div>
+  {% if lines and lines|length %}
+    <pre  class="pre-wrap mono text-sm u-line-height-1-35 u-background-var-surface-1 u-p-12px u-border-radius-8px u-maxh-70vh u-overflow-auto">
+{{ lines|join('\n') }}
+    </pre>
+  {% else %}
+    <div class="alert alert-info">No matches found.</div>
+  {% endif %}
+</div>
+
+<script src="{{ url_for('static', filename='js/ip_page.js') }}"></script>
+{% endblock %}

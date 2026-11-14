@@ -1,0 +1,526 @@
+# -*- coding: utf-8 -*-
+"""The service layer of the Adaptive protection section.
+
+Validates the weight simulator's parameters and adds each address's country
+from the local GeoIP database. The daemon validates the same values again.
+"""
+
+from __future__ import annotations
+
+import csv
+from datetime import datetime, timezone
+import io
+import ipaddress
+import itertools
+import logging
+import re
+from typing import Any, Dict, List, Tuple
+
+from .cache import get_country_code
+from .guardd_client import (
+    guardd_signatures,
+    guardd_signature_candidates,
+    guardd_dismiss_candidate,
+    guardd_traps,
+    guardd_set_traps,
+    guardd_set_signatures,
+    guardd_detection_context,
+    guardd_set_detection_context,
+    guardd_detection_preview,
+    guardd_requests,
+    guardd_requests_status,
+    guardd_requests_summary,
+    guardd_set_request_log,
+    GuarddUnavailable,
+    guardd_health,
+    guardd_quality,
+    guardd_ip,
+    guardd_live_memory,
+    guardd_rate_warnings,
+    guardd_set_ban_durations,
+    guardd_set_live_memory,
+    guardd_set_mode,
+    guardd_set_first_step_page,
+    guardd_set_shield,
+    guardd_shadow,
+)
+
+MODES: tuple[str, ...] = ("off", "monitor", "enforce")
+
+LOG = logging.getLogger("haproxy-admin")
+
+# Kept in step with DEFAULT_WEIGHTS in easy-ha-proxy-guardd.py.
+EVENT_TYPES: tuple[str, ...] = (
+    "SCANNER_PATH",
+    "SCANNER_MULTI_CATEGORY",
+    "LOW_AND_SLOW_SCANNER",
+    "NOT_FOUND_ENUMERATION",
+    "WIDE_ENUMERATION",
+    "MASS_ENUMERATION",
+    "RECURRING_SCANNER",
+    "INVALID_HOST_ACTIVITY",
+    "NOSNI_PROBING",
+    "RATE_EXCEEDED",
+    "ERROR_RATE_EXCEEDED",
+    "LEGACY_HAPROXY_BAN",
+    "HARD_FLOOR_EPISODE",
+)
+
+
+def simulator_params(args: Dict[str, str]) -> Dict[str, Any]:
+    """Collect the what-if parameters from the request, dropping everything else."""
+
+    params: Dict[str, Any] = {}
+    for event_type in EVENT_TYPES:
+        raw = args.get(f"w.{event_type}")
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        params[f"w.{event_type}"] = max(0, min(100, value))
+    for name, low, high in (
+        ("cap", 1, 100),
+        ("window", 3600, 30 * 86400),
+        ("decay", 0, 30 * 86400),
+    ):
+        raw = args.get(name)
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        params[name] = max(low, min(high, value))
+    return params
+
+
+def valid_ip(value: Any) -> str:
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return ""
+
+
+def _annotate(entry: Dict[str, Any]) -> Dict[str, Any]:
+    address = str(entry.get("ip") or "")
+    if address:
+        # Local MMDB lookup only: a visitor address is never sent to a third
+        # party to find out where it is from.
+        entry["country"] = get_country_code(address) or ""
+    return entry
+
+
+def shadow(args: Dict[str, str]) -> Dict[str, Any]:
+    payload = guardd_shadow(simulator_params(args))
+    for entry in payload.get("addresses") or []:
+        _annotate(entry)
+    return payload
+
+
+# Which knob each finding is about. The page exists so an operator can decide
+# whether a limit is wrong, and that decision needs three things the daemon
+# does not have: the real site name behind the sanitised table name, the limit
+# that was configured, and the name of the setting to change.
+_LIMIT_FOR_EVENT = {
+    "RATE_EXCEEDED": ("max_req_rate", "rate_window", "requests"),
+    "ERROR_RATE_EXCEEDED": ("err_limit", "err_window", "errors"),
+}
+
+
+def _site_limits() -> Dict[str, Dict[str, Any]]:
+    """Map the sanitised stick-table suffix back to a real site and its limits."""
+    from .services_haproxy_config import CONFIG_YAML, _load_yaml, jinja_combine
+    from .services_haproxy_sites import get_websites_list
+
+    defaults = (_load_yaml(CONFIG_YAML) or {}).get("site_defaults") or {}
+    table: Dict[str, Dict[str, Any]] = {}
+    for site in get_websites_list():
+        name = str(site.get("name") or "")
+        if not name:
+            continue
+        effective = jinja_combine(defaults, site, True)
+        table[re.sub(r"[^A-Za-z0-9_]", "_", name)] = {
+            "site": name,
+            "domain": str(effective.get("domain") or name),
+            "max_req_rate": effective.get("max_req_rate"),
+            "rate_window": effective.get("rate_window") or defaults.get("rate_window"),
+            "err_limit": effective.get("err_limit") or defaults.get("err_limit"),
+            "err_window": effective.get("err_window") or defaults.get("err_window"),
+        }
+    return table
+
+
+def _explain(contribution: Dict[str, Any], limits: Dict[str, Dict[str, Any]]) -> None:
+    """Say what was measured, against what, and which setting moves it."""
+    known = limits.get(str(contribution.get("site") or ""))
+    if known:
+        contribution["site_name"] = known["site"]
+        contribution["site_domain"] = known["domain"]
+
+    mapping = _LIMIT_FOR_EVENT.get(str(contribution.get("event_type") or ""))
+    detail = str(contribution.get("detail") or "")
+    observed_match = re.search(r"(?:req|err)_rate=(\d+)", detail)
+    if not (mapping and observed_match):
+        return
+    setting, window_key, unit = mapping
+    observed = int(observed_match.group(1))
+    contribution["observed"] = observed
+    contribution["unit"] = unit
+    contribution["setting"] = setting
+
+    # The daemon reads the ceiling out of the generated configuration and puts
+    # it in the finding, so that number is what actually applied at the time.
+    # websites.yml is only the fallback, and it can disagree if the setting was
+    # changed after the finding was recorded.
+    limit_match = re.search(r"limit=(\d+)", detail)
+    limit = int(limit_match.group(1)) if limit_match else known and known.get(setting)
+    if not isinstance(limit, int) or limit <= 0:
+        return
+    contribution["limit"] = limit
+    if known:
+        contribution["window"] = known.get(window_key)
+    contribution["over_by"] = max(0, observed - limit)
+    # Headroom above the peak, so raising it to exactly what was seen does not
+    # put the operator back here on the next slightly busier minute -- but
+    # never a number below the limit already in force, which would read as
+    # advice to tighten it.
+    contribution["suggested"] = max(limit + 1, int(observed * 1.5))
+
+
+def rate_warnings(args: Dict[str, str]) -> Dict[str, Any]:
+    """Trusted addresses over a site's limit, with the real site and country."""
+
+    try:
+        limit = max(1, min(500, int(args.get("limit") or 100)))
+    except (TypeError, ValueError):
+        limit = 100
+    payload = guardd_rate_warnings(limit)
+    try:
+        limits = _site_limits()
+    except Exception:  # pylint: disable=broad-except
+        LOG.warning("cannot read site limits for the rate warnings", exc_info=True)
+        limits = {}
+    for row in itertools.chain(payload.get("open") or [], payload.get("recent") or []):
+        _annotate(row)
+        known = limits.get(str(row.get("site") or ""))
+        if known:
+            row["site_name"] = known["site"]
+            row["site_domain"] = known["domain"]
+    return payload
+
+
+def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:
+    payload = guardd_ip(value, simulator_params(args))
+    _annotate(payload)
+    try:
+        limits = _site_limits()
+    except Exception:  # pylint: disable=broad-except
+        # Enrichment is a convenience; the findings themselves must still show.
+        LOG.warning("cannot read site limits for the findings", exc_info=True)
+        limits = {}
+    contributions = payload.get("contributions") or []
+    for contribution in contributions:
+        _explain(contribution, limits)
+    _withhold_advice_from_attackers(contributions)
+    return payload
+
+
+# Findings that say the address is not a misconfigured client but something
+# probing the gateway.
+# A sweep of thirty or more made-up paths is probing too; the six-path tier
+# is not on the list, because a client with a few stale links trips it.
+_HOSTILE_MARKERS = (
+    "SCANNER", "INVALID_HOST", "NOSNI", "LEGACY_HAPROXY_BAN",
+    "WIDE_ENUMERATION", "MASS_ENUMERATION",
+)
+
+
+def _withhold_advice_from_attackers(contributions: List[Dict[str, Any]]) -> None:
+    """Do not offer to raise a limit for an address that is attacking.
+
+    The suggestion exists for the opposite case -- a real application that
+    opens twenty connections at once and trips a threshold nobody tuned. Shown
+    beside a request for /vendor/phpunit/.../eval-stdin.php and
+    /cgi-bin/../bin/sh it becomes advice to widen the door for a scanner,
+    which is how an operator ends up making the gateway more permissive
+    towards the one address that least deserves it.
+
+    The measurement stays: what was observed, against which limit, and by how
+    much. Only the recommendation goes.
+    """
+    hostile = any(
+        marker in str(contribution.get("event_type") or "")
+        for contribution in contributions
+        for marker in _HOSTILE_MARKERS
+    )
+    if not hostile:
+        return
+    for contribution in contributions:
+        if "suggested" in contribution:
+            contribution.pop("suggested")
+            contribution["advice_withheld"] = "the address is probing the gateway"
+
+
+def health() -> Dict[str, Any]:
+    return guardd_health()
+
+
+def quality(days: Any = 7) -> Dict[str, Any]:
+    try:
+        wanted = int(days)
+    except (TypeError, ValueError):
+        wanted = 7
+    return guardd_quality(max(1, min(wanted, 30)))
+
+
+def detection_rules() -> Dict[str, Any]:
+    return guardd_signatures()
+
+
+def detection_context() -> Dict[str, Any]:
+    return guardd_detection_context()
+
+
+def set_detection_context(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    return guardd_set_detection_context(payload)
+
+
+def detection_preview(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    # Transient input only: this function must never use the audit service.
+    return guardd_detection_preview(payload)
+
+
+def signature_candidates() -> Dict[str, Any]:
+    return guardd_signature_candidates()
+
+
+def dismiss_candidate(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    path = str(payload.get("path") or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("expected a path")
+    return guardd_dismiss_candidate(path, restore=bool(payload.get("restore")),
+                                   host=str(payload.get("host") or ""))
+
+
+def traps() -> Dict[str, Any]:
+    return guardd_traps()
+
+
+def set_traps(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("hosts"), list):
+        raise ValueError("expected a list of names")
+    return guardd_set_traps(payload["hosts"])
+
+
+def set_detection_rules(payload: Any) -> Dict[str, Any]:
+    """Pass the operator's rules to the daemon, which is what validates them.
+
+    Deliberately not re-validated here. The daemon owns the rules and has to
+    refuse a bad one anyway, whoever sends it; a second copy of the same
+    checks in the web layer would be one more thing to drift.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object")
+    return guardd_set_signatures({
+        "added": payload.get("added") or {},
+        "disabled": payload.get("disabled") or [],
+    })
+
+
+def set_first_step_page(value: Any) -> Dict[str, Any]:
+    if type(value) is not bool:
+        raise ValueError("enabled must be true or false")
+    return guardd_set_first_step_page(value)
+
+
+def set_shield(value: Any) -> Dict[str, Any]:
+    if type(value) is not bool:
+        raise ValueError("enabled must be true or false")
+    return guardd_set_shield(value)
+
+
+def set_mode(value: Any) -> Dict[str, Any]:
+    mode = str(value or "").strip().lower()
+    if mode not in MODES:
+        raise ValueError("mode must be one of " + ", ".join(MODES))
+    return guardd_set_mode(mode)
+
+
+# Bounds are checked here as well as in the daemon. The daemon's are the ones
+# that hold; these exist so a typo comes back as a sentence the operator can
+# read rather than as a rejected request from a socket they never see.
+MAX_BAN_STEPS = 6
+MIN_BAN_SECONDS = 60
+MAX_BAN_SECONDS = 365 * 86400
+
+
+def set_ban_durations(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("ban durations must be a non-empty list")
+    if len(value) > MAX_BAN_STEPS:
+        raise ValueError(f"at most {MAX_BAN_STEPS} steps")
+    steps = []
+    for entry in value:
+        if isinstance(entry, bool):
+            raise ValueError("each step must be a whole number of seconds")
+        try:
+            seconds = int(entry)
+        except (TypeError, ValueError):
+            raise ValueError("each step must be a whole number of seconds") from None
+        if seconds < MIN_BAN_SECONDS or seconds > MAX_BAN_SECONDS:
+            raise ValueError(
+                f"each step must be between {MIN_BAN_SECONDS} seconds and "
+                f"{MAX_BAN_SECONDS // 86400} days"
+            )
+        steps.append(seconds)
+    for earlier, later in itertools.pairwise(steps):
+        if later < earlier:
+            raise ValueError(
+                "each step must be at least as long as the one before"
+            )
+    return guardd_set_ban_durations(steps)
+
+
+def unavailable_payload(exc: GuarddUnavailable) -> Dict[str, Any]:
+    LOG.warning("guardd unavailable: %s", exc)
+    return {"ok": False, "unavailable": True, "error": str(exc)}
+
+
+# The Log Explorer reads the same daemon. Filters are passed through by name
+# so a new one on the daemon side does not need a change here, but the set is
+# closed: an unknown key is dropped rather than forwarded.
+REQUEST_FILTERS = (
+    "since", "until", "client", "status", "host", "backend",
+    "request_id", "method", "path", "limit", "before", "count", "hide_admin",
+    "refused", "slower", "agent",
+)
+
+
+def _request_params(args, keys=REQUEST_FILTERS) -> Dict[str, str]:
+    params = {}
+    for key in keys:
+        value = str(args.get(key) or "").strip()
+        if value:
+            params[key] = value[:200]
+    return params
+
+
+def requests(args) -> Dict[str, Any]:
+    return guardd_requests(_request_params(args))
+
+
+# The summary asks for the same requests, without a page.
+SUMMARY_FILTERS = tuple(key for key in REQUEST_FILTERS if key not in ("limit", "before", "count"))
+
+
+def requests_summary(args) -> Dict[str, Any]:
+    return guardd_requests_summary(_request_params(args, SUMMARY_FILTERS))
+
+
+# A download of what a search finds: the same pages the page reads, up to
+# this many rows. Enough to hand to someone; not a copy of the store.
+EXPORT_ROWS = 10000
+EXPORT_COLUMNS = (
+    ("time_utc", None), ("status", "status"), ("refused", "refusal"), ("method", "method"),
+    ("host", "host"), ("path", "path"), ("backend", "backend"), ("server", "server"),
+    ("client", "client"), ("server_answer_ms", "response_ms"), ("whole_request_ms", "duration_ms"),
+    ("bytes", "bytes_out"), ("ended", "term"), ("timers", "times"), ("ban_rule", "ban_reason"),
+    ("user_agent", "user_agent"), ("request_id", "request_id"),
+)
+# A cell a spreadsheet would read as a formula. Paths and user agents are
+# whatever a visitor sent, so one starting with "=" must stay text.
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    # A number, or HAProxy's "-----" (a request that ended normally), is
+    # what it looks like; anything else that a spreadsheet would start
+    # computing is kept as text.
+    if text.startswith(_FORMULA_START) and not re.fullmatch(r"-?\d+|-+", text):
+        text = "'" + text
+    return text
+
+
+def requests_csv(args):
+    """The rows of a search as CSV lines, newest first, page after page.
+
+    The file is already on its way when a page is asked for, so a daemon
+    that stops answering ends the file where it got to.
+    """
+    params = _request_params(args, SUMMARY_FILTERS)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+
+    def flush() -> str:
+        value = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate()
+        return value
+
+    writer.writerow([name for name, _ in EXPORT_COLUMNS])
+    yield flush()
+    written = 0
+    before = ""
+    while written < EXPORT_ROWS:
+        page = dict(params, limit="500", count="0")
+        if before:
+            page["before"] = before
+        try:
+            found = guardd_requests(page)
+        except GuarddUnavailable as exc:
+            LOG.warning("request log export stopped: %s", exc)
+            break
+        rows = found.get("requests") or []
+        for row in rows[:EXPORT_ROWS - written]:
+            stamp = datetime.fromtimestamp(float(row.get("ts") or 0), timezone.utc)
+            writer.writerow([
+                stamp.strftime("%Y-%m-%dT%H:%M:%SZ") if key is None else _csv_cell(row.get(key))
+                for _, key in EXPORT_COLUMNS
+            ])
+        written += min(len(rows), EXPORT_ROWS - written)
+        yield flush()
+        before = str(found.get("next") or "")
+        if not before or found.get("ok") is False:
+            break
+
+
+def requests_status() -> Dict[str, Any]:
+    return guardd_requests_status()
+
+
+def set_request_log(enabled: Any) -> Dict[str, Any]:
+    return guardd_set_request_log(bool(enabled))
+
+
+def live_memory() -> Dict[str, Any]:
+    return guardd_live_memory()
+
+
+def set_live_memory(payload: Any) -> Tuple[int, Dict[str, Any]]:
+    """The panel's status for the daemon's answer, and the answer.
+
+    The daemon validates the budget again; here only the shape is checked,
+    so a page cannot send it anything but two whole numbers.
+    """
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "expected an object"}
+    budget, revision = payload.get("budget_mib"), payload.get("revision")
+    if (isinstance(budget, bool) or not isinstance(budget, int)
+            or isinstance(revision, bool) or not isinstance(revision, int)):
+        return 400, {"ok": False, "error": "budget_mib and revision must be whole numbers"}
+    answer = guardd_set_live_memory(budget, revision)
+    if answer.get("ok") is not False:
+        return 200, answer
+    if answer.get("conflict"):
+        return 409, answer
+    return 400, answer

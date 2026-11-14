@@ -1,0 +1,55 @@
+# roles/authelia/tasks/db_backup.yml
+#
+# Copy Authelia's database before the stack is recreated on a different
+# Authelia image. A new version migrates the storage schema on first start
+# and the old version refuses the result, so going back means restoring the
+# database as it was -- which only exists if it was copied here first.
+# Included right before each reconcile that can change the image.
+
+- name: Read the image the running Authelia container was created from
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - --format
+      - "{{ '{{' }}.Image{{ '}}' }} {{ '{{' }}.Config.Image{{ '}}' }}"
+      - "{{ authelia_container_name }}"
+  register: authelia_db_backup_running
+  changed_when: false
+  failed_when: false
+  # Read-only; check mode would skip it and leave nothing to compare.
+  check_mode: false
+
+- name: Read the image Authelia is about to run
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - inspect
+      - --format
+      - "{{ '{{' }}.Id{{ '}}' }}"
+      - "authelia/authelia:{{ authelia_version | default('4.39.28') }}"
+  register: authelia_db_backup_target
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Copy the Authelia database before a different image starts on it
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/authelia_db_backup.py"
+      - "{{ authelia_root_dir }}/{{ authelia_storage_local_path | default('/config/db.sqlite3') | basename }}"
+      - "{{ authelia_db_backup_dir }}"
+      - "{{ (authelia_db_backup_running.stdout | trim).split(' ') | last }}"
+      - "{{ authelia_db_backup_keep | string }}"
+  register: authelia_db_backup
+  changed_when: "'nothing to copy' not in authelia_db_backup.stdout"
+  # Only when there is a container to compare with (not a first install) and
+  # the image it would be recreated on is a different one. A copy that fails
+  # stops the update here, before the migration it exists to undo.
+  when:
+    - authelia_db_backup_running.rc == 0
+    - authelia_db_backup_target.rc == 0
+    - (authelia_db_backup_running.stdout | trim).split(' ') | first
+      != authelia_db_backup_target.stdout | trim

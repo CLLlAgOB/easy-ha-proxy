@@ -1,0 +1,21 @@
+[Unit]
+Description=Load iptables rules for HAProxy ban set (iptables-legacy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# the ipset must exist before the rules are loaded
+ExecStartPre=/usr/sbin/ipset create haproxy_ban hash:ip family inet -exist
+# First steps of adaptive bans, shown a page: the rules name this set too.
+ExecStartPre=/usr/sbin/ipset create haproxy_ban_page hash:ip family inet -exist
+# --noflush: only HP_BAN, the chain the file declares, is reset and refilled.
+# Without it the restore emptied the whole legacy filter table -- Docker's
+# chains and the host's own rules with it (F01, 30 October review).
+ExecStart=/usr/sbin/iptables-legacy-restore --noflush /etc/iptables/haproxy_ban.rules
+# The jump into HP_BAN, once however often this runs.
+ExecStartPost=/bin/sh -c '/usr/sbin/iptables-legacy -C INPUT -j HP_BAN 2>/dev/null || /usr/sbin/iptables-legacy -I INPUT 1 -j HP_BAN'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

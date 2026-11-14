@@ -1,0 +1,130 @@
+---
+# The PEM directory
+- name: Ensure HAProxy certs dir exists
+  file:
+    path: "{{ haproxy_certs_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  listen: build_pems_and_reload
+
+# === Joining the PEMs of sites with explicit key_types (including [ecdsa, rsa]) ===
+- name: Build PEMs (sites with explicit key_types)
+  vars:
+    site: "{{ pair.0 }}"
+    key_type: "{{ pair.1 }}"
+    keys_len: "{{ site.key_types | length }}"
+    base_dest: "{{ site.cert_path | default(haproxy_certs_dir ~ '/' ~ site.domain ~ '.pem') }}"
+    dest: >-
+      {{
+        (keys_len|int > 1)
+        | ternary(
+            (base_dest.endswith('.pem')
+              | ternary(base_dest[:-4] ~ '-' ~ key_type ~ '.pem', base_dest ~ '-' ~ key_type ~ '.pem')),
+            base_dest)
+      }}
+    lineage: "{{ (keys_len|int > 1) | ternary(site.domain ~ '-' ~ key_type, site.domain) }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+
+    full="/etc/letsencrypt/live/{{ lineage }}/fullchain.pem"
+    key="/etc/letsencrypt/live/{{ lineage }}/privkey.pem"
+
+    # If the certificate has not been issued yet, just skip it;
+    # NO temporary file is created
+    if [ ! -r "$full" ] || [ ! -r "$key" ]; then
+      echo "Skip {{ lineage }}: certificate files not ready" >&2
+      exit 0
+    fi
+
+    # A name the operator put on a standby certificate is held there until
+    # they hand it back. Without this, a config apply would undo the switch
+    # silently -- and this handler runs on far more than renewals.
+    stem="$(basename "{{ dest }}" .pem)"
+    pin="{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}/$stem/.pinned"
+    if [ -s "$pin" ]; then
+      echo "Held: $stem is on a standby certificate ($(cat "$pin")); not replacing it" >&2
+      exit 0
+    fi
+
+    tmp="{{ dest }}.tmp.$$"
+    cat "$full" "$key" > "$tmp"
+    if [ -f "{{ dest }}" ] && cmp -s "$tmp" "{{ dest }}" \
+        && [ "$(stat -c '%a %U:%G' "{{ dest }}")" = "600 root:root" ]; then
+      rm -f "$tmp"
+      exit 0
+    fi
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "{{ dest }}"
+    echo "PEM written: {{ dest }}"
+  args:
+    executable: /bin/bash
+  register: _pem_build
+  changed_when: "'PEM written:' in _pem_build.stdout"
+  loop: "{{ sites | selectattr('key_types','defined') | list | subelements('key_types') }}"
+  loop_control:
+    loop_var: pair
+    label: "{{ pair.0.domain }} / {{ pair.1 }}"
+  listen: build_pems_and_reload
+
+# === Joining the PEMs of sites WITHOUT key_types (cert_key_type, a single file) ===
+- name: Build PEMs (sites without key_types → default key type)
+  vars:
+    site: "{{ s }}"
+    dest: "{{ site.cert_path | default(haproxy_certs_dir ~ '/' ~ site.domain ~ '.pem') }}"
+    lineage: "{{ site.domain }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+
+    full="/etc/letsencrypt/live/{{ lineage }}/fullchain.pem"
+    key="/etc/letsencrypt/live/{{ lineage }}/privkey.pem"
+
+    if [ ! -r "$full" ] || [ ! -r "$key" ]; then
+      echo "Skip {{ lineage }}: certificate files not ready" >&2
+      exit 0
+    fi
+
+    # A name the operator put on a standby certificate is held there until
+    # they hand it back. Without this, a config apply would undo the switch
+    # silently -- and this handler runs on far more than renewals.
+    stem="$(basename "{{ dest }}" .pem)"
+    pin="{{ haproxy_certs_available_dir | default('/etc/haproxy/certs-available') }}/$stem/.pinned"
+    if [ -s "$pin" ]; then
+      echo "Held: $stem is on a standby certificate ($(cat "$pin")); not replacing it" >&2
+      exit 0
+    fi
+
+    tmp="{{ dest }}.tmp.$$"
+    cat "$full" "$key" > "$tmp"
+    if [ -f "{{ dest }}" ] && cmp -s "$tmp" "{{ dest }}" \
+        && [ "$(stat -c '%a %U:%G' "{{ dest }}")" = "600 root:root" ]; then
+      rm -f "$tmp"
+      exit 0
+    fi
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "{{ dest }}"
+    echo "PEM written: {{ dest }}"
+  args:
+    executable: /bin/bash
+  register: _pem_build
+  changed_when: "'PEM written:' in _pem_build.stdout"
+  loop: "{{ sites | rejectattr('key_types','defined') | list }}"
+  loop_control:
+    loop_var: s
+    label: "{{ s.domain }}"
+  listen: build_pems_and_reload
+
+# Reload HAProxy -- only if it is there and allowed
+- name: Reload HAProxy (only if present)
+  service:
+    name: haproxy
+    state: reloaded
+  when:
+    - haproxy_autoreload | default(true)
+    - haproxy_present | default(false)
+  listen: build_pems_and_reload

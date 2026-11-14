@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="{{ current_language }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{% endblock %}</title>
+  <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/pages.css') }}">
+  <script nonce="{{ csp_nonce }}">
+    window.HAPROXY_ADMIN_I18N = {{ i18n_config | tojson }};
+    window.HAPROXY_ADMIN_FLAG_BASE = {{ url_for('static', filename='vendor/flag-icons/flags/4x3/') | tojson }};
+    window.HAPROXY_ADMIN_TIME = {{ server_time | default({'zone': 'UTC', 'abbreviation': 'UTC', 'offset': 'UTC+00:00'}) | tojson }};
+  </script>
+  <script src="{{ i18n_messages_url }}"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/server_time.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/security.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/config_state.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/alerts_badge.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/nav.js') }}"></script>
+</head>
+<body class="app-body" data-page="{{ request.endpoint or '' }}">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <aside class="sidebar" id="app-sidebar" aria-label="Main navigation">
+    <div class="sidebar-brand">
+      <a class="brand" href="{{ url_for('routes.index') }}" aria-label="HAProxy dashboard">
+        <svg class="brand-mark" viewBox="0 0 32 36" aria-hidden="true"><path d="m16 2 13 5v10c0 8-13 17-13 17S3 25 3 17V7l13-5Z"/><path d="M9 18h4l2-6 3 12 2-6h4"/></svg>
+        <span><strong>HAProxy</strong><span class="brand-caption">Security console</span></span>
+      </a>
+      <button class="icon-button sidebar-close" id="nav-close" type="button" title="Close navigation" aria-label="Close navigation">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
+      </button>
+    </div>
+    <div class="sidebar-content">
+      {% if g.is_superadmin %}
+      {% include "_haproxy_nav.html" %}
+      {% else %}
+      <nav class="nav-groups" aria-label="Administration sections"><a class="nav-item nav-item-current" href="{{ url_for('routes.index') }}" aria-current="page">Dashboard</a></nav>
+      {% endif %}
+    </div>
+    <div class="sidebar-account">
+      <span class="account-avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 21v-2a6 6 0 0 0-6-6h-4a6 6 0 0 0-6 6v2M16 5a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg></span>
+      <span><strong class="account-name">{{ g.remote_user | default('HAProxy', true) }}</strong><span class="account-role">{{ 'Administrator' if g.is_superadmin else 'User' }}</span></span>
+    </div>
+  </aside>
+  <button class="nav-backdrop" id="nav-backdrop" type="button" aria-label="Close navigation" tabindex="-1" hidden></button>
+  <div class="app-workspace" id="app-workspace">
+    <header class="app-header">
+      <div class="page-heading">
+        <button class="icon-button nav-toggle" id="nav-toggle" type="button" aria-label="Open navigation" title="Open navigation" aria-controls="app-sidebar" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <div><p class="page-eyebrow">HAProxy Security</p><h1>{% block header_title %}HAProxy Security Dashboard{% endblock %}</h1>
+          <p class="page-timezone" title="{{ server_time.zone if server_time is defined else 'UTC' }}"><span>Server time</span>: <span data-i18n-skip translate="no">{{ server_time.abbreviation if server_time is defined else 'UTC' }} ({{ server_time.offset if server_time is defined else 'UTC+00:00' }})</span></p>
+        </div>
+      </div>
+      <div class="controls">
+        {% block header_lead %}{% endblock %}
+        {% if g.is_superadmin %}
+        <a id="global-config-state" class="global-config-state" href="{{ url_for('routes.haproxy_config_page') }}" data-state-endpoint="{{ url_for('routes.haproxy_configuration_state') }}" aria-label="Open HAProxy configuration" hidden>
+          <span class="global-config-state-dot" aria-hidden="true"></span><span id="global-config-state-label" role="status" aria-live="polite">Configuration status unavailable</span>
+        </a>
+        {% endif %}
+        <a id="global-alerts" class="global-alerts" href="{{ url_for('routes.alerts_page') }}" data-endpoint="{{ url_for('routes.api_alerts_portal') }}" aria-label="Open alerts" hidden>
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7Zm4 11h4"/></svg>
+          <span id="global-alerts-label" role="status" aria-live="polite" data-i18n-skip translate="no"></span>
+        </a>
+        <form class="language-switcher" method="post" action="{{ url_for('set_language') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="next" value="{{ request.full_path }}">
+          <label class="visually-hidden" for="language-select">Interface language</label>
+          <select id="language-select" name="language" aria-label="Interface language" data-submit-on-change>
+            {% for language in supported_languages %}<option value="{{ language.code }}"{% if language.code == current_language %} selected{% endif %}>{{ language.label }}</option>{% endfor %}
+          </select>
+        </form>
+        <button id="theme-toggle" class="icon-button theme-toggle" type="button" title="Toggle theme" aria-label="Dark theme" aria-pressed="false">
+          <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
+          <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 13a9 9 0 0 1-10-10A9 9 0 1 0 21 13Z"/></svg>
+        </button>
+      </div>
+    </header>
+    <main class="container" id="main-content" tabindex="-1">
+      {% set page_actions %}{% block header_buttons %}{% endblock %}{% endset %}
+      {% if page_actions | striptags | trim %}<div class="page-actions">{{ page_actions }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  <footer class="app-footer" id="app-footer">
+    HAProxy Security&nbsp;Dashboard © 2026 ·
+    {% if build and (build.host or build.panel) %}
+    {% set current_build = build.host or build.panel %}
+    <details class="footer-build">
+      <summary title="Show build details"><span>Build</span>
+        {% if current_build.when %}
+        <span class="notranslate" translate="no" data-i18n-skip>{{ current_build.when }}</span>
+        {% else %}
+        <span>Date unavailable</span>
+        {% endif %}
+      </summary>
+      <div class="footer-build-details">
+        {% if build.host %}
+        <div><span>Host build</span>:
+          <span class="notranslate" translate="no" data-i18n-skip>{{ build.host.when }} · {{ build.host.revision }}</span></div>
+        {% endif %}
+        {% if build.panel %}
+        <div><span>Panel build</span>:
+          <span class="notranslate" translate="no" data-i18n-skip>{{ build.panel.when }} · {{ build.panel.revision }}</span></div>
+        {% endif %}
+        {% if build.match is none %}
+        <div>Build comparison is unavailable.</div>
+        {% elif build.match is sameas true and build.host.revision != build.panel.revision %}
+        <div>Panel files match the host. The existing image was reused.</div>
+        {% endif %}
+        <div>All interface times use the server time zone.</div>
+      </div>
+    </details> ·
+    {% endif %}
+    {% if build and build.match is sameas false %}
+    <span class="footer-build-mismatch">Host and panel files differ. Check the update status.</span> ·
+    {% endif %}
+    <a href="https://db-ip.com" rel="noopener noreferrer">IP Geolocation by DB-IP</a>
+  </footer>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

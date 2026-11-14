@@ -1,0 +1,261 @@
+app_dir: /opt/haproxy-admin
+socket_path: /run/haproxy/admin.sock
+geo_ip_dir: /etc/haproxy/geoip
+app_user: haproxyadmin
+app_group: hadmin
+haproxy_admin_proxy_secret: "{{ authelia_session_secret | default('') }}"
+hapadm_ipset_name: haproxy_ban
+venv_dir: "{{ app_dir }}/venv"
+whitelist_global_file: /etc/haproxy/whitelist.ip
+whitelist_geo_file: /etc/haproxy/geoip/whitelist.geo
+ui_exclude_backends_exact:
+  [be_admin, be_stats, be_http_challenge, be_tls_terminator, be_maintenance]
+ui_exclude_backends_prefix: [tbl_]
+haproxy_log: /var/log/haproxy.log
+haproxy_conf: /etc/haproxy/haproxy.cfg
+hapadm_journal_unit: "haproxy.service"
+# Journal lookback step in minutes for one journalctl call.
+# journalctl sources: options ("-u haproxy"), FIELD=VALUE matches, or a bare
+# word which the daemon maps to a syslog identifier ("-t word").
+hapadm_journal_sources: "-u haproxy,SYSLOG_IDENTIFIER=haproxy,-u rsyslog.service"
+hapadm_ban_table: "tbl_ban"
+hapadm_ban_delta_seconds: 120
+hapadm_log_limit: 150
+hapadm_debug_on_empty: "1"
+# --- Authelia bans daemon integration ---
+authelia_bans_enabled: true
+authelia_bans_socket_path: /run/easy-ha-proxy/authelia-bansd.sock
+authelia_bans_socket_timeout: 10
+authelia_bans_max_response_bytes: 2097152
+authelia_root_dir: "/opt/authelia"
+# Path to the active Authelia JSON log.
+authelia_log_file: "{{ authelia_root_dir }}/logs/authelia.log"
+authelia_log_limit: 200
+authelia_log_max_scan_bytes: 16777216
+hapadm_ban_sync_interval: 10
+
+# --- DNS-01 (wildcard certificates) ---
+# Certbot is installed from snap here, so its plugins are snaps too and must
+# match its version; the apt packages belong to a different certbot.
+# Empty by default: a plugin is only installed when an operator asks for that
+# provider. Supported values: cloudflare, digitalocean, route53, rfc2136.
+dns_plugins_enabled: []
+dns_credentials_dir: /etc/easy-ha-proxy/dns-providers
+
+# --- Change log ---
+# Small, high value and kept far longer than metrics: it is the record of who
+# changed what. Secrets are redacted before anything is written.
+audit_database_path: /var/lib/easy-ha-proxy/audit/audit.db
+
+# --- Historical metrics daemon (easy-ha-proxy-metricsd) ---
+metricsd_enabled: true
+metricsd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-metricsd.sock
+metricsd_config_path: "{{ app_dir }}/metricsd.json"
+metricsd_database_path: /var/lib/easy-ha-proxy/metrics/metrics.db
+# HAProxy is polled for live numbers; only one row per object per minute is
+# persisted, so a shorter interval costs resolution in the average, not rows.
+metricsd_poll_interval: 10
+metricsd_maintenance_interval: 300
+# Per-server rows dominate the table on a host with many backends, so they keep
+# minute resolution for a day and survive as hourly rows afterwards.
+metricsd_retention_one_minute_days: 7
+metricsd_retention_one_minute_server_hours: 24
+metricsd_retention_one_hour_days: 365
+# Traffic alerts, judged per backend on each minute's totals (the alert rules'
+# own delay makes it "for five minutes"); 0 switches a check off. A minute
+# with fewer requests than the floor raises nothing.
+metricsd_alert_error_ratio_percent: 10
+metricsd_alert_slow_response_ms: 3000
+metricsd_alert_min_requests: 20
+metricsd_memory_max: 256M
+# Storage safety. "auto" sizes both limits from the filesystem the database
+# actually lives on: cap = min(5GiB, 10%), reserve = max(2GiB, min(10%, 10GiB)).
+# The reserve is enforced even when the cap is lifted -- monitoring is never
+# allowed to be the reason the disk fills up.
+metricsd_max_database_size: auto
+metricsd_reserved_free_space: auto
+# Trade resolution for survival under pressure: minute rows shrink to 3d/1d and
+# hourly rows to 180d/90d/30d before history writes are paused outright.
+metricsd_auto_reduce_retention: true
+metricsd_wal_soft_limit: 64MiB
+
+# --- Adaptive protection engine (easy-ha-proxy-guardd) ---
+# "monitor" observes and records; it cannot ban. "enforce" is rejected by the
+# daemon in this release, on purpose: the weights have not been reviewed
+# against real traffic yet, and a silent downgrade would leave an operator
+# believing the gateway is defending itself.
+guardd_mode: monitor
+guardd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-guardd.sock
+guardd_config_path: "{{ app_dir }}/guardd.json"
+guardd_database_path: /var/lib/easy-ha-proxy/security/security.db
+guardd_log_file: "{{ haproxy_log }}"
+guardd_poll_interval: 10
+guardd_maintenance_interval: 300
+# The log source exists to remember what an address did hours ago, so the
+# per-IP working set is capped in both dimensions rather than left to grow.
+# Measured on a 2-core/2 GiB production gateway: 4.3 KiB per tracked address,
+# so 5000 costs about 21 MiB. That same gateway saw 275 distinct addresses in
+# a full log file, so the default has a wide margin already; raise it only for
+# a host that genuinely fronts a much larger audience.
+guardd_max_tracked_ips: 5000
+guardd_max_paths_per_ip: 32
+# Parsing measured at ~30 us per line end to end, so this budget is roughly
+# 0.4 s of CPU in the worst case and covers well over 1000 req/s sustained.
+# The health endpoint reports lag_bytes when it cannot keep up.
+guardd_log_read_bytes_per_cycle: 4194304
+guardd_event_retention_days: 30
+guardd_memory_max: 256M
+# --- Request log (the Log Explorer store) ---
+# Off by default. A day of traffic on a small production gateway is ~310k
+# records, so the size cap is what actually holds, not the retention window,
+# and the free-space reserve has the last word: diagnostics must never be the
+# reason the disk fills up.
+guardd_request_log_enabled: false
+guardd_request_log_retention_days: 3
+guardd_request_log_max_bytes: 268435456
+guardd_request_log_reserved_free_bytes: 536870912
+guardd_request_log_path: /var/lib/easy-ha-proxy/requests/requests.db
+
+# --- Alert engine (easy-ha-proxy-alertd) ---
+# Conditions and notification policy live in one place instead of inside each
+# feature. The seeded settings file is never overwritten afterwards: an
+# operator changing a threshold in the UI must not lose it on the next update.
+alertd_enabled: true
+alertd_email_enabled: true
+# Empty means the shared notification recipient from mail-notify.json.
+alertd_recipient: ""
+alertd_min_severity: info
+alertd_rules: {}
+alertd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-alertd.sock
+alertd_config_path: "{{ app_dir }}/alertd.json"
+alertd_database_path: /var/lib/easy-ha-proxy/alerts/alerts.db
+alertd_mail_state: /etc/easy-ha-proxy/mail-notify.json
+alertd_mail_lock: /run/easy-ha-proxy/authelia-mail.lock
+alertd_memory_max: 128M
+# Host path to the Authelia user database.
+authelia_users_file: "{{ authelia_root_dir }}/users_database.yml"
+
+# Path to the Authelia Docker Compose file.
+authelia_docker_compose_file: "{{ authelia_root_dir }}/docker-compose.yml"
+
+# Authelia container name in Compose.
+authelia_container_name: authelia
+
+# Authelia configuration path inside the container.
+authelia_config_path: /config/configuration.yml
+# Enable Docker mode for haproxy-admin.
+haproxy_admin_use_docker: true
+
+# Populated dynamically by tasks/install.yml.
+haproxy_admin_uid: ""
+haproxy_admin_gid: ""
+hadmin_gid: ""
+
+# Application root on the host.
+haproxy_admin_root_dir: "{{ app_dir }}"
+haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
+
+# Container image and name.
+haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
+haproxy_admin_container_name: "haproxy-admin"
+
+# UI port exposed on localhost.
+haproxy_admin_listen_port: 5000
+haproxy_admin_start_wait_timeout: 180
+haproxy_admin_compose_pull_timeout: 420
+haproxy_admin_compose_up_timeout: 180
+
+# Container time zone. Empty: the gateway's own (easy_ha_proxy_host_timezone,
+# read by the playbook), so the times the panel writes match the host's.
+haproxy_admin_timezone: ""
+haproxy_admin_default_language: "en"
+
+# Technical UI debug routes are disabled by default.
+haproxy_admin_debug_routes: false
+
+# haproxy-admin .env path containing socket and application settings.
+haproxy_admin_env_file: "{{ haproxy_admin_root_dir }}/.env"
+
+# Helper daemon sockets.
+certd_socket_path: /run/easy-ha-proxy/haproxy-certd.sock
+haproxy_control_socket_path: /run/easy-ha-proxy/haproxy-controld.sock
+backupd_socket_path: /run/easy-ha-proxy/easy-ha-proxy-backupd.sock
+
+# Full backup/restore broker. The spool is deliberately outside every managed
+# directory included in full_backup.py.
+backupd_root_dir: /var/lib/easy-ha-proxy/backup-web
+backupd_jobs_dir: "{{ backupd_root_dir }}/jobs"
+backupd_uploads_dir: "{{ backupd_root_dir }}/uploads"
+backupd_backups_dir: "{{ backupd_root_dir }}/backups"
+backupd_source_dir: /opt/easy-ha-proxy/source
+backupd_max_request_bytes: 65536
+backupd_max_archive_bytes: 8589934592
+backupd_min_free_bytes: 536870912
+backupd_max_capture_bytes: 65536
+backupd_max_state_bytes: 262144
+backupd_job_timeout_seconds: 21600
+backupd_list_limit: 50
+backupd_upload_ttl_seconds: 86400
+backupd_restore_active_marker: /run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active
+backupd_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-backupd-restart.requested
+backupd_operation_lock_path: /run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock
+maintenance_reboot_marker_path: /run/easy-ha-proxy/easy-ha-proxy-web-reboot.json
+
+# Asynchronous software-update broker. It shares backupd's operation lock so
+# update and disaster-recovery jobs cannot mutate the host concurrently.
+updated_socket_path: /run/easy-ha-proxy/easy-ha-proxy-updated.sock
+updated_state_root: /var/lib/easy-ha-proxy/update-web
+updated_jobs_dir: "{{ updated_state_root }}/jobs"
+updated_source_dir: /opt/easy-ha-proxy/source
+updated_config_dir: /etc/easy-ha-proxy
+updated_python_path: /opt/easy-ha-proxy/venv/bin/python
+updated_cli_path: /usr/local/bin/easy-ha-proxy
+updated_max_request_bytes: 32768
+updated_max_response_bytes: 2097152
+updated_max_capture_bytes: 262144
+updated_max_state_bytes: 1048576
+updated_job_timeout_seconds: 7200
+updated_check_timeout_seconds: 600
+updated_plan_ttl_seconds: 900
+updated_list_limit: 30
+updated_active_marker: /run/easy-ha-proxy/easy-ha-proxy-update.active
+updated_restart_request_marker: /run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested
+updated_maintenance_lock_path: "{{ backupd_operation_lock_path }}"
+updated_haproxy_transaction_marker: /opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json
+updated_reboot_delay_seconds: 60
+# A read-only update check every this many hours; it raises the
+# "update.available" alert when something can be installed. 0 switches it off.
+updates_auto_check_hours: 24
+
+# Authelia user-management daemon socket.
+authelia_users_socket: /run/easy-ha-proxy/authelia-usersd.sock
+authelia_users_socket_timeout: 10
+authelia_users_max_response_bytes: 2097152
+
+# haproxy-certd mode: 0 for production, 1 for dry-run.
+haproxy_certd_dry_run: "0"
+haproxy_ca_root_dir: "/etc/haproxy/certificate-authorities"
+
+# Authelia network health-check endpoint.
+authelia_healthcheck_url: "http://authelia:9091/api/health"
+
+# Optional variable-controlled socket group.
+haproxy_certd_socket_group: "hadmin"
+
+# --- Prometheus export ---
+# Mirrors metrics_export_enabled in the haproxy role: one switch turns on both
+# the HAProxy path and the endpoint behind it. The token is the second gate
+# and has no default, because a shipped default token is not a gate.
+metrics_export_enabled: false
+metrics_export_token: ""
+
+# --- Off-host backup copies ---
+# The timer is armed by default but does nothing until the operator saves a
+# destination, stores a passphrase and switches the schedule on: an unattended
+# backup needs a passphrase that lives on this host, and that is a decision to
+# take deliberately rather than by default.
+backupd_destinations_dir: /etc/easy-ha-proxy/backup-destinations
+backup_schedule_enabled: true
+backup_schedule_oncalendar: "*-*-* 03:20:00"
+backup_schedule_jitter: 20m
+backup_schedule_timeout: 8h

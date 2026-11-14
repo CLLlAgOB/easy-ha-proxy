@@ -1,0 +1,105 @@
+---
+# 15 -- checking that the DNS is ready for the issuance targets
+
+- name: Defaults for DNS check
+  set_fact:
+    acme_resolvers: "{{ acme_resolvers | default(['1.1.1.1','8.8.8.8']) }}"
+
+# All the targets planned by the previous step (lineage strings)
+- name: Aggregate planned targets
+  set_fact:
+    _all_planned_lineages: "{{ (targets_explicit | default([])) + (targets_single | default([])) }}"
+
+# A site with a DNS provider profile is validated over DNS-01 by haproxy-certd,
+# which owns the provider credentials. This role only knows the standalone
+# HTTP-01 path, and the certbot DNS plugins are installed by the haproxy-admin
+# role that runs later, so issuing here would use the wrong challenge and would
+# drop any wildcard name.
+- name: Collect the DNS-01 targets
+  set_fact:
+    _dns01_lineages: "{{ _dns01_json | from_json }}"
+  vars:
+    _dns01_json: >-
+      {%- set out = [] -%}
+      {%- for lin in _all_planned_lineages -%}
+        {%- set base = lin | regex_replace('(-rsa|-ecdsa)$','') -%}
+        {%- set site = (cert_sites | default([]) | selectattr('domain','equalto', base) | list | first) -%}
+        {%- if site and (site.dns_profile | default('')) -%}
+          {%- set _ = out.append(lin) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Keep only the HTTP-01 targets for this role
+  set_fact:
+    _planned_lineages: "{{ _all_planned_lineages | reject('in', _dns01_lineages) | list }}"
+
+- name: Report the targets left to haproxy-certd
+  ansible.builtin.debug:
+    msg: >-
+      DNS-01 targets are issued by haproxy-certd, not here:
+      {{ _dns01_lineages | join(', ') }}. Use the site page or apply the
+      HAProxy configuration to issue them.
+  when: (_dns01_lineages | default([]) | length) > 0
+
+# Normalise: lineage -> base + the SANs from the site's description
+- name: Normalize planned targets into uniform objects
+  set_fact:
+    planned_items: "{{ _planned_items_json | from_json }}"
+  vars:
+    _planned_items_json: >-
+      {%- set out = [] -%}
+      {%- for lin in _planned_lineages -%}
+        {%- set base = lin | regex_replace('(-rsa|-ecdsa)$','') -%}
+        {%- set site = (cert_sites | default([]) | selectattr('domain','equalto', base) | list | first) -%}
+        {%- set names = [base] + (site.alt_names | default([])) -%}
+        {%- set _ = out.append({'lineage': lin, 'names': names}) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+# Check: every name has an A or AAAA record at every given resolver
+- name: DNS readiness per target
+  vars:
+    names: "{{ item.names }}"
+  shell: |
+    set -eo pipefail
+    ok=1
+    for n in {{ names | join(' ') }}; do
+      for r in {{ acme_resolvers | join(' ') }}; do
+        if ! (dig +time=2 +tries=1 +short A "$n" @"$r" | grep -E '^[0-9]+\.' >/dev/null \
+           || dig +time=2 +tries=1 +short AAAA "$n" @"$r" | grep -E '^[0-9a-f:]' >/dev/null); then
+          ok=0
+        fi
+      done
+    done
+    echo "$ok"
+  args: { executable: /bin/bash }
+  loop: "{{ planned_items }}"
+  register: _dns_checks
+  changed_when: false
+  loop_control:
+    label: "{{ item.lineage }} → {{ item.names | join(',') }}"
+
+# Split into ready and not ready
+- name: Compute ready/not-ready lineages
+  set_fact:
+    ready_lineages:     "{{ _dns_checks.results | selectattr('stdout','equalto','1') | map(attribute='item.lineage') | list }}"
+    not_ready_lineages: "{{ _dns_checks.results | rejectattr('stdout','equalto','1') | map(attribute='item.lineage') | list }}"
+
+# Build the lists to issue (in the original format -- strings)
+- name: Build issue target lists in the original shape
+  set_fact:
+    issue_targets_explicit: "{{ targets_explicit | default([]) | select('in', ready_lineages) | list }}"
+    issue_targets_single:   "{{ targets_single  | default([]) | select('in', ready_lineages) | list }}"
+
+- name: Compute issue_targets_count
+  set_fact:
+    issue_targets_count: "{{ (issue_targets_explicit | default([]) | length)
+                             + (issue_targets_single  | default([]) | length) }}"
+
+- name: Show DNS readiness summary
+  debug:
+    msg:
+      - "DNS-ready: {{ ready_lineages }}"
+      - "Not ready: {{ not_ready_lineages }}"
+      - "Will issue count: {{ issue_targets_count }}"

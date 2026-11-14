@@ -1,0 +1,198 @@
+---
+# Shared with update_packages: activate this BEFORE apt can restart Docker.
+# A fresh host has no dockerd yet; the Docker role applies it after install.
+- name: Check whether Docker Engine is installed
+  ansible.builtin.stat:
+    path: /usr/bin/dockerd
+  register: docker_live_restore_binary
+
+- name: Configure Docker live restore without restarting containers
+  when: docker_live_restore_binary.stat.exists
+  block:
+    - name: Read Docker service configuration and state
+      ansible.builtin.command:
+        argv: [systemctl, show, docker.service, '--property=ExecStart,ActiveState']
+      register: docker_live_restore_unit
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Require an explicit Docker service state
+      ansible.builtin.assert:
+        that: docker_live_restore_unit.stdout is search('(?m)^ActiveState=\\S+$')
+        fail_msg: Docker service state could not be determined; its configuration was not changed.
+
+    - name: Remember whether Docker is running and configured on the command line
+      ansible.builtin.set_fact:
+        docker_live_restore_running: "{{ docker_live_restore_unit.stdout is search('(?m)^ActiveState=active$') }}"
+        docker_live_restore_cli: "{{ docker_live_restore_unit.stdout is search('--live-restore(?:=|\\s|;|$)') }}"
+      no_log: true
+
+    - name: Require the managed Docker configuration file
+      ansible.builtin.assert:
+        that:
+          - >-
+            (docker_live_restore_unit.stdout | regex_findall('--config-file(?:=|\\s+)([^\\s;]+)')
+             | difference(['/etc/docker/daemon.json'])) | length == 0
+        fail_msg: >-
+          Docker uses a custom configuration-file argument. Configure live-restore
+          there before upgrading packages; the standard file was not changed.
+
+    - name: Read the running Docker configuration
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/docker
+          - --host
+          - unix:///var/run/docker.sock
+          - info
+          - --format
+          - '{{ "{{json .}}" }}'
+      register: docker_live_restore_info
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: docker_live_restore_running
+
+    - name: Remember the current Docker live-restore setting
+      ansible.builtin.set_fact:
+        docker_live_restore_runtime: >-
+          {{ (docker_live_restore_info.stdout | from_json) if docker_live_restore_running else {} }}
+      no_log: true
+
+    - name: Require standalone Docker when enabling live restore
+      ansible.builtin.assert:
+        that:
+          - (docker_live_restore_runtime.get('Swarm', {}).get('LocalNodeState', 'inactive')) != 'active'
+        fail_msg: >-
+          Docker Swarm is active. Live-restore applies to standalone containers.
+          Set docker_live_restore_enabled=false to keep Swarm's service lifecycle.
+      when: docker_live_restore_enabled | bool
+
+    - name: Verify live restore when it is managed through Docker service arguments
+      ansible.builtin.assert:
+        that:
+          - docker_live_restore_running
+          - (docker_live_restore_runtime.get('LiveRestoreEnabled', false) | bool) == (docker_live_restore_enabled | bool)
+        fail_msg: >-
+          Docker already manages live-restore through its service arguments.
+          Adjust that setting to match docker_live_restore_enabled; no duplicate
+          daemon.json option was written.
+      when: docker_live_restore_cli
+
+    - name: Manage live restore in the standard Docker configuration
+      when: not docker_live_restore_cli
+      block:
+        - name: Inspect the existing Docker configuration file
+          ansible.builtin.stat:
+            path: /etc/docker/daemon.json
+            follow: false
+          register: docker_live_restore_file
+
+        - name: Require a regular Docker configuration file
+          ansible.builtin.assert:
+            that:
+              - not docker_live_restore_file.stat.exists or (docker_live_restore_file.stat.isreg | default(false))
+            fail_msg: Docker daemon.json must be a regular file; it was not changed.
+
+        - name: Read the existing Docker configuration
+          ansible.builtin.slurp:
+            src: /etc/docker/daemon.json
+          register: docker_live_restore_original
+          no_log: true
+          when: docker_live_restore_file.stat.exists
+
+        - name: Preserve existing Docker settings
+          ansible.builtin.set_fact:
+            docker_live_restore_config: >-
+              {{ (docker_live_restore_original.content | b64decode | from_json)
+                 if docker_live_restore_file.stat.exists else {} }}
+          no_log: true
+
+        - name: Require a Docker configuration object
+          ansible.builtin.assert:
+            that: docker_live_restore_config is mapping
+            fail_msg: Docker daemon.json must contain a JSON object; it was not changed.
+
+        - name: Ensure the Docker configuration directory exists
+          ansible.builtin.file:
+            path: /etc/docker
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Apply and verify the live-restore setting
+          block:
+            - name: Validate and write Docker live restore while preserving other settings
+              ansible.builtin.copy:
+                dest: /etc/docker/daemon.json
+                content: "{{ docker_live_restore_config | combine({'live-restore': docker_live_restore_enabled | bool}) | to_nice_json }}\n"
+                owner: "{{ docker_live_restore_file.stat.uid | default(0) }}"
+                group: "{{ docker_live_restore_file.stat.gid | default(0) }}"
+                mode: "{{ docker_live_restore_file.stat.mode | default('0644') }}"
+                backup: true
+                validate: /usr/bin/dockerd --validate --config-file %s
+              register: docker_live_restore_written
+              no_log: true
+
+            - name: Reload Docker configuration without stopping containers
+              ansible.builtin.command:
+                argv: [systemctl, reload, docker.service]
+              changed_when: true
+              when:
+                - docker_live_restore_running
+                - not ansible_check_mode
+                - docker_live_restore_written.changed or (docker_live_restore_runtime.get('LiveRestoreEnabled', false) | bool) != (docker_live_restore_enabled | bool)
+
+            - name: Verify that the running Docker daemon applied live restore
+              ansible.builtin.command:
+                argv:
+                  - /usr/bin/docker
+                  - --host
+                  - unix:///var/run/docker.sock
+                  - info
+                  - --format
+                  - '{{ "{{.LiveRestoreEnabled}}" }}'
+              register: docker_live_restore_verified
+              changed_when: false
+              retries: 5
+              delay: 1
+              until:
+                - docker_live_restore_verified.rc == 0
+                - (docker_live_restore_verified.stdout | trim | lower) == (docker_live_restore_enabled | bool | string | lower)
+              when:
+                - docker_live_restore_running
+                - not ansible_check_mode
+
+          rescue:
+            - name: Restore the previous Docker configuration after a failed apply
+              ansible.builtin.copy:
+                dest: /etc/docker/daemon.json
+                src: "{{ docker_live_restore_written.backup_file }}"
+                remote_src: true
+                owner: "{{ docker_live_restore_file.stat.uid }}"
+                group: "{{ docker_live_restore_file.stat.gid }}"
+                mode: "{{ docker_live_restore_file.stat.mode }}"
+              no_log: true
+              when: docker_live_restore_written.backup_file is defined
+
+            - name: Remove the newly created configuration after a failed apply
+              ansible.builtin.file:
+                path: /etc/docker/daemon.json
+                state: absent
+              when: not docker_live_restore_file.stat.exists
+
+            - name: Reload the restored Docker configuration
+              ansible.builtin.command:
+                argv: [systemctl, reload, docker.service]
+              changed_when: true
+              when:
+                - docker_live_restore_running
+                - not ansible_check_mode
+                - docker_live_restore_written.changed | default(false)
+
+            - name: Report the rejected Docker live-restore change
+              ansible.builtin.fail:
+                msg: >-
+                  Docker live-restore could not be applied. The previous
+                  configuration was restored. No Docker restart was attempted.

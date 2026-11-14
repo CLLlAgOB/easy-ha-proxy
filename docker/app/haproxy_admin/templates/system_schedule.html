@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Task schedule{% endblock %}
+{% block header_title %}Task schedule{% endblock %}
+{% block content %}
+<div id="schedule-app" class="schedule-page"
+     data-updates-url="{{ url_for('system_updates.status_view') }}" data-security-url="{{ url_for('os_security.status') }}"
+     data-backups-url="{{ url_for('system_backups.schedule_view') }}" data-geoip-url="{{ url_for('routes.haproxy_geoip_status') }}"
+     data-updates-page="{{ url_for('system_updates.page') }}" data-security-page="{{ url_for('os_security.page') }}"
+     data-backups-page="{{ url_for('system_backups.page') }}" data-geoip-page="{{ url_for('routes.haproxy_geoip_page') }}">
+  <section class="card">
+    <div class="card-header"><div><h2>Next 24 hours</h2><p id="plan-period" class="text-muted" data-i18n-skip translate="no"></p></div><button type="button" class="btn btn-small" id="plan-refresh">Refresh</button></div>
+    <p>All times use the server time zone shown above. Windows and conditional tasks show when a start is allowed; busy maintenance can postpone execution.</p>
+    <p class="text-muted">The chart shows the next known start of each task.</p>
+    <div id="plan-errors" class="text-danger" role="status" data-i18n-skip translate="no"></div>
+    <div class="plan-timeline-scroll"><div id="plan-timeline" class="plan-timeline" aria-label="Scheduled tasks in the next 24 hours" data-i18n-skip translate="no"></div></div>
+    <p id="plan-empty" class="text-muted" hidden>No confirmed task starts in the next 24 hours.</p>
+    <p class="text-muted">A server reboot is conditional on Linux requiring it. Other Linux backup timers are shown separately from the panel backup schedule.</p>
+  </section>
+  <section class="card"><h2>Next starts and conditions</h2>
+    <div class="table-scroll plan-table"><table><thead><tr><th>Task</th><th>Start</th><th>Condition</th><th>Settings</th></tr></thead><tbody id="plan-rows" data-i18n-skip translate="no"></tbody></table></div>
+    <details id="plan-disabled-details" hidden><summary>Disabled or unverified schedules</summary><ul id="plan-disabled" data-i18n-skip translate="no"></ul></details>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ url_for('static', filename='js/schedule_core.js') }}"></script><script src="{{ url_for('static', filename='js/system_schedule.js') }}"></script>{% endblock %}

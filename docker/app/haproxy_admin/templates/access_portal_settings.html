@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Service site{% endblock %}
+{% block header_title %}Service site{% endblock %}
+{% block header_buttons %}<a class="btn" href="{{ url_for('access_portal.sites') }}">Service sites</a>{% endblock %}
+{% block content %}
+{% if error %}<p class="card border-error">{{ error }}</p>{% endif %}
+{% for message in messages %}<p class="card border-success">{{ message }}</p>{% endfor %}
+<section class="card service-site-identity"><h2>Service site settings</h2>
+  <p>Authelia sign-in is required. Successful authentication authorizes the visitor IP. Access rules and MFA are managed in Authelia.</p>
+  <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="save_identity"><input type="hidden" name="revision" value="{{ site_revision }}">
+    <div class="form-group"><label for="service-domain">DNS name</label><input id="service-domain" name="domain" required value="{{ site.domain }}" data-i18n-skip translate="no"></div>
+    {% if site.alt_names %}<p class="text-muted" data-i18n-skip translate="no">{{ site.alt_names|join(', ') }}</p>{% endif %}
+    <div class="form-group"><label for="service-paused">Publication</label><select id="service-paused" name="paused"><option value="false" {% if not site.paused %}selected{% endif %}>Published</option><option value="true" {% if site.paused %}selected{% endif %}>Paused</option></select></div>
+    {% if site.backend_ip and not site.servers %}
+    <div class="form-group"><label for="service-backend-ip">Backend address</label><input id="service-backend-ip" name="backend_ip" required value="{{ site.backend_ip }}" data-i18n-skip translate="no"></div>
+    <div class="form-group"><label for="service-backend-port">Backend port</label><input id="service-backend-port" name="backend_port" type="number" min="1" max="65535" required value="{{ site.backend_port }}"></div>
+    <p class="text-muted">This service site also proxies to a backend of its own, from before service sites were separated from proxy sites. Its other proxy settings are kept as they are.</p>
+    {% elif site.servers %}
+    <p class="text-muted">This service site also proxies to several backends of its own. They are kept as they are and cannot be changed in this editor.</p>
+    {% endif %}
+    <p class="text-muted">Apply the HAProxy configuration after changing the DNS name or publication state. Changing the DNS name also ensures its Authelia login rule and may restart Authelia immediately.</p>
+    {% include "_access_site_auth_note.html" %}
+    <p><span>Certificate</span>: {{ cert.short }} <a href="{{ url_for('routes.haproxy_certs_page') }}">Certificates</a></p>
+    <div class="portal-actions"><button class="btn btn-primary" type="submit">Save service site</button></div>
+  </form>
+  <details class="u-mt-4"><summary>Delete service site</summary><p>Deleting this site removes its published route after the next HAProxy configuration apply.</p><p>Its instructions and attachments stop being published at once and are removed for good after 30 days.</p><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="delete"><input type="hidden" name="revision" value="{{ site_revision }}"><button type="submit" class="btn btn-danger">Confirm deletion</button></form></details>
+</section>
+<div id="portal-editor" class="portal-editor" data-settings-url="{{ url_for('access_portal.settings', name=site.name) }}" data-upload-url="{{ url_for('access_portal.upload', name=site.name) }}">
+  <section class="card">
+    <h2 data-i18n-skip translate="no">{{ site.domain }}</h2>
+    <p>Instructions and downloads appear after signing in through Authelia. Files are stored on disk and downloaded as attachments.</p>
+    <p><a href="https://{{ site.domain }}/" target="_blank" rel="noopener noreferrer">Open access page</a></p>
+    <form id="portal-settings-form">
+      <div class="form-group"><label for="portal-language">Access-page language</label><select id="portal-language"><option value="auto">Use browser language</option>{% for language in supported_languages %}<option value="{{ language.code }}" lang="{{ language.code }}" data-i18n-skip translate="no">{{ language.label }}</option>{% endfor %}</select></div>
+      <p class="text-muted">The language applies to all built-in page messages. Your instructions and file descriptions stay as entered. Text and files are optional.</p>
+      <div class="form-group"><label for="portal-text">Instructions</label><textarea id="portal-text" rows="7" maxlength="12000" placeholder="Explain which file to choose and what to do after downloading."></textarea></div>
+      <p class="text-muted">The first save on an existing static page may require applying the HAProxy configuration. Later language, text and file changes take effect immediately. Instructions use plain text.</p>
+      <p><a href="{{ url_for('routes.haproxy_config_page') }}">Open HAProxy configuration to apply changes</a></p>
+      <div id="portal-files" class="portal-files" data-i18n-skip translate="no"></div>
+      <div class="portal-actions"><button type="submit" class="btn btn-primary" id="portal-save">Save page</button><span id="portal-status" role="status" data-i18n-skip translate="no"></span></div>
+    </form>
+  </section>
+  <section class="card"><h2>Add attachments</h2>
+    <p>Up to 10 files, 128 MiB each, 512 MiB in total. You can select several files. Uploaded files appear immediately when the block is enabled.</p>
+    <label for="portal-upload">Files</label><input id="portal-upload" type="file" multiple>
+    <p class="text-muted">For example, give the temporary client and the permanently installed agent different titles and explain when each is needed.</p>
+    <p id="portal-upload-status" role="status" data-i18n-skip translate="no"></p>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ url_for('static', filename='js/access_portal.js') }}"></script>{% endblock %}

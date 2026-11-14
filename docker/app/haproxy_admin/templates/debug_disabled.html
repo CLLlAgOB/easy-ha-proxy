@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block title %}HAProxy – Diagnostics disabled{% endblock %}
+{% block header_title %}Diagnostics disabled{% endblock %}
+
+{% block header_buttons %}
+<a class="btn" href="{{ url_for('routes.index') }}">← Home</a>
+{% endblock %}
+
+{% block content %}
+<div class="u-maxw-min-900px-100 u-m-40px-auto card" >
+  <h2>Diagnostic routes are disabled</h2>
+  <p  class="u-mt-4">
+    This is the secure default. The diagnostics button is hidden and
+    routes exposing technical data are unavailable.
+  </p>
+
+  <h3  class="u-mt-6">How to enable temporarily</h3>
+  <ol  class="u-m-12px-0-0-24px">
+    <li>
+      Add this to <code>/etc/easy-ha-proxy/vars.yml</code>:
+      <pre  class="u-mt-2">haproxy_admin_debug_routes: true</pre>
+    </li>
+    <li  class="u-mt-3">
+      Apply the current configuration:
+      <pre  class="u-mt-2">sudo easy-ha-proxy update --no-fetch</pre>
+    </li>
+  </ol>
+
+  <p  class="u-mt-5">
+    After diagnostics, set the value to <code>false</code> and run the same
+    command again.
+  </p>
+</div>
+{% endblock %}

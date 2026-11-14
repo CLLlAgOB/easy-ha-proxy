@@ -1,0 +1,419 @@
+"""Regression checks for the monitoring page and its metricsd client."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import sys
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = ROOT / "docker" / "app" / "haproxy_admin"
+sys.path.insert(0, str(ROOT / "docker" / "app"))
+
+from haproxy_admin import services_monitoring as monitoring  # noqa: E402
+from haproxy_admin.metricsd_client import MetricsdUnavailable  # noqa: E402
+
+
+class InputNormalizationTests(unittest.TestCase):
+    def test_unknown_range_falls_back_to_the_default(self):
+        self.assertEqual(monitoring.normalize_range("24h"), "24h")
+        self.assertEqual(monitoring.normalize_range("1y"), "1y")
+        self.assertEqual(monitoring.normalize_range("9999d"), monitoring.DEFAULT_RANGE)
+        self.assertEqual(monitoring.normalize_range(None), monitoring.DEFAULT_RANGE)
+        self.assertEqual(
+            monitoring.normalize_range("1h; DROP TABLE metric_1m"),
+            monitoring.DEFAULT_RANGE,
+        )
+
+    def test_unknown_chart_is_rejected_rather_than_guessed(self):
+        self.assertEqual(monitoring.normalize_chart("traffic"), "traffic")
+        self.assertEqual(monitoring.normalize_chart("TRAFFIC"), "traffic")
+        self.assertEqual(monitoring.normalize_chart("bytes_in"), "")
+        self.assertEqual(monitoring.normalize_chart(None), "")
+
+    def test_site_must_be_one_of_the_known_backends(self):
+        sites = [{"proxy": "be_shop", "label": "shop.example.com"}]
+        self.assertEqual(monitoring.normalize_site("be_shop", sites), "be_shop")
+        self.assertEqual(monitoring.normalize_site("all", sites), "")
+        self.assertEqual(monitoring.normalize_site("", sites), "")
+        self.assertEqual(monitoring.normalize_site("be_other", sites), "")
+        self.assertEqual(monitoring.normalize_site("' OR 1=1 --", sites), "")
+
+
+class DisplayNameTests(unittest.TestCase):
+    def test_backend_names_are_prettified_like_the_other_pages(self):
+        with mock.patch.object(
+            monitoring, "_load_display_map_from_cfg", return_value={}
+        ):
+            self.assertEqual(monitoring.display_name("be_shop_example_com"),
+                             "shop.example.com")
+            self.assertEqual(monitoring.display_name("fe_https"), "fe.https")
+
+    def test_a_tagged_display_name_wins(self):
+        with mock.patch.object(
+            monitoring,
+            "_load_display_map_from_cfg",
+            return_value={"be_shop": "shop.example.com, www.example.com"},
+        ):
+            self.assertEqual(
+                monitoring.display_name("be_shop"), "shop.example.com, www.example.com"
+            )
+
+
+class UnavailableTests(unittest.TestCase):
+    def test_an_unreachable_collector_produces_a_typed_payload(self):
+        payload = monitoring.unavailable_payload(
+            MetricsdUnavailable("connection refused")
+        )
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["unavailable"])
+        self.assertIn("connection refused", payload["error"])
+
+
+class SiteListTests(unittest.TestCase):
+    def test_sites_are_labelled_and_sorted(self):
+        with (
+            mock.patch.object(
+                monitoring,
+                "metricsd_sites",
+                return_value={
+                    "sites": [
+                        {"proxy": "be_zeta"},
+                        {"proxy": "be_alpha"},
+                        {"proxy": ""},
+                    ]
+                },
+            ),
+            mock.patch.object(
+                monitoring, "_load_display_map_from_cfg", return_value={}
+            ),
+        ):
+            sites = monitoring.list_sites()
+        self.assertEqual([site["proxy"] for site in sites], ["be_alpha", "be_zeta"])
+        self.assertEqual(sites[0]["label"], "alpha")
+
+
+class SummaryTests(unittest.TestCase):
+    def test_backend_entries_gain_display_labels(self):
+        with (
+            mock.patch.object(
+                monitoring,
+                "metricsd_summary",
+                return_value={
+                    "ok": True,
+                    "health": {
+                        "backends": [{"proxy": "be_shop", "state": "UP"}],
+                        "servers": [{"proxy": "be_shop", "server": "srv1", "state": "UP"}],
+                    },
+                },
+            ),
+            mock.patch.object(
+                monitoring, "_load_display_map_from_cfg", return_value={}
+            ),
+        ):
+            payload = monitoring.summary("24h", "be_shop")
+        self.assertEqual(payload["health"]["backends"][0]["label"], "shop")
+        self.assertEqual(payload["site_label"], "shop")
+
+
+class PageAssetTests(unittest.TestCase):
+    """The template and its script have to agree on ids and CSP rules."""
+
+    def setUp(self):
+        self.template = (APP_DIR / "templates" / "monitoring.html").read_text(
+            encoding="utf-8"
+        )
+        self.javascript = (APP_DIR / "static" / "js" / "monitoring.js").read_text(
+            encoding="utf-8"
+        )
+
+    def test_every_element_the_script_writes_to_exists(self):
+        referenced = set(re.findall(r'byId\("([a-z0-9-]+)"\)', self.javascript))
+        referenced |= set(re.findall(r'setText\(\s*"([a-z0-9-]+)"', self.javascript))
+        template_ids = set(re.findall(r'id="([a-z0-9-]+)"', self.template))
+        # Chart and legend ids are built from the chart name at runtime.
+        for chart in ("requests", "traffic", "responses", "latency", "connections"):
+            template_ids.discard(f"mon-plot-{chart}")
+            template_ids.discard(f"mon-legend-{chart}")
+            referenced.discard(f"mon-plot-{chart}")
+            referenced.discard(f"mon-legend-{chart}")
+        missing = sorted(referenced - template_ids)
+        self.assertEqual(missing, [], f"script writes to unknown ids: {missing}")
+
+    def test_charts_in_the_script_have_a_plot_and_legend_in_the_page(self):
+        charts = re.findall(r'name:\s*"([a-z]+)"', self.javascript)
+        self.assertEqual(
+            sorted(charts),
+            sorted([
+                "requests", "traffic", "responses", "latency", "connections",
+                "cpu", "memory", "disk", "diskio", "network", "temperature",
+                "percentiles", "refusals",
+            ]),
+        )
+        for chart in charts:
+            self.assertIn(f'id="mon-plot-{chart}"', self.template)
+            self.assertIn(f'id="mon-legend-{chart}"', self.template)
+
+    def test_charts_are_drawn_without_an_external_library(self):
+        # A strict CSP blocks third-party script hosts; the page must not need
+        # one, and must not reach for a CDN if someone adds a chart later.
+        self.assertNotIn("http://", self.javascript.replace("http://www.w3.org", ""))
+        self.assertNotIn("https://", self.javascript)
+        self.assertIn("createElementNS", self.javascript)
+        self.assertIn('"http://www.w3.org/2000/svg"', self.javascript)
+
+    def test_the_script_is_loaded_from_our_own_static_files(self):
+        self.assertIn(
+            "url_for('static', filename='js/monitoring.js')", self.template
+        )
+
+    def test_the_arithmetic_is_loaded_before_the_page_that_uses_it(self):
+        # monitoring.js reads window.EasyHaProxyMonitoring as it starts.
+        core = "url_for('static', filename='js/monitoring_core.js')"
+        page = "url_for('static', filename='js/monitoring.js')"
+        self.assertIn(core, self.template)
+        self.assertLess(self.template.index(core), self.template.index(page))
+        self.assertIn("const core = window.EasyHaProxyMonitoring;", self.javascript)
+
+    def test_numeric_readouts_are_excluded_from_dom_translation(self):
+        for element_id in (
+            "mon-rps",
+            "mon-conns",
+            "mon-traffic",
+            "mon-classes",
+            "mon-health",
+            "mon-st-db",
+            "mon-st-total",
+        ):
+            tag = re.search(rf'<[^>]+id="{element_id}"[^>]*>', self.template)
+            self.assertIsNotNone(tag, element_id)
+            self.assertIn("data-i18n-skip", tag.group(0))
+            self.assertIn('translate="no"', tag.group(0))
+
+    def test_the_ranges_offered_match_the_service_layer(self):
+        offered = set(re.findall(r'data-range="([0-9a-z]+)"', self.template))
+        # The template renders them from the service list, so the loop variable
+        # is what appears here rather than literal values.
+        self.assertEqual(offered, set())
+        self.assertIn("{% for value in ranges %}", self.template)
+        self.assertEqual(
+            monitoring.RANGES, ("1h", "6h", "24h", "7d", "30d", "90d", "1y")
+        )
+
+    def test_the_paused_and_unavailable_notices_are_present(self):
+        self.assertIn('id="mon-unavailable"', self.template)
+        self.assertIn('id="mon-paused"', self.template)
+        self.assertIn("HAProxy traffic is not affected", self.template)
+
+
+class CatalogCoverageTests(unittest.TestCase):
+    def test_every_new_ui_string_has_a_russian_translation(self):
+        catalog = json.loads(
+            (APP_DIR / "translations" / "ru" / "monitoring.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        messages = catalog["messages"]
+        javascript = (APP_DIR / "static" / "js" / "monitoring.js").read_text(
+            encoding="utf-8"
+        )
+        # Every string the script sends through the translator must resolve,
+        # either in this fragment or in one of the shared catalogs.
+        shared = set()
+        for path in (APP_DIR / "translations").rglob("*.json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data["meta"]["code"] == "ru":
+                shared |= set(data["messages"])
+        for source in re.findall(r'uiText\("([^"]+)"\)', javascript):
+            self.assertIn(source, shared, f"missing Russian translation: {source}")
+        self.assertTrue(messages)
+
+
+
+class TheAvailabilityTimelineExplainsItsTotal(unittest.TestCase):
+    """The same outage reads differently in an hour and in a day.
+
+    The unavailable total is a sum over the chosen window, so a day also
+    counts outages an hour does not reach. Drawn strictly to scale, a
+    six-minute outage in a day was two or three pixels wide: the total
+    counted it and the bar all but hid it, and the two windows looked like
+    they disagreed. Outages now keep a minimum width, and the total says
+    how many outages it is made of and whether one is still going on.
+
+    How a bar is cut into pieces, how its stripes are measured and what the
+    total is made of are tested by behaviour in
+    .tests/js/monitoring_core.test.js; here, that the page draws them.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
+        cls.page = (APP_DIR / "templates/monitoring.html").read_text(encoding="utf-8")
+        cls.styles = (APP_DIR / "static/css/pages.css").read_text(encoding="utf-8")
+        cls.render = cls.script.split("function renderTimeline(")[1].split("\n  function ")[0]
+
+    def test_an_outage_keeps_a_visible_width_and_up_time_gives_way(self):
+        self.assertRegex(self.styles, r"\.mon-span-down, \.mon-span-other \{ min-width: \d+px; \}")
+        self.assertIn('span.state === "UP" ? `1 1 ${width}%` : `0 0 ${width}%`', self.render)
+        self.assertNotIn("piece.style.width", self.render)
+
+    def test_a_run_of_short_outages_is_one_piece_drawn_to_scale(self):
+        # Sixty-nine short outages, 24 minutes in all, each kept its minimum
+        # width and painted nine hours of the bar red: a server 98% available
+        # looked 40% down.
+        self.assertIn("core.timelinePieces(entry.spans || [], window).forEach", self.render)
+        flap = self.render.split("if (part.flapping) {")[1].split("return;")[0]
+        self.assertIn('piece.className = "mon-span-flap"', flap)
+        self.assertIn("piece.style.flex = `0 0 ${(length / window) * 100}%`", flap)
+        # Red in proportion to the time really down, never none and never all.
+        self.assertIn('piece.style.setProperty("--down", `${core.flapStripe(part)}px`)', flap)
+        self.assertIn('t("outages: {count}", {count: part.outages})', flap)
+        self.assertIn("formatDuration(part.down)", flap)
+        self.assertRegex(
+            self.styles,
+            r"\.mon-span-flap \{\s*min-width: \d+px;\s*background: repeating-linear-gradient\(",
+        )
+
+    def test_each_piece_says_when_it_was(self):
+        self.assertIn("spanPeriod(span, window)", self.render)
+
+    def test_the_total_names_its_outages_and_an_ongoing_one(self):
+        self.assertIn("outageSummary(entry, until)", self.render)
+        summary = self.script.split("function outageSummary(")[1].split("\n  function ")[0]
+        self.assertIn("core.outageFacts(entry, until)", summary)
+        self.assertIn('t("outages: {count}", {count: facts.count})', summary)
+        self.assertIn('t("ongoing for")', summary)
+        self.assertIn("formatDuration(facts.ongoingSeconds)", summary)
+        # The duration is a number, not a phrase for the page translator.
+        self.assertIn('setAttribute("data-i18n-skip", "")', summary)
+
+    def test_the_new_words_are_in_russian(self):
+        catalogue = json.loads(
+            (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
+        )["messages"]
+        self.assertEqual(catalogue["outages: {count}"], "отключений: {count}")
+        self.assertEqual(catalogue["ongoing for"], "идёт сейчас")
+        self.assertEqual(catalogue["Unstable"], "Нестабильно")
+
+
+class DragAcrossAChartToZoom(unittest.TestCase):
+    """A stretch selected on a chart becomes the period every chart shows.
+
+    It is the same mechanism as typing a period into "Period...", so the
+    availability bars follow it too; each zoom remembers the one before, so
+    "Zoom out" or a double-click steps back, and a preset starts afresh.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
+        cls.page = (APP_DIR / "templates/monitoring.html").read_text(encoding="utf-8")
+
+    def section(self, name):
+        return self.script.split(f"function {name}(")[1].split("\n  function ")[0]
+
+    def test_every_chart_can_be_dragged_across(self):
+        self.assertIn("svg.__geometry = {", self.section("drawChart"))
+        self.assertIn("svg.__geometry = null;", self.section("drawEmpty"))
+        bind = self.section("bindControls")
+        self.assertIn("bindZoom(svg)", bind)
+        self.assertIn('byId("mon-zoom-out")', bind)
+        zoom = self.section("bindZoom")
+        for event in ("pointerdown", "pointermove", "pointerup", "pointercancel", "dblclick"):
+            self.assertIn(f'"{event}"', zoom)
+        # A click is not a selection; on a touch screen a tap asks for the
+        # reading at that point instead.
+        tap = zoom.split("if (right - left < 6) {")[1].split("}")[0]
+        self.assertIn("return;", tap)
+        self.assertIn("showReading(svg, event)", tap)
+        self.assertNotIn("zoomTo(", tap)
+
+    def test_the_pointer_reads_every_shown_line(self):
+        zoom = self.section("bindZoom")
+        self.assertIn('if (start === null && event.pointerType === "mouse") queueReading(svg, event);', zoom)
+        self.assertIn('"pointerleave"', zoom)
+        reading = self.section("showReading")
+        self.assertIn("core.indexAtX(geometry, local.x)", reading)
+        self.assertIn("getScreenCTM()", reading)
+        self.assertIn("drawReading(plot, ts)", reading)
+        self.assertIn("requestAnimationFrame", self.section("queueReading"))
+        self.assertIn("legendValue(dataset.spec, reading)", self.section("showTooltip"))
+        self.assertIn("core.cursorAtTime(geometry, ts)", self.section("drawReading"))
+        self.assertIn("node.dataset.summary", self.section("hideReading"))
+
+    def test_the_selection_becomes_the_shown_period_and_can_be_undone(self):
+        self.assertIn("zoomHistory.push(", self.section("zoomTo"))
+        self.assertIn("showWindow(zoomHistory.pop())", self.section("zoomOut"))
+        show = self.section("showWindow")
+        self.assertIn("customWindow = next;", show)
+        self.assertIn("loadAll();", show)
+        # Presets, a typed period and "Back to presets" start a new history.
+        self.assertEqual(self.script.count("zoomHistory.length = 0;"), 3)
+
+    def test_a_refresh_does_not_drop_a_selection_in_progress(self):
+        self.assertIn("if (inFlight || zoomDragging ||", self.section("loadAll"))
+        self.assertIn("options.refresh && sharedReading", self.section("loadAll"))
+
+    def test_the_page_offers_it_and_says_so(self):
+        self.assertIn('id="mon-zoom-out" hidden>Zoom out</button>', self.page)
+        self.assertIn("Drag across a chart to zoom in, double-click to zoom out", self.page)
+        styles = (APP_DIR / "static/css/pages.css").read_text(encoding="utf-8")
+        self.assertIn("touch-action: pan-y", styles)
+        catalogue = json.loads(
+            (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
+        )["messages"]
+        self.assertEqual(catalogue["Zoom out"], "Отдалить")
+        self.assertIn(
+            "Drag across a chart to zoom in, double-click to zoom out", catalogue
+        )
+
+
+class TheLegendDescribesThePeriodShown(unittest.TestCase):
+    """A Peak line's reading is the highest over the period, with its time.
+
+    The legend used to print the last bucket of every line, so a connections
+    chart that climbed to 44 read "Peak: 7" underneath -- the peak of the
+    final few minutes. Peak lines now read the maximum over the shown period
+    and when it was, Average lines the mean over it; counters keep their
+    latest value, and every reading says which of the three it is.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (APP_DIR / "static/js/monitoring.js").read_text(encoding="utf-8")
+
+    def test_every_peak_and_average_line_says_how_to_summarise_it(self):
+        charts = self.script.split("const CHARTS = [")[1].split("\n  ];")[0]
+        for line in charts.splitlines():
+            if 'label: "Peak"' in line:
+                self.assertIn('summary: "max"', line)
+            if 'label: "Average"' in line:
+                self.assertIn('summary: "mean"', line)
+
+    def test_the_reading_is_the_maximum_or_the_mean_not_the_last_bucket(self):
+        # The reading itself is tested by behaviour in
+        # .tests/js/monitoring_core.test.js; the legend shows it, with when.
+        legend = self.script.split("function renderLegend(")[1].split("\n  function ")[0]
+        self.assertIn("core.legendReading(spec, raw)", legend)
+        self.assertIn("points[reading.index]", legend)
+        self.assertIn("LEGEND_HINTS[spec.summary", legend)
+
+    def test_the_hints_are_in_russian(self):
+        catalogue = json.loads(
+            (APP_DIR / "translations/ru/monitoring.json").read_text(encoding="utf-8")
+        )["messages"]
+        for phrase in (
+            "Highest over the shown period",
+            "Average over the shown period",
+            "Latest value",
+        ):
+            self.assertIn(phrase, catalogue)
+            self.assertIn(phrase, self.script)
+
+
+if __name__ == "__main__":
+    unittest.main()

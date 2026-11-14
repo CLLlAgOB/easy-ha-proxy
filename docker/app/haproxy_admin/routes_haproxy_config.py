@@ -1,0 +1,2167 @@
+# routes_haproxy_config.py
+
+from flask import (
+    render_template,
+    request,
+    jsonify,
+    url_for,
+    Response,
+    send_file,
+    abort,
+    redirect,
+)
+
+from pathlib import Path
+import traceback
+import io
+import base64
+import hashlib
+import ipaddress
+import re
+import zipfile
+from datetime import datetime, timezone
+from .i18n import translate
+from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
+from .routes import bp
+from .services_haproxy_config import (
+    render_haproxy_cfg,
+    check_cfg,
+    preflight_cfg_confirmation,
+    begin_cfg_confirmation,
+    confirm_cfg_transaction,
+    rollback_cfg_transaction,
+    get_config_transaction_status,
+    candidate_request_reachable,
+    CONFIG_GENERATION_HEADER,
+    update_yaml_file,
+    StaleEntry,
+    check_entry_revision,
+    entry_revision,
+    source_lock,
+    WEBSITES_YAML,
+    TCP_YAML,
+    CONFIG_YAML,
+    _load_yaml,
+    #add_site_full,
+    get_config_diff_summary,
+    get_haproxy_configuration_state,
+    save_applied_state_strict,
+    ensure_applied_state_baseline,
+    get_server_cfg_text,
+    make_cfg_html_diff,
+    HAP_TEMPLATE,
+    HAPROXY_CFG_PATH,
+    HAPROXY_STATE_PATH,
+    HAPROXY_STATE_WEBSITES,
+    HAPROXY_STATE_TCP,
+    HAPROXY_STATE_VARS,
+    revert_to_last_applied_state,
+)
+from .services_haproxy_vars import (
+    get_acme_email,
+    get_vars_editor_model,
+    save_acme_email,
+    save_guided_vars,
+    save_raw_vars,
+    validate_admin_access_for_client,
+)
+
+from .services_haproxy_sites import (
+    add_site_minimal,
+    delete_site_by_name,
+    get_sites_and_defaults_for_ui,
+    get_site_raw_and_effective,
+    get_configured_geoip_countries,
+    save_site_raw,
+    ensure_certs_before_apply,
+    set_site_pause,
+    sync_renewal_pauses,
+)
+
+from .services_haproxy_tcp import (
+    get_tcp_proxies_list,
+    save_tcp_from_json,
+    delete_tcp_proxy,
+)
+
+
+# The site editor normally saves through JavaScript, which posts the whole site
+# as JSON. Without JavaScript the browser posts only the form controls, and a
+# site holds far more than the form can express — the backend server table and
+# the error-exclusion rules are built by script and have no form control at
+# all. So these are the only keys a plain submit is allowed to speak for;
+# everything else is carried over from the stored site untouched.
+# Certificate material is small; anything larger is not a certificate, and the
+# daemon on the other side has its own limit besides.
+MAX_CERT_UPLOAD_BYTES = 4 * 1024 * 1024
+# Buttons on the site list: action -> (site key, paused).
+PAUSE_ACTIONS = {
+    "pause": ("paused", True),
+    "resume": ("paused", False),
+    "pause_renewal": ("cert_renewal_paused", True),
+    "resume_renewal": ("cert_renewal_paused", False),
+}
+
+FORM_TEXT_FIELDS = ("backend_host", "health_uri", "hsts")
+FORM_NUMBER_FIELDS = ("max_req_rate", "health_status")
+FORM_TRISTATE_FIELDS = (
+    "redirect_to_https",
+    "authelia_enabled",
+    "zero_trust",
+    "backend_ssl",
+    "backend_ssl_verify",
+    "maintenance",
+    "rate_ban",
+    "compress",
+)
+# Everything above is a select, a text/number input, a textarea or a radio, so
+# the browser submits it whether or not it has a value. That is what makes
+# "the control is present" a usable signal. A checkbox is absent when it is
+# unchecked, which would be indistinguishable from a form that never carried
+# it, so no checkbox-backed key (key_types, and the tables) is handled here.
+
+
+def merge_site_from_edit_form(name, existing, form):
+    """Overlay a plain HTML form submission onto the stored site.
+
+    Returns ``(site, error)``. The stored site is the base: a form control that
+    was submitted wins, and an empty one clears its key so the site_defaults
+    value applies again. A key with no control in the submission is left alone
+    rather than dropped, which is what keeps a non-JavaScript save from
+    silently reverting the certificate source, the key types or the backend
+    server list.
+    """
+    domain = (form.get("domain") or "").strip()
+    backend_ip = (form.get("backend_ip") or "").strip()
+    backend_port_str = (form.get("backend_port") or "").strip()
+
+    if not domain or not backend_ip or not backend_port_str:
+        return {}, 'The domain, backend_ip, and backend_port fields are required'
+    try:
+        backend_port = int(backend_port_str)
+    except ValueError:
+        return {}, 'backend_port must be a number'
+    if not (1 <= backend_port <= 65535):
+        return {}, 'backend_port must be between 1 and 65535'
+
+    site = dict(existing or {})
+    site["name"] = name
+    site["domain"] = domain
+    site["backend_ip"] = backend_ip
+    site["backend_port"] = backend_port
+
+    if "alt_names" in form:
+        alt_names = [
+            line.strip()
+            for line in (form.get("alt_names") or "").splitlines()
+            if line.strip()
+        ]
+        if alt_names:
+            site["alt_names"] = alt_names
+        else:
+            site.pop("alt_names", None)
+
+    # A saved profile is the only switch for DNS-01, so choosing HTTP-01 has to
+    # drop it — and with it the wildcard names that only DNS-01 could validate.
+    if "acme_challenge" in form:
+        profile = ""
+        if (form.get("acme_challenge") or "").strip() == "dns-01":
+            profile = (form.get("dns_profile") or "").strip()
+        if profile:
+            site["dns_profile"] = profile
+            extra = [
+                line.strip()
+                for line in (form.get("cert_alt_names") or "").splitlines()
+                if line.strip()
+            ]
+            if extra:
+                site["cert_alt_names"] = extra
+            else:
+                site.pop("cert_alt_names", None)
+        else:
+            site.pop("dns_profile", None)
+            site.pop("cert_alt_names", None)
+
+    if "allow_ips" in form:
+        entries = [
+            value.strip()
+            for value in re.split(r"[,;\s]+", form.get("allow_ips") or "")
+            if value.strip()
+        ]
+        if entries:
+            site["allow_ips"] = entries
+        else:
+            site.pop("allow_ips", None)
+
+    # Two controls, one setting: the authority is meaningless without a mode
+    # and a mode is refused without an authority, so they move together.
+    if "mtls_mode" in form:
+        mode = (form.get("mtls_mode") or "").strip()
+        if mode in ("optional", "required"):
+            site["mtls_mode"] = mode
+            site["mtls_ca_id"] = (form.get("mtls_ca_id") or "").strip().lower()
+        else:
+            site.pop("mtls_mode", None)
+            site.pop("mtls_ca_id", None)
+
+    # Two-way selects: "true" pauses, anything else resumes.
+    for field in ("paused", "cert_renewal_paused"):
+        if field not in form:
+            continue
+        if (form.get(field) or "").strip() == "true":
+            site[field] = True
+        else:
+            site.pop(field, None)
+
+    for field in FORM_TRISTATE_FIELDS:
+        if field not in form:
+            continue
+        value = (form.get(field) or "").strip()
+        if value == "true":
+            site[field] = True
+        elif value == "false":
+            site[field] = False
+        else:
+            site.pop(field, None)
+
+    for field in FORM_NUMBER_FIELDS:
+        if field not in form:
+            continue
+        value = (form.get(field) or "").strip()
+        if not value:
+            site.pop(field, None)
+            continue
+        try:
+            site[field] = int(value)
+        except ValueError:
+            return {}, f"{field} must be a number"
+
+    for field in FORM_TEXT_FIELDS:
+        if field not in form:
+            continue
+        value = (form.get(field) or "").strip()
+        if value:
+            site[field] = value
+        else:
+            site.pop(field, None)
+
+    return site, ""
+
+
+def _client_trust_sites(res):
+    """The sites certd named as still asking for the CA's client certificates.
+
+    Quoted, so a translated refusal stays whole around them.
+    """
+    sites = (res.get("client_trust") or {}).get("sites") or []
+    if not sites:
+        return ""
+    return (" Sites that ask for its client certificates: "
+            + ", ".join(repr(str(name)) for name in sites) + ".")
+
+
+def _available_dns_profiles():
+    """DNS-01 profiles offered by the site editor.
+
+    certd being unreachable must not break the editor, so the list degrades to
+    empty and the site keeps whatever profile it already references.
+    """
+    from .certd_client import CertdUnavailable, dns_providers_list
+
+    try:
+        data = dns_providers_list()
+    except CertdUnavailable:
+        return []
+    profiles = data.get("profiles")
+    if not isinstance(profiles, list):
+        return []
+    return [
+        entry
+        for entry in profiles
+        if isinstance(entry, dict) and entry.get("name")
+    ]
+
+
+def _trusted_client_ip() -> str:
+    """Return the edge client IP after the trusted HAProxy header rewrite."""
+    raw = str(request.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        return ""
+
+
+@bp.get("/haproxy/config/preview")
+def haproxy_config_preview():
+    """
+    The old endpoint, kept as it is:
+    returns the rendered haproxy.cfg as plain text.
+    """
+    cfg_text = render_haproxy_cfg()
+    return Response(cfg_text, mimetype="text/plain")
+
+
+@bp.get("/haproxy/config/download-cfg/<source>")
+def haproxy_download_cfg(source):
+    """
+    Download haproxy.cfg:
+      - source="rendered" -- rendered from the templates (what would be applied now)
+      - source="server"   -- the live /etc/haproxy/haproxy.cfg
+    """
+    if source == "rendered":
+        try:
+            cfg_text = render_haproxy_cfg()
+        except Exception as e:  # pylint: disable=broad-except
+            traceback.print_exc()
+            return Response(
+                f"Failed to generate configuration: {e}",
+                status=500,
+                mimetype="text/plain",
+            )
+        filename = "haproxy-rendered.cfg"
+
+    elif source == "server":
+        try:
+            cfg_text = HAPROXY_CFG_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return Response(
+                f"File {HAPROXY_CFG_PATH} was not found on the server",
+                status=404,
+                mimetype="text/plain",
+            )
+        except OSError as e:  # pylint: disable=broad-except
+            traceback.print_exc()
+            return Response(
+                f"Failed to read {HAPROXY_CFG_PATH}: {e}",
+                status=500,
+                mimetype="text/plain",
+            )
+        filename = "haproxy-server.cfg"
+
+    else:
+        abort(404)
+
+    resp = Response(cfg_text, mimetype="text/plain")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.get("/haproxy/config/download-all")
+def haproxy_download_all_configs():
+    """
+    Zips up the main HAProxy configuration files:
+      - /etc/haproxy/haproxy.cfg
+      - the haproxy.cfg.j2 template
+      - websites.yml / tcp.yml / vars.yml
+      - the snapshots of the last apply, if any
+    """
+    buf = io.BytesIO()
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+
+        def add(path: Path, arcname: str) -> None:
+            try:
+                if path.exists():
+                    zf.write(path, arcname)
+            except OSError:
+                # if one file cannot be read, the rest are still sent
+                pass
+
+        # The main configuration files
+        add(HAPROXY_CFG_PATH, "haproxy/haproxy.cfg")
+        add(HAP_TEMPLATE, "haproxy/haproxy.cfg.j2")
+
+        add(WEBSITES_YAML, "haproxy/websites.yml")
+        add(TCP_YAML, "haproxy/tcp.yml")
+        add(CONFIG_YAML, "haproxy/vars.yml")
+
+        # Snapshots of the last applied state
+        add(HAPROXY_STATE_PATH, "haproxy/last_applied_state.json")
+        add(HAPROXY_STATE_WEBSITES, "haproxy/last_applied_websites.yml")
+        add(HAPROXY_STATE_TCP, "haproxy/last_applied_tcp.yml")
+        add(HAPROXY_STATE_VARS, "haproxy/last_applied_vars.yml")
+
+    buf.seek(0)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"haproxy-configs-{ts}.zip"
+
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/zip",
+        max_age=0,
+    )
+
+
+@bp.get("/haproxy/config/diff")
+def haproxy_config_diff():
+    """
+    JSON with the diff:
+      - rendered_cfg: the current render from the templates
+      - server_cfg: the real /etc/haproxy/haproxy.cfg
+      - html_diff: the side-by-side HTML diff table
+      - diff_summary: a summary of the changes (for the status strip)
+    """
+    try:
+        rendered = render_haproxy_cfg()
+        server_cfg = get_server_cfg_text()
+        html_diff = make_cfg_html_diff(server_cfg, rendered)
+        summary = get_config_diff_summary(rendered)
+
+        return jsonify(
+            {
+                "ok": True,
+                "rendered_cfg": rendered,
+                "server_cfg": server_cfg,
+                "html_diff": html_diff,
+                "diff_summary": summary,
+            }
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        traceback.print_exc()
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"Failed to build diff: {e}",
+                }
+            ),
+            500,
+        )
+
+
+@bp.get("/haproxy/config/state")
+def haproxy_configuration_state():
+    """Return an aggregate status for the shared superadmin indicator."""
+    try:
+        return jsonify(get_haproxy_configuration_state())
+    except Exception:  # pylint: disable=broad-except
+        # Configuration contents and daemon diagnostics must not be reflected
+        # into a page-wide polling endpoint.
+        traceback.print_exc()
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "state": "unknown",
+                    "status_available": False,
+                    "pending": False,
+                    "error": "Configuration status is unavailable",
+                }
+            ),
+            503,
+        )
+
+
+@bp.route("/haproxy/config", methods=["GET"])
+def haproxy_config_page():
+    """
+    The page:
+      - whether the configuration on the server matches or differs
+      - a summary of the sites/tcp/vars changes since the last apply
+      - the haproxy.cfg preview/diff (behind a button, hidden by default)
+      - the "Check" / "Apply" buttons
+      - the YAML upload forms
+    """
+    error = None
+    cfg_text = ""
+    diff_summary = None
+    vars_sections = []
+    vars_yaml = ""
+    vars_revision = ""
+
+    try:
+        cfg_text = render_haproxy_cfg()
+        try:
+            ensure_applied_state_baseline(cfg_text)
+        except Exception:  # pylint: disable=broad-except
+            traceback.print_exc()
+        try:
+            diff_summary = get_config_diff_summary(cfg_text)
+        except Exception:  # pylint: disable=broad-except
+            traceback.print_exc()
+            diff_summary = None
+    except Exception as e:  # pylint: disable=broad-except
+        error = f"Configuration generation error: {e}"
+
+    try:
+        vars_model = get_vars_editor_model()
+        vars_sections = vars_model["sections"]
+        vars_yaml = vars_model["yaml"]
+        vars_revision = vars_model["revision"]
+    except Exception as exc:  # pylint: disable=broad-except
+        traceback.print_exc()
+        if error:
+            error = f"{error}\nvars.yml editor error: {exc}"
+        else:
+            error = f"vars.yml editor error: {exc}"
+
+    return render_template(
+        "haproxy_config.html",
+        cfg_text=cfg_text,
+        error=error,
+        diff_summary=diff_summary,
+        vars_sections=vars_sections,
+        vars_yaml=vars_yaml,
+        vars_revision=vars_revision,
+        admin_client_ip=_trusted_client_ip(),
+    )
+
+
+@bp.route("/haproxy/config/check", methods=["POST"])
+def haproxy_config_check():
+    """
+    Checks the current rendered configuration with haproxy -c.
+    Returns JSON.
+    """
+    try:
+        cfg_text = render_haproxy_cfg()
+    except Exception as e:  # pylint: disable=broad-except
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"Failed to generate configuration: {e}",
+                    "stdout": "",
+                    "stderr": "",
+                    "rc": None,
+                }
+            ),
+            500,
+        )
+
+    try:
+        config_vars = _load_yaml(CONFIG_YAML)
+        if not isinstance(config_vars, dict):
+            raise ValueError("The candidate vars.yml root must be a mapping")
+        validate_admin_access_for_client(config_vars, _trusted_client_ip())
+    except ValueError as exc:
+        return jsonify(
+            {
+                "ok": False,
+                "error": str(exc),
+                "rc": None,
+                "stdout": "",
+                "stderr": str(exc),
+            }
+        ), 400
+
+    rc, stdout, stderr = check_cfg(cfg_text)
+    ok = rc == 0
+
+    return (
+        jsonify(
+            {
+                "ok": ok,
+                "rc": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        ),
+        200 if ok else 400,
+    )
+
+
+@bp.route("/haproxy/config/apply", methods=["POST"])
+def haproxy_config_apply():
+    """
+    Begin a confirmable HAProxy/YAML transaction.
+
+    The root daemon performs validation, reload and immediate critical-service
+    probes, then keeps the candidate pending. The browser must confirm through
+    the normal frontend before the server-side deadline or everything is
+    restored automatically.
+    """
+    try:
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "The apply request must be a JSON object",
+                    "error_code": "invalid_apply_request",
+                }
+            ), 400
+        allow_external_drift = payload.get("allow_external_drift") is True
+        expected_active_sha256 = str(
+            payload.get("active_cfg_sha256") or ""
+        ).strip().lower()
+        if allow_external_drift and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_active_sha256
+        ):
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "A valid active HAProxy configuration hash is required",
+                    "error_code": "invalid_apply_request",
+                }
+            ), 400
+
+        cfg_text = render_haproxy_cfg()
+        config_vars = _load_yaml(CONFIG_YAML)
+        if not isinstance(config_vars, dict):
+            raise ValueError("The candidate vars.yml root must be a mapping")
+        try:
+            validate_admin_access_for_client(config_vars, _trusted_client_ip())
+        except ValueError as exc:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": "admin_ip_lockout_risk",
+                    "stdout": "",
+                    "stderr": "",
+                }
+            ), 400
+        preflight_result = preflight_cfg_confirmation(
+            cfg_text,
+            allow_external_drift=allow_external_drift,
+            expected_active_sha256=expected_active_sha256,
+        )
+        if not preflight_result.get("ok"):
+            drift_confirmation_required = bool(
+                preflight_result.get("external_drift_confirmation_required")
+            )
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": preflight_result.get("error"),
+                    "error_code": preflight_result.get("error_code"),
+                    "stdout": preflight_result.get("stdout") or "",
+                    "stderr": preflight_result.get("stderr") or "",
+                    "external_drift_confirmation_required": (
+                        drift_confirmation_required
+                    ),
+                    "active_cfg_sha256": preflight_result.get(
+                        "active_cfg_sha256"
+                    ),
+                }
+            ), 409 if drift_confirmation_required else 400
+
+        # Every apply restates the paused renewals, so a pause that could not
+        # be passed on when it was set -- certd restarting, say -- is not lost.
+        sync_renewal_pauses()
+        cert_res = ensure_certs_before_apply()
+        if not cert_res.get("ok"):
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": 'Failed to issue certificates for some sites',
+                    "cert_details": cert_res,
+                    "stdout": "",
+                    "stderr": "",
+                }
+            ), 200
+
+        apply_result = begin_cfg_confirmation(
+            cfg_text,
+            allow_external_drift=allow_external_drift,
+            expected_active_sha256=expected_active_sha256,
+        )
+        ok = bool(apply_result.get("ok"))
+        stdout = str(apply_result.get("stdout") or "")
+        stderr = str(apply_result.get("stderr") or "")
+        state = str(
+            apply_result.get("state") or apply_result.get("status") or ""
+        ).lower()
+        pending_confirmation = ok and state in {
+            "pending",
+            "pending_confirmation",
+        }
+
+        try:
+            diff_summary = get_config_diff_summary(cfg_text)
+        except Exception:  # pylint: disable=broad-except
+            traceback.print_exc()
+            diff_summary = None
+
+        # An apply is the moment the running gateway changes, so it is recorded
+        # even while it is only pending: the confirmation and the automatic
+        # rollback are separate events with their own records.
+        record_request(
+            "config.apply",
+            object_type="haproxy",
+            object_id=str(
+                apply_result.get("transaction_id") or apply_result.get("id") or ""
+            ),
+            result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+            summary=(
+                f"state: {state or 'applied'}"
+                + (", external drift overridden"
+                   if apply_result.get("external_drift_overridden") else "")
+            ),
+            detail="" if ok else str(
+                apply_result.get("error") or stderr or ""
+            )[:500],
+        )
+
+        return (
+            jsonify(
+                {
+                    "ok": ok,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "error": "" if ok else (
+                        apply_result.get("error")
+                        or 'HAProxy confirmable apply failed (see stderr)'
+                    ),
+                    "error_code": apply_result.get("error_code"),
+                    "baseline_source": apply_result.get("baseline_source"),
+                    "baseline_reconciled": bool(
+                        apply_result.get("baseline_reconciled")
+                    ),
+                    "external_drift_confirmation_required": bool(
+                        apply_result.get("external_drift_confirmation_required")
+                    ),
+                    "active_cfg_sha256": apply_result.get("active_cfg_sha256"),
+                    "external_drift_overridden": bool(
+                        apply_result.get("external_drift_overridden")
+                    ),
+                    "safety": apply_result.get("safety") or apply_result,
+                    "state": state,
+                    "pending_confirmation": pending_confirmation,
+                    "transaction_id": (
+                        apply_result.get("transaction_id")
+                        or apply_result.get("id")
+                    ),
+                    "candidate_sha256": apply_result.get("candidate_sha256"),
+                    "confirm_by": (
+                        apply_result.get("confirm_by")
+                        or apply_result.get("deadline")
+                    ),
+                    "remaining_seconds": apply_result.get("remaining_seconds"),
+                    "diff_summary": diff_summary,
+                }
+            ),
+            202 if pending_confirmation else (
+                200 if ok else (
+                    409
+                    if apply_result.get("external_drift_confirmation_required")
+                    else 400
+                )
+            ),
+        )
+
+    except Exception as e:  # pylint: disable=broad-except
+        traceback.print_exc()
+        record_request(
+            "config.apply",
+            object_type="haproxy",
+            result=RESULT_FAILURE,
+            detail=str(e)[:500],
+        )
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"Failed to apply configuration: {e}",
+                    "stdout": "",
+                    "stderr": "",
+                }
+            ),
+            500,
+        )
+
+
+@bp.get("/haproxy/config/apply-status")
+def haproxy_config_apply_status():
+    transaction_id = str(request.args.get("transaction_id") or "").strip()
+    result = get_config_transaction_status(transaction_id)
+    state = str(result.get("state") or result.get("status") or "").lower()
+    result["candidate_reachable"] = bool(
+        state in {"pending", "pending_confirmation"}
+        and candidate_request_reachable(
+            transaction_id,
+            request.headers.get(CONFIG_GENERATION_HEADER, ""),
+        )
+    )
+    return jsonify(result), 200 if result.get("ok") else 409
+
+
+@bp.post("/haproxy/config/confirm")
+def haproxy_config_confirm():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Invalid confirmation request"}), 400
+    transaction_id = str(payload.get("transaction_id") or "").strip()
+    candidate_sha256 = str(payload.get("candidate_sha256") or "").strip()
+    if not candidate_request_reachable(
+        transaction_id,
+        request.headers.get(CONFIG_GENERATION_HEADER, ""),
+    ):
+        return jsonify(
+            {
+                "ok": False,
+                "state": "pending_confirmation",
+                "pending": True,
+                "conflict": True,
+                "retryable": True,
+                "candidate_reachable": False,
+                "error": (
+                    "Waiting for a fresh connection through the candidate "
+                    "HAProxy configuration"
+                ),
+            }
+        ), 409
+    result = confirm_cfg_transaction(transaction_id, candidate_sha256)
+    state = str(result.get("state") or result.get("status") or "").lower()
+    if not result.get("ok") or state != "confirmed":
+        record_request(
+            "config.confirm",
+            object_type="haproxy",
+            object_id=transaction_id,
+            result=RESULT_FAILURE,
+            summary=f"state: {state or 'unknown'}",
+            detail=str(result.get("error") or "")[:500],
+        )
+        return jsonify(result), 409
+
+    warnings = []
+    try:
+        cfg_text = render_haproxy_cfg()
+        rendered_sha256 = hashlib.sha256(cfg_text.encode("utf-8")).hexdigest()
+        if rendered_sha256 != candidate_sha256.lower():
+            raise RuntimeError(
+                "The confirmed HAProxy config no longer matches the runtime YAML"
+            )
+
+        # GeoIP selection/ACL activation, the HAProxy reload, and critical
+        # probes all completed inside the root transaction before the browser
+        # received the confirmation prompt. Confirmation is deliberately a
+        # commit-only operation and must never trigger another reload.
+        save_applied_state_strict(cfg_text)
+    except Exception as exc:  # pylint: disable=broad-except
+        traceback.print_exc()
+        warnings.append(
+            "The configuration is confirmed and remains active, but its "
+            f"applied-state snapshot could not be saved: {exc}"
+        )
+
+    record_request(
+        "config.confirm",
+        object_type="haproxy",
+        object_id=transaction_id,
+        summary="; ".join(warnings) if warnings else "",
+    )
+
+    response = dict(result)
+    response["ok"] = True
+    response["state"] = "confirmed"
+    response["message"] = "Configuration confirmed and kept"
+    if warnings:
+        response["warnings"] = warnings
+        response["warning"] = warnings[0]
+    return jsonify(response), 200
+
+
+@bp.post("/haproxy/config/rollback-pending")
+def haproxy_config_rollback_pending():
+    payload = request.get_json(silent=True) or {}
+    transaction_id = str(payload.get("transaction_id") or "").strip()
+    result = rollback_cfg_transaction(transaction_id)
+    state = str(result.get("state") or result.get("status") or "").lower()
+    rolled_back = state == "rolled_back" and bool(result.get("ok"))
+    record_request(
+        "config.rollback",
+        object_type="haproxy",
+        object_id=transaction_id,
+        result=RESULT_SUCCESS if rolled_back else RESULT_FAILURE,
+        summary=f"state: {state or 'unknown'}",
+        detail="" if rolled_back else str(result.get("error") or "")[:500],
+    )
+    return jsonify(result), 200 if rolled_back else 409
+
+
+@bp.route("/haproxy/config/upload", methods=["POST"])
+def haproxy_config_upload():
+    """
+    Uploads one of the YAML files:
+      kind in {websites, tcp, vars}
+      file -- .yml/.yaml
+
+    Answer: JSON {ok: bool, message|error: str}
+    (always 200, so HAProxy does not replace the body)
+    """
+    kind = request.form.get("kind")
+    file = request.files.get("file")
+
+    if not kind:
+        return jsonify({"ok": False, "error": "The kind parameter is required"}), 200
+    if not file or file.filename == "":
+        return jsonify({"ok": False, "error": 'No file supplied'}), 200
+
+    content = file.read().decode("utf-8", errors="replace")
+
+    try:
+        ok, msg = update_yaml_file(kind, content)
+    except Exception as e:  # pylint: disable=broad-except
+        traceback.print_exc()
+        record_request(
+            "config.upload",
+            object_type="yaml",
+            object_id=str(kind),
+            result=RESULT_FAILURE,
+            detail=str(e)[:500],
+        )
+        return jsonify(
+            {
+                "ok": False,
+                "error": f"File update error: {e}",
+            }
+        ), 200
+
+    # A whole-file replacement can change every site at once, so the record
+    # notes the size rather than the contents.
+    record_request(
+        "config.upload",
+        object_type="yaml",
+        object_id=str(kind),
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        summary=f"bytes: {len(content.encode('utf-8'))}",
+        detail="" if ok else str(msg)[:500],
+    )
+
+    return (
+        jsonify(
+            {
+                "ok": ok,
+                ("message" if ok else "error"): msg,
+            }
+        ),
+        200,
+    )
+
+
+@bp.post("/haproxy/config/vars")
+def haproxy_config_save_vars():
+    payload = request.get_json(silent=True) or {}
+    values = payload.get("values")
+    result = save_guided_vars(
+        values,
+        str(payload.get("revision") or ""),
+        client_ip=_trusted_client_ip(),
+    )
+    record_request(
+        "vars.update",
+        object_type="haproxy",
+        object_id="vars.yml",
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary=(
+            "fields: " + ", ".join(sorted(str(k) for k in values))
+            if isinstance(values, dict)
+            else "guided editor"
+        ),
+        detail="" if result.get("ok") else str(result.get("error") or "")[:500],
+    )
+    status = 200 if result.get("ok") else (409 if result.get("conflict") or result.get("pending") else 400)
+    return jsonify(result), status
+
+
+@bp.post("/haproxy/config/vars/raw")
+def haproxy_config_save_vars_raw():
+    payload = request.get_json(silent=True) or {}
+    content = payload.get("content")
+    result = save_raw_vars(
+        content,
+        str(payload.get("revision") or ""),
+    )
+    # vars.yml holds the ACME email and other settings but no secrets of its
+    # own; even so only the size is recorded, never the text.
+    record_request(
+        "vars.update",
+        object_type="haproxy",
+        object_id="vars.yml",
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary="raw editor, bytes: %d" % len(str(content or "").encode("utf-8")),
+        detail="" if result.get("ok") else str(result.get("error") or "")[:500],
+    )
+    status = 200 if result.get("ok") else (409 if result.get("conflict") or result.get("pending") else 400)
+    return jsonify(result), status
+
+
+@bp.post("/haproxy/config/revert")
+def haproxy_config_revert():
+    """
+    Rolls websites.yml/tcp.yml/vars.yml back to the last applied state,
+    using the last_applied_*.yml files that save_applied_state_strict keeps.
+    """
+    try:
+        ok, msg = revert_to_last_applied_state()
+    except Exception as e:  # pylint: disable=broad-except
+        traceback.print_exc()
+        record_request(
+            "config.revert",
+            object_type="haproxy",
+            result=RESULT_FAILURE,
+            detail=str(e)[:500],
+        )
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"Revert error: {e}",
+                }
+            ),
+            500,
+        )
+
+    record_request(
+        "config.revert",
+        object_type="haproxy",
+        result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+        summary="restored the last applied websites/tcp/vars",
+        detail="" if ok else str(msg)[:500],
+    )
+
+    return (
+        jsonify(
+            {
+                "ok": ok,
+                ("message" if ok else "error"): msg,
+            }
+        ),
+        200,
+    )
+
+
+@bp.get("/haproxy/config/download/<kind>")
+def haproxy_config_download(kind):
+    """
+    Downloads one of the YAML files:
+      kind: websites | tcp | vars
+    The paths come from services_haproxy_config, so the logic is not repeated.
+    """
+    mapping = {
+        "websites": WEBSITES_YAML,
+        "tcp": TCP_YAML,
+        "vars": CONFIG_YAML,
+    }
+
+    path = mapping.get(kind)
+    if path is None:
+        abort(404)
+
+    path = path.resolve()
+
+    if not path.exists():
+        # A clear error is better than a 500 with a traceback
+        return Response(
+            f"File {path} was not found on the server",
+            status=404,
+            mimetype="text/plain",
+        )
+
+    return send_file(
+        path,
+        as_attachment=True,
+        download_name=path.name,
+        mimetype="text/yaml",
+        max_age=0,
+    )
+
+
+# ───── The list of sites (HTTP) ─────────────────────────────
+@bp.route("/haproxy/sites", methods=["GET", "POST"])
+def haproxy_sites_page():
+    """
+    The list of HTTP sites and a simple form to add one:
+
+    - only the fields domain, backend_ip, backend_port;
+    - after a successful add, straight to /haproxy/sites/<domain>/edit;
+    - action=delete is supported for old forms (if anything still uses it).
+    """
+    error = None
+    message = None
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "add").strip()
+
+        # ─── Pause or resume publication / certificate renewal ───────────────
+        if action in PAUSE_ACTIONS:
+            name = (request.form.get("name") or "").strip()
+            key, paused = PAUSE_ACTIONS[action]
+            ok, msg = set_site_pause(name, key, paused) if name else (
+                False, "Site name is required"
+            )
+            record_request(
+                f"site.{action}",
+                object_type="site",
+                object_id=name,
+                result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                detail="" if ok else str(msg)[:500],
+            )
+            if not ok:
+                error = msg
+            elif key == "paused":
+                message = (
+                    "Publication paused. Apply the configuration to take the site off HAProxy."
+                    if paused
+                    else "Publication resumed. Apply the configuration to serve the site again."
+                )
+            else:
+                synced = sync_renewal_pauses()
+                message = (
+                    "Certificate renewal paused."
+                    if paused
+                    else "Certificate renewal resumed."
+                )
+                if not synced.get("ok"):
+                    message += (
+                        " The certificate service could not be told yet: "
+                        + str(synced.get("error") or "unknown error")
+                        + ". It will be told on the next apply."
+                    )
+                elif paused and synced.get("without_lineage"):
+                    message += (
+                        " No certificate of its own was found for it here, so there"
+                        " is nothing for certbot to skip."
+                    )
+
+        # ─── Deleting a site (should a request still come from somewhere) ───────────────────
+        elif action == "delete":
+            name = (request.form.get("name") or "").strip()
+            if not name:
+                error = 'Site name is required for deletion'
+            else:
+                ok, msg = delete_site_by_name(name)
+                record_request(
+                    "site.delete",
+                    object_type="site",
+                    object_id=name,
+                    result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                    detail="" if ok else str(msg)[:500],
+                )
+                if ok:
+                    message = msg
+                else:
+                    error = msg
+
+        # ─── Adding a site (the short form) ─────────────────────────────
+        else:
+            domain = (request.form.get("domain") or "").strip()
+            site_type = (request.form.get("site_type") or "normal").strip()
+            backend_ip = (request.form.get("backend_ip") or "").strip()
+            backend_port_str = (request.form.get("backend_port") or "").strip()
+
+            # An access gate is an Authelia-protected site with no upstream that
+            # authorizes the visitor IP and serves a static welcome page. It is
+            # Legacy forms may still select site_type=gate explicitly. New
+            # service sites have their own page; an empty proxy is an error.
+            is_gate = site_type == "gate"
+            if is_gate:
+                backend_ip = ""
+                backend_port_str = ""
+            if not domain:
+                error = 'The Domain field is required'
+            elif is_gate:
+                pass
+            elif not backend_ip or not backend_port_str:
+                error = 'Backend IP and port are required for a proxy site. Use Service sites for a login page.'
+            else:
+                # Validate the port here, so the message is a human one
+                try:
+                    backend_port = int(backend_port_str)
+                except ValueError:
+                    error = 'Port must be a number'
+                else:
+                    if not (1 <= backend_port <= 65535):
+                        error = 'Port must be between 1 and 65535'
+
+            if not error:
+                # IMPORTANT: add_site_minimal expects (name, domain, backend_ip, backend_port)
+                # name = domain
+                ok, msg = add_site_minimal(
+                    domain,           # name
+                    domain,           # domain
+                    backend_ip,
+                    backend_port_str  # a string, as add_site_minimal expects
+                )
+                record_request(
+                    "site.create",
+                    object_type="site",
+                    object_id=domain,
+                    result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                    summary=(
+                        "access gate"
+                        if is_gate
+                        else f"backend: {backend_ip}:{backend_port_str}"
+                    ),
+                    detail="" if ok else str(msg)[:500],
+                )
+                if ok:
+                    # go straight to editing this site
+                    return redirect(url_for("routes.haproxy_site_edit", name=domain))
+                else:
+                    error = msg
+
+    # GET, or an error on POST: show the list and the form
+    config_vars = _load_yaml(CONFIG_YAML)
+    if not isinstance(config_vars, dict):
+        config_vars = {}
+
+    site_defaults, sites = get_sites_and_defaults_for_ui()
+    return render_template(
+        "haproxy_sites.html",
+        sites=[item for item in sites if item['effective'].get('access_gate') is not True],
+        site_defaults=site_defaults,
+        config_vars=config_vars,
+        error=error,
+        message=message,
+    )
+
+
+@bp.get("/haproxy/mail")
+def mail_settings_page():
+    """Email delivery settings shared by Authelia and certificate hooks."""
+    return render_template("mail_settings.html")
+
+
+@bp.get("/haproxy/certs/api/acme-email")
+def acme_email_view():
+    try:
+        return jsonify(get_acme_email())
+    except Exception as exc:  # pylint: disable=broad-except
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@bp.post("/haproxy/certs/api/acme-email")
+def acme_email_save():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"email", "revision"}:
+        return jsonify(
+            {
+                "ok": False,
+                "validation_error": True,
+                "error": "email and revision are required",
+            }
+        ), 400
+    try:
+        result = save_acme_email(payload.get("email"), payload.get("revision"))
+    except Exception as exc:  # pylint: disable=broad-except
+        traceback.print_exc()
+        record_request(
+            "acme_email.update",
+            object_type="haproxy",
+            object_id="acme_email",
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    # The address itself is operator-supplied contact data, so the record notes
+    # that it changed rather than to what.
+    record_request(
+        "acme_email.update",
+        object_type="haproxy",
+        object_id="acme_email",
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary="address: changed" if result.get("ok") else "",
+        detail="" if result.get("ok") else str(result.get("error") or "")[:500],
+    )
+    if result.get("ok"):
+        status = 200
+    elif result.get("conflict") or result.get("pending"):
+        status = 409
+    elif result.get("validation_error"):
+        status = 400
+    else:
+        status = 500
+    return jsonify(result), status
+
+
+@bp.route("/haproxy/certs", methods=["GET", "POST"])
+def haproxy_certs_page():
+    """
+    The HTML page with the list of certificates and their delete buttons.
+
+    Every operation (reading directories, deleting files, certbot delete)
+    is done by the root service haproxy-certd.
+    """
+    from .certd_client import (
+        list_all_certs,
+        delete_haproxy_cert,
+        delete_le_cert,
+        delete_external_ca,
+        delete_internal_ca,
+        ensure_internal_ca,
+        issue_internal_cert_for_domain,
+        rotate_internal_ca,
+        set_client_auth_cas,
+        set_revoked_client_certificates,
+        upload_external_ca,
+        list_standby_certificates,
+        store_standby_certificate,
+        activate_standby_certificate,
+        delete_standby_certificate,
+        release_to_letsencrypt,
+        store_standby_for_covered_names,
+        adopt_deployed_as_standby,
+    )
+
+    message = None
+    error = None
+
+    # Every certificate action below ends in one audit record. Uploaded bytes,
+    # CA private keys and confirmation phrases never reach it — only which
+    # action ran, against what, and whether it worked.
+    CERT_AUDIT_ACTIONS = {
+        "delete_haproxy": ("certificate.delete", "certificate"),
+        "delete_le": ("certificate.delete", "letsencrypt"),
+        "create_internal_ca": ("ca.create", "internal_ca"),
+        "issue_internal_cert": ("certificate.issue", "certificate"),
+        "rotate_internal_ca": ("ca.rotate", "internal_ca"),
+        "delete_internal_ca": ("ca.delete", "internal_ca"),
+        "import_external_ca": ("ca.import", "external_ca"),
+        "delete_external_ca": ("ca.delete", "external_ca"),
+        "set_client_auth_cas": ("ca.client_auth", "client_auth"),
+        "set_revoked_client_certs": ("ca.revoke_client", "client_certificate"),
+        "store_standby": ("certificate.standby_store", "certificate"),
+        # Which certificate a site presents is exactly the kind of change
+        # that has to be answerable for afterwards.
+        "activate_standby": ("certificate.standby_activate", "certificate"),
+        "delete_standby": ("certificate.standby_delete", "certificate"),
+        "release_standby": ("certificate.standby_release", "certificate"),
+        "adopt_standby": ("certificate.standby_adopt", "certificate"),
+    }
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+        audit_target = ""
+
+        if action == "delete_haproxy":
+            path = (request.form.get("path") or "").strip()
+            audit_target = path
+            res = delete_haproxy_cert(path)
+            if res.get("ok"):
+                message = res.get(
+                    "message") or f"HAProxy certificate deleted: {path}"
+            else:
+                error = (
+                    res.get("message")
+                    or res.get("error")
+                    or 'Failed to delete the HAProxy certificate'
+                )
+
+        elif action == "delete_le":
+            lineage = (request.form.get("lineage") or "").strip()
+            audit_target = lineage
+            res = delete_le_cert(lineage)
+            if res.get("ok"):
+                message = res.get(
+                    "message") or f"Let's Encrypt certificate deleted: {lineage}"
+            else:
+                error = (
+                    res.get("message")
+                    or res.get("error")
+                    or "Failed to delete the Let's Encrypt certificate"
+                )
+
+        elif action == "create_internal_ca":
+            res = ensure_internal_ca()
+            if res.get("ok"):
+                message = res.get("message") or "Internal certificate authority is ready."
+            else:
+                error = res.get("error") or "Failed to create the internal certificate authority"
+
+        elif action == "issue_internal_cert":
+            domain = (request.form.get("domain") or "").strip()
+            alt_names = [
+                value.strip()
+                for value in re.split(r"[,\s]+", request.form.get("alt_names") or "")
+                if value.strip()
+            ]
+            audit_target = domain
+            res = issue_internal_cert_for_domain(domain, alt_names)
+            if res.get("ok"):
+                message = res.get("message") or "Internal certificate issued successfully."
+            else:
+                error = res.get("error") or "Failed to issue the internal certificate"
+
+        elif action == "rotate_internal_ca":
+            res = rotate_internal_ca(request.form.get("confirmation") or "")
+            if res.get("ok"):
+                reissued = len(res.get("reissued") or [])
+                message = (
+                    res.get("message")
+                    or f"Internal certificate authority rotated; certificates reissued: {reissued}."
+                )
+            else:
+                error = res.get("error") or "Failed to rotate the internal certificate authority"
+                error += _client_trust_sites(res)
+
+        elif action == "delete_internal_ca":
+            res = delete_internal_ca(request.form.get("confirmation") or "")
+            if res.get("ok"):
+                message = res.get("message") or "Internal certificate authority deleted."
+            else:
+                error = res.get("error") or "Failed to delete the internal certificate authority"
+                error += _client_trust_sites(res)
+                blockers = res.get("blocking_certificates") or []
+                if blockers:
+                    error += ": " + ", ".join(
+                        ", ".join(item.get("domains") or []) or str(item.get("path") or "")
+                        for item in blockers
+                    )
+
+        elif action == "import_external_ca":
+            ca_file = request.files.get("ca_file")
+            if not ca_file or not ca_file.filename:
+                error = "Select a root or intermediate CA certificate bundle"
+            else:
+                audit_target = str(request.form.get("ca_name") or "").strip()
+                res = upload_external_ca(
+                    audit_target,
+                    ca_file.read(),
+                    ca_file.filename,
+                )
+                if res.get("ok"):
+                    message = res.get("message") or "External certificate authority imported."
+                else:
+                    error = res.get("error") or "Failed to import the certificate authority"
+
+        elif action == "store_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip()
+            audit_target = f"{domain}/{slot}"
+            cert_file = request.files.get("standby_cert")
+            key_file = request.files.get("standby_key")
+            if not cert_file or not cert_file.filename:
+                error = "Select the certificate file"
+            else:
+                # One file or two, in either order. The daemon takes the PEM
+                # blocks apart, drops duplicates and works out which is
+                # which. A certificate authority hands its material over in
+                # whatever shape it likes, and the commonest shape is a
+                # single file with the key and the chain together -- which,
+                # against two required fields, got uploaded into both and was
+                # then refused for containing two private keys.
+                pieces = [cert_file.read().decode("utf-8", "replace")]
+                if key_file and key_file.filename:
+                    pieces.append(key_file.read().decode("utf-8", "replace"))
+                blob = "\n".join(piece.strip() for piece in pieces) + "\n"
+                if domain == "*":
+                    # One wildcard covers a dozen hostnames; filing it a
+                    # dozen times by hand is the sort of chore that gets
+                    # done nine times.
+                    res = store_standby_for_covered_names(slot, blob)
+                    covered = res.get("domains") or []
+                    audit_target = f"*/{slot}"
+                else:
+                    res = store_standby_certificate(domain, slot, blob)
+                    covered = [domain] if res.get("ok") else []
+                if res.get("ok"):
+                    message = (
+                        "Standby certificate kept for "
+                        + ", ".join(covered)
+                    )
+                else:
+                    error = res.get("error") or "Failed to keep the standby certificate"
+
+        elif action == "activate_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip()
+            audit_target = f"{domain}/{slot}"
+            res = activate_standby_certificate(domain, slot)
+            if res.get("ok"):
+                message = (
+                    f"{domain} is now served by the standby certificate "
+                    f"from {res.get('issuer', '')}"
+                )
+            else:
+                error = (
+                    res.get("reload_error")
+                    or res.get("error")
+                    or "Failed to put the standby certificate into service"
+                )
+
+        elif action == "adopt_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip() or "imported"
+            audit_target = f"{domain}/{slot}"
+            res = adopt_deployed_as_standby(domain, slot)
+            if res.get("ok"):
+                message = (
+                    f"{domain} taken out of service and kept as the standby "
+                    f"'{slot}' for " + ", ".join(res.get("domains") or [])
+                )
+            else:
+                error = (
+                    res.get("reload_error")
+                    or res.get("error")
+                    or "Failed to take the certificate out of service"
+                )
+
+        elif action == "release_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            audit_target = domain
+            res = release_to_letsencrypt(domain)
+            if res.get("ok"):
+                message = (
+                    f"{domain} is back on Let's Encrypt"
+                    if res.get("restored")
+                    else res.get("message")
+                    or f"{domain} released; no Let's Encrypt certificate on disk yet"
+                )
+            else:
+                error = (
+                    res.get("reload_error")
+                    or res.get("error")
+                    or "Failed to hand the name back to Let's Encrypt"
+                )
+
+        elif action == "delete_standby":
+            domain = str(request.form.get("standby_domain") or "").strip()
+            slot = str(request.form.get("standby_slot") or "").strip()
+            audit_target = f"{domain}/{slot}"
+            res = delete_standby_certificate(domain, slot)
+            if res.get("ok"):
+                message = f"Standby certificate removed for {domain}"
+            else:
+                error = res.get("error") or "Failed to remove the standby certificate"
+
+        elif action == "delete_external_ca":
+            audit_target = str(request.form.get("ca_id") or "").strip()
+            res = delete_external_ca(audit_target)
+            if res.get("ok"):
+                message = res.get("message") or "External certificate authority deleted."
+            else:
+                error = res.get("error") or "Failed to delete the certificate authority"
+
+        elif action == "set_client_auth_cas":
+            # The form posts the whole set, so an unchecked box is a removal.
+            ca_ids = [
+                value.strip().lower()
+                for value in request.form.getlist("client_auth_ca")
+                if value.strip()
+            ]
+            audit_target = ",".join(sorted(ca_ids))
+            res = set_client_auth_cas(ca_ids)
+            if res.get("ok"):
+                message = res.get("message") or "Client authentication updated."
+                if res.get("reload_error"):
+                    error = (
+                        "The trust list was saved but HAProxy did not reload: "
+                        + str(res["reload_error"])
+                    )
+            else:
+                error = res.get("error") or "Failed to update client authentication"
+
+        elif action == "set_revoked_client_certs":
+            fingerprints = [
+                value.strip()
+                for value in re.split(r"[,;\s]+", request.form.get("fingerprints") or "")
+                if value.strip()
+            ]
+            audit_target = str(len(fingerprints))
+            res = set_revoked_client_certificates(fingerprints)
+            if res.get("ok"):
+                message = res.get("message") or "The revocation list was saved."
+                if res.get("reload_error"):
+                    error = (
+                        "The list was saved but HAProxy did not reload, so it is "
+                        "not in force yet: " + str(res["reload_error"])
+                    )
+            else:
+                error = res.get("error") or "Failed to save the revocation list"
+
+        else:
+            error = "Unknown action"
+
+        if action in CERT_AUDIT_ACTIONS:
+            audit_action, audit_object_type = CERT_AUDIT_ACTIONS[action]
+            record_request(
+                audit_action,
+                object_type=audit_object_type,
+                object_id=audit_target,
+                result=RESULT_FAILURE if error else RESULT_SUCCESS,
+                summary=f"action: {action}",
+                detail=str(error or "")[:500],
+            )
+
+    # Translated here, not in the browser. These sentences come from the
+    # daemon in English; the DOM translator matches what it can and
+    # substitutes catalogue words into the rest, which turns an explanation
+    # into half-English soup. Server-side it is all or nothing, and anything
+    # unknown stays plain English rather than becoming nonsense.
+    if error:
+        error = translate(str(error))
+    if message:
+        message = translate(str(message))
+
+    standby = list_standby_certificates()
+    data = list_all_certs()
+    haproxy_certs = data.get("haproxy") or []
+    le_certs = data.get("letsencrypt") or []
+    authorities = data.get("certificate_authorities") or {}
+
+    if not error and not data.get("ok"):
+        error = data.get(
+            "error") or 'Failed to get the certificate list from haproxy-certd'
+
+    return render_template(
+        "haproxy_certs.html",
+        haproxy_certs=haproxy_certs,
+        le_certs=le_certs,
+        internal_ca=authorities.get("internal"),
+        external_cas=authorities.get("external") or [],
+        revoked_client_certs=authorities.get("revoked_client_certificates") or [],
+        standby_domains=standby.get("domains") or [],
+        standby_error=("" if standby.get("ok") else str(standby.get("error") or "")),
+        message=message,
+        error=error,
+    )
+
+
+def _material_upload(action):
+    """Shared body for the inspect and import steps of the one upload field.
+
+    The browser sends the same file twice -- once to be told what it is, once
+    to act on it -- rather than the gateway holding an unexamined upload
+    between two requests.
+    """
+    from .certd_client import (
+        import_certificate_material,
+        inspect_certificate_material,
+    )
+
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"ok": False, "error": "Select a file"}), 400
+    payload = uploaded.read(MAX_CERT_UPLOAD_BYTES + 1)
+    if len(payload) > MAX_CERT_UPLOAD_BYTES:
+        return jsonify({"ok": False, "error": "The file is too large"}), 413
+
+    common = {
+        "password": request.form.get("password") or "",
+        "name": (request.form.get("name") or "").strip(),
+        "domain": (request.form.get("domain") or "").strip(),
+    }
+    if action == "inspect":
+        return jsonify(
+            inspect_certificate_material(payload, uploaded.filename, **common)
+        )
+    result = import_certificate_material(
+        payload,
+        uploaded.filename,
+        replace=(request.form.get("replace") or "").lower() in ("1", "true", "on"),
+        **common,
+    )
+    record_request(
+        "certificate.import",
+        object_type="certificate",
+        object_id=common["domain"] or common["name"] or uploaded.filename,
+        result=RESULT_SUCCESS if result.get("ok") else RESULT_FAILURE,
+        summary="; ".join(result.get("completed") or []) or "nothing was installed",
+        detail=str(result.get("error") or "")[:500],
+    )
+    return jsonify(result)
+
+
+@bp.post("/haproxy/certs/inspect")
+def haproxy_certs_inspect():
+    """Report what an uploaded file contains, without installing anything."""
+    return _material_upload("inspect")
+
+
+@bp.post("/haproxy/certs/import")
+def haproxy_certs_import():
+    """Install what the file contains: authorities and/or a server certificate."""
+    return _material_upload("import")
+
+
+@bp.get("/haproxy/certs/ca/<ca_id>/download")
+def haproxy_ca_download(ca_id):
+    """Download public CA certificates; private CA keys never leave certd."""
+    from .certd_client import export_ca_certificate
+
+    result = export_ca_certificate(ca_id)
+    if not result.get("ok"):
+        abort(404)
+    try:
+        content = base64.b64decode(result.get("certificate_b64") or "", validate=True)
+    except (ValueError, TypeError):
+        abort(502)
+    return send_file(
+        io.BytesIO(content),
+        as_attachment=True,
+        download_name=result.get("filename") or f"{ca_id}.pem",
+        mimetype="application/x-pem-file",
+        max_age=0,
+    )
+
+# ───── Editing one site ───────────────────────────────────
+
+
+@bp.route("/haproxy/sites/<name>/edit", methods=["GET", "POST"])
+def haproxy_site_edit(name):
+    """
+    The page for editing one site:
+      - shows the current values (raw + effective)
+      - lets the fields be edited
+      - the site can be deleted from the same page (action=delete)
+
+    IMPORTANT:
+      * Settings are saved by JS (a fetch to /haproxy/sites/save), so POST
+        here is needed only for action=delete (the old HTML flow).
+    """
+    error = None
+    message = None
+
+    site_defaults, site_raw, site_effective = get_site_raw_and_effective(name)
+    if site_raw is None:
+        abort(404)
+
+    if site_effective.get('access_gate') is True:
+        if request.method == 'POST':
+            abort(400, description='Use the service-site editor')
+        return redirect(url_for('access_portal.edit', name=name))
+
+    if request.method == "POST":
+        action = request.form.get("action", "save")
+
+        # ─── Deleting the site ──────────────────────────────────────
+        if action == "delete":
+            ok, msg = delete_site_by_name(name)
+            if ok:
+                # deleted: back to the list of sites
+                return redirect(url_for("routes.haproxy_sites_page"))
+            else:
+                error = msg
+
+        # Saving through a classic HTML form is kept just in case, but
+        # normally JS intercepts it and sends JSON to /haproxy/sites/save.
+        elif action == "save":
+            if 'access_gate' in request.form:
+                abort(400, description='Use the service-site editor')
+            # Read, merge and write under one hold, so a save from another
+            # session in between is neither lost nor written over unseen.
+            with source_lock("websites"):
+                site_defaults, site_raw, site_effective = get_site_raw_and_effective(name)
+                if site_raw is None:
+                    abort(404)
+                try:
+                    check_entry_revision(site_raw, request.form.get("revision"), "This site")
+                    new_site, error = merge_site_from_edit_form(
+                        name, site_raw, request.form
+                    )
+                except StaleEntry as exc:
+                    new_site, error = None, str(exc)
+                if not error:
+                    ok, msg = save_site_raw(name, new_site)
+            if not error:
+                if ok and (site_raw or {}).get("cert_renewal_paused") != new_site.get(
+                    "cert_renewal_paused"
+                ):
+                    sync_renewal_pauses()
+                record_request(
+                    "site.update",
+                    object_type="site",
+                    object_id=name,
+                    result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                    summary=summarize(site_raw or {}, new_site) if ok else "",
+                    detail="" if ok else str(msg)[:500],
+                )
+                if ok:
+                    message = (
+                        f"{msg} JavaScript was unavailable, so only the fields "
+                        "this form carries were saved; the backend servers, "
+                        "certificate source, key types and error-exclusion "
+                        "rules were kept as they were."
+                    )
+                    # read the site again after saving
+                    site_defaults, site_raw, site_effective = get_site_raw_and_effective(
+                        name
+                    )
+                else:
+                    error = msg
+
+    # IMPORTANT: original_name and is_new tell the JS that an existing site is being edited
+    from .certd_client import list_all_certs
+
+    cert_data = list_all_certs()
+    authorities = cert_data.get("certificate_authorities") or {}
+    return render_template(
+        "haproxy_site_edit.html",
+        site=site_raw,
+        eff=site_effective,
+        site_defaults=site_defaults,
+        error=error,
+        message=message,
+        original_name=name,
+        site_revision=entry_revision(site_raw),
+        is_new=False,
+        internal_ca=authorities.get("internal"),
+        external_cas=authorities.get("external") or [],
+        dns_profiles=_available_dns_profiles(),
+        geoip_country_codes=get_configured_geoip_countries(),
+    )
+
+
+@bp.post("/haproxy/sites/<name>/issue-cert")
+def haproxy_site_issue_cert(name):
+    from .certd_client import issue_cert_for_domain, issue_internal_cert_for_domain
+
+    try:
+        site_defaults, raw, eff = get_site_raw_and_effective(name)
+        if raw is None:
+            res = {
+                "ok": False,
+                "status": "ERROR",
+                "message": f"Site {name!r} not found",
+            }
+            return jsonify(res), 200
+
+        domain = eff.get("domain") or eff.get("name")
+        if not domain:
+            res = {
+                "ok": False,
+                "status": "ERROR",
+                "message": 'The site has no domain',
+            }
+            return jsonify(res), 200
+
+        alt_names = eff.get("alt_names") or []
+        key_types = eff.get("key_types") or []
+
+        payload = request.get_json(silent=True) or {}
+        requested_source = str(payload.get("source") or "").strip().lower()
+        source = requested_source or raw.get("certificate_source")
+        if source not in ("letsencrypt", "external", "internal"):
+            source = "letsencrypt" if raw.get("le_managed", True) else "external"
+        if source == "external":
+            raw_res = {
+                "ok": False,
+                "error": "External CA certificates must be uploaded with their private key.",
+            }
+        elif source == "internal":
+            raw_res = issue_internal_cert_for_domain(domain, alt_names) or {}
+        else:
+            # Extra certificate names never take part in routing, so they are
+            # added to the SAN list only, and only for a Let's Encrypt lineage.
+            raw_res = issue_cert_for_domain(
+                domain,
+                list(alt_names) + list(eff.get("cert_alt_names") or []),
+                key_types,
+                dns_profile=str(eff.get("dns_profile") or ""),
+            ) or {}
+        res = dict(raw_res)  # Do not mutate the certificate client response.
+        res.setdefault("source", source)
+
+        # Normalize the status for the browser.
+        if "ok" in res:
+            res["status"] = "OK" if res["ok"] else "ERROR"
+        elif "status" not in res:
+            # Fallback for older certificate daemon responses.
+            res["status"] = "UNKNOWN"
+
+        # Normalize a useful user-facing message.
+        if not res.get("message"):
+            msg = (
+                res.get("error")
+                or res.get("details")
+                or res.get("detail")
+                or res.get("stderr")
+                or res.get("stdout")
+            )
+            if msg:
+                res["message"] = str(msg)
+            else:
+                res["message"] = 'no details'
+
+        # An issuance attempt is worth recording either way. The summary names
+        # the challenge and the profile, never a credential: certd does not
+        # return one and the message is truncated regardless.
+        challenge = "dns-01" if eff.get("dns_profile") else "http-01"
+        summary = f"source: {source}, challenge: {challenge}"
+        if eff.get("dns_profile"):
+            summary += f", profile: {eff.get('dns_profile')}"
+        record_request(
+            "certificate.issue",
+            object_type="site",
+            object_id=name,
+            result=RESULT_SUCCESS if res.get("ok") else RESULT_FAILURE,
+            summary=summary,
+            detail="" if res.get("ok") else str(res.get("message") or "")[:500],
+        )
+
+        return jsonify(res), 200
+
+    except Exception as e:  # pylint: disable=broad-except
+        traceback.print_exc()
+        res = {
+            "ok": False,
+            "status": "ERROR",
+            "message": f"Certificate issuance error: {e}",
+        }
+        # Preserve a real HTTP error for unexpected application failures.
+        return jsonify(res), 500
+
+
+@bp.route("/haproxy/certs/backup", methods=["GET"])
+def haproxy_certs_backup():
+    """
+    Downloads a ZIP of the certificates (HAProxy + Let's Encrypt)
+    through haproxy-certd.
+    """
+    import base64
+    from datetime import datetime
+    from flask import current_app, Response
+    from .certd_client import backup_certs
+
+    try:
+        res = backup_certs()
+    except Exception as exc:  # pylint: disable=broad-except
+        current_app.logger.exception("Backup certs failed: %s", exc)
+        return Response(
+            'Certificate backup failed (see the haproxy-certd service log).',
+            status=500,
+            mimetype="text/plain",
+        )
+
+    if not res.get("ok"):
+        msg = res.get("message") or res.get(
+            "error") or 'Unknown backup error.'
+        current_app.logger.warning("Backup certs returned error: %s", msg)
+        return Response(
+            f"Certificate backup error:\n{msg}",
+            status=500,
+            mimetype="text/plain",
+        )
+
+    # Exporting every certificate and private key off the gateway is one of
+    # the most sensitive actions here, so the export itself is the record.
+    record_request("certificate.export", object_type="certificate", object_id="all")
+
+    archive_b64 = res.get("archive_b64")
+    if not archive_b64:
+        return Response(
+            'The backup service did not return an archive (archive_b64 is empty).',
+            status=500,
+            mimetype="text/plain",
+        )
+
+    try:
+        binary = base64.b64decode(archive_b64)
+    except Exception as exc:  # pylint: disable=broad-except
+        current_app.logger.exception("Decode archive_b64 failed: %s", exc)
+        return Response(
+            'Failed to decode the archive (base64 error).',
+            status=500,
+            mimetype="text/plain",
+        )
+
+    filename = f"haproxy_certs_backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.zip"
+
+    resp = Response(binary, mimetype="application/zip")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@bp.route("/haproxy/certs/restore", methods=["POST"])
+def haproxy_certs_restore():
+    """
+    Restores certificates from an uploaded ZIP through haproxy-certd.
+
+    The form on /haproxy/certs looks roughly like this:
+
+      <form action="{{ url_for('routes.haproxy_certs_restore') }}"
+            method="post"
+            enctype="multipart/form-data">
+        <input type="file" name="archive" accept=".zip" required>
+        <button type="submit" class="btn">Restore from backup</button>
+      </form>
+    """
+    from flask import current_app, request, redirect, url_for
+    from .certd_client import restore_certs_from_archive
+
+    file = request.files.get("archive")
+    if not file or file.filename == "":
+        current_app.logger.warning('haproxy_certs_restore: no file selected')
+        return redirect(url_for("routes.haproxy_certs_page"))
+
+    data = file.read()
+    if not data:
+        current_app.logger.warning('haproxy_certs_restore: empty file')
+        return redirect(url_for("routes.haproxy_certs_page"))
+
+    try:
+        res = restore_certs_from_archive(data)
+    except Exception as exc:  # pylint: disable=broad-except
+        current_app.logger.exception(
+            'haproxy_certs_restore: exception while calling certd')
+        record_request(
+            "certificate.restore",
+            object_type="certificate",
+            object_id="all",
+            result=RESULT_FAILURE,
+            summary=f"bytes: {len(data)}",
+            detail=str(exc)[:500],
+        )
+        return redirect(url_for("routes.haproxy_certs_page"))
+
+    if not res.get("ok"):
+        msg = (res.get("message") or res.get("error") or "").strip()
+        current_app.logger.warning(
+            'haproxy_certs_restore: restore failed: %s',
+            msg[:300],
+        )
+    record_request(
+        "certificate.restore",
+        object_type="certificate",
+        object_id="all",
+        result=RESULT_SUCCESS if res.get("ok") else RESULT_FAILURE,
+        summary=f"bytes: {len(data)}",
+        detail="" if res.get("ok") else (res.get("message") or res.get("error") or "")[:500],
+    )
+
+    # No flash messages yet: just go back to the certificates page.
+    return redirect(url_for("routes.haproxy_certs_page"))
+
+
+@bp.route("/haproxy/tcp", methods=["GET", "POST"])
+def haproxy_tcp_page():
+    """
+    The list of TCP proxies and a short form to add one.
+
+    The data comes from config/tcp.yml (the tcp_proxies key).
+    """
+    error = None
+    message = None
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "add").strip()
+
+        # ─── Deleting a TCP proxy (a classic POST) ────────────────────────
+        if action == "delete":
+            name = (request.form.get("name") or "").strip()
+            if not name:
+                error = 'TCP proxy name is required for deletion'
+            else:
+                ok, msg = delete_tcp_proxy(name)
+                record_request(
+                    "tcp_proxy.delete",
+                    object_type="tcp_proxy",
+                    object_id=name,
+                    result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                    detail="" if ok else str(msg)[:500],
+                )
+                if ok:
+                    message = msg
+                else:
+                    error = msg
+
+        # ─── Adding a TCP proxy (the short form) ──────────────────────
+        else:
+            name = (request.form.get("name") or "").strip()
+            bind_ip = (request.form.get("bind_ip") or "").strip() or "0.0.0.0"
+            bind_port_str = (request.form.get("bind_port") or "").strip()
+            backend_host = (request.form.get("backend_host") or "").strip()
+            backend_port_str = (request.form.get("backend_port") or "").strip()
+            balance = (request.form.get("balance") or "").strip() or "source"
+            zero_trust = bool(request.form.get("zero_trust"))
+            ban_check = bool(request.form.get("ban_check"))
+
+            if not name:
+                error = 'The TCP proxy Name field is required'
+            elif not bind_port_str:
+                error = 'The Bind port field is required'
+            elif not backend_host or not backend_port_str:
+                error = 'The backend_host and backend_port fields are required'
+            else:
+                try:
+                    bind_port = int(bind_port_str)
+                    backend_port = int(backend_port_str)
+                except ValueError:
+                    error = 'bind_port and backend_port must be numbers'
+                else:
+                    if not (1 <= bind_port <= 65535 and 1 <= backend_port <= 65535):
+                        error = 'Ports must be between 1 and 65535'
+
+            if not error:
+                tcp_obj = {
+                    "name": name,
+                    "bind_ip": bind_ip,
+                    "bind_port": bind_port,
+                    "backend_host": backend_host,
+                    "backend_port": backend_port,
+                    "balance": balance,
+                    "zero_trust": zero_trust,
+                    "ban_check": ban_check,
+                }
+                ok, msg = save_tcp_from_json(tcp_obj, original_name=None)
+                record_request(
+                    "tcp_proxy.create",
+                    object_type="tcp_proxy",
+                    object_id=name,
+                    result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                    summary=f"bind: {bind_ip}:{bind_port}, backend: {backend_host}:{backend_port}",
+                    detail="" if ok else str(msg)[:500],
+                )
+                if ok:
+                    # added: straight to its edit page
+                    return redirect(url_for("routes.haproxy_tcp_edit", name=name))
+                else:
+                    error = msg
+
+    tcp_proxies = get_tcp_proxies_list()
+    return render_template(
+        "haproxy_tcp.html",
+        tcp_proxies=tcp_proxies,
+        error=error,
+        message=message,
+    )
+
+
+@bp.route("/haproxy/tcp/<name>/edit", methods=["GET", "POST"])
+def haproxy_tcp_edit(name):
+    """
+    The page for editing one TCP proxy.
+
+    Settings are saved by JS (a fetch to /haproxy/tcp/save), so POST here is
+    needed only for action=delete in the fallback mode.
+    """
+    error = None
+    message = None
+
+    tcp_list = get_tcp_proxies_list()
+    tcp_obj = None
+    for t in tcp_list:
+        if t.get("name") == name:
+            tcp_obj = t
+            break
+
+    if tcp_obj is None:
+        return render_template(
+            "haproxy_tcp_edit.html",
+            tcp={"name": name},
+            error=f"TCP proxy with name={name!r} not found",
+            message=None,
+        ), 404
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "save").strip()
+        if action == "delete":
+            ok, msg = delete_tcp_proxy(name)
+            record_request(
+                "tcp_proxy.delete",
+                object_type="tcp_proxy",
+                object_id=name,
+                result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                detail="" if ok else str(msg)[:500],
+            )
+            if ok:
+                return redirect(url_for("routes.haproxy_tcp_page"))
+            else:
+                error = msg
+
+    return render_template(
+        "haproxy_tcp_edit.html",
+        tcp=tcp_obj,
+        tcp_revision=entry_revision(tcp_obj),
+        error=error,
+        message=message,
+    )

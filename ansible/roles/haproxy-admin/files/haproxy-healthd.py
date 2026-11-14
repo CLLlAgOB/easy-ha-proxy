@@ -1,0 +1,2012 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+haproxy-healthd -- the root monitoring daemon of haproxy-admin.
+
+An HTTP API over a Unix socket:
+
+- the state of systemd units (an allow-list plus glob patterns);
+- the state of Docker containers (an allow-list);
+- the logs (journalctl / docker logs) of these objects;
+- an event feed (state changes between snapshots).
+
+To keep the CPU use down:
+- there is NO background polling by default (the state is collected on request only);
+- the state is cached for cache_ttl_seconds, so the UI can refresh itself without frequent systemctl/docker calls;
+- expanding unit_globs (systemctl list-unit-files) is cached (units_rescan_seconds);
+- systemctl show is limited with --property=... (less output to parse);
+- docker inspect uses --format (less data, no JSON parsing).
+
+Background polling can be switched on if needed:
+  ENV HEALTHD_BACKGROUND_POLL=1
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import hmac
+import json
+import logging
+import math
+import os
+import pwd
+import grp
+import re
+import socket
+import stat
+import subprocess
+import tempfile
+import threading
+import time
+from collections import deque, OrderedDict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from socketserver import UnixStreamServer, ThreadingMixIn
+from typing import Any, Dict, Optional, Tuple, List
+from urllib.parse import parse_qs, urlparse
+
+
+LOG = logging.getLogger("haproxy-healthd")
+
+SOCKET_PATH = os.environ.get(
+    "HEALTHD_SOCKET_PATH", "/run/easy-ha-proxy/haproxy-healthd.sock")
+CONFIG_PATH = os.environ.get(
+    "HEALTHD_CONFIG", "/opt/haproxy-admin/healthd.json")
+SOCKET_GROUP = os.environ.get("HEALTHD_SOCKET_GROUP", "hadmin")
+
+# The directory for journalctl --cursor-file (the server keeps the cursors, so the UI does not carry them).
+CURSOR_DIR = os.environ.get(
+    "HEALTHD_CURSOR_DIR", "/run/haproxy-healthd-cursors")
+
+# --- Logs performance tuning ---
+try:
+    LOGS_CACHE_TTL = float(os.environ.get("HEALTHD_LOGS_CACHE_TTL", "1.0"))
+except ValueError:
+    LOGS_CACHE_TTL = 1.0
+
+try:
+    LOGS_CACHE_MAX = int(os.environ.get("HEALTHD_LOGS_CACHE_MAX", "256"))
+except ValueError:
+    LOGS_CACHE_MAX = 256
+
+try:
+    LOGS_CACHE_MAX_VALUE_BYTES = int(os.environ.get(
+        "HEALTHD_LOGS_CACHE_MAX_VALUE_BYTES", str(256 * 1024)))
+except ValueError:
+    LOGS_CACHE_MAX_VALUE_BYTES = 256 * 1024
+
+try:
+    LOGS_CMD_TIMEOUT = int(os.environ.get("HEALTHD_LOGS_CMD_TIMEOUT", "12"))
+except ValueError:
+    LOGS_CMD_TIMEOUT = 12
+
+# --- Control API (start/stop/restart/reload) ---
+CONTROL_TOKEN = os.environ.get("HEALTHD_TOKEN", "").strip()
+HEALTHD_UNIT = os.environ.get(
+    "HEALTHD_UNIT", "haproxy-healthd.service").strip()
+
+# By default: NO background polling.
+BACKGROUND_POLL = (os.environ.get(
+    "HEALTHD_BACKGROUND_POLL", "0").strip() == "1")
+
+# High-volume/self-generated traffic is intentionally excluded from the
+# compact dashboard feed by default. Both services remain available through
+# the per-unit log view and can be explicitly selected in the recent feed.
+RECENT_SYSTEMD_EXCLUDED_UNITS = frozenset({
+    "haproxy.service",
+    "haproxy-healthd.service",
+})
+
+RECENT_SYSTEMD_DEFAULT_LIMIT = 50
+RECENT_SYSTEMD_MAX_LIMIT = 500
+
+
+def _unit_base(unit: str) -> str:
+    u = (unit or "").strip()
+    if u.endswith(".service"):
+        u = u[:-len(".service")]
+    return u
+
+
+def _control_allowed_actions(kind: str, name: str) -> Tuple[str, ...]:
+    """Returns the actions the policy allows for a resource."""
+    kind = (kind or "").strip().lower()
+    nm = (name or "").strip()
+
+    if kind == "docker":
+        # Critical containers: restart only
+        if nm in {"haproxy-admin", "authelia", "authelia-redis"}:
+            return ("restart",)
+        return ("start", "stop", "restart")
+
+    if kind == "systemd":
+        base = _unit_base(nm)
+        # HAProxy: reload and restart
+        if base == "haproxy":
+            return ("reload", "restart")
+        # Authelia*: start/stop/restart
+        if base.startswith("authelia"):
+            return ("start", "stop", "restart")
+        # healthd itself: restart only
+        if base == _unit_base(HEALTHD_UNIT):
+            return ("restart",)
+        # The scheduled backup job: shown with its journal, never started
+        # from here -- a run stops services while it archives, and backups
+        # are made on the backup page.
+        if base == "easy-ha-proxy-backup":
+            return tuple()
+        # The other daemons: start/stop/restart
+        return ("start", "stop", "restart")
+
+    return tuple()
+
+
+@dataclass(frozen=True)
+class HealthdConfig:
+    systemd_units: Tuple[str, ...]
+    systemd_unit_globs: Tuple[str, ...]
+    docker_containers: Tuple[str, ...]
+    poll_interval_seconds: int
+    events_max: int
+
+    # The state cache's TTL (s). 0 => always collect afresh on request.
+    cache_ttl_seconds: int
+
+    # How often to rescan systemctl list-unit-files for the globs (s).
+    units_rescan_seconds: int
+
+    # logs limits
+    logs_default_tail: int
+    logs_max_tail: int
+    logs_default_since_seconds: int
+    logs_max_since_seconds: int
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _run_cmd(argv: List[str], timeout: int = 10) -> Tuple[int, str, str]:
+    """Run a command and return (rc, stdout, stderr)."""
+    try:
+        p = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout}s"
+    except FileNotFoundError:
+        return 127, "", "command not found"
+    except Exception as e:  # pylint: disable=broad-except
+        return 1, "", str(e)
+
+
+# ───── a small TTL/LRU cache for /logs ─────
+
+class _TTLCache:
+    def __init__(self, ttl_seconds: float, max_entries: int, max_value_bytes: int):
+        self.ttl = max(0.0, float(ttl_seconds))
+        self.max_entries = max(0, int(max_entries))
+        self.max_value_bytes = max(0, int(max_value_bytes))
+        self._lock = threading.RLock()
+        self._data: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
+
+    def get(self, key: tuple) -> Optional[dict]:
+        if self.ttl <= 0 or self.max_entries <= 0:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            item = self._data.get(key)
+            if not item:
+                return None
+            ts, val = item
+            if (now - ts) > self.ttl:
+                try:
+                    del self._data[key]
+                except KeyError:
+                    pass
+                return None
+            self._data.move_to_end(key)
+            return dict(val)
+
+    def put(self, key: tuple, value: dict) -> None:
+        if self.ttl <= 0 or self.max_entries <= 0:
+            return
+        try:
+            raw = json.dumps(value, ensure_ascii=False).encode(
+                "utf-8", "replace")
+        except Exception:
+            return
+        if self.max_value_bytes > 0 and len(raw) > self.max_value_bytes:
+            return
+        now = time.monotonic()
+        with self._lock:
+            self._data[key] = (now, dict(value))
+            self._data.move_to_end(key)
+            while len(self._data) > self.max_entries:
+                self._data.popitem(last=False)
+
+
+def _parse_kv(output: str) -> Dict[str, str]:
+    data: Dict[str, str] = {}
+    for line in output.splitlines():
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        data[k.strip()] = v.strip()
+    return data
+
+
+def _clamp_int(value: Optional[str], default: int, min_v: int, max_v: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        n = int(value, 10)
+    except ValueError:
+        return default
+    if n < min_v:
+        return min_v
+    if n > max_v:
+        return max_v
+    return n
+
+
+def _parse_recent_systemd_units(
+    query: Dict[str, List[str]],
+) -> Optional[List[str]]:
+    """Parse an optional recent-feed unit selection.
+
+    ``unit`` may be repeated. ``units`` is accepted as a comma-separated
+    convenience parameter. The distinction between an omitted selection and
+    an explicitly empty one is intentional: omitted uses the safe defaults,
+    while ``units=`` selects no services.
+    """
+    if "unit" not in query and "units" not in query:
+        return None
+
+    selected: List[str] = []
+    seen = set()
+    for key in ("unit", "units"):
+        for raw_value in query.get(key, []):
+            for raw_unit in (raw_value or "").split(","):
+                unit = raw_unit.strip()
+                if not unit or unit in seen:
+                    continue
+                seen.add(unit)
+                selected.append(unit)
+    return selected
+
+
+def _load_config(path: str) -> HealthdConfig:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"config not found: {path}")
+
+    raw = json.loads(p.read_text(encoding="utf-8"))
+
+    systemd = raw.get("systemd") or {}
+    docker = raw.get("docker") or {}
+    logs = raw.get("logs") or {}
+
+    units = tuple(str(x) for x in (systemd.get("units") or []))
+    unit_globs = tuple(str(x) for x in (systemd.get("unit_globs") or []))
+    containers = tuple(str(x) for x in (docker.get("containers") or []))
+
+    poll = int(raw.get("poll_interval_seconds") or 5)
+    events_max = int(raw.get("events_max") or 200)
+
+    cache_ttl = int(raw.get("cache_ttl_seconds") or 15)
+    units_rescan = int(raw.get("units_rescan_seconds") or 60)
+
+    logs_default_tail = int(logs.get("default_tail") or 200)
+    logs_max_tail = int(logs.get("max_tail") or 2000)
+    logs_default_since = int(logs.get("default_since_seconds") or 3600)
+    logs_max_since = int(logs.get("max_since_seconds") or 86400)
+
+    # sanity
+    poll = max(1, min(poll, 300))
+    events_max = max(10, min(events_max, 2000))
+
+    cache_ttl = max(0, min(cache_ttl, 3600))
+    units_rescan = max(5, min(units_rescan, 3600))
+
+    logs_max_tail = max(50, min(logs_max_tail, 20000))
+    logs_default_tail = max(10, min(logs_default_tail, logs_max_tail))
+    logs_max_since = max(300, min(logs_max_since, 7 * 24 * 3600))
+    logs_default_since = max(60, min(logs_default_since, logs_max_since))
+
+    return HealthdConfig(
+        systemd_units=units,
+        systemd_unit_globs=unit_globs,
+        docker_containers=containers,
+        poll_interval_seconds=poll,
+        events_max=events_max,
+        cache_ttl_seconds=cache_ttl,
+        units_rescan_seconds=units_rescan,
+        logs_default_tail=logs_default_tail,
+        logs_max_tail=logs_max_tail,
+        logs_default_since_seconds=logs_default_since,
+        logs_max_since_seconds=logs_max_since,
+    )
+
+
+# systemd state (a minimal set of properties)
+_SYSTEMCTL_PROPS = (
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "Type",
+    "UnitFileState",
+    "Description",
+    "MainPID",
+    "ExecMainPID",
+    "Result",
+    "ExecMainStatus",
+    "ActiveEnterTimestamp",
+    "InactiveEnterTimestamp",
+    "InactiveExitTimestamp",
+)
+
+
+def _systemd_health(data: Dict[str, str]) -> Tuple[Optional[bool], str]:
+    """Return health and a concise display state for a systemd unit.
+
+    A timer-triggered ``Type=oneshot`` service normally returns to
+    ``inactive/dead`` after a successful run. Treating every inactive unit as
+    unhealthy would therefore produce a permanent false alarm for scheduled
+    jobs. Their last result and exit status are the meaningful signals.
+    """
+    load_state = (data.get("LoadState") or "").strip()
+    active_state = (data.get("ActiveState") or "").strip()
+    sub_state = (data.get("SubState") or "").strip()
+    unit_type = (data.get("Type") or "").strip()
+    result = (data.get("Result") or "").strip()
+    exec_main_status = _parse_int(data.get("ExecMainStatus", ""))
+
+    if load_state and load_state != "loaded":
+        return False, load_state
+    if active_state == "failed":
+        return False, "failed"
+    if unit_type == "oneshot" and active_state == "activating":
+        return None, "running"
+    if active_state in {"activating", "deactivating"}:
+        return None, active_state
+    if active_state == "active":
+        return True, "loaded" if sub_state == "exited" else "active"
+    if unit_type == "oneshot" and active_state == "inactive":
+        inactive_exit_timestamp = (
+            data.get("InactiveExitTimestamp") or ""
+        ).strip()
+        if not inactive_exit_timestamp or inactive_exit_timestamp.lower() == "n/a":
+            return None, "not-run"
+        succeeded = result in {"", "success"} and exec_main_status in {None, 0}
+        return (True, "completed") if succeeded else (False, "failed")
+    if active_state == "inactive":
+        return False, "inactive"
+    return None, active_state or "?"
+
+
+def _systemd_display_sub_state(
+    data: Dict[str, str], healthy: Optional[bool], display_state: str
+) -> str:
+    """Return a human-readable sub-state without replacing raw systemd data."""
+    sub_state = (data.get("SubState") or "").strip()
+    if (data.get("Type") or "").strip() != "oneshot":
+        return sub_state
+
+    active_state = (data.get("ActiveState") or "").strip()
+    result = (data.get("Result") or "").strip()
+    if active_state == "activating" or display_state == "running":
+        return "running"
+    if display_state == "completed" and healthy is True:
+        return "success"
+    if display_state == "not-run" and healthy is None:
+        return "—"
+    if healthy is False:
+        return result if result and result != "success" else (sub_state or "failed")
+    return sub_state
+
+
+def _get_systemd_status(unit: str) -> Dict[str, Any]:
+    cmd = ["systemctl", "show", unit, "--no-pager"]
+    # Limit the output to the properties needed.
+    for p in _SYSTEMCTL_PROPS:
+        cmd += ["--property", p]
+
+    rc, out, err = _run_cmd(cmd, timeout=12)
+    if rc != 0:
+        return {"ok": False, "unit": unit, "cmd": " ".join(cmd), "rc": rc, "error": err.strip()}
+
+    data = _parse_kv(out)
+    healthy, display_state = _systemd_health(data)
+    display_sub_state = _systemd_display_sub_state(
+        data, healthy, display_state
+    )
+    return {
+        "ok": True,
+        "unit": unit,
+        "load_state": data.get("LoadState"),
+        "active_state": data.get("ActiveState"),
+        "sub_state": data.get("SubState"),
+        "unit_type": data.get("Type"),
+        "unit_file_state": data.get("UnitFileState"),
+        "description": data.get("Description"),
+        "main_pid": data.get("MainPID"),
+        "exec_main_pid": data.get("ExecMainPID"),
+        "result": data.get("Result"),
+        "exec_main_status": _parse_int(data.get("ExecMainStatus", "")),
+        "active_enter_timestamp": data.get("ActiveEnterTimestamp"),
+        "inactive_enter_timestamp": data.get("InactiveEnterTimestamp"),
+        "inactive_exit_timestamp": data.get("InactiveExitTimestamp"),
+        "healthy": healthy,
+        "display_state": display_state,
+        "display_sub_state": display_sub_state,
+    }
+
+
+# docker state (through --format, without the big JSON)
+# --format takes Go templates.
+_DOCKER_INSPECT_TEMPLATE = "\n".join([
+    "Status={{.State.Status}}",
+    "Running={{.State.Running}}",
+    "Paused={{.State.Paused}}",
+    "Restarting={{.State.Restarting}}",
+    "OOMKilled={{.State.OOMKilled}}",
+    "Dead={{.State.Dead}}",
+    "ExitCode={{.State.ExitCode}}",
+    "StartedAt={{.State.StartedAt}}",
+    "FinishedAt={{.State.FinishedAt}}",
+    "Health={{if .State.Health}}{{.State.Health.Status}}{{end}}",
+    "Image={{.Config.Image}}",
+])
+
+
+def _parse_bool(s: str) -> Optional[bool]:
+    t = (s or "").strip().lower()
+    if t in {"true", "1", "yes"}:
+        return True
+    if t in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _parse_int(s: str) -> Optional[int]:
+    try:
+        return int((s or "").strip(), 10)
+    except Exception:
+        return None
+
+
+def _get_docker_status(name: str) -> Dict[str, Any]:
+    cmd = ["docker", "container", "inspect",
+           "--format", _DOCKER_INSPECT_TEMPLATE, name]
+    rc, out, err = _run_cmd(cmd, timeout=12)
+    if rc != 0:
+        return {"ok": False, "name": name, "cmd": " ".join(cmd), "rc": rc, "error": err.strip()}
+
+    kv = _parse_kv(out)
+    return {
+        "ok": True,
+        "name": name,
+        "status": kv.get("Status"),
+        "running": _parse_bool(kv.get("Running", "")),
+        "paused": _parse_bool(kv.get("Paused", "")),
+        "restarting": _parse_bool(kv.get("Restarting", "")),
+        "oom_killed": _parse_bool(kv.get("OOMKilled", "")),
+        "dead": _parse_bool(kv.get("Dead", "")),
+        "exit_code": _parse_int(kv.get("ExitCode", "")),
+        "started_at": kv.get("StartedAt"),
+        "finished_at": kv.get("FinishedAt"),
+        "health": kv.get("Health") or None,
+        "image": kv.get("Image"),
+    }
+
+
+class _State:
+    def __init__(self, cfg: HealthdConfig):
+        self.cfg = cfg
+        self.lock = threading.RLock()
+
+        self.cache: Dict[str, Any] = {
+            "ok": True,
+            "ts_utc": _utc_now_iso(),
+            "systemd": {"units": {}, "errors": []},
+            "docker": {"containers": {}, "errors": [], "available": None},
+            "meta": {"cached": False, "cache_age_seconds": None},
+        }
+
+        self.events: deque[Dict[str, Any]] = deque(maxlen=cfg.events_max)
+
+        # the cache's own metrics
+        self._last_collect_mono: float = 0.0
+        self._prev_sig: Dict[str, str] = {}
+
+        # the glob expansion cache
+        self._units_rescan_mono: float = 0.0
+        self._units_expanded_cache: List[str] = []
+
+        # stampede lock: parallel requests do not start a collection at the same time
+        self._collect_lock = threading.Lock()
+
+        self._logs_cache = _TTLCache(
+            LOGS_CACHE_TTL, LOGS_CACHE_MAX, LOGS_CACHE_MAX_VALUE_BYTES)
+
+        # cursor-file synchronisation for following the logs
+        self._cursor_locks: Dict[str, threading.Lock] = {}
+        self._cursor_locks_guard = threading.RLock()
+        try:
+            Path(CURSOR_DIR).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        # optional background polling
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._poll_loop, name="healthd-poller", daemon=True)
+
+    def start(self) -> None:
+        if BACKGROUND_POLL:
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if BACKGROUND_POLL:
+            self._thread.join(timeout=3)
+
+    def _allowed_unit(self, unit: str) -> bool:
+        if unit in self.cfg.systemd_units:
+            return True
+        for pat in self.cfg.systemd_unit_globs:
+            if fnmatch.fnmatch(unit, pat):
+                return True
+        return False
+
+    def _allowed_container(self, name: str) -> bool:
+        return name in self.cfg.docker_containers
+
+    def snapshot(self, refresh: bool = False) -> Dict[str, Any]:
+        """
+        Returns the cached state.
+        refresh=True collects it afresh.
+        refresh=False collects only if the TTL has run out or there is no cache yet.
+        """
+        ttl = int(self.cfg.cache_ttl_seconds or 0)
+
+        if refresh or ttl <= 0:
+            return self.force_refresh()
+
+        now = time.monotonic()
+        with self.lock:
+            last = self._last_collect_mono
+            have = bool(self.cache.get("systemd", {}).get("units")) or bool(
+                self.cache.get("docker", {}).get("containers"))
+            if have and last > 0 and (now - last) < ttl:
+                out = json.loads(json.dumps(self.cache))
+                out["meta"]["cached"] = True
+                out["meta"]["cache_age_seconds"] = int(now - last)
+                return out
+
+        # The TTL ran out: collect
+        return self.force_refresh()
+
+    def force_refresh(self) -> Dict[str, Any]:
+        with self._collect_lock:
+            new_cache, sig = self._collect()
+
+            now_iso = _utc_now_iso()
+            now_mono = time.monotonic()
+
+            with self.lock:
+                # events: compare the signatures
+                for key, new_val in sig.items():
+                    old_val = self._prev_sig.get(key)
+                    if old_val is None:
+                        continue
+                    if old_val != new_val:
+                        kind, name = key.split(":", 1)
+                        self.events.append({
+                            "ts_utc": now_iso,
+                            "kind": kind,
+                            "name": name,
+                            "from": old_val,
+                            "to": new_val,
+                        })
+
+                self._prev_sig = sig
+                self.cache = new_cache
+                self._last_collect_mono = now_mono
+
+        # hand out a copy
+        out = json.loads(json.dumps(self.cache))
+        out["meta"]["cached"] = False
+        out["meta"]["cache_age_seconds"] = 0
+        return out
+
+    def events_snapshot(self, limit: int) -> List[Dict[str, Any]]:
+        with self.lock:
+            items = list(self.events)[-limit:]
+            return json.loads(json.dumps(items))
+
+    # ───────────── units expansion ─────────────
+
+    def _expand_units(self) -> List[str]:
+        """
+        Returns the units to check:
+        - the units named in the config
+        - the globs, expanded with systemctl list-unit-files at most every units_rescan_seconds
+        """
+        base: List[str] = list(self.cfg.systemd_units)
+        globs = list(self.cfg.systemd_unit_globs)
+        if not globs:
+            return sorted(set(base))
+
+        now = time.monotonic()
+        need_rescan = False
+
+        with self.lock:
+            if not self._units_expanded_cache:
+                need_rescan = True
+            elif (now - self._units_rescan_mono) >= float(self.cfg.units_rescan_seconds):
+                need_rescan = True
+
+        if not need_rescan:
+            with self.lock:
+                expanded = list(self._units_expanded_cache)
+            return sorted(set(base + expanded))
+
+        # rescan
+        expanded: List[str] = []
+        rc, out, err = _run_cmd(
+            ["systemctl", "list-unit-files", "--type=service",
+                "--no-pager", "--no-legend"],
+            timeout=15,
+        )
+        if rc == 0:
+            for line in out.splitlines():
+                if not line.strip():
+                    continue
+                unit_name = line.split(None, 1)[0].strip()
+                for pat in globs:
+                    if fnmatch.fnmatch(unit_name, pat):
+                        expanded.append(unit_name)
+
+        with self.lock:
+            self._units_expanded_cache = sorted(set(expanded))
+            self._units_rescan_mono = now
+            # list-unit-files errors go into the cache at the next collect (below)
+
+        return sorted(set(base + expanded))
+
+    # ───────────── background polling (optional) ─────────────
+
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.force_refresh()
+            except Exception:
+                LOG.exception("poll refresh failed")
+            self._stop.wait(self.cfg.poll_interval_seconds)
+
+    # ───────────── collecting the state ─────────────
+
+    def _collect(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        now = _utc_now_iso()
+        cache: Dict[str, Any] = {
+            "ok": True,
+            "ts_utc": now,
+            "systemd": {"units": {}, "errors": []},
+            "docker": {"containers": {}, "errors": [], "available": None},
+            "meta": {"cached": False, "cache_age_seconds": None},
+        }
+        sig: Dict[str, str] = {}
+
+        # systemd units (expanded)
+        units_to_check = self._expand_units()
+
+        # with globs and a failed rescan, run list-unit-files again only to report the error
+        # (it does not affect the expanded cache here)
+        if self.cfg.systemd_unit_globs:
+            rc, _, err = _run_cmd(
+                ["systemctl", "list-unit-files", "--type=service",
+                    "--no-pager", "--no-legend"],
+                timeout=15,
+            )
+            if rc != 0:
+                cache["systemd"]["errors"].append(
+                    {"cmd": "systemctl list-unit-files", "rc": rc, "err": err.strip()})
+
+        for unit in units_to_check:
+            if not self._allowed_unit(unit):
+                continue
+            info = _get_systemd_status(unit)
+            cache["systemd"]["units"][unit] = info
+            sig[f"systemd:{unit}"] = f"{info.get('active_state', '?')}/{info.get('sub_state', '?')}"
+
+        # docker availability
+        rc, _, _ = _run_cmd(["docker", "version"], timeout=6)
+        cache["docker"]["available"] = (rc == 0)
+        if rc != 0:
+            return cache, sig
+
+        for name in self.cfg.docker_containers:
+            if not self._allowed_container(name):
+                continue
+            info = _get_docker_status(name)
+            cache["docker"]["containers"][name] = info
+            sig[f"docker:{name}"] = str(info.get("status") or "?")
+
+        return cache, sig
+
+    # ───────────── logs ─────────────
+
+    @staticmethod
+    def _sanitize_cursor_name(s: str) -> str:
+        out = []
+        for ch in (s or ""):
+            if ch.isalnum() or ch in ("-", "_", "."):
+                out.append(ch)
+            else:
+                out.append("_")
+        return "".join(out)[:180] or "unnamed"
+
+    def _cursor_path(self, kind: str, name: str) -> str:
+        safe = self._sanitize_cursor_name(f"{kind}_{name}")
+        return str(Path(CURSOR_DIR) / f"{safe}.cursor")
+
+    def _cursor_lock(self, key: str) -> threading.Lock:
+        with self._cursor_locks_guard:
+            lk = self._cursor_locks.get(key)
+            if lk is None:
+                lk = threading.Lock()
+                self._cursor_locks[key] = lk
+            return lk
+
+    def get_logs_systemd(
+        self,
+        unit: str,
+        tail: int,
+        since_seconds: int,
+        mode: str = "tail",
+        reset_cursor: bool = False,
+        cursor: str = "",
+    ) -> Dict[str, Any]:
+        """
+        mode:
+          - "tail": the client keeps the cursor (--show-cursor / --after-cursor)
+          - "follow": the server keeps a cursor file (journalctl --cursor-file).
+        """
+        if not self._allowed_unit(unit):
+            return {"ok": False, "error": "unit is not allowed", "unit": unit}
+
+        tail = max(10, min(tail, self.cfg.logs_max_tail))
+        since_seconds = max(
+            60, min(since_seconds, self.cfg.logs_max_since_seconds))
+        mode = (mode or "tail").strip().lower()
+        cursor = (cursor or "").strip()
+
+        if mode == "follow":
+            cursor_file = self._cursor_path("systemd", unit)
+            cache_key = ("systemd_follow", unit, tail,
+                         since_seconds, reset_cursor)
+            cached = self._logs_cache.get(cache_key)
+            if cached is not None:
+                cached["cached"] = True
+                return cached
+
+            lk = self._cursor_lock(f"systemd:{unit}")
+            with lk:
+                if reset_cursor:
+                    try:
+                        if os.path.exists(cursor_file):
+                            os.unlink(cursor_file)
+                    except OSError:
+                        pass
+
+                file_exists = os.path.exists(cursor_file)
+
+                if not file_exists:
+                    cmd = [
+                        "journalctl", "-u", unit,
+                        "--no-pager", "-q", "-o", "short-iso",
+                        "--cursor-file", cursor_file,
+                        "--lines", str(tail),
+                        "--since", f"-{since_seconds}s",
+                    ]
+                else:
+                    cmd = [
+                        "journalctl", "-u", unit,
+                        "--no-pager", "-q", "-o", "short-iso",
+                        "--cursor-file", cursor_file,
+                        "--lines", f"+{tail}",
+                    ]
+
+                rc, out, err = _run_cmd(cmd, timeout=LOGS_CMD_TIMEOUT)
+
+            resp = {
+                "ok": rc == 0,
+                "unit": unit,
+                "mode": "follow",
+                "cursor_file": os.path.basename(cursor_file),
+                "cmd": " ".join(cmd),
+                "rc": rc,
+                "text": out if out else err,
+            }
+            self._logs_cache.put(cache_key, resp)
+            return resp
+
+        # tail mode
+        after_cursor = cursor
+        cache_key = ("systemd", unit, tail, since_seconds, after_cursor)
+        cached = self._logs_cache.get(cache_key)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
+
+        cmd = [
+            "journalctl", "-u", unit,
+            "--no-pager", "-q", "-o", "short-iso",
+            "--show-cursor",
+            "--lines", str(tail),
+        ]
+        if after_cursor:
+            cmd += ["--after-cursor", after_cursor]
+        else:
+            cmd += ["--since", f"-{since_seconds}s"]
+
+        rc, out, err = _run_cmd(cmd, timeout=LOGS_CMD_TIMEOUT)
+
+        cursor_out = ""
+        text_out = out
+        if out:
+            lines = out.splitlines()
+            if lines and lines[-1].lstrip().startswith("-- cursor:"):
+                cursor_out = lines[-1].split(":",
+                                             1)[1].strip() if ":" in lines[-1] else ""
+                text_out = "\n".join(lines[:-1])
+                if text_out:
+                    text_out += "\n"
+
+        resp = {
+            "ok": rc == 0,
+            "unit": unit,
+            "mode": "tail",
+            "cmd": " ".join(cmd),
+            "rc": rc,
+            "cursor": cursor_out,
+            "text": text_out if text_out else err,
+        }
+
+        self._logs_cache.put(cache_key, resp)
+        return resp
+
+    def get_recent_systemd_logs(
+        self,
+        limit: int = RECENT_SYSTEMD_DEFAULT_LIMIT,
+        units: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Return the newest journal entries across selected monitored units.
+
+        ``units=None`` applies the default exclusions. An explicit list may
+        include those normally excluded services, but every name must still be
+        present in the expanded configured allow-list.
+        """
+        limit = max(1, min(limit, RECENT_SYSTEMD_MAX_LIMIT))
+        available_units = sorted({
+            unit for unit in self._expand_units()
+            if self._allowed_unit(unit)
+        })
+        available_set = set(available_units)
+
+        if units is None:
+            selected_units = [
+                unit for unit in available_units
+                if unit not in RECENT_SYSTEMD_EXCLUDED_UNITS
+            ]
+            requested_units: Optional[List[str]] = None
+        else:
+            requested_units = []
+            requested_seen = set()
+            for raw_unit in units:
+                unit = str(raw_unit or "").strip()
+                if not unit or unit in requested_seen:
+                    continue
+                requested_seen.add(unit)
+                requested_units.append(unit)
+
+            invalid_units = sorted(
+                unit for unit in requested_units if unit not in available_set
+            )
+            if invalid_units:
+                return {
+                    "ok": False,
+                    "error": "one or more units are not monitored",
+                    "invalid_units": invalid_units,
+                    "available_units": available_units,
+                    "default_excluded_units": sorted(
+                        RECENT_SYSTEMD_EXCLUDED_UNITS
+                    ),
+                }
+            requested_set = set(requested_units)
+            selected_units = [
+                unit for unit in available_units if unit in requested_set
+            ]
+
+        excluded_units = [
+            unit for unit in available_units if unit not in set(selected_units)
+        ]
+
+        if not selected_units:
+            return {
+                "ok": True,
+                "items": [],
+                "units": [],
+                "available_units": available_units,
+                "requested_units": requested_units,
+                "excluded_units": excluded_units,
+                "default_excluded_units": sorted(
+                    RECENT_SYSTEMD_EXCLUDED_UNITS
+                ),
+                "limit": limit,
+            }
+
+        cache_key = ("systemd_recent", tuple(selected_units), limit)
+        cached = self._logs_cache.get(cache_key)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
+
+        cmd = ["journalctl"]
+        for unit in selected_units:
+            cmd.extend(["-u", unit])
+        cmd.extend([
+            "--no-pager",
+            "-q",
+            "-o", "json",
+            "--lines", str(limit),
+            "--reverse",
+        ])
+
+        rc, out, err = _run_cmd(cmd, timeout=LOGS_CMD_TIMEOUT)
+        items: List[Dict[str, Any]] = []
+        if rc == 0:
+            for raw_line in out.splitlines():
+                try:
+                    record = json.loads(raw_line)
+                except (TypeError, ValueError):
+                    continue
+
+                message = record.get("MESSAGE", "")
+                if not isinstance(message, str):
+                    message = json.dumps(message, ensure_ascii=False)
+
+                timestamp = ""
+                try:
+                    timestamp = datetime.fromtimestamp(
+                        int(record.get("__REALTIME_TIMESTAMP") or 0) / 1_000_000,
+                        tz=timezone.utc,
+                    ).isoformat(timespec="seconds")
+                except (TypeError, ValueError, OSError, OverflowError):
+                    pass
+
+                priority: Optional[int]
+                try:
+                    priority = int(record.get("PRIORITY"))
+                except (TypeError, ValueError):
+                    priority = None
+
+                items.append({
+                    "ts_utc": timestamp,
+                    "unit": (
+                        record.get("_SYSTEMD_UNIT")
+                        or record.get("UNIT")
+                        or record.get("OBJECT_SYSTEMD_UNIT")
+                        or record.get("SYSLOG_IDENTIFIER")
+                        or "systemd"
+                    ),
+                    # Do not name this field ``message``: the web application's
+                    # JSON localization hook intentionally translates UI
+                    # messages under that key. Journal text must stay raw.
+                    "raw_message": message[:4000],
+                    "priority": priority,
+                })
+
+        resp = {
+            "ok": rc == 0,
+            "items": items,
+            "units": selected_units,
+            "available_units": available_units,
+            "requested_units": requested_units,
+            "excluded_units": excluded_units,
+            "default_excluded_units": sorted(
+                RECENT_SYSTEMD_EXCLUDED_UNITS
+            ),
+            "limit": limit,
+            "cmd": " ".join(cmd),
+            "rc": rc,
+            "error": "" if rc == 0 else (err.strip() or "journalctl failed"),
+        }
+        self._logs_cache.put(cache_key, resp)
+        return resp
+
+    def get_logs_docker(self, container: str, tail: int, since_seconds: int) -> Dict[str, Any]:
+        if not self._allowed_container(container):
+            return {"ok": False, "error": "container is not allowed", "container": container}
+
+        tail = max(10, min(tail, self.cfg.logs_max_tail))
+        since_seconds = max(
+            60, min(since_seconds, self.cfg.logs_max_since_seconds))
+
+        cache_key = ("docker", container, tail, since_seconds)
+        cached = self._logs_cache.get(cache_key)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
+
+        cmd = ["docker", "logs", "--since",
+               f"{since_seconds}s", "--tail", str(tail), container]
+        rc, out, err = _run_cmd(cmd, timeout=LOGS_CMD_TIMEOUT)
+
+        resp = {
+            "ok": rc == 0,
+            "container": container,
+            "cmd": " ".join(cmd),
+            "rc": rc,
+            "text": out if out else err,
+        }
+
+        self._logs_cache.put(cache_key, resp)
+        return resp
+
+
+# How long one connection may keep a handler thread waiting on it: for the
+# request, or for the caller to take the answer. Callers are local and send a
+# whole request at once; one that connected and went quiet used to hold its
+# thread for good. Processing time is not limited by this.
+REQUEST_TIMEOUT_SECONDS = 30
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    server_version = "haproxy-healthd/1.3"
+    timeout = REQUEST_TIMEOUT_SECONDS
+
+    def _peer(self) -> str:
+        ca = getattr(self, "client_address", None)
+        if isinstance(ca, tuple):
+            try:
+                host = ca[0]
+                return str(host) if host else "unix"
+            except Exception:
+                return "unix"
+        if isinstance(ca, str):
+            return ca or "unix"
+        return "unix"
+
+    def address_string(self) -> str:  # noqa: N802
+        return self._peer()
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: N802
+        try:
+            msg = fmt % args
+        except Exception:
+            msg = fmt
+        LOG.info("%s - %s", self._peer(), msg)
+
+    def _send_json(self, code: int, payload: Dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False,
+                          indent=2).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        st: _State = self.server.state  # type: ignore[attr-defined]
+        url = urlparse(self.path)
+        path = url.path
+        qs = parse_qs(url.query or "", keep_blank_values=True)
+
+        if path == "/api/v1/health/ping":
+            self._send_json(200, {"ok": True, "ts_utc": _utc_now_iso()})
+            return
+
+        if path == "/api/v1/control/capabilities":
+            caps_systemd: Dict[str, Any] = {}
+            for u in st.cfg.systemd_units:
+                caps_systemd[u] = list(_control_allowed_actions("systemd", u))
+            for g in st.cfg.systemd_unit_globs:
+                caps_systemd[g] = list(_control_allowed_actions("systemd", g))
+            caps_docker: Dict[str, Any] = {c: list(_control_allowed_actions(
+                "docker", c)) for c in st.cfg.docker_containers}
+            self._send_json(
+                200, {"ok": True, "systemd": caps_systemd, "docker": caps_docker})
+            return
+
+        if path == "/api/v1/health/status":
+            refresh = (qs.get("refresh", ["0"])[0] == "1")
+            try:
+                data = st.snapshot(refresh=refresh)
+                self._send_json(200, data)
+            except Exception as e:  # pylint: disable=broad-except
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if path == "/api/v1/health/events":
+            limit = _clamp_int(qs.get("limit", [None])[
+                               0], default=50, min_v=1, max_v=500)
+            self._send_json(
+                200, {"ok": True, "items": st.events_snapshot(limit)})
+            return
+
+        if path == "/api/v1/health/logs/systemd":
+            unit = (qs.get("unit", [""])[0] or "").strip()
+            tail = _clamp_int(qs.get("tail", [None])[
+                              0], default=st.cfg.logs_default_tail, min_v=10, max_v=st.cfg.logs_max_tail)
+            since = _clamp_int(qs.get("since", [None])[
+                               0], default=st.cfg.logs_default_since_seconds, min_v=60, max_v=st.cfg.logs_max_since_seconds)
+            if not unit:
+                self._send_json(
+                    400, {"ok": False, "error": "unit is required"})
+                return
+
+            mode = (qs.get("mode", ["tail"])[0] or "tail").strip().lower()
+            reset_cursor = (qs.get("reset_cursor", ["0"])[0] == "1")
+            cursor = (qs.get("cursor", [""])[0] or "").strip()
+
+            self._send_json(200, st.get_logs_systemd(
+                unit, tail=tail, since_seconds=since, mode=mode, reset_cursor=reset_cursor, cursor=cursor))
+            return
+
+        if path == "/api/v1/health/recent-systemd":
+            limit = _clamp_int(
+                qs.get("limit", [None])[0],
+                default=RECENT_SYSTEMD_DEFAULT_LIMIT,
+                min_v=1,
+                max_v=RECENT_SYSTEMD_MAX_LIMIT,
+            )
+            units = _parse_recent_systemd_units(qs)
+            data = st.get_recent_systemd_logs(limit=limit, units=units)
+            self._send_json(200 if data.get("ok") else 400, data)
+            return
+
+        if path == "/api/v1/health/logs/docker":
+            container = (qs.get("container", [""])[0] or "").strip()
+            tail = _clamp_int(qs.get("tail", [None])[
+                              0], default=st.cfg.logs_default_tail, min_v=10, max_v=st.cfg.logs_max_tail)
+            since = _clamp_int(qs.get("since", [None])[
+                               0], default=st.cfg.logs_default_since_seconds, min_v=60, max_v=st.cfg.logs_max_since_seconds)
+            if not container:
+                self._send_json(
+                    400, {"ok": False, "error": "container is required"})
+                return
+            self._send_json(200, st.get_logs_docker(
+                container, tail=tail, since_seconds=since))
+            return
+
+        self._send_json(404, {"ok": False, "error": "not found"})
+
+    def _control_auth_ok(self) -> bool:
+        if not CONTROL_TOKEN:
+            return False
+        token = (self.headers.get("X-Healthd-Token", "") or "").strip()
+        return hmac.compare_digest(token, CONTROL_TOKEN)
+
+    def do_POST(self) -> None:  # noqa: N802
+        st: _State = self.server.state  # type: ignore[attr-defined]
+        url = urlparse(self.path)
+        path = url.path
+
+        if path != "/api/v1/control":
+            self._send_json(404, {"ok": False, "error": "not found"})
+            return
+
+        if not self._control_auth_ok():
+            self._send_json(403, {"ok": False, "error": "forbidden"})
+            return
+
+        try:
+            length = int(
+                (self.headers.get("Content-Length") or "0").strip() or "0")
+        except Exception:
+            length = 0
+
+        if length <= 0 or length > 16384:
+            self._send_json(
+                400, {"ok": False, "error": "invalid Content-Length"})
+            return
+
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except Exception as e:
+            self._send_json(400, {"ok": False, "error": f"bad json: {e}"})
+            return
+
+        kind = (payload.get("kind") or "").strip().lower()
+        name = (payload.get("name") or "").strip()
+        action = (payload.get("action") or "").strip().lower()
+
+        if kind not in {"systemd", "docker"}:
+            self._send_json(
+                400, {"ok": False, "error": "kind must be systemd|docker"})
+            return
+        if not name:
+            self._send_json(400, {"ok": False, "error": "name is required"})
+            return
+        if action not in {"start", "stop", "restart", "reload"}:
+            self._send_json(
+                400, {"ok": False, "error": "action must be start|stop|restart|reload"})
+            return
+
+        if kind == "systemd" and not st._allowed_unit(name):
+            self._send_json(403, {"ok": False, "error": "unit not allowed"})
+            return
+        if kind == "docker" and not st._allowed_container(name):
+            self._send_json(
+                403, {"ok": False, "error": "container not allowed"})
+            return
+
+        allowed = set(_control_allowed_actions(kind, name))
+        if action not in allowed:
+            self._send_json(
+                403, {"ok": False, "error": "action not allowed", "allowed": sorted(allowed)})
+            return
+
+        if kind == "systemd":
+            cmd = ["systemctl", action, name]
+
+            # self-restart async
+            if action == "restart" and _unit_base(name) == _unit_base(HEALTHD_UNIT):
+                def _restart_self() -> None:
+                    time.sleep(0.2)
+                    _run_cmd(cmd, timeout=30)
+
+                threading.Thread(target=_restart_self, daemon=True).start()
+                with st.lock:
+                    st.events.append({"ts_utc": _utc_now_iso(
+                    ), "kind": "control", "name": f"{kind}:{name}", "from": "-", "to": f"{action} scheduled"})
+                self._send_json(202, {"ok": True, "scheduled": True, "kind": kind,
+                                "name": name, "action": action, "cmd": " ".join(cmd)})
+                return
+
+            rc, out, err = _run_cmd(cmd, timeout=30)
+        else:
+            cmd = ["docker", action, name]
+            rc, out, err = _run_cmd(cmd, timeout=60)
+
+        ok = (rc == 0)
+        with st.lock:
+            st.events.append({"ts_utc": _utc_now_iso(), "kind": "control",
+                             "name": f"{kind}:{name}", "from": "-", "to": f"{action} rc={rc}"})
+
+        self._send_json(200 if ok else 500, {
+            "ok": ok,
+            "kind": kind,
+            "name": name,
+            "action": action,
+            "cmd": " ".join(cmd),
+            "rc": rc,
+            "stdout": out,
+            "stderr": err,
+        })
+
+
+class HealthServer(ThreadingMixIn, UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, socket_path: str, handler_cls: type[BaseHTTPRequestHandler], state: _State):
+        super().__init__(socket_path, handler_cls)
+        self.state = state  # type: ignore[assignment]
+
+
+def _set_socket_perms(sock_path: str, group_name: str) -> None:
+    gid = grp.getgrnam(group_name).gr_gid
+    uid = pwd.getpwnam("root").pw_uid
+    os.chown(sock_path, uid, gid)
+    os.chmod(sock_path, 0o660)
+
+
+# ---------------------------------------------------------------------------
+# Per-site availability email alerts.
+#
+# Sites opt in through websites.yml (edited in the web UI):
+#   alert_enabled: true            # default false
+#   alert_mode: down | degraded    # degraded also alerts on partial outages
+#   alert_after: 5m                # continuous downtime before the alert
+#   alert_email: ops@example.com   # optional per-site recipient override
+#
+# Mail is delivered exactly like certificate notifications: through the
+# mail_relay container using the shared /etc/easy-ha-proxy/mail-notify.json
+# state, so alerts are silently skipped while email delivery is disabled.
+# ---------------------------------------------------------------------------
+
+SITE_ALERTS_WEBSITES = os.getenv(
+    "HAPADM_SITE_ALERTS_WEBSITES", "/opt/haproxy-admin/config/websites.yml"
+)
+SITE_ALERTS_INTERVAL = max(
+    5.0, float(os.getenv("HAPADM_SITE_ALERTS_INTERVAL", "15"))
+)
+SITE_ALERTS_HAPROXY_SOCKET = os.getenv(
+    "HAPADM_SITE_ALERTS_HAPROXY_SOCKET", "/run/haproxy/admin.sock"
+)
+SITE_ALERTS_MAIL_STATE = os.getenv(
+    "HAPADM_SITE_ALERTS_MAIL_STATE", "/etc/easy-ha-proxy/mail-notify.json"
+)
+SITE_ALERTS_MAIL_LOCK = os.getenv(
+    "HAPADM_SITE_ALERTS_MAIL_LOCK", "/run/easy-ha-proxy/authelia-mail.lock"
+)
+SITE_ALERTS_REPEAT_SECONDS = max(
+    600, int(os.getenv("HAPADM_SITE_ALERTS_REPEAT_SECONDS", "21600"))
+)
+SITE_ALERTS_STATE_PATH = Path(os.getenv(
+    "HAPADM_SITE_ALERTS_STATE_PATH",
+    "/var/lib/easy-ha-proxy/site-alerts.json",
+))
+SITE_ALERTS_STATE_MAX_BYTES = 1024 * 1024
+SITE_ALERTS_STATE_MAX_INCIDENTS = 1024
+SITE_ALERTS_STATE_VERSION = 1
+
+_INTERVAL_UNIT_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
+_INTERVAL_VALUE_RE = re.compile(r"^([1-9][0-9]*)(ms|s|m|h|d)$")
+_SITE_ID_RE = re.compile(r"[^A-Za-z0-9_]")
+_ALERT_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[A-Za-z0-9-]{2,63}$")
+
+
+def _alert_after_seconds(value: object, default: float = 300.0) -> float:
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    match = _INTERVAL_VALUE_RE.fullmatch(str(value or "").strip())
+    if not match:
+        return default
+    return int(match.group(1)) * _INTERVAL_UNIT_SECONDS[match.group(2)]
+
+
+def _format_duration(seconds: float) -> str:
+    """Render a downtime span as days/hours/minutes instead of raw minutes."""
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _format_servers(servers: List[Dict[str, Any]]) -> str:
+    """One line per backend server: name, address:port when known, and state."""
+    lines: List[str] = []
+    for item in servers:
+        addr = str(item.get("addr") or "").strip()
+        state = "UP" if item.get("up") else "DOWN"
+        if addr:
+            lines.append(f"  - {item.get('name')} ({addr}): {state}")
+        else:
+            lines.append(f"  - {item.get('name')}: {state}")
+    return "\n".join(lines)
+
+
+def _haproxy_show_stat(socket_path: str) -> List[Dict[str, str]]:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(socket_path)
+        sock.sendall(b"show stat\n")
+        chunks: List[bytes] = []
+        total = 0
+        while total < 8 * 1024 * 1024:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    text_out = b"".join(chunks).decode("utf-8", "replace")
+    lines = [ln for ln in text_out.splitlines() if ln.strip()]
+    if not lines or not lines[0].startswith("# "):
+        return []
+    header = [h.strip() for h in lines[0][2:].split(",")]
+    rows: List[Dict[str, str]] = []
+    for line in lines[1:]:
+        values = line.split(",")
+        rows.append({header[i]: values[i] for i in range(min(len(header), len(values)))})
+    return rows
+
+
+def _incident_timestamp(value: object, field: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"invalid incident {field}")
+    timestamp = float(value)
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError(f"invalid incident {field}")
+    return timestamp
+
+
+def _validated_incident_record(value: object) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("invalid incident record")
+    record = {
+        "bad_since": _incident_timestamp(value.get("bad_since"), "bad_since"),
+        "alerted_at": _incident_timestamp(value.get("alerted_at"), "alerted_at"),
+        "alerted_state": str(value.get("alerted_state") or ""),
+        "good_since": _incident_timestamp(value.get("good_since"), "good_since"),
+    }
+    if record["alerted_state"] not in {"", "down", "degraded"}:
+        raise ValueError("invalid incident alerted_state")
+    if record["alerted_at"] is not None and record["bad_since"] is None:
+        raise ValueError("alerted incident has no outage start")
+    if record["good_since"] is not None and record["alerted_at"] is None:
+        raise ValueError("unalerted incident has a recovery start")
+    return record
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: a
+# gateway without the alert daemon falls back to sending its own mail.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+
+class SiteAlertEngine(threading.Thread):
+    def __init__(self) -> None:
+        super().__init__(name="site-alerts", daemon=True)
+        self._stop = threading.Event()
+        # When the alert engine is reachable this class stops deciding: it
+        # reports what it sees and easy-ha-proxy-alertd owns the delay, the
+        # repetition, the escalation and the recovery. The local state machine
+        # and its own mail path remain as the fallback for a gateway where
+        # alertd is not installed, so an update can never lose site alerts.
+        self._alerts = None
+        if AlertClient is not None:
+            client = AlertClient(source="healthd")
+            self._alerts = client if client.configured else None
+        # site name -> {"bad_since": float|None, "alerted_at": float|None,
+        #               "alerted_state": str, "good_since": float|None}
+        self._incidents: Dict[str, Dict[str, Any]] = self._load_incidents()
+        self._yaml = None
+        try:
+            import yaml as _yaml  # type: ignore
+
+            self._yaml = _yaml
+        except Exception:
+            LOG.warning(
+                "PyYAML is unavailable; per-site availability alerts are disabled"
+            )
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    # -- durable incident state -------------------------------------------
+    @staticmethod
+    def _state_file_is_safe(path: Path, *, allow_missing: bool) -> bool:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return allow_missing
+        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+            return False
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            return False
+        return True
+
+    def _load_incidents(self) -> Dict[str, Dict[str, Any]]:
+        path = SITE_ALERTS_STATE_PATH
+        if not path.is_absolute():
+            LOG.warning("site-alerts: state path must be absolute")
+            return {}
+        if not self._state_file_is_safe(path, allow_missing=True):
+            LOG.warning("site-alerts: unsafe state file ignored: %s", path)
+            return {}
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            LOG.warning("site-alerts: cannot open state file: %s", exc)
+            return {}
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o022
+                or info.st_size <= 0
+                or info.st_size > SITE_ALERTS_STATE_MAX_BYTES
+            ):
+                raise ValueError("unsafe or oversized state file")
+            raw = bytearray()
+            while len(raw) <= SITE_ALERTS_STATE_MAX_BYTES:
+                chunk = os.read(descriptor, min(
+                    65536, SITE_ALERTS_STATE_MAX_BYTES + 1 - len(raw)
+                ))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            if len(raw) > SITE_ALERTS_STATE_MAX_BYTES:
+                raise ValueError("state file exceeds the size limit")
+            payload = json.loads(bytes(raw).decode("utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") != SITE_ALERTS_STATE_VERSION
+                or not isinstance(payload.get("incidents"), dict)
+                or len(payload["incidents"]) > SITE_ALERTS_STATE_MAX_INCIDENTS
+            ):
+                raise ValueError("invalid state document")
+            incidents: Dict[str, Dict[str, Any]] = {}
+            for name, record in payload["incidents"].items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or len(name) > 253
+                    or any(ord(character) < 32 for character in name)
+                ):
+                    raise ValueError("invalid incident site name")
+                incidents[name] = _validated_incident_record(record)
+            return incidents
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            LOG.warning("site-alerts: invalid state file ignored: %s", exc)
+            return {}
+        finally:
+            os.close(descriptor)
+
+    def _persist_incidents(self) -> bool:
+        path = SITE_ALERTS_STATE_PATH
+        temporary_path: Optional[str] = None
+        try:
+            if not path.is_absolute():
+                raise ValueError("state path must be absolute")
+            parent = path.parent
+            parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+            parent_info = parent.lstat()
+            if (
+                not stat.S_ISDIR(parent_info.st_mode)
+                or parent.is_symlink()
+                or parent_info.st_uid != os.geteuid()
+                or parent_info.st_mode & 0o022
+            ):
+                raise ValueError("state directory is unsafe")
+            if not self._state_file_is_safe(path, allow_missing=True):
+                raise ValueError("state file is unsafe")
+
+            active = {
+                name: _validated_incident_record(record)
+                for name, record in sorted(self._incidents.items())
+                if any(
+                    record.get(field) is not None
+                    for field in ("bad_since", "alerted_at", "good_since")
+                )
+            }
+            if len(active) > SITE_ALERTS_STATE_MAX_INCIDENTS:
+                raise ValueError("too many incident records")
+            raw = json.dumps(
+                {"version": SITE_ALERTS_STATE_VERSION, "incidents": active},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8") + b"\n"
+            if len(raw) > SITE_ALERTS_STATE_MAX_BYTES:
+                raise ValueError("state document exceeds the size limit")
+
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=".site-alerts.", dir=parent
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                descriptor = -1
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            os.replace(temporary_path, path)
+            temporary_path = None
+            directory_fd = os.open(
+                parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return True
+        except (OSError, TypeError, ValueError) as exc:
+            LOG.warning("site-alerts: cannot persist incident state: %s", exc)
+            return False
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+
+    # -- configuration ------------------------------------------------------
+    def _load_sites(self) -> Optional[List[Dict[str, Any]]]:
+        if self._yaml is None:
+            return None
+        try:
+            with open(SITE_ALERTS_WEBSITES, "r", encoding="utf-8") as stream:
+                data = self._yaml.safe_load(stream) or {}
+        except FileNotFoundError:
+            LOG.warning(
+                "site-alerts: configuration is temporarily unavailable: %s",
+                SITE_ALERTS_WEBSITES,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - config must not kill healthd
+            LOG.warning("site-alerts: cannot read %s: %s", SITE_ALERTS_WEBSITES, exc)
+            return None
+        if not isinstance(data, dict):
+            LOG.warning("site-alerts: configuration root is not a mapping")
+            return None
+        sites = data.get("sites") or []
+        if not isinstance(sites, list):
+            LOG.warning("site-alerts: configuration sites value is not a list")
+            return None
+        result: List[Dict[str, Any]] = []
+        for site in sites:
+            # A paused site is not published at all, so it is expected to be
+            # unreachable; alerting on that would only teach the operator to
+            # ignore the alert.
+            if (
+                isinstance(site, dict)
+                and site.get("alert_enabled") is True
+                and site.get("paused") is not True
+            ):
+                result.append(site)
+        return result
+
+    def _mail_state(self) -> Optional[Dict[str, str]]:
+        try:
+            with open(SITE_ALERTS_MAIL_STATE, "r", encoding="utf-8") as stream:
+                state = json.load(stream)
+        except Exception:
+            return None
+        if not isinstance(state, dict) or state.get("enabled") is not True:
+            return None
+        sender = str(state.get("from") or "")
+        recipient = str(state.get("to") or "")
+        if not _ALERT_EMAIL_RE.fullmatch(sender):
+            return None
+        return {"from": sender, "to": recipient}
+
+    # -- evaluation ---------------------------------------------------------
+    @staticmethod
+    def _site_condition(
+        site_id: str, rows: List[Dict[str, str]]
+    ) -> Optional[Dict[str, Any]]:
+        backend = f"be_{site_id}"
+        servers_total = 0
+        servers_up = 0
+        servers: List[Dict[str, Any]] = []
+        backend_up: Optional[bool] = None
+        for row in rows:
+            if row.get("pxname") != backend:
+                continue
+            svname = row.get("svname") or ""
+            status = (row.get("status") or "").upper()
+            if svname == "BACKEND":
+                backend_up = not status.startswith("DOWN")
+            elif svname != "FRONTEND":
+                servers_total += 1
+                is_up = status.startswith("UP") or status.startswith("NO CHECK")
+                if is_up:
+                    servers_up += 1
+                servers.append(
+                    {"name": svname, "addr": row.get("addr") or "", "up": is_up}
+                )
+        if backend_up is None:
+            return None
+        if backend_up is False or (servers_total > 0 and servers_up == 0):
+            state = "down"
+        elif servers_total > 0 and servers_up < servers_total:
+            state = "degraded"
+        else:
+            state = "ok"
+        return {
+            "state": state,
+            "up": servers_up,
+            "total": servers_total,
+            "servers": servers,
+        }
+
+    # -- delivery -----------------------------------------------------------
+    def _send_mail(self, recipient: str, subject: str, body: str) -> bool:
+        state = self._mail_state()
+        if state is None:
+            LOG.warning(
+                "site-alerts: email delivery is disabled; alert not sent (%s)",
+                subject,
+            )
+            return False
+        sender = state["from"]
+        to = recipient if _ALERT_EMAIL_RE.fullmatch(recipient) else state["to"]
+        if not _ALERT_EMAIL_RE.fullmatch(to):
+            LOG.warning("site-alerts: no valid recipient; alert not sent")
+            return False
+        message = (
+            f"From: {sender}\r\nTo: {to}\r\nSubject: {subject}\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
+        )
+        lock_dir = os.path.dirname(SITE_ALERTS_MAIL_LOCK)
+        try:
+            os.makedirs(lock_dir, mode=0o750, exist_ok=True)
+            with open(SITE_ALERTS_MAIL_LOCK, "a+b") as lock_file:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+                proc = subprocess.run(
+                    [
+                        "/usr/bin/docker",
+                        "exec",
+                        "-i",
+                        "mail_relay",
+                        "/usr/sbin/sendmail",
+                        "-i",
+                        "-f",
+                        sender,
+                        "--",
+                        to,
+                    ],
+                    input=message.encode("utf-8"),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    check=False,
+                )
+        except Exception as exc:  # noqa: BLE001 - delivery is best effort
+            LOG.warning("site-alerts: mail delivery failed: %s", exc)
+            return False
+        if proc.returncode != 0:
+            LOG.warning(
+                "site-alerts: mail_relay rejected the alert (exit %s)",
+                proc.returncode,
+            )
+            return False
+        return True
+
+    # -- main loop ----------------------------------------------------------
+    def run(self) -> None:
+        if self._yaml is None:
+            return
+        while not self._stop.wait(SITE_ALERTS_INTERVAL):
+            try:
+                sites = self._load_sites()
+                if sites is None:
+                    continue
+                if not sites:
+                    if self._incidents:
+                        self._incidents.clear()
+                        self._persist_incidents()
+                    continue
+                rows = _haproxy_show_stat(SITE_ALERTS_HAPROXY_SOCKET)
+                if not rows:
+                    continue
+                seen: set = set()
+                changed = False
+                for site in sites:
+                    name = str(site.get("name") or site.get("domain") or "")
+                    if not name:
+                        continue
+                    seen.add(name)
+                    condition = self._site_condition(
+                        _SITE_ID_RE.sub("_", name), rows
+                    )
+                    if condition is None:
+                        continue
+                    changed = self._evaluate(site, name, condition) or changed
+                for stale in set(self._incidents) - seen:
+                    self._incidents.pop(stale, None)
+                    changed = True
+                if changed:
+                    self._persist_incidents()
+            except Exception:  # noqa: BLE001 - the loop must survive anything
+                LOG.exception("site-alerts: evaluation cycle failed")
+
+    def _report(
+        self, site: Dict[str, Any], name: str, condition: Dict[str, Any]
+    ) -> bool:
+        """Hand the observation to the alert engine and decide nothing.
+
+        The per-site threshold and recipient travel with the observation
+        because they belong to the site, not to the rule.
+        """
+        mode = str(site.get("alert_mode") or "down")
+        triggers = {"down"} if mode == "down" else {"down", "degraded"}
+        state = condition["state"]
+        recipient = str(site.get("alert_email") or "")
+        detail = f"Backend servers up: {condition['up']}/{condition['total']}"
+        servers_block = _format_servers(condition.get("servers") or [])
+        if servers_block:
+            detail += "\n" + servers_block
+        self._alerts.observe(
+            "site.down",
+            name,
+            active=state in triggers,
+            severity="critical" if state == "down" else "warning",
+            summary=f"Site {name} is {state}",
+            detail=detail,
+            trigger_delay=int(_alert_after_seconds(site.get("alert_after"))),
+            recipient=recipient if _ALERT_EMAIL_RE.fullmatch(recipient) else "",
+        )
+        return False
+
+    def _evaluate(
+        self,
+        site: Dict[str, Any],
+        name: str,
+        condition: Dict[str, Any],
+    ) -> bool:
+        if self._alerts is not None:
+            return self._report(site, name, condition)
+        mode = str(site.get("alert_mode") or "down")
+        triggers = {"down"} if mode == "down" else {"down", "degraded"}
+        threshold = _alert_after_seconds(site.get("alert_after"))
+        recovery_threshold = threshold
+        recipient = str(site.get("alert_email") or "")
+        record = self._incidents.setdefault(
+            name,
+            {
+                "bad_since": None,
+                "alerted_at": None,
+                "alerted_state": "",
+                "good_since": None,
+            },
+        )
+        before = dict(record)
+        now = time.time()
+        state = condition["state"]
+        summary = f"Backend servers up: {condition['up']}/{condition['total']}\n"
+        servers_block = _format_servers(condition.get("servers") or [])
+        if servers_block:
+            summary += servers_block + "\n"
+        if state in triggers:
+            record["good_since"] = None
+            if record["bad_since"] is None:
+                record["bad_since"] = now
+            elapsed = max(0.0, now - record["bad_since"])
+            repeat_due = (
+                record["alerted_at"] is not None
+                and now - record["alerted_at"] >= SITE_ALERTS_REPEAT_SECONDS
+            )
+            # A partial outage turning into a full one is news on its own:
+            # report it immediately instead of waiting for the repeat window.
+            # It cannot loop, because the alert records the new state.
+            escalated = (
+                record["alerted_at"] is not None
+                and record["alerted_state"] == "degraded"
+                and state == "down"
+            )
+            if elapsed >= threshold and (
+                record["alerted_at"] is None or repeat_due or escalated
+            ):
+                label = "DOWN" if state == "down" else "PARTIALLY DOWN"
+                sent = self._send_mail(
+                    recipient,
+                    f"[easy-ha-proxy] {name}: {label}",
+                    (
+                        f"Site: {name}\n"
+                        f"State: {label.lower()} for {_format_duration(elapsed)}\n"
+                        + summary
+                    ),
+                )
+                if sent:
+                    LOG.warning("site-alerts: alert sent for %s (%s)", name, state)
+                    record["alerted_at"] = now
+                    record["alerted_state"] = state
+        else:
+            if record["alerted_at"] is not None:
+                if record.get("good_since") is None:
+                    record["good_since"] = now
+                recovered_for = max(0.0, now - record["good_since"])
+                if recovered_for >= recovery_threshold:
+                    sent = self._send_mail(
+                        recipient,
+                        f"[easy-ha-proxy] {name}: RECOVERED",
+                        (
+                            f"Site: {name}\n"
+                            f"State: available again for "
+                            f"{_format_duration(recovered_for)}\n"
+                            + summary
+                        ),
+                    )
+                    if sent:
+                        LOG.info("site-alerts: recovery notice sent for %s", name)
+                        record["bad_since"] = None
+                        record["alerted_at"] = None
+                        record["alerted_state"] = ""
+                        record["good_since"] = None
+                    else:
+                        # Keep the incident open so the next cycle retries the
+                        # notice. Clearing it here would drop the recovery
+                        # message permanently, unlike the outage path which
+                        # records an alert only once it was really delivered.
+                        LOG.warning(
+                            "site-alerts: recovery notice not delivered for %s; "
+                            "keeping the incident open to retry",
+                            name,
+                        )
+            else:
+                record["bad_since"] = None
+                record["alerted_state"] = ""
+                record["good_since"] = None
+        return before != record
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    cfg = _load_config(CONFIG_PATH)
+    state = _State(cfg)
+
+    LOG.info(
+        "Starting haproxy-healthd: socket=%s config=%s ttl=%ss background_poll=%s",
+        SOCKET_PATH, CONFIG_PATH, cfg.cache_ttl_seconds, "1" if BACKGROUND_POLL else "0",
+    )
+
+    # Warm the cache once at start.
+    try:
+        state.force_refresh()
+    except Exception:
+        LOG.exception("Initial refresh failed")
+
+    # Optional background polling
+    state.start()
+
+    site_alerts = SiteAlertEngine()
+    site_alerts.start()
+
+    try:
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+    except OSError:
+        pass
+
+    server = HealthServer(SOCKET_PATH, HealthHandler, state)
+
+    try:
+        _set_socket_perms(SOCKET_PATH, SOCKET_GROUP)
+    except Exception as e:
+        LOG.warning("Failed to set socket permissions: %s", e)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        LOG.info("Interrupted")
+    finally:
+        try:
+            site_alerts.stop()
+            state.stop()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                try:
+                    if os.path.exists(SOCKET_PATH):
+                        os.unlink(SOCKET_PATH)
+                except OSError:
+                    pass
+
+
+if __name__ == "__main__":
+    main()

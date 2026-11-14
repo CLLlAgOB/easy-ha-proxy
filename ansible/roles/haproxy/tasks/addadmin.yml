@@ -1,0 +1,13 @@
+    - name: Ensure admin IPs file exists with static admin_allowed_ips
+      copy:
+        content: |
+          {% for ip in admin_allowed_ips %}
+          {{ ip }}
+          {% endfor %}
+        dest: "{{ admin_ips_file }}"
+        owner: root
+        group: haproxy
+        mode: "0640"
+      notify:
+      - validate haproxy
+      - apply haproxy

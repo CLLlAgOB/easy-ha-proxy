@@ -1,0 +1,6 @@
+{{ {
+  'enabled': mail_notify_enabled | default(false) | bool,
+  'from': mail_notify_from | default(''),
+  'only_for': mail_notify_only_for | default([]),
+  'to': mail_notify_to | default('')
+} | to_nice_json }}

@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block title %}Status{% endblock %}
+{% block header_title %}Status{% endblock %}
+
+{% block content %}
+
+
+<script nonce="{{ csp_nonce }}">
+  // is used in static/js/health.js
+  window.HA_IS_SUPERADMIN = {{ 'true' if is_superadmin else 'false' }};
+</script>
+
+<div class="card monitoring-card">
+  <div class="card-header">
+    <div>
+      <div class="table-title">Monitoring</div>
+      <div class="table-subtitle">systemd + Docker (application objects only)</div>
+    </div>
+    <div class="monitoring-toolbar">
+      <span class="tag" id="control-msg"  hidden></span>
+      <span class="tag notranslate" translate="no" data-i18n-skip id="status-freshness" aria-live="polite"></span>
+      <button class="btn" id="btnRefresh">Refresh</button>
+      <label class="badge" title="Auto-refresh">
+        <input type="checkbox" id="chkAuto"  class="u-transform-translatey-1px">
+        auto
+      </label>
+    </div>
+  </div>
+
+  <div class="monitoring-grid">
+      <section class="monitoring-panel">
+        <div class="monitoring-panel-header">
+          <div class="badge"><span  class="u-w-8px u-h-8px u-border-radius-8px u-background-var-surface-1"></span> systemd</div>
+          <span class="tag notranslate" translate="no" data-i18n-skip id="systemd-summary" title="Healthy / total">0/0</span>
+        </div>
+        <div class="table-wrap">
+          <table class="monitoring-table" id="tblSystemd">
+            <colgroup>
+              <col  class="u-w-38">
+              <col  class="u-w-15">
+              <col  class="u-w-13">
+              <col  class="u-w-34">
+            </colgroup>
+            <thead>
+              <tr>
+                <th  class="text-left">Unit</th>
+                <th  class="text-left">State</th>
+                <th  class="text-left">Sub</th>
+                <th class="text-right actions-cell" >Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="4"  class="text-muted">no data</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="monitoring-panel">
+        <div class="monitoring-panel-header">
+          <div class="badge"><span  class="u-w-8px u-h-8px u-border-radius-8px u-background-var-surface-1"></span> docker</div>
+          <span class="tag notranslate" translate="no" data-i18n-skip id="docker-summary" title="Running / total">0/0</span>
+        </div>
+        <div class="table-wrap">
+          <table class="monitoring-table" id="tblDocker">
+            <colgroup>
+              <col  class="u-w-36">
+              <col  class="u-w-20">
+              <col  class="u-w-20">
+              <col  class="u-w-24">
+            </colgroup>
+            <thead>
+              <tr>
+                <th  class="text-left">Container</th>
+                <th  class="text-left">State</th>
+                <th  class="text-left">Health</th>
+                <th class="text-right actions-cell" >Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="4"  class="text-muted">no data</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    <div id="control-result" class="mono notranslate" translate="no" data-i18n-skip hidden></div>
+  </div>
+</div>
+
+<div class="card" id="card-logs"  hidden>
+  <div class="card-header">
+    <h2 id="logs-title">
+      <span>Logs:</span>
+      <span id="logs-title-target" class="mono notranslate" translate="no" data-i18n-skip></span>
+    </h2>
+    <div class="controls-right">
+      <button class="btn" id="btn-logs-close">Close</button>
+    </div>
+  </div>
+
+  <div class="card-body">
+    <div class="u-grid-template-columns-repeat-4-1fr u-gap-3 u-mb-3 grid" >
+      <div>
+        <div class="u-mb-1 muted" >Tail</div>
+        <input class="input" id="logs-tail" type="number" min="10" max="20000" value="200">
+      </div>
+      <div>
+        <div class="u-mb-1 muted" >Since (sec)</div>
+        <input class="input" id="logs-since" type="number" min="60" max="604800" value="3600">
+      </div>
+      <div  class="u-align-self-end">
+        <button class="btn" id="btn-logs-reload">Refresh logs</button>
+      </div>
+      <div  class="u-align-self-end">
+        <span class="tag" id="logs-meta">—</span>
+      </div>
+    </div>
+
+    <pre class="pre-wrap u-mb-2 mono notranslate" translate="no" data-i18n-skip id="logs-cmd" ></pre>
+    <pre class="pre-wrap u-maxh-520px u-overflow-auto mono notranslate" translate="no" data-i18n-skip id="logs-text" ></pre>
+  </div>
+</div>
+
+<div class="card recent-card">
+  <div class="card-header">
+    <div>
+      <div class="recent-heading">
+        <h2>Recent service logs</h2>
+        <span class="tag notranslate" translate="no" data-i18n-skip id="recent-summary">0</span>
+      </div>
+      <div class="table-subtitle">
+        <span>Newest journal entries across selected monitored systemd units.</span>
+        <span>Ten rows are visible at a time.</span>
+        <span>Default exclusions:</span>
+        <code class="notranslate" translate="no" data-i18n-skip>haproxy.service</code>,
+        <code class="notranslate" translate="no" data-i18n-skip>haproxy-healthd.service</code>.
+      </div>
+    </div>
+    <div class="recent-controls">
+      <label class="recent-limit-control">
+        <span>Lines</span>
+        <input class="input notranslate" translate="no" data-i18n-skip
+               id="recentLimit" type="number" min="1" max="500" value="50">
+      </label>
+      <details class="recent-service-filter" id="recentServiceFilter">
+        <summary class="btn">
+          <span>Services</span>
+          <span class="recent-service-summary notranslate" translate="no" data-i18n-skip
+                id="recentUnitsSummary">0/0</span>
+        </summary>
+        <div class="recent-service-menu">
+          <div class="recent-service-menu-title">Select services for the journal feed</div>
+          <div class="recent-service-options notranslate" translate="no" data-i18n-skip
+               id="recentUnitOptions"></div>
+          <div class="recent-service-actions">
+            <button class="btn" type="button" id="recentUnitsAll">All</button>
+            <button class="btn" type="button" id="recentUnitsNone">None</button>
+            <button class="btn" type="button" id="recentUnitsDefault">Defaults</button>
+          </div>
+        </div>
+      </details>
+      <button class="btn" id="btnRecentRefresh">Refresh events</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <div class="recent-table-wrap">
+      <table class="recent-table" id="tblRecent">
+        <colgroup>
+          <col  class="u-w-210px">
+          <col  class="u-w-250px">
+          <col>
+        </colgroup>
+        <thead>
+          <tr>
+            <th  class="text-left">Time</th>
+            <th  class="text-left">Unit</th>
+            <th  class="text-left">Message</th>
+          </tr>
+        </thead>
+        <tbody id="recent-log-body" class="notranslate" translate="no" data-i18n-skip></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/health.js') }}"></script>
+{% endblock %}

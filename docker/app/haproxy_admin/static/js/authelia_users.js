@@ -1,0 +1,54 @@
+// static/js/authelia_users.js
+(function () {
+  'use strict';
+
+  const searchInput = document.getElementById('user-search');
+  const tbody = document.getElementById('users-tbody');
+  const meta = document.getElementById('users-meta');
+
+  if (!tbody) return;
+
+  const rows = Array.from(tbody.querySelectorAll('tr[data-search-text]'));
+  const total = rows.length;
+
+  function applyFilter() {
+    const q = (searchInput && searchInput.value || '').toLowerCase().trim();
+    let visible = 0;
+
+    rows.forEach(row => {
+      const text = row.getAttribute('data-search-text') || '';
+      const match = !q || text.indexOf(q) !== -1;
+      row.hidden = !(match);
+      if (match) visible++;
+    });
+
+    if (meta) {
+      if (!q) {
+        meta.textContent = `Total users: ${total}`;
+      } else {
+        meta.textContent = `Found: ${visible} of ${total}`;
+      }
+    }
+  }
+
+  // navigate on a click on the row (except on buttons and forms)
+  rows.forEach(row => {
+    const href = row.getAttribute('data-edit-url');
+    if (!href) return;
+
+    row.addEventListener('click', function (e) {
+      // ignore a click on a button, link or form
+      if (e.target.closest('button, a, form, input, select, textarea')) {
+        return;
+      }
+      window.location.href = href;
+    });
+  });
+
+  if (searchInput) {
+    searchInput.addEventListener('input', applyFilter);
+  }
+
+  // the label's initial state
+  applyFilter();
+})();

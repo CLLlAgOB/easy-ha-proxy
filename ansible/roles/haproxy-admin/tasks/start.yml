@@ -1,0 +1,88 @@
+# -------------------------------------------------------------------
+# 8) Enable & start core services
+# -------------------------------------------------------------------
+# roles/haproxy-admin/tasks/start.yml
+
+# Legacy systemd path retained for deployments without Docker.
+- name: "haproxy-admin | Start systemd services (legacy)"
+  block:
+    - name: Start core services via systemd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - haproxy-controld
+        - haproxy-certd
+
+# Docker Compose v2 path.
+- name: "haproxy-admin | Bring up docker stack"
+  when: haproxy_admin_use_docker | bool
+  block:
+    - name: "haproxy-admin | docker compose pull"
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "{{ haproxy_admin_compose_pull_timeout | int | string }}"
+          - docker
+          - compose
+          - pull
+          - --quiet
+        chdir: "{{ haproxy_admin_root_dir }}"
+      environment:
+        COMPOSE_PROGRESS: plain
+        DOCKER_CLI_HINTS: "false"
+      register: hapadm_docker_pull
+      changed_when: false
+      retries: 3
+      delay: 20
+      until: hapadm_docker_pull.rc == 0
+      tags: restore-network
+
+    - name: "haproxy-admin | docker compose up"
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'timeout',
+              haproxy_admin_compose_up_timeout | int | string,
+              'docker',
+              'compose',
+              'up',
+              '--detach',
+              '--remove-orphans'
+            ]
+            + (
+              ['--pull', 'never']
+              if easy_ha_proxy_offline_restore | default(false) | bool
+              else []
+            )
+            + (
+              ['--force-recreate']
+              if haproxy_admin_force_recreate | default(false) | bool
+              else []
+            )
+          }}
+        chdir: "{{ haproxy_admin_root_dir }}"
+      environment:
+        COMPOSE_PROGRESS: plain
+        DOCKER_CLI_HINTS: "false"
+      register: hapadm_docker_up
+      changed_when: >-
+        (
+          (hapadm_docker_up.stdout | default(''))
+          ~
+          (hapadm_docker_up.stderr | default(''))
+        )
+        is regex('(?i)(creating|created|recreating|recreated|starting|started|removing|removed)')
+      retries: 2
+      delay: 10
+      until: hapadm_docker_up.rc == 0
+
+    - name: "haproxy-admin | Verify application health"
+      ansible.builtin.include_tasks: wait_haproxy_admin_healthy.yml
+
+    - name: "haproxy-admin | Remove the legacy external GeoIP JSON cache"
+      ansible.builtin.file:
+        path: "{{ haproxy_admin_root_dir }}/backups/country_cache.json"
+        state: absent

@@ -1,0 +1,395 @@
+# haproxy_admin/__init__.py
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import gzip
+import hashlib
+import json
+import logging
+import os
+import secrets
+import stat
+
+from flask import Flask, abort, g, jsonify, redirect, request, url_for
+from flask_wtf.csrf import CSRFError, CSRFProtect
+from werkzeug.exceptions import HTTPException
+
+from .api_errors import caller_parses_json, error_reason
+from .cache import init_cache
+from .i18n import (
+    DEFAULT_LANGUAGE,
+    LANGUAGE_COOKIE,
+    get_messages,
+    init_request_language,
+    localize_json_response,
+    normalize_language,
+    safe_local_redirect,
+    supported_languages,
+    translate,
+)
+from .utils import ensure_whitelist_file
+from .compression import compress_json_response
+from .security import (
+    STATIC_CACHE_SECONDS,
+    apply_security_headers,
+    enforce_proxy_and_role,
+    init_csrf,
+    keep_redirects_on_this_origin,
+)
+
+# Import routes so they register themselves on their blueprints.
+# The imports are the point, so the names are not used here.
+from . import routes
+from . import server_time
+from . import routes_haproxy_config  # noqa: F401
+from . import routes_haproxy_sites  # noqa: F401
+from . import routes_haproxy_tcp  # noqa: F401
+from . import routes_haproxy_udp  # noqa: F401
+from . import routes_health  # noqa: F401
+from . import routes_geoip  # noqa: F401
+from . import routes_monitoring  # noqa: F401
+from . import routes_security  # noqa: F401
+from . import routes_runtime  # noqa: F401
+from . import routes_audit  # noqa: F401
+from . import routes_config_history  # noqa: F401
+from . import routes_cert_delivery  # noqa: F401
+from . import routes_dns_providers  # noqa: F401
+from . import routes_alerts  # noqa: F401
+from . import routes_prometheus  # noqa: F401
+
+from .routes_authelia_settings import bp_authelia_settings
+from .authelia_acl import bp_authelia_acl
+from .routes_backup import bp_system_backups
+from .routes_updates import bp_system_updates
+from .routes_os_security import bp_os_security
+from .routes_schedule import bp_schedule
+from .routes_access_portal import bp_access_portal
+from . import build_info, updates_badge
+
+logger = logging.getLogger("haproxy-admin")
+csrf = CSRFProtect()
+
+# Where the compose file points it too; the image makes this directory
+# writable for its user, and /opt/haproxy-admin is read-only.
+_DEFAULT_SECRET_FILE = "/var/lib/haproxy-admin/secret_key"
+
+# Per-language cache of the translation catalog served as a standalone,
+# browser-cacheable JavaScript asset. Previously the whole catalog (~200 KB,
+# and ~400 KB once tojson escaped Cyrillic to \uXXXX) was inlined into every
+# page, so it was re-sent and re-parsed on every navigation. Serving it once
+# from a hashed, immutable URL removes it from the per-page HTML entirely.
+# The catalog is static for the life of the process (loaded from bundled
+# files), so building the asset once per worker is safe.
+_I18N_ASSET_CACHE: dict[str, dict[str, object]] = {}
+
+# Static files are addressed by a content version, so they can be cached hard.
+_STATIC_VERSIONS: dict[str, str] = {}
+
+
+def _static_version(static_folder: str | None, filename: str) -> str:
+    """Return a short content version for a static file (cached per process).
+
+    Derived from size and mtime, which changes whenever the image ships a new
+    asset, so a released file never keeps a stale cached copy. Only regular
+    files are versioned: some callers build a directory URL and append the file
+    name in JavaScript, and a query string there would land before the name.
+    """
+    if not static_folder:
+        return ""
+    cached = _STATIC_VERSIONS.get(filename)
+    if cached is not None:
+        return cached
+    try:
+        info = os.stat(os.path.join(static_folder, filename))
+    except OSError:
+        return ""
+    if not stat.S_ISREG(info.st_mode):
+        _STATIC_VERSIONS[filename] = ""
+        return ""
+    version = hashlib.sha256(
+        f"{info.st_size}:{info.st_mtime_ns}".encode("ascii")
+    ).hexdigest()[:12]
+    _STATIC_VERSIONS[filename] = version
+    return version
+
+
+def _i18n_messages_asset(language: str) -> dict[str, object]:
+    cached = _I18N_ASSET_CACHE.get(language)
+    if cached is not None:
+        return cached
+    # ensure_ascii=False keeps Cyrillic as compact UTF-8 (~180 KB) instead of
+    # \uXXXX escapes (~400 KB); the payload is gzipped once (~40 KB on the wire).
+    payload = json.dumps(
+        get_messages(language),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    body = (
+        "window.HAPROXY_ADMIN_I18N=window.HAPROXY_ADMIN_I18N||{};"
+        f"window.HAPROXY_ADMIN_I18N.messages={payload};"
+    ).encode("utf-8")
+    asset = {
+        "body": body,
+        "gzip": gzip.compress(body, 6),
+        "etag": hashlib.sha256(body).hexdigest()[:16],
+    }
+    _I18N_ASSET_CACHE[language] = asset
+    return asset
+
+
+def _get_or_create_secret_key() -> str:
+    # 1) ENV
+    env_key = os.environ.get("HAPROXY_ADMIN_SECRET_KEY", "").strip()
+    if env_key:
+        logger.info("Using Flask secret key from env HAPROXY_ADMIN_SECRET_KEY")
+        return env_key
+
+    # 2) Secret file, shared by every worker process.
+    secret_file = os.environ.get("HAPROXY_ADMIN_SECRET_FILE", _DEFAULT_SECRET_FILE)
+    try:
+        return _shared_secret_key(secret_file)
+    except OSError as exc:
+        # A key of its own per worker would sign a session or a form token
+        # that the next request, served by another worker, rejects -- and
+        # every restart would sign everyone out. Better not to start.
+        raise RuntimeError(
+            f"Cannot keep the Flask secret key in {secret_file} ({exc}); make its "
+            "directory writable or set HAPROXY_ADMIN_SECRET_KEY"
+        ) from exc
+
+
+def _shared_secret_key(secret_file: str) -> str:
+    """Read the key, or make it, with every worker agreeing on one.
+
+    On a first start the workers arrive together. Each used to find no file,
+    make a key and write it, and the last writer won -- after the others had
+    already taken their own. Under the lock the first makes it and the rest
+    read it. It is written whole to a temporary file and moved into place.
+    """
+
+    directory = os.path.dirname(secret_file) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(f"{secret_file}.lock", "a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(secret_file, "r", encoding="utf-8") as handle:
+                existing = handle.read().strip()
+        except FileNotFoundError:
+            existing = ""
+        if existing:
+            logger.info("Using Flask secret key from %s", secret_file)
+            return existing
+
+        new_key = secrets.token_hex(32)
+        temporary = f"{secret_file}.new"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(new_key)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, secret_file)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
+        logger.info("Generated new Flask secret key and saved to %s", secret_file)
+        return new_key
+
+
+def create_app() -> Flask:
+    # Configure logging before any logger.info()/warning() calls.
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    app = Flask(__name__)
+    app.secret_key = _get_or_create_secret_key()
+    app.config.update(
+        MAX_CONTENT_LENGTH=32 * 1024 * 1024,
+        MAX_FORM_MEMORY_SIZE=2 * 1024 * 1024,
+        MAX_FORM_PARTS=100,
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Strict",
+        # Static URLs carry a content version (see add_static_version), so the
+        # browser may keep them instead of revalidating every asset on every
+        # navigation - each revalidation also cost an Authelia auth-request.
+        SEND_FILE_MAX_AGE_DEFAULT=STATIC_CACHE_SECONDS,
+    )
+
+    @app.url_defaults
+    def add_static_version(endpoint: str, values: dict) -> None:
+        if endpoint == "static" and "filename" in values and "v" not in values:
+            version = _static_version(app.static_folder, values["filename"])
+            if version:
+                values["v"] = version
+
+    @app.before_request
+    def configure_request_body_limit():
+        """Allow large raw DR archives only on the exact superadmin upload route."""
+
+        if request.endpoint == 'access_portal.upload':
+            from .access_portal import MAX_FILE_BYTES
+            request.max_content_length = MAX_FILE_BYTES
+        elif request.path == "/system/backups/api/uploads":
+            request.max_content_length = int(
+                os.environ.get(
+                    "EASY_HA_PROXY_BACKUP_MAX_UPLOAD_BYTES",
+                    str(8 * 1024**3),
+                )
+            )
+
+    init_csrf(app, csrf)
+
+    @app.before_request
+    def assign_csp_nonce():
+        # A per-request nonce lets the CSP allow this page's own inline
+        # bootstrap scripts without allowing injected ones.
+        g.csp_nonce = secrets.token_urlsafe(16)
+
+    app.before_request(init_request_language)
+    app.before_request(enforce_proxy_and_role)
+    # Flask calls after_request hooks in reverse: registered first, the
+    # compression runs last, on the body as the browser will read it.
+    app.after_request(compress_json_response)
+    app.after_request(apply_security_headers)
+    app.after_request(keep_redirects_on_this_origin)
+    app.after_request(localize_json_response)
+
+    @app.context_processor
+    def inject_server_time():
+        return {"server_time": server_time.context()}
+
+    @app.context_processor
+    def inject_csp_nonce():
+        return {"csp_nonce": getattr(g, "csp_nonce", "")}
+
+    @app.context_processor
+    def inject_updates_badge():
+        # The navigation's "updates are waiting" dot; never a reason for a
+        # page to fail.
+        try:
+            return {"updates_badge": updates_badge.current_level()}
+        except Exception:  # pylint: disable=broad-except
+            return {"updates_badge": None}
+
+    @app.context_processor
+    def inject_build():
+        # Which build the panel and the host run, for the footer; never a
+        # reason for a page to fail either.
+        try:
+            return {"build": build_info.footer()}
+        except Exception:  # pylint: disable=broad-except
+            return {"build": {"panel": None, "host": None, "match": None}}
+
+    @app.context_processor
+    def inject_i18n_context():
+        language = getattr(g, "language", "en")
+        languages = supported_languages()
+        # The catalog itself is delivered by the cacheable /i18n/messages.js
+        # asset (see below); the inline config only carries the tiny language
+        # metadata so the page HTML stays small.
+        return {
+            "_": translate,
+            "current_language": language,
+            "supported_languages": languages,
+            "i18n_config": {
+                "language": language,
+                "languages": languages,
+            },
+            "i18n_messages_url": url_for(
+                "i18n_messages",
+                lang=language,
+                v=_i18n_messages_asset(language)["etag"],
+            ),
+        }
+
+    @app.get("/i18n/messages.js", endpoint="i18n_messages")
+    def i18n_messages():
+        language = normalize_language(request.args.get("lang")) or DEFAULT_LANGUAGE
+        asset = _i18n_messages_asset(language)
+        accepts_gzip = "gzip" in request.headers.get("Accept-Encoding", "").lower()
+        data = asset["gzip"] if accepts_gzip else asset["body"]
+        response = app.response_class(
+            data, content_type="application/javascript; charset=utf-8"
+        )
+        if accepts_gzip:
+            response.headers["Content-Encoding"] = "gzip"
+        response.headers["Vary"] = "Accept-Encoding"
+        response.headers["Content-Length"] = str(len(data))
+        response.set_etag(str(asset["etag"]))
+        # The URL carries a content hash (?v=), so a changed catalog produces a
+        # new URL; mark it immutable. Set Cache-Control explicitly because the
+        # global security header applies "no-store" only via setdefault.
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+    @app.post("/language", endpoint="set_language")
+    def set_language():
+        language = normalize_language(request.form.get("language"))
+        if not language:
+            abort(400, description=translate("Unsupported interface language"))
+
+        target = safe_local_redirect(request.form.get("next"))
+        response = redirect(target, code=303)
+        response.set_cookie(
+            LANGUAGE_COOKIE,
+            language,
+            max_age=365 * 24 * 60 * 60,
+            secure=app.config["SESSION_COOKIE_SECURE"],
+            httponly=True,
+            samesite=app.config["SESSION_COOKIE_SAMESITE"],
+        )
+        return response
+
+    def _caller_parses_json() -> bool:
+        return caller_parses_json(request.path, request.is_json)
+
+    @app.errorhandler(CSRFError)
+    def handle_csrf_error(exc: CSRFError):
+        message = translate("CSRF validation failed")
+        if _caller_parses_json():
+            return jsonify({"ok": False, "error": message}), 400
+        return f"{message}: {exc.description}", 400
+
+    @app.errorhandler(HTTPException)
+    def handle_api_error(exc: HTTPException):
+        """Answer an API caller in the language it parses.
+
+        Without this, every `abort(400, description=...)` in the API
+        blueprints reaches the browser as an HTML page, the client's
+        `response.json()` fails, and a precise complaint about one field is
+        shown as a generic failure the operator cannot act on.
+        """
+        if not _caller_parses_json():
+            return exc
+        reason = translate(error_reason(exc.description, exc.name))
+        return jsonify({"ok": False, "error": reason}), exc.code
+
+    # Open the local MMDB reader. Each Gunicorn worker reopens it after an
+    # atomic on-disk database update.
+    init_cache()
+
+    ensure_whitelist_file()
+
+    # Main blueprint.
+    app.register_blueprint(routes.bp)
+
+    # Authelia blueprints.
+    app.register_blueprint(bp_authelia_settings)
+    app.register_blueprint(bp_authelia_acl)
+    app.register_blueprint(bp_system_backups)
+    app.register_blueprint(bp_system_updates)
+    app.register_blueprint(bp_os_security)
+    app.register_blueprint(bp_schedule)
+    app.register_blueprint(bp_access_portal)
+
+    return app

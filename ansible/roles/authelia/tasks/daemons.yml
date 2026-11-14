@@ -1,0 +1,7 @@
+---
+# roles/authelia/tasks/daemons.yml
+# Installing all of Authelia's helper daemons in one stage
+
+- import_tasks: usersd.yml
+- import_tasks: bansd.yml
+- import_tasks: configd.yml

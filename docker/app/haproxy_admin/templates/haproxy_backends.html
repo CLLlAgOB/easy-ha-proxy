@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Backends{% endblock %}
+{% block header_title %}Backends{% endblock %}
+
+{% block content %}
+
+
+<div class="rt-notice">
+  These controls change the running HAProxy immediately. The state is saved and restored across reloads and restarts, so a server left in maintenance stays in maintenance until you put it back — including after a reboot.
+</div>
+
+<div class="rt-notice error" id="rt-error" hidden></div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Servers</h2>
+    <span class="mon-sub" id="rt-updated" data-i18n-skip translate="no"></span>
+  </div>
+
+  {# The /haproxy prefix is already superadmin-only, so this flag is belt and
+     braces: it keeps the controls inert if the page ever moves elsewhere. #}
+  <div id="rt-list" data-superadmin="{{ '1' if is_superadmin else '0' }}"></div>
+  <div class="rt-empty" id="rt-empty">No backends are currently defined</div>
+</div>
+
+<script src="{{ url_for('static', filename='js/haproxy_backends.js') }}"></script>
+{% endblock %}

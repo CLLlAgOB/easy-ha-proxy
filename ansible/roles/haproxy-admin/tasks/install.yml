@@ -1,0 +1,16 @@
+# -------------------------------------------------------------------
+# 1) Packages
+# -------------------------------------------------------------------
+- import_tasks: packages.yml
+  tags: restore-network
+
+- import_tasks: fs.yml
+
+# -------------------------------------------------------------------
+# 4) The helper daemons (moved into stages of their own)
+# -------------------------------------------------------------------
+- import_tasks: certd.yml
+- import_tasks: controld.yml
+- import_tasks: backupd.yml
+- import_tasks: iptables-ban.yml
+- import_tasks: iptables-udp.yml

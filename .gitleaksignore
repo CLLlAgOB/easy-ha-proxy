@@ -1,0 +1,22 @@
+# gitleaks runs over the whole history with its default rules (the "Secrets"
+# job in CI). Fixtures and public checksums are acknowledged one by one as
+# file:rule:line. A fingerprint without a commit holds for every commit, so a
+# finding that moves to another line, or a new one in the same file, still
+# fails and has to be looked at again.
+
+# PEM markers the standby-certificate tests split and join
+.tests/test_certd_standby.py:private-key:158
+.tests/test_certd_standby.py:private-key:1113
+
+# a made-up token in a query string the request filter must leave alone
+.tests/test_query_injection.py:generic-api-key:63
+
+# a throwaway ed25519 key, used nowhere, whose line shape a backup test checks
+.tests/test_destination_key_material.py:private-key:47
+
+# a made-up TSIG secret (base64 of "secret-tsig-key") a DNS profile test keeps across an edit
+.tests/test_dns_profile_partial_edit.py:generic-api-key:27
+
+# Public SHA-256 of the HAProxy community repository signing key, downloaded
+# from https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy.
+ansible/roles/haproxy/defaults/main.yml:generic-api-key:12

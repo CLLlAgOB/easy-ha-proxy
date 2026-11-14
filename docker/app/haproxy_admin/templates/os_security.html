@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}OS security{% endblock %}
+{% block header_title %}OS security{% endblock %}
+{% block content %}
+<div id="os-security-app" class="os-security-page"
+     data-status-url="{{ url_for('os_security.status') }}" data-check-url="{{ url_for('os_security.check') }}"
+     data-policy-url="{{ url_for('os_security.policy') }}" data-install-url="{{ url_for('os_security.install') }}"
+     data-reboot-policy-url="{{ url_for('os_security.automatic_reboot') }}" data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}"
+     data-restart-policy-url="{{ url_for('os_security.restart_policy') }}" data-restart-check-url="{{ url_for('os_security.restart_check') }}"
+     data-restart-url="{{ url_for('os_security.restart_services') }}">
+  <section class="card">
+    <div class="card-header"><h2>Security updates for Linux</h2><button type="button" class="btn" id="oss-check">Check security updates</button></div>
+    <p>Install security fixes from trusted Ubuntu or Debian repositories. Container images and HAProxy use their own update controls.</p>
+    <div id="oss-message" role="status" aria-live="polite"></div>
+    <dl class="updates-haproxy-versions">
+      <div><dt>Last successful security check</dt><dd id="oss-checked">—</dd></div>
+      <div><dt>Security updates pending</dt><dd id="oss-count">—</dd></div>
+      <div><dt>Last security installation attempt</dt><dd id="oss-installed">—</dd></div>
+    </dl>
+    <p id="oss-state" class="text-muted" role="status" data-i18n-skip translate="no"></p>
+    <p id="oss-native" class="text-muted" data-i18n-skip translate="no"></p>
+  </section>
+  <section class="card" aria-labelledby="oss-current-title">
+    <div class="card-header"><h2 id="oss-current-title">Current update settings</h2><span id="oss-settings-read" class="text-muted" data-i18n-skip translate="no"></span></div>
+    <dl class="oss-current-grid">
+      <div><dt>Update management</dt><dd id="oss-current-mode" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Security check schedule</dt><dd id="oss-current-check" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Installation schedule</dt><dd id="oss-current-install" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Next scheduled run (server time)</dt><dd id="oss-next-install" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Automatic server reboot</dt><dd id="oss-current-reboot" data-i18n-skip translate="no">—</dd><a href="#oss-reboot-policy">Configure reboot</a></div>
+      <div><dt>Automatic service restarts</dt><dd id="oss-current-restarts" data-i18n-skip translate="no">—</dd><a href="#oss-restarts-policy">Configure service restarts</a></div>
+    </dl>
+    <p id="oss-live-error" class="text-danger" role="status" data-i18n-skip translate="no"></p>
+    <details><summary>Native Linux settings</summary><dl class="oss-current-grid">
+      <div><dt>Native automatic installation</dt><dd id="oss-native-auto" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Native installation interval in days</dt><dd id="oss-native-interval" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Native timer schedule</dt><dd id="oss-native-calendar" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Random timer delay</dt><dd id="oss-native-delay" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Native automatic server reboot</dt><dd id="oss-native-reboot" data-i18n-skip translate="no">—</dd></div>
+    </dl></details>
+  </section>
+  <section class="card">
+    <h2>Security update policy</h2>
+    <p>System settings remain in effect until you explicitly enable panel management. Managed modes pause the native APT upgrade timer; system mode restores its previous state.</p>
+    <form id="oss-policy-form">
+      <div class="oss-policy-grid">
+        <label for="oss-mode">Update mode<select id="oss-mode" class="form-input">
+          <option value="system">Use existing system settings</option><option value="notify">Notify only</option>
+          <option value="daily">Every day at a set time</option><option value="auto">Automatically after each check</option><option value="window">Automatically in a time window</option>
+        </select></label>
+        <label for="oss-interval">Security check interval in hours<select id="oss-interval" class="form-input">
+          {% for hour in [1, 2, 4, 6, 12, 24] %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}
+        </select></label>
+        <div class="oss-hours" id="oss-hours" hidden>
+          <label for="oss-start"><span id="oss-start-label" data-i18n-skip translate="no">Install from</span><select id="oss-start" class="form-input">{% for hour in range(24) %}<option value="{{ hour }}">{{ '%02d:00'|format(hour) }}</option>{% endfor %}</select></label>
+          <label for="oss-end" id="oss-end-label">Install until<select id="oss-end" class="form-input">{% for hour in range(24) %}<option value="{{ hour }}">{{ '%02d:00'|format(hour) }}</option>{% endfor %}</select></label>
+        </div>
+      </div>
+      <p class="text-muted">The installation window uses the server's local time. Saving a managed policy may install the distribution security tools. It does not install pending security updates immediately.</p>
+      <p id="oss-daily-note" class="text-muted" hidden>Daily installation starts at the selected server hour. Busy maintenance delays it within that hour; a missed hour waits until the next day.</p>
+      <p class="text-muted"><span>Server time zone</span>: <span id="oss-timezone" data-i18n-skip translate="no">—</span></p>
+      <p class="updates-confirm-note">Automatic reboots follow the separate reboot policy below. Package updates may restart other affected services. HAProxy, Docker and active maintenance services require a controlled restart.</p>
+      <div class="oss-actions"><button class="btn" id="oss-save" disabled>Save security policy</button><button type="button" class="btn btn-secondary" id="oss-restore" hidden>Restore existing Linux settings</button><span id="oss-unsaved" class="text-muted" data-i18n-skip translate="no"></span></div>
+    </form>
+  </section>
+  <section class="card" id="oss-reboot-policy" aria-labelledby="oss-reboot-title">
+    <h2 id="oss-reboot-title">Scheduled server reboot</h2>
+    <p>Reboot when Linux requires it after an update. The optional service fallback below also permits a reboot for verified deferred service restarts. All sites are briefly unavailable during a reboot.</p>
+    <form id="oss-reboot-form">
+      <div class="oss-policy-grid">
+        <label for="oss-reboot-enabled">Automatic server reboot<select id="oss-reboot-enabled" class="form-input"><option value="0">Off</option><option value="1">Daily, only when required</option></select></label>
+        <label for="oss-reboot-time">Reboot time (server time)<input id="oss-reboot-time" class="form-input" type="time" step="60" value="03:00" required></label>
+      </div>
+      <label><input id="oss-reboot-services" type="checkbox"> Allow a scheduled reboot for services that remain deliberately deferred after successful restart maintenance</label>
+      <p class="text-muted">Service fallback requires enabled service restart maintenance and a successful run in its latest window. Failed or unknown checks never authorize a reboot.</p>
+      <p class="text-muted">The selected time starts a one-minute countdown with a cancel button. Busy maintenance postpones the reboot within one hour; a missed window waits until the next day.</p>
+      <p id="oss-reboot-mode-note" class="text-muted" hidden>Enable a managed security update mode above to configure scheduled reboots. Native Linux reboot settings remain visible under current settings.</p>
+      <p><span>Server time zone</span>: <span id="oss-reboot-timezone" data-i18n-skip translate="no">—</span></p>
+      <dl class="oss-current-grid">
+        <div><dt>Reboot required now</dt><dd id="oss-reboot-required" data-i18n-skip translate="no">—</dd></div>
+        <div><dt>Next reboot window (server time)</dt><dd id="oss-reboot-next" data-i18n-skip translate="no">—</dd></div>
+      </dl>
+      <p id="oss-reboot-state" role="status" data-i18n-skip translate="no"></p>
+      <div class="oss-actions"><button class="btn" id="oss-reboot-save" disabled>Save reboot settings</button><button type="button" class="btn btn-secondary" id="oss-reboot-cancel" hidden>Cancel pending reboot</button><span id="oss-reboot-unsaved" class="text-muted" data-i18n-skip translate="no"></span></div>
+      <p id="oss-reboot-message" role="status" aria-live="polite" data-i18n-skip translate="no"></p>
+    </form>
+  </section>
+  <section class="card">
+    <div class="card-header"><h2>Available security fixes</h2><button class="btn" type="button" id="oss-install" disabled>Install security fixes now</button></div>
+    <p>Protected and held packages remain visible here. Install their fixes through the appropriate controlled update process.</p>
+    <div class="table-scroll oss-packages"><table><thead><tr><th>Package</th><th>Installed</th><th>Security version</th><th>State</th></tr></thead><tbody id="oss-packages"></tbody></table></div>
+    <p id="oss-package-note" class="text-muted" data-i18n-skip translate="no"></p>
+  </section>
+  <section class="card" id="oss-restarts-policy" aria-labelledby="oss-restarts-title">
+    <div class="card-header"><h2 id="oss-restarts-title">Apply installed updates</h2><button type="button" class="btn btn-secondary" id="oss-restart-check">Check pending restarts</button></div>
+    <p>Restart affected services in a separate daily window, even when no new packages were installed. Native and administrator exclusions remain in effect. Package installation can also restart services, so keep installations within your maintenance window.</p>
+    <form id="oss-restarts-form">
+      <div class="oss-policy-grid">
+        <label for="oss-restarts-enabled">Service restart mode<select id="oss-restarts-enabled" class="form-input"><option value="0">Notify only</option><option value="1">Automatically on schedule, when needed</option></select></label>
+        <label for="oss-restarts-time">Service restart time (server time)<input id="oss-restarts-time" class="form-input" type="time" step="60" value="02:15" required></label>
+      </div>
+      <p class="text-muted">Busy maintenance postpones the run within one hour. A missed window waits until the next day. Network services, HAProxy, Docker and active maintenance workers are excluded from ordinary automatic restarts.</p>
+      <p><span>Server time zone</span>: <span id="oss-restarts-timezone" data-i18n-skip translate="no">—</span></p>
+      <dl class="oss-current-grid">
+        <div><dt>Next service restart window</dt><dd id="oss-restarts-next" data-i18n-skip translate="no">—</dd></div>
+        <div><dt>Last service restart attempt</dt><dd id="oss-restarts-last" data-i18n-skip translate="no">—</dd></div>
+        <div><dt>Restarted services</dt><dd id="oss-restarts-done" data-i18n-skip translate="no">—</dd></div>
+      </dl>
+      <div class="oss-actions"><button class="btn" id="oss-restarts-save" disabled>Save service restart settings</button><button class="btn btn-secondary" type="button" id="oss-restart-now" disabled>Restart eligible services now</button><span id="oss-restarts-unsaved" class="text-muted" data-i18n-skip translate="no"></span></div>
+      <p id="oss-restarts-message" role="status" aria-live="polite" data-i18n-skip translate="no"></p>
+    </form>
+    <p id="oss-restarts-state" role="status" data-i18n-skip translate="no"></p>
+    <p id="oss-restart" role="status" data-i18n-skip translate="no">Not checked yet.</p>
+    <div class="table-scroll"><table><thead><tr><th>Service</th><th>Next action</th></tr></thead><tbody id="oss-services" data-i18n-skip translate="no"></tbody></table></div>
+    <p>Installed files do not replace libraries already in use. A pending restart means the running service or kernel may still need the security fix.</p>
+  </section>
+  <section class="card"><h2>Security maintenance jobs</h2><p id="oss-job" role="status" data-i18n-skip translate="no"></p>
+    <details id="oss-log-details"><summary>Job details</summary><pre id="oss-log" class="config-technical-output mono" data-i18n-skip translate="no"></pre></details>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ url_for('static', filename='js/os_security.js') }}"></script>{% endblock %}

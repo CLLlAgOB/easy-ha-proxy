@@ -1,0 +1,3872 @@
+#!/usr/bin/env python3
+"""Least-privilege broker for asynchronous easy-ha-proxy update jobs.
+
+The web container can request only a bounded update check or an allow-listed
+component update.  It cannot provide commands, Ansible tags, repository URLs,
+paths, or image references.  Job and plan state lives on the host so updating
+the haproxy-admin container does not lose progress or the final result.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import errno
+import fcntl
+import grp
+import hashlib
+import json
+import logging
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import tempfile
+import threading
+import time
+from typing import Any
+import uuid
+
+
+LOG = logging.getLogger("easy-ha-proxy-updated")
+
+
+class UpdatedError(RuntimeError):
+    """Expected request or job failure safe to return to the web UI."""
+
+    def __init__(self, message: str, *, code: str = "invalid") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError as exc:
+        raise UpdatedError(f"{name} must be an integer") from exc
+    if value < minimum or (maximum is not None and value > maximum):
+        raise UpdatedError(f"{name} is outside the supported range")
+    return value
+
+
+SOCKET_PATH = Path(
+    os.environ.get(
+        "UPDATED_SOCKET_PATH",
+        "/run/easy-ha-proxy/easy-ha-proxy-updated.sock",
+    )
+)
+STATE_ROOT = Path(
+    os.environ.get(
+        "UPDATED_STATE_ROOT",
+        "/var/lib/easy-ha-proxy/update-web",
+    )
+)
+JOBS_DIR = STATE_ROOT / "jobs"
+LATEST_PLAN_PATH = STATE_ROOT / "latest-plan.json"
+SOURCE_DIR = Path(
+    os.environ.get("UPDATED_SOURCE_DIR", "/opt/easy-ha-proxy/source")
+)
+CONFIG_DIR = Path(
+    os.environ.get("UPDATED_CONFIG_DIR", "/etc/easy-ha-proxy")
+)
+PYTHON_PATH = Path(
+    os.environ.get("UPDATED_PYTHON_PATH", "/opt/easy-ha-proxy/venv/bin/python")
+)
+CLI_PATH = Path(
+    os.environ.get("UPDATED_CLI_PATH", "/usr/local/bin/easy-ha-proxy")
+)
+APP_USER = os.environ.get("UPDATED_SOCKET_USER", "haproxyadmin")
+APP_GROUP = os.environ.get("UPDATED_APP_GROUP", "hadmin")
+SERVICE_NAME = os.environ.get(
+    "UPDATED_SERVICE_NAME", "easy-ha-proxy-updated.service"
+)
+ACTIVE_MARKER = Path(
+    os.environ.get(
+        "UPDATED_ACTIVE_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-update.active",
+    )
+)
+RESTART_REQUEST_MARKER = Path(
+    os.environ.get(
+        "UPDATED_RESTART_REQUEST_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested",
+    )
+)
+REBOOT_MARKER = Path(
+    os.environ.get(
+        "UPDATED_REBOOT_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json",
+    )
+)
+ASSISTANT_REBOOT_MARKER = Path("/run/easy-ha-proxy/reboot-scheduled")
+# This is deliberately the same lock used by backupd.  Holding it makes an
+# update conflict with backup, inspect, restore, and backup deletion.
+MAINTENANCE_LOCK_PATH = Path(
+    os.environ.get(
+        "UPDATED_MAINTENANCE_LOCK",
+        "/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock",
+    )
+)
+HAPROXY_TRANSACTION_MARKER = Path(
+    os.environ.get(
+        "UPDATED_HAPROXY_TRANSACTION_MARKER",
+        "/opt/haproxy-admin/backups/haproxy/pending_ui_transaction.json",
+    )
+)
+HAPROXY_TRANSACTION_STATE = Path(
+    os.environ.get(
+        "UPDATED_HAPROXY_TRANSACTION_STATE",
+        "/var/lib/easy-ha-proxy/haproxy-config-guard/transaction.json",
+    )
+)
+
+MAX_REQUEST_BYTES = env_int(
+    "UPDATED_MAX_REQUEST_BYTES", 32 * 1024, maximum=64 * 1024
+)
+MAX_RESPONSE_BYTES = env_int(
+    "UPDATED_MAX_RESPONSE_BYTES", 2 * 1024 * 1024, maximum=4 * 1024 * 1024
+)
+MAX_CAPTURE_BYTES = env_int(
+    "UPDATED_MAX_CAPTURE_BYTES", 256 * 1024, maximum=1024 * 1024
+)
+MAX_STATE_BYTES = env_int(
+    "UPDATED_MAX_STATE_BYTES", 1024 * 1024, maximum=2 * 1024 * 1024
+)
+JOB_TIMEOUT_SECONDS = env_int(
+    "UPDATED_JOB_TIMEOUT_SECONDS", 2 * 60 * 60, maximum=12 * 60 * 60
+)
+CHECK_TIMEOUT_SECONDS = env_int(
+    "UPDATED_CHECK_TIMEOUT_SECONDS", 10 * 60, maximum=30 * 60
+)
+PLAN_TTL_SECONDS = env_int(
+    "UPDATED_PLAN_TTL_SECONDS", 15 * 60, maximum=24 * 60 * 60
+)
+LIST_LIMIT = env_int("UPDATED_LIST_LIMIT", 30, maximum=100)
+# A scheduled check, so "updates are available" reaches the
+# operator without anyone opening the page. 0 switches it off. The first one
+# waits a while after start, so a reboot does not begin with a git clone.
+AUTO_CHECK_HOURS = env_int("UPDATED_AUTO_CHECK_HOURS", 24, minimum=0, maximum=24 * 30)
+AUTO_CHECK_DELAY_SECONDS = env_int(
+    "UPDATED_AUTO_CHECK_DELAY_SECONDS", 900, minimum=0, maximum=24 * 3600
+)
+AUTO_CHECK_RETRY_SECONDS = 3600
+# The page can change the interval without Ansible: its choice is kept in the
+# broker's own state and wins over the default above. The schedule looks at it
+# once a minute, so a change takes effect without a restart.
+AUTO_CHECK_CHOICES = (0, 6, 12, 24, 72, 168)
+AUTO_CHECK_POLL_SECONDS = 60
+SETTINGS_PATH = STATE_ROOT / "settings.json"
+MAX_CONNECTIONS = env_int("UPDATED_MAX_CONNECTIONS", 16, maximum=64)
+
+PROTOCOL_VERSION = 2
+IDENTIFIER_RE = re.compile(r"^[0-9a-f]{32}$")
+BOOT_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
+SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
+IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# "changes" never appears in a plan of its own: it is the source update with
+# only the playbook steps the changed files need, and the plan describes it in
+# the "all" component's details.scope.
+CHANGES_COMPONENT = "changes"
+ALLOWED_COMPONENTS = frozenset(
+    {
+        "all",
+        CHANGES_COMPONENT,
+        "services",
+        "daemons",
+        "authelia-container",
+        "admin-container",
+        "os",
+        "haproxy",
+    }
+)
+SOURCE_COMPONENTS = frozenset({"all", "services", "daemons", CHANGES_COMPONENT})
+CONTAINER_COMPONENTS = frozenset(
+    {"authelia-container", "admin-container"}
+)
+ACTIVE_STATUSES = frozenset({"queued", "running"})
+# Progress for the page. The installer prints "EHP-PROGRESS phase=<name>" as it
+# moves through its own steps, and the easy_ha_proxy_progress Ansible callback
+# prints "EHP-PROGRESS <done>/<total> <task>" before each task. Only the part of
+# the log after the current component's heading counts: earlier components'
+# output is carried into the same log.
+COMPONENT_HEADING = "=== Applying component:"
+PROGRESS_RE = re.compile(
+    r"^EHP-PROGRESS (?:phase=(?P<phase>[a-z-]{1,24})"
+    r"|(?P<done>\d{1,6})/(?P<total>\d{1,6})(?: (?P<task>[^\n]{0,400}))?)[ \t]*$",
+    re.MULTILINE,
+)
+PROGRESS_PHASES = frozenset(
+    {
+        "checking", "verifying", "starting", "source", "prepare", "syntax",
+        "playbook", "rechecking",
+    }
+)
+MAX_PROGRESS_TASK = 160
+TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
+
+
+# The alert client lives beside this script in /usr/local/sbin, which is
+# sys.path[0] for a daemon started by absolute path. Optional on purpose: the
+# job still runs on a gateway without the alert daemon.
+try:
+    from easy_ha_proxy_alert_client import AlertClient  # type: ignore[import]
+except Exception:  # pragma: no cover - the daemon runs without it
+    AlertClient = None  # type: ignore[assignment]
+
+_ALERTS = None
+if AlertClient is not None:
+    _candidate = AlertClient(source="updated")
+    _ALERTS = _candidate if _candidate.configured else None
+
+
+AVAILABLE_RULE = "update.available"
+AVAILABLE_SUBJECT = "software"
+# Names for the alert text, which is read away from the page.
+ALERT_COMPONENT_NAMES = {
+    "all": "a new source revision",
+    "services": "host services",
+    "daemons": "helper daemons",
+    "authelia-container": "Authelia containers",
+    "admin-container": "the web application",
+    "os": "operating-system packages",
+    "haproxy": "HAProxy",
+}
+ALERT_CHANGELOG_LINES = 15
+
+
+def availability_report(plan: dict[str, Any]) -> tuple[bool, str, str] | None:
+    """(active, summary, detail) for the "updates available" level, or None
+    when the check could not tell either way."""
+
+    components = [item for item in plan.get("components") or [] if isinstance(item, dict)]
+    actionable = [
+        item for item in components
+        if item.get("state") == "available" and item.get("actionable") is True
+    ]
+    if not actionable:
+        if any(item.get("state") == "unknown" for item in components):
+            return None
+        return False, "Software is up to date", ""
+    names = []
+    for item in actionable:
+        name = ALERT_COMPONENT_NAMES.get(str(item.get("id")), str(item.get("id")))
+        if item.get('id') == 'haproxy':
+            name += f" {item.get('installed') or '?'} → {item.get('available') or '?'}"
+        count = (item.get("details") or {}).get("package_count") if item.get("id") == "os" else None
+        names.append(f"{name} ({count})" if isinstance(count, int) and count > 0 else name)
+    summary = f"Software updates are available: {', '.join(names)}"
+    lines: list[str] = []
+    source = next((item for item in actionable if item.get("id") == "all"), None)
+    changelog = ((source or {}).get("details") or {}).get("changelog")
+    if isinstance(changelog, dict) and isinstance(changelog.get("commits"), list):
+        count = changelog.get("count")
+        more = "" if changelog.get("complete") else "+"
+        lines.append(f"{count}{more} new change(s):")
+        for commit in changelog["commits"][:ALERT_CHANGELOG_LINES]:
+            if isinstance(commit, dict):
+                lines.append(f"- {commit.get('subject') or commit.get('revision')}")
+        lines.append("")
+    lines.append("Install them from Software updates in HAProxy Admin.")
+    return True, summary, "\n".join(lines)
+
+
+def report_availability(plan: dict[str, Any]) -> None:
+    """Keep the "updates available" level in step with the newest check."""
+    if _ALERTS is None:
+        return
+    try:
+        report = availability_report(plan)
+        if report is None:
+            return
+        active, summary, detail = report
+        _ALERTS.observe(
+            AVAILABLE_RULE, AVAILABLE_SUBJECT, active=active, summary=summary, detail=detail
+        )
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
+
+
+def report_alert(rule: str, subject: str, summary: str, detail: str = "") -> None:
+    """Tell the alert engine a job failed. Never disturbs the job itself."""
+    if _ALERTS is None:
+        return
+    try:
+        _ALERTS.observe(rule, subject, summary=summary, detail=detail)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug("alert reporting failed", exc_info=True)
+HAPROXY_TRANSACTION_ACTIVE_STATES = frozenset(
+    {"prepared", "pending_confirmation", "rolling_back", "rollback_failed"}
+)
+HAPROXY_TRANSACTION_SETTLED_STATES = frozenset({"confirmed", "rolled_back"})
+SOURCE_CHANNELS = frozenset({"github", "local"})
+IMAGE_CHANNELS = frozenset({"latest", "alpha"})
+RELEASE_CHANNELS = frozenset({"stable", "alpha", "local"})
+# Unified channel -> (branch, image) for github-tracked channels.
+RELEASE_CHANNEL_MAP = {
+    "stable": {"branch": "main", "image_channel": "latest"},
+    "alpha": {"branch": "alpha", "image_channel": "alpha"},
+}
+BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
+
+
+def derive_release_channel(
+    source_channel: str, branch: str, image_channel: str
+) -> str:
+    # Keyed off the image tag so pre-branch installs still map cleanly.
+    if (source_channel or "github") == "local":
+        return "local"
+    if (image_channel or "latest") == "alpha":
+        return "alpha"
+    return "stable"
+REQUEST_FIELDS = {
+    "status": frozenset({"action", "job_id"}),
+    "set_settings": frozenset({"action", "auto_check_hours"}),
+    "set_auto_install": frozenset({"action", "enabled", "start", "end"}),
+    "summary": frozenset({"action"}),
+    "start_check": frozenset(
+        {"action", "image_channel", "source_channel", "release_channel"}
+    ),
+    "start_apply": frozenset(
+        {"action", "plan_id", "components", "confirmation"}
+    ),
+    "set_channels": frozenset(
+        {"action", "image_channel", "source_channel", "release_channel"}
+    ),
+    "reboot": frozenset(
+        {"action", "confirmation", "expected_boot_id", "actor"}
+    ),
+    "cancel_reboot": frozenset({"action", "expected_boot_id", "actor"}),
+    "prepare_haproxy_migration": frozenset({"action", "target_branch"}),
+    "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
+    "start_haproxy_transition": frozenset({"action", "target_branch", "confirmed"}),
+    "os_security_status": frozenset({"action", "job_id"}),
+    "os_security_check": frozenset({"action"}),
+    "os_security_install": frozenset({"action", "confirmation"}),
+    "os_security_configure": frozenset({"action", "mode", "interval", "start", "end", "confirmation"}),
+    "set_auto_reboot": frozenset({"action", "enabled", "time", "allow_service_reboot", "confirmation", "expected_boot_id", "actor"}),
+    "set_service_restarts": frozenset({"action", "enabled", "time", "confirmation", "expected_boot_id", "actor"}),
+    "os_security_restart_check": frozenset({"action"}),
+    "os_security_restart": frozenset({"action", "confirmation"}),
+}
+
+STATE_LOCK = threading.RLock()
+OPERATION_THREAD_LOCK = threading.Lock()
+CONNECTION_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
+STOP_EVENT = threading.Event()
+SHUTDOWN_REQUESTED = threading.Event()
+APP_UID = -1
+APP_PRIMARY_GID = -1
+APP_GROUP_GID = -1
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def identifier(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
+        raise UpdatedError(f"invalid {label}")
+    return value
+
+
+def ensure_absolute_path(path: Path, label: str) -> None:
+    if not path.is_absolute() or ".." in path.parts:
+        raise UpdatedError(f"unsafe {label}")
+
+
+def ensure_directory(path: Path, *, uid: int, gid: int, mode: int) -> None:
+    ensure_absolute_path(path, "state path")
+    path.mkdir(parents=True, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise UpdatedError(f"state path is not a real directory: {path}")
+    os.chown(path, uid, gid)
+    os.chmod(path, mode)
+
+
+def ensure_layout() -> None:
+    global APP_UID, APP_PRIMARY_GID, APP_GROUP_GID
+    user = pwd.getpwnam(APP_USER)
+    group = grp.getgrnam(APP_GROUP)
+    APP_UID = user.pw_uid
+    APP_PRIMARY_GID = user.pw_gid
+    APP_GROUP_GID = group.gr_gid
+    for path, label in (
+        (SOCKET_PATH, "socket path"),
+        (STATE_ROOT, "state path"),
+        (SOURCE_DIR, "source path"),
+        (CONFIG_DIR, "configuration path"),
+        (MAINTENANCE_LOCK_PATH, "maintenance lock"),
+        (ACTIVE_MARKER, "active marker"),
+        (RESTART_REQUEST_MARKER, "restart marker"),
+        (REBOOT_MARKER, "reboot marker"),
+        (ASSISTANT_REBOOT_MARKER, "assistant reboot marker"),
+        (HAPROXY_TRANSACTION_MARKER, "HAProxy transaction marker"),
+        (HAPROXY_TRANSACTION_STATE, "HAProxy transaction state"),
+    ):
+        ensure_absolute_path(path, label)
+    ensure_directory(STATE_ROOT, uid=0, gid=APP_GROUP_GID, mode=0o750)
+    ensure_directory(JOBS_DIR, uid=0, gid=APP_GROUP_GID, mode=0o750)
+    SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.chown(SOCKET_PATH.parent, 0, APP_GROUP_GID)
+    os.chmod(SOCKET_PATH.parent, 0o750)
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_STATE_BYTES:
+        raise UpdatedError("update state is too large", code="too_large")
+    temporary = path.parent / (
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fchown(descriptor, 0, APP_GROUP_GID)
+            os.fchmod(descriptor, 0o640)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def safe_json_file(path: Path) -> dict[str, Any]:
+    info = path.lstat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != 0
+        or not 0 < info.st_size <= MAX_STATE_BYTES
+    ):
+        raise UpdatedError(f"unsafe update state file: {path.name}")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            raise UpdatedError(f"state file changed while opening: {path.name}")
+        raw = os.read(descriptor, MAX_STATE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise UpdatedError(f"invalid update state file: {path.name}")
+    return payload
+
+
+def state_path(job_id: str) -> Path:
+    return JOBS_DIR / f"{identifier(job_id, 'job id')}.json"
+
+
+def new_job(operation: str, **values: Any) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    state = {
+        "id": job_id,
+        "operation": operation,
+        "status": "queued",
+        "created_at": utc_now(),
+        "started_at": None,
+        "completed_at": None,
+        "components": [],
+        "current_component": None,
+        "plan_id": None,
+        "output": None,
+        "result": None,
+        "error": None,
+    }
+    state.update(values)
+    with STATE_LOCK:
+        atomic_json(state_path(job_id), state)
+    return state
+
+
+def parse_progress(text: str) -> dict[str, Any] | None:
+    """The newest progress marker of the component that is running now."""
+
+    section = text.rsplit(COMPONENT_HEADING, 1)[-1]
+    last = None
+    for match in PROGRESS_RE.finditer(section):
+        last = match
+    if last is None:
+        return None
+    if last.group("phase"):
+        phase = last.group("phase")
+        return {"phase": phase} if phase in PROGRESS_PHASES else None
+    task = CONTROL_RE.sub("", last.group("task") or "").strip()[:MAX_PROGRESS_TASK]
+    return {
+        "phase": "playbook",
+        "done": int(last.group("done")),
+        "total": int(last.group("total")),
+        "task": task,
+    }
+
+
+def public_progress(value: Any) -> dict[str, Any] | None:
+    """Only the shape the page knows, whatever ended up in the state file."""
+
+    if not isinstance(value, dict) or value.get("phase") not in PROGRESS_PHASES:
+        return None
+    result: dict[str, Any] = {"phase": value["phase"]}
+    for key in ("done", "total"):
+        number = value.get(key)
+        if isinstance(number, int) and 0 <= number <= 999999:
+            result[key] = number
+    task = value.get("task")
+    if isinstance(task, str) and task:
+        result["task"] = CONTROL_RE.sub("", task)[:MAX_PROGRESS_TASK]
+    return result
+
+
+def public_job(state: dict[str, Any], *, include_log: bool = True) -> dict[str, Any]:
+    output = state.get("output") if isinstance(state.get("output"), dict) else None
+    if output is not None and not include_log:
+        output = {key: value for key, value in output.items() if key != "log"}
+    return {
+        "id": str(state.get("id") or ""),
+        "operation": str(state.get("operation") or ""),
+        "status": str(state.get("status") or ""),
+        "created_at": state.get("created_at"),
+        "started_at": state.get("started_at"),
+        "completed_at": state.get("completed_at"),
+        "components": state.get("components")
+        if isinstance(state.get("components"), list)
+        else [],
+        "current_component": state.get("current_component"),
+        "component_index": state.get("component_index")
+        if isinstance(state.get("component_index"), int)
+        else None,
+        "component_started_at": str(state.get("component_started_at"))[:40]
+        if state.get("component_started_at")
+        else None,
+        "scheduled": state.get("scheduled") is True,
+        "progress": public_progress(state.get("progress")),
+        "plan_id": state.get("plan_id"),
+        "output": output,
+        "result": state.get("result")
+        if isinstance(state.get("result"), dict)
+        else None,
+        "error": str(state.get("error"))[:4096] if state.get("error") else None,
+    }
+
+
+def load_job(job_id: str, *, include_log: bool = True) -> dict[str, Any]:
+    path = state_path(job_id)
+    if not path.exists():
+        raise UpdatedError("update job was not found", code="not_found")
+    state = safe_json_file(path)
+    if state.get("id") != job_id:
+        raise UpdatedError("update job identifier does not match")
+    return public_job(state, include_log=include_log)
+
+
+def update_job(job_id: str, **updates: Any) -> dict[str, Any]:
+    with STATE_LOCK:
+        path = state_path(job_id)
+        state = safe_json_file(path)
+        state.update(updates)
+        atomic_json(path, state)
+    return public_job(state)
+
+
+def list_jobs() -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    for path in JOBS_DIR.glob("*.json"):
+        if not IDENTIFIER_RE.fullmatch(path.stem):
+            continue
+        try:
+            jobs.append(load_job(path.stem, include_log=False))
+        except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+            LOG.warning("Ignoring unsafe update job state %s", path.name)
+    jobs.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return jobs[:LIST_LIMIT]
+
+
+def active_job() -> dict[str, Any] | None:
+    return next(
+        (job for job in list_jobs() if job.get("status") in ACTIVE_STATUSES),
+        None,
+    )
+
+
+def recover_stale_jobs() -> None:
+    for job in list_jobs():
+        if job.get("status") in ACTIVE_STATUSES:
+            update_job(
+                job["id"],
+                status="interrupted",
+                completed_at=utc_now(),
+                error="the update broker restarted before the job completed",
+            )
+    for marker in (ACTIVE_MARKER, RESTART_REQUEST_MARKER):
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+    for path in JOBS_DIR.glob(".*.output"):
+        if not IDENTIFIER_RE.fullmatch(path.name[1:-len(".output")]):
+            continue
+        try:
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_uid == 0:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+    stop_orphan_transient_jobs()
+
+
+def stop_orphan_transient_jobs() -> None:
+    """Transient job units outlive a crashed broker; reconcile them at start.
+
+    Their jobs were just marked interrupted, so a still-running child would
+    otherwise race the next operation for the same managed state.
+    """
+
+    if not transient_jobs_supported():
+        return
+    try:
+        result = subprocess.run(
+            [
+                SYSTEMCTL_PATH,
+                "list-units",
+                "--all",
+                "--plain",
+                "--no-legend",
+                "easy-ha-proxy-updated-job-*.service",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        LOG.warning("Could not list orphan transient update jobs")
+        return
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        unit = line.split()[0] if line.split() else ""
+        if unit.startswith("easy-ha-proxy-updated-job-"):
+            LOG.warning("Stopping orphan transient update job %s", unit)
+            stop_transient_unit(unit)
+
+
+def sanitize_log(value: str) -> str:
+    clean = CONTROL_RE.sub("", value).replace("\r", "")
+    encoded = clean.encode("utf-8", "replace")
+    if len(encoded) > MAX_CAPTURE_BYTES:
+        prefix = b"[output truncated]\n"
+        if MAX_CAPTURE_BYTES <= len(prefix):
+            return prefix[:MAX_CAPTURE_BYTES].decode("ascii")
+        encoded = prefix + encoded[-(MAX_CAPTURE_BYTES - len(prefix)):]
+        # The byte slice can begin inside a UTF-8 sequence. Dropping only that
+        # incomplete leading code point keeps the advertised byte cap exact.
+        clean = encoded.decode("utf-8", "ignore")
+    return clean
+
+
+def read_tail(stream: Any) -> str:
+    # os.pread keeps the file offset untouched: the running child shares the
+    # same open file description and would otherwise write where a concurrent
+    # live read repositioned the offset, corrupting its own log.
+    stream.flush()
+    descriptor = stream.fileno()
+    size = os.fstat(descriptor).st_size
+    if size <= 0:
+        return ""
+    offset = max(0, size - MAX_CAPTURE_BYTES * 2)
+    return sanitize_log(
+        os.pread(descriptor, size - offset, offset).decode("utf-8", "replace")
+    )
+
+
+def child_environment() -> dict[str, str]:
+    return {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        "PYTHONUNBUFFERED": "1",
+        "EASY_HA_PROXY_LANGUAGE": "en",
+        # Ask the installer and Ansible for the progress markers above.
+        "EASY_HA_PROXY_PROGRESS": "1",
+        # A web update reports a required reboot; it never schedules one.
+        "EASY_HA_PROXY_REBOOT_DECISION": "no",
+        # The broker holds the maintenance lock for the job it starts.
+        "EASY_HA_PROXY_MAINTENANCE_LOCK_HELD": "updated",
+    }
+
+
+SYSTEMD_RUN_PATH = "/usr/bin/systemd-run"
+SYSTEMCTL_PATH = "/usr/bin/systemctl"
+# Delayed + cancelable reboot: PID 1 owns a uniquely named timer, so the HTTP
+# response reaches the browser before the host goes down and cancellation can
+# never affect a shutdown scheduled by another administrator.
+REBOOT_DELAY_SECONDS = env_int(
+    "UPDATED_REBOOT_DELAY_SECONDS", 60, minimum=15, maximum=15 * 60
+)
+REBOOT_UNIT_PREFIX = "easy-ha-proxy-web-reboot"
+REBOOT_UNIT_RE = re.compile(
+    rf"^{re.escape(REBOOT_UNIT_PREFIX)}-[0-9a-f]{{12}}$"
+)
+REBOOT_CONFIRMATION = "REBOOT"
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+REBOOT_REQUIRED_PATH = Path("/var/run/reboot-required")
+# A restore in progress must never be interrupted by a reboot.
+BACKUPD_RESTORE_ACTIVE_MARKER = Path(
+    os.environ.get(
+        "UPDATED_BACKUPD_RESTORE_MARKER",
+        "/run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active",
+    )
+)
+TRANSIENT_STOP_TIMEOUT = 30
+
+
+def transient_jobs_supported() -> bool:
+    """Privileged children escape this broker's sandbox through PID 1.
+
+    The broker unit keeps NoNewPrivileges; APT, dpkg, and snap-confined
+    certbot only work when their processes are spawned by systemd itself as
+    transient units. Unprivileged test runs fall back to direct execution.
+    """
+
+    return (
+        os.geteuid() == 0
+        and os.path.isdir("/run/systemd/system")
+        and os.access(SYSTEMD_RUN_PATH, os.X_OK)
+    )
+
+
+def systemctl_properties(unit: str, names: list[str]) -> dict[str, str]:
+    result = subprocess.run(
+        [SYSTEMCTL_PATH, "show", unit, *(f"--property={name}" for name in names)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=30,
+    )
+    properties: dict[str, str] = {}
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            properties[key.strip()] = value.strip()
+    return properties
+
+
+def stop_transient_unit(unit: str) -> None:
+    for command in (
+        [SYSTEMCTL_PATH, "stop", unit],
+        [SYSTEMCTL_PATH, "reset-failed", unit],
+    ):
+        try:
+            subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=TRANSIENT_STOP_TIMEOUT + 15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            LOG.warning("Could not clean up transient unit %s", unit)
+
+
+def read_file_tail(path: Path) -> str:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return ""
+    try:
+        size = os.fstat(descriptor).st_size
+        if size <= 0:
+            return ""
+        offset = max(0, size - MAX_CAPTURE_BYTES * 2)
+        return sanitize_log(
+            os.pread(descriptor, size - offset, offset).decode("utf-8", "replace")
+        )
+    finally:
+        os.close(descriptor)
+
+
+def transient_job_unit_name():
+    return f"easy-ha-proxy-updated-job-{uuid.uuid4().hex[:12]}.service"
+
+
+def run_transient_command(
+    job_id: str,
+    argv: list[str],
+    *,
+    timeout: int,
+    log_prefix: str = "",
+) -> tuple[int, str]:
+    unit = transient_job_unit_name()
+    output_path = JOBS_DIR / f".{identifier(job_id, 'job id')}.output"
+    descriptor = os.open(
+        output_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        if log_prefix:
+            os.write(descriptor, (log_prefix + "\n").encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    command = [
+        SYSTEMD_RUN_PATH,
+        "--quiet",
+        "--no-block",
+        "--unit",
+        unit,
+        "--service-type=oneshot",
+        "-p",
+        "RemainAfterExit=yes",
+        "-p",
+        f"StandardOutput=append:{output_path}",
+        "-p",
+        "StandardError=inherit",
+        "-p",
+        "KillMode=control-group",
+        "-p",
+        f"TimeoutStopSec={TRANSIENT_STOP_TIMEOUT}",
+    ]
+    if len(argv) > 1 and Path(argv[1]) == SOURCE_DIR / 'installer/apt_metadata.py':
+        command.extend(['-p', 'CPUQuota=100%', '-p', 'MemoryMax=512M'])
+    for key, value in child_environment().items():
+        command.append(f"--setenv={key}={value}")
+    command.append("--")
+    command.extend(argv)
+    try:
+        started = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        output_path.unlink(missing_ok=True)
+        raise UpdatedError(f"could not start the privileged update job: {exc}") from exc
+    if started.returncode != 0:
+        detail = started.stderr.decode("utf-8", "replace").strip()
+        output_path.unlink(missing_ok=True)
+        raise UpdatedError(
+            "could not start the privileged update job"
+            + (f": {detail}" if detail else "")
+        )
+    begun = time.monotonic()
+    last_publish = 0.0
+    timed_out = False
+    try:
+        while True:
+            properties = systemctl_properties(
+                unit, ["LoadState", "ActiveState", "SubState", "ExecMainStatus"]
+            )
+            active = properties.get("ActiveState", "")
+            if properties.get("LoadState") == "not-found":
+                # Only successfully finished transient units are unloaded
+                # automatically; failed ones stay loaded until reset.
+                return 0, read_file_tail(output_path)
+            if active == "failed":
+                try:
+                    returncode = int(properties.get("ExecMainStatus") or 1)
+                except ValueError:
+                    returncode = 1
+                return returncode or 1, read_file_tail(output_path)
+            if active == "active" and properties.get("SubState") == "exited":
+                try:
+                    returncode = int(properties.get("ExecMainStatus") or 0)
+                except ValueError:
+                    returncode = 0
+                return returncode, read_file_tail(output_path)
+            if time.monotonic() - begun > timeout:
+                timed_out = True
+                raise UpdatedError("update command exceeded its timeout")
+            if time.monotonic() - last_publish >= 2:
+                publish_output(job_id, read_file_tail(output_path))
+                last_publish = time.monotonic()
+            time.sleep(0.5)
+    finally:
+        stop_transient_unit(unit)
+        if timed_out:
+            update_job(job_id, output={"log": read_file_tail(output_path)})
+        output_path.unlink(missing_ok=True)
+
+
+def publish_output(job_id: str, log: str) -> None:
+    updates: dict[str, Any] = {"output": {"log": log}}
+    progress = parse_progress(log)
+    if progress is not None:
+        updates["progress"] = progress
+    update_job(job_id, **updates)
+
+
+def run_command(
+    job_id: str,
+    argv: list[str],
+    *,
+    timeout: int,
+    log_prefix: str = "",
+) -> tuple[int, str]:
+    if transient_jobs_supported():
+        return run_transient_command(
+            job_id, argv, timeout=timeout, log_prefix=log_prefix
+        )
+    return run_direct_command(job_id, argv, timeout=timeout, log_prefix=log_prefix)
+
+
+def run_direct_command(
+    job_id: str,
+    argv: list[str],
+    *,
+    timeout: int,
+    log_prefix: str = "",
+) -> tuple[int, str]:
+    with tempfile.TemporaryFile() as output_file:
+        if log_prefix:
+            output_file.write((log_prefix + "\n").encode("utf-8"))
+            output_file.flush()
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            env=child_environment(),
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        last_publish = 0.0
+        try:
+            while process.poll() is None:
+                if time.monotonic() - started > timeout:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait()
+                    raise UpdatedError("update command exceeded its timeout")
+                if time.monotonic() - last_publish >= 2:
+                    publish_output(job_id, read_tail(output_file))
+                    last_publish = time.monotonic()
+                time.sleep(0.25)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        return process.returncode, read_tail(output_file)
+
+
+def checker_command(
+    *,
+    image_channel: str | None = None,
+    source_channel: str | None = None,
+    branch: str | None = None,
+) -> list[str]:
+    checker = SOURCE_DIR / "installer/update_plan.py"
+    if not checker.is_file() or checker.is_symlink():
+        raise UpdatedError(
+            "the structured update checker is unavailable; run one controller update first",
+            code="not_found",
+        )
+    python = PYTHON_PATH if PYTHON_PATH.is_file() else Path("/usr/bin/python3")
+    command = [str(python), str(checker), "--format", "json"]
+    if (SOURCE_DIR / 'installer/haproxy_update_status.py').is_file():
+        command.append('--haproxy-status')
+    if image_channel:
+        command.extend(("--image-channel", image_channel))
+    if source_channel:
+        command.extend(("--source-channel", source_channel))
+    if branch:
+        command.extend(("--branch", branch))
+    return command
+
+
+def parse_checker_output(raw: str) -> dict[str, Any]:
+    # run_command prepends one broker-owned progress line. Decode exactly one
+    # JSON value after the first object delimiter; trailing non-whitespace is
+    # rejected by json.loads.
+    start = raw.find("{")
+    if start < 0:
+        raise UpdatedError("the update checker returned an empty response")
+    try:
+        payload = json.loads(raw[start:])
+    except json.JSONDecodeError as exc:
+        raise UpdatedError("the update checker returned invalid JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("components"), list):
+        raise UpdatedError("the update checker returned an invalid plan")
+    seen: set[str] = set()
+    for component in payload["components"]:
+        if not isinstance(component, dict):
+            raise UpdatedError("the update checker returned an invalid component")
+        component_id = component.get("id")
+        if (
+            component_id not in ALLOWED_COMPONENTS
+            or component_id == CHANGES_COMPONENT
+            or component_id in seen
+        ):
+            raise UpdatedError("the update checker returned an unsupported component")
+        seen.add(component_id)
+        if component.get("state") not in {
+            "available",
+            "current",
+            "unknown",
+            "blocked",
+        }:
+            raise UpdatedError("the update checker returned an invalid component state")
+    source_channel = payload.get("source_channel")
+    image_channel = payload.get("image_channel")
+    if source_channel not in {"github", "local"}:
+        raise UpdatedError("the update checker returned an invalid source channel")
+    if image_channel not in {"latest", "alpha"}:
+        raise UpdatedError("the update checker returned an invalid image channel")
+    return payload
+
+
+METADATA_CONTEXT = threading.local()
+
+
+def trusted_source(filename):
+    path = SOURCE_DIR / 'installer' / filename
+    if not path.is_file() or path.is_symlink():
+        raise UpdatedError('Update the host services before using controlled HAProxy updates')
+    return path
+
+
+def refresh_apt_metadata(job_id):
+    if not (SOURCE_DIR / 'installer/apt_metadata.py').is_file():
+        return  # Legacy checker protocol while installing the new broker.
+    descriptor = None
+    try:
+        if getattr(METADATA_CONTEXT, 'unlocked', False):
+            descriptor = os.open(MAINTENANCE_LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise UpdatedError('Another maintenance operation is active', code='busy') from error
+        update_job(job_id, progress={'phase': 'checking'})
+        python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
+        code, _ = run_command(job_id, [str(python), str(trusted_source('apt_metadata.py')), 'refresh'],
+                              timeout=130, log_prefix='Refreshing signed package metadata without installing packages…')
+        # A completed failed refresh writes a durable unknown state. A failure
+        # to launch the helper must not leave a previously current plan trusted.
+        if code:
+            raise UpdatedError('APT metadata refresh helper could not complete')
+    except Exception:
+        # An old green plan must disappear even when the privileged helper
+        # could not start and therefore could not invalidate its own record.
+        LATEST_PLAN_PATH.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def execute_checker(
+    job_id: str,
+    *,
+    image_channel: str | None = None,
+    source_channel: str | None = None,
+    branch: str | None = None,
+) -> dict[str, Any]:
+    refresh_apt_metadata(job_id)
+    command = checker_command(
+        image_channel=image_channel,
+        source_channel=source_channel,
+        branch=branch,
+    )
+    returncode, output = run_command(
+        job_id,
+        command,
+        timeout=CHECK_TIMEOUT_SECONDS,
+        log_prefix="Checking Git, managed Docker images, host daemons, and APT cache…",
+    )
+    if returncode != 0:
+        raise UpdatedError(
+            "the update checker failed" + (f": {output.splitlines()[-1]}" if output else "")
+        )
+    return parse_checker_output(output)
+
+
+def plan_digest(payload: dict[str, Any]) -> str:
+    material = {
+        "source_channel": payload.get("source_channel"),
+        "image_channel": payload.get("image_channel"),
+        "components": payload.get("components"),
+    }
+    encoded = json.dumps(
+        material,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def store_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    now = dt.datetime.now(dt.timezone.utc)
+    plan = dict(payload)
+    plan["id"] = uuid.uuid4().hex
+    plan["protocol_version"] = PROTOCOL_VERSION
+    plan["created_at"] = now.isoformat()
+    plan["expires_at"] = (
+        now + dt.timedelta(seconds=PLAN_TTL_SECONDS)
+    ).isoformat()
+    plan["digest"] = plan_digest(plan)
+    atomic_json(LATEST_PLAN_PATH, plan)
+    return plan
+
+
+def load_latest_plan() -> dict[str, Any] | None:
+    if not LATEST_PLAN_PATH.exists():
+        return None
+    plan = safe_json_file(LATEST_PLAN_PATH)
+    if not IDENTIFIER_RE.fullmatch(str(plan.get("id") or "")):
+        raise UpdatedError("the cached update plan is invalid")
+    return plan
+
+
+def plan_is_expired(plan: dict[str, Any]) -> bool:
+    try:
+        expires = dt.datetime.fromisoformat(str(plan["expires_at"]))
+    except (KeyError, TypeError, ValueError):
+        return True
+    if expires.tzinfo is None:
+        return True
+    return dt.datetime.now(dt.timezone.utc) >= expires
+
+
+def component_signature(component: dict[str, Any]) -> str:
+    material = {
+        key: component.get(key)
+        for key in (
+            "id",
+            "state",
+            "actionable",
+            "installed",
+            "available",
+            "candidate",
+            "count",
+            # update_plan keeps the exact image and daemon digests, plus the
+            # selected APT package set, in details while the top-level version
+            # can be only a count.  Signing details closes that stale-plan gap.
+            "details",
+        )
+    }
+    if isinstance(material.get('details'), dict):
+        details = dict(material['details'])
+        if isinstance(details.get('apt'), dict):
+            details['apt'] = {key: details['apt'].get(key) for key in ('fresh', 'sources')}
+        details.pop('last_operation', None)
+        material['details'] = details
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def selected_components(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value or len(value) > len(ALLOWED_COMPONENTS):
+        raise UpdatedError("select at least one supported update component")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item not in ALLOWED_COMPONENTS:
+            raise UpdatedError("unsupported update component")
+        if item in result:
+            raise UpdatedError("duplicate update component")
+        result.append(item)
+    if "all" in result:
+        result = [item for item in result if item not in SOURCE_COMPONENTS - {"all"}]
+        result = [item for item in result if item not in CONTAINER_COMPONENTS]
+    elif CHANGES_COMPONENT in result:
+        # It covers what the narrower source updates would do.
+        result = [item for item in result if item not in {"services", "daemons"}]
+    # Updating the web application last reduces avoidable reconnects.  APT is
+    # always last because it can leave the host awaiting a reboot.
+    order = {
+        "all": 0,
+        CHANGES_COMPONENT: 1,
+        "services": 1,
+        "daemons": 2,
+        "authelia-container": 3,
+        "admin-container": 4,
+        "os": 5,
+        "haproxy": 6,
+    }
+    return sorted(result, key=order.__getitem__)
+
+
+def changes_scope(component: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The scope a plan's source component offers for a changes-only update."""
+
+    details = component.get("details") if isinstance(component, dict) else None
+    scope = details.get("scope") if isinstance(details, dict) else None
+    if not isinstance(scope, dict) or scope.get("ready") is not True:
+        return None
+    tags = scope.get("tags")
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        return None
+    return scope
+
+
+def plan_source_component(plan_map: dict[str, dict[str, Any]], component_id: str) -> dict[str, Any] | None:
+    """The plan entry a selected component is checked against."""
+
+    if component_id == CHANGES_COMPONENT:
+        source = plan_map.get("all")
+        return source if changes_scope(source) is not None else None
+    return plan_map.get(component_id)
+
+
+def component_requirements(entry: dict[str, Any] | None, component_id: str) -> list[list[str]]:
+    """What has to be installed with a component, as clauses: every clause
+    needs one of its components in the same selection."""
+
+    details = (entry or {}).get("details") if isinstance(entry, dict) else None
+    if not isinstance(details, dict):
+        return []
+    if component_id == CHANGES_COMPONENT:
+        scope = details.get("scope")
+        clauses = scope.get("requires") if isinstance(scope, dict) else None
+    else:
+        clauses = details.get("requires")
+    if not isinstance(clauses, list):
+        return []
+    return [
+        [str(item) for item in clause if item in ALLOWED_COMPONENTS]
+        for clause in clauses
+        if isinstance(clause, list)
+    ]
+
+
+def validate_requirements(plan_map: dict[str, dict[str, Any]], components: list[str]) -> None:
+    """The host and the web application come from one source: a selection that
+    would install one without the other is refused here, not only on the page."""
+
+    selected = set(components)
+    # The full stack pulls the web application image itself.
+    satisfied = selected | ({"admin-container"} if "all" in selected else set())
+    for component_id in components:
+        entry = plan_source_component(plan_map, component_id)
+        for clause in component_requirements(entry, component_id):
+            if clause and not satisfied.intersection(clause):
+                raise UpdatedError(
+                    f"{component_id} has to be installed together with "
+                    + " or ".join(clause),
+                    code="dependency",
+                )
+
+
+def plan_component_map(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    components = plan.get("components")
+    if not isinstance(components, list):
+        raise UpdatedError("the cached update plan is invalid")
+    return {
+        str(item.get("id")): item
+        for item in components
+        if isinstance(item, dict) and item.get("id") in ALLOWED_COMPONENTS
+    }
+
+
+CHANNEL_MISMATCH_MESSAGE = (
+    "This update was checked for a different release channel than the one "
+    "this gateway is set to. Save the channel first, or run the check again."
+)
+
+
+def validate_plan_channel(plan: dict[str, Any]) -> None:
+    """Refuse to apply a plan checked for a channel this gateway is not on.
+
+    The check deliberately previews whichever channel is selected on the
+    page, saved or not. Applying that preview was never a supported path, and
+    it failed in the least helpful way available: the apply-time recheck fell
+    back to the branch in the gateway's metadata, found a different
+    candidate, and reported "the update candidate changed; check again" --
+    which it would repeat after every check, for ever. Had the recheck
+    followed the preview instead, the gateway would have been moved to
+    another branch without its channel ever being saved.
+
+    So it is refused up front, in words that say what actually happened.
+    """
+
+    deployment = read_deployment()
+    planned_source = str(plan.get("source_channel") or "github")
+    planned_image = str(plan.get("image_channel") or "latest")
+    mismatch = (
+        planned_source != deployment.get("source_channel", "github")
+        or planned_image != deployment.get("image_channel", "latest")
+    )
+    planned_branch = plan.get("branch")
+    if not mismatch and planned_source != "local" and planned_branch:
+        mismatch = str(planned_branch) != deployment.get("branch", "main")
+    if mismatch:
+        raise UpdatedError(CHANNEL_MISMATCH_MESSAGE, code="channel_mismatch")
+
+
+def validate_selection(plan: dict[str, Any], components: list[str]) -> None:
+    validate_plan_channel(plan)
+    available = plan_component_map(plan)
+    for component_id in components:
+        component = plan_source_component(available, component_id)
+        if (
+            component is None
+            or component.get("state") != "available"
+            or component.get("actionable") is not True
+        ):
+            raise UpdatedError(
+                f"component is not an actionable update: {component_id}",
+                code="stale_plan",
+            )
+    validate_requirements(available, components)
+    if SOURCE_COMPONENTS.intersection(components) or 'haproxy' in components:
+        metadata = CONFIG_DIR / "metadata.yml"
+        try:
+            text = metadata.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise UpdatedError("managed metadata is unavailable", code="conflict") from exc
+        if re.search(r"(?m)^configuration_pending:\s*(true|yes|1)\s*$", text, re.I):
+            raise UpdatedError(
+                "managed configuration is pending; apply or revert it before updating host source",
+                code="config_pending",
+            )
+        if haproxy_transaction_active():
+            raise UpdatedError(
+                "an HAProxy configuration confirmation is active",
+                code="config_pending",
+            )
+
+
+def haproxy_transaction_active() -> bool:
+    """Fail closed while either UI or authoritative transaction state is active.
+
+    The UI marker is useful during the normal browser workflow, but it can be
+    absent after a web-container crash.  haproxy-controld persists the actual
+    transaction separately and keeps settled records for diagnostics, so mere
+    existence of that authoritative file is not enough.
+    """
+
+    if os.path.lexists(HAPROXY_TRANSACTION_MARKER):
+        return True
+    if not os.path.lexists(HAPROXY_TRANSACTION_STATE):
+        return False
+    try:
+        state = safe_json_file(HAPROXY_TRANSACTION_STATE)
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        LOG.warning("HAProxy transaction state is unreadable; blocking source update")
+        return True
+    state_name = state.get("state")
+    if state_name in HAPROXY_TRANSACTION_ACTIVE_STATES:
+        return True
+    if state_name in HAPROXY_TRANSACTION_SETTLED_STATES:
+        return False
+    LOG.warning("HAProxy transaction state is unknown; blocking source update")
+    return True
+
+
+def validate_fresh_candidates(
+    stored: dict[str, Any],
+    fresh: dict[str, Any],
+    components: list[str],
+) -> None:
+    old_map = plan_component_map(stored)
+    new_map = plan_component_map(fresh)
+    for component_id in components:
+        old = plan_source_component(old_map, component_id)
+        new = plan_source_component(new_map, component_id)
+        if (
+            old is None
+            or new is None
+            or new.get("state") != "available"
+            or new.get("actionable") is not True
+            or component_signature(old) != component_signature(new)
+        ):
+            raise UpdatedError(
+                f"the update candidate changed for {component_id}; check again",
+                code="stale_plan",
+            )
+
+
+def reviewed_source_revision(
+    plan: dict[str, Any], components: list[str]
+) -> str | None:
+    """Return the exact remote revision approved for a GitHub source update."""
+
+    if not SOURCE_COMPONENTS.intersection(components):
+        return None
+    if plan.get("source_channel") != "github":
+        return None
+    source = plan_component_map(plan).get("all")
+    candidate = str((source or {}).get("available") or "").strip().lower()
+    if not SOURCE_REVISION_RE.fullmatch(candidate):
+        raise UpdatedError(
+            "the checked source revision is unavailable; check again",
+            code="stale_plan",
+        )
+    return candidate
+
+
+def container_components_for_selection(components: list[str]) -> set[str]:
+    if "all" in components:
+        return set(CONTAINER_COMPONENTS)
+    return set(components).intersection(CONTAINER_COMPONENTS)
+
+
+def reviewed_container_digests(
+    plan: dict[str, Any], components: list[str], *, current: bool = False
+) -> dict[tuple[str, str], str]:
+    """Return exact reviewed or installed image digests for selected updates."""
+
+    result: dict[tuple[str, str], str] = {}
+    component_map = plan_component_map(plan)
+    digest_field = "current_digest" if current else "available_digest"
+    for component_id in sorted(container_components_for_selection(components)):
+        component = component_map.get(component_id)
+        details = component.get("details") if isinstance(component, dict) else None
+        images = details.get("images") if isinstance(details, dict) else None
+        if not isinstance(images, list) or not images:
+            raise UpdatedError(
+                f"the checked image digests are unavailable for {component_id}",
+                code="stale_plan",
+            )
+        for item in images:
+            if not isinstance(item, dict):
+                raise UpdatedError("the checked image plan is invalid", code="stale_plan")
+            # A reviewed image is named by what it will become, an installed
+            # one by what runs now. The check after an update reads the
+            # branch again, and a commit pushed while the update ran may
+            # already re-pin the running image: named by its next target, it
+            # would not be found, and a faithful update would fail.
+            if current:
+                image = str(item.get("current_image") or item.get("image") or "")
+            else:
+                image = str(item.get("target_image") or item.get("image") or "")
+            digest = str(item.get(digest_field) or "").lower()
+            if (
+                not image
+                or len(image) > 512
+                or CONTROL_RE.search(image)
+                or not IMAGE_DIGEST_RE.fullmatch(digest)
+            ):
+                raise UpdatedError(
+                    f"the checked image digest is unavailable for {component_id}",
+                    code="stale_plan",
+                )
+            key = (component_id, image)
+            if key in result:
+                raise UpdatedError("the checked image plan contains duplicates", code="stale_plan")
+            result[key] = digest
+    return result
+
+
+def validate_reviewed_container_candidates(
+    stored: dict[str, Any], fresh: dict[str, Any], components: list[str]
+) -> None:
+    expected = reviewed_container_digests(stored, components)
+    if not expected:
+        return
+    current = reviewed_container_digests(fresh, components)
+    if current != expected:
+        raise UpdatedError(
+            "a managed image candidate changed after the update check; check again",
+            code="stale_plan",
+        )
+
+
+def validate_applied_container_digests(
+    stored: dict[str, Any], applied: dict[str, Any], components: list[str]
+) -> None:
+    expected = reviewed_container_digests(stored, components)
+    if not expected:
+        return
+    actual = reviewed_container_digests(applied, components, current=True)
+    if actual != expected:
+        raise UpdatedError(
+            "an applied image digest differs from the reviewed update plan",
+            code="verification_failed",
+        )
+    component_map = plan_component_map(applied)
+    for component_id in container_components_for_selection(components):
+        images = (component_map[component_id].get("details") or {}).get("images") or []
+        for image in images:
+            if (
+                image.get("state") == "unknown"
+                or image.get("reason") in {"running-older-image", "running-unchecked", "running-image-unreadable"}
+                or image.get("running") in {"different-content", "unchecked", "unreadable", "not-running"}
+            ):
+                LOG.warning("Installed container verification failed for %s", component_id)
+                raise UpdatedError(
+                    "The container update could not be verified. Check the running containers and try again.",
+                    code="verification_failed",
+                )
+
+
+def acquire_operation(*, allow_scheduled_reboot: bool = False, allow_security_recovery: bool = False) -> int:
+    if SHUTDOWN_REQUESTED.is_set():
+        raise UpdatedError("the update broker is shutting down", code="conflict")
+    if haproxy_patch_active():
+        raise UpdatedError('An interrupted HAProxy update requires recovery before other maintenance', code='conflict')
+    if not allow_security_recovery and security_recovery_pending():
+        raise UpdatedError('Restore system management after the interrupted OS security policy change', code='conflict')
+    if not allow_scheduled_reboot and reboot_guard_present():
+        raise UpdatedError("a server reboot is scheduled", code="conflict")
+    if not OPERATION_THREAD_LOCK.acquire(blocking=False):
+        raise UpdatedError("another maintenance operation is active", code="busy")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            MAINTENANCE_LOCK_PATH,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not allow_scheduled_reboot and reboot_guard_present():
+            release_operation(descriptor)
+            raise UpdatedError("a server reboot is scheduled", code="conflict")
+        return descriptor
+    except (OSError, BlockingIOError) as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        OPERATION_THREAD_LOCK.release()
+        raise UpdatedError("another maintenance operation is active", code="busy") from exc
+
+
+def release_operation(descriptor: int) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+        OPERATION_THREAD_LOCK.release()
+        if SHUTDOWN_REQUESTED.is_set():
+            STOP_EVENT.set()
+
+
+def finish_failed(job_id: str, exc: Exception, log: str = "", *, alert: bool = True) -> None:
+    current_log = ""
+    try:
+        current = load_job(job_id)
+        output = current.get("output")
+        if isinstance(output, dict) and isinstance(output.get("log"), str):
+            current_log = sanitize_log(output["log"])
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        pass
+    candidate_log = sanitize_log(log)
+    if len(current_log.encode("utf-8")) > len(candidate_log.encode("utf-8")):
+        candidate_log = current_log
+    updates: dict[str, Any] = {
+        "status": "failed",
+        "completed_at": utc_now(),
+        "error": (str(exc) or exc.__class__.__name__)[:4096],
+    }
+    if candidate_log:
+        updates["output"] = {"log": candidate_log}
+    update_job(job_id, **updates)
+    LOG.warning("Update job %s failed: %s", job_id, exc)
+    if not alert:
+        return
+    report_alert(
+        "update.failed",
+        job_id,
+        "A software update job failed",
+        (str(exc) or exc.__class__.__name__)[:1000],
+    )
+
+
+def run_check(
+    job_id: str,
+    image_channel: str | None,
+    source_channel: str | None,
+    branch: str | None = None,
+    *,
+    alert_on_failure: bool = True,
+) -> bool:
+    try:
+        update_job(
+            job_id,
+            status="running",
+            started_at=utc_now(),
+            current_component="check",
+            progress={"phase": "checking"},
+        )
+        payload = execute_checker(
+            job_id,
+            image_channel=image_channel,
+            source_channel=source_channel,
+            branch=branch,
+        )
+        plan = store_plan(payload)
+        update_job(
+            job_id,
+            status="completed",
+            completed_at=utc_now(),
+            current_component=None,
+            plan_id=plan["id"],
+            result={"plan_id": plan["id"], "updates_available": sum(
+                1 for item in plan["components"]
+                if item.get("state") == "available" and item.get("actionable") is True
+            )},
+        )
+        report_availability(plan)
+        return True
+    except Exception as exc:  # noqa: BLE001 - stored as bounded job failure
+        finish_failed(job_id, exc, alert=alert_on_failure)
+        return False
+
+
+def check_worker(
+    job_id: str,
+    lock_fd: int,
+    image_channel: str | None,
+    source_channel: str | None,
+    branch: str | None = None,
+) -> None:
+    try:
+        run_check(job_id, image_channel, source_channel, branch)
+    finally:
+        release_operation(lock_fd)
+
+
+def maintenance_lock_busy() -> bool:
+    """Whether a backup, restore or update holds the shared lock right now."""
+    try:
+        descriptor = os.open(
+            MAINTENANCE_LOCK_PATH,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return True
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def auto_check_once() -> str:
+    """One scheduled check. Only its bounded APT refresh holds the shared lock;
+    subsequent Git/registry probes release it so backups can run meanwhile.
+    """
+    if SHUTDOWN_REQUESTED.is_set() or reboot_guard_present() or ACTIVE_MARKER.exists() or haproxy_patch_active():
+        return "busy"
+    if not OPERATION_THREAD_LOCK.acquire(blocking=False):
+        return "busy"
+    try:
+        if maintenance_lock_busy():
+            return "busy"
+        job = new_job("check", scheduled=True)
+        METADATA_CONTEXT.unlocked = True
+        try:
+            done = run_check(job["id"], None, None, None, alert_on_failure=False)
+        finally:
+            METADATA_CONTEXT.unlocked = False
+        return "done" if done else "failed"
+    finally:
+        OPERATION_THREAD_LOCK.release()
+        if SHUTDOWN_REQUESTED.is_set():
+            STOP_EVENT.set()
+
+
+def read_settings() -> dict[str, Any]:
+    try:
+        return safe_json_file(SETTINGS_PATH) if SETTINGS_PATH.exists() else {}
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        LOG.warning("Ignoring unreadable update settings %s", SETTINGS_PATH.name)
+        return {}
+
+
+def auto_check_hours() -> int:
+    """The interval in force: the page's choice, else the configured default."""
+    value = read_settings().get("auto_check_hours")
+    if isinstance(value, int) and not isinstance(value, bool) and value in AUTO_CHECK_CHOICES:
+        return value
+    return AUTO_CHECK_HOURS
+
+
+# What the schedule decided last; the page shows it.
+AUTO_CHECK_STATE: dict[str, float | None] = {"next_at": None, "retry_after": 0.0}
+
+
+def settings_payload() -> dict[str, Any]:
+    next_at = AUTO_CHECK_STATE.get("next_at")
+    return {
+        "auto_check_hours": auto_check_hours(),
+        "default_auto_check_hours": AUTO_CHECK_HOURS,
+        "choices": list(AUTO_CHECK_CHOICES),
+        "next_auto_check_at": (
+            dt.datetime.fromtimestamp(next_at, dt.timezone.utc).isoformat()
+            if isinstance(next_at, (int, float)) and next_at > 0
+            else None
+        ),
+        "auto_install": {**auto_install_settings(), "last": last_auto_install()},
+    }
+
+
+# Automatic installation, off until the page turns it on. Only easy-ha-proxy's
+# own updates -- the host source, the panel image, the Authelia stack images,
+# as the project tested them -- never the operating system's packages, and
+# never a reboot: those stay with the operator. Once a night, inside a window
+# of the gateway's local hours, through exactly the path the Install button
+# takes: a fresh plan, the same selection rules, the same guards. A failed
+# installation raises update.failed like any other; a refused one too.
+AUTO_INSTALL_WINDOW = (3, 5)
+AUTO_INSTALL_PATH = STATE_ROOT / "auto-install.json"
+AUTO_INSTALL_STATE: dict[str, Any] = {"night": None}
+AUTO_INSTALL_EXCLUDED = frozenset({"os", "haproxy"})
+
+
+def auto_install_settings() -> dict[str, Any]:
+    settings = read_settings()
+    start = settings.get("auto_install_start")
+    end = settings.get("auto_install_end")
+    if not (
+        isinstance(start, int) and isinstance(end, int)
+        and not isinstance(start, bool) and not isinstance(end, bool)
+        and 0 <= start <= 23 and 0 <= end <= 23 and start != end
+    ):
+        start, end = AUTO_INSTALL_WINDOW
+    return {"enabled": settings.get("auto_install") is True, "start": start, "end": end}
+
+
+def set_auto_install(request: dict[str, Any]) -> dict[str, Any]:
+    enabled = request.get("enabled")
+    start = request.get("start")
+    end = request.get("end")
+    if not isinstance(enabled, bool):
+        raise UpdatedError("enabled must be true or false", code="invalid")
+    for value in (start, end):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
+            raise UpdatedError("the window is given in whole hours, 0 to 23", code="invalid")
+    if start == end:
+        raise UpdatedError("the window must not start and end at the same hour", code="invalid")
+    settings = read_settings()
+    settings.update(auto_install=enabled, auto_install_start=start, auto_install_end=end)
+    atomic_json(SETTINGS_PATH, settings)
+    LOG.info("Automatic installation %s, window %02d:00-%02d:00",
+             "on" if enabled else "off", start, end)
+    return {"ok": True, "settings": settings_payload()}
+
+
+def in_install_window(local: dt.datetime, start: int, end: int) -> bool:
+    """Whether a local time falls in [start, end), the window may span midnight."""
+
+    if start < end:
+        return start <= local.hour < end
+    return local.hour >= start or local.hour < end
+
+
+def install_night(local: dt.datetime, start: int, end: int) -> str:
+    """The date the current window opened on, so a night gets one attempt."""
+
+    opened = local.date()
+    if start > end and local.hour < end:
+        opened -= dt.timedelta(days=1)
+    return opened.isoformat()
+
+
+def auto_install_selection(plan: dict[str, Any]) -> list[str]:
+    """What the Install button's "select all" would take, without the OS.
+
+    The changes-only update when the plan offers it, with the container
+    images beside it; else the complete stack, which brings the services,
+    the daemons and the panel with it; else each actionable component.
+    """
+
+    available = plan_component_map(plan)
+    actionable = [
+        component_id
+        for component_id, item in available.items()
+        if item.get("state") == "available"
+        and item.get("actionable") is True
+        and component_id not in AUTO_INSTALL_EXCLUDED
+    ]
+    if "all" in actionable and changes_scope(available.get("all")) is not None:
+        return [CHANGES_COMPONENT] + [
+            component_id
+            for component_id in ("authelia-container", "admin-container")
+            if component_id in actionable
+        ]
+    if "all" in actionable:
+        # The complete stack pulls the Authelia and panel images itself.
+        return ["all"]
+    return sorted(actionable)
+
+
+def last_auto_install() -> dict[str, Any] | None:
+    try:
+        return safe_json_file(AUTO_INSTALL_PATH) if AUTO_INSTALL_PATH.exists() else None
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def record_auto_install(outcome: str, **values: Any) -> None:
+    record = {"at": utc_now(), "outcome": outcome, **values}
+    try:
+        atomic_json(AUTO_INSTALL_PATH, record)
+    except OSError:
+        LOG.warning("Could not record the automatic installation")
+    LOG.info("Automatic installation: %s %s", outcome, values or "")
+
+
+def auto_install_once() -> str:
+    """One night's attempt: "busy" to try again in a minute, else the outcome."""
+
+    if SHUTDOWN_REQUESTED.is_set() or reboot_guard_present() or ACTIVE_MARKER.exists():
+        return "busy"
+    plan = load_latest_plan()
+    if plan is None or plan_is_expired(plan):
+        checked = auto_check_once()
+        if checked == "busy":
+            return "busy"
+        plan = load_latest_plan()
+        if checked != "done" or plan is None or plan_is_expired(plan):
+            record_auto_install("check-failed")
+            report_alert("update.failed", "auto-install",
+                         "The automatic installation could not check for updates")
+            return "check-failed"
+    components = auto_install_selection(plan)
+    if not components:
+        record_auto_install("nothing")
+        return "nothing"
+    try:
+        validate_selection(plan, components)
+        lock_fd = acquire_operation()
+    except UpdatedError as exc:
+        if exc.code == "busy":
+            return "busy"
+        record_auto_install("refused", components=components, error=str(exc)[:500])
+        report_alert("update.failed", "auto-install",
+                     "The automatic installation was refused", str(exc)[:1000])
+        return "refused"
+    job = new_job("apply", components=components, plan_id=plan["id"], scheduled=True)
+    record_auto_install("started", components=components, job_id=job["id"])
+    # The same worker as the Install button; it reports a failure itself.
+    apply_worker(job["id"], lock_fd, plan, components)
+    status = str(load_job(job["id"], include_log=False).get("status") or "")
+    outcome = "installed" if status == "completed" else "failed"
+    record_auto_install(outcome, components=components, job_id=job["id"])
+    return outcome
+
+
+def auto_install_tick(now: dt.datetime | None = None) -> str | None:
+    """Called each minute by the schedule; None when it is not the time."""
+
+    settings = auto_install_settings()
+    if not settings["enabled"]:
+        return None
+    local = (now or dt.datetime.now()).astimezone()
+    if not in_install_window(local, settings["start"], settings["end"]):
+        return None
+    night = install_night(local, settings["start"], settings["end"])
+    if AUTO_INSTALL_STATE.get("night") == night:
+        return None
+    outcome = auto_install_once()
+    if outcome != "busy":
+        AUTO_INSTALL_STATE["night"] = night
+    return outcome
+
+
+def set_settings(request: dict[str, Any]) -> dict[str, Any]:
+    value = request.get("auto_check_hours")
+    if isinstance(value, bool) or not isinstance(value, int) or value not in AUTO_CHECK_CHOICES:
+        raise UpdatedError(
+            "auto_check_hours must be one of " + ", ".join(str(item) for item in AUTO_CHECK_CHOICES),
+            code="invalid",
+        )
+    settings = read_settings()
+    settings["auto_check_hours"] = value
+    atomic_json(SETTINGS_PATH, settings)
+    # The next pass of the schedule recomputes from the new interval.
+    AUTO_CHECK_STATE["next_at"] = None
+    AUTO_CHECK_STATE["retry_after"] = 0.0
+    LOG.info("Automatic update checks set to every %s h (0 = off)", value)
+    return {"ok": True, "settings": settings_payload()}
+
+
+def last_check_time() -> float:
+    try:
+        plan = load_latest_plan()
+        created = dt.datetime.fromisoformat(str((plan or {}).get("created_at") or ""))
+        return created.timestamp()
+    except (UpdatedError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0.0
+
+
+def seconds_until_auto_check(now: float) -> float | None:
+    """How long until the newest check is an interval old; None when off."""
+    hours = auto_check_hours()
+    if hours <= 0:
+        return None
+    return max(0.0, last_check_time() + hours * 3600 - now)
+
+
+def auto_check_loop() -> None:
+    started = time.time()
+    while True:
+        answer = ''
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                answer = os_security_tick()
+        except Exception:
+            answer = 'failed'
+            LOG.exception('Scheduled OS security maintenance failed')
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                os_security_watch(last_answer=answer)
+        except Exception:
+            LOG.exception('The OS security watch failed')
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                service_restart_tick()
+        except Exception:
+            LOG.exception('Scheduled service restarts failed')
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                auto_reboot_tick()
+        except Exception:
+            LOG.exception('Scheduled automatic reboot failed')
+        try:
+            now = time.time()
+            wait = seconds_until_auto_check(now)
+            if wait is None:
+                AUTO_CHECK_STATE["next_at"] = None
+            else:
+                due = max(
+                    now + wait,
+                    started + AUTO_CHECK_DELAY_SECONDS,
+                    float(AUTO_CHECK_STATE.get("retry_after") or 0.0),
+                )
+                AUTO_CHECK_STATE["next_at"] = due
+                if now >= due:
+                    outcome = auto_check_once()
+                    LOG.info("Scheduled update check: %s", outcome)
+                    if outcome != "done":
+                        AUTO_CHECK_STATE["retry_after"] = time.time() + AUTO_CHECK_RETRY_SECONDS
+        except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
+            LOG.exception("Scheduled update check failed")
+            AUTO_CHECK_STATE["retry_after"] = time.time() + AUTO_CHECK_RETRY_SECONDS
+        try:
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                # record_auto_install logs the outcome itself.
+                auto_install_tick()
+        except Exception:  # noqa: BLE001 - the schedule must outlive one bad run
+            LOG.exception("Automatic installation failed")
+        if STOP_EVENT.wait(AUTO_CHECK_POLL_SECONDS):
+            return
+
+
+def update_command(
+    component: str,
+    *,
+    source_channel: str,
+    image_channel: str,
+    expected_source_revision: str | None = None,
+) -> list[str]:
+    if component not in ALLOWED_COMPONENTS:
+        raise UpdatedError("unsupported update component")
+    command = [
+        str(CLI_PATH),
+        "update",
+        "--component",
+        component,
+        "--source-channel",
+        source_channel,
+    ]
+    if component in {"all", "admin-container"}:
+        command.extend(("--image-channel", image_channel))
+    if component in SOURCE_COMPONENTS and source_channel == "github":
+        revision = str(expected_source_revision or "").lower()
+        if not SOURCE_REVISION_RE.fullmatch(revision):
+            raise UpdatedError("the approved source revision is unavailable")
+        command.extend(("--expected-source-revision", revision))
+    if component == CHANGES_COMPONENT:
+        command.append("--no-full-fallback")
+    return command
+
+
+def request_self_restart_if_needed() -> None:
+    if not RESTART_REQUEST_MARKER.exists():
+        return
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemctl", "try-restart", "--no-block", SERVICE_NAME],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=child_environment(),
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        LOG.exception("Could not request deferred update-broker restart")
+        return
+    if result.returncode != 0:
+        LOG.error(
+            "Could not request deferred update-broker restart: systemctl exit %s",
+            result.returncode,
+        )
+        return
+    try:
+        RESTART_REQUEST_MARKER.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def apply_haproxy_patch(job_id, plan, log_prefix):
+    entry = plan_component_map(plan).get('haproxy') or {}
+    details = entry.get('details') or {}
+    expected = entry.get('available_version') or entry.get('available')
+    if not isinstance(expected, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+:~_-]{1,100}', expected):
+        raise UpdatedError('The reviewed HAProxy version is unavailable', code='stale_plan')
+    python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
+    command = [str(python), str(trusted_source('haproxy_package_migrate.py')), 'patch', '--expected-version', expected]
+    if details.get('needs_reload') is True:
+        command.append('--reinstall')
+    previous = haproxy_operation()
+    code, output = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS, log_prefix=log_prefix)
+    result = haproxy_operation()
+    if result and result.get('id') != (previous or {}).get('id'):
+        update_job(job_id, result={'haproxy': result})
+    if (code or not result or result.get('id') == (previous or {}).get('id')
+            or result.get('phase') != 'committed' or result.get('target_verified') is not True):
+        raise UpdatedError('HAProxy update failed; review its recovery status and job log', code='verification_failed')
+    return result, output
+
+
+def apply_worker(
+    job_id: str,
+    lock_fd: int,
+    plan: dict[str, Any],
+    components: list[str],
+) -> None:
+    combined_log = ""
+    haproxy_result = None
+    lock_reacquired = True
+    try:
+        # Ensure the HTTP 202 response reaches the browser before a selected
+        # admin-container update starts recreating this web application.
+        time.sleep(1.0)
+        # Configuration can change after the request-level validation but
+        # before this worker starts. Recheck while holding the maintenance
+        # lock before declaring the mutating update active.
+        validate_selection(plan, components)
+        if 'haproxy' in components and components[-1] != 'haproxy':
+            raise UpdatedError('The controlled HAProxy update must run last')
+        ACTIVE_MARKER.write_text(f"job_id={job_id}\n", encoding="utf-8")
+        os.chmod(ACTIVE_MARKER, 0o600)
+        update_job(
+            job_id,
+            status="running",
+            started_at=utc_now(),
+            progress={"phase": "verifying"},
+        )
+        fresh = execute_checker(
+            job_id,
+            image_channel=str(plan.get("image_channel") or "latest"),
+            source_channel=str(plan.get("source_channel") or "github"),
+            # The branch the plan was checked against, so the recheck
+            # compares like with like instead of trusting the metadata.
+            branch=(str(plan["branch"]) if plan.get("branch") else None),
+        )
+        validate_fresh_candidates(plan, fresh, components)
+        validate_reviewed_container_candidates(plan, fresh, components)
+        source_channel = str(plan.get("source_channel"))
+        image_channel = str(plan.get("image_channel"))
+        expected_source_revision = reviewed_source_revision(plan, components)
+        component_seconds: dict[str, int] = {}
+        for index, component in enumerate(components):
+            begun = time.monotonic()
+            update_job(
+                job_id,
+                current_component=component,
+                component_index=index,
+                component_started_at=utc_now(),
+                progress={"phase": "starting"},
+            )
+            heading = f"\n=== Applying component: {component} ==="
+            if component == 'haproxy':
+                # HAProxy is last. Transfer custody of the common lock to the
+                # PID-1-owned child; it takes the lock itself before any work.
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_reacquired = False
+                haproxy_result, output = apply_haproxy_patch(job_id, plan, sanitize_log(combined_log + heading))
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_reacquired = True
+                except BlockingIOError:
+                    pass  # Another operation may start after the verified child exits.
+                returncode = 0
+            else:
+                command = update_command(
+                    component,
+                    source_channel=source_channel,
+                    image_channel=image_channel,
+                    expected_source_revision=expected_source_revision,
+                )
+                returncode, output = run_command(
+                    job_id,
+                    command,
+                    timeout=JOB_TIMEOUT_SECONDS,
+                    log_prefix=sanitize_log(combined_log + heading),
+                )
+            combined_log = sanitize_log(output)
+            if returncode != 0:
+                raise UpdatedError(
+                    f"component update failed: {component} (exit code {returncode})"
+                )
+            component_seconds[component] = int(time.monotonic() - begun)
+        reboot_required = Path("/var/run/reboot-required").exists()
+        result: dict[str, Any] = {
+            "components": components,
+            "reboot_required": reboot_required,
+            # How long each part took, for the next installation's estimate.
+            "component_seconds": component_seconds,
+        }
+        if haproxy_result is not None:
+            result['haproxy'] = haproxy_result
+        update_job(job_id, progress={"phase": "rechecking"})
+        try:
+            if not lock_reacquired:
+                raise UpdatedError('The update was verified; recheck after the other maintenance operation completes')
+            refreshed_payload = execute_checker(
+                job_id,
+                image_channel=image_channel,
+                source_channel=source_channel,
+                # The branch that was reviewed and installed, like the check
+                # before the update; not whatever the metadata says.
+                branch=(str(plan["branch"]) if plan.get("branch") else None),
+            )
+            validate_applied_container_digests(plan, refreshed_payload, components)
+            refreshed = store_plan(refreshed_payload)
+            report_availability(refreshed)
+            result["refreshed_plan_id"] = refreshed["id"]
+        except Exception as exc:  # noqa: BLE001 - update already succeeded
+            if container_components_for_selection(components):
+                raise
+            result["recheck_error"] = str(exc)[:4096]
+            try:
+                LATEST_PLAN_PATH.unlink()
+            except FileNotFoundError:
+                pass
+        update_job(
+            job_id,
+            status="completed",
+            completed_at=utc_now(),
+            current_component=None,
+            output={"log": combined_log},
+            result=result,
+        )
+    except Exception as exc:  # noqa: BLE001 - stored as bounded job failure
+        finish_failed(job_id, exc, combined_log)
+    finally:
+        try:
+            ACTIVE_MARKER.unlink()
+        except FileNotFoundError:
+            pass
+        release_operation(lock_fd)
+        request_self_restart_if_needed()
+
+
+def start_thread(target: Any, *args: Any) -> None:
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+def start_check(request: dict[str, Any]) -> dict[str, Any]:
+    release_channel = request.get("release_channel")
+    if release_channel is not None and release_channel not in RELEASE_CHANNELS:
+        raise UpdatedError("release channel must be stable, alpha or local")
+    image_channel = request.get("image_channel")
+    source_channel = request.get("source_channel")
+    branch: str | None = None
+    # A unified release channel derives the source/branch/image to preview
+    # without persisting anything first.
+    if release_channel == "local":
+        source_channel = "local"
+    elif release_channel in RELEASE_CHANNEL_MAP:
+        mapping = RELEASE_CHANNEL_MAP[release_channel]
+        source_channel = "github"
+        branch = mapping["branch"]
+        image_channel = mapping["image_channel"]
+    if image_channel is not None and image_channel not in IMAGE_CHANNELS:
+        raise UpdatedError("image channel must be latest or alpha")
+    if source_channel is not None and source_channel not in SOURCE_CHANNELS:
+        raise UpdatedError("source channel must be github or local")
+    if branch is not None and not BRANCH_RE.fullmatch(branch):
+        raise UpdatedError("invalid git branch")
+    lock_fd = acquire_operation()
+    try:
+        job = new_job("check")
+        start_thread(
+            check_worker, job["id"], lock_fd, image_channel, source_channel, branch
+        )
+        return {"ok": True, "job_id": job["id"], "job": public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+def start_apply(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("confirmation") != "UPDATE":
+        raise UpdatedError("type UPDATE to confirm component updates")
+    plan_id = identifier(request.get("plan_id"), "plan id")
+    plan = load_latest_plan()
+    if plan is None or plan.get("id") != plan_id or plan_is_expired(plan):
+        raise UpdatedError("the update plan is stale; check again", code="stale_plan")
+    components = selected_components(request.get("components"))
+    validate_selection(plan, components)
+    lock_fd = acquire_operation()
+    try:
+        job = new_job(
+            "apply",
+            components=components,
+            plan_id=plan_id,
+        )
+        start_thread(apply_worker, job["id"], lock_fd, plan, components)
+        return {"ok": True, "job_id": job["id"], "job": public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+def read_deployment() -> dict[str, str]:
+    deployment: dict[str, str] = {}
+    metadata_path = CONFIG_DIR / "metadata.yml"
+    try:
+        info = metadata_path.lstat()
+        if (
+            stat.S_ISREG(info.st_mode)
+            and not stat.S_ISLNK(info.st_mode)
+            and info.st_size <= MAX_STATE_BYTES
+        ):
+            metadata_text = metadata_path.read_text(encoding="utf-8")
+            for key, allowed in (
+                ("source_channel", SOURCE_CHANNELS),
+                ("image_channel", IMAGE_CHANNELS),
+            ):
+                match = re.search(
+                    rf"(?m)^{key}:\s*['\"]?([a-z]+)['\"]?\s*(?:#.*)?$",
+                    metadata_text,
+                )
+                if match and match.group(1) in allowed:
+                    deployment[key] = match.group(1)
+            branch_match = re.search(
+                r"(?m)^branch:\s*['\"]?([A-Za-z0-9._/-]{1,100})['\"]?\s*(?:#.*)?$",
+                metadata_text,
+            )
+            if branch_match and BRANCH_RE.fullmatch(branch_match.group(1)):
+                deployment["branch"] = branch_match.group(1)
+    except (OSError, UnicodeError):
+        pass
+    deployment["release_channel"] = derive_release_channel(
+        deployment.get("source_channel", "github"),
+        deployment.get("branch", "main"),
+        deployment.get("image_channel", "latest"),
+    )
+    return deployment
+
+
+def set_channels(request: dict[str, Any]) -> dict[str, Any]:
+    release_channel = request.get("release_channel")
+    if release_channel is not None and release_channel not in RELEASE_CHANNELS:
+        raise UpdatedError("release channel must be stable, alpha or local")
+    source_channel = request.get("source_channel")
+    if source_channel is not None and source_channel not in SOURCE_CHANNELS:
+        raise UpdatedError("source channel must be github or local")
+    image_channel = request.get("image_channel")
+    if image_channel is not None and image_channel not in IMAGE_CHANNELS:
+        raise UpdatedError("image channel must be latest or alpha")
+    if release_channel is None and source_channel is None and image_channel is None:
+        raise UpdatedError("select a channel to persist")
+    command = [str(CLI_PATH), "set-channels"]
+    if release_channel is not None:
+        command.extend(("--release-channel", release_channel))
+    if source_channel is not None:
+        command.extend(("--source-channel", source_channel))
+    if image_channel is not None:
+        command.extend(("--image-channel", image_channel))
+    lock_fd = acquire_operation()
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=child_environment(),
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            tail = sanitize_log(
+                result.stdout.decode("utf-8", "replace")
+            ).strip().splitlines()
+            raise UpdatedError(
+                "persisting the deployment channels failed"
+                + (f": {tail[-1]}" if tail else "")
+            )
+        # A cached plan was built for the previous channels; drop it so the
+        # next apply cannot silently reapply the superseded channel choice.
+        try:
+            LATEST_PLAN_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        return {"ok": True, "deployment": read_deployment()}
+    except subprocess.TimeoutExpired as exc:
+        raise UpdatedError("persisting the deployment channels timed out") from exc
+    finally:
+        release_operation(lock_fd)
+
+
+# The build the host runs, for the panel's footer: which commit the managed
+# source is at, when it was made, and the fingerprint of its web files -- the
+# same `git ls-tree` sum CI labels the panel image with, so the panel can say
+# whether it was built from what the host has. The source is a shallow clone,
+# so a commit count would always be 1; the commit time orders builds instead.
+BUILD_TTL_SECONDS = 60.0
+WEB_TREE_INPUTS = ("Dockerfile", ".dockerignore", "docker/app")
+_HOST_BUILD: dict[str, Any] = {"at": None, "value": None}
+_HOST_BUILD_LOCK = threading.Lock()
+
+
+def _source_git(*args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={SOURCE_DIR}", "-C", str(SOURCE_DIR), *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", "replace")
+
+
+def _read_host_build() -> dict[str, str] | None:
+    if not (SOURCE_DIR / ".git").exists():
+        return None
+    head = (_source_git("log", "-1", "--format=%H %cI") or "").split()
+    if len(head) != 2 or not SOURCE_REVISION_RE.fullmatch(head[0]):
+        return None
+    try:
+        committed = dt.datetime.fromisoformat(head[1])
+    except ValueError:
+        return None
+    listing = _source_git("ls-tree", "-r", "--full-tree", "HEAD", "--", *WEB_TREE_INPUTS)
+    return {
+        "revision": head[0],
+        "committed_at": committed.astimezone(dt.timezone.utc).isoformat(timespec="seconds"),
+        "web_tree": hashlib.sha256(listing.encode("utf-8")).hexdigest() if listing else "",
+    }
+
+
+def host_build() -> dict[str, str] | None:
+    """The installed source's build, read at most once a minute."""
+
+    with _HOST_BUILD_LOCK:
+        at = _HOST_BUILD["at"]
+        if at is not None and time.monotonic() - at < BUILD_TTL_SECONDS:
+            return _HOST_BUILD["value"]
+        value = _read_host_build()
+        _HOST_BUILD.update(at=time.monotonic(), value=value)
+        return value
+
+
+def summary_payload(plan: dict[str, Any] | None) -> dict[str, Any]:
+    """What the navigation shows: whether the newest check found anything.
+
+    "product" when easy-ha-proxy itself has an update, "os" when only the
+    operating system's packages do -- those come nearly every day and should
+    not shout like the rest -- and None when there is nothing to install.
+    A plan past its install deadline still counts: it is what the newest
+    check found, and the page asks for a fresh check before installing.
+    """
+
+    kinds = [
+        str(item.get("id"))
+        for item in (plan or {}).get("components") or []
+        if isinstance(item, dict)
+        and item.get("state") == "available"
+        and item.get("actionable") is True
+    ]
+    level = "product" if any(kind != "os" for kind in kinds) else ("os" if kinds else None)
+    return {
+        "level": level,
+        "components": kinds,
+        "checked_at": (plan or {}).get("created_at"),
+        "build": host_build(),
+    }
+
+
+def summary_response() -> dict[str, Any]:
+    try:
+        plan = load_latest_plan()
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError):
+        plan = None
+    return {"ok": True, **summary_payload(plan)}
+
+
+HAPROXY_UPDATE_STATE = Path('/var/lib/easy-ha-proxy/haproxy-package-migration/last-update.json')
+HAPROXY_MIGRATION_STATE = HAPROXY_UPDATE_STATE.with_name('last-migration.json')
+HAPROXY_MIGRATION_PLAN = STATE_ROOT / 'haproxy-migration-plan.json'
+HAPROXY_MIGRATION_CONFIRMATION = 'MIGRATE 3.4'
+HAPROXY_SETTLED_PHASES = frozenset({'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'})
+
+
+def read_haproxy_operation(path):
+    try:
+        if path.is_symlink() or path.stat().st_size > 64 * 1024:
+            return None
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict) or not re.fullmatch(r'[0-9a-f]{32}', str(data.get('id', ''))):
+            return None
+        if not isinstance(data.get('phase'), str):
+            return None
+        if any(data.get(key) is not None and not isinstance(data[key], list) for key in ('target_packages', 'extra_packages')):
+            return None
+        return {key: data.get(key) for key in ('id', 'kind', 'phase', 'architecture', 'created_at', 'engine_digest',
+                                               'old_version', 'target_runtime_version', 'target_packages', 'extra_packages', 'updated_at',
+                                               'failure', 'target_verified', 'rollback_verified')}
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def haproxy_operation():
+    operations = [op for path in (HAPROXY_UPDATE_STATE, HAPROXY_MIGRATION_STATE)
+                  if (op := read_haproxy_operation(path)) is not None]
+    # Never hide a required recovery behind a newer completed operation.
+    operations.sort(key=lambda op: (op.get('phase') not in HAPROXY_SETTLED_PHASES,
+                                   op.get('updated_at') if isinstance(op.get('updated_at'), (float, int)) else 0), reverse=True)
+    return operations[0] if operations else None
+
+
+def haproxy_patch_active():
+    for path in (HAPROXY_UPDATE_STATE, HAPROXY_MIGRATION_STATE):
+        operation = read_haproxy_operation(path)
+        if operation is None:
+            if os.path.lexists(path):
+                return True
+        elif operation.get('phase') not in HAPROXY_SETTLED_PHASES:
+            return True
+    return False
+
+
+def migration_tool_digest():
+    tool = trusted_source('haproxy_package_migrate.py')
+    if tool.stat().st_size > 1024 * 1024:
+        raise UpdatedError('Update host services before preparing a HAProxy migration', code='dependency')
+    source = tool.read_bytes()
+    if b'WEB_MIGRATION_PROTOCOL = 1' not in source:
+        raise UpdatedError('Update host services before preparing a HAProxy migration', code='dependency')
+    return hashlib.sha256(source).hexdigest()
+
+
+def migration_offer(plan):
+    result = {'target_branch': '3.4', 'state': 'blocked', 'reason': ''}
+    try:
+        migration_tool_digest()
+    except (OSError, UpdatedError):
+        return {**result, 'reason': 'Update host services before preparing a HAProxy migration'}
+    if not plan or plan_is_expired(plan):
+        return {**result, 'state': 'check_required', 'reason': 'Check for updates before preparing a HAProxy migration'}
+    entry = plan_component_map(plan).get('haproxy') or {}
+    details = entry.get('details') or {}
+    if details.get('branch') == '3.4' and details.get('binary_matches') is True:
+        return {**result, 'state': 'current', 'reason': 'HAProxy 3.4 is already installed; use updates within its branch'}
+    if details.get('qualified') is not True:
+        return {**result, 'reason': 'Migration requires Ubuntu 24.04 on AMD64 or ARM64'}
+    if (details.get('package') != 'haproxy' or not str(details.get('installed_version', '')).startswith('2.8.')
+            or not str(details.get('running_version', '')).startswith('2.8.') or details.get('binary_matches') is not True):
+        return {**result, 'reason': 'Migration requires a verified distribution HAProxy 2.8 installation'}
+    return {**result, 'state': 'available', 'reason': 'Prepare and review the transition from HAProxy 2.8 to 3.4 LTS'}
+
+
+def migration_fingerprint(operation):
+    material = {key: operation.get(key) for key in
+                ('id', 'kind', 'architecture', 'created_at', 'engine_digest', 'old_version',
+                 'target_runtime_version', 'target_packages', 'extra_packages')}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def migration_review(*, require_fresh=False):
+    if not os.path.lexists(HAPROXY_MIGRATION_PLAN):
+        if require_fresh:
+            raise UpdatedError('Prepare a new HAProxy migration plan first', code='stale_plan')
+        return None
+    plan = safe_json_file(HAPROXY_MIGRATION_PLAN)
+    identifier(plan.get('id'), 'migration plan id')
+    identifier(plan.get('transaction_id'), 'migration transaction id')
+    operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+    fresh = (not plan_is_expired(plan) and not plan.get('consumed_by') and operation
+             and operation.get('kind') == 'migration' and operation.get('phase') == 'prepared'
+             and operation.get('id') == plan['transaction_id']
+             and migration_fingerprint(operation) == plan.get('fingerprint')
+             and migration_tool_digest() == plan.get('source_digest'))
+    if require_fresh and not fresh:
+        raise UpdatedError('The HAProxy migration plan is stale; prepare it again', code='stale_plan')
+    return {**plan, 'stale': not bool(fresh)}
+
+
+def public_migration_operation(operation):
+    if not operation:
+        return None
+    result = {key: operation.get(key) for key in ('id', 'phase', 'old_version', 'architecture', 'target_runtime_version',
+                                                  'target_verified', 'rollback_verified', 'updated_at')}
+    result['packages'] = [{'name': str(p.get('Package', ''))[:80], 'version': str(p.get('Version', ''))[:120]}
+                          for p in (operation.get('target_packages') or [])[:8] if isinstance(p, dict)]
+    result['dependencies'] = [{'name': str(p.get('Package', ''))[:80], 'version': str(p.get('Version', ''))[:120]}
+                              for p in (operation.get('extra_packages') or [])[:8] if isinstance(p, dict)]
+    return result
+
+
+def migration_status(plan):
+    offer = migration_offer(plan)
+    recovery_blocked = haproxy_patch_active()
+    if recovery_blocked:
+        offer.update(state='blocked', reason='HAProxy update or recovery is in progress. Other maintenance is blocked.')
+    operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+    try:
+        review = migration_review()
+    except (UpdatedError, OSError, ValueError, TypeError):
+        review = None
+    public = None
+    if review:
+        public = {key: review.get(key) for key in ('id', 'transaction_id', 'expires_at', 'stale', 'consumed_by')}
+        public['stale'] = public['stale'] or recovery_blocked
+        public['operation'] = public_migration_operation(operation)
+    return {**offer, 'plan': public, 'last_operation': public_migration_operation(operation),
+            'automatic': automatic_migration_offer(plan, operation, recovery_blocked)}
+
+
+def migration_platform_supported():
+    try:
+        release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+        return (release.get('ID', '').strip('"') == 'ubuntu' and release.get('VERSION_ID', '').strip('"') == '24.04'
+                and os.uname().machine in {'aarch64', 'x86_64'})
+    except OSError:
+        return False
+
+
+def automatic_migration_tool():
+    migration_tool_digest()
+    tool = trusted_source('haproxy_package_migrate.py')
+    if b'AUTOMATIC_MIGRATION_PROTOCOL = 1' not in tool.read_bytes():
+        raise UpdatedError('Update host services before using the automatic HAProxy transition', code='dependency')
+    trusted_source('apt_metadata.py')
+    return tool
+
+
+def automatic_migration_offer(plan, operation, recovery_blocked):
+    result = {'can_start': False, 'current': False, 'reason': ''}
+    try:
+        automatic_migration_tool()
+    except (OSError, UpdatedError):
+        return {**result, 'reason': 'Update host services before using the automatic HAProxy transition'}
+    if recovery_blocked:
+        return {**result, 'reason': 'HAProxy update or recovery is in progress. Other maintenance is blocked.'}
+    if not migration_platform_supported():
+        return {**result, 'reason': 'Migration requires Ubuntu 24.04 on AMD64 or ARM64'}
+    # This cached display hint never authorizes execution. The native worker
+    # verifies the current package, running binary and configuration itself.
+    details = ((plan_component_map(plan).get('haproxy') or {}).get('details') or {}) if plan else {}
+    if plan and not plan_is_expired(plan) and details.get('binary_matches') is True:
+        current = details.get('branch') == '3.4'
+    else:
+        current = bool(operation and operation.get('phase') == 'committed' and operation.get('target_verified') is True)
+    return {**result, 'can_start': not current, 'current': current,
+            'reason': 'HAProxy 3.4 is already installed; use updates within its branch' if current else
+            'Configuration checks, package preparation and the transition run automatically after confirmation.'}
+
+
+def migration_worker(job_id, lock_fd, review=None, automatic=False):
+    """A fixed root child owns maintenance custody through switch/recovery."""
+    log = ''
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
+        update_job(job_id, status='running', started_at=utc_now(), current_component='haproxy',
+                   progress={'phase': 'checking' if automatic else 'prepare' if review is None else 'starting'})
+        ACTIVE_MARKER.write_text(f'job_id={job_id}\n', encoding='utf-8')
+        os.chmod(ACTIVE_MARKER, 0o600)
+        python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
+        command = [str(python), str(trusted_source('haproxy_package_migrate.py'))]
+        previous = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+        if automatic:
+            automatic_migration_tool()
+            HAPROXY_MIGRATION_PLAN.unlink(missing_ok=True)
+            LATEST_PLAN_PATH.unlink(missing_ok=True)
+            command.extend(['migrate', '--web-progress'])
+        elif review is None:
+            HAPROXY_MIGRATION_PLAN.unlink(missing_ok=True)
+            command.extend(['prepare', '--web-progress'])
+        else:
+            # Revalidate after queueing, before handing control to the child.
+            operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+            if (not operation or operation.get('phase') != 'prepared'
+                    or migration_fingerprint(operation) != review['fingerprint']
+                    or migration_tool_digest() != review['source_digest'] or plan_is_expired(review)):
+                raise UpdatedError('The HAProxy migration plan is stale; prepare it again', code='stale_plan')
+            LATEST_PLAN_PATH.unlink(missing_ok=True)
+            command.extend(['apply', '--id', review['transaction_id'], '--web-progress'])
+        # As with patch updates, the PID-1-owned child takes the same lock.
+        # A racing backup can only refuse preparation/apply before changes.
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        code, log = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS)
+        operation = read_haproxy_operation(HAPROXY_MIGRATION_STATE)
+        if review is None and not automatic:
+            if (code or not operation or operation.get('id') == (previous or {}).get('id')
+                    or operation.get('phase') != 'prepared' or operation.get('kind') != 'migration'
+                    or not str(operation.get('target_runtime_version', '')).startswith('3.4.')
+                    or operation.get('engine_digest') != migration_tool_digest()):
+                raise UpdatedError('HAProxy migration preparation failed; review the job log', code='verification_failed')
+            review = {'id': uuid.uuid4().hex, 'transaction_id': identifier(operation['id'], 'migration transaction id'),
+                      'expires_at': (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PLAN_TTL_SECONDS)).isoformat(),
+                      'fingerprint': migration_fingerprint(operation), 'source_digest': migration_tool_digest()}
+            atomic_json(HAPROXY_MIGRATION_PLAN, review)
+            message = 'HAProxy migration prepared; review the target version before confirming'
+        else:
+            if operation:
+                update_job(job_id, result={'haproxy': public_migration_operation(operation)})
+            wrong_transaction = (operation and operation.get('id') == (previous or {}).get('id')) if automatic else (
+                not operation or operation.get('id') != review['transaction_id'])
+            if (code or not operation or wrong_transaction
+                    or automatic and (operation.get('kind') != 'migration'
+                                      or not str(operation.get('target_runtime_version', '')).startswith('3.4.')
+                                      or operation.get('engine_digest') != migration_tool_digest())
+                    or operation.get('phase') != 'committed' or operation.get('target_verified') is not True):
+                raise UpdatedError('HAProxy migration failed; review its recovery status and job log', code='verification_failed')
+            message = 'HAProxy migration verified'
+        update_job(job_id, status='completed', completed_at=utc_now(),
+                   result={'message': message, 'haproxy': public_migration_operation(operation)},
+                   output={'log': log})
+    except Exception as exc:
+        finish_failed(job_id, exc, log)
+    finally:
+        ACTIVE_MARKER.unlink(missing_ok=True)
+        release_operation(lock_fd)
+
+
+def start_haproxy_migration(request, *, apply=False):
+    if apply:
+        if request.get('confirmation') != HAPROXY_MIGRATION_CONFIRMATION:
+            raise UpdatedError('Type MIGRATE 3.4 to confirm the HAProxy transition')
+        plan_id = identifier(request.get('plan_id'), 'migration plan id')
+    elif request.get('target_branch') != '3.4':
+        raise UpdatedError('Only the qualified HAProxy 3.4 LTS migration is supported')
+    lock_fd = acquire_operation()
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
+        review = None
+        if apply:
+            review = migration_review(require_fresh=True)
+            if review['id'] != plan_id:
+                raise UpdatedError('The HAProxy migration plan is stale; prepare it again', code='stale_plan')
+        else:
+            offer = migration_offer(load_latest_plan())
+            if offer['state'] != 'available':
+                raise UpdatedError(offer['reason'], code='dependency')
+        job = new_job('haproxy-migrate' if apply else 'haproxy-prepare', components=['haproxy'],
+                      plan_id=review['id'] if review else None)
+        if review:
+            atomic_json(HAPROXY_MIGRATION_PLAN, {**review, 'consumed_by': job['id']})
+        start_thread(migration_worker, job['id'], lock_fd, review)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+def start_haproxy_transition(request):
+    if request.get('target_branch') != '3.4' or request.get('confirmed') is not True:
+        raise UpdatedError('Confirm the transition to HAProxy 3.4 LTS')
+    automatic_migration_tool()
+    if not migration_platform_supported():
+        raise UpdatedError('Migration requires Ubuntu 24.04 on AMD64 or ARM64', code='dependency')
+    lock_fd = acquire_operation()
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before migration', code='config_pending')
+        job = new_job('haproxy-transition', components=['haproxy'])
+        start_thread(migration_worker, job['id'], lock_fd, None, True)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+OS_SECURITY_ROOT = STATE_ROOT / 'os-security'
+OS_SECURITY_MODES = frozenset({'system', 'notify', 'auto', 'window', 'daily'})
+OS_SECURITY_INTERVALS = (1, 2, 4, 6, 12, 24)
+OS_SECURITY_DEFAULT = {'mode': 'system', 'interval': 4, 'start': 3, 'end': 5}
+OS_SECURITY_INSPECTION_CACHE = {}
+OS_SECURITY_INSPECTION_LOCK = threading.Lock()
+
+
+def security_recovery_pending():
+    path = OS_SECURITY_ROOT / 'policy.json'
+    if not os.path.lexists(path):
+        return False
+    try:
+        record = safe_json_file(path)
+        os_security_policy(record.get('policy') or {})
+        return record.get('phase') != 'ready'
+    except (OSError, ValueError, UpdatedError):
+        return True
+
+
+def os_security_policy(request):
+    value = {key: request.get(key) for key in ('mode', 'interval', 'start', 'end')}
+    if (not isinstance(value['mode'], str) or value['mode'] not in OS_SECURITY_MODES or type(value['interval']) is not int or value['interval'] not in OS_SECURITY_INTERVALS
+            or any(type(value[key]) is not int or not 0 <= value[key] <= 23 for key in ('start', 'end'))
+            or value['start'] == value['end']):
+        raise UpdatedError('Invalid OS security policy')
+    return value
+
+
+def os_security_tool():
+    tool = trusted_source('os_security.py')
+    if tool.stat().st_size > 1024 * 1024 or b'PROTOCOL = 1' not in tool.read_bytes():
+        raise UpdatedError('Update host services before using OS security management', code='dependency')
+    return tool
+
+
+AUTO_REBOOT_TIME = re.compile(r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
+
+
+def auto_reboot_tool():
+    tool = trusted_source('auto_reboot.py')
+    if tool.stat().st_size > 1024 * 1024 or b'AUTO_REBOOT_PROTOCOL = 1' not in tool.read_bytes():
+        raise UpdatedError('Update host services before configuring automatic reboots', code='dependency')
+    return tool
+
+
+def auto_reboot_record():
+    path = OS_SECURITY_ROOT / 'reboot-policy.json'
+    if not os.path.lexists(path):
+        return {'enabled': False, 'time': '03:00', 'id': None, 'updated_at': 0}
+    value = safe_json_file(path)
+    if (type(value.get('enabled')) is not bool or not isinstance(value.get('time'), str)
+            or not AUTO_REBOOT_TIME.fullmatch(value['time']) or not IDENTIFIER_RE.fullmatch(str(value.get('id', '')))
+            or type(value.get('updated_at')) not in (int, float) or not isinstance(value.get('attempt', {}), dict)
+            or type(value.get('allow_service_reboot', False)) is not bool):
+        raise UpdatedError('The automatic reboot policy is invalid', code='conflict')
+    return value
+
+
+def auto_reboot_window(local, text):
+    hour, minute = map(int, text.split(':'))
+    anchor = local.replace(hour=hour, minute=minute, second=0, microsecond=0, fold=0)
+    if local.timestamp() < anchor.timestamp():
+        anchor -= dt.timedelta(days=1)
+    anchor = dt.datetime.fromtimestamp(anchor.timestamp(), local.tzinfo)
+    return anchor, anchor.strftime('%Y-%m-%d') + ' ' + text
+
+
+def service_restart_tool():
+    tool = trusted_source('service_restarts.py')
+    if tool.stat().st_size > 1024 * 1024 or b'SERVICE_RESTART_PROTOCOL = 1' not in tool.read_bytes():
+        raise UpdatedError('Update host services before managing service restarts', code='dependency')
+    return tool
+
+
+def service_restart_record():
+    path = OS_SECURITY_ROOT / 'restart-policy.json'
+    if not os.path.lexists(path):
+        return {'enabled': False, 'time': '02:15', 'id': None, 'updated_at': 0}
+    value = safe_json_file(path)
+    if (type(value.get('enabled')) is not bool or not isinstance(value.get('time'), str)
+            or not AUTO_REBOOT_TIME.fullmatch(value['time']) or not IDENTIFIER_RE.fullmatch(str(value.get('id', '')))
+            or type(value.get('updated_at')) not in (int, float)):
+        raise UpdatedError('The service restart policy is invalid', code='conflict')
+    return value
+
+
+def service_restart_due(value, status, local):
+    anchor, key = auto_reboot_window(local, value['time'])
+    same = status.get('policy_id') == value['id'] and status.get('boot_id') == current_boot_id()
+    retry = 900 if status.get('state') == 'running' else 300
+    return (value['enabled'] and 0 <= local.timestamp() - anchor.timestamp() < 3600
+            and value['updated_at'] <= anchor.timestamp()
+            and not (status.get('policy_id') == value['id'] and status.get('window') == key and status.get('state') == 'ready' and status.get('applied'))
+            and (not same or local.timestamp() - status.get('last_attempt', 0) >= retry)), key
+
+
+def service_restart_snapshot():
+    result = {'available': False, 'enabled': False, 'time': '02:15', 'status': None}
+    try:
+        service_restart_tool()
+        result['available'] = True
+        value = service_restart_record()
+        result.update({key: value.get(key) for key in ('enabled', 'time', 'updated_at')})
+        path = OS_SECURITY_ROOT / 'restart-status.json'
+        status = safe_json_file(path) if os.path.lexists(path) else {}
+        result['status'] = status or None
+        if value['enabled']:
+            local = os_security_local_time()
+            due, _ = service_restart_due(value, status, local)
+            if due:
+                upcoming = local
+            else:
+                retry = 900 if status.get('state') == 'running' else 300
+                upcoming = dt.datetime.fromtimestamp(max(local.timestamp(), status.get('last_attempt', 0) + retry), local.tzinfo)
+                if not service_restart_due(value, status, upcoming)[0]:
+                    hour, minute = map(int, value['time'].split(':'))
+                    upcoming = local.replace(hour=hour, minute=minute, second=0, microsecond=0, fold=0)
+                    if upcoming.timestamp() <= local.timestamp():
+                        upcoming += dt.timedelta(days=1)
+            result['next_window'] = dt.datetime.fromtimestamp(upcoming.timestamp(), local.tzinfo).isoformat()
+    except (OSError, ValueError, TypeError, KeyError, UpdatedError) as error:
+        result['error'] = str(error)
+    return result
+
+
+def set_service_restarts(request):
+    boot_id, actor = request_identity(request)
+    if (type(request.get('enabled')) is not bool or not isinstance(request.get('time'), str)
+            or not AUTO_REBOOT_TIME.fullmatch(request['time']) or request.get('confirmation') != 'SECURITY'):
+        raise UpdatedError('Confirm a valid service restart policy')
+    service_restart_tool()
+    lock_fd = acquire_operation(allow_scheduled_reboot=True, allow_security_recovery=not request['enabled'])
+    try:
+        if request['enabled'] and os_security_snapshot()['policy']['mode'] == 'system':
+            raise UpdatedError('Enable managed OS security updates before scheduling service restarts', code='dependency')
+        if request['enabled'] and haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before OS maintenance', code='config_pending')
+        marker = reboot_marker_state()
+        if marker and (marker.get('automatic') or {}).get('reason') == 'services':
+            cancel_automatic_reboot_intent(marker)
+            stop_reboot_unit(marker['unit'])
+            REBOOT_MARKER.unlink()
+            fsync_directory(REBOOT_MARKER.parent)
+        value = {'enabled': request['enabled'], 'time': request['time'], 'id': uuid.uuid4().hex,
+                 'actor': actor, 'updated_at': time.time()}
+        OS_SECURITY_ROOT.mkdir(parents=True, mode=0o700, exist_ok=True)
+        atomic_json(OS_SECURITY_ROOT / 'restart-policy.json', value)
+    finally:
+        release_operation(lock_fd)
+    LOG.warning('Service restart policy changed by %s: enabled=%s time=%s', actor, value['enabled'], value['time'])
+    return {'ok': True, 'service_restarts': service_restart_snapshot(), 'boot_id': boot_id}
+
+
+def service_restart_tick(now=None):
+    if SHUTDOWN_REQUESTED.is_set():
+        return 'disabled'
+    snapshot = service_restart_snapshot()
+    managed = os_security_snapshot()
+    if (not snapshot['available'] or snapshot.get('error') or not snapshot['enabled']
+            or managed.get('recovery_required') or managed['policy']['mode'] == 'system'):
+        return 'disabled'
+    value = service_restart_record()
+    if not service_restart_due(value, snapshot.get('status') or {}, now or os_security_local_time())[0]:
+        return 'waiting'
+    try:
+        start_os_security({'action': 'os_security_restart_cycle'}, scheduled=True)
+    except UpdatedError as error:
+        return error.code
+    return 'started'
+
+
+def service_reboot_reason():
+    tool = service_restart_tool()
+    try:
+        child = subprocess.run(['/usr/bin/python3', str(tool), 'reboot-reason', '--state-root', str(OS_SECURITY_ROOT)],
+                               capture_output=True, text=True, timeout=90)
+        value = json.loads(child.stdout)
+        if child.returncode or not isinstance(value, dict) or value.get('ok') is not True or not isinstance(value.get('services'), list):
+            raise ValueError('unverified restart state')
+        return value['services']
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise UpdatedError('The remaining service restarts could not be verified', code='verification_failed') from error
+
+
+def auto_reboot_due(record, local):
+    anchor, key = auto_reboot_window(local, record['time'])
+    attempt = record.get('attempt') or {}
+    return (record['enabled'] is True and 0 <= local.timestamp() - anchor.timestamp() < 3600
+            and record['updated_at'] <= anchor.timestamp()
+            and not (attempt.get('window') == key and attempt.get('state') in {'scheduled', 'triggered', 'canceled'})
+            and local.timestamp() - attempt.get('at', 0) >= 300), key
+
+
+def auto_reboot_snapshot():
+    result = {'available': False, 'required': REBOOT_REQUIRED_PATH.exists(), 'pending': None}
+    try:
+        auto_reboot_tool()
+        result['available'] = True
+        record = auto_reboot_record()
+        result.update({key: record.get(key) for key in ('enabled', 'time', 'updated_at', 'attempt')})
+        result['allow_service_reboot'] = record.get('allow_service_reboot', False)
+        marker = reboot_marker_state()
+        if marker:
+            result['pending'] = {key: marker.get(key) for key in ('scheduled_at', 'delay_seconds', 'automatic')}
+            result['pending']['due_at'] = (dt.datetime.fromisoformat(marker['scheduled_at']) + dt.timedelta(seconds=marker['delay_seconds'])).isoformat()
+        if record['enabled']:
+            local = os_security_local_time()
+            retry = dt.datetime.fromtimestamp(max(local.timestamp(), (record.get('attempt') or {}).get('at', 0) + 300), local.tzinfo)
+            due, _ = auto_reboot_due(record, retry)
+            if due:
+                result['next_window'] = retry.isoformat()
+            else:
+                hour, minute = map(int, record['time'].split(':'))
+                upcoming = local.replace(hour=hour, minute=minute, second=0, microsecond=0, fold=0)
+                if upcoming.timestamp() <= local.timestamp():
+                    upcoming += dt.timedelta(days=1)
+                result['next_window'] = dt.datetime.fromtimestamp(upcoming.timestamp(), local.tzinfo).isoformat()
+    except (OSError, ValueError, TypeError, KeyError, UpdatedError) as error:
+        result['error'] = str(error)
+    return result
+
+
+def cancel_automatic_reboot_intent(marker):
+    if not marker or not marker.get('automatic'):
+        return
+    record = auto_reboot_record()
+    if record.get('id') == marker['automatic'].get('policy_revision'):
+        record['attempt'] = {'window': marker['automatic'].get('window'), 'state': 'canceled', 'at': time.time()}
+        atomic_json(OS_SECURITY_ROOT / 'reboot-policy.json', record)
+
+
+def set_auto_reboot(request):
+    boot_id, actor = request_identity(request)
+    if (type(request.get('enabled')) is not bool or not isinstance(request.get('time'), str)
+            or not AUTO_REBOOT_TIME.fullmatch(request['time']) or request.get('confirmation') != 'REBOOT'
+            or type(request.get('allow_service_reboot', False)) is not bool):
+        raise UpdatedError('Confirm a valid automatic reboot policy')
+    auto_reboot_tool()
+    if request.get('allow_service_reboot'):
+        service_restart_tool()
+        if b'SERVICE_REBOOT_PROTOCOL = 1' not in auto_reboot_tool().read_bytes():
+            raise UpdatedError('Update host services before allowing service reboot fallback', code='dependency')
+    lock_fd = acquire_operation(allow_scheduled_reboot=True, allow_security_recovery=not request['enabled'])
+    try:
+        if request['enabled'] and os_security_snapshot()['policy']['mode'] == 'system':
+            raise UpdatedError('Enable managed OS security updates before enabling scheduled reboots', code='dependency')
+        if request['enabled'] and haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before OS maintenance', code='config_pending')
+        marker = reboot_marker_state()
+        if marker and marker.get('automatic'):
+            cancel_automatic_reboot_intent(marker)
+            stop_reboot_unit(marker['unit'])
+            REBOOT_MARKER.unlink()
+            fsync_directory(REBOOT_MARKER.parent)
+        value = {'enabled': request['enabled'], 'time': request['time'], 'allow_service_reboot': request.get('allow_service_reboot', False), 'id': uuid.uuid4().hex,
+                 'actor': actor, 'updated_at': time.time()}
+        OS_SECURITY_ROOT.mkdir(parents=True, mode=0o700, exist_ok=True)
+        atomic_json(OS_SECURITY_ROOT / 'reboot-policy.json', value)
+    finally:
+        release_operation(lock_fd)
+    LOG.warning('Automatic reboot policy changed by %s: enabled=%s time=%s', actor, value['enabled'], value['time'])
+    return {'ok': True, 'automatic_reboot': auto_reboot_snapshot(), 'boot_id': boot_id}
+
+
+def auto_reboot_tick(now=None):
+    if SHUTDOWN_REQUESTED.is_set():
+        return 'disabled'
+    record = auto_reboot_record()
+    if not record['enabled'] or not (REBOOT_REQUIRED_PATH.exists() or record.get('allow_service_reboot', False)):
+        return 'disabled'
+    local = now or os_security_local_time()
+    due, key = auto_reboot_due(record, local)
+    if not due:
+        return 'waiting'
+    try:
+        auto_reboot_tool()
+        lock_fd = acquire_operation()
+    except UpdatedError as error:
+        return error.code
+    try:
+        # Re-read consent under the same custody as timer creation.
+        record = auto_reboot_record()
+        due, key = auto_reboot_due(record, local)
+        if not due or os_security_snapshot()['policy']['mode'] == 'system':
+            return 'disabled'
+        record['attempt'] = {'window': key, 'state': 'scheduled', 'at': local.timestamp()}
+        atomic_json(OS_SECURITY_ROOT / 'reboot-policy.json', record)
+        try:
+            request_reboot({'confirmation': REBOOT_CONFIRMATION, 'expected_boot_id': current_boot_id(), 'actor': 'os-security-auto'},
+                           automatic={'policy_revision': record['id'], 'window': key}, held_lock=lock_fd)
+        except Exception as error:
+            # With "also reboot for deferred services" on, the window opens
+            # every night whether or not anything asks for a reboot. "Nothing
+            # does" is then the usual answer of a healthy gateway: it used to
+            # be recorded as a deferral with an error and logged with a
+            # traceback, twelve times a night.
+            not_required = isinstance(error, UpdatedError) and error.code == 'not_required'
+            if not os.path.lexists(REBOOT_MARKER):
+                if not_required:
+                    record['attempt'] = {'window': key, 'state': 'not_required', 'at': local.timestamp()}
+                else:
+                    record['attempt'].update(state='deferred', error=str(error)[:500])
+                atomic_json(OS_SECURITY_ROOT / 'reboot-policy.json', record)
+            if not_required:
+                return 'not_required'
+            if isinstance(error, UpdatedError):
+                # A refusal the broker gave itself (a restore in progress, an
+                # unanswered HAProxy confirmation): recorded above, said once
+                # per attempt in one line, tried again in five minutes.
+                LOG.warning('Scheduled automatic reboot deferred: %s', error)
+                return error.code
+            raise
+        return 'scheduled'
+    finally:
+        release_operation(lock_fd)
+
+
+def os_security_snapshot():
+    result = {'policy': dict(OS_SECURITY_DEFAULT), 'status': None, 'recovery_required': False, 'available': False}
+    try:
+        tool = os_security_tool()
+        result['available'] = True
+        result['daily_supported'] = b'SETTINGS_PROTOCOL = 1' in tool.read_bytes()
+        path = OS_SECURITY_ROOT / 'policy.json'
+        if os.path.lexists(path):
+            record = safe_json_file(path)
+            result['policy'] = os_security_policy(record.get('policy') or {})
+            result['policy_phase'] = record.get('phase')
+            result['policy_updated_at'] = record.get('updated_at')
+            result['recovery_required'] = record.get('phase') != 'ready'
+        path = OS_SECURITY_ROOT / 'status.json'
+        if os.path.lexists(path):
+            status = safe_json_file(path)
+            result['status'] = {key: status.get(key) for key in (
+                'state', 'error', 'last_attempt', 'checked_at', 'last_success', 'platform', 'packages',
+                'package_count', 'eligible_count', 'restart', 'native_timer', 'native_policy', 'installed_count', 'last_install_at', 'last_install_attempt')}
+        path = OS_SECURITY_ROOT / 'restart-status.json'
+        if os.path.lexists(path):
+            service = safe_json_file(path)
+            current = result['status'] or {'state': 'unverified'}
+            same_boot = service.get('boot_id') == current_boot_id()
+            candidates = [item for item in (current.get('restart'), service.get('restart') if same_boot else None,
+                          service.get('check') if service.get('check_boot_id') == current_boot_id() else None) if isinstance(item, dict)]
+            if same_boot and service.get('state') == 'unknown':
+                current['restart'] = {'error': service.get('error') or 'Service restarts could not be verified', 'checked_at': service.get('last_attempt', 0)}
+                result['status'] = current
+            elif candidates:
+                current['restart'] = max(candidates, key=lambda item: item.get('checked_at', 0))
+                result['status'] = current
+    except (UpdatedError, OSError, ValueError, TypeError) as error:
+        result['error'] = str(error)
+        result['recovery_required'] = security_recovery_pending()
+    return result
+
+
+def os_security_live_settings():
+    """Short, cached read-only probe; never loads the package cache on GET."""
+    if not OS_SECURITY_INSPECTION_LOCK.acquire(blocking=False):
+        return dict(OS_SECURITY_INSPECTION_CACHE.get('value') or {'error': 'Reading current Linux settings…'})
+    try:
+        if time.monotonic() - OS_SECURITY_INSPECTION_CACHE.get('at', -60) < 30:
+            return dict(OS_SECURITY_INSPECTION_CACHE['value'])
+        try:
+            tool = os_security_tool()
+            if b'SETTINGS_PROTOCOL = 1' not in tool.read_bytes():
+                raise UpdatedError('Update host services to read current Linux settings')
+            probe = subprocess.run(['/usr/bin/python3', str(tool), 'inspect'], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=8)
+            value = json.loads(probe.stdout)
+            if probe.returncode or not isinstance(value, dict) or value.get('ok') is not True:
+                raise UpdatedError(value.get('error', 'Current Linux settings could not be read') if isinstance(value, dict) else 'Current Linux settings could not be read')
+        except (OSError, ValueError, UpdatedError, subprocess.TimeoutExpired) as error:
+            value = {'error': str(error)}
+        OS_SECURITY_INSPECTION_CACHE.update(at=time.monotonic(), value=value)
+        return dict(value)
+    finally:
+        OS_SECURITY_INSPECTION_LOCK.release()
+
+
+def os_security_local_time():
+    from zoneinfo import ZoneInfo
+    try:
+        with open('/etc/localtime', 'rb') as handle:
+            return dt.datetime.now(ZoneInfo.from_file(handle))
+    except (OSError, ValueError):
+        return dt.datetime.now().astimezone()
+
+
+def os_security_install_due(policy, status, local):
+    last = status.get('last_install_at') or 0
+    previous = dt.datetime.fromtimestamp(last, local.tzinfo) if last else None
+    if policy['mode'] == 'daily':
+        return local.hour == policy['start'] and (previous is None or previous.date() != local.date())
+    return (policy['mode'] == 'window' and in_install_window(local, policy['start'], policy['end'])
+            and (previous is None or install_night(previous, policy['start'], policy['end']) != install_night(local, policy['start'], policy['end'])))
+
+
+def os_security_schedule(snapshot, now=None):
+    policy, status = snapshot['policy'], snapshot.get('status') or {}
+    if snapshot.get('recovery_required') or snapshot.get('configuring') or policy['mode'] == 'system':
+        return {}
+    local = now or os_security_local_time()
+    stamp = local.timestamp()
+    result = {'next_check': max(stamp, (status.get('last_success') or 0) + policy['interval'] * 3600,
+                                (status.get('last_attempt') or 0) + 1800)}
+    if policy['mode'] == 'auto':
+        result['next_install'] = dt.datetime.fromtimestamp(result['next_check'], local.tzinfo).isoformat()
+    if policy['mode'] in {'daily', 'window'}:
+        if os_security_install_due(policy, status, local):
+            next_time = dt.datetime.fromtimestamp(max(stamp, (status.get('last_install_attempt') or 0) + 1800), local.tzinfo)
+            # A retry must still fit the allowed hour/window.
+            end = (policy['start'] + 1) % 24 if policy['mode'] == 'daily' else policy['end']
+            if not in_install_window(next_time, policy['start'], end):
+                next_time = (local + dt.timedelta(days=1)).replace(hour=policy['start'], minute=0, second=0, microsecond=0)
+        else:
+            next_time = local.replace(hour=policy['start'], minute=0, second=0, microsecond=0)
+            if next_time <= local:
+                next_time += dt.timedelta(days=1)
+        result['next_install'] = next_time.isoformat()
+    return result
+
+
+def os_security_notifications(snapshot):
+    if _ALERTS is None:
+        return
+    status = snapshot.get('status') or {}
+    if snapshot.get('error'):
+        return
+    if status.get('state') not in {'ready', 'unknown'}:
+        return
+    try:
+        _ALERTS.observe("os.security_check_failed", 'host', active=status.get('state') == 'unknown',
+                        summary='OS security updates could not be checked', detail=str(status.get('error') or ''))
+        if status.get('state') != 'ready':
+            return  # Unknown never resolves an existing security incident.
+        count = status.get('package_count')
+        if type(count) is int:
+            _ALERTS.observe("os.security_updates", 'host', active=count > 0,
+                            summary='OS security updates are available', detail=f'{count} package(s) require a security update.')
+        restart = status.get('restart') or {}
+        if not restart.get('error'):
+            _ALERTS.observe("os.security_restart", 'host', active=bool(restart.get('reboot_required') or restart.get('services')),
+                            summary=('Security updates require a server reboot' if restart.get('reboot_required')
+                                     else 'Some services require a restart after security updates'),
+                            detail=', '.join(restart.get('services') or []))
+    except Exception:
+        LOG.debug('OS security alert reporting failed', exc_info=True)
+
+
+# Managed OS security switches Linux's own upgrade timer off and installs
+# through this broker instead. The alerts above are sent at the end of a job,
+# so whatever keeps a job from starting -- a policy change left half done, a
+# state that cannot be read, a confirmation of the HAProxy configuration nobody
+# answered -- used to end in silence: no fixes installed and nothing said.
+# This is looked at on every pass of the schedule, job or no job.
+OS_SECURITY_STALLED_RULE = "os.security_stalled"
+OS_SECURITY_STALLED_FLOOR_SECONDS = 24 * 3600
+OS_SECURITY_STALLED_INTERVALS = 3
+OS_SECURITY_WATCH_REPEAT_SECONDS = 600
+OS_SECURITY_WATCH = {'at': 0.0, 'reason': None}
+
+
+def os_security_stalled(now, last_answer=''):
+    """Why managed OS security is not doing its work, or '' when it is.
+
+    Read from the policy record itself rather than from the snapshot: a
+    snapshot that failed falls back to "Linux manages it", which is the one
+    answer that must not be assumed here.
+    """
+    path = OS_SECURITY_ROOT / 'policy.json'
+    if not os.path.lexists(path):
+        return ''  # never taken over: Linux's own timer is in charge
+    try:
+        record = safe_json_file(path)
+        policy = os_security_policy(record.get('policy') or {})
+    except (OSError, ValueError, UpdatedError) as error:
+        return ('The OS security policy cannot be read, so it is not known whether updates are installed. '
+                + str(error)[:300])
+    if record.get('phase') != 'ready':
+        active = active_job()
+        if active and active.get('operation') == 'security-configure' and active.get('status') in {'queued', 'running'}:
+            return ''
+        return ("An interrupted policy change left OS security needing recovery. "
+                "Linux's own automatic updates may be switched off, and the panel installs nothing until it is resolved.")
+    if policy['mode'] == 'system':
+        return ''
+    snapshot = os_security_snapshot()
+    if snapshot.get('error'):
+        return 'Managed OS security cannot run. ' + str(snapshot['error'])[:300]
+    status = snapshot.get('status') or {}
+    limit = max(OS_SECURITY_STALLED_FLOOR_SECONDS, OS_SECURITY_STALLED_INTERVALS * policy['interval'] * 3600)
+    last = max(float(status.get('last_success') or 0), float(record.get('updated_at') or 0))
+    if now - last <= limit:
+        return ''
+    detail = f'No OS security check has succeeded for {int((now - last) // 3600)} hours.'
+    if status.get('state') == 'unknown' and status.get('error'):
+        detail += ' Last error: ' + str(status['error'])[:300]
+    elif last_answer and last_answer not in {'started', 'waiting'}:
+        detail += ' The schedule could not start a check: ' + str(last_answer)[:80] + '.'
+    return detail
+
+
+def os_security_watch(now=None, last_answer=''):
+    """Tell the alert engine whether managed OS security is stalled."""
+    if _ALERTS is None:
+        return ''
+    now = time.time() if now is None else now
+    reason = os_security_stalled(now, last_answer)
+    # A level is refreshed, not repeated: again when it changes, and often
+    # enough that the alert engine does not take silence for recovery.
+    if reason == OS_SECURITY_WATCH['reason'] and now - OS_SECURITY_WATCH['at'] < OS_SECURITY_WATCH_REPEAT_SECONDS:
+        return reason
+    OS_SECURITY_WATCH.update(at=now, reason=reason)
+    try:
+        _ALERTS.observe(OS_SECURITY_STALLED_RULE, 'host', active=bool(reason),
+                        summary='OS security updates are not running', detail=reason)
+    except Exception:  # pylint: disable=broad-except
+        LOG.debug('OS security alert reporting failed', exc_info=True)
+    return reason
+
+
+def os_security_worker(job_id, lock_fd, action, policy=None):
+    log = ''
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before OS maintenance', code='config_pending')
+        tool = service_restart_tool() if action in {'restart-check', 'restart', 'restart-cycle'} else os_security_tool()
+        update_job(job_id, status='running', started_at=utc_now(), current_component='os', progress={'phase': 'checking'})
+        ACTIVE_MARKER.write_text(f'job_id={job_id}\n', encoding='utf-8')
+        os.chmod(ACTIVE_MARKER, 0o600)
+        command = ['/usr/bin/python3', str(tool), action, '--state-root', str(OS_SECURITY_ROOT),
+                   '--maintenance-lock', str(MAINTENANCE_LOCK_PATH), '--request-id', job_id]
+        if policy:
+            for key in ('mode', 'interval', 'start', 'end'):
+                command.extend(['--' + key, str(policy[key])])
+        # The PID-1-owned worker holds custody even if this broker dies.
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        code, log = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS)
+        try:
+            result = json.loads(log.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        if code or result.get('ok') is not True or result.get('request_id') != job_id:
+            raise UpdatedError(str(result.get('error') or 'OS security operation failed; review the job log'), code='verification_failed')
+        if action in {'install', 'cycle', 'configure'}:
+            LATEST_PLAN_PATH.unlink(missing_ok=True)
+        update_job(job_id, status='completed', completed_at=utc_now(), result={'message': str(result.get('message') or '')}, output={'log': log})
+    except Exception as error:
+        finish_failed(job_id, error, log)
+    finally:
+        with OS_SECURITY_INSPECTION_LOCK:
+            OS_SECURITY_INSPECTION_CACHE.clear()
+        os_security_notifications(os_security_snapshot())
+        ACTIVE_MARKER.unlink(missing_ok=True)
+        release_operation(lock_fd)
+
+
+def start_os_security(request, *, scheduled=False):
+    action = {'os_security_check': 'check', 'os_security_install': 'install',
+              'os_security_configure': 'configure', 'os_security_cycle': 'cycle',
+              'os_security_restart_check': 'restart-check', 'os_security_restart': 'restart',
+              'os_security_restart_cycle': 'restart-cycle'}[request['action']]
+    policy = os_security_policy(request) if action == 'configure' else None
+    if action in {'install', 'configure', 'restart'} and request.get('confirmation') != 'SECURITY':
+        raise UpdatedError('Type SECURITY to confirm OS security management')
+    os_security_tool()
+    if action in {'restart-check', 'restart', 'restart-cycle'}:
+        service_restart_tool()
+    lock_fd = acquire_operation(allow_security_recovery=bool(policy and policy['mode'] == 'system'))
+    try:
+        if haproxy_transaction_active():
+            raise UpdatedError('Resolve pending HAProxy configuration changes before OS maintenance', code='config_pending')
+        if policy and policy['mode'] == 'system' and auto_reboot_record()['enabled']:
+            # Returning control to Linux also revokes the panel's reboot policy.
+            value = auto_reboot_record()
+            value.update(enabled=False, id=uuid.uuid4().hex, updated_at=time.time())
+            atomic_json(OS_SECURITY_ROOT / 'reboot-policy.json', value)
+        if policy and policy['mode'] == 'system' and service_restart_record()['enabled']:
+            value = service_restart_record()
+            value.update(enabled=False, id=uuid.uuid4().hex, updated_at=time.time())
+            atomic_json(OS_SECURITY_ROOT / 'restart-policy.json', value)
+        if action in {'install', 'cycle', 'restart', 'restart-cycle'} and os_security_snapshot()['policy']['mode'] == 'system':
+            raise UpdatedError('Enable OS security management before installing updates', code='dependency')
+        job = new_job('security-' + action, components=['os'], scheduled=scheduled)
+        start_thread(os_security_worker, job['id'], lock_fd, action, policy)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
+def os_security_tick(now=None):
+    snapshot = os_security_snapshot()
+    policy, status = snapshot['policy'], snapshot.get('status') or {}
+    if not snapshot['available'] or snapshot['recovery_required'] or policy['mode'] == 'system':
+        return 'disabled'
+    local = now or os_security_local_time()
+    stamp = local.timestamp()
+    last_attempt = status.get('last_attempt') or 0
+    last_success = status.get('last_success') or 0
+    # Persisted timestamps prevent a broker restart or a failure from making
+    # a new APT job every minute. A busy operation does not consume the turn.
+    due = stamp - last_success >= policy['interval'] * 3600
+    install_due = os_security_install_due(policy, status, local)
+    last_relevant_attempt = (status.get('last_install_attempt') or 0) if install_due else last_attempt
+    if stamp - last_relevant_attempt < 1800:
+        return 'waiting'
+    if not due and not install_due:
+        return 'waiting'
+    try:
+        start_os_security({'action': 'os_security_cycle'}, scheduled=True)
+    except UpdatedError as error:
+        return error.code
+    return 'started'
+
+
+def os_security_response(request):
+    result = {'ok': True, **os_security_snapshot()}
+    result['jobs'] = [job for job in list_jobs() if job.get('operation', '').startswith('security-')][:10]
+    active = active_job()
+    result['active_job'] = public_job(active, include_log=False) if active else None
+    result['configuring'] = bool(active and active.get('operation') == 'security-configure' and active.get('status') in {'queued', 'running'})
+    if result['configuring']:
+        result['recovery_required'] = False
+    result['live_settings'] = os_security_live_settings() if result['available'] else None
+    result['schedule'] = os_security_schedule(result)
+    result['automatic_reboot'] = auto_reboot_snapshot()
+    result['service_restarts'] = service_restart_snapshot()
+    result['boot_id'] = current_boot_id()
+    if request.get('job_id'):
+        job = load_job(identifier(request['job_id'], 'job id'))
+        if not job.get('operation', '').startswith('security-'):
+            raise UpdatedError('OS security job was not found', code='not_found')
+        result['job'] = job
+    result['server_time'] = utc_now()
+    result['server_timezone'] = dt.datetime.now().astimezone().strftime('%Z %z')
+    return result
+
+
+def status_response(request: dict[str, Any]) -> dict[str, Any]:
+    requested = request.get("job_id")
+    jobs = (
+        [load_job(identifier(requested, "job id"))]
+        if requested is not None
+        else list_jobs()
+    )
+    plan = load_latest_plan()
+    if plan is not None:
+        plan = dict(plan)
+        plan["stale"] = plan_is_expired(plan)
+    boot_id = current_boot_id()
+    return {
+        "ok": True,
+        "protocol_version": PROTOCOL_VERSION,
+        "deployment": read_deployment(),
+        "plan": plan,
+        "jobs": jobs,
+        "active_job": active_job(),
+        "boot_id": boot_id,
+        "reboot_required": REBOOT_REQUIRED_PATH.exists(),
+        "reboot_scheduled": reboot_is_scheduled(),
+        "reboot_scheduled_elsewhere": os.path.lexists(ASSISTANT_REBOOT_MARKER),
+        "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+        "settings": settings_payload(),
+        "summary": summary_payload(plan),
+        'haproxy_operation': haproxy_operation(),
+        'haproxy_migration': migration_status(plan),
+    }
+
+
+def current_boot_id() -> str:
+    try:
+        value = BOOT_ID_PATH.read_text(encoding="ascii").strip().lower()
+    except (OSError, UnicodeError) as exc:
+        raise UpdatedError("the current boot id is unavailable", code="conflict") from exc
+    if not BOOT_ID_RE.fullmatch(value):
+        raise UpdatedError("the current boot id is invalid", code="conflict")
+    return value
+
+
+def request_identity(request: dict[str, Any]) -> tuple[str, str]:
+    expected_boot_id = request.get("expected_boot_id")
+    if not isinstance(expected_boot_id, str) or not BOOT_ID_RE.fullmatch(
+        expected_boot_id
+    ):
+        raise UpdatedError("a valid expected boot id is required", code="validation")
+    actor = request.get("actor")
+    if not isinstance(actor, str) or not ACTOR_RE.fullmatch(actor):
+        raise UpdatedError("a valid authenticated actor is required", code="validation")
+    boot_id = current_boot_id()
+    if expected_boot_id != boot_id:
+        raise UpdatedError(
+            "the server boot changed; reload the page and try again",
+            code="stale_boot",
+        )
+    return boot_id, actor
+
+
+def reboot_marker_state() -> dict[str, Any] | None:
+    if not os.path.lexists(REBOOT_MARKER):
+        return None
+    try:
+        state = safe_json_file(REBOOT_MARKER)
+    except (UpdatedError, OSError, ValueError, json.JSONDecodeError) as exc:
+        LOG.error("The web reboot marker is unsafe or unreadable: %s", exc)
+        raise UpdatedError("the web reboot marker is unsafe", code="conflict") from exc
+    unit = state.get("unit")
+    marker_boot_id = state.get("boot_id")
+    if (
+        not isinstance(unit, str)
+        or not REBOOT_UNIT_RE.fullmatch(unit)
+        or not isinstance(marker_boot_id, str)
+        or not BOOT_ID_RE.fullmatch(marker_boot_id)
+    ):
+        raise UpdatedError("the web reboot marker is invalid", code="conflict")
+    if marker_boot_id != current_boot_id():
+        REBOOT_MARKER.unlink(missing_ok=True)
+        fsync_directory(REBOOT_MARKER.parent)
+        return None
+    return state
+
+
+def reboot_is_scheduled() -> bool:
+    return reboot_marker_state() is not None
+
+
+def reboot_guard_present() -> bool:
+    return os.path.lexists(REBOOT_MARKER) or os.path.lexists(
+        ASSISTANT_REBOOT_MARKER
+    )
+
+
+def stop_reboot_unit(unit: str) -> None:
+    if not REBOOT_UNIT_RE.fullmatch(unit):
+        raise UpdatedError("the scheduled reboot unit is invalid", code="conflict")
+    try:
+        result = subprocess.run(
+            [
+                SYSTEMCTL_PATH,
+                "stop",
+                f"{unit}.timer",
+                f"{unit}.service",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdatedError(f"failed to stop the reboot timer: {exc}") from exc
+    remaining = []
+    for suffix in ("timer", "service"):
+        try:
+            properties = systemctl_properties(
+                f"{unit}.{suffix}", ["LoadState", "ActiveState"]
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise UpdatedError(
+                f"failed to verify the reboot timer stopped: {exc}"
+            ) from exc
+        # A failed D-Bus query can otherwise look like an empty, inactive
+        # result. Cancellation must be proven before its guard is removed.
+        if not {"LoadState", "ActiveState"}.issubset(properties):
+            raise UpdatedError("failed to verify the reboot timer stopped")
+        if properties.get("ActiveState") in {
+            "activating",
+            "active",
+            "reloading",
+            "deactivating",
+        }:
+            remaining.append(f"{unit}.{suffix}")
+    if remaining:
+        raise UpdatedError(
+            "failed to stop the reboot timer: "
+            + (result.stderr or result.stdout or ", ".join(remaining)).strip()
+        )
+
+
+def request_reboot(request: dict[str, Any], *, automatic=None, held_lock=None) -> dict[str, Any]:
+    if request.get("confirmation") != REBOOT_CONFIRMATION:
+        raise UpdatedError("reboot requires an explicit confirmation")
+    boot_id, actor = request_identity(request)
+    existing = reboot_marker_state()
+    if existing is not None:
+        return {
+            "ok": True,
+            "message": "Reboot is already scheduled.",
+            "reboot_scheduled": True,
+            "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+            "boot_id": boot_id,
+        }
+    lock_fd = acquire_operation() if held_lock is None else held_lock
+    try:
+        existing = reboot_marker_state()
+        if existing is not None:
+            return {
+                "ok": True,
+                "message": "Reboot is already scheduled.",
+                "reboot_scheduled": True,
+                "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+                "boot_id": boot_id,
+            }
+        if automatic is not None and not REBOOT_REQUIRED_PATH.exists():
+            if not auto_reboot_record().get('allow_service_reboot') or not service_reboot_reason():
+                raise UpdatedError('the operating system does not currently require a reboot', code='not_required')
+            automatic.update(reason='services', restart_policy_revision=service_restart_record()['id'])
+        if BACKUPD_RESTORE_ACTIVE_MARKER.exists():
+            raise UpdatedError(
+                "a restore is in progress; the reboot was refused",
+                code="operation_active",
+            )
+        if haproxy_transaction_active():
+            raise UpdatedError(
+                "an HAProxy configuration confirmation is active",
+                code="config_pending",
+            )
+        unit = f"{REBOOT_UNIT_PREFIX}-{uuid.uuid4().hex[:12]}"
+        # Publish the root-owned guard before asking PID 1 to create the timer.
+        # The shared lock keeps update/backup workers out, while controld uses
+        # this marker to reject new host configuration mutations.
+        atomic_json(
+            REBOOT_MARKER,
+            {
+                "version": 1,
+                "unit": unit,
+                "boot_id": boot_id,
+                "actor": actor,
+                "scheduled_at": utc_now(),
+                "delay_seconds": REBOOT_DELAY_SECONDS,
+                **({'automatic': automatic} if automatic else {}),
+            },
+        )
+        result = subprocess.run(
+            [
+                SYSTEMD_RUN_PATH,
+                f"--unit={unit}",
+                "--description=easy-ha-proxy web controlled reboot",
+                f"--on-active={REBOOT_DELAY_SECONDS}s",
+                "--timer-property=AccuracySec=1s",
+                *(['--timer-property=RemainAfterElapse=no', '--property=TimeoutStartSec=infinity',
+                   '--', '/usr/bin/python3', str(auto_reboot_tool()), 'fire', '--state-root', str(OS_SECURITY_ROOT),
+                   '--maintenance-lock', str(MAINTENANCE_LOCK_PATH), '--reboot-marker', str(REBOOT_MARKER),
+                   '--required-marker', str(REBOOT_REQUIRED_PATH), '--unit', unit]
+                  if automatic else [SYSTEMCTL_PATH, 'reboot']),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            raise UpdatedError(
+                "failed to schedule the reboot: "
+                + (result.stderr or result.stdout or "unknown error").strip()
+            )
+    except Exception as exc:
+        cleanup_safe = True
+        if "unit" in locals():
+            try:
+                stop_reboot_unit(unit)
+            except UpdatedError as cleanup_exc:
+                # Keep the marker (and therefore every maintenance guard) if
+                # PID 1 may still own a live timer.  An administrator can then
+                # retry cancellation without an untracked reboot racing work.
+                cleanup_safe = False
+                LOG.error(
+                    "Could not prove the failed reboot timer was stopped: %s",
+                    cleanup_exc,
+                )
+        if cleanup_safe and os.path.lexists(REBOOT_MARKER):
+            REBOOT_MARKER.unlink(missing_ok=True)
+            fsync_directory(REBOOT_MARKER.parent)
+        if isinstance(exc, (OSError, subprocess.TimeoutExpired)):
+            raise UpdatedError(f"failed to schedule the reboot: {exc}") from exc
+        raise
+    finally:
+        # Hold the lock through timer creation and marker persistence so no
+        # update or backup can enter the scheduling gap.
+        if held_lock is None:
+            release_operation(lock_fd)
+    LOG.warning(
+        "reboot scheduled from the web UI by %s (delay %ss)",
+        actor,
+        REBOOT_DELAY_SECONDS,
+    )
+    return {
+        "ok": True,
+        "message": "Reboot scheduled.",
+        "reboot_scheduled": True,
+        "reboot_delay_seconds": REBOOT_DELAY_SECONDS,
+        "boot_id": boot_id,
+    }
+
+
+def cancel_reboot(request: dict[str, Any]) -> dict[str, Any]:
+    boot_id, actor = request_identity(request)
+    lock_fd = acquire_operation(allow_scheduled_reboot=True)
+    try:
+        state = reboot_marker_state()
+        if state is None:
+            raise UpdatedError("no web-scheduled reboot exists", code="not_found")
+        cancel_automatic_reboot_intent(state)
+        stop_reboot_unit(str(state["unit"]))
+        REBOOT_MARKER.unlink()
+        fsync_directory(REBOOT_MARKER.parent)
+    finally:
+        release_operation(lock_fd)
+    LOG.info("reboot canceled from the web UI by %s", actor)
+    return {
+        "ok": True,
+        "message": "Reboot canceled.",
+        "reboot_scheduled": False,
+        "boot_id": boot_id,
+    }
+
+
+def dispatch(request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        raise UpdatedError("request must be a JSON object")
+    action = request.get("action")
+    if action not in REQUEST_FIELDS:
+        raise UpdatedError("unknown update broker action")
+    unexpected = set(request) - REQUEST_FIELDS[action]
+    if unexpected:
+        raise UpdatedError("unexpected request fields: " + ", ".join(sorted(unexpected)))
+    if action == "status":
+        return status_response(request)
+    if action == "start_check":
+        return start_check(request)
+    if action == "set_channels":
+        return set_channels(request)
+    if action == "set_settings":
+        return set_settings(request)
+    if action == "set_auto_install":
+        return set_auto_install(request)
+    if action == "summary":
+        return summary_response()
+    if action == "reboot":
+        return request_reboot(request)
+    if action == "cancel_reboot":
+        return cancel_reboot(request)
+    if action == 'set_auto_reboot':
+        return set_auto_reboot(request)
+    if action == 'set_service_restarts':
+        return set_service_restarts(request)
+    if action == 'prepare_haproxy_migration':
+        return start_haproxy_migration(request)
+    if action == 'apply_haproxy_migration':
+        return start_haproxy_migration(request, apply=True)
+    if action == 'start_haproxy_transition':
+        return start_haproxy_transition(request)
+    if action == 'os_security_status':
+        return os_security_response(request)
+    if action in {'os_security_check', 'os_security_install', 'os_security_configure', 'os_security_restart_check', 'os_security_restart'}:
+        return start_os_security(request)
+    return start_apply(request)
+
+
+def peer_uid(connection: socket.socket) -> int:
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise UpdatedError("Unix peer credentials are unavailable")
+    raw = connection.getsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_PEERCRED,
+        struct.calcsize("3i"),
+    )
+    _pid, uid, _gid = struct.unpack("3i", raw)
+    return uid
+
+
+def receive_request(connection: socket.socket) -> bytes:
+    deadline = time.monotonic() + 10
+    data = bytearray()
+    while len(data) <= MAX_REQUEST_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise UpdatedError("request timed out")
+        connection.settimeout(remaining)
+        try:
+            chunk = connection.recv(min(4096, MAX_REQUEST_BYTES + 1 - len(data)))
+        except socket.timeout as exc:
+            raise UpdatedError("request timed out") from exc
+        if not chunk:
+            break
+        data.extend(chunk)
+        if b"\n" in chunk:
+            break
+    if len(data) > MAX_REQUEST_BYTES:
+        raise UpdatedError("request is too large", code="too_large")
+    if not data.endswith(b"\n") or data.count(b"\n") != 1:
+        raise UpdatedError("request must contain exactly one JSON line")
+    return bytes(data[:-1])
+
+
+def handle_connection(connection: socket.socket) -> None:
+    with connection:
+        try:
+            if peer_uid(connection) not in {0, APP_UID}:
+                raise UpdatedError("socket peer is not authorized")
+            request = json.loads(receive_request(connection).decode("utf-8"))
+            response = dispatch(request)
+        except UpdatedError as exc:
+            response = {
+                "ok": False,
+                "error": str(exc)[:4096],
+                "error_code": exc.code,
+            }
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            response = {
+                "ok": False,
+                "error": str(exc)[:4096],
+                "error_code": "invalid",
+            }
+        except OSError as exc:
+            if exc.errno in {errno.ENOSPC, errno.EDQUOT}:
+                code = "insufficient_space"
+            elif exc.errno in {errno.EBUSY, errno.EEXIST}:
+                code = "conflict"
+            elif exc.errno == errno.ENOENT:
+                code = "not_found"
+            else:
+                code = "internal"
+            response = {
+                "ok": False,
+                "error": str(exc)[:4096],
+                "error_code": code,
+            }
+        except Exception:  # noqa: BLE001 - do not expose tracebacks
+            LOG.exception("Unhandled update broker request error")
+            response = {
+                "ok": False,
+                "error": "internal update broker error",
+                "error_code": "internal",
+            }
+        encoded = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+        if len(encoded) > MAX_RESPONSE_BYTES:
+            encoded = (
+                b'{"ok":false,"error":"response is too large",'
+                b'"error_code":"too_large"}\n'
+            )
+        try:
+            connection.settimeout(5)
+            connection.sendall(encoded)
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass
+
+
+def handle_connection_in_slot(connection: socket.socket) -> None:
+    try:
+        handle_connection(connection)
+    finally:
+        CONNECTION_SLOTS.release()
+
+
+def signal_stop(_signum: int, _frame: Any) -> None:
+    SHUTDOWN_REQUESTED.set()
+    if not OPERATION_THREAD_LOCK.locked():
+        STOP_EVENT.set()
+
+
+def serve() -> None:
+    ensure_layout()
+    recover_stale_jobs()
+    # Always running: it idles while the interval is 0, so the page can switch
+    # checks on without a restart.
+    threading.Thread(target=auto_check_loop, name="auto-check", daemon=True).start()
+    try:
+        SOCKET_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(SOCKET_PATH))
+        os.chown(SOCKET_PATH, APP_UID, APP_PRIMARY_GID)
+        os.chmod(SOCKET_PATH, 0o600)
+        server.listen(16)
+        server.settimeout(1)
+        LOG.info("Listening on %s", SOCKET_PATH)
+        while not STOP_EVENT.is_set():
+            try:
+                connection, _address = server.accept()
+            except socket.timeout:
+                continue
+            if not CONNECTION_SLOTS.acquire(blocking=False):
+                with connection:
+                    try:
+                        connection.sendall(
+                            b'{"ok":false,"error":"too many active requests",'
+                            b'"error_code":"busy"}\n'
+                        )
+                    except OSError:
+                        pass
+                continue
+            threading.Thread(
+                target=handle_connection_in_slot,
+                args=(connection,),
+                daemon=True,
+            ).start()
+    finally:
+        server.close()
+        try:
+            SOCKET_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    signal.signal(signal.SIGTERM, signal_stop)
+    signal.signal(signal.SIGINT, signal_stop)
+    try:
+        serve()
+    except (UpdatedError, OSError, KeyError) as exc:
+        LOG.error("Cannot start update broker: %s", exc)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

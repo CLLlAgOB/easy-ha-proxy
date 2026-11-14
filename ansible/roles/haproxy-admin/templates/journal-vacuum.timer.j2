@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily vacuum of systemd journal
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=journal-vacuum.service
+
+[Install]
+WantedBy=timers.target

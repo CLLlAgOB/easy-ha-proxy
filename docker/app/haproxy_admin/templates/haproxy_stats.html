@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – statistics{% endblock %}
+{% block header_title %}HAProxy statistics{% endblock %}
+
+{% block content %}
+{# Styles for this page only #}
+
+
+<div class="stats-page-fullscreen">
+  <iframe src="/stats" title="HAProxy statistics"></iframe>
+</div>
+{% endblock %}

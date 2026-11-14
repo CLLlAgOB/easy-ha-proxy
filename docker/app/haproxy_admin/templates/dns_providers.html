@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}DNS providers{% endblock %}
+{% block header_title %}DNS providers{% endblock %}
+
+{% block content %}
+
+
+<div class="notice-info rt-notice" >
+  DNS-01 proves control of a domain through a DNS record instead of an HTTP request, which is the only way to obtain a wildcard certificate and the only option when port 80 is unreachable. A saved credential is written root-only and is never sent back to this page: to change one, enter it again.
+</div>
+
+<div class="rt-notice error" id="dp-error" hidden></div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Profiles</h2>
+  </div>
+  <div id="dp-list" data-i18n-skip translate="no"></div>
+  <div class="dp-empty" id="dp-empty">No DNS provider profiles yet</div>
+</div>
+
+<div class="u-mt-6 card" >
+  <div class="card-header">
+    <h2>Add or replace a profile</h2>
+  </div>
+
+  <div class="dp-form">
+    <label>
+      Profile name
+      <input type="text" id="dp-name" placeholder="my-cloudflare" maxlength="40">
+    </label>
+    <label>
+      Provider
+      <select id="dp-provider">
+        {% for provider in providers %}
+          <option value="{{ provider }}">{{ provider }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+
+  <div class="dp-form" id="dp-credentials"></div>
+
+  <div class="ap-sim-actions">
+    <button class="btn" type="button" id="dp-save">Save profile</button>
+    <span class="mon-sub" id="dp-result" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="dp-note" id="dp-plugin-note"></p>
+</div>
+
+<script src="{{ url_for('static', filename='js/dns_providers.js') }}"></script>
+{% endblock %}

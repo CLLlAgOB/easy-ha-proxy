@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Configuration history{% endblock %}
+{% block header_title %}Configuration history{% endblock %}
+
+{% block content %}
+
+
+<div class="notice-info rt-notice" >
+  A version is kept every time a configuration change is confirmed. What is compared is the managed model — sites, TCP proxies and variables — not the generated HAProxy file, so the list shows what you changed rather than every line it produced.
+</div>
+
+<div class="ch-layout">
+  <div class="card">
+    <div class="card-header">
+      <h2>Versions</h2>
+      <span class="mon-sub" id="ch-count" data-i18n-skip translate="no"></span>
+    </div>
+    <div id="ch-list" data-i18n-skip translate="no"></div>
+    <div class="ch-empty" id="ch-list-empty">No versions have been recorded yet</div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Changes</h2>
+    </div>
+
+    <div class="ch-compare">
+      <span>Compare</span>
+      <select id="ch-left" data-i18n-skip translate="no"></select>
+      <span>with</span>
+      <select id="ch-right" data-i18n-skip translate="no"></select>
+    </div>
+
+    <div id="ch-diff"></div>
+    <div class="ch-empty" id="ch-diff-empty">Select a version to see what changed</div>
+
+    <div class="ch-restore" id="ch-restore" hidden>
+      <p>
+        Restoring puts these files back and applies them through the normal guarded path: the configuration is validated, your own administrative access is checked, and the change still has to be confirmed before its deadline or it rolls itself back.
+      </p>
+      <div class="ap-sim-actions">
+        <button class="btn" type="button" id="ch-restore-start">Restore this version</button>
+        <span class="mon-sub" id="ch-restore-result" data-i18n-skip translate="no"></span>
+      </div>
+    </div>
+
+    <div class="ch-confirm" id="ch-confirm" hidden>
+      <p id="ch-confirm-text"></p>
+      <div class="ap-sim-actions">
+        <button class="btn" type="button" id="ch-confirm-yes">Confirm restore</button>
+        <button class="btn" type="button" id="ch-confirm-no">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/config_history.js') }}"></script>
+{% endblock %}

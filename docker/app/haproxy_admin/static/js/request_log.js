@@ -1,0 +1,933 @@
+/* Log Explorer: find one request again.
+ *
+ * Read-only. Everything shown here came out of the access log after the
+ * engine's own normalization, so there is nothing to redact on this side --
+ * the query string was dropped before it was stored.
+ *
+ * The search on screen is in the address: a reload, a bookmark or a link
+ * opens the same search, and Back returns to the one before.
+ */
+(function () {
+  "use strict";
+
+  const t = window.t || ((value) => String(value));
+  const core = window.EasyHaProxyRequestLog;
+  // The live page's reading of how a request ended and where its time went.
+  const live = window.EasyHaProxyLive;
+  const dateTimeFormat = window.EasyHaProxyTime.formatter({
+    dateStyle: "short",
+    timeStyle: "medium"
+  });
+
+  const PAGE_SIZE = 100;
+  const COLUMNS = 9;
+  // Why the gateway itself turned a request away, as the live page says it.
+  const REFUSALS = {
+    banned: "Banned",
+    "rate-limited": "Request rate limit",
+    geo: "GeoIP",
+    "zero-trust": "Zero trust: not signed in",
+    denied: "Address not allowed",
+    "invalid-request": "Unknown name or bad request",
+    refused: "Refused by the gateway"
+  };
+  // A filter as the page writes it: the input that holds it.
+  const INPUTS = {
+    status: "rq-status",
+    client: "rq-client",
+    host: "rq-host",
+    backend: "rq-backend",
+    path: "rq-path",
+    request_id: "rq-request-id",
+    agent: "rq-agent",
+    method: "rq-method",
+    slower: "rq-slower"
+  };
+
+  // The filters of the search on screen: "show more" carries on with these,
+  // not with whatever has been typed since.
+  let query = null;
+  // Where "show more" carries on: below the last row, or below where a
+  // search that ran out of time stopped. 0 when there is nothing further.
+  let next = 0;
+  // The newest search; an answer to an older one is dropped.
+  let sequence = 0;
+  // A period a link brought (the charts and the live page link here): kept
+  // as an extra choice in the period list until the filters are reset.
+  let chosenPeriod = null;
+  // The rows on screen by id, for their details.
+  const shownRows = new Map();
+  // The overview of the search on screen, and the newest asked for.
+  let summaryData = null;
+  let summarySequence = 0;
+  // The bar a drag across the histogram started on, -1 when none.
+  let dragFrom = -1;
+  const HIST_WIDTH = 720;
+  const HIST_HEIGHT = 80;
+  const KIND_LABELS = {
+    ok: "Answered",
+    client_errors: "Errors (4xx)",
+    server_errors: "Server errors (5xx)",
+    refused: "Refused by the gateway"
+  };
+  const KIND_COLOURS = { ok: "var(--chart-success)", client_errors: "var(--chart-warning)", server_errors: "var(--chart-server-error)", refused: "var(--chart-error)" };
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function formatTime(seconds) {
+    const numeric = Number(seconds);
+    if (!Number.isFinite(numeric) || numeric <= 0) return "—";
+    return dateTimeFormat.format(new Date(numeric * 1000));
+  }
+
+  function statusClass(status) {
+    const numeric = Number(status) || 0;
+    if (numeric >= 500) return "rq-5xx";
+    if (numeric >= 400) return "rq-4xx";
+    if (numeric >= 300) return "rq-3xx";
+    if (numeric >= 200) return "rq-2xx";
+    return "rq-4xx";
+  }
+
+  function ms(value) {
+    return `${Number(value).toLocaleString(document.documentElement.lang || undefined)} ${t("ms")}`;
+  }
+
+  /* ---------- the view: inputs <-> address ---------- */
+
+  function choosePeriod(period) {
+    const select = byId("rq-range");
+    const old = select.querySelector('option[value="chosen"]');
+    if (old) old.remove();
+    chosenPeriod = period;
+    if (!period) return;
+    const option = document.createElement("option");
+    option.value = "chosen";
+    option.setAttribute("data-i18n-skip", "");
+    option.setAttribute("translate", "no");
+    option.textContent = `${t("Chosen period")}: ${formatTime(period.since)} – ${formatTime(period.until)}`;
+    select.insertBefore(option, select.firstChild);
+    select.value = "chosen";
+  }
+
+  function readView() {
+    const view = {};
+    const choice = byId("rq-range").value;
+    if (choice === "chosen" && chosenPeriod) {
+      view.since = chosenPeriod.since;
+      view.until = chosenPeriod.until;
+    } else {
+      view.range = Number(choice || 0);
+    }
+    Object.keys(INPUTS).forEach((name) => {
+      const value = byId(INPUTS[name]).value.trim();
+      if (value) view[name] = value;
+    });
+    if (byId("rq-refused").checked) view.refused = true;
+    if (byId("rq-admin").checked) view.admin = true;
+    return view;
+  }
+
+  // A value into its input; a method the list does not name is added to it.
+  function setValue(input, value) {
+    if (input.tagName === "SELECT" && value && !Array.from(input.options).some((option) => option.value === value)) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      input.appendChild(option);
+    }
+    input.value = value;
+  }
+
+  function fillInputs(view) {
+    Object.keys(INPUTS).forEach((name) => {
+      setValue(byId(INPUTS[name]), view[name] === undefined ? "" : String(view[name]));
+    });
+    byId("rq-refused").checked = Boolean(view.refused);
+    byId("rq-admin").checked = Boolean(view.admin);
+    if (view.since && view.until) {
+      choosePeriod({ since: view.since, until: view.until });
+    } else {
+      choosePeriod(null);
+      byId("rq-range").value = String(view.range === undefined ? core.DEFAULT_RANGE : view.range);
+    }
+  }
+
+  // The search on screen into the address. A search someone asked for is a
+  // step Back returns from; the first one on a visit only tidies the address.
+  function writeAddress(view, push) {
+    try {
+      const url = new URL(window.location.href);
+      const query = new URLSearchParams(core.viewQuery(view)).toString();
+      url.search = query ? `?${query}` : "";
+      if (url.toString() === window.location.href) return;
+      if (push) window.history.pushState(null, "", url.toString());
+      else window.history.replaceState(null, "", url.toString());
+    } catch (error) {
+      /* the address stays as it was */
+    }
+  }
+
+  /* ---------- the table ---------- */
+
+  function cell(row, value, className) {
+    const td = document.createElement("td");
+    if (value instanceof Node) td.appendChild(value);
+    else td.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
+    if (className) td.className = className;
+    row.appendChild(td);
+    return td;
+  }
+
+  // A value that narrows the search to itself when clicked.
+  function filterButton(name, value, text, className) {
+    if (value === null || value === undefined || value === "") return "—";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `rq-link ${className || ""}`.trim();
+    button.dataset.filter = name;
+    button.dataset.value = String(value);
+    button.textContent = text === undefined ? String(value) : text;
+    button.title = `${button.textContent} · ${t("Search for only this")}`;
+    return button;
+  }
+
+  function statusCell(entry) {
+    const wrap = document.createElement("div");
+    const badge = filterButton("status", entry.bad_request ? "" : String(entry.status),
+      entry.bad_request ? t("bad request") : String(entry.status), `rq-status ${statusClass(entry.status)}`);
+    if (badge instanceof Node) wrap.appendChild(badge);
+    else {
+      const plain = document.createElement("span");
+      plain.className = `rq-status ${statusClass(entry.status)}`;
+      plain.textContent = entry.bad_request ? t("bad request") : String(entry.status);
+      wrap.appendChild(plain);
+    }
+    if (entry.refusal) {
+      const why = document.createElement("div");
+      why.className = "rq-sub";
+      why.textContent = t(REFUSALS[entry.refusal] || "Refused by the gateway");
+      wrap.appendChild(why);
+    }
+    return wrap;
+  }
+
+  // A value clicked in the table or the overview: the search narrowed to it.
+  function applyFilter(button) {
+    const input = byId(INPUTS[button.dataset.filter]);
+    if (!input) return;
+    setValue(input, button.dataset.value);
+    if (button.dataset.host) byId("rq-host").value = button.dataset.host;
+    run(true);
+  }
+
+  /* ---------- the overview ---------- */
+
+  function count(value) {
+    return Number(value || 0).toLocaleString(document.documentElement.lang || undefined);
+  }
+
+  function topRow(button, amount) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.appendChild(button instanceof Node ? button : document.createTextNode(String(button)));
+    const number = document.createElement("td");
+    number.className = "rq-count";
+    number.textContent = count(amount);
+    tr.appendChild(label);
+    tr.appendChild(number);
+    return tr;
+  }
+
+  function fillTop(id, rows) {
+    const body = byId(id);
+    body.textContent = "";
+    rows.forEach((row) => body.appendChild(row));
+  }
+
+  function drawHistogram(pick) {
+    const svg = byId("rq-hist");
+    const data = summaryData;
+    if (!data) {
+      svg.innerHTML = "";
+      return;
+    }
+    const parts = [];
+    const bars = (data.buckets || []).length;
+    if (pick) {
+      const step = HIST_WIDTH / Math.max(1, bars);
+      const first = Math.min(pick.from, pick.to);
+      const last = Math.max(pick.from, pick.to);
+      parts.push(`<rect class="rq-pick" x="${first * step}" y="0" width="${(last - first + 1) * step}" height="${HIST_HEIGHT}"></rect>`);
+    }
+    core.histogramRects(data.buckets, HIST_WIDTH, HIST_HEIGHT).forEach((rect) => {
+      parts.push(`<rect class="${rect.kind}" x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" ` +
+        `width="${rect.width.toFixed(1)}" height="${rect.height.toFixed(1)}"></rect>`);
+    });
+    svg.innerHTML = parts.join("");
+  }
+
+  function renderSummary(data) {
+    summaryData = data;
+    const overview = byId("rq-overview");
+    overview.hidden = !data || !(Number(data.counted) > 0);
+    if (overview.hidden) return;
+    drawHistogram(null);
+    const bars = (data.buckets || []).length;
+    const end = Math.min(Date.now() / 1000, Number(data.start) + bars * Number(data.bucket_seconds));
+    byId("rq-axis-start").textContent = formatTime(data.start);
+    byId("rq-axis-end").textContent = formatTime(end);
+    const partial = byId("rq-summary-partial");
+    partial.hidden = Boolean(data.complete);
+    partial.textContent = data.complete
+      ? ""
+      : `${t("The overview covers the newest of these requests, back to")} ${formatTime(data.reached_to)}.`;
+    fillTop("rq-top-clients", (data.clients || []).map((row) =>
+      topRow(filterButton("client", row.client), row.count)));
+    fillTop("rq-top-paths", (data.paths || []).map((row) => {
+      const button = filterButton("path", row.path, `${row.host || ""}${row.path || ""}`, "rq-mono");
+      if (button instanceof Node && row.host) button.dataset.host = row.host;
+      return topRow(button, row.count);
+    }));
+    fillTop("rq-top-statuses", (data.statuses || []).map((row) =>
+      topRow(filterButton("status", String(row.status), String(row.status), `rq-status ${statusClass(row.status)}`), row.count)));
+  }
+
+  async function summarize(params) {
+    const mine = ++summarySequence;
+    let answer;
+    try {
+      answer = await getJson("/api/security/requests/summary", params);
+    } catch (error) {
+      answer = { status: 0, payload: {} };
+    }
+    if (mine !== summarySequence) return;
+    const { status, payload } = answer;
+    renderSummary(status === 200 && payload.ok !== false ? payload : null);
+  }
+
+  function barUnder(event) {
+    const svg = byId("rq-hist");
+    const box = svg.getBoundingClientRect();
+    const bars = summaryData ? (summaryData.buckets || []).length : 0;
+    return core.barAt((event.clientX - box.left) / Math.max(1, box.width), bars);
+  }
+
+  function showTip(event, index) {
+    const tip = byId("rq-hist-tip");
+    if (index < 0 || !summaryData) {
+      tip.hidden = true;
+      return;
+    }
+    const span = core.barsSpan(index, index, summaryData, Date.now() / 1000);
+    const bar = summaryData.buckets[index] || [];
+    tip.textContent = "";
+    const head = document.createElement("div");
+    head.textContent = `${formatTime(span.since)} – ${formatTime(span.until)}`;
+    tip.appendChild(head);
+    core.KINDS.forEach((kind, part) => {
+      const line = document.createElement("div");
+      const swatch = document.createElement("i");
+      swatch.style.background = KIND_COLOURS[kind];
+      line.appendChild(swatch);
+      line.appendChild(document.createTextNode(`${t(KIND_LABELS[kind])}: ${count(bar[part])}`));
+      tip.appendChild(line);
+    });
+    const wrap = byId("rq-hist").getBoundingClientRect();
+    const x = event.clientX - wrap.left;
+    tip.hidden = false;
+    tip.style.left = `${Math.max(0, Math.min(x + 12, wrap.width - tip.offsetWidth))}px`;
+    tip.style.top = "0px";
+  }
+
+  function wireHistogram() {
+    const svg = byId("rq-hist");
+    svg.addEventListener("pointerdown", (event) => {
+      dragFrom = barUnder(event);
+      if (dragFrom >= 0) {
+        svg.setPointerCapture(event.pointerId);
+        drawHistogram({ from: dragFrom, to: dragFrom });
+      }
+    });
+    svg.addEventListener("pointermove", (event) => {
+      const index = barUnder(event);
+      showTip(event, index);
+      if (dragFrom >= 0 && index >= 0) drawHistogram({ from: dragFrom, to: index });
+    });
+    svg.addEventListener("pointerup", (event) => {
+      const from = dragFrom;
+      dragFrom = -1;
+      const to = barUnder(event);
+      if (from < 0 || !summaryData) return;
+      // One bar clicked, or a stretch dragged across: that time only.
+      choosePeriod(core.barsSpan(from, to < 0 ? from : to, summaryData, Date.now() / 1000));
+      byId("rq-hist-tip").hidden = true;
+      run(true);
+    });
+    svg.addEventListener("pointerleave", () => {
+      byId("rq-hist-tip").hidden = true;
+      if (dragFrom < 0) drawHistogram(null);
+    });
+  }
+
+  function render(rows, append) {
+    const body = byId("rq-body");
+    if (!append) {
+      body.textContent = "";
+      shownRows.clear();
+    }
+    rows.forEach((entry) => {
+      shownRows.set(String(entry.id), entry);
+      const tr = document.createElement("tr");
+      tr.className = "rq-row";
+      tr.dataset.row = String(entry.id);
+      cell(tr, formatTime(entry.ts));
+      cell(tr, statusCell(entry));
+      cell(tr, filterButton("method", entry.method));
+      cell(tr, filterButton("host", entry.host));
+      cell(tr, filterButton("path", entry.path), "rq-path");
+      cell(tr, filterButton("backend", entry.backend,
+        entry.server ? `${entry.backend} / ${entry.server}` : entry.backend));
+      const clientCell = cell(tr, filterButton("client", entry.client));
+      if (entry.authenticated_user) {
+        const user = document.createElement("div");
+        user.textContent = `${t("Authenticated user")}: ${entry.authenticated_user}`;
+        user.setAttribute("data-i18n-skip", "");
+        clientCell.appendChild(user);
+      }
+      // How soon the server answered; the whole request -- a download, a
+      // long poll -- is in the tooltip. 0 ms is an answer, not a dash.
+      const answered = Number(entry.response_ms);
+      const timing = cell(tr, Number.isFinite(answered) && answered >= 0 ? ms(answered) : "—");
+      if (Number.isFinite(Number(entry.duration_ms))) {
+        timing.title = `${t("The whole request")}: ${ms(entry.duration_ms)}`;
+      }
+      const id = cell(tr, entry.request_id ? String(entry.request_id).slice(0, 8) : "—", "rq-path");
+      if (entry.request_id) id.title = entry.request_id;
+      body.appendChild(tr);
+    });
+  }
+
+  // One request, opened: where its time went, how it ended, who asked.
+  function detailsRow(entry) {
+    const items = [];
+    const add = (label, value) => items.push([label, value]);
+    const mono = (text) => {
+      const span = document.createElement("span");
+      span.className = "rq-mono";
+      span.textContent = text || "—";
+      return span;
+    };
+    add("Request", mono(`${entry.method || ""} ${entry.path || ""}`.trim()));
+    add("Site", mono(entry.host));
+    add("Server", mono(entry.server ? `${entry.backend} / ${entry.server}` : entry.backend));
+    add("Status", document.createTextNode(
+      `${entry.bad_request ? t("bad request") : entry.status} · ${live ? live.bytes(entry.bytes_out) : entry.bytes_out}`
+    ));
+    if (entry.refusal) add("Refused because", document.createTextNode(t(REFUSALS[entry.refusal] || "Refused by the gateway")));
+    if (live && entry.term) {
+      const ending = live.termination(entry.term);
+      const said = ending.normal
+        ? t("Ended normally")
+        : [ending.cause, ending.phase].filter(Boolean).map((part) => t(part)).join(", ") || t("Unknown");
+      const span = document.createElement("span");
+      span.textContent = `${said} `;
+      span.appendChild(Object.assign(mono(entry.term), { className: "rq-mono rq-sub" }));
+      add("How it ended", span);
+    }
+    if (live && entry.times) {
+      const timers = document.createElement("div");
+      timers.className = "rq-timers";
+      live.timers(entry.times).forEach((timer) => {
+        const part = document.createElement("span");
+        part.textContent = `${t(timer.label)}: `;
+        const value = document.createElement("b");
+        value.textContent = timer.ms === null ? "—" : ms(timer.ms);
+        part.appendChild(value);
+        timers.appendChild(part);
+      });
+      add("Where the time went", timers);
+    } else {
+      add("Where the time went", document.createTextNode(
+        `${t("The whole request")}: ${ms(entry.duration_ms || 0)}`
+      ));
+    }
+    const agent = document.createElement("span");
+    agent.appendChild(mono(entry.user_agent));
+    if (entry.user_agent) {
+      agent.appendChild(document.createTextNode(" "));
+      agent.appendChild(filterButton("agent", entry.user_agent, t("Only this client")));
+    }
+    add("Client", agent);
+    add("Authenticated user", mono(entry.authenticated_user || "—"));
+    if (entry.ban_reason) add("Ban rule", mono(entry.ban_reason));
+    const identity = document.createElement("span");
+    identity.appendChild(mono(entry.request_id));
+    add("Request id", identity);
+    const now = document.createElement("a");
+    now.className = "rq-link";
+    now.href = `/monitoring/live?ip=${encodeURIComponent(entry.client)}&window=3600`;
+    now.textContent = t("What this address is doing now");
+    add("Address", (() => {
+      const span = document.createElement("span");
+      span.appendChild(mono(entry.client));
+      span.appendChild(document.createTextNode(" "));
+      span.appendChild(now);
+      return span;
+    })());
+
+    const list = document.createElement("dl");
+    list.className = "rq-details-grid";
+    items.forEach(([label, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = t(label);
+      const dd = document.createElement("dd");
+      dd.appendChild(value);
+      list.appendChild(dt);
+      list.appendChild(dd);
+    });
+    const tr = document.createElement("tr");
+    tr.className = "rq-details";
+    const td = document.createElement("td");
+    td.colSpan = COLUMNS;
+    td.appendChild(list);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function toggleDetails(tr) {
+    const following = tr.nextElementSibling;
+    if (following && following.classList.contains("rq-details")) {
+      following.remove();
+      tr.classList.remove("rq-open");
+      return;
+    }
+    const entry = shownRows.get(tr.dataset.row);
+    if (!entry) return;
+    tr.after(detailsRow(entry));
+    tr.classList.add("rq-open");
+  }
+
+  function renderFound(payload, append) {
+    const body = byId("rq-body");
+    const shown = body.querySelectorAll("tr.rq-row").length;
+    byId("rq-empty").hidden = shown > 0 || Boolean(payload.timed_out);
+    byId("rq-more").hidden = !next;
+    const found = byId("rq-found");
+    if (!append && payload.total !== undefined) {
+      const total = Number(payload.total || 0).toLocaleString(document.documentElement.lang || undefined);
+      found.textContent = payload.total_exact === false
+        ? `${t("Found, at least")}: ${total}`
+        : `${t("Found")}: ${total}`;
+    }
+    const stopped = byId("rq-stopped");
+    stopped.hidden = !payload.timed_out;
+    stopped.textContent = payload.timed_out
+      ? `${t("The search stopped after a few seconds; it reached back to")} ${formatTime(payload.searched_to)}. ` +
+        t("Show more carries on further back; a shorter period or a narrower filter answers sooner.")
+      : "";
+    const memory = byId("rq-memory");
+    memory.hidden = payload.source !== "memory";
+    memory.textContent = payload.source === "memory"
+      ? `${t("Recording is off, so these are the requests guardd keeps in memory, back to")} ` +
+        `${formatTime(payload.reaches_back_to)}.`
+      : "";
+  }
+
+  function setNotice(id, visible) {
+    byId(id).hidden = !visible;
+  }
+
+  function setBusy(busy) {
+    byId("rq-searching").hidden = !busy;
+  }
+
+  /* ---------- searching ---------- */
+
+  async function getJson(path, params) {
+    const query = new URLSearchParams(params || {});
+    const response = await fetch(`${path}?${query.toString()}`, {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin"
+    });
+    const payload = await response.json().catch(() => ({}));
+    return { status: response.status, payload };
+  }
+
+  async function search(append) {
+    if (!append || !query) {
+      query = core.searchParams(readView(), Date.now() / 1000);
+      next = 0;
+      byId("rq-export").href = `/api/security/requests/export?${new URLSearchParams(query).toString()}`;
+      summarize(query);
+    }
+    const params = new URLSearchParams(query);
+    params.set("limit", String(PAGE_SIZE));
+    if (append) {
+      params.set("before", String(next));
+      params.set("count", "0");
+    }
+    const mine = ++sequence;
+    setBusy(true);
+    let answer;
+    try {
+      answer = await getJson("/api/security/requests", params);
+    } catch (error) {
+      answer = { status: 0, payload: {} };
+    }
+    // A newer search is on its way; this answer is for filters no longer shown.
+    if (mine !== sequence) return;
+    setBusy(false);
+    const { status, payload } = answer;
+    const fromMemory = payload.source === "memory";
+    if (status === 404 || (payload.enabled === false && !fromMemory)) {
+      // The daemon answers this when the store is switched off and has no
+      // memory to answer from, which is different from being unreachable.
+      setNotice("rq-disabled", true);
+      setNotice("rq-unavailable", false);
+      render([], false);
+      renderFound({}, false);
+      byId("rq-found").textContent = "";
+      return;
+    }
+    if (status === 0 || status >= 500 || payload.unavailable) {
+      setNotice("rq-unavailable", true);
+      setNotice("rq-disabled", false);
+      return;
+    }
+    // From memory the record is still off: the switch stays in sight.
+    setNotice("rq-disabled", fromMemory);
+    setNotice("rq-unavailable", false);
+
+    next = Number(payload.next || 0);
+    render(payload.requests || [], append);
+    renderFound(payload, append);
+  }
+
+  // A search someone asked for: into the address, then asked.
+  function run(push) {
+    writeAddress(readView(), push);
+    search(false);
+    refreshStore();
+  }
+
+  async function setRecording(enabled) {
+    const note = byId("rq-switch-status");
+    note.textContent = "…";
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    const response = await fetch("/api/security/requests/enabled", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRFToken": meta ? meta.getAttribute("content") || "" : ""
+      },
+      body: JSON.stringify({ enabled: enabled })
+    });
+    const payload = await response.json().catch(function () { return {}; });
+    if (!response.ok || payload.ok === false) {
+      note.textContent = payload.error || "It was not changed";
+      return;
+    }
+    note.textContent = "";
+    await refreshStore();
+    await search(false);
+  }
+
+  async function refreshStore() {
+    const { status, payload } = await getJson("/api/security/requests/status", {});
+    const element = byId("rq-store");
+    // The panel passes the daemon's "switched off" on with a 200, so the
+    // body says it, not the status: no stop button and no "0 records" then.
+    const recording = status === 200 && payload.enabled !== false && payload.ok !== false;
+    byId("rq-disable").hidden = !recording;
+    if (!recording) {
+      element.textContent = "";
+      return;
+    }
+    const megabytes = Math.round((payload.database_bytes || 0) / 1048576);
+    const cap = Math.round((payload.max_bytes || 0) / 1048576);
+    const parts = [
+      `${payload.rows || 0} ${t("records")}`,
+      `${megabytes} / ${cap} MiB`,
+      `${payload.retention_days || 0} ${t("days")}`
+    ];
+    // How far back a search can look: usually the size cap, not the days.
+    const reach = core.historyReach(payload, Date.now() / 1000);
+    if (reach) {
+      parts.splice(1, 0, `${t("history from")} ${formatTime(reach.oldest)}`);
+      if (reach.cappedBySize) parts.push(t("the size cap decides how far back"));
+    }
+    if (payload.paused) parts.push(t("paused"));
+    element.textContent = parts.join(" · ");
+  }
+
+  /* ---------- the latest requests in memory ---------- */
+
+  // The setting as guardd last answered it, and whether the slider has been
+  // moved since: a refresh then updates what is held, not the slider.
+  let memoryState = null;
+  let memoryMoved = false;
+  const MEMORY_REFRESH_MS = 60000;
+
+  function number(value) {
+    return Number(value || 0).toLocaleString(document.documentElement.lang || undefined);
+  }
+
+  function sizeText(bytes) {
+    return number(core.megabytes(bytes));
+  }
+
+  function durationText(seconds) {
+    const parts = core.durationParts(seconds);
+    return parts.unit === "min"
+      ? t("{value} min", {value: number(parts.value)})
+      : t("{value} h", {value: number(parts.value)});
+  }
+
+  function memoryLines(memory) {
+    const buffer = memory.buffer || {};
+    const lines = [];
+    if (buffer.records) {
+      lines.push(t("In memory now: {size} MB, {count} requests, back to {since}.", {
+        size: sizeText(buffer.bytes), count: number(buffer.records), since: formatTime(buffer.oldest)
+      }));
+    } else {
+      lines.push(t("Nothing is held in memory yet."));
+    }
+    const rate = buffer.rate || {};
+    if (rate.bytes_per_hour > 0) {
+      lines.push(t("At the current traffic that is about {size} MB an hour ({count} requests).", {
+        size: sizeText(rate.bytes_per_hour), count: number(rate.records_per_hour)
+      }));
+    }
+    if (memory.applied_mib) {
+      lines.push(t("Limit now: {size} MB, and nothing older than a day.", {size: number(memory.applied_mib)}));
+    } else {
+      const usual = memory.default || {};
+      lines.push(t("Limit now: the usual {count} requests or {duration}, whichever comes first.", {
+        count: number(usual.records), duration: durationText(usual.seconds)
+      }));
+    }
+    const refill = (memory.limits || {}).refill_bytes;
+    if (refill) {
+      lines.push(t("After a restart, the last {size} MB of the access log are read back at once, and older " +
+        "requests in the background, up to the limit or a day.", {
+        size: sizeText(refill)
+      }));
+    }
+    return lines;
+  }
+
+  function renderMemoryChoice() {
+    const memory = memoryState;
+    if (!memory) return;
+    const slider = byId("rq-mem-range");
+    const chosen = Number(slider.value);
+    const reach = core.budgetReach(chosen, (memory.buffer || {}).rate, (memory.limits || {}).max_seconds);
+    const value = byId("rq-mem-value");
+    if (!reach) {
+      value.textContent = t("{size} MB", {size: number(chosen)});
+    } else if (reach.capped) {
+      value.textContent = t("{size} MB: a whole day at the current traffic, the longest kept", {
+        size: number(chosen)
+      });
+    } else {
+      value.textContent = t("{size} MB ≈ {duration} at the current traffic", {
+        size: number(chosen), duration: durationText(reach.seconds)
+      });
+    }
+    const warning = byId("rq-mem-warning");
+    const keeps = core.budgetKeeps(chosen, memory.buffer);
+    const changed = chosen !== Number(memory.applied_mib || 0);
+    const usual = memory.default || {};
+    const buffer = memory.buffer || {};
+    const span = Math.max(0, Number(buffer.newest) - Number(buffer.oldest)) || 0;
+    if (changed && keeps) {
+      warning.hidden = false;
+      warning.textContent = t("Less than is held now: the oldest requests go at once, and about the last {duration} remain.", {
+        duration: durationText(keeps.seconds)
+      });
+    } else if (memory.applied_mib && (buffer.records > usual.records || span > usual.seconds)) {
+      warning.hidden = false;
+      warning.textContent = t("Back to the usual limit drops at once whatever is beyond {count} requests or {duration}.", {
+        count: number(usual.records), duration: durationText(usual.seconds)
+      });
+    } else {
+      warning.hidden = true;
+      warning.textContent = "";
+    }
+    byId("rq-mem-apply").disabled = !changed || slider.disabled;
+  }
+
+  function renderMemory(memory, keepSlider) {
+    memoryState = memory;
+    byId("rq-mem").hidden = false;
+    const lines = byId("rq-mem-now");
+    lines.replaceChildren(...memoryLines(memory).map((line) => {
+      const div = document.createElement("div");
+      div.textContent = line;
+      return div;
+    }));
+    const range = core.budgetRange(memory);
+    const slider = byId("rq-mem-range");
+    slider.min = String(range.min);
+    slider.max = String(Math.max(range.min, range.max));
+    slider.step = String(range.step);
+    slider.disabled = !range.usable;
+    if (!keepSlider) {
+      slider.value = String(core.budgetStart(memory));
+      memoryMoved = false;
+    }
+    const limits = memory.limits || {};
+    const limit = byId("rq-mem-limit");
+    if (!range.usable) {
+      limit.textContent = t("The gateway cannot give the latest requests more memory now.");
+    } else if (limits.limited_by === "service") {
+      limit.textContent = t("At most {size} MB: the rest of the security engine's memory limit stays free.", {
+        size: number(range.max)
+      });
+    } else if (limits.limited_by === "host") {
+      limit.textContent = t("At most {size} MB now: the gateway has little memory available.", {
+        size: number(range.max)
+      });
+    } else {
+      limit.textContent = "";
+    }
+    limit.hidden = !limit.textContent;
+    byId("rq-mem-default").hidden = !memory.applied_mib;
+    renderMemoryChoice();
+  }
+
+  async function refreshMemory(keepSlider) {
+    const { status, payload } = await getJson("/api/security/requests/memory", {}).catch(
+      () => ({status: 0, payload: {}})
+    );
+    // Off (the live buffer is switched off in guardd.json) or unreachable:
+    // nothing to choose.
+    if (status !== 200 || payload.ok === false) {
+      byId("rq-mem").hidden = true;
+      return;
+    }
+    renderMemory(payload, keepSlider);
+  }
+
+  async function setMemory(budget) {
+    if (!memoryState) return;
+    const note = byId("rq-mem-status");
+    note.textContent = "…";
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    let response;
+    let payload = {};
+    try {
+      response = await fetch("/api/security/requests/memory", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "X-CSRFToken": meta ? meta.getAttribute("content") || "" : ""
+        },
+        body: JSON.stringify({budget_mib: budget, revision: Number(memoryState.revision || 0)})
+      });
+      payload = await response.json().catch(() => ({}));
+    } catch (error) {
+      note.textContent = t("It was not changed");
+      return;
+    }
+    if (response.status === 409 && payload.limits) {
+      // Someone else changed it: what is in force now, and the slider with it.
+      renderMemory(payload, false);
+      note.textContent = t("Another administrator changed this in the meantime; the setting in force is shown.");
+      return;
+    }
+    if (response.status === 403) {
+      note.textContent = t("Only a superadmin can change this.");
+      return;
+    }
+    if (!response.ok || payload.ok === false) {
+      note.textContent = payload.error || t("It was not changed");
+      return;
+    }
+    renderMemory(payload, false);
+    note.textContent = payload.dropped
+      ? t("Applied: {count} older requests dropped.", {count: number(payload.dropped)})
+      : t("Applied.");
+  }
+
+  function wireMemory() {
+    const slider = byId("rq-mem-range");
+    slider.addEventListener("input", () => {
+      memoryMoved = true;
+      byId("rq-mem-status").textContent = "";
+      renderMemoryChoice();
+    });
+    byId("rq-mem-apply").addEventListener("click", () => setMemory(Number(slider.value)));
+    byId("rq-mem-default").addEventListener("click", () => setMemory(0));
+    refreshMemory(false);
+    window.setInterval(() => {
+      if (!document.hidden) refreshMemory(memoryMoved);
+    }, MEMORY_REFRESH_MS);
+  }
+
+  /* ---------- wiring ---------- */
+
+  function wire() {
+    byId("rq-search").addEventListener("click", () => run(true));
+    byId("rq-reset").addEventListener("click", () => {
+      fillInputs({});
+      run(true);
+    });
+    byId("rq-more").addEventListener("click", () => search(true));
+    byId("rq-enable").addEventListener("click", () => setRecording(true));
+    byId("rq-disable").addEventListener("click", () => setRecording(false));
+    ["rq-range", "rq-method", "rq-refused", "rq-admin"].forEach((id) => {
+      byId(id).addEventListener("change", () => {
+        if (id === "rq-range" && byId("rq-range").value !== "chosen") choosePeriod(null);
+        run(true);
+      });
+    });
+    document.querySelectorAll(".rq-filters input").forEach((input) => {
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") run(true);
+      });
+    });
+    byId("rq-overview").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-filter]");
+      if (button) applyFilter(button);
+    });
+    wireHistogram();
+    byId("rq-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-filter]");
+      if (button) {
+        applyFilter(button);
+        return;
+      }
+      // A row opens its details; a link inside it does what it says.
+      const row = event.target.closest("tr.rq-row");
+      if (row && !event.target.closest("a, button")) toggleDetails(row);
+    });
+    // Back and Forward: the search the address now names.
+    window.addEventListener("popstate", () => {
+      fillInputs(core.viewFromQuery(window.location.search));
+      search(false);
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const methods = byId("rq-method");
+    core.METHODS.forEach((method) => {
+      const option = document.createElement("option");
+      option.value = method;
+      option.textContent = method;
+      methods.appendChild(option);
+    });
+    wire();
+    wireMemory();
+    fillInputs(core.viewFromQuery(window.location.search));
+    run(false);
+  });
+})();

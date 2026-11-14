@@ -1,0 +1,760 @@
+{% extends "base.html" %}
+
+{% block title %}HAProxy – certificates{% endblock %}
+{% block header_title %}HAProxy certificates and certificate authorities{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="border-error card" >
+  <div class="card-header">
+    <h2>Error</h2>
+  </div>
+  <div class="pre-wrap text-sm mono"
+       data-i18n-skip translate="no">
+    {{ error }}
+  </div>
+</div>
+{% endif %}
+
+{% if message %}
+<div class="border-success card" >
+  <div class="card-header">
+    <h2>Operation completed</h2>
+  </div>
+  <div class="pre-wrap text-sm mono"
+       data-i18n-skip translate="no">
+    {{ message }}
+  </div>
+</div>
+{% endif %}
+
+{# Let's Encrypt account email #}
+<section class="card" aria-labelledby="acme-email-title">
+  <div class="card-header">
+    <div>
+      <h2 id="acme-email-title">Let's Encrypt account email</h2>
+      <div class="table-meta">Expiry warnings from Let's Encrypt are sent to this address. The same setting is available on the Mail settings page.</div>
+    </div>
+  </div>
+  <form id="acme-email-form" autocomplete="off">
+    <div class="form-group">
+      <label class="form-label" for="acme-email-input">Account email</label>
+      <input class="form-input" id="acme-email-input" name="acme_email" type="email"
+             maxlength="254" autocomplete="off" placeholder="admin@example.com" required data-i18n-skip translate="no">
+      <p class="vars-field-help">
+        Applies to future certificate registrations and renewals after the next certificate operation or stack update.
+      </p>
+    </div>
+    <div class="vars-form-actions">
+      <button type="submit" class="btn" id="acme-email-save">Save email</button>
+      <span id="acme-email-result" class="result-message" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+</section>
+
+{# Certificate authorities #}
+<div class="card">
+  <div class="card-header">
+    <h2>Certificate authorities</h2>
+    <div class="table-meta">
+      Manage the local root CA and trusted external root/intermediate certificates.
+      CA private keys cannot be imported or downloaded here.
+    </div>
+  </div>
+  <div  class="u-p-12px-16px">
+    <h3>Internal certificate authority</h3>
+    {% if internal_ca %}
+    <div class="table-container u-mt-2">
+    <table class="table mono cert-table">
+      <thead><tr><th>Name</th><th>Valid until</th><th>SHA-256</th><th  class="text-right">Actions</th></tr></thead>
+      <tbody><tr>
+        <td>{{ internal_ca.name }}</td>
+        <td>{{ internal_ca.not_after }}</td>
+        <td><code class="cert-digest" title="{{ internal_ca.sha256 }}">{{ internal_ca.sha256[:16] }}…</code></td>
+        <td  class="text-right">
+          <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id='internal') }}">
+            Download root certificate
+          </a>
+        </td>
+      </tr></tbody>
+    </table>
+    </div>
+    <div class="u-mt-1 table-meta" >
+      Install this public root certificate in client trust stores. The root private key remains on the server.
+    </div>
+
+    <h4  class="u-mt-4">Issue or renew an internal certificate</h4>
+    <form method="post"  class="u-mt-2 u-maxw-min-720px-100">
+      <input type="hidden" name="action" value="issue_internal_cert">
+      <label class="form-label" for="internal_domain">Primary domain</label>
+      <input class="form-input" id="internal_domain" name="domain" type="text"
+        placeholder="app.example.com" required data-i18n-skip translate="no">
+      <label class="u-mt-2 form-label" for="internal_alt_names" >
+        Alternative domains (comma or space separated)
+      </label>
+      <input class="form-input" id="internal_alt_names" name="alt_names" type="text"
+        placeholder="www.example.com api.example.com" data-i18n-skip translate="no">
+      <div  class="u-mt-2">
+        <button class="btn" type="submit">Issue internal certificate</button>
+      </div>
+      <div class="u-mt-1 table-meta" >
+        The certificate is installed in HAProxy immediately. Select Internal CA for the site so future renewals use the same source.
+      </div>
+    </form>
+
+    <details  class="u-mt-4">
+      <summary>Root CA lifecycle</summary>
+      <div  class="u-mt-2 u-maxw-min-760px-100">
+        <p class="text-danger table-meta" >
+          Rotating the root creates a new root key and reissues every active HAProxy certificate signed by the old root.
+          Clients will stop trusting those sites until the new root certificate is installed in their trust stores.
+          Download a certificate backup before continuing.
+        </p>
+        <form method="post"
+          data-confirm="Rotate the internal root CA and reissue all certificates signed by it?" class="u-mt-2">
+          <input type="hidden" name="action" value="rotate_internal_ca">
+          <label class="form-label" for="rotate_confirmation">Type ROTATE to confirm</label>
+          <input class="u-maxw-min-220px-100 form-input" id="rotate_confirmation" name="confirmation" type="text"
+            autocomplete="off" pattern="ROTATE" required >
+          <button class="u-mt-2 btn btn-danger" type="submit" >
+            Rotate root CA and reissue certificates
+          </button>
+        </form>
+        <form method="post"
+          data-confirm="Delete the internal root CA?" class="u-mt-4">
+          <input type="hidden" name="action" value="delete_internal_ca">
+          <label class="form-label" for="delete_ca_confirmation">Type DELETE to confirm</label>
+          <input class="u-maxw-min-220px-100 form-input" id="delete_ca_confirmation" name="confirmation" type="text"
+            autocomplete="off" pattern="DELETE" required >
+          <button class="u-mt-2 btn btn-danger" type="submit" >
+            Delete unused internal CA
+          </button>
+          <div class="u-mt-1 table-meta" >
+            Deletion is refused while any active HAProxy certificate is signed by this root.
+          </div>
+        </form>
+      </div>
+    </details>
+    {% else %}
+    <form method="post"  class="u-mt-2">
+      <input type="hidden" name="action" value="create_internal_ca">
+      <button class="btn" type="submit">Create internal certificate authority</button>
+    </form>
+    {% endif %}
+
+    <h3  class="u-mt-6">Import a certificate or an authority</h3>
+    <div class="u-maxw-min-820px-100 table-meta" >
+      One field for all of it. Choose a PEM, a DER file, or a PKCS#12 bundle
+      (.p12/.pfx) and it is read to find out what is inside:
+      certificates that are authorities go to the trust store below, and an end-entity
+      certificate that arrived with its private key becomes a server certificate.
+      Nothing is installed until you have seen what was found.
+    </div>
+    <div  class="u-mt-2 u-maxw-min-820px-100">
+      <div class="file-picker">
+        <input id="material-file" type="file" class="file-input-hidden"
+          accept=".pem,.crt,.cer,.der,.p12,.pfx,.key">
+        <button type="button" class="btn btn-icon" id="material-choose">Choose file</button>
+        {# The chosen file name is the operating system's, not ours. Left translatable, the substitution pass rewrites any catalogue word inside it -- site-backup.pem is shown as site-бэкап.pem. The fallback below is translated by the script instead. #}
+        <span class="file-name" id="material-name"
+              data-i18n-skip translate="no">No file selected</span>
+      </div>
+
+      <label class="u-mt-2 form-label" for="material-password" >
+        Password (PKCS#12 or an encrypted key only)
+      </label>
+      <input class="u-maxw-min-420px-100 form-input" id="material-password" type="password"
+        autocomplete="new-password" >
+
+      <label class="u-mt-2 form-label" for="material-ca-name" >
+        Name for the authority (optional)
+      </label>
+      <input class="u-maxw-min-420px-100 form-input" id="material-ca-name" type="text"
+        placeholder="taken from the certificate if left empty" >
+
+      <label class="u-mt-2 form-label" for="material-domain" >
+        Domain for the server certificate (optional)
+      </label>
+      <input class="u-maxw-min-420px-100 form-input" id="material-domain" type="text"
+        placeholder="taken from the certificate if left empty" >
+
+      <div  class="u-mt-2">
+        <button type="button" class="btn" id="material-inspect">Examine the file</button>
+        <button type="button" class="btn" id="material-import" hidden>Install</button>
+      </div>
+      <div id="material-report" class="u-mt-2 table-meta"
+        data-i18n-skip></div>
+    </div>
+
+    <h3  class="u-mt-5">External certificate authorities</h3>
+    {% if external_cas %}
+    <div class="table-container u-mt-2">
+    <table class="table mono cert-table">
+      <thead><tr><th>Name</th><th>Certificates</th><th>Valid until</th><th  class="text-right">Actions</th></tr></thead>
+      <tbody>
+      {% for ca in external_cas %}
+      <tr>
+        <td>{{ ca.name }}<div class="table-meta"><code>{{ ca.id }}</code></div></td>
+        <td>{{ ca.certificates }}</td>
+        <td>{{ ca.not_after }}</td>
+        <td  class="text-right nowrap">
+          <a class="btn btn-small" href="{{ url_for('routes.haproxy_ca_download', ca_id=ca.id) }}">Download</a>
+          <form method="post"
+            data-confirm="Delete this external certificate authority?" class="inline">
+            <input type="hidden" name="action" value="delete_external_ca">
+            <input type="hidden" name="ca_id" value="{{ ca.id }}">
+            <button class="btn btn-small btn-danger" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="table-meta">No external certificate authorities have been imported.</div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data"  class="u-mt-3">
+      <input type="hidden" name="action" value="import_external_ca">
+      <label class="form-label" for="ca_name">Short name</label>
+      <input class="u-maxw-min-420px-100 form-input" id="ca_name" name="ca_name" type="text"
+        placeholder="company-pki" >
+      <label class="u-mt-2 form-label" for="ca_file" >Root/intermediate CA bundle (PEM)</label>
+      <input id="ca_file" name="ca_file" type="file" accept=".pem,.crt,.cer" required>
+      <div  class="u-mt-2"><button class="btn" type="submit">Import certificate authority</button></div>
+      <div class="u-mt-1 table-meta" >
+        Import public CA certificates here, then select this authority for a site and upload its server certificate, chain, and private key.
+      </div>
+    </form>
+
+    <h3  class="u-mt-6">Client certificate authentication</h3>
+    <div class="u-maxw-min-820px-100 table-meta" >
+      An authority listed above only vouches for servers. Tick it here to also let it
+      vouch for visitors, then choose it on a site. Nothing becomes a client authority
+      on its own: the authority that signs this gateway's own certificates has no say
+      in who may connect to it.
+    </div>
+    {% if internal_ca or external_cas %}
+    <form method="post"  class="u-mt-2">
+      <input type="hidden" name="action" value="set_client_auth_cas">
+      <div class="table-container u-maxw-min-820px-100">
+      <table class="table mono cert-table">
+        <thead><tr><th  class="u-w-60px">Trust</th><th>Authority</th><th>Issuer names matched</th></tr></thead>
+        <tbody>
+        {% for ca in ([internal_ca] if internal_ca else []) + external_cas %}
+        <tr>
+          <td>
+            <input type="checkbox" name="client_auth_ca" value="{{ ca.id }}"
+              id="client_auth_{{ ca.id }}" {% if ca.client_auth %}checked{% endif %}
+              {% if not ca.subject_cns %}disabled{% endif %}>
+          </td>
+          <td><label for="client_auth_{{ ca.id }}">{{ ca.name }}</label>
+            <div class="table-meta"><code>{{ ca.id }}</code></div></td>
+          <td>
+            {% if ca.subject_cns %}
+              {% for cn in ca.subject_cns %}<code>{{ cn }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}
+              <span class="table-meta">No Common Name — this authority cannot be told apart from another</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <button class="u-mt-2 btn" type="submit" >Save client authentication</button>
+      <div class="u-mt-1 table-meta" >
+        Turning an authority off here denies every request that relied on it, immediately.
+        Sites keep their setting, so turning it back on restores them.
+      </div>
+    </form>
+    {% else %}
+    <div class="u-mt-2 table-meta" >Import or create a certificate authority first.</div>
+    {% endif %}
+
+    <h4  class="u-mt-5">Refused client certificates</h4>
+    <form method="post"  class="u-mt-2 u-maxw-min-820px-100">
+      <input type="hidden" name="action" value="set_revoked_client_certs">
+      <label class="form-label" for="fingerprints">SHA-256 fingerprints, one per line</label>
+      <textarea class="form-input mono" id="fingerprints" name="fingerprints" rows="4"
+        spellcheck="false" translate="no"
+        placeholder="3b1f…  (openssl x509 -in client.crt -noout -fingerprint -sha256)"
+      >{{ revoked_client_certs | join('\n') }}</textarea>
+      <div  class="u-mt-2"><button class="btn" type="submit">Save refused certificates</button></div>
+      <div class="u-mt-1 table-meta" >
+        Refuses one certificate without discarding the authority that signed it.
+        Colons and upper case are accepted. Saving reloads HAProxy, because that is
+        when the list takes effect.
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ─────────────────── HAProxy certificates ─────────────────── #}
+<div class="u-mt-5 card" >
+  <div class="card-header">
+    <h2>HAProxy certificates ({{ haproxy_certs|length }})</h2>
+    <div class="table-meta">
+      Source: directory <code>haproxy_certs_dir</code>
+      (usually <code>/etc/haproxy/certs</code>).
+    </div>
+  </div>
+
+  <div  class="u-p-12px-16px">
+    {% if haproxy_certs %}
+    <div class="table-container">
+    <table class="table-fixed w-full table mono cert-table">
+      <colgroup>
+        <col  class="u-w-26">
+        <col  class="u-w-34">
+        <col  class="u-w-18">
+        <col  class="u-w-12">
+        <col  class="u-w-10">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Domains</th>
+          <th>File</th>
+          <th>Expiring</th>
+          <th>Status</th>
+          <th  class="text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in haproxy_certs %}
+        {% set domains = item.domains or [] %}
+        {% set days = item.days_left %}
+        <tr>
+          {# Domains #}
+          <td>
+            {% if domains %}
+            <div>{{ domains[0] }}</div>
+            {% if domains|length > 1 %}
+            <div class="table-meta">
+              {{ domains[1:] | join(", ") }}
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">no DNS names</span>
+            {% endif %}
+          </td>
+
+          {# Path to the file #}
+          <td>
+            <div class="break-anywhere mono" >
+              <code>{{ item.path }}</code>
+            </div>
+          </td>
+
+          {# Validity #}
+          <td>
+            {% if item.not_after %}
+            <div>{{ item.not_after }}</div>
+            {% if days is not none %}
+            <div  class="u-mt-1">
+              <span  class="u-p-2px-10px u-border-radius-8px text-xs u-background-var-surface-1">
+                {% if days < 0 %} expired {{ -days }} days ago {% else %} {{ days }} days remaining {% endif %} </span>
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">undefined</span>
+            {% endif %}
+          </td>
+
+          {# Status (without repeating the date) #}
+          <td>
+            {% if item.state %}
+            <div>{{ item.state }}</div>
+            {% elif item.short %}
+            <div>{{ item.short }}</div>
+            {% else %}
+            <div>?</div>
+            {% endif %}
+          </td>
+
+          {# Actions #}
+          <td  class="text-right nowrap">
+            <form method="post"  class="inline cert-delete-haproxy"
+              data-domain="{{ domains[0] if domains else '' }}">
+              <input type="hidden" name="action" value="delete_haproxy">
+              <input type="hidden" name="path" value="{{ item.path }}">
+              <button type="submit" class="btn btn-small btn-danger">
+                Delete
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="table-meta">
+      No certificates were found in the HAProxy directory.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ─────────────────── Let's Encrypt certificates ─────────────────── #}
+<div class="u-mt-5 card" >
+  <div class="card-header">
+    <h2>Standby certificates</h2>
+    <div class="table-meta">
+      A second certificate for a name, from another authority, kept ready in
+      case this one cannot be renewed.
+    </div>
+  </div>
+
+  <div  class="u-p-12px-16px">
+    <p class="u-mt-0 mon-sub" >
+      HAProxy resolves a name to exactly one certificate and never looks at
+      the dates: given an expired one and a good one in the same directory it
+      serves the expired one, and the site is down while the replacement sits
+      unused. So a standby is kept out of that directory and put into service
+      deliberately, from here. Nothing switches on its own — the certificate
+      that takes over is usually signed by an authority most visitors do not
+      carry, and that trade is yours to make, not a timer's.
+    </p>
+    <p class="mon-sub">
+      While a name is on a standby it is held there. Renewal, a configuration
+      apply and the orphan sweep all leave it alone, so the switch is not
+      undone behind your back. Hand it back when Let's Encrypt is working
+      again.
+    </p>
+
+    {% if standby_error %}
+    <div class="text-danger table-meta" >{{ standby_error }}</div>
+    {% endif %}
+
+    {% if standby_domains %}
+    <div class="table-container">
+    <table class="table-fixed w-full table mono cert-table">
+      <colgroup>
+        <col  class="u-w-26">
+        <col  class="u-w-22">
+        <col  class="u-w-16">
+        <col  class="u-w-16">
+        <col  class="u-w-20">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Issued by</th>
+          <th>Until</th>
+          <th>Role</th>
+          <th  class="text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in standby_domains %}
+        <tr>
+          <td data-i18n-skip translate="no"><b>{{ entry.domain }}</b></td>
+          <td data-i18n-skip translate="no">
+            {{ entry.active.issuer or entry.active.error or "—" }}
+          </td>
+          <td data-i18n-skip translate="no">
+            {{ entry.active.not_after or "—" }}
+            {% if entry.active.days_left is defined and entry.active.days_left <= 14 %}
+              <span class="badge danger" data-i18n-skip translate="no">
+                {{ entry.active.days_left }}
+              </span>
+            {% endif %}
+          </td>
+          <td>
+            {% if entry.pinned %}
+              <span class="badge warn">Held</span>
+            {% else %}
+              In service
+            {% endif %}
+          </td>
+          <td  class="text-right">
+            {% if entry.pinned %}
+            <form method="post"
+                  onsubmit="return confirm('{{ entry.domain }} → Let's Encrypt?');" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="release_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <button type="submit" class="btn-small primary">
+                Hand back to Let's Encrypt
+              </button>
+            </form>
+            {% elif entry.can_be_put_away %}
+            <form method="post"
+                  onsubmit="return confirm('{{ entry.domain }}?');" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="adopt_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="imported">
+              <button type="submit" class="btn-small">Keep as a standby</button>
+            </form>
+            {% elif not entry.has_usable_standby %}
+              <span class="mon-sub">No standby</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% for spare in entry.standbys %}
+        <tr  class="text-muted">
+          <td  data-i18n-skip translate="no" class="u-pl-6">
+            ↳ {{ spare.slot }}
+          </td>
+          <td data-i18n-skip translate="no">
+            {{ spare.issuer or spare.error or "—" }}
+          </td>
+          <td data-i18n-skip translate="no">{{ spare.not_after or "—" }}</td>
+          <td>
+            {% if entry.pinned == spare.slot %}
+              <span class="badge warn">In service</span>
+            {% elif spare.usable %}Standby{% else %}Unusable{% endif %}
+          </td>
+          <td  class="text-right nowrap">
+            {% if spare.usable and entry.pinned != spare.slot %}
+            <form method="post"
+                  onsubmit="return confirm('{{ entry.domain }} → {{ spare.slot }}?');" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="activate_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="{{ spare.slot }}">
+              <button type="submit" class="btn-small primary">Put into service</button>
+            </form>
+            {% endif %}
+            {% if entry.pinned != spare.slot %}
+            <form method="post"
+                  onsubmit="return confirm('{{ spare.slot }}?');" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="delete_standby">
+              <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
+              <input type="hidden" name="standby_slot" value="{{ spare.slot }}">
+              <button type="submit" class="btn-small">Remove</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="table-meta">No certificates are deployed yet.</div>
+    {% endif %}
+
+    <h3  class="u-mt-5">Keep a standby</h3>
+    <form method="post" enctype="multipart/form-data"  class="u-maxw-min-640px-100">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="store_standby">
+      <div class="form-row">
+        <label for="standby-domain">Name it is for</label>
+        <select id="standby-domain" name="standby_domain" required>
+          <option value="*">Every name this certificate covers</option>
+          {% for entry in standby_domains %}
+          <option value="{{ entry.domain }}" data-i18n-skip translate="no">
+            {{ entry.domain }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="standby-slot">Call it</label>
+        <input id="standby-slot" name="standby_slot" required
+               placeholder="other-ca" maxlength="64">
+      </div>
+      <div class="form-row">
+        <label for="standby-cert">Certificate file</label>
+        <input id="standby-cert" name="standby_cert" type="file" required
+               accept=".pem,.crt,.cer,.key,.txt">
+      </div>
+      <div class="form-row">
+        <label for="standby-key">Key file, if it is separate</label>
+        <input id="standby-key" name="standby_key" type="file"
+               accept=".pem,.key,.txt">
+      </div>
+      <div class="table-meta">
+        One file holding the key and the chain together is the usual shape
+        and is all that is needed; the second field is only for material that
+        came as two files. Order does not matter and a file given twice is
+        not counted twice. Checked before it is accepted: the key has to
+        match the certificate and the certificate has to cover the name — a
+        standby discovered to be broken at the moment it is needed is worse
+        than none. A wildcard filed against every name it covers is stored
+        once per name, so each can be put into service on its own.
+      </div>
+      <button type="submit" class="u-mt-2 btn primary" >
+        Keep it
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="u-mt-5 card" >
+  <div class="card-header">
+    <h2>Let's Encrypt certificates ({{ le_certs|length }})</h2>
+    <div class="table-meta">
+      Source: <code>/etc/letsencrypt/live/*/fullchain.pem</code>.<br>
+      Deletion is performed through <code>certbot delete --cert-name &lt;lineage&gt;</code>.
+    </div>
+  </div>
+
+  <div  class="u-p-12px-16px">
+    {% if le_certs %}
+    <div class="table-container">
+    <table class="table-fixed w-full table mono cert-table">
+      <colgroup>
+        <col  class="u-w-26">
+        <col  class="u-w-34">
+        <col  class="u-w-18">
+        <col  class="u-w-12">
+        <col  class="u-w-10">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Domains</th>
+          <th>File</th>
+          <th>Expiring</th>
+          <th>Status</th>
+          <th  class="text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in le_certs %}
+        {% set domains = item.domains or [] %}
+        {% set days = item.days_left %}
+        <tr>
+          {# Domains #}
+          <td>
+            {% if domains %}
+            <div>{{ domains[0] }}</div>
+            {% if domains|length > 1 %}
+            <div class="table-meta">
+              {{ domains[1:] | join(", ") }}
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">no DNS names</span>
+            {% endif %}
+          </td>
+
+          {# Path to fullchain + lineage #}
+          <td>
+            <div class="break-anywhere mono" >
+              <code>{{ item.fullchain_path }}</code>
+            </div>
+            <div class="table-meta">
+              lineage: <code>{{ item.lineage }}</code>
+            </div>
+          </td>
+
+          {# Validity #}
+          <td>
+            {% if item.not_after %}
+            <div>{{ item.not_after }}</div>
+            {% if days is not none %}
+            <div  class="u-mt-1">
+              <span  class="u-p-2px-10px u-border-radius-8px text-xs u-background-var-surface-1">
+                {% if days < 0 %} expired {{ -days }} days ago {% else %} {{ days }} days remaining {% endif %} </span>
+            </div>
+            {% endif %}
+            {% else %}
+            <span class="table-meta">undefined</span>
+            {% endif %}
+          </td>
+
+          {# Status (short, without the date) #}
+          <td>
+            {% if item.state %}
+            <div>{{ item.state }}</div>
+            {% elif item.short %}
+            <div>{{ item.short }}</div>
+            {% else %}
+            <div>?</div>
+            {% endif %}
+          </td>
+
+          {# Actions #}
+          <td  class="text-right nowrap">
+            <form method="post"  class="inline cert-delete-le" data-lineage="{{ item.lineage }}">
+              <input type="hidden" name="action" value="delete_le">
+              <input type="hidden" name="lineage" value="{{ item.lineage }}">
+              <button type="submit" class="btn btn-small btn-danger">
+                Delete LE
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="table-meta">
+      No Let's Encrypt certificates were found.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ─────────────────── Backup / restore ─────────────────── #}
+<div class="u-mt-5 card" >
+  <div class="card-header">
+    <h2>Certificate backup / restore</h2>
+  </div>
+  <div  class="u-p-12px-16px">
+    <p class="table-meta">
+      The backup contains directories
+      <code>{{ haproxy_certs_dir|default('/etc/haproxy/certs') }}</code>
+      and
+      <code>{{ letsencrypt_root_dir|default('/etc/letsencrypt') }}</code>, including certificate authority data.
+    </p>
+    <p class="text-danger table-meta" >
+      This ZIP contains private server keys and the internal CA private key. Store it encrypted and restrict access.
+    </p>
+
+    <p  class="u-mt-2">
+      <a class="btn" href="{{ url_for('routes.haproxy_certs_backup') }}">
+        Download backup (.zip)
+      </a>
+    </p>
+
+    <form id="certs-restore-form" action="{{ url_for('routes.haproxy_certs_restore') }}" method="post"
+      enctype="multipart/form-data"
+      data-confirm="WARNING: existing certificates will be overwritten. Continue?" class="u-mt-3">
+
+      <label class="form-label" for="backup_file">
+        Restore from backup (.zip)
+      </label>
+
+      <div class="file-picker">
+        <input id="backup_file" name="archive" type="file" class="file-input-hidden" accept=".zip">
+
+        <button type="button" class="btn btn-icon" id="backup_choose_btn">
+          Choose file
+        </button>
+
+        <span class="file-name" id="backup_file_name"
+              data-i18n-skip translate="no">
+          No file selected
+        </span>
+      </div>
+
+      <div  class="u-mt-2">
+        <button type="submit" class="btn btn-danger" id="backup_restore_btn" disabled>
+          Restore from backup
+        </button>
+      </div>
+
+      <div class="u-mt-1 table-meta" >
+        Warning: files in certificate directories will be overwritten.
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/haproxy_certs.js') }}"></script>
+<script src="{{ url_for('static', filename='js/acme_email.js') }}"></script>
+{% endblock %}

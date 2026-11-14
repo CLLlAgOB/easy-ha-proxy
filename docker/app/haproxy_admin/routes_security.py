@@ -1,0 +1,603 @@
+# routes_security.py
+#
+# The Adaptive protection section and the detection rules page. Only two
+# routes change state: switching the mode and the operator's rules; both need
+# superadmin and CSRF, like any other form in the application.
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import logging
+
+from flask import Response, g, jsonify, render_template, request, stream_with_context
+
+from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
+from .guardd_client import GuarddUnavailable
+from .routes import bp
+from . import services_security as security
+
+LOG = logging.getLogger("haproxy-admin")
+
+
+@bp.get("/security/adaptive")
+def adaptive_protection_page():
+    return render_template(
+        "adaptive_protection.html", event_types=security.EVENT_TYPES
+    )
+
+
+@bp.get("/security/detection-rules")
+def detection_rules_page():
+    """The rules, on their own page.
+
+    They were a card on the shadow-review page, which put a list of eighty
+    signatures between the operator and the numbers they came to read.
+    """
+
+    return render_template("detection_rules.html")
+
+
+@bp.get("/api/security/detection-rules")
+def api_detection_rules():
+    try:
+        return jsonify(security.detection_rules())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/traps")
+def api_traps():
+    """Trap names and the names that get traffic without serving a site."""
+    try:
+        return jsonify(security.traps())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/detection-rules/context")
+def api_detection_context():
+    try:
+        return jsonify(security.detection_context())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules/context")
+def api_set_detection_context():
+    if not getattr(g, "is_superadmin", False):
+        record_request("adaptive.rules", object_type="detection_context", result=RESULT_DENIED,
+                       detail="superadmin required")
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    if request.content_length and request.content_length > 131072:
+        return jsonify({"ok": False, "error": "settings too large"}), 413
+    try:
+        before = security.detection_context()["config"]
+        result = security.set_detection_context(request.get_json(silent=True))
+        record_request("adaptive.rules", object_type="detection_context", before=before,
+                       after=result["config"], result=RESULT_SUCCESS, detail="contextual detection settings")
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules/preview")
+def api_detection_preview():
+    # Do not audit this request, even on failure: its query can contain a
+    # password-reset token. CSRF is enforced by the application as usual.
+    if not getattr(g, "is_superadmin", False):
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    if request.content_length and request.content_length > 8192:
+        return jsonify({"ok": False, "error": "request too large"}), 413
+    try:
+        return jsonify(security.detection_preview(request.get_json(silent=True)))
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid request fields"}), 400
+    except GuarddUnavailable:
+        return jsonify({"ok": False, "unavailable": True, "error": "detection engine unavailable"}), 503
+
+
+@bp.post("/api/security/traps")
+def api_set_traps():
+    """Replace the trap names. A request for one bans the address that made it."""
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        before = security.traps().get("trap_hosts") or []
+        result = security.set_traps(payload)
+    except ValueError as exc:
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_FAILURE,
+            detail=str(exc)[:300],
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "adaptive.rules",
+        object_type="detection_rules",
+        before={"trap_hosts": before},
+        after={"trap_hosts": result.get("trap_hosts")},
+        detail="trap names changed",
+    )
+    return jsonify(result)
+
+
+@bp.get("/api/security/detection-rules/candidates")
+def api_detection_rule_candidates():
+    """Signatures the traffic suggests: refused to many, matched by nothing."""
+    try:
+        return jsonify(security.signature_candidates())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/detection-rules/candidates/dismiss")
+def api_dismiss_detection_rule_candidate():
+    """Hide a suggestion, or bring it back. Changes no rule, but is recorded."""
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.dismiss_candidate(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "adaptive.rules",
+        object_type="detection_rules",
+        object_id=str(payload.get("path") or "")[:200],
+        detail=("suggestion restored" if payload.get("restore") else "suggestion hidden"),
+    )
+    return jsonify(result)
+
+
+@bp.post("/api/security/detection-rules")
+def api_set_detection_rules():
+    """Store the operator's own rules.
+
+    Changing what the engine bans by is exactly as consequential as changing
+    the mode, so it is guarded the same way.
+    """
+
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+
+    try:
+        before = security.detection_rules()
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+    try:
+        result = security.set_detection_rules(payload)
+    except ValueError as exc:
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request(
+            "adaptive.rules",
+            object_type="detection_rules",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+
+    # A rule added or suppressed here changes who gets banned, so the record
+    # carries both sides rather than a count.
+    record_request(
+        "adaptive.rules",
+        object_type="detection_rules",
+        before={"added": before.get("added"), "disabled": before.get("disabled")},
+        after={"added": result.get("added"), "disabled": result.get("disabled")},
+        detail=(
+            f"{len(result.get('added') or {})} added, "
+            f"{len(result.get('disabled') or [])} suppressed"
+        ),
+    )
+    LOG.warning(
+        "Detection rules changed by %s", getattr(g, "remote_user", "unknown")
+    )
+    return jsonify(result)
+
+
+@bp.get("/api/security/adaptive/shadow")
+def api_adaptive_shadow():
+    try:
+        return jsonify(security.shadow(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/adaptive/rate-warnings")
+def api_adaptive_rate_warnings():
+    try:
+        return jsonify(security.rate_warnings(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/adaptive/ip")
+def api_adaptive_ip():
+    address = security.valid_ip(request.args.get("ip"))
+    if not address:
+        return jsonify({"ok": False, "error": "invalid ip"}), 400
+    try:
+        return jsonify(security.address(address, request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/adaptive/quality")
+def api_adaptive_quality():
+    try:
+        return jsonify(security.quality(request.args.get("days", 7)))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/adaptive/health")
+def api_adaptive_health():
+    try:
+        return jsonify(security.health())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/adaptive/durations")
+def api_adaptive_ban_durations():
+    """Set how long an adaptive ban lasts, by strike.
+
+    Mutating and it decides how long real visitors stay locked out, so it is
+    superadmin-only, CSRF protected and recorded, exactly like the mode.
+    """
+
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get("durations")
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.ban_durations",
+            object_type="adaptive_protection",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_ban_durations(requested)
+    except ValueError as exc:
+        record_request(
+            "adaptive.ban_durations",
+            object_type="adaptive_protection",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request(
+            "adaptive.ban_durations",
+            object_type="adaptive_protection",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "adaptive.ban_durations",
+        object_type="adaptive_protection",
+        after={"durations": result.get("ban_durations_seconds")},
+    )
+    LOG.warning(
+        "Adaptive ban durations set to %s by %s",
+        result.get("ban_durations_seconds"),
+        getattr(g, "remote_user", "unknown"),
+    )
+    return jsonify(result)
+
+
+@bp.post("/api/security/adaptive/first-step-page")
+def api_adaptive_first_step_page():
+    """Answer the first step of an adaptive ban with a page, or cut it off."""
+
+    payload = request.get_json(silent=True) or {}
+    if not getattr(g, "is_superadmin", False):
+        record_request("adaptive.first_step_page", object_type="adaptive_protection",
+                       result=RESULT_DENIED, detail="superadmin required")
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_first_step_page(payload.get("enabled"))
+    except ValueError as exc:
+        record_request("adaptive.first_step_page", object_type="adaptive_protection",
+                       result=RESULT_FAILURE, detail=str(exc))
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request("adaptive.first_step_page", object_type="adaptive_protection",
+                       result=RESULT_FAILURE, detail=str(exc))
+        return jsonify(security.unavailable_payload(exc)), 503
+    state = result.get("first_step_page") or {}
+    record_request("adaptive.first_step_page", object_type="adaptive_protection",
+                   after={"enabled": state.get("enabled")},
+                   detail=f"first steps turned into cut-offs: {state.get('changed', 0)}")
+    LOG.warning("First-step page switched %s by %s", "on" if state.get("enabled") else "off",
+                getattr(g, "remote_user", "unknown"))
+    return jsonify(result)
+
+
+@bp.post("/api/security/adaptive/shield")
+def api_adaptive_shield():
+    """Switch the first-request shield: what HAProxy refuses by itself."""
+
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get("enabled")
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.shield",
+            object_type="adaptive_protection",
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_shield(requested)
+    except ValueError as exc:
+        record_request(
+            "adaptive.shield",
+            object_type="adaptive_protection",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request(
+            "adaptive.shield",
+            object_type="adaptive_protection",
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    state = result.get("path_shield") or {}
+    record_request(
+        "adaptive.shield",
+        object_type="adaptive_protection",
+        after={"enabled": state.get("enabled")},
+        detail=f"segments {state.get('segments', 0)}, paths {state.get('paths', 0)}",
+    )
+    LOG.warning(
+        "Path shield switched %s by %s",
+        "on" if state.get("enabled") else "off",
+        getattr(g, "remote_user", "unknown"),
+    )
+    return jsonify(result)
+
+
+@bp.post("/api/security/adaptive/mode")
+def api_adaptive_mode():
+    """Switch between observing and enforcing.
+
+    The only mutating route in this section, so it is superadmin-only and CSRF
+    protected like every other state-changing form in the application.
+    """
+
+    payload = request.get_json(silent=True) or {}
+    requested = str(payload.get("mode") or "")
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "adaptive.mode",
+            object_type="adaptive_protection",
+            object_id=requested,
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_mode(requested)
+    except ValueError as exc:
+        record_request(
+            "adaptive.mode",
+            object_type="adaptive_protection",
+            object_id=requested,
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except GuarddUnavailable as exc:
+        record_request(
+            "adaptive.mode",
+            object_type="adaptive_protection",
+            object_id=requested,
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    # Switching to enforce starts banning, and switching away lifts every ban
+    # it applied: both belong in the record with their counts.
+    record_request(
+        "adaptive.mode",
+        object_type="adaptive_protection",
+        object_id=result.get("mode", ""),
+        before={"mode": result.get("previous")},
+        after={"mode": result.get("mode")},
+        detail=(
+            f"banned {len(result.get('applied') or [])}, "
+            f"lifted {len(result.get('lifted') or [])}"
+        ),
+    )
+    LOG.warning(
+        "Adaptive protection mode set to %s by %s",
+        result.get("mode"),
+        getattr(g, "remote_user", "unknown"),
+    )
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Log Explorer
+# ---------------------------------------------------------------------------
+
+
+@bp.get("/security/requests")
+def request_log_page():
+    return render_template("request_log.html")
+
+
+@bp.get("/api/security/requests")
+def api_request_log():
+    try:
+        return jsonify(security.requests(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/summary")
+def api_request_log_summary():
+    try:
+        return jsonify(security.requests_summary(request.args))
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/export")
+def api_request_log_export():
+    """What a search finds, as a CSV file, up to EXPORT_ROWS rows."""
+    filename = datetime.now(timezone.utc).strftime("requests-%Y%m%d-%H%M.csv")
+    response = Response(
+        stream_with_context(security.requests_csv(request.args)),
+        mimetype="text/csv",
+    )
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.post("/api/security/requests/enabled")
+def api_request_log_enabled():
+    """Start or stop recording requests.
+
+    Superadmin only and audited, like the enforcement switch: this decides
+    whether the gateway keeps a record of what every visitor asked for.
+    """
+    payload = request.get_json(silent=True) or {}
+    wanted = bool(payload.get("enabled"))
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "request_log.enabled",
+            object_type="request_log",
+            object_id=str(wanted).lower(),
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        result = security.set_request_log(wanted)
+    except GuarddUnavailable as exc:
+        record_request(
+            "request_log.enabled",
+            object_type="request_log",
+            object_id=str(wanted).lower(),
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    record_request(
+        "request_log.enabled",
+        object_type="request_log",
+        object_id=str(wanted).lower(),
+        after={"enabled": result.get("enabled")},
+        result=RESULT_SUCCESS,
+        summary="recording requests" if result.get("enabled") else "recording stopped",
+    )
+    return jsonify(result)
+
+
+@bp.get("/api/security/requests/status")
+def api_request_log_status():
+    try:
+        return jsonify(security.requests_status())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.get("/api/security/requests/memory")
+def api_live_memory():
+    """What guardd keeps of the latest requests in memory, and its budget."""
+    try:
+        return jsonify(security.live_memory())
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
+@bp.post("/api/security/requests/memory")
+def api_live_memory_set():
+    """Give the latest requests in memory a budget in MiB, or 0 for the
+    configured profile. Superadmin only and audited: it decides how much of
+    the gateway's memory the engine may take."""
+    payload = request.get_json(silent=True)
+    wanted = payload.get("budget_mib") if isinstance(payload, dict) else None
+    if not getattr(g, "is_superadmin", False):
+        record_request(
+            "request_log.memory",
+            object_type="request_log",
+            object_id=str(wanted),
+            result=RESULT_DENIED,
+            detail="superadmin required",
+        )
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
+    try:
+        status, result = security.set_live_memory(payload)
+    except GuarddUnavailable as exc:
+        record_request(
+            "request_log.memory",
+            object_type="request_log",
+            object_id=str(wanted),
+            result=RESULT_FAILURE,
+            detail=str(exc),
+        )
+        return jsonify(security.unavailable_payload(exc)), 503
+    if status != 200:
+        record_request(
+            "request_log.memory",
+            object_type="request_log",
+            object_id=str(wanted),
+            result=RESULT_FAILURE,
+            detail=str(result.get("error") or "refused"),
+        )
+        return jsonify(result), status
+    record_request(
+        "request_log.memory",
+        object_type="request_log",
+        object_id=str(result.get("budget_mib")),
+        after={"budget_mib": result.get("budget_mib")},
+        result=RESULT_SUCCESS,
+        summary=(
+            f"latest requests in memory: {result.get('budget_mib')} MiB"
+            if result.get("budget_mib") else "latest requests in memory: configured profile"
+        ),
+        detail=f"dropped {result.get('dropped', 0)}",
+    )
+    return jsonify(result)

@@ -1,0 +1,447 @@
+{% extends "base.html" %}
+
+{% block title %}Full backup and restore{% endblock %}
+{% block header_title %}Full backup and restore{% endblock %}
+
+{% block content %}
+<div id="backup-app"
+     data-status-url="{{ url_for('system_backups.status_view') }}"
+     data-create-url="{{ url_for('system_backups.start_backup') }}"
+     data-upload-url="{{ url_for('system_backups.upload_archive') }}"
+     data-inspect-url-template="{{ url_for('system_backups.inspect_archive', upload_id='UPLOAD_ID') }}"
+     data-stage-url-template="{{ url_for('system_backups.stage_backup', backup_id='BACKUP_ID') }}"
+     data-restore-url="{{ url_for('system_backups.start_restore') }}"
+     data-delete-url="{{ url_for('system_backups.delete_artifact') }}"
+     data-download-url-template="{{ url_for('system_backups.download_backup', backup_id='BACKUP_ID') }}">
+
+  <section class="card backup-intro-card" aria-labelledby="backup-intro-title">
+    <div class="card-header backup-card-header">
+      <div>
+        <h2 id="backup-intro-title">Encrypted disaster-recovery snapshots</h2>
+        <p class="table-meta">
+          Move the complete easy-ha-proxy state to a newly installed server or return this server to an earlier snapshot.
+        </p>
+      </div>
+    </div>
+    <div class="alert alert-warning">
+      A restore replaces managed configuration, secrets, users, certificates and application data. The restored domains and
+      access rules take effect after reconciliation, so verify DNS and keep console or SSH access available.
+    </div>
+    <div id="backup-service-status" class="result-message" role="status" aria-live="polite"></div>
+  </section>
+
+  <div class="backup-workflow-grid">
+    <section class="card" aria-labelledby="backup-create-title">
+      <div class="card-header">
+        <div>
+          <h2 id="backup-create-title">Create full backup</h2>
+          <p class="table-meta">The archive is encrypted before it becomes available for download.</p>
+        </div>
+      </div>
+      <form id="backup-create-form" class="backup-form" autocomplete="off">
+        <div class="form-group">
+          <label class="form-label" for="backup-passphrase">Backup passphrase</label>
+          <input id="backup-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
+                 autocomplete="new-password" aria-describedby="backup-passphrase-help" required>
+          <label class="backup-option backup-option-inline" for="backup-passphrase-show">
+            <input id="backup-passphrase-show" type="checkbox">
+            Show passphrase
+          </label>
+          <p class="vars-field-help" id="backup-passphrase-help">Check the passphrase visually before creating the backup. It is never saved by easy-ha-proxy and cannot be recovered.</p>
+          <p class="vars-field-help">Store this passphrase separately.</p>
+        </div>
+
+        <label class="backup-option" for="backup-quiesce">
+          <input id="backup-quiesce" type="checkbox" checked>
+          Pause managed services briefly for a consistent snapshot
+        </label>
+        <div class="form-group">
+          <label class="backup-option backup-option-danger" for="backup-include-ssh">
+            <input id="backup-include-ssh" type="checkbox" aria-describedby="backup-ssh-help">
+            Include SSH host and private keys
+          </label>
+          <p class="vars-field-help" id="backup-ssh-help">
+            SSH identity is excluded by default. Restoring host keys on another server duplicates its SSH fingerprint.
+          </p>
+        </div>
+
+        <button type="submit" class="btn" id="backup-create-button">Create encrypted backup</button>
+        <div id="backup-create-status" class="result-message" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section class="card backup-restore-card" aria-labelledby="backup-restore-title">
+      <div class="card-header">
+        <div>
+          <h2 id="backup-restore-title">Restore full backup</h2>
+          <p class="table-meta">Upload and verify the encrypted archive before any server files are changed.</p>
+        </div>
+      </div>
+
+      <div class="alert alert-info">
+        Web restore works over an already installed easy-ha-proxy stack, including a fresh minimal installation. A completely
+        empty Debian or Ubuntu server must first be restored with the controller installer.
+      </div>
+
+      <form id="backup-inspect-form" class="backup-form" autocomplete="off">
+        <div class="form-group">
+          <label class="form-label" for="backup-restore-file">Encrypted backup archive</label>
+          <input id="backup-restore-file" class="form-input" type="file" accept=".enc,application/octet-stream" aria-describedby="backup-upload-limit" required>
+          <p class="vars-field-help" id="backup-upload-limit">Maximum upload size on this server: {{ max_upload_gib }} GiB.</p>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="backup-restore-passphrase">Backup passphrase</label>
+          <input id="backup-restore-passphrase" class="form-input" type="password" minlength="12" maxlength="1024"
+                 autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn" id="backup-inspect-button">Upload and verify backup</button>
+        <div id="backup-upload-status" class="result-message" role="status" aria-live="polite"></div>
+      </form>
+
+      <div id="backup-inspection" class="backup-inspection backup-form" hidden>
+        <h3>Verified backup</h3>
+        <dl class="backup-manifest-list">
+          <div><dt>Source server</dt><dd id="backup-source-host">—</dd></div>
+          <div><dt>Created</dt><dd id="backup-created-at">—</dd></div>
+          <div><dt>Architecture</dt><dd id="backup-machine">—</dd></div>
+          <div><dt>Managed data size</dt><dd id="backup-expanded-size">—</dd></div>
+          <div><dt>Consistent snapshot</dt><dd id="backup-quiesced-state">—</dd></div>
+          <div><dt>SSH keys included</dt><dd id="backup-ssh-state">—</dd></div>
+          <div><dt>Monitoring history included</dt><dd id="backup-metrics-state">—</dd></div>
+        </dl>
+
+        <fieldset class="authelia-mail-mode-fieldset">
+          <legend>Restore scope</legend>
+          <div class="authelia-mail-mode-grid">
+            <label class="authelia-mail-mode-option" for="backup-scope-full">
+              <input id="backup-scope-full" type="radio" name="backup_restore_scope" value="full" checked>
+              <span>
+                <strong>Full restore</strong>
+                <small>Replaces all managed state, including source, services, secrets and Authelia.</small>
+              </span>
+            </label>
+            <label class="authelia-mail-mode-option" for="backup-scope-config">
+              <input id="backup-scope-config" type="radio" name="backup_restore_scope" value="config">
+              <span>
+                <strong>Sites and certificates only</strong>
+                <small>Restores HTTP/TCP sites, their settings and certificates. Source, systemd units, secrets, Authelia and SSH stay untouched — safe for backups taken on an older software revision.</small>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <label class="backup-option backup-option-danger" for="backup-restore-ssh" id="backup-restore-ssh-row">
+          <input id="backup-restore-ssh" type="checkbox" disabled>
+          Restore archived SSH keys and merge current authorized_keys
+        </label>
+        <label class="backup-option backup-option-danger" for="backup-replace-confirm">
+          <input id="backup-replace-confirm" type="checkbox">
+          I understand that all managed state on this server will be replaced
+        </label>
+        <div class="form-group">
+          <label class="form-label" for="backup-restore-confirmation">Type RESTORE to continue</label>
+          <input id="backup-restore-confirmation" class="form-input mono notranslate" translate="no" data-i18n-skip
+                 type="text" autocomplete="off" spellcheck="false" placeholder="RESTORE">
+        </div>
+        <button type="button" class="btn btn-danger" id="backup-restore-button" disabled>Restore and reconcile server</button>
+        <div id="backup-restore-status" class="result-message" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="backup-artifacts-title">
+    <div class="card-header">
+      <div>
+        <h2 id="backup-artifacts-title">Backups stored on this server</h2>
+        <p class="table-meta">Download both the encrypted archive and its SHA-256 checksum, then store them separately from the server.</p>
+        <p class="table-meta" id="backup-local-summary" data-i18n-skip translate="no"></p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="backup-table">
+        <thead><tr><th>Created</th><th>Source</th><th>Size</th><th>SSH</th><th>Actions</th></tr></thead>
+        <tbody id="backup-artifacts-body">
+          <tr><td colspan="5" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="backup-jobs-title">
+    <div class="card-header">
+      <div>
+        <h2 id="backup-jobs-title">Backup and restore jobs</h2>
+        <p class="table-meta">The status remains on the host while the application container is paused or recreated.</p>
+      </div>
+    </div>
+    <div id="backup-progress" class="job-progress" hidden>
+      <div class="job-progress-meta">
+        <span id="backup-progress-label">Working…</span>
+        <span id="backup-progress-elapsed" class="mono notranslate" translate="no" data-i18n-skip>0:00</span>
+      </div>
+      <div class="job-progress-track job-progress-track--indeterminate">
+        <div class="job-progress-fill"></div>
+      </div>
+    </div>
+    <details id="backup-log-details" class="backup-technical-details">
+      <summary>Selected job details <span id="backup-log-mode" class="muted"></span></summary>
+      <pre id="backup-job-log" class="mono notranslate config-technical-output" translate="no" data-i18n-skip>No job selected.</pre>
+    </details>
+    <div class="table-wrap">
+      <table class="backup-table">
+        <thead><tr><th>Started</th><th>Operation</th><th>Status</th><th>Result</th></tr></thead>
+        <tbody id="backup-jobs-body" data-i18n-skip translate="no">
+          <tr><td colspan="4" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="backup-destinations">
+    <header class="card-head">
+      <h2 id="backup-destinations-title">Copies on another machine</h2>
+    </header>
+    <p class="muted">
+      An encrypted archive sitting on the server it would rebuild is not a
+      backup of that server. A destination pushes the finished archive
+      somewhere else over SFTP. Only the already-encrypted file is sent: the
+      passphrase stays here and nothing is unpacked on the way.
+    </p>
+    <p class="muted">
+      The host key you pin is the one that will be accepted, and nothing older
+      is removed on the far end until the new copy has been verified there.
+      The private key and the host key are stored root-only and are never sent
+      back to this page.
+    </p>
+
+    <div class="table-wrap">
+      <table class="backup-table">
+        <thead>
+          <tr><th>Name</th><th>Where</th><th>Host key</th><th>Keep</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="backup-destinations-body" data-i18n-skip translate="no">
+          <tr><td colspan="4" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <form id="backup-destination-form" class="backup-form" autocomplete="off">
+      <div class="form-grid">
+        <label>Name
+          <input id="dest-name" class="form-input" type="text" required
+                 placeholder="offsite" pattern="[a-z0-9][a-z0-9-]*">
+        </label>
+        <label>Kind
+          <select id="dest-type" class="form-input">
+            <option value="sftp">SFTP</option>
+            <option value="s3">S3-compatible</option>
+          </select>
+        </label>
+        <label>Keep daily
+          <input id="dest-keep-daily" class="form-input" type="number" value="7"
+                 min="0" max="365">
+        </label>
+        <label>Keep weekly
+          <input id="dest-keep-weekly" class="form-input" type="number" value="4"
+                 min="0" max="260">
+        </label>
+        <label>Keep monthly
+          <input id="dest-keep-monthly" class="form-input" type="number" value="6"
+                 min="0" max="120">
+        </label>
+      </div>
+
+      <div id="dest-sftp-fields">
+        <div class="form-grid">
+          <label>Host
+            <input id="dest-host" class="form-input" type="text"
+                   placeholder="backup.example.com" data-i18n-skip translate="no">
+          </label>
+          <label>Port
+            <input id="dest-port" class="form-input" type="number" value="22"
+                   min="1" max="65535">
+          </label>
+          <label>User
+            <input id="dest-user" class="form-input" type="text"
+                   placeholder="gateway">
+          </label>
+          <label>Checking the copy
+          <select id="dest-verify" class="form-input">
+            <option value="auto">Read it back if the far end cannot hash</option>
+            <option value="transfer">Trust the transfer</option>
+          </select>
+        </label>
+        <label>Remote directory
+            <input id="dest-path" class="form-input" type="text"
+                   placeholder="/srv/backups/gateway or empty for the login directory">
+          </label>
+        </div>
+        <label>Sign in with
+          <select id="dest-auth" class="form-input">
+            <option value="key">Private key</option>
+            <option value="password">Password</option>
+          </select>
+        </label>
+        <label id="dest-key-field">Private key
+          <textarea id="dest-key" class="form-input mono" rows="4"
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    data-i18n-skip translate="no"></textarea>
+        </label>
+        <label id="dest-password-field" hidden>Password
+          <input id="dest-password" class="form-input" type="password"
+                 autocomplete="new-password">
+        </label>
+        <label>Host key (optional)
+          <textarea id="dest-host-key" class="form-input mono" rows="2"
+                    placeholder="backup.example.com ssh-ed25519 AAAA..." data-i18n-skip translate="no"></textarea>
+        </label>
+        <p class="muted">
+          Leave it empty and the key the server offers on the first connection
+          is pinned; its fingerprint is shown in the list to compare with the
+          server's own. If the server later presents a different key, nothing
+          is sent until you choose to trust the new one.
+        </p>
+      </div>
+
+      <div id="dest-s3-fields" hidden>
+        <div class="form-grid">
+          <label>Endpoint
+            <input id="dest-endpoint" class="form-input" type="url"
+                   placeholder="https://s3.eu-central-1.amazonaws.com">
+          </label>
+          <label>Region
+            <input id="dest-region" class="form-input" type="text"
+                   placeholder="eu-central-1">
+          </label>
+          <label>Bucket
+            <input id="dest-bucket" class="form-input" type="text"
+                   placeholder="gateway-backups">
+          </label>
+          <label>Prefix
+            <input id="dest-prefix" class="form-input" type="text"
+                   placeholder="gateway-1">
+          </label>
+          <label>Access key
+            <input id="dest-access-key" class="form-input" type="text">
+          </label>
+          <label>Secret key
+            <input id="dest-secret-key" class="form-input" type="password"
+                   autocomplete="new-password">
+          </label>
+        </div>
+        <label class="form-checkbox-inline">
+          <input id="dest-allow-insecure" type="checkbox">
+          <span>Allow a plain http endpoint</span>
+        </label>
+        <p class="muted">
+          The upload carries the archive's SHA-256 in its signature, so the
+          storage service refuses a body that does not match it. A successful
+          upload is already proof the far end holds these exact bytes, with no
+          second transfer to check.
+        </p>
+      </div>
+
+      <p class="muted">
+        Leave a key or secret empty when editing an existing destination to
+        keep the one already stored.
+      </p>
+      <button type="submit" class="btn" id="dest-save">Save destination</button>
+      <div id="dest-status" class="result-message" role="status" aria-live="polite"
+           data-i18n-skip translate="no"></div>
+    </form>
+  </section>
+
+  <section class="card" id="backup-schedule" aria-labelledby="backup-schedule-title">
+    <div class="card-header">
+      <div>
+        <h2 id="backup-schedule-title">Every night, without being asked</h2>
+        <p class="table-meta">A destination says where a copy goes. This says when.</p>
+      </div>
+    </div>
+
+    <form id="backup-schedule-form" class="backup-form" autocomplete="off">
+      <label class="backup-option" for="schedule-enabled">
+        <input id="schedule-enabled" type="checkbox">
+        Run the backup on a schedule
+      </label>
+
+      <div class="form-group">
+        <label class="form-label" for="schedule-time">Time of day</label>
+        <input id="schedule-time" class="u-maxw-min-160px-100 form-input" type="time" value="03:20" required
+               >
+        <p class="vars-field-help">
+          Server local time. A few minutes of jitter are added so a fleet of
+          gateways does not call on the same destination at the same second.
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="schedule-destinations">Send each copy to</label>
+        <div id="schedule-destinations" data-i18n-skip translate="no">
+          <p class="vars-field-help">Loading…</p>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="schedule-keep-local">Keep on this server</label>
+        <input id="schedule-keep-local" class="u-maxw-min-120px-100 form-input" type="number"
+               min="1" max="50" step="1" value="3" required >
+        <p class="vars-field-help">
+          How many of the newest backups stay on this server. Older ones are
+          removed only after every destination holds a verified copy of the new
+          one; if any copy fails, nothing is removed.
+        </p>
+      </div>
+
+      <label class="backup-option" for="schedule-quiesce">
+        <input id="schedule-quiesce" type="checkbox" checked>
+        Pause managed services briefly for a consistent snapshot
+      </label>
+      <label class="backup-option backup-option-danger" for="schedule-include-ssh">
+        <input id="schedule-include-ssh" type="checkbox">
+        Include SSH host and private keys
+      </label>
+
+      <div class="form-group">
+        <label class="form-label" for="schedule-passphrase">Backup passphrase</label>
+        <input id="schedule-passphrase" class="form-input" type="password"
+               autocomplete="new-password" minlength="12" maxlength="1024">
+        <p class="vars-field-help">
+          Stored root-only so an unattended run can encrypt without anyone
+          present. It is the only thing that can open these archives afterwards,
+          so keep it somewhere that survives losing this server. Leave the field
+          empty to keep the passphrase already stored.
+        </p>
+      </div>
+
+      <div class="justify-start backup-actions" >
+        <button type="submit" class="btn" id="schedule-save">Save schedule</button>
+        <button type="button" class="btn" id="schedule-run">Run it now</button>
+      </div>
+      <div id="schedule-status" class="result-message" role="status" aria-live="polite"
+           data-i18n-skip translate="no"></div>
+    </form>
+
+    <dl class="backup-manifest-list">
+      <div><dt>Next run</dt><dd id="schedule-next-run" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Last run</dt><dd id="schedule-last-run" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Result</dt><dd id="schedule-last-result" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Passphrase stored</dt><dd id="schedule-passphrase-state" data-i18n-skip translate="no">—</dd></div>
+    </dl>
+    <p id="schedule-jitter" class="text-muted" data-i18n-skip translate="no"></p>
+    <details id="schedule-other-details" hidden><summary>Other active backup timers</summary>
+      <p>These timers are managed separately in Linux. Changing the panel schedule does not change them.</p>
+      <ul id="schedule-other-timers" data-i18n-skip translate="no"></ul>
+    </details>
+    <a class="btn btn-small" href="{{ url_for('schedule.page') }}">Open task schedule</a>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="{{ url_for('static', filename='js/system_backups.js') }}"></script>
+<script src="{{ url_for('static', filename='js/backup_destinations.js') }}"></script>
+<script src="{{ url_for('static', filename='js/backup_schedule.js') }}"></script>
+{% endblock %}

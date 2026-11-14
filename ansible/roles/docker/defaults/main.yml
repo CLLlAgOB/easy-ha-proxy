@@ -1,0 +1,4 @@
+---
+# Keep standalone containers running during short Docker daemon restarts.
+# This does not cover host reboots, container recreation or major upgrades.
+docker_live_restore_enabled: true

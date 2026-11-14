@@ -1,0 +1,310 @@
+{% extends 'base.html' %}
+{% block title %}Authelia – bans{% endblock %}
+{% block header_title %}Authelia bans{% endblock %}
+
+{% block content %}
+
+{% for category, flashed_message in get_flashed_messages(with_categories=true) %}
+  <div class="u-mb-3 alert {% if category == 'error' %}alert-error{% else %}alert-success{% endif %}"
+       >
+    <span {% if category == 'error' %}class="notranslate" translate="no" data-i18n-skip{% endif %}>{{ flashed_message }}</span>
+  </div>
+{% endfor %}
+
+{# ---- Card: the current bans ---- #}
+<div class="card">
+  <div class="card-header">
+    <h2>Current bans</h2>
+  </div>
+
+  {% if bans_error %}
+    <div class="u-m-12px-16px-0 alert alert-error" >
+      <strong>Cannot load current bans:</strong>
+      <span class="notranslate" translate="no" data-i18n-skip>{{ bans_error }}</span>
+    </div>
+  {% endif %}
+
+  <div class="u-p-16px-16px-8px grid" >
+    <div>
+      <div class="table-header">
+        <div class="table-title">By user</div>
+      </div>
+      <div class="table-container">
+        {% if bans.users %}
+          <table class="data-table authelia-ban-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>User</th>
+                <th>Expires</th>
+                <th>Source</th>
+                <th>Reason</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for ban in bans.users %}
+              <tr>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.id }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.subject }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.expires }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.source }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.reason }}</td>
+                <td>
+                  <form method="post" class="authelia-ban-action" data-confirm="Unban this user?">
+                    <input type="hidden" name="action" value="unban_user">
+                    <input type="hidden" name="username" value="{{ ban.subject }}">
+                    <button class="btn btn-secondary" type="submit">Unban</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% elif bans.users_raw %}
+          <pre class="text-sm u-p-8px u-m-0 pre-wrap mono notranslate" translate="no" data-i18n-skip
+               >{{ bans.users_raw }}</pre>
+        {% else %}
+          <div class="u-p-8px-0 no-data" >
+            There are no active user bans.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div>
+      <div class="table-header">
+        <div class="table-title">By IP</div>
+      </div>
+      <div class="table-container">
+        {% if bans.ips %}
+          <table class="data-table authelia-ban-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>IP</th>
+                <th>Expires</th>
+                <th>Source</th>
+                <th>Reason</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for ban in bans.ips %}
+              <tr>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.id }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.subject }}</td>
+                <td class="mono notranslate" translate="no" data-i18n-skip>{{ ban.expires }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.source }}</td>
+                <td class="notranslate" translate="no" data-i18n-skip>{{ ban.reason }}</td>
+                <td>
+                  <form method="post" class="authelia-ban-action" data-confirm="Unban this IP?">
+                    <input type="hidden" name="action" value="unban_ip">
+                    <input type="hidden" name="ip" value="{{ ban.subject }}">
+                    <button class="btn btn-secondary" type="submit">Unban</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% elif bans.ips_raw %}
+          <pre class="text-sm u-p-8px u-m-0 pre-wrap mono notranslate" translate="no" data-i18n-skip
+               >{{ bans.ips_raw }}</pre>
+        {% else %}
+          <div class="u-p-8px-0 no-data" >
+            There are no active IP bans.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ---- Card: unban ---- #}
+<div class="card">
+  <div class="card-header">
+    <h2>Unban</h2>
+  </div>
+
+  <div  class="u-p-16px flex u-direction-column u-gap-4">
+
+    <form method="post" id="authelia-unban-user-form"
+           class="flex items-end u-gap-4 flex-wrap">
+      <div  class="u-minw-min-220px-100 grow">
+        <label class="form-label" for="unban-username">User</label>
+        <input
+          type="text"
+          id="unban-username"
+          name="username"
+          class="form-input"
+          placeholder="username"
+        >
+      </div>
+      <div>
+        <input type="hidden" name="action" value="unban_user">
+        <button class="btn" type="submit">Unban user</button>
+      </div>
+    </form>
+
+    <form method="post" id="authelia-unban-ip-form"
+           class="flex items-end u-gap-4 flex-wrap">
+      <div  class="u-minw-min-220px-100 grow">
+        <label class="form-label" for="unban-ip">IP / CIDR</label>
+        <input
+          type="text"
+          id="unban-ip"
+          name="ip"
+          class="form-input"
+          placeholder="203.0.113.201 or 203.0.113.0/24"
+        >
+      </div>
+      <div>
+        <input type="hidden" name="action" value="unban_ip">
+        <button class="btn" type="submit">Unban IP</button>
+      </div>
+    </form>
+
+  </div>
+</div>
+
+{# ---- Card: Authelia's logs ---- #}
+<div class="card">
+  <div class="card-header">
+    <h2>Authelia logs</h2>
+  </div>
+
+  <div  class="u-p-16px-16px-8px">
+    <form method="get"  class="flex flex-wrap u-gap-4 items-end">
+      <div  class="u-minw-min-180px-100">
+        <label class="form-label" for="log_ip">IP</label>
+        <input
+          type="text"
+          id="log_ip"
+          name="log_ip"
+          class="form-input"
+          value="{{ log_ip }}"
+          placeholder="203.0.113.201"
+        >
+      </div>
+      <div  class="u-minw-min-180px-100">
+        <label class="form-label" for="log_user">User</label>
+        <input
+          type="text"
+          id="log_user"
+          name="log_user"
+          class="form-input"
+          value="{{ log_user }}"
+          placeholder="username"
+        >
+      </div>
+      <div  class="u-minw-min-180px-100">
+        <label class="form-label" for="log_level">Level</label>
+        <input
+          type="text"
+          id="log_level"
+          name="log_level"
+          class="form-input"
+          value="{{ log_level }}"
+          placeholder="error / warning / info"
+        >
+      </div>
+      <div  class="flex u-gap-2">
+        <button type="submit" class="btn">Apply</button>
+        <a href="{{ url_for('routes.authelia_bans') }}" class="btn btn-secondary">Reset</a>
+      </div>
+    </form>
+
+    {% if logs_error %}
+      <div class="u-mt-3 alert alert-error" >
+        <span class="notranslate" translate="no" data-i18n-skip>{{ logs_error }}</span>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if logs and logs|length %}
+    <div class="table-container">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Level</th>
+            <th>IP</th>
+            <th>Method</th>
+            <th>Path</th>
+            <th>User</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody class="notranslate" translate="no" data-i18n-skip>
+        {% for e in logs %}
+          <tr>
+            <td>{{ e.time }}</td>
+            <td>{{ e.level }}</td>
+            <td class="ip-cell">
+              {% if e.remote_ip %}
+                <button type="button"
+                        class="authelia-log-link authelia-log-link-ip js-authelia-log-ip"
+                        data-ip="{{ e.remote_ip }}">
+                  {{ e.remote_ip }}
+                </button>
+              {% endif %}
+            </td>
+            <td>{{ e.method }}</td>
+            <td>{{ e.path }}</td>
+            <td>
+              {% if e.username %}
+                <button type="button"
+                        class="authelia-log-link authelia-log-link-user js-authelia-log-user"
+                        data-user="{{ e.username }}">
+                  {{ e.username }}
+                </button>
+              {% endif %}
+            </td>
+            <td class="authelia-log-message-cell">
+              {% if e.msg %}
+                <div class="authelia-log-message">{{ e.msg }}</div>
+              {% endif %}
+              {% if e.error %}
+                <div class="authelia-log-error">{{ e.error }}</div>
+              {% endif %}
+              {% if not e.msg and not e.error %}
+                <pre class="u-m-0 pre-wrap mono" >{{ e.raw }}</pre>
+              {% endif %}
+              {% if e.msg or e.error %}
+                <details class="authelia-log-details">
+                  <summary>{{ _("Log details") }}</summary>
+                  {% if e.details %}
+                    <dl>
+                    {% for detail in e.details %}
+                      <dt>{{ detail.name }}</dt>
+                      <dd class="mono">{{ detail.value }}</dd>
+                    {% endfor %}
+                    </dl>
+                  {% endif %}
+                  <div class="authelia-log-raw-label">{{ _("Raw log entry") }}</div>
+                  <pre class="mono">{{ e.raw }}</pre>
+                </details>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="u-p-12px-16px-16px no-data" >
+      {% if log_ip or log_user or log_level %}
+        No logs match the selected filters.
+      {% else %}
+        Authelia log is empty.
+      {% endif %}
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/authelia_bans.js') }}"></script>
+{% endblock %}
