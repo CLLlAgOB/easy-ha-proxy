@@ -497,7 +497,9 @@ sys.exit(1 if os.environ.get("PROBE_FAIL_LINEAGE") == lineage else 0)
         path = certd._dns_profile_path("zone-a")
         path.write_text(path.read_text().replace("[default]\n", ""))
         before = path.read_bytes()
-        with mock.patch.object(certd.os, "replace", side_effect=OSError("atomic replace denied")):
+        # Path.replace, not os.replace: on Python 3.10 Path.replace reaches
+        # os.replace through an accessor bound when pathlib is imported.
+        with mock.patch.object(certd.Path, "replace", side_effect=OSError("atomic replace denied")):
             with self.assertRaisesRegex(OSError, "atomic replace denied"):
                 certd._route53_environment("zone-a")
         self.assertEqual(path.read_bytes(), before)
@@ -606,7 +608,9 @@ sys.exit(1 if os.environ.get("PROBE_FAIL_LINEAGE") == lineage else 0)
         self.conf("a.example.com", "standalone")
         self.conf("b.example.com", "standalone")
         started = time.monotonic()
-        with mock.patch.object(certd, "CERTBOT_TIMEOUT_SECONDS", 0.2), \
+        # Long enough for the healthy lineage's probe to start on a slow host
+        # (0.2 s failed on an ARM test machine), short beside the 8 s bound.
+        with mock.patch.object(certd, "CERTBOT_TIMEOUT_SECONDS", 2), \
                 mock.patch.object(certd, "DNS_PROPAGATION_MAX", 0), \
                 mock.patch.dict(os.environ, {"PROBE_HANG_LINEAGE": "a.example.com"}):
             self.assertEqual(certd.renew_certificates(), 1)
