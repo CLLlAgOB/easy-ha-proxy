@@ -23,11 +23,17 @@ APP = ROOT / "docker" / "app" / "haproxy_admin"
 sys.path.insert(0, str(ROOT / "docker" / "app"))
 WINDOWS = sys.platform == "win32"
 if not WINDOWS:
+    # Bound at import: test_authelia_bans later swaps a stub in for the package.
+    from haproxy_admin import create_app  # noqa: E402
     from haproxy_admin import backend_presets as sets  # noqa: E402
     from haproxy_admin import services_haproxy_config as config_service  # noqa: E402
     from haproxy_admin import services_haproxy_sites as sites_service  # noqa: E402
     from haproxy_admin import services_haproxy_tcp as tcp_service  # noqa: E402
     from haproxy_admin import services_haproxy_udp as udp_service  # noqa: E402
+    # The real panel modules, as they are now. test_authelia_bans leaves stubs
+    # under these names for every later test; the page tests put these back.
+    REAL_MODULES = {name: module for name, module in sys.modules.items()
+                    if name == "haproxy_admin" or name.startswith("haproxy_admin.")}
 
 UPLINKS = {"name": "Two uplinks", "servers": [
     {"host": "198.51.100.10", "role": "primary", "weight": 50, "note": "first uplink"},
@@ -227,7 +233,6 @@ class ThePages(_Files):
     def setUp(self):
         super().setUp()
         import os
-        from haproxy_admin import create_app
         root = self.vars.parent.parent
         environment = mock.patch.dict(os.environ, {
             "HAPROXY_ADMIN_PROXY_SECRET": "sets-test-proxy",
@@ -237,6 +242,9 @@ class ThePages(_Files):
         })
         environment.start()
         self.addCleanup(environment.stop)
+        modules = mock.patch.dict(sys.modules, REAL_MODULES)
+        modules.start()
+        self.addCleanup(modules.stop)
         with mock.patch("haproxy_admin.ensure_whitelist_file"):
             app = create_app()
         app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
