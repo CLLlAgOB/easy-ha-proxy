@@ -1355,6 +1355,10 @@ def restore_config_scope(
         )
     if args.apply:
         preflight_restore_control_plane()
+    # Which of the fixed roots existed is part of the previous state too: a
+    # root the failed attempt created (say /etc/letsencrypt, certificates and
+    # keys included) used to survive a rollback that reported the previous
+    # configuration restored.
     rollback_paths = [
         path for path in CONFIG_SCOPE_PATHS if os.path.lexists(path)
     ]
@@ -1368,13 +1372,25 @@ def restore_config_scope(
             reconcile_restored_configuration()
     except (Exception, KeyboardInterrupt) as restore_error:
         if rollback is None:
+            # None of the roots existed: the previous state is their absence.
+            try:
+                remove_paths(list(CONFIG_SCOPE_PATHS))
+            except OSError as cleanup_error:
+                raise BackupError(
+                    "Configuration restore failed, and removing what it had "
+                    f"written also failed: {cleanup_error}. "
+                    f"Restore error: {restore_error}"
+                ) from cleanup_error
             raise BackupError(
-                "Configuration restore failed and no previous state was "
-                f"available for automatic rollback: {restore_error}"
+                "Configuration restore failed; none of its paths existed "
+                "before, and what it had written was removed again. "
+                f"Restore error: {restore_error}"
             ) from restore_error
         try:
             validate_rollback_payload(rollback, include_ssh=False)
-            remove_paths(rollback_paths)
+            # Every fixed root, not only those that existed: the archive
+            # brings back the ones that did.
+            remove_paths(list(CONFIG_SCOPE_PATHS))
             extract_payload(rollback)
             normalize_restored_config_permissions()
             if args.apply:

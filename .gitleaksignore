@@ -6,7 +6,7 @@
 
 # PEM markers the standby-certificate tests split and join
 .tests/test_certd_standby.py:private-key:158
-.tests/test_certd_standby.py:private-key:1113
+.tests/test_certd_standby.py:private-key:1145
 
 # a made-up token in a query string the request filter must leave alone
 .tests/test_query_injection.py:generic-api-key:63

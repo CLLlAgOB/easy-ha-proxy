@@ -891,6 +891,38 @@ class ADualKeySiteMovesAsOne(StandbyFixture):
         self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "")
         self.assertEqual(CERTD.read_pin("example.com-rsa"), "")
 
+    def reload_answers(self, *answers):
+        answers = list(answers)
+        patcher = mock.patch.object(CERTD, "_reload_haproxy", side_effect=lambda: answers.pop(0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_sibling_haproxy_refuses_puts_the_first_back_and_says_so(self):
+        # Half a switch left two authorities on one name and answered ok with
+        # the sibling's error dropped.
+        self.setup_pair()
+        self.reload_answers((0, "", ""), (1, "", "rsa file rejected"), (0, "", ""))
+        result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reload_rc"], 1)
+        self.assertIn("example.com-rsa", result["reload_error"])
+        self.assertIn("rsa file rejected", result["reload_error"])
+        self.assertIn("put back", result["reload_error"])
+        self.assertEqual(result["also_switched"], [])
+        for stem in ("example.com-ecdsa", "example.com-rsa"):
+            deployed = (CERTD.HAPROXY_CERTS_DIR / f"{stem}.pem").read_bytes()
+            self.assertEqual(CERTD._describe_pem(deployed)["issuer"], "LE", stem)
+            self.assertEqual(CERTD.read_pin(stem), "", stem)
+
+    def test_a_failed_putting_back_is_said_too(self):
+        self.setup_pair()
+        self.reload_answers((0, "", ""), (1, "", "rsa file rejected"), (1, "", "still broken"))
+        result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        self.assertFalse(result["ok"])
+        self.assertIn("failed too", result["reload_error"])
+        self.assertIn("still broken", result["reload_error"])
+        self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "")
+
     def test_an_ordinary_name_has_no_sibling(self):
         self.assertEqual(CERTD._sibling_stem("site.example.com"), "")
         self.assertEqual(CERTD._sibling_stem("example.com-ecdsa"), "example.com-rsa")

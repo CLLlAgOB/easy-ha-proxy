@@ -200,16 +200,31 @@ def build_artefacts(
     if fmt == "pfx":
         out = workdir / "certificate.pfx"
         password = str(record.get("pfx_password") or "")
-        result = subprocess.run(
-            [
-                "openssl", "pkcs12", "-export",
-                "-inkey", str(privkey),
-                "-in", str(fullchain),
-                "-out", str(out),
-                "-passout", f"pass:{password}",
-            ],
-            capture_output=True, timeout=60, check=False,
-        )
+        # Through a pipe, never in the arguments: any local user can read a
+        # process's command line (ps, /proc/<pid>/cmdline) while it runs.
+        # openssl takes the first line; a password is far below a pipe's
+        # buffer, so it is written in full before openssl starts.
+        if "\n" in password or "\r" in password:
+            raise DeliveryError("the PFX password cannot contain a line break")
+        read_end, write_end = os.pipe()
+        try:
+            with os.fdopen(write_end, "wb") as writer:
+                write_end = -1
+                writer.write(password.encode("utf-8") + b"\n")
+            result = subprocess.run(
+                [
+                    "openssl", "pkcs12", "-export",
+                    "-inkey", str(privkey),
+                    "-in", str(fullchain),
+                    "-out", str(out),
+                    "-passout", f"fd:{read_end}",
+                ],
+                capture_output=True, timeout=60, check=False, pass_fds=(read_end,),
+            )
+        finally:
+            os.close(read_end)
+            if write_end != -1:
+                os.close(write_end)
         if result.returncode != 0:
             raise DeliveryError(
                 "openssl could not build the PKCS#12 file: "

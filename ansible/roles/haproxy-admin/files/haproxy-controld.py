@@ -246,6 +246,10 @@ UDP_FAIL_AFTER = 3
 UDP_RECOVER_AFTER = 6
 UDP_FAILOVER_RULE = "udp.failover"
 UDP_FAILOVER_REPORT_SECONDS = 300
+# A switch whose rules could not be applied is tried again this often, until
+# it is in effect: the state file already says "backup" by then, so without a
+# retry nothing would ever apply it.
+UDP_APPLY_RETRY_SECONDS = 30
 MAX_ARCHIVE_BYTES = int(os.getenv("HAPADM_MAX_ARCHIVE_BYTES", str(64 * 1024 * 1024)))
 MAX_ARCHIVE_FILES = int(os.getenv("HAPADM_MAX_ARCHIVE_FILES", "4096"))
 MAX_ARCHIVE_EXPANDED_BYTES = int(
@@ -362,6 +366,12 @@ class UdpFailover:
         self.error: "str | None" = None
         self.reported: Dict[str, float] = {}
         self.conntrack_missing = False
+        # Switches written to the state file but not yet in effect: name ->
+        # (side the rules still send to, side wanted, target). Only once the
+        # rules are applied are the switch and its conntrack cleanup done.
+        self.pending: Dict[str, tuple] = {}
+        self.apply_error: "str | None" = None
+        self.retry_at = 0.0
 
     # -- reading ----------------------------------------------------------
     def load_targets(self) -> list[dict]:
@@ -432,13 +442,19 @@ class UdpFailover:
                         switches.append((name, "backup", "primary", target))
             for gone in set(self.state) - names:
                 self.state.pop(gone)
+                self.pending.pop(gone, None)
                 self._report(gone, False, "", now, force=True)
             if switches or self._file_out_of_step():
-                for name, _old, new, _target in switches:
+                for name, old, new, target in switches:
                     self.state[name].update(active=new, since=now, fails=0, oks=0)
+                    # Keep the side the rules still send to; a switch back
+                    # before the first one took effect cancels out.
+                    applied = self.pending.pop(name, (old, new, target))[0]
+                    if applied != new:
+                        self.pending[name] = (applied, new, target)
                 self._write_state()
-                if switches:
-                    self._apply(switches)
+            if self.pending and (switches or now >= self.retry_at):
+                self._apply(now)
             for name, entry in self.state.items():
                 self._report(name, entry["active"] == "backup", self._detail(name, entry), now,
                              force=any(item[0] == name for item in switches))
@@ -471,16 +487,19 @@ class UdpFailover:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
 
-    def _apply(self, switches: list[tuple]) -> None:
-        for name, old, new, _target in switches:
+    def _apply(self, now: float) -> None:
+        """Apply the rules for every pending switch; kept pending on failure."""
+        for name, (old, new, _target) in self.pending.items():
             LOG.warning("UDP forward %s: switching from its %s to its %s backend", name, old, new)
         try:
             run_cmd(["systemctl", "restart", "iptables-haproxy-udp.service"], timeout=60)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
             LOG.error("UDP failover could not apply the rules: %s", exc)
-            self.error = f"the switch could not be applied: {str(exc)[:300]}"
+            self.apply_error = f"the switch could not be applied: {str(exc)[:300]}"
+            self.retry_at = now + UDP_APPLY_RETRY_SECONDS
             return
-        for _name, old, _new, target in switches:
+        done, self.pending, self.apply_error = self.pending, {}, None
+        for _name, (old, _new, target) in done.items():
             left = target.get(old)
             if not left:
                 continue
@@ -516,10 +535,12 @@ class UdpFailover:
     def public_state(self) -> dict:
         with self.lock:
             return {
-                "error": self.error,
+                "error": self.error or self.apply_error,
                 "forwards": {
-                    name: {key: entry.get(key) for key in
-                           ("active", "since", "primary_ok", "backup_ok", "checked_at", "primary", "backup")}
+                    name: {**{key: entry.get(key) for key in
+                              ("active", "since", "primary_ok", "backup_ok", "checked_at", "primary", "backup")},
+                           # "active" is what is wanted; this says it is not in effect yet.
+                           "apply_pending": name in self.pending}
                     for name, entry in self.state.items()
                 },
             }

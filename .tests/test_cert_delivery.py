@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -188,6 +190,53 @@ class BuildingTheArtefact(unittest.TestCase):
         self.assertEqual(check.returncode, 0, check.stderr.decode()[:300])
         self.assertEqual(local.stat().st_mode & 0o077, 0)
         del shutil
+
+    def test_the_pfx_password_never_reaches_the_process_arguments(self):
+        # Any local user can read a running process's command line.
+        phrase = "synthetic pass phrase"
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"], seen["kwargs"] = argv, kwargs
+            descriptor = int(argv[argv.index("-passout") + 1].split(":", 1)[1])
+            seen["read"] = os.read(descriptor, 1024)
+            (self.work / "certificate.pfx").write_bytes(b"pkcs12")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        with mock.patch.object(deliver.subprocess, "run", side_effect=fake_run):
+            self.build({"format": "pfx", "remote_path": "cert.pfx", "pfx_password": phrase})
+        self.assertFalse(any(phrase in part for part in seen["argv"]), seen["argv"])
+        passout = seen["argv"][seen["argv"].index("-passout") + 1]
+        self.assertRegex(passout, r"^fd:\d+$")
+        self.assertIn(int(passout[3:]), seen["kwargs"]["pass_fds"])
+        self.assertEqual(seen["read"], phrase.encode() + b"\n")
+
+    def test_a_pfx_password_with_a_line_break_is_refused(self):
+        with self.assertRaises(deliver.DeliveryError):
+            self.build({"format": "pfx", "remote_path": "cert.pfx", "pfx_password": "one\ntwo"})
+
+    @unittest.skipUnless(have_openssl(), "openssl is not installed here")
+    def test_a_pfx_opens_with_its_password_and_not_without(self):
+        key = self.lineage / "privkey.pem"
+        chain = self.lineage / "fullchain.pem"
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(key), "-out", str(chain), "-days", "1",
+             "-subj", "/CN=example.com"],
+            capture_output=True, check=True,
+        )
+        local, _remote = self.build({"format": "pfx", "remote_path": "cert.pfx",
+                                     "pfx_password": "synthetic pass"})[0]
+
+        def opens(password):
+            return subprocess.run(
+                ["openssl", "pkcs12", "-in", str(local), "-info", "-nokeys",
+                 "-passin", f"pass:{password}"],
+                capture_output=True, check=False,
+            ).returncode == 0
+
+        self.assertTrue(opens("synthetic pass"))
+        self.assertFalse(opens("another"))
 
 
 class TheTransportIsPinned(unittest.TestCase):

@@ -1217,6 +1217,23 @@ def _activate_server_pem(
         temporary.unlink(missing_ok=True)
 
 
+def _restore_server_pem(destination: Path, previous: Optional[bytes]) -> Tuple[bool, str]:
+    """Put a certificate file back as it was before a switch, and reload."""
+
+    try:
+        if previous is None:
+            destination.unlink(missing_ok=True)
+        else:
+            destination.write_bytes(previous)
+            _set_cert_permissions(destination)
+    except OSError as exc:
+        return False, str(exc)
+    rc, _stdout, stderr = _reload_haproxy()
+    if rc not in (None, 0):
+        return False, (stderr or "HAProxy did not reload").strip()[:400]
+    return True, ""
+
+
 def _verify_external_chain(
     certificates: List[x509.Certificate], ca_path: Path
 ) -> Tuple[bool, str]:
@@ -2983,6 +3000,7 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
     destination = _ensure_within(
         certs_dir, certs_dir / f"{_safe_slug(checked_domain)}.pem"
     )
+    previous = destination.read_bytes() if destination.exists() else None
     ok, rc, _stdout, stderr = _activate_server_pem(
         destination, data, override_pin=True, allow_shadow=True
     )
@@ -2991,19 +3009,29 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
     # would leave the other still claiming that name with the old
     # certificate -- the shadowing this feature exists to prevent, recreated
     # by the act of preventing it. The sibling comes along when it holds the
-    # same standby.
+    # same standby, and the pair moves as one: when the sibling is refused,
+    # the first file goes back too and nothing is pinned. A half switch used
+    # to answer ok with the sibling's error dropped.
     also: List[str] = []
     sibling = _sibling_stem(checked_domain)
     if ok and sibling and _standby_path(sibling, checked_slot).is_file():
         sibling_destination = _ensure_within(
             certs_dir, certs_dir / f"{_safe_slug(sibling)}.pem"
         )
-        sibling_ok, _rc2, _out2, _err2 = _activate_server_pem(
+        sibling_ok, sibling_rc, _out2, sibling_err = _activate_server_pem(
             sibling_destination, data, override_pin=True, allow_shadow=True
         )
         if sibling_ok:
-            _write_pin(sibling, checked_slot)
             also.append(sibling)
+        else:
+            ok, rc = False, sibling_rc
+            stderr = f"{sibling}: {(sibling_err or 'HAProxy refused it').strip()}"
+            restored, restore_error = _restore_server_pem(destination, previous)
+            stderr += (
+                f"; {checked_domain} was put back as it was"
+                if restored
+                else f"; putting {checked_domain} back failed too: {restore_error}"
+            )
 
     if ok:
         # Held from here on. Everything else that writes this directory --
@@ -3012,10 +3040,16 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
         # because a switch that the next renewal silently undoes is not a
         # switch, and the operator would find out from a browser.
         _write_pin(checked_domain, checked_slot)
-    LOG.warning(
-        "Standby certificate %s put into service for %s (issuer %s)",
-        checked_slot, checked_domain, described["issuer"],
-    )
+        for stem in also:
+            _write_pin(stem, checked_slot)
+    if ok:
+        LOG.warning(
+            "Standby certificate %s put into service for %s (issuer %s)",
+            checked_slot, checked_domain, described["issuer"],
+        )
+    else:
+        LOG.error("Standby certificate %s not put into service for %s: %s",
+                  checked_slot, checked_domain, stderr.strip()[:400])
     return {
         "ok": ok,
         "domain": checked_domain,

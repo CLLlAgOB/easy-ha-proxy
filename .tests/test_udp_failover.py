@@ -188,16 +188,58 @@ class Switching(unittest.TestCase):
         self.assertEqual((state["active"], state["primary_ok"], state["backup_ok"]), ("backup", False, True))
 
     def test_a_failing_apply_is_said_and_retried_with_the_file_in_place(self):
+        # The state file says "backup" at once; until the rules are applied
+        # traffic still goes to the dead main backend, so the apply is tried
+        # again until it works -- and the conntrack cleanup waits for it.
         self.up["10.0.0.5"] = False
+        refusals = [RuntimeError("unit failed")]
+        restarts = []
+
+        def flaky(args, **kw):
+            if args[:2] == ["systemctl", "restart"]:
+                restarts.append(args)
+                if refusals:
+                    raise refusals.pop()
+            self.commands.append(args)
+
+        controld.run_cmd.side_effect = flaky
+        self.ticks(3)
+        state = self.failover.public_state()
+        self.assertIn("could not be applied", state["error"])
+        self.assertEqual(self.written(), {"voip": "backup"})
+        self.assertTrue(state["forwards"]["voip"]["apply_pending"])
+        self.assertNotIn(["conntrack", "-D", "-p", "udp", "--reply-src", "10.0.0.5"], self.commands)
+        self.assertEqual(len(restarts), 1)
+
+        self.ticks(5)  # 25 s: still inside the retry delay
+        self.assertEqual(len(restarts), 1)
+        self.ticks(1)  # 30 s: tried again, and it works
+        self.assertEqual(len(restarts), 2)
+        state = self.failover.public_state()
+        self.assertIsNone(state["error"])
+        self.assertFalse(state["forwards"]["voip"]["apply_pending"])
+        self.assertIn(["conntrack", "-D", "-p", "udp", "--reply-src", "10.0.0.5"], self.commands)
+        self.ticks(20)
+        self.assertEqual(len(restarts), 2)  # nothing left to apply
+
+    def test_a_switch_back_before_the_first_took_effect_cancels_it(self):
+        self.up["10.0.0.5"] = False
+        restarts = []
 
         def refuse(args, **kw):
             if args[:2] == ["systemctl", "restart"]:
+                restarts.append(args)
                 raise RuntimeError("unit failed")
             self.commands.append(args)
 
         controld.run_cmd.side_effect = refuse
         self.ticks(3)
-        self.assertIn("could not be applied", self.failover.public_state()["error"])
+        self.assertTrue(self.failover.pending)
+        self.up = {"10.0.0.5": True, "10.0.0.6": False}  # backup dies, main answers: back at once
+        self.ticks(1)
+        self.assertEqual(self.written(), {})
+        self.assertEqual(self.failover.pending, {})  # the rules never left the main backend
+        self.assertFalse(self.failover.public_state()["forwards"]["voip"]["apply_pending"])
 
 
 class Checking(unittest.TestCase):
