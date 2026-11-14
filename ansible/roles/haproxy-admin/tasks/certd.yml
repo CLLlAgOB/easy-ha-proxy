@@ -31,10 +31,29 @@
     mode: "0644"
   register: certd_unit
 
+# dns-route53 has no per-lineage credentials option. The snap's timer
+# therefore uses certd's renewal mode to select each lineage's AWS profile.
+- name: "haproxy-certd | Ensure the Certbot renewal override directory"
+  ansible.builtin.file:
+    path: /etc/systemd/system/snap.certbot.renew.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "haproxy-certd | Bind automatic renewal to saved DNS profiles"
+  ansible.builtin.template:
+    src: certbot-renew.service.conf.j2
+    dest: /etc/systemd/system/snap.certbot.renew.service.d/easy-ha-proxy.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: certbot_renew_unit
+
 - name: "haproxy-certd | systemd daemon-reload if unit changed"
   ansible.builtin.systemd:
     daemon_reload: yes
-  when: certd_unit.changed
+  when: certd_unit.changed or certbot_renew_unit.changed
 
 - name: "haproxy-certd | Enable service"
   ansible.builtin.systemd:

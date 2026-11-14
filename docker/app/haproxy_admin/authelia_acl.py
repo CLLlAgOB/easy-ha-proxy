@@ -1,24 +1,33 @@
 # -*- coding: utf-8 -*-
 
 import json
+import hashlib
 import os
 import logging
+import secrets
 import socket
 import time
 from collections import OrderedDict
+from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 
 import requests
 import yaml
 from flask import (
     Blueprint,
+    abort,
     current_app,
     flash,
     redirect,
     render_template,
     request,
+    g,
+    session,
     url_for,
 )
+from itsdangerous import BadSignature, URLSafeSerializer
+
+from .i18n import translate
 
 logger = logging.getLogger("haproxy-admin.authelia-acl")
 
@@ -176,7 +185,9 @@ def load_rules_yaml() -> str:
     raise RuntimeError("invalid rules response from authelia-configd")
 
 
-def save_rules_from_yaml(rules_yaml: str) -> Tuple[bool, str]:
+def save_rules_from_yaml(
+    rules_yaml: str, *, expected_revision: str | None = None
+) -> Tuple[bool, str]:
     """
     Hands the YAML list of rules to authelia-configd to save:
 
@@ -188,12 +199,10 @@ def save_rules_from_yaml(rules_yaml: str) -> Tuple[bool, str]:
 
     Returns (ok, message) for the UI.
     """
-    resp = _configd_request(
-        {
-            "action": "rules_set",
-            "rules_yaml": rules_yaml,
-        }
-    )
+    payload = {"action": "rules_set", "rules_yaml": rules_yaml}
+    if expected_revision is not None:
+        payload["expected_revision"] = expected_revision
+    resp = _configd_request(payload)
 
     if not resp.get("ok"):
         return (
@@ -212,6 +221,89 @@ def save_rules_from_yaml(rules_yaml: str) -> Tuple[bool, str]:
 # ---------------------------------------------------------------------
 # Parsing Authelia rules into the UI structure
 # ---------------------------------------------------------------------
+
+
+def _rules_revision(rules: List[Dict[str, Any]]) -> str:
+    # Keep the serialization in sync with authelia-configd's _rules_revision.
+    data = yaml.safe_dump(rules, allow_unicode=True, sort_keys=True)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _load_backend_rules() -> List[Dict[str, Any]]:
+    rules_yaml = load_rules_yaml()
+    rules = yaml.safe_load(rules_yaml) if rules_yaml else []
+    if rules is None:
+        rules = []
+    if not isinstance(rules, list) or any(not isinstance(r, dict) for r in rules):
+        raise ValueError("Authelia rules YAML is not a list of rules")
+    return rules
+
+
+def _snapshot_serializer() -> URLSafeSerializer:
+    return URLSafeSerializer(current_app.secret_key, salt="authelia-acl-snapshot")
+
+
+def _snapshot_token(
+    rules: List[Dict[str, Any]], ui_rules: List[Dict[str, Any]]
+) -> str:
+    nonce = session.setdefault("authelia_acl_nonce", secrets.token_urlsafe(24))
+    return _snapshot_serializer().dumps({
+        "revision": _rules_revision(rules),
+        "nonce": nonce,
+        "user": getattr(g, "remote_user", ""),
+        "sources": [ui.get("source_index", "") for ui in ui_rules],
+    })
+
+
+def _verify_snapshot(token: str, rules: List[Dict[str, Any]], form: Dict[str, Any]) -> bool:
+    try:
+        snapshot = _snapshot_serializer().loads(token)
+    except BadSignature:
+        abort(400, description="Invalid access rules form. Reload the page.")
+    if (
+        not isinstance(snapshot, dict)
+        or not session.get("authelia_acl_nonce")
+        or snapshot.get("nonce") != session.get("authelia_acl_nonce")
+        or snapshot.get("user") != getattr(g, "remote_user", "")
+    ):
+        abort(400, description="Invalid access rules form. Reload the page.")
+    # Bind each submitted row to its original rule. Removing/changing a hidden
+    # reference must never turn a read-only AND rule into a new flat OR rule.
+    ui_rules = _collect_ui_rules_from_form(form)
+    if snapshot.get("sources") != [ui.get("source_index", "") for ui in ui_rules]:
+        abort(400, description="Invalid access rule references. Reload the page.")
+    return snapshot.get("revision") == _rules_revision(rules)
+
+
+def _rule_is_editable(rule: Dict[str, Any]) -> bool:
+    """The simple form cannot express AND subjects or advanced restrictions."""
+    if set(rule) - {"domain", "policy", "subject", "resources"}:
+        return False
+    domains = rule.get("domain")
+    domains = domains if isinstance(domains, list) else [domains]
+    if not domains or any(
+        not isinstance(d, str) or not d.strip() or "," in d for d in domains
+    ):
+        return False
+    policy = rule.get("policy")
+    if not isinstance(policy, str) or policy not in {"one_factor", "two_factor", "bypass", "deny"}:
+        return False
+    subject = rule.get("subject")
+    subjects = subject if isinstance(subject, list) else [subject]
+    for item in subjects:
+        if item is None:
+            continue
+        if not isinstance(item, str) or not item.startswith(("group:", "user:")):
+            return False
+        name = item.split(":", 1)[1]
+        if (
+            not name or name != name.strip() or any(c in name for c in ",\r\n")
+            or item == "group:authenticated"
+        ):
+            return False
+    resources = rule.get("resources")
+    resources = resources if isinstance(resources, list) else [resources]
+    return all(r is None or isinstance(r, str) for r in resources)
 
 
 def _normalize_domain(rule: Dict[str, Any]) -> str:
@@ -336,7 +428,9 @@ def _parse_resources_for_ui(resources: Any) -> str:
     return str(resources).strip()
 
 
-def _backend_rule_to_ui(rule: Dict[str, Any]) -> Dict[str, Any]:
+def _backend_rule_to_ui(
+    rule: Dict[str, Any], source_index: int | None = None
+) -> Dict[str, Any]:
     """
     Turns a rule from configuration.yml into the structure
     the authelia_acl_edit.html template uses.
@@ -348,9 +442,10 @@ def _backend_rule_to_ui(rule: Dict[str, Any]) -> Dict[str, Any]:
     groups, users, flag_auth, flag_anon = _parse_subject_for_ui(subject)
 
     resources_text = _parse_resources_for_ui(rule.get("resources"))
+    resources_text = resources_text.replace("\r\n", "\n").replace("\r", "\n")
 
     return {
-        "domains": domains,
+        "domains": domains.strip(),
         "policy": policy or "one_factor",
         "groups": ", ".join(groups),
         "users": ", ".join(users),
@@ -359,6 +454,9 @@ def _backend_rule_to_ui(rule: Dict[str, Any]) -> Dict[str, Any]:
         "flag_authenticated": flag_auth,
         "flag_anonymous": flag_anon,
         "resources": resources_text,
+        "source_index": "" if source_index is None else str(source_index),
+        "advanced": not _rule_is_editable(rule),
+        "original_yaml": yaml.safe_dump(rule, allow_unicode=True, sort_keys=False),
     }
 
 
@@ -371,6 +469,7 @@ def _empty_ui_rule() -> Dict[str, Any]:
         "flag_authenticated": False,
         "flag_anonymous": False,
         "resources": "",
+        "source_index": "",
     }
 
 
@@ -428,25 +527,15 @@ def _collect_ui_rules_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     try:
         total = int(form.get("total_rules", "0"))
-    except ValueError:
-        total = 0
+    except (ValueError, TypeError):
+        abort(400, description="Invalid access rules count.")
+    if total < 0 or total > 500:
+        abort(400, description="At most 500 access rules are allowed.")
 
     ui_rules: List[Dict[str, Any]] = []
 
     for idx in range(total):
         prefix = f"rule-{idx}-"
-        # A row is "empty" if it has no domains, groups, users or resources
-        # and the anonymous flag is not set. policy is ignored, so that its
-        # default one_factor does not make the row "non-empty".
-        has_any = False
-        for key in ("domains", "groups", "users", "resources"):
-            if form.get(prefix + key):
-                has_any = True
-                break
-        if not has_any and not _parse_bool(form, prefix + "flag_anonymous"):
-            ui_rules.append(_empty_ui_rule())
-            continue
-
         ui_rule = {
             "domains": (form.get(prefix + "domains") or "").strip(),
             "policy": (form.get(prefix + "policy") or "").strip() or "one_factor",
@@ -454,7 +543,9 @@ def _collect_ui_rules_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
             "users": (form.get(prefix + "users") or "").strip(),
             "flag_authenticated": _parse_bool(form, prefix + "flag_authenticated"),
             "flag_anonymous": _parse_bool(form, prefix + "flag_anonymous"),
-            "resources": (form.get(prefix + "resources") or "").strip(),
+            "resources": (form.get(prefix + "resources") or "").strip()
+                .replace("\r\n", "\n").replace("\r", "\n"),
+            "source_index": form.get(prefix + "source_index", ""),
         }
         ui_rules.append(ui_rule)
 
@@ -463,6 +554,7 @@ def _collect_ui_rules_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _convert_form_to_backend_rules(
     form: Dict[str, Any],
+    original_rules: List[Dict[str, Any]] | None = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     """
     Turns the form data into Authelia's backend rules.
@@ -476,8 +568,23 @@ def _convert_form_to_backend_rules(
     ui_rules = _collect_ui_rules_from_form(form)
     backend_rules: List[Dict[str, Any]] = []
     errors: List[str] = []
+    seen_sources: set[int] = set()
 
     for idx, ui in enumerate(ui_rules):
+        original = _original_rule_for_ui(ui, original_rules or [], seen_sources)
+        if original is not None:
+            original_ui = _backend_rule_to_ui(original)
+            fields = ("domains", "policy", "groups", "users", "flag_anonymous", "resources")
+            if all(ui.get(key) == original_ui.get(key) for key in fields):
+                backend_rules.append(deepcopy(original))
+                continue
+            if not _rule_is_editable(original):
+                errors.append(translate(
+                    "Rule #{number}: advanced rules cannot be edited in this form. "
+                    "Reload the page and use the configuration file to edit this rule.",
+                    number=idx + 1,
+                ))
+                continue
         domains_raw = (ui.get("domains") or "").strip()
         policy = (ui.get("policy") or "").strip() or "one_factor"
         groups_raw = (ui.get("groups") or "").strip()
@@ -534,9 +641,52 @@ def _convert_form_to_backend_rules(
             if res_lines:
                 rule["resources"] = res_lines
 
+        if original is not None:
+            # A policy edit must not rewrite an untouched subject/resources
+            # value, even when its scalar/list shape is representable here.
+            merged = deepcopy(original)
+            field_groups = {
+                "domain": ("domains",),
+                "policy": ("policy",),
+                "subject": ("groups", "users", "flag_anonymous"),
+                "resources": ("resources",),
+            }
+            for backend_key, ui_fields in field_groups.items():
+                if any(ui.get(key) != original_ui.get(key) for key in ui_fields):
+                    merged.pop(backend_key, None)
+                    if backend_key in rule:
+                        merged[backend_key] = rule[backend_key]
+            rule = merged
         backend_rules.append(rule)
 
     return backend_rules, ui_rules, errors
+
+
+def _original_rule_for_ui(
+    ui: Dict[str, Any], original_rules: List[Dict[str, Any]], seen: set[int]
+) -> Dict[str, Any] | None:
+    source = ui.get("source_index", "")
+    if source == "":
+        return None
+    try:
+        index = int(source)
+    except (ValueError, TypeError):
+        abort(400, description="Invalid access rule reference. Reload the page.")
+    if index < 0 or index >= len(original_rules) or index in seen:
+        abort(400, description="Invalid access rule reference. Reload the page.")
+    seen.add(index)
+    return original_rules[index]
+
+
+def _restore_rule_metadata(
+    ui_rules: List[Dict[str, Any]], original_rules: List[Dict[str, Any]]
+) -> None:
+    seen: set[int] = set()
+    for ui in ui_rules:
+        original = _original_rule_for_ui(ui, original_rules, seen)
+        if original is not None:
+            ui["advanced"] = not _rule_is_editable(original)
+            ui["original_yaml"] = yaml.safe_dump(original, allow_unicode=True, sort_keys=False)
 
 
 def _move_rule(rules: List[Dict[str, Any]], index: int, direction: str) -> None:
@@ -552,6 +702,8 @@ def _render_acl_template(
     *,
     active_group_domain: str | None = None,
     load_error: str | None = None,
+    snapshot_token: str = "",
+    original_rules: List[Dict[str, Any]] | None = None,
 ):
     """
     The one place that renders the template, so groups / total_rules /
@@ -564,6 +716,10 @@ def _render_acl_template(
     """
     if not ui_rules and not load_error:
         ui_rules = [_empty_ui_rule()]
+
+    if original_rules is not None:
+        _restore_rule_metadata(ui_rules, original_rules)
+        snapshot_token = _snapshot_token(original_rules, ui_rules)
 
     ui_rules = _attach_indices(ui_rules)
     groups = _group_ui_rules_by_domain(ui_rules)
@@ -581,6 +737,7 @@ def _render_acl_template(
         total_rules=total_rules,
         active_group_domain=active_group_domain or "",
         acl_load_error=load_error,
+        acl_snapshot=snapshot_token,
     )
 
 
@@ -591,24 +748,29 @@ def _render_acl_template(
 def edit_rules():
     form = request.form
 
+    try:
+        original_rules = _load_backend_rules()
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception("Failed to load Authelia rules")
+        return _render_acl_template([], load_error=str(exc))
+
+    if request.method == "POST":
+        if not _verify_snapshot(form.get("acl_snapshot", ""), original_rules, form):
+            return _render_acl_template(
+                [], load_error=translate(
+                    "Access rules changed since this page was loaded. Reload before editing."
+                )
+            ), 409
+
+    def render(ui_rules, **kwargs):
+        return _render_acl_template(
+            ui_rules, original_rules=original_rules, **kwargs
+        )
+
     # --- GET: just show the rules ---
     if request.method == "GET":
-        try:
-            rules_yaml = load_rules_yaml()
-            backend_rules: List[Dict[str, Any]] = []
-            obj: Any = []
-            if rules_yaml:
-                obj = yaml.safe_load(rules_yaml) or []
-            if isinstance(obj, list):
-                backend_rules = [r for r in obj if isinstance(r, dict)]
-            else:
-                raise ValueError("Authelia rules YAML is not a list")
-        except Exception as exc:  # noqa: BLE001
-            current_app.logger.exception("Failed to load Authelia rules")
-            return _render_acl_template([], load_error=str(exc))
-
-        ui_rules = [_backend_rule_to_ui(r) for r in backend_rules]
-        return _render_acl_template(ui_rules)
+        ui_rules = [_backend_rule_to_ui(r, i) for i, r in enumerate(original_rules)]
+        return render(ui_rules)
 
     # --- POST: the various actions ---
     active_group_domain = (form.get("active_group_domain") or "").strip()
@@ -617,12 +779,16 @@ def edit_rules():
     if "add_rule" in form:
         ui_rules = _collect_ui_rules_from_form(form)
 
+        if len(ui_rules) >= 500:
+            flash(translate("At most 500 access rules are allowed."), "danger")
+            return render(ui_rules, active_group_domain=active_group_domain)
+
         # A new rule never has a domain, so it lands in the group "New / without a domain"
         new_rule = _empty_ui_rule()
         ui_rules.append(new_rule)
 
         # Ask for the group without a domain to be open (active_group_domain == "")
-        return _render_acl_template(
+        return render(
             ui_rules,
             active_group_domain="",
         )
@@ -638,7 +804,7 @@ def edit_rules():
         if 0 <= del_idx < len(ui_rules):
             ui_rules.pop(del_idx)
 
-        return _render_acl_template(ui_rules, active_group_domain=active_group_domain)
+        return render(ui_rules, active_group_domain=active_group_domain)
 
     # 3) Move up or down
     if "move_rule_up" in form:
@@ -650,7 +816,7 @@ def edit_rules():
         if 0 <= idx < len(ui_rules):
             _move_rule(ui_rules, idx, "up")
 
-        return _render_acl_template(ui_rules, active_group_domain=active_group_domain)
+        return render(ui_rules, active_group_domain=active_group_domain)
 
     if "move_rule_down" in form:
         ui_rules = _collect_ui_rules_from_form(form)
@@ -661,18 +827,18 @@ def edit_rules():
         if 0 <= idx < len(ui_rules):
             _move_rule(ui_rules, idx, "down")
 
-        return _render_acl_template(ui_rules, active_group_domain=active_group_domain)
+        return render(ui_rules, active_group_domain=active_group_domain)
 
     # 4) Save (submit_action = save / apply)
     submit_action = form.get("submit_action")
     if submit_action in ("save", "apply"):
-        backend_rules, ui_rules, errors = _convert_form_to_backend_rules(form)
+        backend_rules, ui_rules, errors = _convert_form_to_backend_rules(form, original_rules)
 
         if errors:
             for msg in errors:
                 flash(msg, "danger")
             # Just render the form again, without saving
-            return _render_acl_template(
+            return render(
                 ui_rules,
                 active_group_domain=active_group_domain,
             )
@@ -692,20 +858,18 @@ def edit_rules():
                 f"Failed to serialize rules to YAML: {exc}",
                 "danger",
             )
-            return _render_acl_template(
+            return render(
                 ui_rules,
                 active_group_domain=active_group_domain,
             )
 
-        ok, msg = save_rules_from_yaml(rules_yaml)
-        flash(msg, "success" if ok else "danger")
-
-        # Rebuild ui_rules from backend_rules, so what is shown is what
-        # actually went into the configuration (a flat list without groups)
-        ui_rules = [_backend_rule_to_ui(r) for r in backend_rules]
+        ok, msg = save_rules_from_yaml(
+            rules_yaml, expected_revision=_rules_revision(original_rules)
+        )
+        flash(translate(msg), "success" if ok else "danger")
 
         if not ok:
-            return _render_acl_template(
+            return render(
                 ui_rules,
                 active_group_domain=active_group_domain,
             )
@@ -752,7 +916,7 @@ def edit_rules():
 
     # Just in case: render the current form again
     ui_rules = _collect_ui_rules_from_form(form)
-    return _render_acl_template(
+    return render(
         ui_rules,
         active_group_domain=active_group_domain,
     )

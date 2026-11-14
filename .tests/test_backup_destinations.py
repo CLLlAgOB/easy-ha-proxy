@@ -275,7 +275,8 @@ class UploadTests(DestinationTestCase):
         # An interrupted transfer must not look like a finished backup to
         # whatever prunes next.
         self.assertIn(".part", calls[0])
-        self.assertIn("rename", calls[0])
+        self.assertNotIn("rename", calls[0])
+        self.assertTrue(any(batch.startswith("rename ") for batch in calls[1:]))
 
     def test_a_verified_copy_allows_pruning(self):
         listing = "\n".join(
@@ -315,7 +316,12 @@ class UploadTests(DestinationTestCase):
         result = self.run_upload(sftp, ssh)
         self.assertFalse(result["ok"])
         self.assertEqual(result["pruned"], [])
-        self.assertFalse(any(batch.startswith("-rm ") for batch in batches))
+        # Failed verification may remove only the request's staging files.
+        cleanup = [batch for batch in batches if batch.startswith("-rm ")]
+        self.assertTrue(cleanup)
+        self.assertTrue(all(line.endswith('.part"') for batch in cleanup
+                            for line in batch.splitlines()))
+        self.assertFalse(any(batch.startswith("ls ") for batch in batches))
 
     def test_a_far_end_reporting_different_bytes_is_a_failure(self):
         def sftp(record, batch):

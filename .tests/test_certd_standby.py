@@ -1284,5 +1284,168 @@ class ADualKeyPairSurvivesAnException(StandbyFixture):
         self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "")
 
 
+
+class StandbySwitchTransactionTests(StandbyFixture):
+    stems = ("example.com-ecdsa", "example.com-rsa")
+
+    def prepare(self):
+        for index, stem in enumerate(self.stems):
+            self.deploy_active(stem, self.make_pem("example.com", "Original CA"))
+            CERTD.store_standby_certificate(
+                stem, "spare", self.make_pem("example.com", f"Standby {index}")
+            )
+            # Different previous slots catch rollback that simply unpins
+            # everything, or assumes both halves had the same prior hold.
+            CERTD._write_pin(stem, f"old-{index}")
+            live = CERTD._get_le_live_dir() / stem
+            live.mkdir(parents=True)
+            pem = self.make_pem("example.com", "Renewing CA")
+            cert, marker, key = pem.partition("-----BEGIN RSA PRIVATE KEY-----")
+            (live / "fullchain.pem").write_text(cert)
+            (live / "privkey.pem").write_text(marker + key)
+        return self.snapshot()
+
+    def snapshot(self):
+        return {
+            stem: ((CERTD.HAPROXY_CERTS_DIR / f"{stem}.pem").read_bytes(),
+                   CERTD._pin_path(stem).read_bytes())
+            for stem in self.stems
+        }
+
+    def test_a_pin_commit_failure_restores_the_exact_previous_holds_and_pems(self):
+        before = self.prepare()
+        real = Path.write_text
+
+        def full_disk(path, *args, **kwargs):
+            if path == CERTD._pin_path(self.stems[1]).with_name(".pinned.tmp"):
+                raise OSError(28, "No space left on device")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "write_text", full_disk):
+            result = CERTD.activate_standby_certificate(self.stems[0], "spare")
+        self.assertFalse(result["ok"])
+        self.assertIn("No space left", result["reload_error"])
+        self.assertEqual(result["also_switched"], [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_each_half_uses_its_own_stored_pem(self):
+        self.prepare()
+        result = CERTD.activate_standby_certificate(self.stems[0], "spare")
+        self.assertTrue(result["ok"])
+        for index, stem in enumerate(self.stems):
+            pem, pin = self.snapshot()[stem]
+            self.assertEqual(CERTD._describe_pem(pem)["issuer"], f"Standby {index}")
+            self.assertEqual(pin, b"spare\n")
+
+    def test_release_refusal_of_either_half_keeps_both_pems_and_holds(self):
+        for rejected_index in range(2):
+            with self.subTest(rejected_index=rejected_index):
+                if rejected_index == 0:
+                    before = self.prepare()
+                else:
+                    before = self.snapshot()
+                calls = []
+
+                def reload(calls=calls, rejected_index=rejected_index):
+                    calls.append(True)
+                    # Holds must survive every reload until both succeed.
+                    for index, stem in enumerate(self.stems):
+                        self.assertEqual(CERTD.read_pin(stem), f"old-{index}")
+                    return (1, "", "refused renewing PEM") if len(calls) == rejected_index + 1 else (0, "", "")
+
+                with mock.patch.object(CERTD, "_reload_haproxy", reload):
+                    result = CERTD.release_to_letsencrypt(self.stems[0])
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["restored"])
+                self.assertEqual(result["also_released"], [])
+                self.assertIn(self.stems[rejected_index], result["reload_error"])
+                self.assertIn("refused renewing PEM", result["reload_error"])
+                self.assertEqual(self.snapshot(), before)
+
+    def test_a_release_reload_exception_restores_both_pems_and_holds(self):
+        before = self.prepare()
+        with mock.patch.object(CERTD, "_reload_haproxy", side_effect=[
+            (0, "", ""), OSError("reload disappeared"), (0, "", "")
+        ]):
+            result = CERTD.release_to_letsencrypt(self.stems[0])
+        self.assertFalse(result["ok"])
+        self.assertIn("reload disappeared", result["reload_error"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_hold_removal_failure_rolls_back_a_successful_release(self):
+        before = self.prepare()
+        real = Path.unlink
+
+        def denied(path, *args, **kwargs):
+            if path == CERTD._pin_path(self.stems[1]):
+                raise PermissionError("hold removal denied")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", denied):
+            result = CERTD.release_to_letsencrypt(self.stems[0])
+        self.assertFalse(result["ok"])
+        self.assertIn("hold removal denied", result["reload_error"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_failed_rollback_reload_is_reported(self):
+        self.prepare()
+        with mock.patch.object(CERTD, "_reload_haproxy", side_effect=[
+            (0, "", ""), (1, "", "renewing PEM rejected"), (1, "", "rollback reload failed")
+        ]):
+            result = CERTD.release_to_letsencrypt(self.stems[0])
+        self.assertFalse(result["ok"])
+        self.assertIn("rollback reload failed", result["reload_error"])
+        self.assertIn("did not reload", result["reload_error"])
+
+    def test_a_pin_rollback_failure_is_reported_with_the_original_failure(self):
+        self.prepare()
+        real_write = Path.write_text
+        real_replace = Path.replace
+
+        def full_disk(path, *args, **kwargs):
+            if path == CERTD._pin_path(self.stems[1]).with_name(".pinned.tmp"):
+                raise OSError("pin commit full disk")
+            return real_write(path, *args, **kwargs)
+
+        def denied_restore(path, destination):
+            if path.name.startswith(".pin-"):
+                raise PermissionError("pin restore denied")
+            return real_replace(path, destination)
+
+        with mock.patch.object(Path, "write_text", full_disk), \
+                mock.patch.object(Path, "replace", denied_restore):
+            result = CERTD.activate_standby_certificate(self.stems[0], "spare")
+        self.assertFalse(result["ok"])
+        self.assertIn("pin commit full disk", result["reload_error"])
+        self.assertIn("restoring holds failed", result["reload_error"])
+        self.assertIn("pin restore denied", result["reload_error"])
+        self.assertIn(self.stems[0], result["reload_error"])
+
+    def test_pem_and_reload_rollback_failures_are_both_reported(self):
+        before = self.prepare()
+        real_replace = Path.replace
+
+        def denied_restore(path, destination):
+            if Path(destination).stem == self.stems[0] and path.read_bytes() == before[self.stems[0]][0]:
+                raise OSError("PEM restore denied")
+            return real_replace(path, destination)
+
+        with mock.patch.object(Path, "replace", denied_restore), \
+                mock.patch.object(CERTD, "_reload_haproxy", side_effect=[
+                    (0, "", ""), (1, "", "renewing PEM rejected"), (1, "", "rollback reload failed")
+                ]):
+            result = CERTD.release_to_letsencrypt(self.stems[0])
+        self.assertFalse(result["ok"])
+        self.assertIn("renewing PEM rejected", result["reload_error"])
+        self.assertIn("PEM restore denied", result["reload_error"])
+        self.assertIn("rollback reload failed", result["reload_error"])
+
+    def test_a_pair_with_only_one_live_lineage_stays_held(self):
+        before = self.prepare()
+        (CERTD._get_le_live_dir() / self.stems[1] / "privkey.pem").unlink()
+        with self.assertRaisesRegex(ValueError, "both renewing certificates"):
+            CERTD.release_to_letsencrypt(self.stems[0])
+        self.assertEqual(self.snapshot(), before)
+
 if __name__ == "__main__":
     unittest.main()

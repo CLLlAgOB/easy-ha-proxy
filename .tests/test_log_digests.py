@@ -112,6 +112,41 @@ class TheDigest(unittest.TestCase):
         later = MINUTE + guardd.DIGEST_KEEP_SECONDS + 3600
         self.assertEqual(self.digests.complete(0, later), [])
 
+    def test_producer_retention_does_not_need_a_monitoring_consumer(self):
+        request = guardd.parse_access_line(line())
+        collector = metricsd.Collector(metricsd.MetricsConfig(), mock.Mock())
+        collector.monitors["percentiles"] = False
+        collector.monitors["refusals"] = False
+        with mock.patch.object(metricsd, "unix_get_json") as client:
+            for minute in range(24 * 60):
+                now = MINUTE + minute * 60 + 1
+                self.digests.add(request, now, now)
+                collector.pull_digests(now)
+                self.assertLessEqual(
+                    len(self.digests._minutes), guardd.DIGEST_KEEP_SECONDS // 60 + 1
+                )
+        client.assert_not_called()
+        self.assertGreaterEqual(min(self.digests._minutes), now - guardd.DIGEST_KEEP_SECONDS)
+
+    def test_retention_scans_once_per_producer_minute(self):
+        class CountedMinutes(dict):
+            scans = 0
+
+            def __iter__(self):
+                self.scans += 1
+                return super().__iter__()
+
+        self.digests._minutes = CountedMinutes()
+        request = guardd.parse_access_line(line())
+        for second in range(60):
+            self.digests.add(request, MINUTE + second, MINUTE + second)
+        self.assertEqual(self.digests._minutes.scans, 1)
+        # A long pause is pruned immediately, including a late log line.
+        later = MINUTE + guardd.DIGEST_KEEP_SECONDS + 3600
+        self.digests.add(request, MINUTE, later)
+        self.assertEqual(self.digests._minutes, {})
+        self.assertEqual(self.digests._minutes.scans, 2)
+
     def test_the_engine_feeds_it_from_the_one_read_of_the_log(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

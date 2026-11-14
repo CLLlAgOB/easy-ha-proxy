@@ -147,6 +147,7 @@ class InstallerLocalizationTests(unittest.TestCase):
             )
             with (
                 mock.patch("easy_ha_proxy.require_root"),
+                mock.patch("easy_ha_proxy.hold_maintenance_lock"),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
                 mock.patch("easy_ha_proxy.backup_configuration"),
                 mock.patch("easy_ha_proxy.syntax_check") as syntax_check,

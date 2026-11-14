@@ -308,6 +308,41 @@ class OneFailureDoesNotStopTheRest(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual([r["ok"] for r in results], [False, False])
 
+    def post_command_failure(self, failure):
+        for name in ("first", "second"):
+            self.target(name, post_command="service reload" if name == "first" else "")
+            (self.dir / f"{name}.key").write_text("synthetic private key")
+            (self.dir / f"{name}.known_hosts").write_text("synthetic host key")
+        sent = []
+
+        def run(command, **kwargs):
+            if command[0] == "/usr/bin/ssh":
+                raise failure
+            self.assertEqual(command[0], "/usr/bin/sftp")
+            self.assertIn(b"CK", Path(kwargs["input"].decode().split('"')[1]).read_bytes())
+            sent.append(command[-1])
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(deliver, "uncovered_names", return_value=[]), \
+             mock.patch.object(deliver.subprocess, "run", side_effect=run):
+            results = deliver.deliver_all(self.lineage, ["a.example.com"])
+        self.assertEqual(len(sent), 2)
+        self.assertEqual([result["name"] for result in results], ["first", "second"])
+        self.assertEqual([result["ok"] for result in results], [True, True])
+        self.assertIn("file was delivered", results[0]["warning"])
+        self.assertNotIn("warning", results[1])
+        return results[0]["warning"]
+
+    def test_a_post_command_timeout_warns_and_the_next_target_receives_the_file(self):
+        warning = self.post_command_failure(
+            subprocess.TimeoutExpired(["/usr/bin/ssh"], deliver.SSH_TIMEOUT_SECONDS)
+        )
+        self.assertIn("timed out", warning)
+
+    def test_a_post_command_os_error_warns_and_the_next_target_receives_the_file(self):
+        warning = self.post_command_failure(OSError("the SSH client could not start"))
+        self.assertIn("SSH client could not start", warning)
+
     def test_a_target_with_no_key_says_so_rather_than_crashing(self):
         self.target("first")
         results = deliver.deliver_all(self.lineage, ["a.example.com"])

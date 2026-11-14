@@ -342,9 +342,17 @@ def run_post_command(record: Dict[str, Any]) -> Optional[str]:
         return None
     full = ssh_base_command(record, "/usr/bin/ssh")
     full += [f"{record['user']}@{record['host']}", "--", command]
-    result = subprocess.run(
-        full, capture_output=True, timeout=SSH_TIMEOUT_SECONDS, check=False
-    )
+    try:
+        result = subprocess.run(
+            full, capture_output=True, timeout=SSH_TIMEOUT_SECONDS, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            "the file was delivered but the command afterwards "
+            f"timed out after {SSH_TIMEOUT_SECONDS}s"
+        )
+    except OSError as exc:
+        return "the file was delivered but the command afterwards failed: " + str(exc)
     if result.returncode != 0:
         return (
             "the file was delivered but the command afterwards failed: "

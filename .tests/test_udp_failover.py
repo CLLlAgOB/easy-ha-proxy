@@ -176,10 +176,67 @@ class Switching(unittest.TestCase):
         self.assertEqual(self.failover.public_state()["forwards"], {})
         self.assertFalse(self.alerts.observe.call_args.kwargs["active"])
 
-    def test_a_restart_of_controld_rewrites_a_stale_file(self):
+    def test_a_restart_confirms_the_saved_backup_then_applies_a_return_to_primary(self):
         self.state_file.write_text('{"version": 1, "active": {"voip": "backup"}}')
-        self.ticks(1)  # a fresh controld starts on the main backend
+        self.ticks(1)
+        self.assertEqual(self.written(), {"voip": "backup"})
+        self.assertEqual(self.failover.public_state()["forwards"]["voip"]["active"], "backup")
+        self.assertEqual(self.commands.count(["systemctl", "restart", "iptables-haproxy-udp.service"]), 1)
+        # The firewall and saved state survived the controller restart. A
+        # later backup outage must actually move traffic to the healthy main.
+        self.up["10.0.0.6"] = False
+        switches = self.ticks(1)
+        self.assertEqual([(old, new) for _, old, new, _ in switches], [("backup", "primary")])
         self.assertEqual(self.written(), {})
+        self.assertEqual(self.commands.count(["systemctl", "restart", "iptables-haproxy-udp.service"]), 2)
+        self.assertIn(["conntrack", "-D", "-p", "udp", "--reply-src", "10.0.0.6"], self.commands)
+        self.ticks(20)
+        self.assertFalse(self.failover.public_state()["forwards"]["voip"]["apply_pending"])
+
+    def test_a_restart_does_not_send_traffic_back_to_an_unhealthy_primary(self):
+        self.state_file.write_text('{"version": 1, "active": {"voip": "backup"}}')
+        self.up["10.0.0.5"] = False
+        self.assertEqual(self.ticks(10), [])
+        self.assertEqual(self.written(), {"voip": "backup"})
+        self.assertEqual(self.failover.public_state()["forwards"]["voip"]["active"], "backup")
+        self.assertEqual(self.commands.count(["systemctl", "restart", "iptables-haproxy-udp.service"]), 1)
+
+    def test_saved_primary_is_reconciled_and_an_initial_failure_is_retried(self):
+        # An empty active map records the desired main side, but a failed
+        # command before the old process exited may have left backup rules.
+        self.state_file.write_text('{"version": 1, "active": {}}')
+        calls = []
+
+        def flaky(args, **kwargs):
+            if args[:2] == ["systemctl", "restart"]:
+                calls.append(args)
+                if len(calls) == 1:
+                    raise RuntimeError("transient restart error")
+            self.commands.append(args)
+
+        controld.run_cmd.side_effect = flaky
+        self.ticks(1)
+        self.assertTrue(self.failover.public_state()["forwards"]["voip"]["apply_pending"])
+        self.ticks(5)
+        self.assertEqual(len(calls), 1)
+        self.ticks(1)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(self.failover.public_state()["error"])
+        self.assertFalse(self.failover.public_state()["forwards"]["voip"]["apply_pending"])
+
+    def test_a_restart_reconciles_a_saved_forward_that_was_removed(self):
+        self.state_file.write_text('{"version": 1, "active": {"removed": "backup"}}')
+        self.failover.load_targets.side_effect = lambda: []
+        self.ticks(1)
+        self.assertEqual(self.written(), {})
+        self.assertIn(["systemctl", "restart", "iptables-haproxy-udp.service"], self.commands)
+        self.assertEqual(self.failover.public_state()["forwards"], {})
+
+    def test_a_restart_replaces_invalid_state_and_confirms_primary_rules(self):
+        self.state_file.write_text('{invalid json')
+        self.ticks(1)
+        self.assertEqual(json.loads(self.state_file.read_text()), {"version": 1, "active": {}})
+        self.assertIn(["systemctl", "restart", "iptables-haproxy-udp.service"], self.commands)
 
     def test_the_panel_sees_the_state(self):
         self.up["10.0.0.5"] = False

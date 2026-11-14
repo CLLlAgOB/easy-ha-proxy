@@ -843,6 +843,26 @@ to the browser: the form always starts empty, and saving replaces what is
 stored. A value containing a line break is refused, because the file is read by
 Certbot as root and one value must not be able to introduce another directive.
 
+Route53 profiles use the standard AWS shared-credentials format with a
+`[default]` section. The selected profile is supplied to Certbot through its
+environment, without putting keys in command-line arguments. Each issued
+Route53 lineage keeps a private profile binding under
+`/etc/letsencrypt/easy-ha-proxy-dns/`. The managed override for
+`snap.certbot.renew.service` renews lineages separately so different AWS
+accounts can be used on the same host; Certbot still decides which
+certificates are due and runs their hooks. A profile used by a Route53
+lineage cannot be deleted or changed to another provider until that lineage
+has been reissued with a different profile or validation method.
+
+Existing Route53 lineages without a binding keep the normal AWS credential
+chain. Reissue them through the panel with the desired profile to record the
+binding. A direct manual Certbot command also uses its normal credential
+chain; to select a stored profile explicitly, set
+`AWS_SHARED_CREDENTIALS_FILE=/etc/easy-ha-proxy/dns-providers/<profile>.ini`
+and `AWS_PROFILE=default` in that command's environment. Older sectionless
+Route53 files are converted on their first use through the panel or managed
+renewal.
+
 Only the profile name travels from the browser. The plugin name, the
 credentials path and every Certbot argument come from a fixed table, and a
 profile whose plugin is not installed is refused with the snap to install. A

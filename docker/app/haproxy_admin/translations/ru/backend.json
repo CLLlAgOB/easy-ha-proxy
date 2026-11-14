@@ -4,6 +4,13 @@
     "label": "Русский"
   },
   "messages": {
+    "Access rules changed since this page was loaded. Reload before editing.": "Правила доступа изменились после загрузки страницы. Перед редактированием обновите страницу.",
+    "At most 500 access rules are allowed.": "Допускается не более 500 правил доступа.",
+    "Invalid access rules count.": "Недопустимое количество правил доступа.",
+    "Invalid access rules form. Reload the page.": "Недопустимая форма правил доступа. Обновите страницу.",
+    "Invalid access rule reference. Reload the page.": "Недопустимая ссылка на правило доступа. Обновите страницу.",
+    "Invalid access rule references. Reload the page.": "Недопустимые ссылки на правила доступа. Обновите страницу.",
+    "Rule #{number}: advanced rules cannot be edited in this form. Reload the page and use the configuration file to edit this rule.": "Правило №{number}: расширенные правила нельзя редактировать в этой форме. Обновите страницу и измените это правило в конфигурационном файле.",
     "\n--- Full certbot output ---\n": "\n--- Полный вывод certbot ---\n",
     "\n[apply_cfg] Failed to create backup directory ": "\n[apply_cfg] Не удалось создать каталог бэкапов ",
     "\n[apply_cfg] Failed to save backup ": "\n[apply_cfg] Не удалось сохранить бэкап ",

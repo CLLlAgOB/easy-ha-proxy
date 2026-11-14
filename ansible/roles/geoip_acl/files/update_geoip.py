@@ -107,8 +107,27 @@ def file_matches_sha256(path: Path, expected: Any) -> bool:
         return False
 
 
+def country_acl_hashes(release: Path) -> dict[str, str]:
+    """Include names as well as contents: removing a country is a change."""
+
+    return {
+        path.name: sha256_file(path)
+        for path in sorted(release.glob("[A-Z][A-Z].cidr"))
+    }
+
+
+def country_acls_match(release: Path, expected: Any) -> bool:
+    if not isinstance(expected, dict):
+        return False
+    try:
+        return country_acl_hashes(release) == expected
+    except OSError:
+        return False
+
+
 def release_payload_matches(
-    release: Path, database_sha256: str, allowed_sha256: str
+    release: Path, database_sha256: str, allowed_sha256: str,
+    country_sha256: dict[str, str],
 ) -> bool:
     state = read_state(release / STATE_NAME)
     return (
@@ -117,6 +136,8 @@ def release_payload_matches(
         and str(state.get("allowed_sha256") or "").lower() == allowed_sha256
         and file_matches_sha256(release / DATABASE_NAME, database_sha256)
         and file_matches_sha256(release / ALLOWED_NAME, allowed_sha256)
+        and state.get("country_sha256") == country_sha256
+        and country_acls_match(release, country_sha256)
     )
 
 
@@ -893,6 +914,10 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
             previous_allowed_content = previous_allowed.read_bytes()
         except OSError:
             previous_allowed_content = None
+        try:
+            previous_country_sha256 = country_acl_hashes(previous_release or directory)
+        except OSError:
+            previous_country_sha256 = None
 
         periods = month_candidates(datetime.now(timezone.utc))
         wanted_period = periods[0]
@@ -911,6 +936,10 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
                 current_state.get("allowed_sha256"),
             )
         )
+        country_hash_matches = bool(
+            previous_release is not None
+            and country_acls_match(previous_release, current_state.get("country_sha256"))
+        )
         state_matches = (
             not args.force_download
             and previous_release is not None
@@ -925,6 +954,7 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
             == access_filter_enabled
             and database_hash_matches
             and allowed_hash_matches
+            and country_hash_matches
             and (
                 not access_filter_enabled
                 or (previous_release / ALLOWED_NAME).stat().st_size > 0
@@ -1000,7 +1030,6 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
             ):
                 (build_root / ALLOWED_NAME).write_bytes(previous_allowed_content)
             allowed_content = (build_root / ALLOWED_NAME).read_bytes()
-            acl_changed = previous_allowed_content != allowed_content
             allowed_sha256 = hashlib.sha256(allowed_content).hexdigest()
             published_allowed_count = sum(
                 bool(line.strip()) and not line.lstrip().startswith(b"#")
@@ -1008,6 +1037,11 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
             )
             for code, networks in per_country.items():
                 write_networks(build_root / f"{code}.cidr", networks)
+            country_sha256 = country_acl_hashes(build_root)
+            acl_changed = (
+                previous_allowed_content != allowed_content
+                or previous_country_sha256 != country_sha256
+            )
 
             config_hash = hashlib.sha256(
                 json.dumps(
@@ -1016,6 +1050,7 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
                         "countries": countries,
                         "access_filter_enabled": access_filter_enabled,
                         "allowed_sha256": allowed_sha256,
+                        "country_sha256": country_sha256,
                     },
                     sort_keys=True,
                 ).encode("utf-8")
@@ -1038,6 +1073,7 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
                 "country_networks": counts,
                 "allowed_networks": published_allowed_count,
                 "allowed_sha256": allowed_sha256,
+                "country_sha256": country_sha256,
                 "access_filter_enabled": access_filter_enabled,
             }
             (build_root / STATE_NAME).write_text(
@@ -1047,7 +1083,7 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
             set_release_permissions(build_root)
 
             if release.exists():
-                if release_payload_matches(release, db_sha256, allowed_sha256):
+                if release_payload_matches(release, db_sha256, allowed_sha256, country_sha256):
                     shutil.rmtree(build_root)
                     build_root = release
                 else:
@@ -1113,7 +1149,7 @@ def update(args: argparse.Namespace, *, lock_held: bool = False) -> None:
             elif not acl_changed:
                 log("HAProxy ACL is unchanged; reload is not required")
 
-            if old_target and database_hash_matches and allowed_hash_matches:
+            if old_target and database_hash_matches and allowed_hash_matches and country_hash_matches:
                 atomic_symlink(old_target, directory / "previous")
             remove_legacy_country_files(directory)
             log(

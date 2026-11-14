@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import configparser
 import email.parser
 import email.policy
 import io
@@ -30,13 +31,13 @@ import json
 import logging
 import os
 import re
-import secrets
 import shutil
 import signal
 import socketserver
 import ssl
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -448,7 +449,8 @@ def _dns_profile_path(name: str) -> Path:
 
 
 def _run_bounded(
-    argv: Sequence[str], *, timeout: float, text: bool = True
+    argv: Sequence[str], *, timeout: float, text: bool = True,
+    env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess:
     """Run a command; past ``timeout``, stop it and everything it started.
 
@@ -466,6 +468,7 @@ def _run_bounded(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
+        env=env,
         start_new_session=True,
     )
     try:
@@ -594,6 +597,101 @@ def _read_dns_profile(path: Path) -> Dict[str, Any]:
     return {"provider": provider, "values": values}
 
 
+def _write_private_file(path: Path, data: bytes) -> None:
+    """Replace root-owned credential/metadata files without an open-read gap."""
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _dns_binding_path(lineage: str) -> Path:
+    if not lineage or lineage in (".", "..") or Path(lineage).name != lineage:
+        raise ValueError("invalid Certbot lineage name")
+    return _get_letsencrypt_root_dir() / "easy-ha-proxy-dns" / f"{lineage}.json"
+
+
+
+def _renewal_authenticator(conf: Path) -> str:
+    # Certbot uses ConfigObj, whose nested [[webroot_map]] sections cannot be
+    # read by configparser. Only this scalar in renewalparams is needed.
+    match = re.search(r"(?m)^\s*authenticator\s*=\s*([^\s#]+)", conf.read_text(encoding="utf-8"))
+    return match[1] if match else ""
+
+
+def _dns_profile_lineages(profile: str) -> List[str]:
+    """Active lineages that need this profile during unattended renewal."""
+    root = _get_letsencrypt_root_dir()
+    used = []
+    for path in sorted((root / "easy-ha-proxy-dns").glob("*.json")):
+        conf = root / "renewal" / f"{path.stem}.conf"
+        if not conf.is_file():
+            continue
+        try:
+            if _renewal_authenticator(conf) != "dns-route53":
+                continue
+            binding = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(binding, dict):
+                raise ValueError("invalid binding")
+        except (OSError, ValueError) as exc:
+            # Do not delete credentials while a broken binding makes their
+            # ownership impossible to establish safely.
+            raise ValueError(f"cannot read DNS renewal binding for {path.stem}") from exc
+        if binding.get("profile") == profile:
+            used.append(path.stem)
+    return used
+
+
+def _route53_environment(profile: str) -> Dict[str, str]:
+    """Give boto one explicit, profile-specific AWS file, never ambient keys.
+
+    Certbot is a classic snap. An absolute file under /etc is available even
+    when its service hides /root with ProtectHome=tmpfs; ~/.aws is not. Do not
+    put credentials in argv or rely on the snap's choice of HOME.
+    """
+    path = _dns_profile_path(profile)
+    stored = _read_dns_profile(path)
+    if stored["provider"] != "route53":
+        raise ValueError(f"DNS profile {profile!r} is not a Route53 profile")
+    values = stored["values"]
+    keys = DNS_PROVIDERS["route53"]["keys"]
+    if any(not values.get(key, "").strip() for key in keys):
+        raise ValueError("Route53 requires both AWS access key and secret key")
+    # Earlier profiles were sectionless Certbot-style INI, which AWS cannot
+    # read. Migrate them atomically on first use, retaining their values.
+    parser = configparser.RawConfigParser()
+    try:
+        parser.read_string(path.read_text(encoding="utf-8"))
+        valid = parser.has_section("default") and all(
+            parser.get("default", key, raw=True) == values[key] for key in keys
+        )
+    except configparser.Error:
+        valid = False
+    if not valid:
+        lines = ["# provider: route53", "[default]"]
+        lines.extend(f"{key} = {values[key]}" for key in keys)
+        _write_private_file(path, ("\n".join(lines) + "\n").encode("utf-8"))
+    env = {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
+    env.update({
+        "AWS_SHARED_CREDENTIALS_FILE": str(path.resolve()),
+        "AWS_PROFILE": "default",
+        "AWS_DEFAULT_PROFILE": "default",
+        "AWS_CONFIG_FILE": "/dev/null",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "BOTO_CONFIG": "/dev/null",
+    })
+    return env
+
+
 def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Write a profile's credentials with mode 0600."""
 
@@ -619,7 +717,12 @@ def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
     stored = _read_dns_profile(path)
     kept = stored["values"] if stored["provider"] == provider else {}
 
+    if stored["provider"] != provider and _dns_profile_lineages(name):
+        raise ValueError("this DNS profile is used for automatic renewal; reissue those lineages first")
+
     lines = [f"# provider: {provider}"]
+    if provider == "route53":
+        lines.append("[default]")
     for key in spec["keys"]:
         raw = supplied.get(key)
         if raw is None or str(raw) == "":
@@ -634,33 +737,21 @@ def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
         if any(character in value for character in "\r\n\x00"):
             raise ValueError(f"{key} contains a line break")
         lines.append(f"{key} = {value}")
-    if len(lines) == 1:
+    if len(lines) == (2 if provider == "route53" else 1):
         raise ValueError("no credentials were supplied")
+    if provider == "route53" and len(lines) != 4:
+        raise ValueError("Route53 requires both AWS access key and secret key")
 
-    DNS_CREDENTIALS_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
-    os.chmod(DNS_CREDENTIALS_DIR, 0o700)
-    temporary = DNS_CREDENTIALS_DIR / f".{name}.{secrets.token_hex(8)}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    except Exception:
-        with contextlib.suppress(OSError):
-            os.unlink(temporary)
-        raise
+    _write_private_file(path, ("\n".join(lines) + "\n").encode("utf-8"))
     LOG.info("Saved DNS provider profile %s (%s)", name, provider)
     return {"name": name, "provider": provider}
 
 
 def delete_dns_provider(name: str) -> Dict[str, Any]:
     path = _dns_profile_path(str(name or "").strip().lower())
+    used = _dns_profile_lineages(path.stem)
+    if used:
+        raise ValueError("this DNS profile is used for automatic renewal by " + ", ".join(used))
     existed = path.exists()
     with contextlib.suppress(FileNotFoundError):
         path.unlink()
@@ -701,8 +792,8 @@ def _dns_challenge_flags(profile: str, propagation: Any = None) -> List[str]:
 
     flags = [f"--{plugin}", "--preferred-challenges", "dns-01"]
     if provider != "route53":
-        # route53 reads the environment or the instance role; the others take
-        # a credentials file.
+        # Route53 uses the AWS shared credentials file selected in the
+        # child environment; its plugin has no credentials-file argument.
         flags.extend([f"--{plugin}-credentials", str(_dns_profile_path(profile))])
     flags.extend([f"--{plugin}-propagation-seconds", str(seconds)])
     return flags
@@ -762,6 +853,8 @@ def _run_certbot_for_lineage(
         key_type,
         "--cert-name",
         lineage,
+        "--config-dir",
+        str(_get_letsencrypt_root_dir()),
         "--keep-until-expiring",
     ]
 
@@ -783,7 +876,39 @@ def _run_certbot_for_lineage(
 
     LOG.info("Running certbot for lineage %s: %s", lineage, " ".join(cmd))
 
-    proc = _run_bounded(cmd, timeout=_certbot_timeout(dns_profile, dns_propagation))
+    env = None
+    binding_path = _dns_binding_path(lineage)
+    previous_binding = binding_path.read_bytes() if binding_path.exists() else None
+    route53 = bool(dns_profile and _dns_provider_of(dns_profile) == "route53")
+    if route53:
+        env = _route53_environment(dns_profile)
+        # Write before issuance so the first unattended renewal cannot run
+        # between creation of the lineage and creation of its binding.
+        if not CERTD_DRY_RUN:
+            _write_private_file(binding_path, json.dumps({"profile": dns_profile}).encode("utf-8"))
+    try:
+        proc = _run_bounded(cmd, timeout=_certbot_timeout(dns_profile, dns_propagation), env=env)
+    except Exception:
+        if route53 and not CERTD_DRY_RUN:
+            if previous_binding is None:
+                binding_path.unlink(missing_ok=True)
+            else:
+                _write_private_file(binding_path, previous_binding)
+        raise
+    if not CERTD_DRY_RUN:
+        if proc.returncode == 0:
+            if not route53 and previous_binding is not None:
+                conf = _get_letsencrypt_root_dir() / "renewal" / f"{lineage}.conf"
+                # keep-until-expiring can succeed without reconfiguring an
+                # existing lineage. Keep its credentials until the actual
+                # authenticator has changed, not merely the requested one.
+                if conf.is_file() and _renewal_authenticator(conf) not in ("", "dns-route53"):
+                    binding_path.unlink(missing_ok=True)
+        elif route53:
+            if previous_binding is None:
+                binding_path.unlink(missing_ok=True)
+            else:
+                _write_private_file(binding_path, previous_binding)
 
     return {
         "lineage": lineage,
@@ -792,6 +917,42 @@ def _run_certbot_for_lineage(
         "stderr": proc.stderr,
         "cmd": " ".join(cmd),
     }
+
+
+def renew_certificates() -> int:
+    """The snap timer's runner, preserving each lineage's saved DNS profile.
+
+    Certbot still decides whether each certificate is due and runs its normal
+    hooks. Separate invocations are necessary: boto's environment is process
+    wide, while two Route53 lineages can belong to different AWS accounts.
+    Direct manual Certbot commands keep their normal AWS credential chain.
+    """
+    failed = False
+    root = _get_letsencrypt_root_dir()
+    for conf in sorted((root / "renewal").glob("*.conf")):
+        try:
+            env = None
+            binding_path = _dns_binding_path(conf.stem)
+            # A direct manual reconfiguration to HTTP/another DNS provider
+            # supersedes an old binding without altering that provider's env.
+            authenticator = _renewal_authenticator(conf)
+            if binding_path.exists() and authenticator == "dns-route53":
+                binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                env = _route53_environment(binding["profile"])
+            command = [str(CERTBOT_BIN), "renew", "--non-interactive", "--quiet",
+                       "--cert-name", conf.stem, "--config-dir", str(root),
+                       "--no-random-sleep-on-renew"]
+            proc = _run_bounded(
+                command, timeout=CERTBOT_TIMEOUT_SECONDS + DNS_PROPAGATION_MAX, env=env
+            )
+            if proc.returncode:
+                failed = True
+                LOG.error("Certbot renewal failed for %s (rc=%s): %s",
+                          conf.stem, proc.returncode, (proc.stderr or "").strip()[:400])
+        except Exception as exc:  # pylint: disable=broad-except
+            failed = True
+            LOG.error("Cannot renew %s: %s", conf.stem, exc)
+    return int(failed)
 
 
 # ───────────────────── X.509 ─────────────────────
@@ -1241,8 +1402,21 @@ def _put_back_pems(touched: List[Tuple[str, Path, Optional[bytes]]]) -> str:
             if previous is None:
                 destination.unlink(missing_ok=True)
             else:
-                destination.write_bytes(previous)
-                _set_cert_permissions(destination)
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=destination.parent, prefix=".cert-", delete=False
+                ) as handle:
+                    temporary = Path(handle.name)
+                    try:
+                        handle.write(previous)
+                        handle.flush()
+                    except Exception:
+                        temporary.unlink(missing_ok=True)
+                        raise
+                try:
+                    _set_cert_permissions(temporary)
+                    temporary.replace(destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
         except OSError as exc:
             failed.append(f"{stem} ({exc})")
     try:
@@ -1251,7 +1425,10 @@ def _put_back_pems(touched: List[Tuple[str, Path, Optional[bytes]]]) -> str:
         rc, reload_error = -1, str(exc)
     names = ", ".join(stem for stem, _destination, _previous in changed)
     if failed:
-        return f"; putting back failed for {', '.join(failed)}: these files still hold the new certificate"
+        message = f"; putting back failed for {', '.join(failed)}: these files still hold the new certificate"
+        if rc not in (None, 0):
+            message += f"; HAProxy rollback reload failed: {(reload_error or '').strip()[:300]}"
+        return message
     if rc not in (None, 0):
         return (f"; {names} put back as they were, but HAProxy did not reload: "
                 f"{(reload_error or '').strip()[:300]}")
@@ -2689,14 +2866,17 @@ def _write_pin(stem: str, slot: str) -> None:
     path = _pin_path(stem)
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(f"{slot}\n", encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(f"{slot}\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _clear_pin(stem: str) -> None:
-    with contextlib.suppress(ValueError, OSError):
-        _pin_path(stem).unlink(missing_ok=True)
+    # A failed removal is a failed switch, not a successfully released hold.
+    _pin_path(stem).unlink(missing_ok=True)
 
 
 def _describe_pem(data: bytes) -> Dict[str, Any]:
@@ -2996,160 +3176,164 @@ def adopt_deployed_as_standby(domain: Any, slot: Any) -> Dict[str, Any]:
     }
 
 
-def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
-    """Put a standby into service for one name.
+_STANDBY_SWITCH_LOCK = threading.RLock()
 
-    Deliberately a decision somebody makes, never one this daemon makes for
-    them: a spare is usually signed by an authority most clients do not
-    trust, so swapping to it unasked would trade one broken page for another
-    without anybody deciding that was the better trade.
+
+def _switch_certificate_files(
+    changes: Sequence[Tuple[str, Optional[bytes]]], pin: Optional[str]
+) -> Tuple[bool, Optional[int], str]:
+    """Commit the PEMs and their holds together, restoring both on failure.
+
+    Install holds before putting standbys in service so deploy hooks cannot
+    replace them during the switch. Release holds only after every renewing
+    PEM has been accepted. Snapshots are read before the first mutation; an
+    unreadable hold must never be mistaken for an absent one.
     """
+    certs_dir = _get_haproxy_certs_dir()
+    pems: List[Tuple[str, Path, Optional[bytes]]] = []
+    pins: List[Tuple[str, Path, Optional[bytes]]] = []
+    for stem, _data in changes:
+        destination = _ensure_within(certs_dir, certs_dir / f"{_safe_slug(stem)}.pem")
+        pems.append((stem, destination, destination.read_bytes() if destination.exists() else None))
+        path = _pin_path(stem)
+        pins.append((stem, path, path.read_bytes() if path.exists() else None))
 
+    rc: Optional[int] = None
+    active_stem = changes[0][0]
+    try:
+        if pin is not None:
+            for active_stem, _data in changes:
+                _write_pin(active_stem, pin)
+        for (name, data), (_stem, destination, _previous) in zip(changes, pems, strict=True):
+            active_stem = name
+            if data is None:
+                continue
+            ok, rc, _stdout, stderr = _activate_server_pem(
+                destination, data, override_pin=True, allow_shadow=True
+            )
+            if not ok:
+                raise RuntimeError((stderr or "HAProxy refused it").strip()[:200])
+        if pin is None:
+            for active_stem, _data in changes:
+                _clear_pin(active_stem)
+        return True, rc, ""
+    except Exception as exc:  # pylint: disable=broad-except
+        error = f"{active_stem}: {str(exc)[:200]}" + _put_back_pems(pems)
+        pin_errors = []
+        for stem, path, previous in pins:
+            try:
+                current = path.read_bytes() if path.exists() else None
+                if current == previous:
+                    continue
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    # Do not call _write_pin: restore the exact original
+                    # bytes, including holds on another standby slot.
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", dir=path.parent, prefix=".pin-", delete=False
+                    ) as handle:
+                        temporary = Path(handle.name)
+                        try:
+                            handle.write(previous)
+                            handle.flush()
+                            os.fchmod(handle.fileno(), 0o644)
+                        except Exception:
+                            temporary.unlink(missing_ok=True)
+                            raise
+                    try:
+                        temporary.replace(path)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            except OSError as pin_exc:
+                pin_errors.append(f"{stem} ({pin_exc})")
+        if pin_errors:
+            error += "; restoring holds failed for " + ", ".join(pin_errors)
+        return False, rc, error
+
+
+def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
+    """Put a standby and its dual-key sibling into service as one switch."""
     checked_domain = _standby_key(domain)
     checked_slot = _standby_slot(slot)
-    path = _standby_path(checked_domain, checked_slot)
-    if not path.is_file():
-        raise ValueError(f"no standby named {checked_slot!r} for this name")
-
-    data = path.read_bytes()
-    _validate_server_pem(data, _stem_domain(checked_domain))
-    described = _describe_pem(data)
-    if not described["usable"]:
-        raise ValueError(
-            "that standby is not valid today "
-            f"({described['not_before']} to {described['not_after']})"
-        )
-
-    certs_dir = _get_haproxy_certs_dir()
-    destination = _ensure_within(
-        certs_dir, certs_dir / f"{_safe_slug(checked_domain)}.pem"
-    )
-    # Every file this switch touches, with what it held before, so that any
-    # failure -- HAProxy refusing a file, or an exception such as a full disk
-    # half way -- puts all of them back.
-    touched: List[Tuple[str, Path, Optional[bytes]]] = [
-        (checked_domain, destination, destination.read_bytes() if destination.exists() else None)
-    ]
-    try:
-        ok, rc, _stdout, stderr = _activate_server_pem(
-            destination, data, override_pin=True, allow_shadow=True
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        ok, rc, stderr = False, None, f"{checked_domain}: {exc}" + _put_back_pems(touched)
-
-    # A dual-key site is two files for one name. Moving only one of them
-    # would leave the other still claiming that name with the old
-    # certificate -- the shadowing this feature exists to prevent, recreated
-    # by the act of preventing it. The sibling comes along when it holds the
-    # same standby, and the pair moves as one: when the sibling fails, the
-    # first file goes back too and nothing is pinned. A half switch used to
-    # answer ok with the sibling's error dropped.
-    also: List[str] = []
-    sibling = _sibling_stem(checked_domain)
-    if ok and sibling and _standby_path(sibling, checked_slot).is_file():
-        sibling_destination = _ensure_within(
-            certs_dir, certs_dir / f"{_safe_slug(sibling)}.pem"
-        )
-        touched.append((sibling, sibling_destination,
-                        sibling_destination.read_bytes() if sibling_destination.exists() else None))
-        try:
-            sibling_ok, sibling_rc, _out2, sibling_err = _activate_server_pem(
-                sibling_destination, data, override_pin=True, allow_shadow=True
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            sibling_ok, sibling_rc, sibling_err = False, None, str(exc)
-        if sibling_ok:
-            also.append(sibling)
-        else:
-            ok, rc = False, sibling_rc
-            stderr = (f"{sibling}: {(sibling_err or 'HAProxy refused it').strip()}"
-                      + _put_back_pems(touched))
-
+    with _STANDBY_SWITCH_LOCK:
+        stems = [checked_domain]
+        sibling = _sibling_stem(checked_domain)
+        if sibling and _standby_path(sibling, checked_slot).is_file():
+            stems.append(sibling)
+        changes: List[Tuple[str, Optional[bytes]]] = []
+        descriptions = []
+        for stem in stems:
+            path = _standby_path(stem, checked_slot)
+            if not path.is_file():
+                raise ValueError(f"no standby named {checked_slot!r} for this name")
+            data = path.read_bytes()
+            _validate_server_pem(data, _stem_domain(stem))
+            described = _describe_pem(data)
+            if not described["usable"]:
+                raise ValueError(
+                    "that standby is not valid today "
+                    f"({described['not_before']} to {described['not_after']})"
+                )
+            changes.append((stem, data))
+            descriptions.append(described)
+        ok, rc, stderr = _switch_certificate_files(changes, checked_slot)
+    described = descriptions[0]
     if ok:
-        # Held from here on. Everything else that writes this directory --
-        # the renewal hook, the Ansible handlers, the orphan sweep, this
-        # daemon's own issue paths -- checks the pin and leaves it alone,
-        # because a switch that the next renewal silently undoes is not a
-        # switch, and the operator would find out from a browser.
-        _write_pin(checked_domain, checked_slot)
-        for stem in also:
-            _write_pin(stem, checked_slot)
-    if ok:
-        LOG.warning(
-            "Standby certificate %s put into service for %s (issuer %s)",
-            checked_slot, checked_domain, described["issuer"],
-        )
+        LOG.warning("Standby certificate %s put into service for %s (issuer %s)",
+                    checked_slot, checked_domain, described["issuer"])
     else:
         LOG.error("Standby certificate %s not put into service for %s: %s",
-                  checked_slot, checked_domain, stderr.strip()[:400])
+                  checked_slot, checked_domain, stderr)
     return {
         "ok": ok,
         "domain": checked_domain,
         "slot": checked_slot,
-        "also_switched": also,
+        "also_switched": stems[1:] if ok else [],
         "issuer": described["issuer"],
         "not_after": described["not_after"],
         "reload_rc": rc,
-        "reload_error": "" if ok else stderr.strip()[:400],
-    }
-
-
-def _release_one(stem: str) -> Dict[str, Any]:
-    """Lift the hold on one file and restore its lineage if there is one."""
-
-    live = _get_le_live_dir() / stem
-    fullchain = live / "fullchain.pem"
-    privkey = live / "privkey.pem"
-    _clear_pin(stem)
-    if not (fullchain.is_file() and privkey.is_file()):
-        LOG.warning(
-            "Released %s, but no live lineage to restore; the next issue "
-            "will install it", stem,
-        )
-        return {"ok": True, "domain": stem, "restored": False}
-    certs_dir = _get_haproxy_certs_dir()
-    destination = _ensure_within(
-        certs_dir, certs_dir / f"{_safe_slug(stem)}.pem"
-    )
-    ok, rc, _stdout, stderr = _activate_server_pem(
-        destination,
-        fullchain.read_bytes() + privkey.read_bytes(),
-        override_pin=True,
-        allow_shadow=True,
-    )
-    LOG.warning("Released %s back to the renewing certificate", stem)
-    return {
-        "ok": ok,
-        "domain": stem,
-        "restored": ok,
-        "reload_rc": rc,
-        "reload_error": "" if ok else stderr.strip()[:400],
+        "reload_error": stderr,
     }
 
 
 def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
-    """Hand a name back to the renewing certificate.
-
-    Clears the hold and reinstalls from the live lineage straight away, so
-    the name is not left on a standby that nothing is going to renew while
-    waiting for the next renewal to come round.
-    """
-
+    """Restore renewing PEMs before lifting any hold on the pair."""
     stem = _standby_key(domain)
-    if not read_pin(stem):
-        raise ValueError("that name is not being held on a standby")
-
-    also: List[str] = []
-    sibling = _sibling_stem(stem)
-    if sibling and read_pin(sibling):
-        # Both halves went over together; both come back together.
-        _release_one(sibling)
-        also.append(sibling)
-
-    result = _release_one(stem)
-    result["also_released"] = also
-    if not result["restored"]:
-        result["message"] = "released; no Let's Encrypt certificate is on disk yet"
+    with _STANDBY_SWITCH_LOCK:
+        if not read_pin(stem):
+            raise ValueError("that name is not being held on a standby")
+        stems = [stem]
+        sibling = _sibling_stem(stem)
+        if sibling and read_pin(sibling):
+            stems.append(sibling)
+        changes: List[Tuple[str, Optional[bytes]]] = []
+        for name in stems:
+            live = _get_le_live_dir() / name
+            fullchain, privkey = live / "fullchain.pem", live / "privkey.pem"
+            data = None
+            if fullchain.is_file() and privkey.is_file():
+                data = fullchain.read_bytes() + privkey.read_bytes()
+                _validate_server_pem(data, _stem_domain(name))
+            changes.append((name, data))
+        available = [data is not None for _name, data in changes]
+        if any(available) and not all(available):
+            raise ValueError("both renewing certificates must be on disk to restore this pair")
+        ok, rc, stderr = _switch_certificate_files(changes, None)
+    result = {
+        "ok": ok,
+        "domain": stem,
+        "restored": ok and all(available),
+        "also_released": stems[1:] if ok else [],
+        "reload_rc": rc,
+        "reload_error": stderr,
+    }
+    if ok:
+        LOG.warning("Released %s back to the renewing certificate", ", ".join(stems))
+        if not all(available):
+            result["message"] = "released; no Let's Encrypt certificate is on disk yet"
+    else:
+        LOG.error("Cannot release %s back to the renewing certificate: %s", ", ".join(stems), stderr)
     return result
 
 
@@ -4691,6 +4875,8 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         "delete",
         "--cert-name",
         lineage,
+        "--config-dir",
+        str(_get_letsencrypt_root_dir()),
         "--non-interactive",
     ]
 
@@ -4700,6 +4886,8 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
     rc = proc.returncode
     ok = rc == 0
+    if ok:
+        _dns_binding_path(lineage).unlink(missing_ok=True)
 
     return 200, {
         "ok": ok,
@@ -5175,4 +5363,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--renew"]:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+        sys.exit(renew_certificates())
     main()

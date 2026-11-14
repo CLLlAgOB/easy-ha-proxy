@@ -239,6 +239,8 @@ REQUEST_FIELDS = {
 
 STATE_LOCK = threading.RLock()
 OPERATION_THREAD_LOCK = threading.Lock()
+DESTINATION_UPLOAD_LOCKS_GUARD = threading.Lock()
+DESTINATION_UPLOAD_LOCKS: dict[tuple[str, ...], tuple[Any, int]] = {}
 CONNECTION_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 STOP_EVENT = threading.Event()
 SHUTDOWN_REQUESTED = threading.Event()
@@ -3346,6 +3348,144 @@ def s3_prune(record: dict[str, Any], victims: list[str]) -> list[str]:
     return removed
 
 
+@contextlib.contextmanager
+def sftp_upload_lock(record: dict[str, Any]):
+    """Keep publication, verification and retention together for this folder.
+
+    Use the remote identity, so two saved profiles pointing at the same
+    destination share a lock. Waiting requests count as users too; the last
+    request removes its entry rather than accumulating locks forever.
+    """
+    key = (
+        str(record.get("host") or "").lower().rstrip("."),
+        str(record.get("port") or 22),
+        str(record.get("user") or ""),
+        normalize_remote_dir(record["path"]),
+    )
+    with DESTINATION_UPLOAD_LOCKS_GUARD:
+        lock, users = DESTINATION_UPLOAD_LOCKS.get(key, (threading.Lock(), 0))
+        DESTINATION_UPLOAD_LOCKS[key] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with DESTINATION_UPLOAD_LOCKS_GUARD:
+            _lock, users = DESTINATION_UPLOAD_LOCKS[key]
+            if users == 1:
+                del DESTINATION_UPLOAD_LOCKS[key]
+            else:
+                DESTINATION_UPLOAD_LOCKS[key] = (lock, users - 1)
+
+
+def publish_sftp_file(
+    record: dict[str, Any], staging: str, final: str, expected: str, size: int
+) -> bool:
+    """Publish without ever unlinking an existing copy; return whether moved.
+
+    OpenSSH uses atomic replacement where the server supports it. A plain
+    SFTP server can refuse a rename over an existing file. In that case an
+    exact match makes a retry successful too, but transfer-only verification
+    cannot prove that the *existing* file is the one we intended to send.
+    """
+    result = run_sftp(record, f"rename {remote_quote(staging)} {remote_quote(final)}\n")
+    if result.returncode == 0:
+        return True
+    same, _method, _detail = verify_remote_copy(
+        {**record, "verify": "auto"}, final, expected, size
+    )
+    if same:
+        return False
+    detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:500]
+    raise BackupdError(
+        "the copy could not be published safely; an existing file was kept: " + detail,
+        code="upstream",
+    )
+
+
+def upload_sftp_backup(
+    record: dict[str, Any], backup_id: str, archive: Path,
+    remote_name: str, expected: str, size: int,
+) -> dict[str, Any]:
+    remote_dir = record["path"]
+    remote_file = remote_join(remote_dir, remote_name)
+    token = uuid.uuid4().hex
+    staging = f"{remote_file}.{token}.part"
+    staging_checksum = f"{remote_file}.sha256.{token}.part"
+    pending = [staging, staging_checksum]
+    checksum_body = remote_checksum_body(expected, remote_name)
+    response = {
+        "ok": True,
+        "backup_id": backup_id,
+        "destination": record["name"],
+        "bytes": size,
+        "pruned": [],
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="backupd-upload-") as work:
+            checksum_copy = Path(work) / (remote_name + ".sha256")
+            checksum_copy.write_bytes(checksum_body)
+            batch = (
+                f"-mkdir {remote_quote(remote_dir)}\n"
+                f"put {remote_quote(str(archive))} {remote_quote(staging)}\n"
+                f"put {remote_quote(str(checksum_copy))} {remote_quote(staging_checksum)}\n"
+            )
+            result = run_sftp(record, batch)
+        if result.returncode != 0:
+            detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:500]
+            raise BackupdError(f"the upload failed: {detail}", code="upstream")
+
+        # Verify before publication: a bad retry cannot replace a good final
+        # archive, even when the server offers atomic rename-overwrite.
+        verified, method, detail = verify_remote_copy(record, staging, expected, size)
+        response.update(verified=verified, verified_by=method)
+        if not verified:
+            response["ok"] = False
+            response["error"] = detail or "the copy could not be verified"
+            report_alert(
+                "backup.failed",
+                f"{backup_id}@{record['name']}",
+                "The off-host copy could not be verified",
+                response["error"],
+            )
+            return response
+
+        if publish_sftp_file(record, staging, remote_file, expected, size):
+            pending.remove(staging)
+        if publish_sftp_file(
+            record, staging_checksum, remote_file + ".sha256",
+            hashlib.sha256(checksum_body).hexdigest(), len(checksum_body),
+        ):
+            pending.remove(staging_checksum)
+
+        victims = retention_victims(remote_listing(record), record)
+        if victims:
+            prune = "".join(
+                f"-rm {remote_quote(remote_join(remote_dir, name))}\n"
+                f"-rm {remote_quote(remote_join(remote_dir, name + '.sha256'))}\n"
+                for name in victims
+            )
+            run_sftp(record, prune)
+            response["pruned"] = victims
+        return response
+    except (BackupdError, OSError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc)[:500]
+        report_alert(
+            "backup.failed",
+            f"{backup_id}@{record['name']}",
+            "The off-host copy of the backup failed",
+            detail,
+        )
+        raise BackupdError(f"the upload failed: {detail}", code="upstream") from exc
+    finally:
+        if pending:
+            # Only this request's temporary names are ours to clean up. Never
+            # remove a final archive to recover from a refused rename.
+            try:
+                run_sftp(record, "".join(f"-rm {remote_quote(path)}\n" for path in pending))
+            except (BackupdError, OSError, subprocess.TimeoutExpired):
+                LOG.warning("Could not clean up temporary upload for %s", record["name"])
+
+
 def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
     """Copy one finished archive to one destination, then prune the far end."""
     backup_id = identifier(request.get("backup_id"), "backup id")
@@ -3375,68 +3515,10 @@ def upload_backup(request: dict[str, Any]) -> dict[str, Any]:
             response["pruned"] = s3_prune(record, victims)
         return response
 
-    remote_dir = record["path"]
-    remote_file = remote_join(remote_dir, remote_name)
-    # Upload beside the final name and rename, so an interrupted transfer
-    # cannot look like a complete backup to whoever prunes next.
-    staging = remote_file + ".part"
-    with tempfile.TemporaryDirectory(prefix="backupd-upload-") as work:
-        checksum_copy = Path(work) / (remote_name + ".sha256")
-        checksum_copy.write_bytes(remote_checksum_body(expected, remote_name))
-        batch = (
-            f"-mkdir {remote_quote(remote_dir)}\n"
-            f"put {remote_quote(str(archive))} {remote_quote(staging)}\n"
-            f"-rm {remote_quote(remote_file)}\n"
-            f"rename {remote_quote(staging)} {remote_quote(remote_file)}\n"
-            f"put {remote_quote(str(checksum_copy))} "
-            f"{remote_quote(remote_file + '.sha256')}\n"
+    with sftp_upload_lock(record):
+        return upload_sftp_backup(
+            record, backup_id, archive, remote_name, expected, size
         )
-        result = run_sftp(record, batch)
-    if result.returncode != 0:
-        detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:500]
-        report_alert(
-            "backup.failed",
-            f"{backup_id}@{record['name']}",
-            "The off-host copy of the backup failed",
-            detail,
-        )
-        raise BackupdError(f"the upload failed: {detail}", code="upstream")
-
-    verified, method, detail = verify_remote_copy(
-        record, remote_file, expected, size
-    )
-    response = {
-        "ok": True,
-        "backup_id": backup_id,
-        "destination": record["name"],
-        "bytes": size,
-        "verified": verified,
-        "verified_by": method,
-        "pruned": [],
-    }
-    if not verified:
-        # The new copy is not proven, so nothing old is removed: a broken
-        # upload must never be the reason the last good copy disappears.
-        response["ok"] = False
-        response["error"] = detail or "the copy could not be verified"
-        report_alert(
-            "backup.failed",
-            f"{backup_id}@{record['name']}",
-            "The off-host copy could not be verified",
-            response["error"],
-        )
-        return response
-
-    victims = retention_victims(remote_listing(record), record)
-    if victims:
-        prune = "".join(
-            f"-rm {remote_quote(remote_join(remote_dir, name))}\n"
-            f"-rm {remote_quote(remote_join(remote_dir, name + '.sha256'))}\n"
-            for name in victims
-        )
-        run_sftp(record, prune)
-        response["pruned"] = victims
-    return response
 
 
 def test_destination(request: dict[str, Any]) -> dict[str, Any]:

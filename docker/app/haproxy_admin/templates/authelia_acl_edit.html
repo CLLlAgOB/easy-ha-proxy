@@ -4,6 +4,12 @@
 
 {% block content %}
 
+{% for category, flashed_message in get_flashed_messages(with_categories=true) %}
+<p class="result-message {{ 'success' if category == 'success' else ('warning' if category == 'warning' else 'error') }}">
+  {{ _(flashed_message) }}
+</p>
+{% endfor %}
+
 <p  class="u-mb-2 text-muted text-sm">
   Only rules are edited here <code>access_control.rules</code>.
   General settings (port, logging, storage, Redis, etc.) are edited on the page
@@ -20,6 +26,7 @@
 {% else %}
 <form method="post" id="authelia-acl-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="acl_snapshot" value="{{ acl_snapshot }}">
   <input type="hidden" name="total_rules" value="{{ total_rules }}">
   <input type="hidden" name="active_group_domain" id="active_group_domain" value="{{ active_group_domain or '' }}">
 
@@ -74,6 +81,7 @@
 
     {% for rule in group.rules %}
     {% set idx = rule.idx %}
+    <input type="hidden" name="rule-{{ idx }}-source_index" value="{{ rule.source_index }}">
     <div class="u-background-var-surface-1 u-mt-2 card" >
       <div class="flex items-center justify-between u-gap-2 flex-wrap card-header"
         >
@@ -102,6 +110,18 @@
       </div>
 
       <div class="card-body">
+
+        {% if rule.advanced %}
+        <p class="text-muted">This rule uses advanced options and is preserved unchanged.
+          Edit it in the Authelia configuration file. You can move or delete it here.</p>
+        <pre class="mono notranslate" translate="no" data-i18n-skip>{{ rule.original_yaml }}</pre>
+        {% for field in ['domains', 'policy', 'groups', 'users', 'resources'] %}
+        <input type="hidden" name="rule-{{ idx }}-{{ field }}" value="{{ rule[field] }}">
+        {% endfor %}
+        {% if rule.flag_anonymous %}
+        <input type="hidden" name="rule-{{ idx }}-flag_anonymous" value="on">
+        {% endif %}
+        {% else %}
 
         <!-- Domain(s) -->
         <div  class="u-mb-2">
@@ -204,6 +224,8 @@
             If the list is empty, the rule applies to all paths on this domain.
           </div>
         </div>
+
+        {% endif %}
 
       </div> <!-- card-body -->
     </div> <!-- card -->

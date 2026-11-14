@@ -122,6 +122,7 @@ class GeoIPACLTests(unittest.TestCase):
         release.mkdir(parents=True)
         (release / updater.DATABASE_NAME).write_bytes(b"old-database")
         (release / updater.ALLOWED_NAME).write_text("192.0.2.0/24\n", encoding="ascii")
+        (release / "US.cidr").write_text("192.0.2.0/24\n", encoding="ascii")
         (release / updater.STATE_NAME).write_text(
             json.dumps(
                 {
@@ -136,6 +137,7 @@ class GeoIPACLTests(unittest.TestCase):
                     "allowed_sha256": updater.sha256_file(
                         release / updater.ALLOWED_NAME
                     ),
+                    "country_sha256": updater.country_acl_hashes(release),
                 }
             )
             + "\n",
@@ -219,6 +221,7 @@ class GeoIPACLTests(unittest.TestCase):
                 "allowed_sha256": updater.sha256_file(
                     root / "releases/old" / updater.ALLOWED_NAME
                 ),
+                "country_sha256": updater.country_acl_hashes(root / "releases/old"),
             }
             (root / "releases/old" / updater.STATE_NAME).write_text(
                 json.dumps(state), encoding="utf-8"
@@ -252,6 +255,7 @@ class GeoIPACLTests(unittest.TestCase):
                         "countries": ("US",),
                         "access_filter_enabled": True,
                         "allowed_sha256": expected_allowed,
+                        "country_sha256": {"US.cidr": expected_allowed},
                     },
                     sort_keys=True,
                 ).encode("utf-8")
@@ -270,6 +274,7 @@ class GeoIPACLTests(unittest.TestCase):
                 "access_filter_enabled": True,
                 "database_sha256": database_sha256,
                 "allowed_sha256": expected_allowed,
+                "country_sha256": {"US.cidr": expected_allowed},
             }
             (release / updater.STATE_NAME).write_text(
                 json.dumps(state), encoding="utf-8"
@@ -328,6 +333,109 @@ class GeoIPACLTests(unittest.TestCase):
                 "192.0.2.0/24\n",
             )
             self.assertTrue(legacy_country.is_file())
+
+    def test_country_reassignment_reloads_even_when_allowed_union_is_unchanged(self) -> None:
+        networks = ["8.8.8.0/24", "9.9.9.0/24", "2001:4860::/32", "2606:4700::/32"]
+        records = [(value, {"country": {"iso_code": code}}) for value, code in zip(
+            networks, ("CA", "US", "CA", "US"), strict=True
+        )]
+        for reject in (False, True):
+            with self.subTest(rollback=reject), tempfile.TemporaryDirectory() as temporary:
+                updater = load_module("geoip_country_reassignment", UPDATER_PATH,
+                                      fake_maxminddb(lambda _path, mode=None: FakeReader(records)))
+                updater.MIN_DATABASE_NODES = 1
+                root = Path(temporary)
+                self._old_release(updater, root)
+                old = (root / "current").resolve()
+                (old / "US.cidr").write_text(networks[0] + "\n" + networks[2] + "\n")
+                (old / "CA.cidr").write_text(networks[1] + "\n" + networks[3] + "\n")
+                (old / updater.ALLOWED_NAME).write_text("\n".join(networks) + "\n")
+                state = updater.read_state(old / updater.STATE_NAME)
+                state.update(countries=["CA", "US"],
+                             allowed_sha256=updater.sha256_file(old / updater.ALLOWED_NAME),
+                             country_sha256=updater.country_acl_hashes(old))
+                (old / updater.STATE_NAME).write_text(json.dumps(state))
+                before = {path.name: path.read_bytes() for path in old.iterdir()}
+                args = self._args(root, skip_reload=False)
+                args.country = ["CA", "US"]
+                with (
+                    mock.patch.object(updater, "download_database",
+                                      side_effect=lambda _url, build, _periods: self._new_database(build)),
+                    mock.patch.object(updater, "haproxy_is_active", return_value=True),
+                    mock.patch.object(updater, "validate_reload_and_probe",
+                                      side_effect=[(False, "rejected"), (True, "recovered")]
+                                      if reject else [(True, "ok")]) as reload,
+                ):
+                    if reject:
+                        with self.assertRaisesRegex(updater.GeoIPUpdateError, "rollback succeeded"):
+                            updater.update(args)
+                    else:
+                        updater.update(args)
+                current = (root / "current").resolve()
+                self.assertEqual((current / updater.ALLOWED_NAME).read_bytes(), before[updater.ALLOWED_NAME])
+                self.assertEqual(reload.call_count, 2 if reject else 1)
+                if reject:
+                    self.assertEqual(current, old)
+                    self.assertEqual({path.name: path.read_bytes() for path in old.iterdir()}, before)
+                else:
+                    self.assertNotEqual((current / "US.cidr").read_bytes(), before["US.cidr"])
+                    self.assertEqual(updater.read_state(current / updater.STATE_NAME)["country_sha256"],
+                                     updater.country_acl_hashes(current))
+
+    def test_country_manifest_changes_include_removed_files(self) -> None:
+        for remove_country in (False, True):
+            with self.subTest(remove_country=remove_country), tempfile.TemporaryDirectory() as temporary:
+                updater = load_module("geoip_country_set", UPDATER_PATH, fake_maxminddb())
+                root = Path(temporary)
+                self._old_release(updater, root)
+                old = (root / "current").resolve()
+                if remove_country:
+                    (old / "CA.cidr").write_bytes((old / "US.cidr").read_bytes())
+                network = ipaddress.ip_network("192.0.2.0/24")
+                acl = ([network], {"US": [network]}, {"US": {"ipv4": 1, "ipv6": 0}},
+                       FakeMetadata(), 700_000)
+                with (
+                    mock.patch.object(updater, "download_database",
+                                      side_effect=lambda _url, build, _periods: self._new_database(build)),
+                    mock.patch.object(updater, "derive_acl", return_value=acl),
+                    mock.patch.object(updater, "haproxy_is_active", return_value=True),
+                    mock.patch.object(updater, "validate_reload_and_probe", return_value=(True, "ok")) as reload,
+                ):
+                    updater.update(self._args(root, skip_reload=False))
+                self.assertEqual(reload.call_count, int(remove_country))
+                self.assertEqual(set(updater.country_acl_hashes((root / "current").resolve())), {"US.cidr"})
+
+    def test_country_checksum_mismatch_repairs_current_month_and_release_collision(self) -> None:
+        for damage in ("changed", "missing"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as temporary:
+                updater = load_module("geoip_country_repair", UPDATER_PATH, fake_maxminddb())
+                root = Path(temporary)
+                period = updater.month_candidates(datetime.now(timezone.utc))[0]
+
+                def download(_url, build, _periods, selected_period=period):
+                    path, _period, url, metadata = self._new_database(build)
+                    return path, selected_period, url, metadata
+
+                with (mock.patch.object(updater, "download_database", side_effect=download),
+                      mock.patch.object(updater, "derive_acl", return_value=self._new_acl())):
+                    updater.update(self._args(root, skip_reload=True))
+                broken = (root / "current").resolve()
+                if damage == "changed":
+                    (broken / "US.cidr").write_text("198.51.100.0/24\n")
+                else:
+                    (broken / "US.cidr").unlink()
+                with (mock.patch.object(updater, "download_database") as download_again,
+                      mock.patch.object(updater, "derive_acl", return_value=self._new_acl()) as derive):
+                    args = self._args(root, skip_reload=True)
+                    args.force_download = False
+                    updater.update(args)
+                download_again.assert_not_called()
+                derive.assert_called_once()
+                repaired = (root / "current").resolve()
+                self.assertNotEqual(repaired, broken)
+                self.assertIn("-repair-", repaired.name)
+                self.assertEqual((repaired / "US.cidr").read_text(), "203.0.113.0/24\n")
+                self.assertFalse((root / "previous").exists())
 
     def test_legacy_haproxy_config_skips_guarded_probe(self) -> None:
         updater = load_module(

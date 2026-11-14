@@ -236,6 +236,7 @@ UDP_MAX_PORT_RANGE = 1024
 # UDP failover: a forward with a backup backend is moved to it when its main
 # backend stops answering, and back once the main one has answered for a while.
 UDP_FAILOVER_STATE = Path(os.getenv("HP_UDP_FAILOVER", "/run/easy-ha-proxy/udp-failover.json"))
+UDP_FAILOVER_STATE_MAX_BYTES = 64 * 1024
 UDP_CONFIG = Path(os.getenv("HP_UDP_CONFIG", "/opt/haproxy-admin/config/udp.yml"))
 UDP_GENERATOR = os.getenv("HP_UDP_GENERATOR", "/usr/local/sbin/haproxy-udp-forward.py")
 UDP_HEALTH_INTERVAL = max(2, int(os.getenv("HP_UDP_HEALTH_INTERVAL", "5")))
@@ -374,8 +375,35 @@ class UdpFailover:
         self.pending: Dict[str, tuple] = {}
         self.apply_error: "str | None" = None
         self.retry_at = 0.0
+        self._initialized = False
+        self._reconcile_pending = False
 
     # -- reading ----------------------------------------------------------
+    def _startup_state(self) -> tuple[dict[str, str], bool]:
+        """Recover the desired sides, without treating them as applied rules.
+
+        A controller restart leaves the firewall and this file in place. A
+        previous command may have failed after changing rules, so a saved
+        state (including an empty one) needs a confirmed apply on startup.
+        """
+        try:
+            with UDP_FAILOVER_STATE.open(encoding="utf-8") as handle:
+                raw = handle.read(UDP_FAILOVER_STATE_MAX_BYTES + 1)
+            if len(raw) > UDP_FAILOVER_STATE_MAX_BYTES:
+                raise ValueError("state exceeds the size limit")
+            data = json.loads(raw)
+            if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("active"), dict):
+                raise ValueError("invalid state schema")
+            active = data["active"]
+            if any(not isinstance(name, str) or side not in ("primary", "backup") for name, side in active.items()):
+                raise ValueError("invalid saved backend side")
+            return {name: side for name, side in active.items() if side == "backup"}, True
+        except FileNotFoundError:
+            return {}, False
+        except (OSError, ValueError) as exc:
+            LOG.warning("UDP failover state could not be recovered; reconciling the current configuration: %s", exc)
+            return {}, True
+
     def load_targets(self) -> list[dict]:
         try:
             info = UDP_CONFIG.stat()
@@ -421,6 +449,16 @@ class UdpFailover:
         now = time.time() if now is None else now
         with self.lock:
             targets = self.load_targets()
+            startup_active: dict[str, str] = {}
+            startup_sync = False
+            if not self._initialized:
+                # Do not overwrite a saved choice while the configuration
+                # needed to interpret it is temporarily unreadable.
+                if self.error:
+                    return []
+                startup_active, startup_sync = self._startup_state()
+                self._reconcile_pending = startup_sync
+                self._initialized = True
             switches = []
             names = set()
             for target in targets:
@@ -428,7 +466,9 @@ class UdpFailover:
                 if not name:
                     continue
                 names.add(name)
-                entry = self.state.setdefault(name, {"active": "primary", "since": now, "fails": 0, "oks": 0})
+                entry = self.state.setdefault(name, {"active": startup_active.get(name, "primary"), "since": now, "fails": 0, "oks": 0})
+                if self._reconcile_pending:
+                    self.pending[name] = (entry["active"], target)
                 primary_ok = self.probe(target.get("primary"), target.get("check", "ping"), target.get("health_port"))
                 backup_ok = self.probe(target.get("backup"), target.get("check", "ping"), target.get("health_port"))
                 entry.update(primary_ok=primary_ok, backup_ok=backup_ok, checked_at=now,
@@ -446,12 +486,12 @@ class UdpFailover:
                 self.state.pop(gone)
                 self.pending.pop(gone, None)
                 self._report(gone, False, "", now, force=True)
-            if switches or self._file_out_of_step():
+            if switches or startup_sync or self._file_out_of_step():
                 for name, _old, new, target in switches:
                     self.state[name].update(active=new, since=now, fails=0, oks=0)
                     self.pending[name] = (new, target)
                 self._write_state()
-            if self.pending and (switches or now >= self.retry_at):
+            if (self.pending or self._reconcile_pending) and (switches or now >= self.retry_at):
                 self._apply(now)
             for name, entry in self.state.items():
                 self._report(name, entry["active"] == "backup", self._detail(name, entry), now,
@@ -497,6 +537,7 @@ class UdpFailover:
             self.retry_at = now + UDP_APPLY_RETRY_SECONDS
             return
         done, self.pending, self.apply_error = self.pending, {}, None
+        self._reconcile_pending = False
         for _name, (new, target) in done.items():
             # Flows to the side not wanted, wherever the rules sent before.
             left = target.get("backup" if new == "primary" else "primary")

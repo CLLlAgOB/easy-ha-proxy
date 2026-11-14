@@ -4,6 +4,7 @@
     "label": "Русский"
   },
   "messages": {
+    "This rule uses advanced options and is preserved unchanged. Edit it in the Authelia configuration file. You can move or delete it here.": "Это правило содержит расширенные параметры и сохраняется без изменений. Редактируйте его в конфигурационном файле Authelia. Здесь можно переместить или удалить правило.",
     "${Math.floor(sec / 3600)} hr": "${Math.floor(sec / 3600)} ч",
     "${Math.floor(sec / 60)} min": "${Math.floor(sec / 60)} мин",
     "${Math.floor(sec / 86400)} days": "${Math.floor(sec / 86400)} дн",

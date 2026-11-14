@@ -86,9 +86,9 @@ REBOOT_DELAY_SECONDS = 30
 REBOOT_SYSTEMD_UNIT_PREFIX = "easy-ha-proxy-reboot"
 UPDATE_SOURCE_REFRESHED_ENV = "EASY_HA_PROXY_UPDATE_SOURCE_REFRESHED"
 # One maintenance operation at a time: the update broker and the backup
-# daemon take this lock for every update, backup, inspection and restore. An
-# update typed on the command line takes it as well, or it runs over one
-# started from the panel -- and each sees the other's restarts as failures.
+# daemon take this lock for every update, backup, inspection and restore.
+# Mutating installer commands take it as well, before reading configuration,
+# or they can overwrite a restore or race a backup started from the panel.
 MAINTENANCE_LOCK_PATH = Path(
     os.environ.get(
         "EASY_HA_PROXY_MAINTENANCE_LOCK",
@@ -2771,6 +2771,8 @@ def set_migration_value(
 
 def command_migrate_domain(args: argparse.Namespace) -> None:
     require_root()
+    if not args.plan_only:
+        hold_maintenance_lock()
     directory = config_dir()
     promote_production = bool(getattr(args, "promote_production", False))
     if promote_production and not is_test_mode(directory):
@@ -3132,6 +3134,7 @@ def command_migrate_domain(args: argparse.Namespace) -> None:
 
 def command_install(args: argparse.Namespace) -> None:
     require_root()
+    hold_maintenance_lock()
     directory = configure_interactively(
         overwrite=args.reconfigure,
         test_mode=args.test_mode,
@@ -3315,10 +3318,10 @@ def started_by_update_broker(cgroup_path: Path = Path("/proc/self/cgroup")) -> b
 
 
 def hold_maintenance_lock(path: Path | None = None) -> None:
-    """Take the maintenance lock for this update, or refuse to start.
+    """Take the maintenance lock for this operation, or refuse to start.
 
-    Not waited for: an update that queues silently behind a restore is worse
-    than one that says why it cannot start. Held until the process exits,
+    Not waited for: report a competing operation instead of silently queuing
+    behind it. Held until the process exits,
     across the restart into the refreshed installer.
     """
 
@@ -3474,6 +3477,7 @@ def command_set_channels(args: argparse.Namespace) -> None:
         or args.image_channel is not None
         or getattr(args, "branch", None) is not None
     ):
+        hold_maintenance_lock()
         persist_deployment_channels(
             release_channel=release_channel,
             source_channel=args.source_channel,
@@ -3518,6 +3522,7 @@ def command_language(args: argparse.Namespace) -> None:
     """Persist the assistant, UI, and Authelia notification language."""
 
     require_root()
+    hold_maintenance_lock()
     directory = config_dir()
     variables_path = directory / "vars.yml"
     authelia_path = directory / "authelia.yml"
@@ -3660,6 +3665,7 @@ def command_apply_restored(args: argparse.Namespace) -> None:
 
 def command_configure(args: argparse.Namespace) -> None:
     require_root()
+    hold_maintenance_lock()
     directory = configure_interactively(
         overwrite=True,
         test_mode=None,

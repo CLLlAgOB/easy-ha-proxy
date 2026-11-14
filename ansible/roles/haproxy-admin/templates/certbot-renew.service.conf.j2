@@ -1,0 +1,12 @@
+# Managed by easy-ha-proxy. Keep the snap timer and Certbot's due/hook logic,
+# but give each Route53 lineage its own AWS credential environment.
+[Service]
+ExecStart=
+ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py --renew
+Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
+Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
+# The runner bounds every Certbot subprocess. A single global 90s timeout
+# would terminate a valid batch with several DNS propagation waits.
+TimeoutStartSec=infinity
+KillMode=control-group
+UMask=0077

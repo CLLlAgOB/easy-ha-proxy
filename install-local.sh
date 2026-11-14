@@ -107,7 +107,10 @@ if [[ "${use_existing_source}" == "true" ]]; then
 elif [[ -d "${source_dir}/.git" ]]; then
   log "Updating source checkout"
   git -C "${source_dir}" fetch --depth=1 origin "${branch}"
-  git -C "${source_dir}" reset --hard "origin/${branch}"
+  # A shallow clone only tracks its original branch. Fetching another branch
+  # need not create origin/<branch>, so use the commit this fetch delivered.
+  fetched_revision="$(git -C "${source_dir}" rev-parse --verify 'FETCH_HEAD^{commit}')"
+  git -C "${source_dir}" reset --hard "${fetched_revision}"
 elif [[ -e "${source_dir}" ]]; then
   backup="${source_dir}.before-install.$(date -u +%Y%m%dT%H%M%SZ)"
   log "Moving the existing unmanaged source directory to ${backup}"

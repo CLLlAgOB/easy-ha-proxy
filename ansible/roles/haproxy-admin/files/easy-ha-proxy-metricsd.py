@@ -1291,25 +1291,31 @@ class MetricsDatabase:
     def store_baselines(
         self, baselines: Dict[Tuple[int, str], Tuple[int, int]]
     ) -> None:
+        with self._lock, self._conn:
+            self._store_baselines_locked(baselines)
+
+    def _store_baselines_locked(
+        self, baselines: Dict[Tuple[int, str], Tuple[int, int]]
+    ) -> None:
         if not baselines:
             return
         payload = [
             (object_id, metric, value, updated_ts)
             for (object_id, metric), (value, updated_ts) in baselines.items()
         ]
-        with self._lock, self._conn:
-            self._conn.executemany(
-                "INSERT INTO counter_baseline (object_id, metric, value, updated_ts) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT (object_id, metric) DO UPDATE SET "
-                "value = excluded.value, updated_ts = excluded.updated_ts",
-                payload,
-            )
+        self._conn.executemany(
+            "INSERT INTO counter_baseline (object_id, metric, value, updated_ts) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (object_id, metric) DO UPDATE SET "
+            "value = excluded.value, updated_ts = excluded.updated_ts",
+            payload,
+        )
 
     # -- metrics ----------------------------------------------------------
 
     def write_buckets(
-        self, bucket_ts: int, rows: Dict[int, Dict[str, int]]
+        self, bucket_ts: int, rows: Dict[int, Dict[str, int]], *, merge: bool = False,
+        baselines: Optional[Dict[Tuple[int, str], Tuple[int, int]]] = None,
     ) -> None:
         if not rows:
             return
@@ -1321,11 +1327,43 @@ class MetricsDatabase:
             for object_id, row in rows.items()
         ]
         with self._lock, self._conn:
-            self._conn.executemany(
-                f"INSERT OR REPLACE INTO metric_1m ({columns}) "
-                f"VALUES ({placeholders})",
-                payload,
-            )
+            if merge:
+                # Poll flushes contain only the samples since the last flush.
+                # A stop/start (or another forced flush) can split one minute
+                # into several fragments. Merge those with the same rules as
+                # the hourly rollup. Complete edge digests still replace their
+                # row, so fetching the same digest again stays idempotent.
+                updates = ["samples = metric_1m.samples + excluded.samples"]
+                updates.extend(
+                    f"{column} = metric_1m.{column} + excluded.{column}"
+                    for column in _ROLLUP_SUM
+                )
+                updates.extend(
+                    f"{column} = MAX(metric_1m.{column}, excluded.{column})"
+                    for column in _ROLLUP_MAX
+                )
+                updates.extend(
+                    f"{column} = CAST(COALESCE((metric_1m.{column} * metric_1m.samples "
+                    f"+ excluded.{column} * excluded.samples) "
+                    "/ NULLIF(metric_1m.samples + excluded.samples, 0), 0) AS INTEGER)"
+                    for column in _ROLLUP_WAVG
+                )
+                self._conn.executemany(
+                    f"INSERT INTO metric_1m ({columns}) VALUES ({placeholders}) "
+                    "ON CONFLICT (bucket_ts, object_id) DO UPDATE SET "
+                    + ", ".join(updates),
+                    payload,
+                )
+            else:
+                self._conn.executemany(
+                    f"INSERT OR REPLACE INTO metric_1m ({columns}) "
+                    f"VALUES ({placeholders})",
+                    payload,
+                )
+            if baselines is not None:
+                # The saved counter and the delta credited to this minute
+                # must advance together, including on a failed write/restart.
+                self._store_baselines_locked(baselines)
 
     def record_state_change(
         self, object_id: int, previous: str, state: str, now: int
@@ -2716,6 +2754,7 @@ class Collector:
         self._baselines: Dict[Tuple[int, str], Tuple[int, int]] = {}
         self._buckets: Dict[int, Bucket] = {}
         self._bucket_ts: Optional[int] = None
+        self._bucket_reported = False
         self._last_states: Dict[int, str] = {}
         # Previous (total, idle) jiffies. CPU is a rate, so the first poll
         # after a start has nothing to compare against and reports nothing.
@@ -2860,6 +2899,7 @@ class Collector:
                 self._flush_locked(self._bucket_ts)
                 self._bucket_ts = bucket_ts
 
+            self._bucket_reported = False
             observed = 0
             for row in rows:
                 identity = classify(row)
@@ -3425,21 +3465,29 @@ class Collector:
             for object_id, bucket in self._buckets.items()
             if bucket.samples
         }
-        self._buckets = {}
         if not rows:
+            self._buckets = {}
+            self._bucket_reported = False
             return 0
         # Judged on the minute even when it cannot be written: a full disk
         # must not silence the alerts about the sites.
-        self._report_traffic(rows)
+        if not self._bucket_reported:
+            self._report_traffic(rows)
+            self._bucket_reported = True
         if self.storage.writes_paused:
             # Counting continues in memory -- the baselines are still correct,
             # so nothing is double-counted once writing resumes -- but this
             # minute is dropped rather than grown onto a filesystem that has no
             # room for it.
             self.buckets_dropped += len(rows)
+            self._buckets = {}
+            self._bucket_reported = False
             return 0
-        self.database.write_buckets(bucket_ts, rows)
-        self.database.store_baselines(self._baselines)
+        # Keep the fragment in memory until both it and its baselines commit.
+        # A database rollback can then be retried without losing or doubling it.
+        self.database.write_buckets(bucket_ts, rows, merge=True, baselines=self._baselines)
+        self._buckets = {}
+        self._bucket_reported = False
         self.last_flush_ts = bucket_ts
         self.buckets_written += len(rows)
         return len(rows)

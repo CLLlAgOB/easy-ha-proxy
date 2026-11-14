@@ -160,9 +160,14 @@ class TheSftpCopy(Gateway):
 
     def test_the_copy_lands_under_its_dated_name_with_a_matching_checksum(self):
         self.upload()
-        first = self.batches[0]
-        self.assertIn(f'rename "/upload/{DATED}.part" "/upload/{DATED}"', first)
-        self.assertIn(f'"/upload/{DATED}.sha256"', first)
+        transfers = self.batches[0]
+        self.assertRegex(transfers, rf'"/upload/{DATED}\.[0-9a-f]{{32}}\.part"')
+        publication = "".join(self.batches[1:])
+        self.assertRegex(
+            publication,
+            rf'rename "/upload/{DATED}\.[0-9a-f]{{32}}\.part" "/upload/{DATED}"',
+        )
+        self.assertIn(f'"/upload/{DATED}.sha256"', publication)
         self.assertEqual(self.checksum_sent, f"{self.digest}  {DATED}\n".encode())
 
     def test_old_dated_copies_are_pruned_and_nothing_else_is_touched(self):

@@ -225,6 +225,132 @@ class CollectorTestCase(unittest.TestCase):
 
 
 class DeltaTests(CollectorTestCase):
+    def test_restart_merges_fragments_of_the_same_minute(self):
+        self.collector.monitors = dict.fromkeys(self.collector.monitors, False)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=100, scur=2)), now=3610)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=120, scur=4)), now=3620)
+        self.flush(now=3625)
+        # A repeated forced flush has no new samples to add.
+        self.flush(now=3626)
+
+        self.collector = metricsd.Collector(self.config, self.database)
+        with mock.patch.object(metricsd.threading, "Thread"):
+            self.collector.start()
+        self.collector.monitors = dict.fromkeys(self.collector.monitors, False)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=130, scur=12)), now=3630)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=140, scur=3)), now=3660)
+
+        row = self.rows()[0]
+        self.assertEqual(row["bucket_ts"], 3600)
+        self.assertEqual(row["requests"], 30)
+        self.assertEqual(row["samples"], 3)
+        self.assertEqual(row["conn_cur_avg"], 6)
+        self.assertEqual(row["conn_cur_max"], 12)
+        self.flush(now=3665)
+        self.assertEqual(sum(row["requests"] for row in self.rows()), 40)
+        self.database.rollup_hours(7200)
+        hour = self.rows(table="metric_1h")[0]
+        self.assertEqual(hour["requests"], 40)
+        self.assertEqual(hour["samples"], 4)
+        self.assertEqual(hour["conn_cur_avg"], 5)
+        self.assertEqual(hour["conn_cur_max"], 12)
+
+    def test_forced_flush_fragments_preserve_wide_counters_and_capacity_maxima(self):
+        object_id = self.database.object_id(metricsd.HOST_KIND, "", "", 3600)
+        first = {column: 0 for column in metricsd.METRIC_COLUMNS}
+        first.update(samples=2, net_rx=2 ** 40, cpu_avg=100, cpu_max=200,
+                     memory_total=2 ** 35, disk_total=2 ** 45)
+        second = dict(first, samples=1, net_rx=2 ** 39, cpu_avg=400, cpu_max=400,
+                      memory_total=2 ** 34, disk_total=2 ** 44)
+        self.database.write_buckets(3600, {object_id: first})
+        self.database.write_buckets(3600, {object_id: second}, merge=True)
+        row = self.host_rows()[0]
+        self.assertEqual(row["samples"], 3)
+        self.assertEqual(row["net_rx"], 2 ** 40 + 2 ** 39)
+        self.assertEqual(row["cpu_avg"], 200)
+        self.assertEqual(row["cpu_max"], 400)
+        self.assertEqual(row["memory_total"], 2 ** 35)
+        self.assertEqual(row["disk_total"], 2 ** 45)
+
+    def test_force_flush_does_not_readd_already_written_samples(self):
+        self.collector.monitors = dict.fromkeys(self.collector.monitors, False)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=100)), now=3610)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=120)), now=3620)
+        self.flush(now=3625)
+        self.flush(now=3626)
+        self.poll(payload(stat_row("be_site", "BACKEND", req_tot=130)), now=3630)
+        self.flush(now=3635)
+        self.flush(now=3636)
+        row = self.rows()[0]
+        self.assertEqual(row["requests"], 30)
+        self.assertEqual(row["samples"], 3)
+
+    def test_failed_baseline_write_rolls_back_fragment_and_can_retry_or_restart(self):
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                # Each branch owns a real SQLite file and collector, so a
+                # trigger can fail *after* the minute's merge has executed.
+                with tempfile.TemporaryDirectory() as temporary:
+                    database = metricsd.MetricsDatabase(str(Path(temporary) / "metrics.db"))
+                    try:
+                        collector = metricsd.Collector(self.config, database)
+                        collector.monitors = dict.fromkeys(collector.monitors, False)
+
+                        def poll(target, counter, now):
+                            text = payload(stat_row("be_site", "BACKEND", req_tot=counter))
+                            with (mock.patch.object(metricsd, "runtime_command", return_value=text),
+                                  mock.patch.object(metricsd, "_utc_now", return_value=now)):
+                                target.poll()
+
+                        def flush(target, now):
+                            with mock.patch.object(metricsd, "_utc_now", return_value=now):
+                                return target.flush(force=True)
+
+                        poll(collector, 100, 3610)
+                        poll(collector, 120, 3620)
+                        flush(collector, 3625)
+                        poll(collector, 130, 3630)
+                        object_id = collector._object_ids[("backend", "be_site", "")]
+                        database._conn.execute(
+                            "CREATE TRIGGER reject_baseline BEFORE UPDATE ON counter_baseline "
+                            "WHEN NEW.metric = 'requests' BEGIN "
+                            "SELECT RAISE(ABORT, 'baseline write failed'); END"
+                        )
+                        with mock.patch.object(collector, "_report_traffic") as report:
+                            for now in (3635, 3636):
+                                with self.assertRaisesRegex(sqlite3.IntegrityError, "baseline write failed"):
+                                    flush(collector, now)
+                            self.assertEqual(report.call_count, 1)
+                        row = database._conn.execute("SELECT requests FROM metric_1m").fetchone()
+                        self.assertEqual(row["requests"], 20)
+                        self.assertEqual(database.load_baselines()[(object_id, "requests")][0], 120)
+                        self.assertEqual(collector._buckets[object_id].counters["requests"], 10)
+                        database._conn.execute("DROP TRIGGER reject_baseline")
+
+                        if restart:
+                            # Reopen the database as a replacement process
+                            # would: the aborted fragment and its baseline
+                            # must both be absent from durable state.
+                            database.close()
+                            database = metricsd.MetricsDatabase(str(Path(temporary) / "metrics.db"))
+                            collector = metricsd.Collector(self.config, database)
+                            with mock.patch.object(metricsd.threading, "Thread"):
+                                collector.start()
+                            collector.monitors = dict.fromkeys(collector.monitors, False)
+                        else:
+                            self.assertEqual(flush(collector, 3637), 1)
+                            self.assertEqual(flush(collector, 3638), 0)
+                            self.assertFalse(collector._buckets)
+                        poll(collector, 135, 3640)
+                        flush(collector, 3645)
+                        flush(collector, 3646)
+                        row = database._conn.execute("SELECT requests, samples FROM metric_1m").fetchone()
+                        self.assertEqual(row["requests"], 35)
+                        self.assertEqual(row["samples"], 3 if restart else 4)
+                        self.assertEqual(database.load_baselines()[(object_id, "requests")][0], 135)
+                    finally:
+                        database.close()
+
     def test_first_sample_seeds_the_baseline_without_emitting_a_delta(self):
         self.poll(payload(stat_row("be_site", "srv01", stot=1000)), now=600)
         self.flush(now=660)

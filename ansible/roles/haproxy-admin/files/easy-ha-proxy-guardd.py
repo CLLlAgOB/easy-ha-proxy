@@ -6219,14 +6219,21 @@ class MinuteDigests:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._minutes: Dict[int, Dict[str, Any]] = {}
+        self._trim_minute: Optional[int] = None
         self.late = 0
+
+    def _trim_locked(self, now: int, *, force: bool = False) -> None:
+        minute = now // 60
+        if not force and minute == self._trim_minute:
+            return
+        # The producer owns retention even when no monitoring client asks
+        # for digests. Scan at most once per wall-clock minute on its hot path.
+        self._trim_minute = minute
+        for stamp in [m for m in self._minutes if m < now - DIGEST_KEEP_SECONDS]:
+            del self._minutes[stamp]
 
     def add(self, request: "ParsedRequest", ended: float, now: int) -> None:
         minute = int(ended) // 60 * 60
-        if minute + 60 + DIGEST_CLOSE_SECONDS <= now:
-            # Its minute was already handed out as complete.
-            self.late += 1
-            return
         refusal = live_refusal(request.status, request.backend, request.term, request.ban_reason)
         backend = request.backend.split("/", 1)[0] if request.backend else ""
         answered = (
@@ -6237,9 +6244,14 @@ class MinuteDigests:
             and backend
             and not request.backend.endswith("/<NOSRV>")
         )
-        if not refusal and not answered:
-            return
         with self._lock:
+            self._trim_locked(now)
+            if minute + 60 + DIGEST_CLOSE_SECONDS <= now:
+                # Its minute was already handed out as complete.
+                self.late += 1
+                return
+            if not refusal and not answered:
+                return
             digest = self._minutes.get(minute)
             if digest is None:
                 digest = {"backends": {}, "refused": dict.fromkeys(DIGEST_REFUSALS, 0)}
@@ -6262,8 +6274,7 @@ class MinuteDigests:
         """The complete minutes after since, oldest first; forgets old ones."""
 
         with self._lock:
-            for minute in [m for m in self._minutes if m < now - DIGEST_KEEP_SECONDS]:
-                del self._minutes[minute]
+            self._trim_locked(now, force=True)
             ready = sorted(
                 minute for minute in self._minutes
                 if minute > since and minute + 60 + DIGEST_CLOSE_SECONDS <= now

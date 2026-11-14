@@ -1949,6 +1949,12 @@ def _handle_restart(req: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _rules_revision(rules: List[Dict[str, Any]]) -> str:
+    # Keep the serialization in sync with the ACL UI's _rules_revision.
+    data = yaml.safe_dump(rules, allow_unicode=True, sort_keys=True)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
 def _handle_rules_get(req: Dict[str, Any]) -> Dict[str, Any]:
     """
     The UI's API: return the rules as a YAML list.
@@ -1973,7 +1979,7 @@ def _handle_rules_get(req: Dict[str, Any]) -> Dict[str, Any]:
         LOG.exception("rules_get: failed to dump rules YAML")
         return {"ok": False, "error": f"Could not build the rules YAML: {exc}"}
 
-    return {"ok": True, "rules_yaml": rules_yaml}
+    return {"ok": True, "rules_yaml": rules_yaml, "revision": _rules_revision(rules)}
 
 
 def _protected_domains() -> set[str]:
@@ -2021,7 +2027,8 @@ def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
     The UI's API: take a YAML list of rules and save it to access_control.rules.
 
     Expects:
-      { "action": "rules_set", "rules_yaml": "<yaml list>" }
+      { "action": "rules_set", "rules_yaml": "<yaml list>",
+        "expected_revision": "<optional rules_get revision>" }
     """
     rules_yaml = req.get("rules_yaml")
     if not isinstance(rules_yaml, str):
@@ -2049,10 +2056,23 @@ def _handle_rules_set(req: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
     try:
-        root, _old_rules = _load_config_data()
+        root, old_rules = _load_config_data()
     except Exception as exc:  # noqa: BLE001
         LOG.exception("rules_set: failed to load config")
         return {"ok": False, "error": f"Could not read configuration.yml: {exc}"}
+
+    # serve() processes one request at a time. Compare and save in this same
+    # handler so a second browser cannot overwrite an intervening ACL save.
+    if "expected_revision" in req and (
+        not isinstance(req["expected_revision"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", req["expected_revision"])
+        or not hmac.compare_digest(req["expected_revision"], _rules_revision(old_rules))
+    ):
+        return {
+            "ok": False,
+            "conflict": True,
+            "error": "Access rules changed since this page was loaded. Reload before editing.",
+        }
 
     ac = root.get("access_control")
     if ac is None or not isinstance(ac, dict):
