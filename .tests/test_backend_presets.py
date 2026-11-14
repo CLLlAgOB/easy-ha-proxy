@@ -356,22 +356,79 @@ class UdpStaysInStep(_Files):
         self.assertFalse(ok)
         self.assertIn("udp", held[0])
 
-    def test_a_transaction_that_settles_brings_the_forwards_along(self):
+    def old_schema(self):
+        """vars.yml and udp.yml as the commits before ids wrote them."""
+        variables = self.load(self.vars)
+        for preset in variables["backend_presets"]:
+            preset.pop("id", None)
+        self.vars.write_text(yaml.safe_dump(variables, sort_keys=False), encoding="utf-8")
+        forwards = self.load(self.udp)
+        for forward in forwards["udp_forwards"]:
+            forward.pop("servers_preset_id", None)
+        self.udp.write_text(yaml.safe_dump(forwards, sort_keys=False), encoding="utf-8")
+
+    def test_a_set_saved_before_ids_comes_back_with_its_forward(self):
+        self.old_schema()
+        self.applied_now()
+        self.assertTrue(sets.save_preset(self.renamed(), "Two uplinks", self.revision())[0])
+        self.assertEqual(self.forward()["servers_preset"], "Uplinks")
+
+        ok, message = config_service.revert_to_last_applied_state()
+        self.assertTrue(ok, message)
+        forward = self.forward()
+        self.assertEqual((forward["servers_preset"], forward["backend_host"]), ("Two uplinks", "198.51.100.10"))
+        self.assertNotIn("id", sets.load_presets()[0])  # the snapshot itself has none
+
+    def settle(self, state="rolled_back"):
+        """A status check after the host settled the transaction this panel started."""
         transaction = "a" * 20
-        settled = {"ok": True, "state": "rolled_back", "transaction_id": transaction}
-        with mock.patch.object(config_service, "_read_pending_transaction_marker",
-                               return_value={"transaction_id": transaction}), \
+        marker = {"transaction_id": transaction}
+        with mock.patch.object(config_service, "_read_pending_transaction_marker", return_value=marker), \
                 mock.patch.object(config_service, "_clear_pending_transaction_marker"), \
-                mock.patch.object(config_service, "_controld_json_request", return_value=settled), \
-                mock.patch.object(sets, "reconcile_udp_quietly", return_value="") as follow:
-            config_service.get_config_transaction_status(transaction)
-        follow.assert_called_once()
+                mock.patch.object(config_service, "_controld_json_request",
+                                  return_value={"ok": True, "state": state, "transaction_id": transaction}):
+            return config_service.get_config_transaction_status(transaction)
+
+    def status(self):
         with mock.patch.object(config_service, "_read_pending_transaction_marker", return_value={}), \
                 mock.patch.object(config_service, "_controld_json_request",
-                                  return_value={"ok": True, "state": "none"}), \
-                mock.patch.object(sets, "reconcile_udp_quietly", return_value="") as follow:
-            config_service.get_config_transaction_status()
-        follow.assert_not_called()
+                                  return_value={"ok": True, "state": "none"}):
+            return config_service.get_config_transaction_status()
+
+    def test_a_host_rollback_brings_the_forwards_along_and_a_failed_attempt_is_retried(self):
+        self.applied_now()
+        self.assertTrue(sets.save_preset(self.renamed(), "Two uplinks", self.revision())[0])
+        # The host puts the applied vars.yml back, as its rollback does.
+        self.vars.write_bytes(config_service.HAPROXY_STATE_VARS.read_bytes())
+
+        self.fail_udp = True
+        result = self.settle()
+        self.assertIn("could not follow", result.get("backend_sets_note", ""))
+        self.assertEqual(self.forward()["servers_preset"], "Uplinks")
+        self.assertIn("nft refused the rules", sets.follow_udp_error())
+
+        # The marker is gone; later status checks keep trying, once a minute.
+        self.fail_udp = False
+        self.assertIn("not followed", self.status().get("backend_sets_note", ""))
+        with mock.patch.object(sets, "FOLLOW_RETRY_SECONDS", 0), mock.patch.object(sets.time, "time", return_value=10**10):
+            result = self.status()
+        self.assertIn("applied again", result.get("backend_sets_note", ""))
+        forward = self.forward()
+        self.assertEqual((forward["servers_preset"], forward["backend_host"]), ("Two uplinks", "198.51.100.10"))
+        self.assertEqual(sets.follow_udp_error(), "")
+        self.assertNotIn("backend_sets_note", self.status())
+
+    def test_a_status_check_without_a_debt_touches_nothing(self):
+        applied = len(self.applied)
+        self.assertNotIn("backend_sets_note", self.status())
+        self.assertEqual(len(self.applied), applied)
+
+    def test_inside_a_save_the_debt_waits_for_the_next_call(self):
+        sets.mark_udp_follow("a test")
+        with config_service.source_lock("udp"), mock.patch.object(sets, "reconcile_udp") as reconcile:
+            self.status()
+        reconcile.assert_not_called()
+        self.assertTrue(sets.follow_udp_error())
 
 
 @unittest.skipIf(WINDOWS, "the admin package needs fcntl")

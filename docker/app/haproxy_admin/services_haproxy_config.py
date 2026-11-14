@@ -208,17 +208,37 @@ def _clear_pending_transaction_marker() -> None:
         pass
 
 
-def _follow_backend_sets(where: str, result: Optional[Dict[str, Any]] = None) -> str:
-    """Re-expand the UDP forwards after vars.yml may have changed under them.
+def _mark_backend_sets(where: str) -> None:
+    """Record that the UDP forwards owe a reconciliation with the backend sets.
 
-    vars.yml holds the backend sets and goes back with the HAProxy sources;
-    udp.yml does not, its rules were applied at once. Called wherever the
-    sources settle -- a transaction confirmed or rolled back, unapplied
-    changes discarded. The note, if any, goes into ``result``.
+    vars.yml holds the sets and goes back with the HAProxy sources; udp.yml
+    does not, its rules were applied at once. Recorded before the
+    transaction's marker goes, so a failed first attempt is not forgotten.
     """
-    from .backend_presets import reconcile_udp_quietly
+    from .backend_presets import mark_udp_follow
 
-    note = reconcile_udp_quietly(where)
+    mark_udp_follow(where)
+
+
+def _follow_backend_sets(
+    where: str, result: Optional[Dict[str, Any]] = None, *, mark: bool = True
+) -> str:
+    """Bring the UDP forwards in line with the backend sets, if that is owed.
+
+    With ``mark`` the debt is recorded first (the sources just settled);
+    without, only a debt recorded earlier is retried. The note, if any, goes
+    into ``result``.
+    """
+    from .backend_presets import follow_udp
+
+    if mark:
+        _mark_backend_sets(where)
+    # Inside a save that holds source locks (update_yaml_file asks for the
+    # transaction status) the forwards are left to the next call: the save
+    # has read udp.yml already and would write over the reconciliation.
+    if getattr(_SOURCE_LOCKS_HELD, "kinds", None):
+        return ""
+    note = follow_udp(force=mark)
     if note and result is not None:
         result["backend_sets_note"] = note
     return note
@@ -418,11 +438,15 @@ def get_config_transaction_status(
         marker_id = str(marker.get("transaction_id") or "")
         result_id = str(result.get("transaction_id") or result.get("id") or "")
         if not marker_id or not result_id or marker_id == result_id:
-            _clear_pending_transaction_marker()
-            # Only once, when a transaction this panel started has settled
-            # -- the timeout rollback happens on the host with nobody asking.
+            # A transaction this panel started has settled -- the timeout
+            # rollback happens on the host with nobody asking. The debt is
+            # recorded before the marker goes.
             if marker:
-                _follow_backend_sets(f"a transaction that ended {state}", result)
+                _mark_backend_sets(f"a transaction that ended {state}")
+            _clear_pending_transaction_marker()
+    # Every status poll (the header asks on every page) retries a debt left
+    # by a failed attempt, at most once a minute.
+    _follow_backend_sets("a status check", result, mark=False)
     return result
 
 
@@ -984,6 +1008,7 @@ def confirm_cfg_transaction(
         timeout=HAPROXY_GUARDED_APPLY_TIMEOUT,
     )
     if result.get("ok") and _transaction_state(result) == "confirmed":
+        _mark_backend_sets("a confirmed transaction")
         _clear_pending_transaction_marker()
         _follow_backend_sets("a confirmed transaction", result)
     elif _transaction_state(result) == "rolled_back":
@@ -1000,6 +1025,7 @@ def rollback_cfg_transaction(transaction_id: str) -> Dict[str, Any]:
         timeout=HAPROXY_GUARDED_APPLY_TIMEOUT,
     )
     if _transaction_state(result) == "rolled_back":
+        _mark_backend_sets("a transaction rollback")
         _clear_pending_transaction_marker()
         _follow_backend_sets("a transaction rollback", result)
     return result
@@ -1915,6 +1941,7 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
 
     any_restored = False
     errors = []
+    _mark_backend_sets("discarded changes")
 
     mapping = [
         (HAPROXY_STATE_WEBSITES, WEBSITES_YAML, "websites.yml"),
@@ -1944,7 +1971,7 @@ def revert_to_last_applied_state() -> Tuple[bool, str]:
     if not any_restored:
         return False, 'YAML backup files were not found'
 
-    note = _follow_backend_sets("discarded changes")
+    note = _follow_backend_sets("discarded changes", mark=False) if any_restored else ""
     return True, 'YAML files reverted to the last applied state' + (f" {note}" if note else "")
 
 

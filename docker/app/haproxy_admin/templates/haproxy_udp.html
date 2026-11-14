@@ -16,6 +16,18 @@
 </div>
 {% endfor %}
 
+{% if udp_follow_error %}
+<div class="border-warning card" id="udp-follow-pending">
+  <div class="card-header">
+    <strong>UDP forwards wait for the backend sets</strong>
+  </div>
+  <div class="card-body">
+    <p class="u-m-0">The backend sets went back with the HAProxy configuration, and the UDP forwards that use them could not be applied again yet. The panel tries again every minute.</p>
+    <pre class="pre-wrap mono u-mt-2" data-i18n-skip translate="no">{{ udp_follow_error }}</pre>
+  </div>
+</div>
+{% endif %}
+
 {% if error %}
 <div class="border-error card" >
   <div class="card-header">

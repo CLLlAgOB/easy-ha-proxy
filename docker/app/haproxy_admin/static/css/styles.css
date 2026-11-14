@@ -494,6 +494,7 @@
 @layer utilities {
   .border-error { border-left: 3px solid var(--error); }
   .border-success { border-left: 3px solid var(--success); }
+  .border-warning { border-left: 3px solid var(--warning); }
   .chart-key-error { background: var(--chart-error); }
   .chart-key-server-error { background: var(--chart-server-error); }
   .chart-key-success { background: var(--chart-success); }

@@ -36,6 +36,8 @@
     "With a set, the addresses and their roles come from it, and a change to the set reaches this entry too.": "С набором адреса и их роли берутся из него, и изменение набора доходит и до этой записи.",
     "Switching to manual addresses keeps the current list so it can be edited here.": "При переходе на адреса вручную текущий список сохраняется, и его можно править здесь.",
     "Manage backend sets": "Управление наборами бэкендов",
+    "UDP forwards wait for the backend sets": "UDP-пробросы ждут наборы бэкендов",
+    "The backend sets went back with the HAProxy configuration, and the UDP forwards that use them could not be applied again yet. The panel tries again every minute.": "Наборы бэкендов откатились вместе с конфигурацией HAProxy, а UDP-пробросы, которые их используют, пока не удалось применить заново. Панель повторяет попытку каждую минуту.",
     "The addresses, roles and weights below come from the set and are changed on the backend sets page; only the port is chosen here.": "Адреса, роли и веса ниже берутся из набора и меняются на странице наборов бэкендов; здесь выбирается только порт.",
     "The addresses and roles below come from the set and are changed on the backend sets page; only the port is chosen here.": "Адреса и роли ниже берутся из набора и меняются на странице наборов бэкендов; здесь выбирается только порт.",
     "Set the backend port for the backend set (1-65535)": "Укажите порт бэкенда для набора бэкендов (1–65535)",

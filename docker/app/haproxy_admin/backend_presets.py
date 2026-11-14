@@ -15,9 +15,13 @@ configuration is applied. Typing addresses by hand keeps working as before.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import re
 import secrets
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -78,11 +82,26 @@ def find(presets: List[Dict[str, Any]], name: Any) -> Optional[Dict[str, Any]]:
     return next((p for p in presets if str(p.get("name")) == wanted), None)
 
 
+def effective_id(preset: Dict[str, Any]) -> str:
+    """A set's id: the stored one, or for a set saved before ids existed one
+    derived from its name.
+
+    A set of the old schema gets that same derived id when it is next saved,
+    so an applied snapshot or a history version taken before ids -- which
+    holds the set under its old name and without an id -- still matches the
+    id a UDP forward was given at the rename.
+    """
+    stored = str(preset.get("id") or "")
+    if ID_RE.fullmatch(stored):
+        return stored
+    return hashlib.sha256(f"backend-set:{preset.get('name')}".encode("utf-8")).hexdigest()[:12]
+
+
 def find_by_id(presets: List[Dict[str, Any]], preset_id: Any) -> Optional[Dict[str, Any]]:
     wanted = str(preset_id or "").strip()
     if not ID_RE.fullmatch(wanted):
         return None
-    return next((p for p in presets if str(p.get("id") or "") == wanted), None)
+    return next((p for p in presets if effective_id(p) == wanted), None)
 
 
 def new_id() -> str:
@@ -217,10 +236,7 @@ def apply_to_udp(entry: Dict[str, Any], presets: List[Dict[str, Any]]) -> None:
     entry.pop(PORT_FIELD, None)
     if preset is None:
         return
-    if preset.get("id"):
-        entry[ID_FIELD] = preset["id"]
-    else:
-        entry.pop(ID_FIELD, None)
+    entry[ID_FIELD] = effective_id(preset)
     servers = preset.get("servers") or []
     primary = next((s["host"] for s in servers if s.get("role") != "backup"), "")
     backup = next((s["host"] for s in servers if s.get("role") == "backup"), "")
@@ -298,7 +314,7 @@ def _repoint_udp(
         name = str(forward.get(PRESET_FIELD) or "").strip()
         if not name:
             continue
-        same_id = bool(preset.get("id")) and forward.get(ID_FIELD) == preset["id"]
+        same_id = forward.get(ID_FIELD) == effective_id(preset)
         if same_id or name == preset["name"] or (old and name == old):
             forward[PRESET_FIELD] = preset["name"]
             touched.append(forward)
@@ -394,8 +410,9 @@ def save_preset(
                 check_entry_revision(presets[index], expected_revision, "This backend set")
                 if preset["name"] != original and find(presets, preset["name"]):
                     return False, f"Backend set {preset['name']!r} already exists"
-                stored_id = str(presets[index].get("id") or "")
-                preset = {"id": stored_id if ID_RE.fullmatch(stored_id) else new_id(), **preset}
+                # Keeps the id, or fixes the derived one of an old-schema set
+                # from the name it had until now.
+                preset = {"id": effective_id(presets[index]), **preset}
                 presets[index] = preset
             else:
                 if find(presets, preset["name"]):
@@ -506,19 +523,80 @@ def reconcile_udp() -> Tuple[bool, int, str]:
         return ok, len(touched) + dropped, msg
 
 
-def reconcile_udp_quietly(where: str) -> str:
-    """reconcile_udp for a caller that must not fail on it; a line to report, or ''."""
+# A reconciliation owed survives a failed attempt and a restart: the
+# HAProxy transaction's own marker is gone by then, and a UDP apply that
+# failed once (the rules busy, controld restarting) must be tried again.
+FOLLOW_RETRY_SECONDS = 60
+
+
+def _follow_path():
+    return UDP_YAML.parent / ".backend-sets-udp-follow.json"
+
+
+def _read_follow() -> Dict[str, Any]:
+    try:
+        value = json.loads(_follow_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_follow(state: Dict[str, Any]) -> None:
+    path = _follow_path()
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def mark_udp_follow(where: str) -> None:
+    """Record that the UDP forwards owe a reconciliation -- before vars.yml moves."""
+    state = _read_follow()
+    state.update({"where": where, "since": state.get("since") or int(time.time()), "next": 0})
+    try:
+        _write_follow(state)
+    except OSError as exc:
+        logger.warning("Could not record a pending UDP reconciliation after %s: %s", where, exc)
+
+
+def follow_udp(*, force: bool = False) -> str:
+    """Run the reconciliation owed, if any; a line to report, or ''.
+
+    Cleared only once the forwards agree with the sets. A failure keeps the
+    record with its error for the UDP page and is tried again on a later
+    call, at most once a minute unless ``force``.
+    """
+    state = _read_follow()
+    if not state:
+        return ""
+    if not force and time.time() < float(state.get("next") or 0):
+        return f"The UDP forwards have not followed the backend sets yet: {state.get('error') or 'waiting'}"
     try:
         ok, count, msg = reconcile_udp()
     except Exception as exc:  # noqa: BLE001 -- a status poll or revert must still answer
-        logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", where, exc)
-        return "The UDP forwards could not be checked against the backend sets."
-    if not count:
-        return ""
+        ok, count, msg = False, 0, f"{type(exc).__name__}: {exc}"
     if ok:
-        return f"{count} UDP forward(s) followed the backend sets and were applied again."
-    logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", where, msg)
+        try:
+            _follow_path().unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not clear the pending UDP reconciliation: %s", exc)
+        return f"{count} UDP forward(s) followed the backend sets and were applied again." if count else ""
+    logger.warning("UDP forwards not reconciled with the backend sets after %s: %s", state.get("where"), msg)
+    state.update({"error": str(msg)[:500], "next": time.time() + FOLLOW_RETRY_SECONDS})
+    try:
+        _write_follow(state)
+    except OSError:
+        pass
     return f"The UDP forwards could not follow the backend sets: {msg}"
+
+
+def follow_udp_error() -> str:
+    """The last error of a reconciliation still owed, for the UDP page; '' when none is owed."""
+    state = _read_follow()
+    if not state:
+        return ""
+    return str(state.get("error") or "waiting for the next attempt")
 
 
 def delete_preset(name: str) -> Tuple[bool, str]:

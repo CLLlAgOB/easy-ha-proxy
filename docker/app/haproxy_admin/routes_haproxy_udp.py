@@ -5,6 +5,7 @@ import traceback
 
 from flask import flash, jsonify, redirect, render_template, request, url_for
 
+from . import backend_presets
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .routes import bp
 from .services_haproxy_udp import (
@@ -126,6 +127,7 @@ def haproxy_udp_page():
         edit_forward=edit_forward,
         original_name=original_name,
         revision=revision,
+        udp_follow_error=backend_presets.follow_udp_error(),
     )
 
 
