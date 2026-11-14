@@ -30,6 +30,7 @@
     "The reboot finished successfully.": "Перезагрузка прошла успешно.",
     "Server has not returned": "Сервер не вернулся",
     "The server did not come back within 10 minutes. Check your provider console.": "Сервер не вернулся за 10 минут. Проверьте консоль провайдера.",
-    "The current server boot could not be verified.": "Не удалось подтвердить текущую загрузку сервера."
+    "The current server boot could not be verified.": "Не удалось подтвердить текущую загрузку сервера.",
+    "Type REBOOT to confirm": "Введите REBOOT для подтверждения"
   }
 }
