@@ -80,14 +80,17 @@ class TheLinters(unittest.TestCase):
             line for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
-        # Five fixtures and one exact public checksum; additions require review.
-        # Each is file:rule:line with no commit, so it holds in every commit.
+        # Six fixture lines and one exact public checksum; additions require
+        # review. Each is file:rule:line with no commit, so it holds in every
+        # commit -- which is why a fixture that moved keeps its old line too
+        # (the standby-certificate PEM marker: 1113 in earlier commits, 1145
+        # since).
         public_checksum = "ansible/roles/haproxy/defaults/main.yml:generic-api-key:12"
-        self.assertEqual(len(acknowledged), 6)
+        self.assertEqual(len(acknowledged), 7)
         self.assertIn(public_checksum, acknowledged)
         self.assertTrue(all(len(line.split(":")) == 3 for line in acknowledged))
         fixtures = [line for line in acknowledged if line != public_checksum]
-        self.assertEqual(len(fixtures), 5)
+        self.assertEqual(len(fixtures), 6)
         self.assertTrue(all(line.startswith(".tests/") for line in fixtures))
 
     def test_the_names_come_from_a_secret(self):
