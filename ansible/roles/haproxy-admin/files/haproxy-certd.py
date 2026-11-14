@@ -609,7 +609,9 @@ def _write_private_file(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.replace(path)
+        # os.replace, not Path.replace: on Python 3.10 the latter goes
+        # through an accessor bound at import time.
+        os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
