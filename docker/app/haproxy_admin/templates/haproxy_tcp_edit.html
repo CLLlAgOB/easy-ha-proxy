@@ -158,6 +158,7 @@
 
       {% set picker_current = tcp.servers_preset or '' %}
       {% set picker_port = tcp.servers_preset_port or ((tcp.servers or [{}])[0].port) or tcp.backend_port or '' %}
+      {% set picker_weights = false %}
       {% include "_backend_set_picker.html" %}
 
       <div id="backend-manual">

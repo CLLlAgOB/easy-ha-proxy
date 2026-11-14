@@ -292,6 +292,22 @@ class TheWiring(unittest.TestCase):
         for name in ("haproxy_site_edit.js", "haproxy_tcp.js"):
             self.assertIn("window.backendSetChoice", (APP / "static" / "js" / name).read_text(encoding="utf-8"))
 
+    def test_the_picker_hides_the_manual_table_and_shows_the_set_read_only(self):
+        # The picker (and its script) sits above the manual table, so the
+        # script must wait for the page: run at once it found no table to hide,
+        # and the old addresses stayed editable under a chosen set.
+        script = (APP / "static" / "js" / "backend_sets.js").read_text(encoding="utf-8")
+        self.assertIn("DOMContentLoaded", script)
+        self.assertIn(".backend-set-port", script)
+        picker = (APP / "templates" / "_backend_set_picker.html").read_text(encoding="utf-8")
+        self.assertIn("backend-set-view", picker)
+        self.assertIn('class="form-input backend-set-port" disabled', picker)
+        self.assertIn("{% if picker_weights %}", picker)
+        site = (APP / "templates" / "haproxy_site_edit.html").read_text(encoding="utf-8")
+        tcp = (APP / "templates" / "haproxy_tcp_edit.html").read_text(encoding="utf-8")
+        self.assertIn("{% set picker_weights = true %}", site)
+        self.assertIn("{% set picker_weights = false %}", tcp)
+
     def test_the_page_and_picker_translate_whole(self):
         try:
             import importlib.util
@@ -303,6 +319,10 @@ class TheWiring(unittest.TestCase):
         for text in ("Backend sets", "Backend set", "Manual addresses", "Manage backend sets",
                      "Type the address", "Type the addresses", "Save backend set",
                      "Set the backend port for the backend set (1-65535)",
+                     "The addresses, roles and weights below come from the set and are changed on the "
+                     "backend sets page; only the port is chosen here.",
+                     "The addresses and roles below come from the set and are changed on the backend "
+                     "sets page; only the port is chosen here.",
                      "Changing a set changes every entry that uses it. Sites and TCP proxies take the "
                      "change when the HAProxy configuration is validated and applied; UDP forwards are "
                      "applied at once."):

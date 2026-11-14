@@ -1,6 +1,7 @@
 {# Pick a backend set instead of typing addresses. Expects:
    picker_current  -- the set the entry names now ('' for manual addresses)
    picker_port     -- the port to show
+   picker_weights  -- whether the entry takes the set's weights (sites do, TCP proxies do not)
    The manual table must sit inside an element with id="backend-manual". #}
 {% set sets = backend_presets_list() %}
 {% set known = sets | selectattr('name', 'equalto', picker_current) | list %}
@@ -32,17 +33,50 @@
     Switching to manual addresses keeps the current list so it can be edited here.
     <a href="{{ url_for('routes.backend_presets_page') }}">Manage backend sets</a>
   </div>
-  <div id="backend-set-preview" class="u-mt-2">
+  <div id="backend-set-preview">
     {% for p in sets %}
     <div class="backend-set-preview" data-set="{{ p.name }}" hidden>
-      {% for s in p.servers %}
-      <div>
-        <span class="mono" data-i18n-skip translate="no">{{ s.host }}</span>
-        {% if s.role == 'backup' %}<span class="tag tag-warn">Backup</span>{% else %}<span class="tag">Primary</span>{% endif %}
-        {% if s.weight %}<span class="table-meta">weight <span data-i18n-skip translate="no">{{ s.weight }}</span></span>{% endif %}
-        {% if s.note %}<span class="table-meta" data-i18n-skip translate="no">{{ s.note }}</span>{% endif %}
+      <div class="table-meta u-mt-2">
+        {% if picker_weights %}
+        <span>The addresses, roles and weights below come from the set and are changed on the backend sets page; only the port is chosen here.</span>
+        {% else %}
+        <span>The addresses and roles below come from the set and are changed on the backend sets page; only the port is chosen here.</span>
+        {% endif %}
       </div>
-      {% endfor %}
+      <div class="scroll-x"><table class="u-mt-2 table mono backend-edit-table backend-set-view">
+        <thead>
+          <tr>
+            <th class="u-w-15">Name</th>
+            <th class="u-w-26">Address</th>
+            <th class="u-w-12">Port</th>
+            <th class="u-w-20">Role</th>
+            {% if picker_weights %}<th class="u-w-10">Weight</th>{% endif %}
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set ns = namespace(primary=0, backup=0) %}
+          {% for s in p.servers %}
+          {% if s.role == 'backup' %}{% set ns.backup = ns.backup + 1 %}{% else %}{% set ns.primary = ns.primary + 1 %}{% endif %}
+          <tr>
+            <td><input type="text" class="form-input" disabled data-i18n-skip translate="no"
+                value="{{ ('backup' ~ ns.backup) if s.role == 'backup' else ('srv' ~ ns.primary) }}"></td>
+            <td><input type="text" class="form-input" disabled data-i18n-skip translate="no" value="{{ s.host }}"></td>
+            <td><input type="number" class="form-input backend-set-port" disabled value="{{ picker_port }}"></td>
+            <td>
+              <select class="form-input" disabled>
+                {% if s.role == 'backup' %}<option selected>Backup</option>{% else %}<option selected>Primary</option>{% endif %}
+              </select>
+            </td>
+            {% if picker_weights %}
+            <td><input type="text" class="form-input" disabled data-i18n-skip translate="no"
+                value="{{ s.weight or '' }}" placeholder="—"></td>
+            {% endif %}
+            <td class="table-meta" data-i18n-skip translate="no">{{ s.note or '' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
     </div>
     {% endfor %}
   </div>

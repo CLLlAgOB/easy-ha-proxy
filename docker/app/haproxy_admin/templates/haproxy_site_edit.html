@@ -179,6 +179,7 @@
 
                 {% set picker_current = site.servers_preset or '' %}
                 {% set picker_port = site.servers_preset_port or ((site.servers or [{}])[0].port) or site.backend_port or eff.backend_port or site_defaults.backend_port or 80 %}
+                {% set picker_weights = true %}
                 {% include "_backend_set_picker.html" %}
 
                 <div id="backend-manual">
