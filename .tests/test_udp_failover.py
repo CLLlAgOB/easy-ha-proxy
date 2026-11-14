@@ -222,24 +222,38 @@ class Switching(unittest.TestCase):
         self.ticks(20)
         self.assertEqual(len(restarts), 2)  # nothing left to apply
 
-    def test_a_switch_back_before_the_first_took_effect_cancels_it(self):
+    def test_after_a_failed_apply_a_switch_back_is_applied_too(self):
+        # A failed apply leaves the rules unknown: the generator replaces them
+        # before it writes its status. Going back to the main backend must
+        # still be applied, or traffic could stay on the backup that died.
         self.up["10.0.0.5"] = False
+        refusals = [RuntimeError("status write failed"), RuntimeError("busy")]
         restarts = []
 
-        def refuse(args, **kw):
+        def flaky(args, **kw):
             if args[:2] == ["systemctl", "restart"]:
                 restarts.append(args)
-                raise RuntimeError("unit failed")
+                if refusals:
+                    raise refusals.pop(0)
             self.commands.append(args)
 
-        controld.run_cmd.side_effect = refuse
+        controld.run_cmd.side_effect = flaky
         self.ticks(3)
-        self.assertTrue(self.failover.pending)
+        self.assertEqual(len(restarts), 1)
         self.up = {"10.0.0.5": True, "10.0.0.6": False}  # backup dies, main answers: back at once
         self.ticks(1)
         self.assertEqual(self.written(), {})
-        self.assertEqual(self.failover.pending, {})  # the rules never left the main backend
-        self.assertFalse(self.failover.public_state()["forwards"]["voip"]["apply_pending"])
+        self.assertEqual(len(restarts), 2)  # applied at the switch back, and refused again
+        self.assertTrue(self.failover.public_state()["forwards"]["voip"]["apply_pending"])
+        self.ticks(6)  # 30 s later: applied for good
+        self.assertEqual(len(restarts), 3)
+        state = self.failover.public_state()
+        self.assertFalse(state["forwards"]["voip"]["apply_pending"])
+        self.assertIsNone(state["error"])
+        # Flows to the side not wanted go, wherever the rules sent them before.
+        self.assertIn(["conntrack", "-D", "-p", "udp", "--reply-src", "10.0.0.6"], self.commands)
+        self.ticks(20)
+        self.assertEqual(len(restarts), 3)
 
 
 class Checking(unittest.TestCase):

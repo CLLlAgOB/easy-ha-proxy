@@ -1217,21 +1217,45 @@ def _activate_server_pem(
         temporary.unlink(missing_ok=True)
 
 
-def _restore_server_pem(destination: Path, previous: Optional[bytes]) -> Tuple[bool, str]:
-    """Put a certificate file back as it was before a switch, and reload."""
+def _put_back_pems(touched: List[Tuple[str, Path, Optional[bytes]]]) -> str:
+    """Put the files of a failed switch back as they were; what to add to the error.
 
+    Only files that differ from before are written, and HAProxy is reloaded
+    once if any was. When that fails the message names what still holds the
+    new certificate, so nobody takes the old state for granted.
+    """
+
+    changed = []
+    for stem, destination, previous in touched:
+        try:
+            current = destination.read_bytes() if destination.exists() else None
+        except OSError:
+            current = b""  # unreadable: write it back to be sure
+        if current != previous:
+            changed.append((stem, destination, previous))
+    if not changed:
+        return "; nothing had changed"
+    failed = []
+    for stem, destination, previous in changed:
+        try:
+            if previous is None:
+                destination.unlink(missing_ok=True)
+            else:
+                destination.write_bytes(previous)
+                _set_cert_permissions(destination)
+        except OSError as exc:
+            failed.append(f"{stem} ({exc})")
     try:
-        if previous is None:
-            destination.unlink(missing_ok=True)
-        else:
-            destination.write_bytes(previous)
-            _set_cert_permissions(destination)
-    except OSError as exc:
-        return False, str(exc)
-    rc, _stdout, stderr = _reload_haproxy()
+        rc, _stdout, reload_error = _reload_haproxy()
+    except Exception as exc:  # pylint: disable=broad-except
+        rc, reload_error = -1, str(exc)
+    names = ", ".join(stem for stem, _destination, _previous in changed)
+    if failed:
+        return f"; putting back failed for {', '.join(failed)}: these files still hold the new certificate"
     if rc not in (None, 0):
-        return False, (stderr or "HAProxy did not reload").strip()[:400]
-    return True, ""
+        return (f"; {names} put back as they were, but HAProxy did not reload: "
+                f"{(reload_error or '').strip()[:300]}")
+    return f"; {names} put back as they were"
 
 
 def _verify_external_chain(
@@ -3000,38 +3024,46 @@ def activate_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
     destination = _ensure_within(
         certs_dir, certs_dir / f"{_safe_slug(checked_domain)}.pem"
     )
-    previous = destination.read_bytes() if destination.exists() else None
-    ok, rc, _stdout, stderr = _activate_server_pem(
-        destination, data, override_pin=True, allow_shadow=True
-    )
+    # Every file this switch touches, with what it held before, so that any
+    # failure -- HAProxy refusing a file, or an exception such as a full disk
+    # half way -- puts all of them back.
+    touched: List[Tuple[str, Path, Optional[bytes]]] = [
+        (checked_domain, destination, destination.read_bytes() if destination.exists() else None)
+    ]
+    try:
+        ok, rc, _stdout, stderr = _activate_server_pem(
+            destination, data, override_pin=True, allow_shadow=True
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        ok, rc, stderr = False, None, f"{checked_domain}: {exc}" + _put_back_pems(touched)
 
     # A dual-key site is two files for one name. Moving only one of them
     # would leave the other still claiming that name with the old
     # certificate -- the shadowing this feature exists to prevent, recreated
     # by the act of preventing it. The sibling comes along when it holds the
-    # same standby, and the pair moves as one: when the sibling is refused,
-    # the first file goes back too and nothing is pinned. A half switch used
-    # to answer ok with the sibling's error dropped.
+    # same standby, and the pair moves as one: when the sibling fails, the
+    # first file goes back too and nothing is pinned. A half switch used to
+    # answer ok with the sibling's error dropped.
     also: List[str] = []
     sibling = _sibling_stem(checked_domain)
     if ok and sibling and _standby_path(sibling, checked_slot).is_file():
         sibling_destination = _ensure_within(
             certs_dir, certs_dir / f"{_safe_slug(sibling)}.pem"
         )
-        sibling_ok, sibling_rc, _out2, sibling_err = _activate_server_pem(
-            sibling_destination, data, override_pin=True, allow_shadow=True
-        )
+        touched.append((sibling, sibling_destination,
+                        sibling_destination.read_bytes() if sibling_destination.exists() else None))
+        try:
+            sibling_ok, sibling_rc, _out2, sibling_err = _activate_server_pem(
+                sibling_destination, data, override_pin=True, allow_shadow=True
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            sibling_ok, sibling_rc, sibling_err = False, None, str(exc)
         if sibling_ok:
             also.append(sibling)
         else:
             ok, rc = False, sibling_rc
-            stderr = f"{sibling}: {(sibling_err or 'HAProxy refused it').strip()}"
-            restored, restore_error = _restore_server_pem(destination, previous)
-            stderr += (
-                f"; {checked_domain} was put back as it was"
-                if restored
-                else f"; putting {checked_domain} back failed too: {restore_error}"
-            )
+            stderr = (f"{sibling}: {(sibling_err or 'HAProxy refused it').strip()}"
+                      + _put_back_pems(touched))
 
     if ok:
         # Held from here on. Everything else that writes this directory --

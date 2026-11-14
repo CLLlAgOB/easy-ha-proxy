@@ -366,9 +366,11 @@ class UdpFailover:
         self.error: "str | None" = None
         self.reported: Dict[str, float] = {}
         self.conntrack_missing = False
-        # Switches written to the state file but not yet in effect: name ->
-        # (side the rules still send to, side wanted, target). Only once the
-        # rules are applied are the switch and its conntrack cleanup done.
+        # Switches written to the state file but not confirmed in effect:
+        # name -> (side wanted, target). Once an apply has failed nobody knows
+        # where the rules send -- the generator replaces them before it writes
+        # its status, and a timed-out systemctl proves nothing -- so a switch
+        # back does not cancel anything: only a successful apply settles it.
         self.pending: Dict[str, tuple] = {}
         self.apply_error: "str | None" = None
         self.retry_at = 0.0
@@ -445,13 +447,9 @@ class UdpFailover:
                 self.pending.pop(gone, None)
                 self._report(gone, False, "", now, force=True)
             if switches or self._file_out_of_step():
-                for name, old, new, target in switches:
+                for name, _old, new, target in switches:
                     self.state[name].update(active=new, since=now, fails=0, oks=0)
-                    # Keep the side the rules still send to; a switch back
-                    # before the first one took effect cancels out.
-                    applied = self.pending.pop(name, (old, new, target))[0]
-                    if applied != new:
-                        self.pending[name] = (applied, new, target)
+                    self.pending[name] = (new, target)
                 self._write_state()
             if self.pending and (switches or now >= self.retry_at):
                 self._apply(now)
@@ -489,8 +487,8 @@ class UdpFailover:
 
     def _apply(self, now: float) -> None:
         """Apply the rules for every pending switch; kept pending on failure."""
-        for name, (old, new, _target) in self.pending.items():
-            LOG.warning("UDP forward %s: switching from its %s to its %s backend", name, old, new)
+        for name, (new, _target) in self.pending.items():
+            LOG.warning("UDP forward %s: sending to its %s backend", name, new)
         try:
             run_cmd(["systemctl", "restart", "iptables-haproxy-udp.service"], timeout=60)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
@@ -499,8 +497,9 @@ class UdpFailover:
             self.retry_at = now + UDP_APPLY_RETRY_SECONDS
             return
         done, self.pending, self.apply_error = self.pending, {}, None
-        for _name, (old, _new, target) in done.items():
-            left = target.get(old)
+        for _name, (new, target) in done.items():
+            # Flows to the side not wanted, wherever the rules sent before.
+            left = target.get("backup" if new == "primary" else "primary")
             if not left:
                 continue
             # Flows already set up keep their old destination until the

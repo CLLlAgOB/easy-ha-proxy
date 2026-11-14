@@ -919,7 +919,7 @@ class ADualKeySiteMovesAsOne(StandbyFixture):
         self.reload_answers((0, "", ""), (1, "", "rsa file rejected"), (1, "", "still broken"))
         result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
         self.assertFalse(result["ok"])
-        self.assertIn("failed too", result["reload_error"])
+        self.assertIn("did not reload", result["reload_error"])
         self.assertIn("still broken", result["reload_error"])
         self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "")
 
@@ -1225,6 +1225,63 @@ class MaterialArrivesInWhateverShapeTheAuthorityChose(StandbyFixture):
         cert, key = self.parts()
         result = CERTD.normalise_uploaded_pem((cert + key).encode(), b"")
         self.assertIn(b"BEGIN CERTIFICATE", result)
+
+
+class ADualKeyPairSurvivesAnException(StandbyFixture):
+    """The pair goes back on any failure of either half, not only a refusal."""
+
+    def setup_pair(self):
+        for stem in ("example.com-ecdsa", "example.com-rsa"):
+            self.deploy_active(stem, self.make_pem("example.com", "LE"))
+            CERTD.store_standby_certificate(
+                stem, "other-ca", self.make_pem("example.com", "Another CA")
+            )
+
+    def originals(self):
+        return {stem: (CERTD.HAPROXY_CERTS_DIR / f"{stem}.pem").read_bytes()
+                for stem in ("example.com-ecdsa", "example.com-rsa")}
+
+    def test_a_full_disk_on_the_second_file_puts_the_first_back(self):
+        # An exception, not a refusal: it used to leave the function before
+        # the putting back, with the first file already switched.
+        self.setup_pair()
+        before = self.originals()
+        real = CERTD.tempfile.NamedTemporaryFile
+        calls = []
+
+        def second_fails(*args, **kwargs):
+            calls.append(True)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(CERTD.tempfile, "NamedTemporaryFile", side_effect=second_fails):
+            result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        self.assertFalse(result["ok"])
+        self.assertIn("No space left on device", result["reload_error"])
+        self.assertIn("put back", result["reload_error"])
+        self.assertEqual(self.originals(), before)
+        self.assertEqual(result["also_switched"], [])
+        for stem in before:
+            self.assertEqual(CERTD.read_pin(stem), "", stem)
+
+    def test_an_exception_after_the_first_file_was_replaced_puts_it_back(self):
+        self.setup_pair()
+        before = self.originals()
+        answers = [RuntimeError("reload crashed"), (0, "", "")]
+
+        def reload():
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with mock.patch.object(CERTD, "_reload_haproxy", side_effect=reload):
+            result = CERTD.activate_standby_certificate("example.com-ecdsa", "other-ca")
+        self.assertFalse(result["ok"])
+        self.assertIn("reload crashed", result["reload_error"])
+        self.assertEqual(self.originals(), before)
+        self.assertEqual(CERTD.read_pin("example.com-ecdsa"), "")
 
 
 if __name__ == "__main__":
