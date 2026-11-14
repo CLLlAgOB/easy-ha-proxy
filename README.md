@@ -35,6 +35,14 @@ per-site GeoIP filtering, IP allow-lists, zero trust and client certificates
 helper APIs. GeoIP lookups and country flags work offline, so visitor
 addresses never go to third parties.
 
+**Ports that open only after sign-in.** Mark a TCP proxy, a UDP forward
+or a site as zero trust, and it answers only addresses that have signed in.
+RDP, SSH, WireGuard, a database or a game server stay closed to the internet.
+A user opens your sign-in page, passes Authelia with two-factor login, and
+their current IP address gets access for a set time. Nothing to install on
+the client, no VPN to set up. The same page can carry instructions and files
+for your users.
+
 **Fast and light.** HAProxy does the work at the edge. The whole stack (HAProxy,
 Authelia, Redis, the panel and its helper daemons) uses about **300 MB of RAM**,
 measured on a 4-core ARM64 board with 2 GB. Configuration changes go out as a
@@ -123,9 +131,10 @@ Step by step: [Quick Start](docs/quickstart.md) · every option:
 - **Certificates.** Let's Encrypt issuance and renewal (HTTP-01, or DNS-01 for
   wildcards), a built-in certificate authority, import of PEM, DER and PKCS#12,
   standby certificates, delivery of certificates to other machines.
-- **Access.** Authelia SSO with users, groups and per-site policies; a sign-in
-  page that authorizes the visitor's address; IP allow-lists, zero trust, GeoIP
-  and client certificates.
+- **Access.** Authelia SSO with users, groups and per-site policies. Zero trust
+  for sites, TCP and UDP: a sign-in page authorizes the visitor's address, and
+  only authorized addresses get through. Also IP allow-lists, GeoIP and client
+  certificates.
 - **Protection.** Adaptive scoring of scanners and brute force, editable
   detection rules, a page instead of silence on the first ban step (so a real
   person can tell you), rate limits, bans in HAProxy and in the firewall.
