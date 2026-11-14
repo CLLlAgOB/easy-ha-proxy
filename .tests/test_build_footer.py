@@ -129,16 +129,16 @@ class TheFooter(unittest.TestCase):
         reply = "Name: HAProxy\nVersion: 3.4.7-0+ha34+ubuntu24.04u2\nRelease_date: 2026/10/31\n"
         build_info._HAPROXY_VERSION.update(at=None, value=None)
         self.addCleanup(build_info._HAPROXY_VERSION.update, at=None, value=None)
-        with mock.patch("haproxy_admin.utils.haproxy_runtime_command", return_value=reply) as ask:
+        with mock.patch.object(build_info, "haproxy_runtime_command", return_value=reply) as ask:
             first = build_info.haproxy_version()
             build_info.haproxy_version()
         self.assertEqual(first, {"short": "3.4.7", "full": "3.4.7-0+ha34+ubuntu24.04u2"})
         self.assertEqual(ask.call_count, 1)
 
     def test_an_unreachable_or_odd_haproxy_is_no_version(self):
-        with mock.patch("haproxy_admin.utils.haproxy_runtime_command", side_effect=OSError("gone")):
+        with mock.patch.object(build_info, "haproxy_runtime_command", side_effect=OSError("gone")):
             self.assertIsNone(build_info._read_haproxy_version())
-        with mock.patch("haproxy_admin.utils.haproxy_runtime_command",
+        with mock.patch.object(build_info, "haproxy_runtime_command",
                         return_value="Version: <script>\n"):
             self.assertIsNone(build_info._read_haproxy_version())
 

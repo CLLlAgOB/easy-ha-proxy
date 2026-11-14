@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 from . import updates_badge
 from .server_time import format_datetime
+from .utils import SOCKET, haproxy_runtime_command
 
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _TREE_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -41,8 +42,6 @@ def _version(value: Any) -> str:
 
 def _read_haproxy_version() -> Optional[dict[str, str]]:
     """{"short": "3.4.7", "full": "3.4.7-0+ha34+ubuntu24.04u2"} from `show info`."""
-    from .utils import SOCKET, haproxy_runtime_command
-
     try:
         reply = haproxy_runtime_command("show info", SOCKET, timeout=2) or ""
     except (OSError, ValueError):
