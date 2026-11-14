@@ -6,6 +6,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fs = require("node:fs");
+const vm = require("node:vm");
 
 const {russianCatalogue} = require("./catalogue.js");
 
@@ -34,6 +36,41 @@ const t = i18n.createTranslator({
 });
 
 /* ---------- the rules ---------- */
+
+test("page labels only compile and run fallback patterns they actually contain", () => {
+  let compiled = 0;
+  let replaced = 0;
+  class CountedRegExp extends RegExp {
+    constructor(...args) {
+      super(...args);
+      compiled++;
+    }
+    [Symbol.replace](...args) {
+      replaced++;
+      return super[Symbol.replace](...args);
+    }
+  }
+  const sandbox = {module: {exports: {}}, RegExp: CountedRegExp};
+  vm.runInNewContext(fs.readFileSync(path.join(STATIC, "i18n.js"), "utf8"), sandbox);
+  const messages = Object.fromEntries(Array.from({length: 1000}, (_, index) =>
+    [`Unrelated phrase ${index}`, `Другая фраза ${index}`]
+  ));
+  messages["Backend traffic"] = "Трафик бэкендов";
+  const translate = sandbox.module.exports.createTranslator(messages);
+  // The catalogue is rebuilt on every navigation. Exact hits and machine
+  // values must not compile or run thousands of Unicode boundary patterns.
+  assert.equal(compiled, 0);
+  assert.equal(translate("Backend traffic"), "Трафик бэкендов");
+  assert.equal(translate("192.0.2.5"), "192.0.2.5");
+  assert.equal(compiled, 0);
+  assert.equal(replaced, 0);
+  assert.equal(translate("Backend traffic: 5"), "Трафик бэкендов: 5");
+  assert.equal(compiled, 1);
+  assert.equal(replaced, 1);
+  assert.equal(translate("Backend traffic: 6"), "Трафик бэкендов: 6");
+  assert.equal(compiled, 1);
+  assert.equal(replaced, 2);
+});
 
 test("a string the catalogue knows comes back translated whole", () => {
   assert.equal(t("Save changes"), "Сохранить изменения");

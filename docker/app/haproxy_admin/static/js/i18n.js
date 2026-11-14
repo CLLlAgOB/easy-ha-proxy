@@ -60,13 +60,10 @@
       .map(([source, target]) => ({
         source,
         target,
-        // A token-aware expression prevents short entries such as "and" from
-        // changing letters in the middle of another word, a hyphenated
-        // technical identifier, a machine-readable key=value fragment, a
-        // path or a domain. A phrase gets the same edge on each side that
-        // starts or ends with a letter or digit: "1 day" used to match inside
-        // "21 days" and left an English "s" after the Russian word.
-        pattern: boundedPattern(source)
+        // Boundary patterns are expensive to compile with a large catalogue.
+        // Most entries never occur on a given page; build and retain a pattern
+        // only when its literal source is present in a fallback translation.
+        pattern: undefined
       }));
     // English words a translation keeps on purpose -- a product's name,
     // "backend" -- may stay in a translated sentence.
@@ -109,9 +106,13 @@
 
       if (result === source) {
         for (const item of replacements) {
+          // Every pattern contains this exact, case-sensitive literal. Avoid
+          // compiling or running a Unicode regex when it cannot possibly match.
+          if (!result.includes(item.source)) continue;
+          if (item.pattern === undefined) item.pattern = boundedPattern(item.source);
           if (item.pattern) {
             result = result.replace(item.pattern, (match, prefix) => prefix + item.target);
-          } else if (result.includes(item.source)) {
+          } else {
             result = result.split(item.source).join(item.target);
           }
         }
