@@ -19,6 +19,17 @@ SERVICE_RESTART_PROTOCOL = 1
 TIME = re.compile(r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
 UNIT = re.compile(r'^[A-Za-z0-9_@.:\-]+\.service$')
 BOOT = Path('/proc/sys/kernel/random/boot_id')
+NEEDRESTART_CONF = Path('/etc/needrestart/needrestart.conf')
+PERL = Path('/usr/bin/perl')
+# Loads the native configuration the way needrestart does (its conf.d snippets
+# are read by the main file) and says, per unit, whether an override_rc rule
+# with a false value keeps needrestart from restarting it.
+NATIVE_CHECK = (
+    'our %nrconf; my $loaded = do $ARGV[0]; die($@ || $!) unless defined $loaded;'
+    ' my $rules = $nrconf{override_rc} || {};'
+    ' for my $unit (@ARGV[1..$#ARGV]) {'
+    ' print((grep { $unit =~ $_ && !$rules->{$_} } keys %$rules) ? "blocked\n" : "allowed\n"); }'
+)
 # These services are deliberately left to controlled maintenance. Never infer
 # that an arbitrary failed restart can be fixed by rebooting the host.
 PROTECTED = re.compile(r'^(?:haproxy|docker|containerd|easy-ha-proxy-updated|easy-ha-proxy-updated-job-[0-9a-f]{12}|easy-ha-proxy-backupd)\.service$')
@@ -80,12 +91,42 @@ def due(value, status, local, boot_id, installed_at=0):
             and (not same or local.timestamp() - status.get('last_attempt', 0) >= retry)), key
 
 
-def classification(service):
+def classification(service, native=frozenset()):
+    """protected, deferred, automatic or unknown.
+
+    ``native`` are the units the host's own needrestart configuration never
+    restarts (consoles, getty, unattended-upgrades...). needrestart -r a
+    skips them, so taking them for automatic left them "unresolved" after
+    every pass, and that blocked the reboot the operator allowed for
+    deferred services.
+    """
     if PROTECTED.fullmatch(service):
         return 'protected'
-    if DEFERRED.fullmatch(service):
+    if DEFERRED.fullmatch(service) or service in native:
         return 'deferred'
     return 'automatic' if UNIT.fullmatch(service) or service == 'systemd-manager' else 'unknown'
+
+
+def native_exclusions(units):
+    """The units the native needrestart configuration keeps from a restart.
+
+    An empty set when that cannot be told -- no configuration, no perl, a
+    configuration that fails to load, an answer of the wrong shape: the
+    units then stay automatic, and one needrestart does not restart stays
+    unresolved and blocks the reboot fallback, as before.
+    """
+    units = [unit for unit in units if UNIT.fullmatch(unit)]
+    if not units or not NEEDRESTART_CONF.is_file() or not PERL.is_file():
+        return set()
+    try:
+        child = subprocess.run([str(PERL), '-e', NATIVE_CHECK, str(NEEDRESTART_CONF), *units],
+                               capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    answers = child.stdout.split()
+    if child.returncode or len(answers) != len(units) or set(answers) - {'blocked', 'allowed'}:
+        return set()
+    return {unit for unit, answer in zip(units, answers, strict=True) if answer == 'blocked'}
 
 
 def checked_restart():
@@ -94,7 +135,9 @@ def checked_restart():
         raise SecurityError(result['error'])
     if any(classification(service) == 'unknown' for service in result['services']):
         raise SecurityError('The restart checker returned an unsupported service')
-    result['details'] = [{'service': service, 'kind': classification(service)} for service in result['services']]
+    native = native_exclusions([service for service in result['services'] if classification(service) == 'automatic'])
+    result['native_excluded'] = sorted(native)
+    result['details'] = [{'service': service, 'kind': classification(service, native)} for service in result['services']]
     return result
 
 
@@ -117,7 +160,8 @@ def fallback_services(root, *, now=None, restart=None):
             or status.get('failed_services') or status.get('unresolved')):
         return []
     deferred = status.get('deferred') or []
-    if not deferred or any(classification(service) not in {'protected', 'deferred'} for service in deferred):
+    native = set(status.get('native_excluded') or [])
+    if not deferred or any(classification(service, native) not in {'protected', 'deferred'} for service in deferred):
         return []
     fresh = restart if restart is not None else checked_restart()
     services = fresh.get('services') or []
@@ -163,7 +207,8 @@ def execute(action, root, *, now=None):
         maintenance_guard()
         with package_locks():
             before = checked_restart()
-            automatic = [unit for unit in before['services'] if classification(unit) == 'automatic']
+            native_before = set(before.get('native_excluded') or [])
+            automatic = [unit for unit in before['services'] if classification(unit, native_before) == 'automatic']
             # Preserve native and operator exclusions; add protection for the
             # network and the workers that currently own maintenance custody.
             if automatic:
@@ -182,14 +227,16 @@ def execute(action, root, *, now=None):
                 code, text = command(['/usr/bin/systemctl', 'show', unit, '--property=ActiveState', '--value'], check=False)
                 if code or text.strip() not in {'active', 'reloading'}:
                     failed.append(unit)
-            deferred = [unit for unit in after['services'] if classification(unit) in {'protected', 'deferred'}]
+            native_after = set(after.get('native_excluded') or [])
+            deferred = [unit for unit in after['services'] if classification(unit, native_after) in {'protected', 'deferred'}]
             unresolved = sorted(set(after['services']) - set(deferred))
             # An unknown kernel state stays visible and blocks the reboot
             # fallback; the listed services were restarted all the same.
             kernel_warning = after.get('kernel_warning') or before.get('kernel_warning')
             state.update(state='ready', completed_at=time.time(), applied=True, verified=not failed and not unresolved,
                          before=before['services'], restart=after, restarted=sorted(set(automatic) - set(after['services']) - set(failed)),
-                         deferred=deferred, unresolved=unresolved, failed_services=failed, kernel_warning=kernel_warning)
+                         deferred=deferred, unresolved=unresolved, failed_services=failed, kernel_warning=kernel_warning,
+                         native_excluded=sorted(native_after))
             atomic(path, state)
             if failed:
                 raise SecurityError('Some services did not become active after their restart')

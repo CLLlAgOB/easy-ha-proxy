@@ -46,6 +46,8 @@ class ServiceRestarts(unittest.TestCase):
         self.scan = patch.object(s, 'restart_status', return_value=self.restart()).start()
         self.command = patch.object(s, 'command', return_value=(0, 'active\n')).start()
         patch.object(broker, 'current_boot_id', return_value=BOOT).start()
+        # The host's needrestart config is not part of these tests unless one says so.
+        patch.object(s, 'NEEDRESTART_CONF', self.root / 'no-needrestart.conf').start()
 
     def save_policy(self):
         (self.root / 'restart-policy.json').write_text(json.dumps(self.policy))
@@ -249,6 +251,54 @@ class ServiceRestarts(unittest.TestCase):
         noon = self.now.replace(hour=12)
         (self.root / 'status.json').write_text(json.dumps({'last_install_at': noon.timestamp()}))
         self.assertFalse(s.due(self.policy, self.state(), noon + dt.timedelta(minutes=5), BOOT, s.last_install(self.root))[0])
+
+
+    def test_a_service_the_native_config_never_restarts_is_deferred_and_the_pass_verified(self):
+        # needrestart -r a skips getty and unattended-upgrades by its own
+        # rules; taken for automatic they stayed unresolved and blocked the
+        # reboot allowed for deferred services.
+        native = {'getty@tty1.service', 'unattended-upgrades.service'}
+        patch.object(s, 'native_exclusions', side_effect=lambda units: native & set(units)).start()
+        self.scan.side_effect = [
+            self.restart('cron.service', 'dbus.service', 'getty@tty1.service', 'unattended-upgrades.service'),
+            self.restart('dbus.service', 'getty@tty1.service', 'unattended-upgrades.service'),
+        ]
+        result = s.run('restart-cycle', self.root, now=self.now)
+        self.assertEqual(result['restarted'], ['cron.service'])
+        self.assertEqual(result['unresolved'], [])
+        self.assertTrue(result['verified'])
+        self.assertEqual(result['deferred'], ['dbus.service', 'getty@tty1.service', 'unattended-upgrades.service'])
+        self.assertEqual(self.state()['native_excluded'], ['getty@tty1.service', 'unattended-upgrades.service'])
+        checked = [call.args[0] for call in self.command.call_args_list if call.args[0][0] == '/usr/bin/systemctl']
+        self.assertEqual([argv[2] for argv in checked], ['cron.service'])
+        # The verified pass is evidence for the allowed reboot.
+        self.scan.side_effect = None
+        self.scan.return_value = self.restart('dbus.service', 'getty@tty1.service')
+        self.assertEqual(s.fallback_services(self.root, now=self.now), ['dbus.service', 'getty@tty1.service'])
+
+    def native_config(self, text):
+        config = self.root / 'needrestart.conf'
+        config.write_text(text)
+        patch.object(s, 'NEEDRESTART_CONF', config).start()
+        if not s.PERL.is_file():
+            self.skipTest('Perl is used by the native needrestart package')
+
+    def test_native_exclusions_come_from_the_real_config_and_its_snippets(self):
+        snippets = self.root / 'conf.d'
+        snippets.mkdir()
+        (snippets / 'site.conf').write_text("$nrconf{override_rc}{qr(^unattended-upgrades\\.service$)} = 0;\n")
+        self.native_config(
+            "$nrconf{override_rc} = { qr(^getty@.+\\.service) => 0, qr(^cron\\.service$) => 1 };\n"
+            f"foreach my $fn (sort <{snippets}/*.conf>) {{ eval do {{ local(@ARGV, $/) = $fn; <> }}; die $@ if $@; }}\n"
+            "1;\n")
+        units = ['getty@tty1.service', 'cron.service', 'unattended-upgrades.service', 'ssh.service']
+        self.assertEqual(s.native_exclusions(units), {'getty@tty1.service', 'unattended-upgrades.service'})
+
+    def test_a_config_that_cannot_be_read_excludes_nothing(self):
+        self.native_config("this is not perl {{{\n")
+        self.assertEqual(s.native_exclusions(['getty@tty1.service']), set())
+        patch.object(s, 'NEEDRESTART_CONF', self.root / 'missing.conf').start()
+        self.assertEqual(s.native_exclusions(['getty@tty1.service']), set())
 
 
 @unittest.skipUnless(s, 'Linux service restart executor')
