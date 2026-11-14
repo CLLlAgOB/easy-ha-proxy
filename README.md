@@ -127,7 +127,8 @@ Step by step: [Quick Start](docs/quickstart.md) · every option:
 
 - **Routing.** HTTP/HTTPS sites, TCP proxies with TLS passthrough, UDP
   forwarding (for example WireGuard) with an automatic backup backend, several
-  backends per site with health checks, maintenance pages.
+  backends per site with health checks, reusable backend sets (addresses with a
+  primary or backup role, kept once), maintenance pages.
 - **Certificates.** Let's Encrypt issuance and renewal (HTTP-01, or DNS-01 for
   wildcards), a built-in certificate authority, import of PEM, DER and PKCS#12,
   standby certificates, delivery of certificates to other machines.

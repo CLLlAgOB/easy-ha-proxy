@@ -32,6 +32,8 @@ and encrypted disaster-recovery backups from one assistant.
   changes.
   The interface supports English and Russian and remembers the selected
   language.
+- Optional backend sets: named address lists with a primary or backup role,
+  kept once and picked by sites, TCP proxies and UDP forwards.
 - A local and SSH-based installer with inspection, check mode, targeted updates,
   repair, domain migration, and legacy-configuration migration. An argument-free
   start asks for English or Russian; English is the default.
@@ -941,6 +943,50 @@ The administration domain is deliberately not offered here. The safety net for
 a configuration change is a probe from the machine itself, which client
 certificates would have to be exempt from — so the one check that guards an
 apply could not see the setting most likely to lock you out.
+
+### Backend sets
+
+When the same servers stand behind many sites, TCP proxies or UDP forwards,
+keep them once under **HAProxy → Backend sets** and pick the set instead of
+typing the addresses again. Sets are optional: manual addresses stay the
+default everywhere, and an entry can switch between a set and manual
+addresses at any time.
+
+A set has a name (up to 48 letters, digits, spaces, dots, dashes or
+underscores, Cyrillic included) and up to 16 addresses. For each address:
+
+| Field | Meaning |
+|---|---|
+| Address | IPv4/IPv6 address or host name, without a port |
+| Role | `primary` takes traffic; `backup` takes it only when every primary is down. At least one primary is required |
+| Weight | optional, 1–256; relative share of traffic, used by sites only |
+| Note | optional, up to 64 characters, shown only in the panel |
+
+The port is not part of the set: the same servers often listen on different
+ports for different services, so each site or TCP proxy that uses a set gives
+its own port next to it. Up to 50 sets can be kept.
+
+How an entry uses a set:
+
+- **Site** — every address becomes a server (`srv1`, `srv2`, … for primaries,
+  `backup1`, … for backups) on the entry's port, with the weights.
+- **TCP proxy** — the same, without weights.
+- **UDP forward** — a forward has one main backend and at most one backup, so it
+  takes the set's first primary and first backup; the port stays the forward's
+  own.
+
+The set is a reference, not a copy. It is stored in `vars.yml` under
+`backend_presets`, and the entry keeps its name in `servers_preset` (and the
+port in `servers_preset_port`). When the entry is saved the set is expanded
+into ordinary servers, so HAProxy, the UDP rules and the daemons read exactly
+what they read before. Saving a set expands it again in every entry that
+names it: sites and TCP proxies take effect after the next validate and apply
+of the HAProxy configuration, UDP forwards are applied at once. A set renamed
+in the editor stays attached to its entries.
+
+A set in use cannot be deleted; the panel lists the entries that name it,
+switch them to another set or to manual addresses first. Health checks,
+balancing algorithm and the other backend settings stay per entry.
 
 ### Backend maintenance
 
