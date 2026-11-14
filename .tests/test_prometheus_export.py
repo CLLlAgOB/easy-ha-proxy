@@ -13,6 +13,7 @@ import re
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,13 +24,16 @@ def load_exporter():
     """Load the exposition builder alone, without the Flask package."""
     package = types.ModuleType("haproxy_admin")
     package.__path__ = [str(APP_DIR)]
-    sys.modules.setdefault("haproxy_admin", package)
-    spec = importlib.util.spec_from_file_location(
-        "haproxy_admin.services_prometheus", APP_DIR / "services_prometheus.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # Only for the load: a later test must find the real package and the
+    # real services_prometheus, not this copy.
+    with mock.patch.dict(sys.modules):
+        sys.modules.setdefault("haproxy_admin", package)
+        spec = importlib.util.spec_from_file_location(
+            "haproxy_admin.services_prometheus", APP_DIR / "services_prometheus.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
     return module
 
 

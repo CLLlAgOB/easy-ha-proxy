@@ -11,6 +11,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,17 +37,20 @@ def load_services_module():
     cache = types.ModuleType("haproxy_admin.cache")
     cache.get_country_code = lambda _ip: ""
 
-    sys.modules["haproxy_admin"] = package
-    sys.modules["haproxy_admin.utils"] = utils
-    sys.modules["haproxy_admin.cache"] = cache
-
-    path = APP_DIR / "haproxy_admin" / "services.py"
-    spec = importlib.util.spec_from_file_location(
-        "haproxy_admin.services_under_test", path
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
+    # The stubs stand in only while services.py imports them; the module keeps
+    # what it bound, and every later test finds the real package again.
+    with mock.patch.dict(sys.modules, {
+        "haproxy_admin": package,
+        "haproxy_admin.utils": utils,
+        "haproxy_admin.cache": cache,
+    }):
+        path = APP_DIR / "haproxy_admin" / "services.py"
+        spec = importlib.util.spec_from_file_location(
+            "haproxy_admin.services_under_test", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
     return module
 
 
