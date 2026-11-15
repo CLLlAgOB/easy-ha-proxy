@@ -1014,6 +1014,9 @@
     byId("updates-auto-install-runtime").disabled = !byId("updates-auto-install-unified").checked;
     byId("updates-auto-install-os").disabled = byId("updates-auto-install-unified").checked;
     byId("updates-separate-schedules").style.display = byId("updates-auto-install-unified").checked ? "none" : "";
+    // The unified window replaces the separate schedules even while it is
+    // switched off; say so where the switch is.
+    byId("updates-maintenance-paused").hidden = !(byId("updates-auto-install-unified").checked && !box.checked);
     byId("updates-save-auto-install").disabled = !autoInstall || !dirty || requestRunning
       || start.value === end.value;
   }

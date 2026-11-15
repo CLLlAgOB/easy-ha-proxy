@@ -1,16 +1,21 @@
 {
-  "meta": {"code": "ru", "label": "Русский"},
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
   "messages": {
     "Unified maintenance window": "Общее окно обслуживания",
     "Enabled. Every day in the server time zone.": "Включено. Ежедневно по времени сервера.",
     "The maintenance window is open. New stages may start until it closes.": "Окно обслуживания открыто. Новые этапы могут запускаться до его окончания.",
-    "The unified window is configured, but automatic maintenance is disabled.": "Общее окно задано, но автоматическое обслуживание выключено.",
     "A unified window has not been selected. Separate schedules apply.": "Общее окно не выбрано. Действуют отдельные расписания.",
     "The saved maintenance window could not be verified. Check the update settings.": "Не удалось подтвердить сохранённое окно обслуживания. Проверьте настройки обновлений.",
     "Maintenance window settings could not be read.": "Не удалось прочитать настройки окна обслуживания.",
     "Current window: {start} – {end}": "Текущее окно: {start} – {end}",
     "Next window: {start} – {end}": "Ближайшее окно: {start} – {end}",
     "One window for project and OS updates, supported HAProxy updates, service restarts and necessary server reboots.": "Единое время для обновлений проекта и ОС, поддерживаемых обновлений HAProxy, перезапуска служб и необходимых перезагрузок сервера.",
-    "An installation already started and container recovery finish after the window closes. New stages and a reboot not yet started wait for the next window.": "Начатая установка и восстановление контейнеров завершаются и после закрытия окна. Новые этапы и ещё не начатая перезагрузка ждут следующего окна."
+    "An installation already started and container recovery finish after the window closes. New stages and a reboot not yet started wait for the next window.": "Начатая установка и восстановление контейнеров завершаются и после закрытия окна. Новые этапы и ещё не начатая перезагрузка ждут следующего окна.",
+    "The unified window is configured, but automatic maintenance is disabled. Nothing starts in it, and the separate schedules for security installation, service restarts and reboots are paused as well.": "Общее окно задано, но автоматическое обслуживание выключено. В нём ничего не запускается, а отдельные расписания установки исправлений безопасности, перезапуска служб и перезагрузки тоже приостановлены.",
+    "Disabled; separate schedules are paused as well": "Выключено; отдельные расписания тоже приостановлены",
+    "Disabled: nothing starts in this window": "Выключено: в этом окне ничего не запускается"
   }
 }

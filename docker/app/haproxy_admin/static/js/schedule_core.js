@@ -9,7 +9,7 @@
   const HOUR = 3600000;
   function build(data, clock, now, translate) {
     const t = translate || ((text, params = {}) => text.replace(/\{(\w+)\}/g, (_, key) => params[key] ?? `{${key}}`));
-    const tasks = [], disabled = [], until = now + 24 * HOUR;
+    const tasks = [], disabled = [], inactive = [], until = now + 24 * HOUR;
     const stamp = (value) => clock.parse(value)?.getTime();
     const seconds = (value) => typeof value === "number" && value > 0 ? value * 1000 : null;
     function add(id, label, start, condition, page, end, detail) {
@@ -65,7 +65,15 @@
     if (unified) {
       if (common.enabled === true) add("project-install", "Unified software maintenance", maintenance.next?.start,
         t("Updates, application, service restarts and necessary reboot; new stages only inside the window"), "updates", maintenance.next?.end);
-      else off("Unified software maintenance", "updates");
+      else {
+        off("Unified software maintenance", "updates", "Disabled; separate schedules are paused as well");
+        // The configured hours stay on the chart, greyed, so a window that
+        // was saved but not switched on is seen rather than missed. It is
+        // not a start: the table of next starts does not list it.
+        if (maintenanceWindow) inactive.push({id: "project-install", label: t("Unified software maintenance"),
+          start: maintenanceWindow.start, end: maintenanceWindow.end,
+          condition: t("Disabled: nothing starts in this window"), page: "updates"});
+      }
     }
     const b = data.backups?.schedule;
     if (b) {
@@ -117,7 +125,8 @@
       else off("GeoIP database update", "geoip");
     }
     tasks.sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
-    return {tasks, visible: tasks.filter((task) => task.start < until && (task.end || task.start) >= now - 60000), disabled, maintenance, now, until};
+    const shown = (task) => task.start < until && (task.end || task.start) >= now - 60000;
+    return {tasks, visible: tasks.filter(shown), inactive: inactive.filter(shown), disabled, maintenance, now, until};
   }
   return {build};
 });

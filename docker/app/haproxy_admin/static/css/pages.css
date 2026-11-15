@@ -552,6 +552,8 @@
 .plan-grid { stroke: var(--border); stroke-dasharray: 3 5; }
 .plan-point { fill: var(--accent-primary); }
 .plan-window { fill: var(--accent-primary); opacity: .4; stroke: var(--accent-primary); stroke-width: 2; }
+.plan-window-inactive { fill: var(--text-secondary); opacity: .25; stroke: var(--text-secondary); stroke-dasharray: 8 6; }
+.plan-task-inactive { color: var(--text-secondary); }
 .plan-task-label { font-size: 13px; overflow-wrap: anywhere; }
 .plan-task-label small, .plan-detail { display: block; color: var(--text-secondary); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
 .plan-table { overflow-x: auto; margin: 18px 0; max-height: 480px; }

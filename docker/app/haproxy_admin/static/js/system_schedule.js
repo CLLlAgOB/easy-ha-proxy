@@ -23,13 +23,14 @@
     const states = {
       enabled: "Enabled. Every day in the server time zone.",
       open: "The maintenance window is open. New stages may start until it closes.",
-      disabled: "The unified window is configured, but automatic maintenance is disabled.",
+      disabled: "The unified window is configured, but automatic maintenance is disabled. Nothing starts in it, and the separate schedules for security installation, service restarts and reboots are paused as well.",
       separate: "A unified window has not been selected. Separate schedules apply.",
       invalid: "The saved maintenance window could not be verified. Check the update settings.",
       unavailable: "Maintenance window settings could not be read."
     };
     el("maintenance-hours").textContent = maintenance.hours ? `${maintenance.hours} · ${clock.zone}` : "—";
     el("maintenance-state").textContent = t(states[maintenance.state]);
+    el("maintenance-state").classList.toggle("text-warning", maintenance.state === "disabled");
     el("maintenance-next").hidden = !maintenance.next;
     el("maintenance-next").textContent = maintenance.next ? t(maintenance.state === "open"
       ? "Current window: {start} – {end}" : "Next window: {start} – {end}", {
@@ -44,19 +45,23 @@
     for (const hour of ticks) axis.append(svg("text", {x: hour / 24 * width, y: 20, "text-anchor": hour === 0 ? "start" : hour === 24 ? "end" : "middle"},
       clock.formatter({hour: "2-digit", minute: "2-digit"}).format(model.now + hour * 3600000)));
     timeline.append(axis);
-    for (const task of model.visible) {
-      const link = node("a", task.label, "plan-task-label"); link.href = pages[task.page];
+    const rows = [...model.visible, ...(model.inactive || []).map((task) => ({...task, inactive: true}))]
+      .sort((a, b) => a.start - b.start);
+    for (const task of rows) {
+      const link = node("a", task.label, task.inactive ? "plan-task-label plan-task-inactive" : "plan-task-label");
+      link.href = pages[task.page];
       if (task.detail) link.append(node("small", task.detail));
       const title = `${task.label}: ${when(task)} · ${task.condition}`;
       link.title = title; timeline.append(link);
       const chart = svg("svg", {viewBox: `0 0 ${width} 40`, class: "plan-track", role: "img", "aria-label": title});
       chart.append(svg("title", {}, title));
       for (const hour of ticks) chart.append(svg("line", {x1: hour / 24 * width, x2: hour / 24 * width, y1: 0, y2: 40, class: "plan-grid"}));
-      if (task.end) chart.append(svg("rect", {x: x(task.start), y: 11, width: Math.max(3, x(task.end) - x(task.start)), height: 18, rx: 4, class: "plan-window"}));
+      if (task.end) chart.append(svg("rect", {x: x(task.start), y: 11, width: Math.max(3, x(task.end) - x(task.start)), height: 18, rx: 4,
+        class: task.inactive ? "plan-window plan-window-inactive" : "plan-window"}));
       else chart.append(svg("circle", {cx: Math.max(6, Math.min(width - 6, x(task.start))), cy: 20, r: 6, class: "plan-point"}));
       timeline.append(chart);
     }
-    el("empty").hidden = model.visible.length > 0;
+    el("empty").hidden = rows.length > 0;
     el("rows").replaceChildren();
     for (const task of model.tasks) {
       const tr = node("tr"), name = node("td", task.label);

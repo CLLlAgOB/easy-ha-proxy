@@ -42,6 +42,16 @@ test("a saved disabled common window remains visible without inventing a schedul
   assert.deepEqual(result.tasks, []);
   assert(result.disabled.some((item) => item.label === "Unified software maintenance"));
   assert(!result.disabled.some((item) => item.label === "Project update installation"));
+  // Drawn greyed on the chart at its configured hours, never as a start.
+  assert.equal(result.inactive.length, 1);
+  assert.equal(result.inactive[0].label, "Unified software maintenance");
+  assert.equal(clock.time(result.inactive[0].end), "02:00:00");
+  assert.match(result.inactive[0].condition, /nothing starts/);
+  assert.match(result.disabled.find((item) => item.label === "Unified software maintenance").condition, /paused/);
+});
+test("an enabled or separate schedule has nothing greyed", () => {
+  assert.deepEqual(build({updates: {settings: {auto_install: {enabled: true, unified: true, start: 1, end: 2}}}}, clock, now).inactive, []);
+  assert.deepEqual(build({updates: {settings: {auto_install: {enabled: false, unified: false, start: 1, end: 2}}}}, clock, now).inactive, []);
 });
 test("the common window is still shown when update status fails but security status succeeds", () => {
   const result = build({security: {...security, maintenance_window: {
