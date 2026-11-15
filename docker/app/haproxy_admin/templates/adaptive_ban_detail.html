@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Ban details{% endblock %}
+{% block header_title %}Ban details{% endblock %}
+{% block content %}
+  <section id="ab-detail" class="card ab-detail" data-ban="{{ ban|tojson|forceescape }}" aria-labelledby="ab-detail-title">
+    <div class="card-header"><h2 id="ab-detail-title" tabindex="-1" data-i18n-skip translate="no"></h2><a class="btn-small" id="ab-back" href="{{ url_for('routes.adaptive_bans_page') }}">Back to bans</a></div>
+    <p id="ab-detail-note" class="mon-sub" role="status" data-i18n-skip translate="no"></p>
+    <h4>Findings recorded at the ban</h4>
+    <p id="ab-evidence-note" class="mon-sub" data-i18n-skip translate="no"></p>
+    <div class="ap-page-table"><table class="data-table"><thead><tr><th>When</th><th>Finding</th><th>Site</th><th>Detail</th><th>Points</th></tr></thead><tbody id="ab-evidence" data-i18n-skip translate="no"></tbody></table></div>
+    <div class="ab-toolbar">
+      <h4>Requests before the ban</h4>
+      <label>Look back<select id="ab-hours"><option value="1">1 hour</option><option value="6">6 hours</option><option value="24">24 hours</option><option value="168">7 days</option></select></label>
+      <a id="ab-explorer" class="btn-small" href="/security/requests">Open request log</a>
+      <a id="ab-ip-page" class="btn-small" href="#">Address details and unban</a>
+    </div>
+    <p class="mon-sub">Requests are shown newest first, up to the recorded ban time. Findings are saved separately and may outlive the request log.</p>
+    <p id="ab-requests-note" class="mon-sub" role="status" data-i18n-skip translate="no"></p>
+    <div class="ap-page-table"><table class="data-table"><thead><tr><th>When</th><th>Method</th><th>Site</th><th>Path</th><th>Status</th><th>Client</th></tr></thead><tbody id="ab-requests" data-i18n-skip translate="no"></tbody></table></div>
+    <button class="btn-small" type="button" id="ab-more" hidden>Older requests</button>
+  </section>
+<script src="{{ url_for('static', filename='js/adaptive_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/adaptive_ban_detail.js') }}"></script>
+{% endblock %}

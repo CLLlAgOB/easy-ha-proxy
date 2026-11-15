@@ -27,6 +27,8 @@
   let ladder = [];
   let draft = [];
   let lastSummary = {};
+  let reputation = [];
+  let reputationPage = 0;
 
   function csrfToken() {
     const meta = document.querySelector('meta[name="csrf-token"]');
@@ -390,10 +392,6 @@
     return core.formatLeft(seconds, unitLabel);
   }
 
-  function renderBans(bans) {
-    window.EasyHaProxyBans.setActive(bans);
-  }
-
   function renderSummary(summary) {
     if (!summary) return;
     // The heading and this label were written when monitor was the only
@@ -437,6 +435,14 @@
     const empty = byId("ap-table-empty");
     if (!body) return;
     body.textContent = "";
+    const found = core.reputationPage(addresses, Boolean(byId("ap-show-normal")?.checked), reputationPage);
+    reputationPage = found.page;
+    addresses = found.rows;
+    setText("ap-reputation-note", `${uiText("Addresses requiring review")}: ${formatCount(found.total)}`);
+    setText("ap-reputation-page", found.total ? `${reputationPage * 10 + 1}–${Math.min(found.total, reputationPage * 10 + 10)} / ${found.total}` : '0 / 0');
+    if (byId("ap-reputation-prev")) byId("ap-reputation-prev").disabled = reputationPage === 0;
+    if (byId("ap-reputation-next")) byId("ap-reputation-next").disabled = (reputationPage + 1) * 10 >= found.total;
+    if (empty) empty.textContent = uiText("No addresses match this reputation filter");
     if (!addresses || !addresses.length) {
       if (empty) empty.hidden = false;
       return;
@@ -481,7 +487,7 @@
       if (entry.likely_false_positive) {
         const flag = document.createElement("span");
         flag.className = "ap-flag fp";
-        flag.textContent = "authenticated";
+        flag.textContent = uiText("Check this one");
         state.appendChild(flag);
       }
       row.appendChild(state);
@@ -886,8 +892,8 @@
       renderMode(payload);
       renderPolicy(payload.policy);
       renderSummary(payload.summary);
-      renderBans(payload.bans);
-      renderTable(payload.addresses);
+      reputation = payload.addresses || [];
+      renderTable(reputation);
       setText("ap-updated", payload.ts ? formatTime(payload.ts) : "");
       loadShield();
       loadQuality();
@@ -895,11 +901,16 @@
     } catch (error) {
       showUnavailable(Boolean(error.unavailable));
       renderTable([]);
-      window.EasyHaProxyBans.setActive(null);
     }
   }
 
   function bind() {
+    const normal = byId("ap-show-normal");
+    if (normal) normal.addEventListener("change", () => { reputationPage = 0; renderTable(reputation); });
+    const previous = byId("ap-reputation-prev");
+    const next = byId("ap-reputation-next");
+    if (previous) previous.addEventListener("click", () => { --reputationPage; renderTable(reputation); });
+    if (next) next.addEventListener("click", () => { ++reputationPage; renderTable(reputation); });
     const edit = byId("ap-ladder-edit");
     if (edit) edit.addEventListener("click", () => openLadderEditor(true));
     const cancel = byId("ap-ladder-cancel");

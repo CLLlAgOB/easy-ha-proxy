@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 
-from flask import Response, g, jsonify, render_template, request, stream_with_context
+from flask import Response, abort, g, jsonify, render_template, request, stream_with_context
 
 from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
 from .guardd_client import GuarddUnavailable
@@ -24,6 +24,24 @@ def adaptive_protection_page():
     return render_template(
         "adaptive_protection.html", event_types=security.EVENT_TYPES
     )
+
+
+@bp.get("/security/adaptive/bans")
+def adaptive_bans_page():
+    return render_template("adaptive_bans.html")
+
+
+@bp.get("/security/adaptive/ban")
+def adaptive_ban_page():
+    address = security.valid_ip(request.args.get('ip'))
+    try:
+        decision_id = int(request.args.get('id') or 0)
+        timestamp = int(request.args.get('at') or 0)
+    except ValueError:
+        abort(400, description='Invalid ban reference')
+    if not 0 <= decision_id <= 2**62 or not 0 <= timestamp <= 2**62 or not (decision_id or address):
+        abort(400, description='Invalid ban reference')
+    return render_template("adaptive_ban_detail.html", ban={'id': decision_id, 'ip': address, 'ts': timestamp})
 
 
 @bp.get("/security/detection-rules")
@@ -251,8 +269,8 @@ def api_adaptive_bans():
     from .guardd_client import guardd_adaptive_bans
 
     detail = request.path.endswith('/ban')
-    keys = ('id', 'ip', 'at') if detail else ('q', 'since', 'sort', 'direction', 'offset', 'snapshot')
-    params = {key: str(request.args[key])[:100] for key in keys if key in request.args}
+    keys = ('id', 'ip', 'at') if detail else ('q', 'terms', 'since', 'sort', 'direction', 'offset', 'snapshot')
+    params = {key: str(request.args[key])[:(2048 if key == 'terms' else 100)] for key in keys if key in request.args}
     try:
         payload = guardd_adaptive_bans(params, detail=detail)
         return jsonify(payload), 200 if payload.get('ok') else (404 if detail else 400)

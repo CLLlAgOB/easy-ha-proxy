@@ -45,6 +45,7 @@
     "label": "Protection",
     "items": [
       ("routes.adaptive_protection_page", "Adaptive protection"),
+      ("routes.adaptive_bans_page",       "Adaptive bans"),
       ("routes.detection_rules_page",     "Detection rules"),
       ("routes.request_log_page",         "Request log"),
       ("routes.haproxy_geoip_page",       "GeoIP database"),
@@ -74,6 +75,7 @@
 
 
 {% set parents = {
+  'routes.adaptive_ban_page': 'routes.adaptive_bans_page',
   'access_portal.edit': 'access_portal.sites',
   'routes.haproxy_site_edit': 'routes.haproxy_sites_page',
   'routes.haproxy_site_new': 'routes.haproxy_sites_page',

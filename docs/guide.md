@@ -1489,6 +1489,21 @@ engine exists to find.
 
 #### Shadow review
 
+Protection has an overview, a ban list and a page for one recorded decision:
+
+- **Adaptive protection** (`/security/adaptive`) shows the mode and reputation.
+  Normal addresses are hidden until **Show normal addresses** is checked;
+  possible false positives remain visible. Reputation shows 10 addresses per
+  page. The ladder, first-step page,
+  shield and simulator are collapsed under **Protection settings and diagnostics**.
+- **Adaptive bans** (`/security/adaptive/bans`) lists active bans and retained
+  history with filters, sorting and 25 rows per page, without a separate
+  vertical table scrollbar.
+- Selecting an IP opens **Ban details**, with saved findings and the request
+  log before that decision. **Back to bans** preserves the search, period,
+  sorting and page. The ban step comes from the recorded decision rather than
+  today's repeat counter. An older ban without a saved step shows “—”.
+
 **Adaptive protection** in the HAProxy navigation is where that review happens.
 It reports how many addresses were scored, how many enforcement *would* have
 banned, and -- the number that decides whether enforcement is safe to enable --

@@ -42,6 +42,7 @@ EXPECTED_ENDPOINTS = {
     "routes.live_activity_page",
     "routes.monitoring_page",
     "routes.adaptive_protection_page",
+    "routes.adaptive_bans_page",
     "routes.detection_rules_page",
     "routes.request_log_page",
     "routes.alerts_page",
