@@ -366,6 +366,8 @@
   }
   .mon-span-down { background: var(--chart-error); }
   .mon-span-other { background: var(--chart-warning); }
+  .mon-span-absent { background: transparent; }
+  .mon-timeline-removed .mon-timeline-name { color: var(--text-secondary); }
   .mon-event { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
   .mon-event-alert { color: var(--warning); }
   .mon-event-recovered { color: var(--success); }

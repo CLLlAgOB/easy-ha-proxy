@@ -181,6 +181,8 @@
     "Response time percentiles, from the access log": "Перцентили времени ответа, по журналу доступа",
     "Requests refused at the gateway, by reason": "Запросы, отклонённые шлюзом, по причинам",
     "The access log is read by adaptive protection. It is switched off and the request log is off too, so nothing reads it: the percentiles and the refusals have nothing to show.": "Журнал доступа читает адаптивная защита. Она выключена, журнал запросов тоже, поэтому журнал никто не читает: перцентилям и отказам нечего показать.",
-    "From the access log: how soon the server answered half, 95 and 99 of every hundred requests": "По журналу доступа: как быстро сервер ответил на половину, 95 и 99 запросов из каждой сотни"
+    "From the access log: how soon the server answered half, 95 and 99 of every hundred requests": "По журналу доступа: как быстро сервер ответил на половину, 95 и 99 запросов из каждой сотни",
+    "Not in the configuration": "Нет в конфигурации",
+    "Removed from the configuration": "Удалён из конфигурации"
   }
 }

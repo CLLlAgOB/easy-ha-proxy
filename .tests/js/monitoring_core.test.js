@@ -662,3 +662,18 @@ test("rare things are counted per minute, the rest per second", () => {
   );
   assert.deepEqual(view.datasets[0].values, [3]);
 });
+
+test("time a server did not exist is neither up nor an outage", () => {
+  // Before HAProxy first reported it, and after it was removed from the
+  // configuration (renamed, or its site deleted).
+  const entry = {
+    current_state: "REMOVED",
+    spans: [span("ABSENT", 0, 100), span("UP", 100, 100), span("DOWN", 200, 20), span("UP", 220, 30), span("ABSENT", 250, 50)]
+  };
+  assert.deepEqual(core.outageFacts(entry, 300), {count: 1, ongoingSeconds: null});
+  assert.equal(core.isOutage(span("ABSENT", 0, 10)), false);
+  assert.equal(core.isOutage(span("MAINT", 0, 10)), true);
+  // Short absent bars never join a run of outages.
+  const absentRuns = [span("UP", 0, DAY - 400), span("ABSENT", DAY - 400, 100), span("UP", DAY - 300, 100), span("ABSENT", DAY - 200, 100), span("UP", DAY - 100, 100)];
+  assert.ok(core.timelinePieces(absentRuns, DAY).every((piece) => !piece.flapping));
+});

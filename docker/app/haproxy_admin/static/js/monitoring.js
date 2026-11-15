@@ -915,6 +915,7 @@
   function spanClass(state) {
     if (state === "UP") return "mon-span-up";
     if (state === "DOWN") return "mon-span-down";
+    if (state === "ABSENT") return "mon-span-absent";
     return "mon-span-other";
   }
 
@@ -987,7 +988,9 @@
         // the bar all but hid it, so the day and the hour looked like they
         // disagreed.
         piece.style.flex = span.state === "UP" ? `1 1 ${width}%` : `0 0 ${width}%`;
-        piece.title = `${span.state} · ${spanPeriod(span, window)} · ${formatDuration(seconds)}`;
+        piece.title = span.state === "ABSENT"
+          ? `${uiText("Not in the configuration")} · ${spanPeriod(span, window)}`
+          : `${span.state} · ${spanPeriod(span, window)} · ${formatDuration(seconds)}`;
         track.appendChild(piece);
       });
       row.appendChild(track);
@@ -1002,7 +1005,18 @@
       state.setAttribute("data-i18n-skip", "");
       state.setAttribute("translate", "no");
       state.textContent = `${entry.current_state || "—"} · ${percent}`;
-      meta.appendChild(state);
+      if (entry.current_state === "REMOVED") {
+        // Renamed or deleted: its history stays readable, its state is not
+        // a current one.
+        state.textContent = percent;
+        const removed = document.createElement("span");
+        removed.textContent = ` · ${uiText("Removed from the configuration")}`;
+        meta.appendChild(state);
+        meta.appendChild(removed);
+        row.classList.add("mon-timeline-removed");
+      } else {
+        meta.appendChild(state);
+      }
       if (entry.downtime_seconds) {
         const label = document.createElement("span");
         label.textContent = ` · ${uiText("Unavailable")} `;

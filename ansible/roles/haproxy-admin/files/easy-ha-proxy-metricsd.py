@@ -159,8 +159,17 @@ _SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([a-z]*)$")
 MAX_CHART_POINTS = 1500
 MAX_RANGE_SECONDS = 365 * 86400
 # A flapping server could otherwise return a transition per poll for the whole
-# window; the timeline says it was truncated rather than shipping all of them.
+# window. Past this many bars the timeline is redrawn in this many slices of
+# the window, each keeping its exact up and down seconds (_compress_spans).
 MAX_TIMELINE_SPANS = 200
+# A backend or server HAProxy stopped reporting -- a renamed server, a deleted
+# site -- is recorded once in this state, after this many polls in a row
+# without it, so its last state is not carried forward for ever.
+REMOVED_STATE = "REMOVED"
+RETIRE_AFTER_POLLS = 3
+# A bar for the time an object did not exist: before it was first reported
+# and after it was removed. It is neither up nor down.
+ABSENT_SPAN = "ABSENT"
 
 RANGES: Dict[str, int] = {
     "1h": 3600,
@@ -1121,6 +1130,56 @@ def read_temperature(thermal_root: str) -> Optional[int]:
     return warmest
 
 
+def _compress_spans(
+    spans: List[Dict[str, Any]], since: int, until: int, slices: int
+) -> List[Dict[str, Any]]:
+    """The same history in at most a few bars per slice of the window.
+
+    Cutting the list after the first MAX_TIMELINE_SPANS transitions painted
+    the state of the last one kept to the end of the window: a backup server
+    flapping a few hundred times a day read as down since the evening before,
+    31% available, while HAProxy said it was up. Here every slice keeps how
+    long it was up, down and absent, in the order those first occurred in
+    it, so the totals stay exact and a run of short outages still reads as
+    one (the page stripes it, monitoring_core.timelinePieces).
+    """
+
+    length = max(1, until - since)
+    result: List[Dict[str, Any]] = []
+    index = 0
+    for number in range(slices):
+        start = since + length * number // slices
+        end = since + length * (number + 1) // slices
+        if end <= start:
+            continue
+        while index < len(spans) and spans[index]["end"] <= start:
+            index += 1
+        seconds: Dict[str, int] = {}
+        order: List[str] = []
+        worst: Dict[str, int] = {}
+        probe = index
+        while probe < len(spans) and spans[probe]["start"] < end:
+            span = spans[probe]
+            overlap = min(end, span["end"]) - max(start, span["start"])
+            probe += 1
+            if overlap <= 0:
+                continue
+            state_name = span["state"]
+            group = state_name if state_name in ("UP", ABSENT_SPAN) else "OTHER"
+            if group not in seconds:
+                seconds[group] = 0
+                order.append(group)
+            seconds[group] += overlap
+            if group == "OTHER":
+                worst[state_name] = worst.get(state_name, 0) + overlap
+        cursor = start
+        for group in order:
+            name = max(worst, key=worst.__getitem__) if group == "OTHER" else group
+            _close_span(result, cursor, cursor + seconds[group], name)
+            cursor += seconds[group]
+    return result
+
+
 def _close_span(spans: List[Dict[str, Any]], start: int, end: int, state_name: str) -> None:
     """End the bar that began at start, in state_name, at end."""
     if end <= start:
@@ -1374,6 +1433,32 @@ class MetricsDatabase:
                 "VALUES (?, ?, ?, ?)",
                 (now, object_id, previous, state),
             )
+
+    def last_observed(self, object_id: int) -> Optional[int]:
+        """When an object was last reported, judged by its stored history.
+
+        Used to date the removal of an object that was already gone when this
+        daemon started, rather than dating it by the restart.
+        """
+
+        with self._lock:
+            minute = self._conn.execute(
+                "SELECT MAX(bucket_ts) FROM metric_1m WHERE object_id = ?", (object_id,)
+            ).fetchone()[0]
+            hour = None
+            if minute is None:
+                hour = self._conn.execute(
+                    "SELECT MAX(bucket_ts) FROM metric_1h WHERE object_id = ?", (object_id,)
+                ).fetchone()[0]
+            event = self._conn.execute(
+                "SELECT MAX(ts) FROM server_state_events WHERE object_id = ?", (object_id,)
+            ).fetchone()[0]
+        candidates = [int(event)] if event is not None else []
+        if minute is not None:
+            candidates.append(int(minute) + BUCKET_SECONDS)
+        elif hour is not None:
+            candidates.append(int(hour))
+        return max(candidates) if candidates else None
 
     def load_last_states(self) -> Dict[int, str]:
         """Return the most recent recorded state for every object.
@@ -2105,7 +2190,8 @@ class MetricsDatabase:
                 "SELECT o.kind, o.proxy, o.server, e.state, e.ts "
                 "FROM server_state_events e JOIN objects o ON o.id = e.object_id "
                 "WHERE e.id IN (SELECT MAX(id) FROM server_state_events "
-                "GROUP BY object_id) ORDER BY o.proxy, o.server"
+                "GROUP BY object_id) AND e.state != ? ORDER BY o.proxy, o.server",
+                (REMOVED_STATE,),
             ).fetchall()
         backends: List[Dict[str, Any]] = []
         servers: List[Dict[str, Any]] = []
@@ -2183,8 +2269,12 @@ class MetricsDatabase:
             )
 
         window = max(1, until - since)
-        truncated = False
+        compressed = False
         result: List[Dict[str, Any]] = []
+
+        def drawn(state_name: str) -> str:
+            return ABSENT_SPAN if state_name == REMOVED_STATE else state_name
+
         for row in objects:
             object_id = int(row["id"])
             changes = by_object.get(object_id, [])
@@ -2192,39 +2282,59 @@ class MetricsDatabase:
             if state is None and not changes:
                 # Never observed in or before the window: nothing to draw.
                 continue
+            if state in (None, REMOVED_STATE) and all(
+                next_state == REMOVED_STATE for _, next_state in changes
+            ):
+                # Removed before the window opened and never back.
+                continue
 
             spans: List[Dict[str, Any]] = []
-            cursor = since
-            current = state or changes[0][1]
-
-            for ts, next_state in changes[:MAX_TIMELINE_SPANS]:
-                _close_span(spans, cursor, ts, current)
+            if state is None:
+                # First reported inside the window; before that it did not
+                # exist, which is not the same as having been up.
+                cursor = max(since, changes[0][0])
+                _close_span(spans, since, cursor, ABSENT_SPAN)
+                current = changes[0][1]
+            else:
+                cursor = since
+                current = state
+            removed_at: Optional[int] = None
+            for ts, next_state in changes:
+                _close_span(spans, cursor, ts, drawn(current))
                 cursor = max(cursor, ts)
                 current = next_state
-            if len(changes) > MAX_TIMELINE_SPANS:
-                truncated = True
-            _close_span(spans, cursor, until, current)
+                removed_at = ts if next_state == REMOVED_STATE else None
+            _close_span(spans, cursor, until, drawn(current))
 
+            absent = sum(
+                span["end"] - span["start"] for span in spans if span["state"] == ABSENT_SPAN
+            )
             downtime = sum(
                 span["end"] - span["start"]
                 for span in spans
-                if span["state"] != "UP"
+                if span["state"] not in ("UP", ABSENT_SPAN)
             )
-            result.append(
-                {
-                    "kind": str(row["kind"]),
-                    "proxy": str(row["proxy"]),
-                    "server": str(row["server"]),
-                    "current_state": current,
-                    "transitions": len(changes),
-                    "downtime_seconds": downtime,
-                    "availability": round(
-                        max(0.0, (window - downtime) / window), 5
-                    ),
-                    "spans": spans,
-                }
-            )
-        return {"objects": result, "truncated": truncated}
+            present = max(1, window - absent)
+            if len(spans) > MAX_TIMELINE_SPANS:
+                spans = _compress_spans(spans, since, until, MAX_TIMELINE_SPANS)
+                compressed = True
+            entry = {
+                "kind": str(row["kind"]),
+                "proxy": str(row["proxy"]),
+                "server": str(row["server"]),
+                "current_state": current,
+                "transitions": sum(
+                    1 for _, next_state in changes if next_state != REMOVED_STATE
+                ),
+                "downtime_seconds": downtime,
+                "availability": round(max(0.0, (present - downtime) / present), 5),
+                "spans": spans,
+            }
+            if current == REMOVED_STATE and removed_at is not None:
+                entry["removed_at"] = removed_at
+            result.append(entry)
+        # Nothing is left out any more; "truncated" stays for older pages.
+        return {"objects": result, "truncated": False, "compressed": compressed}
 
     def record_storage_sample(self, ts: int, total_bytes: int) -> None:
         """Keep one coarse size sample per hour for trend reporting."""
@@ -2756,6 +2866,10 @@ class Collector:
         self._bucket_ts: Optional[int] = None
         self._bucket_reported = False
         self._last_states: Dict[int, str] = {}
+        # Objects HAProxy has stopped reporting: when they were first missed
+        # and in how many polls in a row (see _retire_missing).
+        self._missing: Dict[int, Tuple[int, int]] = {}
+        self._seen_since_start: set = set()
         # Previous (total, idle) jiffies. CPU is a rate, so the first poll
         # after a start has nothing to compare against and reports nothing.
         self._cpu_previous: Optional[Tuple[int, int]] = None
@@ -2901,6 +3015,7 @@ class Collector:
 
             self._bucket_reported = False
             observed = 0
+            present: set = set()
             for row in rows:
                 identity = classify(row)
                 if identity is None:
@@ -2910,6 +3025,9 @@ class Collector:
                     continue
                 self._observe(kind, proxy, server, row, now)
                 observed += 1
+                if kind in ("server", "backend"):
+                    present.add(self._object_ids[identity])
+            self._retire_missing(present, now)
 
             if any(self.monitors[name] for name in HOST_MONITORS):
                 self._observe_host(now)
@@ -3424,6 +3542,34 @@ class Collector:
         if now - last_ts > max_gap:
             return 0
         return current - last_value
+
+    def _retire_missing(self, present: set, now: int) -> None:
+        """End the timeline of a backend or server HAProxy no longer reports.
+
+        Its last state used to be carried forward for ever: after a site
+        moved to a backend set its servers were renamed, and the old names
+        stayed "UP" on the availability card next to the new ones, as did
+        sites deleted weeks before. A few polls in a row without it, so a
+        partial reply cannot retire anything.
+        """
+
+        self._seen_since_start.update(present)
+        for object_id, state in list(self._last_states.items()):
+            if object_id in present or state == REMOVED_STATE:
+                self._missing.pop(object_id, None)
+                continue
+            first, count = self._missing.get(object_id, (now, 0))
+            count += 1
+            if count < RETIRE_AFTER_POLLS or self.storage.writes_paused:
+                self._missing[object_id] = (first, count)
+                continue
+            self._missing.pop(object_id, None)
+            if object_id not in self._seen_since_start:
+                # Already gone when this daemon started: date it by the
+                # history it left, not by the restart.
+                first = min(now, self.database.last_observed(object_id) or first)
+            self._last_states[object_id] = REMOVED_STATE
+            self.database.record_state_change(object_id, state, REMOVED_STATE, first)
 
     def _track_state(self, object_id: int, status: str, now: int) -> None:
         if not status:

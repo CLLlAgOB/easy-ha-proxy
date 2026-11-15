@@ -294,6 +294,13 @@
 
   /* ---------- availability ---------- */
 
+  // A bar for the time an object did not exist -- before HAProxy first
+  // reported it, after it was removed -- is neither up nor an outage.
+  const ABSENT = "ABSENT";
+  function isOutage(span) {
+    return span.state !== "UP" && span.state !== ABSENT;
+  }
+
   // Deliberately not translated: single-letter unit keys are exactly the kind
   // of fragment the DOM translator would match inside unrelated words, and
   // "2h 15m" reads the same in every language this UI ships.
@@ -317,7 +324,7 @@
   // proportion to the time it was really down.
   function timelinePieces(spans, window) {
     const isShort = (span) =>
-      span.state !== "UP" && (Number(span.end) - Number(span.start)) / window < FLAP_SHORT_SHARE;
+      isOutage(span) && (Number(span.end) - Number(span.start)) / window < FLAP_SHORT_SHARE;
     const isGap = (span) =>
       span.state === "UP" && (Number(span.end) - Number(span.start)) / window < FLAP_GAP_SHARE;
     const pieces = [];
@@ -368,7 +375,7 @@
   // of: how many outages, and how long the last one has lasted if it is
   // still going on (null when it is not).
   function outageFacts(entry, until) {
-    const outages = (entry.spans || []).filter((span) => span.state !== "UP");
+    const outages = (entry.spans || []).filter(isOutage);
     const last = outages[outages.length - 1];
     const ongoing = Boolean(last) && entry.current_state !== "UP" && Number(last.end) >= until;
     return {
@@ -656,6 +663,7 @@
     formatBytes,
     formatDuration,
     timelinePieces,
+    isOutage,
     flapStripe,
     outageFacts,
     sortedBackends,

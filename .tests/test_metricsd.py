@@ -1504,8 +1504,9 @@ class StateTimelineTests(CollectorTestCase):
 
     def test_repeating_the_same_state_does_not_split_the_bar(self):
         # A restart re-observes the state it left behind; the timeline should
-        # still read as one uninterrupted stretch.
-        self.event("server", "be_shop", "srv1", "UP", 11000)
+        # still read as one uninterrupted stretch. (First reported before the
+        # window: one reported inside it starts with an absent bar.)
+        self.event("server", "be_shop", "srv1", "UP", 9000)
         self.event("server", "be_shop", "srv1", "UP", 14000)
         timeline = self.database.state_timeline(
             site="", since=10000, until=20000
@@ -1553,18 +1554,90 @@ class StateTimelineTests(CollectorTestCase):
         )
         self.assertEqual(timeline["objects"], [])
 
-    def test_a_flapping_server_is_truncated_rather_than_unbounded(self):
+    def test_a_flapping_server_is_compressed_with_exact_totals(self):
+        # The list used to be cut after MAX_TIMELINE_SPANS transitions and the
+        # last state kept painted to the end of the window: a backup server
+        # that flapped a few hundred times a day read as down since the
+        # evening before (31% available) while HAProxy said it was up.
         object_id = self.database.object_id("server", "be_shop", "srv1", 0)
-        for index in range(metricsd.MAX_TIMELINE_SPANS + 50):
-            state = "UP" if index % 2 else "DOWN"
-            self.database.record_state_change(object_id, "", state, 10001 + index)
+        self.database.record_state_change(object_id, "", "UP", 100)
+        changes = metricsd.MAX_TIMELINE_SPANS * 2 + 51
+        for index in range(changes):
+            # Twenty seconds down, twenty up.
+            state = "DOWN" if index % 2 == 0 else "UP"
+            self.database.record_state_change(object_id, "", state, 10010 + index * 20)
         timeline = self.database.state_timeline(
-            site="", since=10000, until=20000
+            site="", since=10000, until=40000
         )
-        self.assertTrue(timeline["truncated"])
-        self.assertLessEqual(
-            len(timeline["objects"][0]["spans"]), metricsd.MAX_TIMELINE_SPANS + 1
+        entry = timeline["objects"][0]
+        down_events = (changes + 1) // 2
+        self.assertEqual(entry["current_state"], "DOWN" if changes % 2 else "UP")
+        expected_down = (down_events - (1 if changes % 2 else 0)) * 20
+        last_ts = 10010 + (changes - 1) * 20
+        if changes % 2:
+            expected_down += 40000 - last_ts
+        self.assertEqual(entry["downtime_seconds"], expected_down)
+        self.assertEqual(entry["transitions"], changes)
+        self.assertTrue(timeline["compressed"])
+        self.assertFalse(timeline["truncated"])
+        spans = entry["spans"]
+        self.assertLessEqual(len(spans), metricsd.MAX_TIMELINE_SPANS * 3)
+        self.assertEqual(spans[0]["start"], 10000)
+        self.assertEqual(spans[-1]["end"], 40000)
+        for previous, following in itertools.pairwise(spans):
+            self.assertEqual(previous["end"], following["start"])
+        drawn_down = sum(s["end"] - s["start"] for s in spans if s["state"] != "UP")
+        self.assertEqual(drawn_down, expected_down)
+
+    def test_the_current_state_is_the_last_one_even_after_compression(self):
+        object_id = self.database.object_id("server", "be_shop", "backup1", 0)
+        self.database.record_state_change(object_id, "", "UP", 100)
+        for index in range(metricsd.MAX_TIMELINE_SPANS * 2):
+            state = "DOWN" if index % 2 == 0 else "UP"
+            self.database.record_state_change(object_id, "", state, 10010 + index * 10)
+        timeline = self.database.state_timeline(site="", since=10000, until=86400)
+        entry = timeline["objects"][0]
+        self.assertEqual(entry["current_state"], "UP")
+        self.assertGreater(entry["availability"], 0.95)
+        self.assertEqual(entry["spans"][-1]["state"], "UP")
+
+    def test_an_object_first_reported_inside_the_window_is_not_backdated(self):
+        self.event("server", "be_shop", "srv1", "UP", 15000)
+        timeline = self.database.state_timeline(site="", since=10000, until=20000)
+        entry = timeline["objects"][0]
+        self.assertEqual(
+            entry["spans"],
+            [{"state": "ABSENT", "start": 10000, "end": 15000},
+             {"state": "UP", "start": 15000, "end": 20000}],
         )
+        self.assertEqual(entry["downtime_seconds"], 0)
+        self.assertEqual(entry["availability"], 1.0)
+
+    def test_a_removed_server_ends_where_it_was_removed(self):
+        object_id = self.event("server", "be_shop", "main", "UP", 100)
+        self.database.record_state_change(object_id, "UP", metricsd.REMOVED_STATE, 14000)
+        timeline = self.database.state_timeline(site="", since=10000, until=20000)
+        entry = timeline["objects"][0]
+        self.assertEqual(entry["current_state"], metricsd.REMOVED_STATE)
+        self.assertEqual(entry["removed_at"], 14000)
+        self.assertEqual(entry["spans"][-1], {"state": "ABSENT", "start": 14000, "end": 20000})
+        self.assertEqual(entry["downtime_seconds"], 0)
+        self.assertEqual(entry["availability"], 1.0)
+        self.assertEqual(entry["transitions"], 0)
+
+    def test_an_object_removed_before_the_window_is_not_shown(self):
+        object_id = self.event("server", "be_shop", "main", "UP", 100)
+        self.database.record_state_change(object_id, "UP", metricsd.REMOVED_STATE, 5000)
+        timeline = self.database.state_timeline(site="", since=10000, until=20000)
+        self.assertEqual(timeline["objects"], [])
+
+    def test_a_removed_object_is_not_in_the_health_summary(self):
+        object_id = self.event("server", "be_shop", "main", "UP", 100)
+        self.event("server", "be_shop", "srv1", "UP", 100)
+        self.database.record_state_change(object_id, "UP", metricsd.REMOVED_STATE, 5000)
+        health = self.database.backend_health()
+        self.assertEqual([item["server"] for item in health["servers"]], ["srv1"])
+        self.assertEqual(health["servers_total"], 1)
 
     def test_a_transition_recorded_by_the_collector_shows_up(self):
         self.poll(payload(stat_row("be_shop", "srv1", status="UP")), now=10100)
@@ -1577,6 +1650,68 @@ class StateTimelineTests(CollectorTestCase):
         ][0]
         self.assertEqual(server["current_state"], "DOWN")
         self.assertEqual(server["downtime_seconds"], 5000)
+
+
+class RemovedObjectTests(CollectorTestCase):
+    """A server HAProxy stopped reporting -- renamed when a site moved to a
+    backend set, or its site deleted -- no longer stays "UP" for ever."""
+
+    def events(self):
+        connection = sqlite3.connect(str(self.database.path))
+        try:
+            return connection.execute(
+                "SELECT o.server, e.ts, e.previous_state, e.state FROM server_state_events e "
+                "JOIN objects o ON o.id = e.object_id WHERE o.kind = 'server' ORDER BY e.id"
+            ).fetchall()
+        finally:
+            connection.close()
+
+    def test_a_renamed_server_is_retired_after_a_few_polls(self):
+        self.poll(payload(stat_row("be_site", "main", status="UP")), now=600)
+        renamed = payload(stat_row("be_site", "srv1", status="UP"))
+        self.poll(renamed, now=610)
+        self.poll(renamed, now=620)
+        self.assertNotIn(metricsd.REMOVED_STATE, [row[3] for row in self.events()])
+        self.poll(renamed, now=630)
+        self.assertIn(("main", 610, "UP", metricsd.REMOVED_STATE), self.events())
+        health = self.database.backend_health()
+        self.assertEqual([item["server"] for item in health["servers"]], ["srv1"])
+        # Retired once, not again on every poll.
+        self.poll(renamed, now=640)
+        self.assertEqual([row[3] for row in self.events()].count(metricsd.REMOVED_STATE), 1)
+
+    def test_a_server_that_comes_back_is_up_again(self):
+        self.poll(payload(stat_row("be_site", "main", status="UP")), now=600)
+        for now in (610, 620, 630):
+            self.poll(payload(stat_row("be_site", "srv1", status="UP")), now=now)
+        self.poll(payload(stat_row("be_site", "main", status="UP"),
+                          stat_row("be_site", "srv1", status="UP")), now=640)
+        self.assertEqual(self.events()[-1], ("main", 640, metricsd.REMOVED_STATE, "UP"))
+
+    def test_one_reply_without_it_retires_nothing(self):
+        both = payload(stat_row("be_site", "main", status="UP"), stat_row("be_site", "srv1", status="UP"))
+        self.poll(both, now=600)
+        self.poll(payload(stat_row("be_site", "srv1", status="UP")), now=610)
+        self.poll(both, now=620)
+        for now in (630, 640, 650):
+            self.poll(both, now=now)
+        self.assertNotIn(metricsd.REMOVED_STATE, [row[3] for row in self.events()])
+
+    def test_a_server_gone_before_a_restart_is_dated_by_its_history(self):
+        self.poll(payload(stat_row("be_site", "main", status="UP", stot=1)), now=600)
+        self.poll(payload(stat_row("be_site", "main", status="UP", stot=5)), now=660)
+        self.flush(now=730)
+        restarted = metricsd.Collector(self.config, self.database)
+        restarted.cgroup_root = self.collector.cgroup_root
+        restarted._baselines = self.database.load_baselines()
+        restarted._last_states = self.database.load_last_states()
+        self.collector = restarted
+        for now in (90000, 90010, 90020):
+            self.poll(payload(stat_row("be_site", "srv1", status="UP")), now=now)
+        removed = [row for row in self.events() if row[3] == metricsd.REMOVED_STATE]
+        self.assertEqual(len(removed), 1)
+        self.assertEqual(removed[0][0], "main")
+        self.assertLess(removed[0][1], 1000)
 
 
 class MigrationTests(CollectorTestCase):
