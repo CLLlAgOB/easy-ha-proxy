@@ -1051,13 +1051,13 @@ def _probe_os(runner: Runner, freshness=None, excluded=frozenset()) -> dict[str,
             details={"reason": "apt-simulation-failed", "error": _short_error(result)},
         )
     packages: list[str] = []
-    candidates: list[dict[str, str]] = []
+    candidates: list[dict[str, str | None]] = []
     seen: set[str] = set()
     for line in result.stdout.splitlines():
         if not line.startswith("Inst "):
             continue
         match = re.match(
-            r"^Inst\s+(?P<name>\S+)(?:\s+\[[^\]]*\])?\s+"
+            r"^Inst\s+(?P<name>\S+)(?:\s+\[(?P<installed>[^\]]*)\])?\s+"
             r"\((?P<version>\S+)(?:\s|\))",
             line,
         )
@@ -1078,7 +1078,7 @@ def _probe_os(runner: Runner, freshness=None, excluded=frozenset()) -> dict[str,
             continue
         if name not in seen:
             packages.append(name)
-            candidates.append({"name": name, "version": version})
+            candidates.append({"name": name, "version": version, "installed_version": match.group("installed")})
             seen.add(name)
     if freshness is not None and not freshness.get('fresh'):
         return _component('os', 'unknown', 'APT metadata is stale or its refresh failed. Check for updates again.',

@@ -316,6 +316,19 @@
   function technicalCell(value) {
     return `<span class="mono notranslate" translate="no" data-i18n-skip>${escape(versionText(value))}</span>`;
   }
+  function osPackageDetails(component) {
+    const model = core.osPackageModel(component);
+    const rows = model.rows.map((item) => `<tr>
+      <td>${technicalCell(item.name)}${item.purpose ? `<div class="updates-package-purpose">${escape(t(item.purpose))}</div>` : ""}</td>
+      <td>${item.installed ? technicalCell(item.installed) : escape(t(item.newPackage ? "Not installed" : "Not reported by this check"))}</td>
+      <td>${item.available ? technicalCell(item.available) : escape(t("Not reported by this check"))}</td>
+    </tr>`).join("");
+    return `${rows ? `<table class="updates-package-table">
+      <thead><tr><th scope="col">${escape(t("Package"))}</th><th scope="col">${escape(t("Installed version"))}</th><th scope="col">${escape(t("Available version"))}</th></tr></thead>
+      <tbody>${rows}</tbody></table>` : `<p>${escape(t("Package details are unavailable. Check for updates again to see the package list."))}</p>`}
+      <p>${escape(t(model.impact))}</p>
+      <p>${escape(t("A server reboot is a separate step, performed only if required by the operating system."))}</p>`;
+  }
   // A check previews whichever channel is selected, saved or not. That
   // preview is worth having, but it cannot be applied: the broker refuses a
   // plan for a channel the gateway is not set to. Say so here, before the
@@ -551,7 +564,7 @@
       const shown = component.details && typeof component.details === "object" && !Array.isArray(component.details)
         ? Object.fromEntries(Object.entries(component.details).filter(([key]) => !["scope", "changelog", "requires"].includes(key)))
         : component.details;
-      const details = Array.isArray(component.details && component.details.artifacts)
+      const details = component.id === "os" || Array.isArray(component.details && component.details.artifacts)
         ? ""
         : detailsText(shown);
       const pickId = `updates-pick-${String(component.id).replace(/[^a-z0-9-]/gi, "")}`;
@@ -567,10 +580,10 @@
           <div class="updates-row-reason">${escape(componentReason(component))}</div>
           ${requirementNote(component)}
           <details class="updates-row-more">
-            <summary>${escape(t("Versions and impact"))}</summary>
-            <div>${technicalCell(component.current)} → ${technicalCell(component.available)}</div>
+            <summary>${escape(t(component.id === "os" ? "Packages and service impact" : "Versions and impact"))}</summary>
+            ${component.id === "os" ? osPackageDetails(component) : `<div>${technicalCell(component.current)} → ${technicalCell(component.available)}</div>
             <div>${escape(t(String(component.impact)))}</div>
-            ${details ? `<div class="notranslate" translate="no" data-i18n-skip>${escape(details)}</div>` : ""}
+            ${details ? `<div class="notranslate" translate="no" data-i18n-skip>${escape(details)}</div>` : ""}`}
           </details>
         </td>
       </tr>`;

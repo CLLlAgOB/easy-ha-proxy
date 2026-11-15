@@ -198,6 +198,31 @@ test("values read as short text", () => {
   assert.equal(core.taskText("Install script"), "Install script");
 });
 
+test("OS packages keep their individual versions and explain the container runtime impact", () => {
+  const model = core.osPackageModel({available: 2, details: {package_count: 2,
+    packages: ["containerd.io:arm64", "docker-buildx-plugin"], candidates: [
+      {name: "containerd.io:arm64", installed_version: "2.1.5-1", version: "2.4.2-1"},
+      {name: "docker-buildx-plugin", installed_version: "0.38.0-1", version: "0.39.0-1"}
+    ]}});
+  assert.equal(model.rows.length, 2);
+  assert.deepEqual(model.rows[0], {name: "containerd.io:arm64", purpose: "Runs and manages containers",
+    available: "2.4.2-1", installed: "2.1.5-1", newPackage: false});
+  assert.equal(model.rows[1].purpose, "Builds Docker images");
+  assert.match(model.impact, /temporarily interrupting the panel/);
+  assert(!/container runtime/.test(core.osPackageModel({details: {
+    candidates: [{name: "docker-buildx-plugin", version: "0.39.0-1"}]}}).impact));
+});
+
+test("older OS plans and missing installed versions never become fictitious package versions", () => {
+  const model = core.osPackageModel({available: 3, details: {packages: ["libc6", "new-dependency", "old-plan"],
+    candidates: [{name: "libc6", version: "2.39-1"}, {name: "new-dependency", version: "1.0", installed_version: null}, null]}});
+  assert.deepEqual(model.rows.map((item) => [item.name, item.installed, item.available, item.newPackage]), [
+    ["libc6", null, "2.39-1", false], ["new-dependency", null, "1.0", true], ["old-plan", null, null, false]
+  ]);
+  assert.deepEqual(core.osPackageModel({available: 2}).rows, []);
+  assert.deepEqual(core.osPackageModel(null).rows, []);
+});
+
 function finished(component, seconds, startedAt) {
   return {
     id: `job-${component}-${seconds}`, operation: "apply", status: "completed",

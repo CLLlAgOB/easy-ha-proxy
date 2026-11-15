@@ -406,6 +406,11 @@
   .updates-table td, .updates-choice-table td, .backup-table td { overflow-wrap: anywhere; }
   .updates-row-more { margin-top: 6px; color: var(--text-secondary); }
   .updates-row-more > summary { font-size: 11px; }
+  .updates-package-table { width: 100%; margin-top: 10px; border-collapse: collapse; text-align: left; table-layout: fixed; }
+  .updates-package-table th, .updates-package-table td { padding: 8px; vertical-align: top; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+  .updates-package-table th { font-size: 11px; font-weight: 500; }
+  .updates-package-table th:first-child { width: 40%; }
+  .updates-package-purpose { margin-top: 4px; font-size: 11px; }
   .updates-row-superseded { color: var(--text-secondary); }
   .updates-channel-line, .updates-setting { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .updates-channel-line select { width: auto; }

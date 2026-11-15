@@ -1,0 +1,20 @@
+{
+  "meta": {"code": "ru", "label": "Русский"},
+  "messages": {
+    "Packages and service impact": "Пакеты и влияние на работу",
+    "Installed version": "Установленная версия",
+    "Available version": "Доступная версия",
+    "Not installed": "Не установлен",
+    "Not reported by this check": "Нет данных в этой проверке",
+    "Package details are unavailable. Check for updates again to see the package list.": "Данных о пакетах нет. Запустите проверку обновлений ещё раз, чтобы получить список.",
+    "Runs and manages containers": "Запуск и работа контейнеров",
+    "Starts container processes": "Запуск процессов внутри контейнеров",
+    "Docker container service": "Служба контейнеров Docker",
+    "Docker command-line tools": "Управление Docker из командной строки",
+    "Builds Docker images": "Сборка образов Docker",
+    "Manages applications with Docker Compose": "Управление приложениями через Docker Compose",
+    "The container runtime will be updated. Containers may restart, temporarily interrupting the panel, sign-in and other container services.": "Обновится среда выполнения контейнеров. Возможен перезапуск контейнеров с временной недоступностью панели, входа и других сервисов в контейнерах.",
+    "System services may restart during installation, briefly interrupting the services they provide.": "Во время установки могут перезапуститься системные службы. Возможен кратковременный перерыв в работе связанных с ними сервисов.",
+    "A server reboot is a separate step, performed only if required by the operating system.": "Перезагрузка сервера — отдельный этап. Она выполняется только при необходимости по требованию ОС."
+  }
+}

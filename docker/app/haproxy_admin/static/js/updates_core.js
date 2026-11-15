@@ -120,6 +120,37 @@
     return String(value);
   }
 
+  // OS updates are individual packages, not one versioned component. Older
+  // brokers reported only target versions; do not invent installed versions.
+  function osPackageModel(component) {
+    const details = component?.details || {};
+    const candidates = Array.isArray(details.candidates) ? details.candidates : [];
+    const packages = Array.isArray(details.packages) ? details.packages : [];
+    const roles = {
+      "containerd.io": "Runs and manages containers",
+      containerd: "Runs and manages containers",
+      runc: "Starts container processes",
+      "docker-ce": "Docker container service",
+      "docker.io": "Docker container service",
+      "docker-ce-cli": "Docker command-line tools",
+      "docker-buildx-plugin": "Builds Docker images",
+      "docker-compose-plugin": "Manages applications with Docker Compose"
+    };
+    const rows = [], seen = new Set();
+    for (const item of [...candidates, ...packages.map((name) => ({name}))]) {
+      if (!item || typeof item.name !== "string" || !item.name || seen.has(item.name)) continue;
+      seen.add(item.name);
+      const name = item.name.split(":")[0];
+      rows.push({name: item.name, purpose: roles[name] || "", available: item.version || null,
+        installed: item.installed_version || null,
+        newPackage: Object.prototype.hasOwnProperty.call(item, "installed_version") && item.installed_version === null});
+    }
+    const runtime = rows.some((item) => /^(?:containerd(?:\.io)?|runc|docker-ce(?:-rootless-extras)?|docker\.io|moby-(?:engine|containerd|runc))(?::|$)/.test(item.name));
+    return {rows, impact: runtime
+      ? "The container runtime will be updated. Containers may restart, temporarily interrupting the panel, sign-in and other container services."
+      : "System services may restart during installation, briefly interrupting the services they provide."};
+  }
+
   // --- Plans --------------------------------------------------------------------
 
   function normalizeComponents(plan) {
@@ -505,6 +536,7 @@
     isTerminal,
     versionText,
     detailsText,
+    osPackageModel,
     normalizeComponents,
     changesScope,
     withChangesRow,

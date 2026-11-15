@@ -197,6 +197,22 @@ class OsIsolation(unittest.TestCase):
                 return CommandResult(0, 'Inst haproxy-awslc [3.4.7] (3.4.8 repo)\nInst libssl-awslc [4.2] (4.3 repo)\nInst libc6 [2.39] (2.39.1 repo)')
         result = _probe_os(Runner(), {'fresh': True}, status.PACKAGES)
         self.assertEqual(result['details']['packages'], ['libc6'])
+        self.assertEqual(result['details']['candidates'], [
+            {'name':'libc6', 'version':'2.39.1', 'installed_version':'2.39'}])
+
+    def test_os_package_versions_keep_the_pairing_architecture_and_new_dependencies(self):
+        class Runner:
+            def run(self, *args, **kwargs):
+                return CommandResult(0, 'Inst containerd.io:arm64 [1:2.1.5-1] (1:2.2.0-1 repo [arm64])\n'
+                                     'Inst docker-buildx-plugin [0.38.0-1] (0.39.0-1 repo)\n'
+                                     'Inst new-dependency (1.0 repo)\n'
+                                     'Inst docker-buildx-plugin [0.38.0-1] (0.39.0-1 repo)\n')
+        result = _probe_os(Runner(), {'fresh': True})
+        self.assertEqual(result['details']['package_count'], 3)
+        self.assertEqual(result['details']['candidates'], [
+            {'name':'containerd.io:arm64', 'version':'1:2.2.0-1', 'installed_version':'1:2.1.5-1'},
+            {'name':'docker-buildx-plugin', 'version':'0.39.0-1', 'installed_version':'0.38.0-1'},
+            {'name':'new-dependency', 'version':'1.0', 'installed_version':None}])
 
     def test_failed_refresh_marks_os_unknown_even_when_simulation_is_empty(self):
         class Runner:
