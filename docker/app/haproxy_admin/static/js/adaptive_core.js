@@ -194,13 +194,13 @@
     return Number(item.points) > 0 ? `+${item.points}` : `0 · ${(label || identity)(item.reason)}`;
   }
 
-  function banRows(rows, filters) {
+  function banRows(rows, filters, label = identity) {
     const query = String(filters.q || "").trim().toLowerCase();
     const key = ["ip", "ts", "until", "score", "strike"].includes(filters.sort) ? filters.sort : "ts";
     const direction = filters.direction === "asc" ? 1 : -1;
     return (rows || []).map((row) => ({...row, ts: row.ts ?? row.banned_at, strike: row.strike ?? row.strikes}))
       .filter((row) => Number(row.ts) >= Number(filters.since || 0) &&
-        (!query || `${row.ip} ${(row.categories || []).join(" ")}`.toLowerCase().includes(query)))
+        (!query || `${row.ip} ${(row.categories || []).join(" ")} ${(row.categories || []).map((value) => banReason(value, label)).join(" ")}`.toLowerCase().includes(query)))
       .sort((a, b) => direction * (key === "ip" ? String(a.ip).localeCompare(String(b.ip)) :
         (Number(a[key] || 0) - Number(b[key] || 0))) || String(a.ip).localeCompare(String(b.ip)));
   }
@@ -211,9 +211,72 @@
       until: Number(ban.ts), hide_admin: "0", limit: 100};
   }
 
+  const BAN_REASONS = {
+    secrets: "Secret file probes", vcs: "Repository probes", wordpress: "WordPress probes",
+    config: "Configuration probes", "rce-probe": "Command execution probes", "server-info": "Server information probes",
+    "known-exploit": "Known exploit probes", SCANNER_PATH: "Scanner signature",
+    SCANNER_MULTI_CATEGORY: "Several scanner categories", LOW_AND_SLOW_SCANNER: "Persistent slow scanning",
+    NOT_FOUND_ENUMERATION: "Missing path enumeration", WIDE_ENUMERATION: "Wide path enumeration",
+    MASS_ENUMERATION: "Mass path enumeration", RECURRING_SCANNER: "Repeated scanning",
+    INVALID_HOST_ACTIVITY: "Unknown host probes", NOSNI_PROBING: "Requests without a server name",
+    RATE_EXCEEDED: "Request rate exceeded", ERROR_RATE_EXCEEDED: "Error rate exceeded",
+    LEGACY_HAPROXY_BAN: "HAProxy rule", HARD_FLOOR_EPISODE: "Hard protection threshold"
+  };
+  function banReason(value, label = identity) { return label(BAN_REASONS[value] || value || "Unknown reason"); }
+  function banSearchTerms(query, label = identity) {
+    const text = String(query || "").trim().toLowerCase();
+    return text ? Object.keys(BAN_REASONS).filter((key) => banReason(key, label).toLowerCase().includes(text)) : [];
+  }
+
+  function reputationRows(rows, showNormal = false) {
+    return (rows || []).filter((row) => showNormal || STATES.slice(0, -1).includes(row.state) || row.likely_false_positive)
+      .slice().sort((a, b) => Number(Boolean(b.likely_false_positive)) - Number(Boolean(a.likely_false_positive)) ||
+        Number(b.score || 0) - Number(a.score || 0) || Number(b.last_seen || 0) - Number(a.last_seen || 0));
+  }
+  function reputationPage(rows, showNormal, page) {
+    const found = reputationRows(rows, showNormal);
+    const current = Math.min(Math.max(0, Number(page) || 0), Math.max(0, Math.ceil(found.length / 10) - 1));
+    return {rows: found.slice(current * 10, current * 10 + 10), total: found.length, page: current};
+  }
+
+  function banListState(search) {
+    const params = new URLSearchParams(search);
+    const integer = (key, max) => Math.min(max, Math.max(0, Math.floor(Number(params.get(key)) || 0)));
+    return {mode: params.get("mode") === "history" ? "history" : "active", q: (params.get("q") || "").slice(0, 100),
+      period: [86400, 604800, 2592000].includes(Number(params.get("period"))) ? Number(params.get("period")) : 0,
+      since: integer("since", 2000000000),
+      sort: ["ip", "ts", "until", "score", "strike"].includes(params.get("sort")) ? params.get("sort") : "ts",
+      direction: params.get("direction") === "asc" ? "asc" : "desc",
+      page: integer("page", 40000), snapshot: integer("snapshot", Number.MAX_SAFE_INTEGER)};
+  }
+  function banListUrl(state) {
+    return `/security/adaptive/bans?${new URLSearchParams(banListState(new URLSearchParams(state)))}`;
+  }
+  function banReturnUrl(value) {
+    try {
+      const url = new URL(value || "/security/adaptive/bans", "https://local.invalid");
+      if (url.origin !== "https://local.invalid" || url.pathname !== "/security/adaptive/bans") return "/security/adaptive/bans";
+      return banListUrl(banListState(url.search));
+    } catch { return "/security/adaptive/bans"; }
+  }
+  function banDetailUrl(ban, returnTo) {
+    const params = new URLSearchParams({ip: ban.ip || "", at: ban.ts || 0, return: banReturnUrl(returnTo)});
+    if (ban.id) params.set("id", ban.id);
+    return `/security/adaptive/ban?${params}`;
+  }
+
   return {
     banRows,
     banRequestParams,
+    banReason,
+    banSearchTerms,
+    BAN_REASONS,
+    reputationRows,
+    reputationPage,
+    banListState,
+    banListUrl,
+    banReturnUrl,
+    banDetailUrl,
     STATES,
     UNITS,
     MAX_LADDER_STEPS,

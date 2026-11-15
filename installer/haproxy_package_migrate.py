@@ -1098,11 +1098,17 @@ class Engine:
         with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as guard, \
                 sqlite3.connect(self.directory / 'tables.sqlite') as snapshot:
             guard.execute('PRAGMA query_only=ON')
-            for query, code in [('SELECT ip, banned_until FROM ip_state WHERE banned_until > ?', 40),
-                                ('SELECT ip, expires_at FROM manual_bans WHERE expires_at > ?', 50)]:
-                for address, _ in guard.execute(query, (int(time.time()) + 2,)):
+            columns = {row[1] for row in guard.execute('PRAGMA table_info(ip_state)')}
+            # Before the first-step page existed, every adaptive ban used 40.
+            # Newer databases persist the actual mode (40 cut-off, 41 page).
+            # Compare it exactly: accepting either code would silently turn a
+            # page into a cut-off, or weaken a cut-off into a page.
+            code = 'COALESCE(NULLIF(ban_code, 0), 40)' if 'ban_code' in columns else '40'
+            for query, allowed in [(f'SELECT ip, {code} FROM ip_state WHERE banned_until > ?', {40, 41}),
+                                   ('SELECT ip, 50 FROM manual_bans WHERE expires_at > ?', {50})]:
+                for address, expected in guard.execute(query, (int(time.time()) + 2,)):
                     row = snapshot.execute('SELECT gpc0,gpt0 FROM entries WHERE tab=? AND ip=?', ('tbl_ban', address)).fetchone()
-                    if not row or row[0] <= 0 or row[1] != code:
+                    if expected not in allowed or not row or row[0] <= 0 or row[1] != expected:
                         missing += 1
         if missing:
             raise MigrationError(f'Persisted guard decisions differ from Runtime API: {missing} entries; resolve drift first')
@@ -1614,8 +1620,10 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (MigrationError, OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
-        print(json.dumps({'error': str(error), 'transaction': engine.state.get('id'),
-                          'phase': engine.state.get('phase')}, ensure_ascii=False), file=sys.stderr)
+        result = {'error': str(error), 'transaction': engine.state.get('id'), 'phase': engine.state.get('phase')}
+        if engine.state.get('failure'):
+            result['failure'] = engine.state['failure']
+        print(json.dumps(result, ensure_ascii=False), file=sys.stderr)
         return 1
 
 

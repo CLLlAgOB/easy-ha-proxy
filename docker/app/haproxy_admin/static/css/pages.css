@@ -5,13 +5,24 @@
   .ab-toolbar .ab-search { flex: 1; min-width: min(220px, 100%); }
   .ab-toolbar input, .ab-toolbar select { width: 100%; min-width: 0; }
   .ab-pagination { align-items: center; }
-  .ab-table { min-width: 740px; }
-  .ab-table th button { padding: 4px 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
+  .ab-table { min-width: 740px; table-layout: fixed; }
+  .ap-page-table { overflow-x: auto; max-width: 100%; margin: 14px 0; }
+  .ap-page-table th { position: static; }
+  .ab-table th:nth-child(1) { width: 17%; }
+  .ab-table th:nth-child(2), .ab-table th:nth-child(3) { width: 21%; }
+  .ab-table th:nth-child(4), .ab-table th:nth-child(5) { width: 10%; }
+  .ab-table th { white-space: normal; }
+  .ab-date, .ab-reason { overflow-wrap: anywhere; }
+  .ap-normal-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .ap-normal-toggle input { width: auto; }
+  .ap-settings { margin-top: 20px; }
+  .ap-settings > summary { cursor: pointer; font-weight: 650; }
+  .ab-table th button { padding: 4px 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: normal; text-align: left; }
   .ab-table th[aria-sort="descending"] button::after { content: ' ↓'; }
   .ab-table th[aria-sort="ascending"] button::after { content: ' ↑'; }
   .ab-address { border: 0; background: transparent; padding: 4px 0; color: var(--accent-primary); text-decoration: underline; cursor: pointer; font: inherit; }
   .ab-left { display: block; color: var(--text-secondary); margin-top: 4px; }
-  .ab-detail { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 16px; }
+  .ab-detail { min-width: 0; }
   .ab-detail h4 { margin: 16px 0 8px; }
   .data-table td.ab-wrap { white-space: normal; overflow-wrap: anywhere; min-width: 160px; max-width: 420px; }
   #ab-detail-title { overflow-wrap: anywhere; }

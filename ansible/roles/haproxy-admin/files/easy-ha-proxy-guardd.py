@@ -4313,7 +4313,7 @@ class SecurityDatabase:
         return feed
 
     def adaptive_ban_history(self, *, query="", since=0, sort="ts", direction="desc",
-                             offset=0, snapshot=0, limit=50):
+                             offset=0, snapshot=0, limit=25, terms=()):
         """Applied adaptive bans, sorted and filtered before pagination.
 
         Pin pages to a decision id so new bans do not shift an open history.
@@ -4327,8 +4327,13 @@ class SecurityDatabase:
             where = "source = 'adaptive' AND action = 'applied' AND outcome = 'applied' AND id <= ? AND ts >= ?"
             values = [snapshot, since]
             if query:
-                where += " AND (instr(ip, ?) > 0 OR instr(lower(reason), lower(?)) > 0)"
+                terms = tuple(term for term in terms[:32] if re.fullmatch(r'[A-Za-z0-9_-]{1,64}', term))
+                where += " AND (instr(ip, ?) > 0 OR instr(lower(reason), lower(?)) > 0"
                 values.extend([query, query])
+                for term in terms:
+                    where += ' OR instr(lower(reason), lower(?)) > 0'
+                    values.append(term)
+                where += ')'
             total = self._conn.execute(f"SELECT COUNT(*) FROM ban_decisions WHERE {where}", values).fetchone()[0]
             rows = self._conn.execute(
                 "SELECT id, ts, ip, until, strike, score, reason FROM ban_decisions "
@@ -4346,9 +4351,14 @@ class SecurityDatabase:
             items.append(item)
         return {"bans": items, "total": total, "snapshot": snapshot, "offset": offset, "limit": limit}
 
-    def adaptive_ban_detail(self, *, decision_id=0, ip="", at=0):
+    def adaptive_ban_detail(self, *, decision_id=0, ip="", at=0, until=0):
         # Never substitute a different strike for the one the operator opened.
-        where, values = ("id = ?", (decision_id,)) if decision_id else ("ip = ? AND ts = ?", (ip, at))
+        if decision_id:
+            where, values = "id = ?", (decision_id,)
+        elif until:
+            where, values = "ip = ? AND until = ?", (ip, until)
+        else:
+            where, values = "ip = ? AND ts = ?", (ip, at)
         with self._lock:
             row = self._conn.execute(
                 "SELECT id, ts, ip, until, strike, score, reason FROM ban_decisions "
@@ -9506,7 +9516,8 @@ class GuardEngine:
             if remaining <= 0:
                 # Served, and due to be lifted on the next cycle.
                 continue
-            last_ban = self.database.last_ban_ts(ip)
+            decision = self.database.adaptive_ban_detail(ip=ip, until=int(until))
+            last_ban = decision['ts'] if decision else self.database.last_ban_ts(ip)
             # Why it was banned, taken from what was written down at the
             # time. Recomputing it here reports what the address is doing
             # *now*, and a banned address is doing nothing: its findings
@@ -9514,20 +9525,23 @@ class GuardEngine:
             # out, so within hours every ban read "score 0, no categories".
             # True, useless, and the opposite of the question being asked.
             recorded = self._parse_ban_detail(self.database.last_ban_detail(ip))
+            reason = (decision or {}).get('reason') or {}
             standing = self.reputation(ip, now, scheduled=scheduled)
             rows.append({
                 "ip": ip,
+                "id": (decision or {}).get('id'),
                 "until": int(until),
                 "seconds_left": remaining,
                 "banned_at": last_ban,
-                "strikes": self.strike_level(ip, now),
+                "strikes": (decision or {}).get('strike'),
                 "score": (
+                    decision['score'] if decision else
                     recorded["score"] if recorded["score"] is not None
                     else standing.get("score", 0)
                 ),
                 "state": standing.get("state", ""),
                 "categories": (
-                    recorded["categories"]
+                    decision_summary(reason).get('categories') or recorded["categories"]
                     or sorted(standing.get("categories") or {})
                 ),
                 "likely_false_positive": bool(
@@ -9983,6 +9997,7 @@ class GuardHandler(BaseHTTPRequestHandler):
                 if path.endswith("/bans"):
                     payload = database.adaptive_ban_history(
                         query=value("q")[:100], since=max(0, int(value("since", "0"))),
+                        terms=tuple(value('terms')[:2048].split(',')),
                         sort=value("sort", "ts"), direction=value("direction", "desc"),
                         offset=min(1000000, max(0, int(value("offset", "0")))),
                         snapshot=min(2**62, max(0, int(value("snapshot", "0")))),
