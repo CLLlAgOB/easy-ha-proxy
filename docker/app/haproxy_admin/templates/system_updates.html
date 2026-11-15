@@ -278,6 +278,17 @@
     <p id="updates-haproxy-meta" class="updates-hero-meta notranslate" translate="no" data-i18n-skip></p>
     <p id="updates-haproxy-error" class="updates-hero-meta notranslate" translate="no" data-i18n-skip hidden></p>
     <p id="updates-haproxy-last" class="updates-hero-meta" hidden></p>
+    <details id="updates-haproxy-manual" class="updates-row-more" hidden>
+      <summary>Manual HAProxy maintenance on this platform</summary>
+      <p class="updates-hero-meta">HAProxy packages stay held on Debian and Ubuntu. Installing OS packages in this panel does not update them. This platform has no controlled HAProxy updater; a separate operator action is required.</p>
+      <ol class="updates-changelog-list">
+        <li>Use SSH or the server console during maintenance. Back up the HAProxy configuration and arrange package recovery first; connections may be interrupted and this manual procedure has no automatic rollback.</li>
+        <li>Pause automatic maintenance. Review the installed package, its APT candidate and the proposed installation before changing anything. Keep the same package provider; a branch or provider change requires its own migration plan.</li>
+        <li id="updates-haproxy-manual-distribution" hidden>For the distribution package haproxy: temporarily remove its hold with apt-mark unhold, install only the reviewed HAProxy version, then restore apt-mark hold even if installation fails. Use the shared maintenance lock so this cannot overlap a panel update or backup restore.</li>
+        <li id="updates-haproxy-manual-vendor" hidden>For haproxy-awslc: follow the installed vendor's procedure for this platform, including its libssl-awslc dependency. Do not replace it with the distribution haproxy package. Restore holds on both packages after the operation, including on failure.</li>
+        <li>Validate the configuration, check haproxy.service and site availability, and reload HAProxy if replaced libraries still require it. Run a new update check in the panel, then resume automatic maintenance.</li>
+      </ol>
+    </details>
     <p class="updates-hero-meta">HAProxy updates require an explicit selection. They are excluded from automatic installation.</p>
     <div class="updates-migration" id="updates-migration" hidden>
       <h3>Transition to HAProxy 3.4 LTS</h3>

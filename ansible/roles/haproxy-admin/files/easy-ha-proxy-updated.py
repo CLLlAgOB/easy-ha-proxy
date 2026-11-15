@@ -2000,10 +2000,10 @@ def unified_security_stage(action):
 
 
 def unified_reboot(value, window):
-    if time.time() + REBOOT_DELAY_SECONDS >= window['closes_at']:
-        return 'deferred'
     if not REBOOT_REQUIRED_PATH.exists() and not service_reboot_reason():
         return 'completed'
+    if time.time() + REBOOT_DELAY_SECONDS >= window['closes_at']:
+        return 'deferred'
     descriptor = acquire_operation()
     try:
         current = unified_policy()

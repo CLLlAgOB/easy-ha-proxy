@@ -86,10 +86,11 @@ def probe(runner, *, binary=Path('/usr/sbin/haproxy'), metadata=None, reader=run
     if len(found) != 1:
         return result('unknown', 'The installed HAProxy package could not be determined.')
     name, version = next(iter(found.items()))
-    branch = '3.4' if name == 'haproxy-awslc' else '2.8'
+    version_branch = re.match(r'^(?:\d+:)?(\d+\.\d+)\.', version)
+    branch = version_branch[1] if version_branch else None
     details.update(package=name, installed_version=version, branch=branch,
-                   provider='HAProxy Technologies' if name == 'haproxy-awslc' else 'Ubuntu',
-                   source='ha34 / Ubuntu noble' if name == 'haproxy-awslc' else 'Ubuntu noble')
+                   provider='HAProxy Technologies' if name == 'haproxy-awslc' else 'Ubuntu' if qualified else 'Distribution',
+                   source=('ha34 / Ubuntu noble' if name == 'haproxy-awslc' else 'Ubuntu noble') if qualified else 'APT')
     policy = runner.run(('apt-cache', 'policy', name), timeout=15)
     match = re.search(r'^\s+Candidate:\s*(\S+)', policy.stdout, re.M)
     if policy.returncode == 0 and match and match[1] != '(none)':
@@ -113,12 +114,14 @@ def probe(runner, *, binary=Path('/usr/sbin/haproxy'), metadata=None, reader=run
         return result('blocked', 'The running HAProxy binary differs from the installed package; operator recovery is required.')
     details['needs_reload'] = bool(details.get('replaced_libraries'))
     if not qualified:
-        return result('blocked', 'Controlled HAProxy updates require qualified Ubuntu 24.04 ARM64 or AMD64; use the distribution update procedure on other platforms.')
+        details['manual_update'] = 'distribution' if name == 'haproxy' else 'vendor'
+        return result('blocked', 'HAProxy is excluded from OS package updates in the panel, including manual installation. Controlled updates require Ubuntu 24.04 ARM64 or AMD64. On this platform, update HAProxy separately over SSH or the server console and restore package holds afterwards.')
     if not details['apt'].get('fresh'):
         return result('unknown', 'APT metadata is stale or its refresh failed. Check for updates again.')
     if not details['candidate_version']:
         return result('unknown', 'No eligible HAProxy package candidate was found.')
-    if not version.startswith(branch + '.') or not details['candidate_version'].startswith(branch + '.'):
+    supported_branch = '3.4' if name == 'haproxy-awslc' else '2.8'
+    if not version.startswith(supported_branch + '.') or not details['candidate_version'].startswith(supported_branch + '.'):
         return result('blocked', 'A different HAProxy branch requires a separate migration.')
     if not details['protected']:
         return result('blocked', 'Enable controlled HAProxy package protection with a host-service update first.')

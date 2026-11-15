@@ -181,7 +181,27 @@ class VersionStatus(unittest.TestCase):
         self.assertEqual(self.probe()['state'], 'unknown')
 
     def test_unsupported_platform_does_not_offer_a_controlled_install(self):
-        self.assertEqual(self.probe(qualified=False)['state'], 'blocked')
+        result = self.probe(qualified=False)
+        self.assertEqual(result['state'], 'blocked')
+        self.assertEqual(result['details']['manual_update'], 'vendor')
+        self.assertIn('including manual installation', result['summary'])
+
+    def test_unqualified_distribution_package_has_a_separate_manual_path_and_accurate_branch(self):
+        self.package = 'haproxy'
+        for version, branch in (('2.4.30-0ubuntu0.22.04.1', '2.4'), ('3.0.11-1+deb13u1', '3.0'), ('1:3.2.0-1', '3.2')):
+            with self.subTest(version=version):
+                self.installed = self.candidate = self.runtime['running_version'] = version
+                result = self.probe(qualified=False)
+                self.assertEqual(result['state'], 'blocked')
+                self.assertFalse(result['actionable'])
+                self.assertEqual(result['details']['manual_update'], 'distribution')
+                self.assertEqual(result['details']['branch'], branch)
+                self.assertEqual(result['details']['source'], 'APT')
+        self.assertFalse(any(command[0] in {'apt-get', 'apt-mark'} for command in self.calls))
+
+    def test_manual_upgrade_guidance_is_not_offered_when_runtime_recovery_is_required(self):
+        self.runtime['binary_matches'] = False
+        self.assertNotIn('manual_update', self.probe(qualified=False)['details'])
 
 
 class OsIsolation(unittest.TestCase):

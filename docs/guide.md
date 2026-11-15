@@ -428,6 +428,37 @@ released a newer version upstream than the one the project pins -- nothing is
 pulled or re-pinned for it -- and an image counts as current only when its
 container actually runs the same layers, not merely when the tag was pulled.
 
+**HAProxy on other platforms.** Package protection also applies outside the
+qualified Ubuntu 24.04 ARM64/AMD64 platform. Both manual and automatic OS
+package installation in the panel exclude HAProxy; neither is a workaround
+for its hold. The HAProxy card explains the separate manual procedure.
+Use SSH or the server console during maintenance, pause automatic maintenance,
+back up the configuration and arrange package recovery. An ordinary package
+installation may interrupt connections and has no controlled automatic rollback.
+
+For the distribution package `haproxy`, review `apt-cache policy haproxy` and
+`apt-get -s install --only-upgrade haproxy=VERSION`. Replace `VERSION` with the
+exact reviewed version from the existing provider; a branch/provider change
+requires a separate migration plan. On a host with the default maintenance
+lock path, the following operator command temporarily releases only this hold
+and restores it on shell exit, including an installation failure:
+
+```bash
+sudo flock -n /run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock /bin/bash -c '
+  trap "apt-mark hold haproxy" EXIT
+  apt-mark unhold haproxy &&
+  apt-get install --no-remove --only-upgrade haproxy=VERSION
+'
+```
+
+Use the configured lock path if it was customized. Review the interactive APT
+proposal before accepting it. For `haproxy-awslc`, follow the installed
+vendor's platform-specific procedure and restore holds on it and `libssl-awslc`;
+do not substitute the distribution package. Afterwards validate the HAProxy
+configuration, check `haproxy.service` and sites, and reload if replaced libraries
+still require it. Run a fresh panel check before resuming automatic maintenance.
+The panel does not run these commands or release holds automatically.
+
 The **Unified maintenance window** option uses one pair of hours for automatic
 project/OS installation, eligible controlled HAProxy patches, service restarts
 and any necessary reboot. Enable managed OS security first (notification mode

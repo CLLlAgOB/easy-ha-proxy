@@ -170,9 +170,21 @@ class Coordinator(unittest.TestCase):
 
     def test_not_enough_time_for_the_countdown_defers_reboot_without_a_timer(self):
         value = windows.policy(self.raw)
-        with patch.object(self.b.time, 'time', return_value=100), patch.object(self.b, 'request_reboot') as request:
+        with patch.object(self.b.time, 'time', return_value=100), patch.object(self.b, 'request_reboot') as request, \
+             patch.object(self.b, 'REBOOT_REQUIRED_PATH', self.root / 'reboot-required'), \
+             patch.object(self.b, 'service_reboot_reason', return_value=['docker.service']):
             self.assertEqual(self.actual_reboot(value, {'closes_at':130}), 'deferred')
         request.assert_not_called()
+
+    def test_no_reboot_needed_completes_even_when_the_countdown_would_not_fit(self):
+        value = windows.policy(self.raw)
+        with patch.object(self.b.time, 'time', return_value=100), patch.object(self.b, 'request_reboot') as request, \
+             patch.object(self.b, 'REBOOT_REQUIRED_PATH', self.root / 'reboot-required'), \
+             patch.object(self.b, 'service_reboot_reason', return_value=[]), \
+             patch.object(self.b, 'acquire_operation') as acquire:
+            self.assertEqual(self.actual_reboot(value, {'closes_at':130}), 'completed')
+        request.assert_not_called()
+        acquire.assert_not_called()
 
     def test_native_stage_receives_the_common_revision_and_cannot_start_after_closing(self):
         with patch.object(self.b, 'acquire_operation', return_value=42), \

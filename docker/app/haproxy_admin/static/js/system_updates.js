@@ -436,6 +436,10 @@
     note.hidden = !last || (last.kind === "migration" && last.phase === "prepared");
     note.textContent = last ? `${t(last.kind === "migration" && last.phase === "prepared" ? "HAProxy migration prepared; review the target version before confirming" : phases[last.phase] || "HAProxy update in progress")}${last.updated_at ? ` · ${formatDate(last.updated_at * 1000)}` : ""}` : "";
     note.classList.toggle("text-danger", ["rollback_failed", "recovery_exhausted"].includes(last?.phase));
+    const manual = details.qualified === false && ["distribution", "vendor"].includes(details.manual_update) && !unfinished;
+    byId("updates-haproxy-manual").hidden = !manual;
+    byId("updates-haproxy-manual-distribution").hidden = !manual || details.manual_update !== "distribution";
+    byId("updates-haproxy-manual-vendor").hidden = !manual || details.manual_update !== "vendor";
     const button = byId("updates-haproxy-install");
     button.hidden = !(component?.actionable && component.state === "available") || outdated || Boolean(plan?.stale) || Boolean(unfinished);
     button.disabled = requestRunning || operationRunning || planForOtherChannel(plan);
