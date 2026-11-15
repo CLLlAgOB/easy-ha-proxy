@@ -5,6 +5,60 @@
 
 {% block content %}
 
+<section class="card" id="ap-bans-card" aria-labelledby="ap-bans-title">
+  <div class="card-header">
+    <h2 id="ap-bans-title">Adaptive bans</h2>
+    <button class="btn-small" type="button" id="ab-refresh">Refresh bans</button>
+  </div>
+  <p class="mon-sub">See when an address was banned and open the decision to review its findings and requests.</p>
+  <form id="ab-filters" class="ab-toolbar">
+    <label>Show<select id="ab-mode"><option value="active">Banned right now</option><option value="history">Ban history</option></select></label>
+    <label class="ab-search">IP or reason<input id="ab-query" type="search" maxlength="100" placeholder="IP or reason"></label>
+    <label>Ban period<select id="ab-period"><option value="0">All retained history</option><option value="86400">Last 24 hours</option><option value="604800">Last 7 days</option><option value="2592000">Last 30 days</option></select></label>
+    <button class="btn-small primary" type="submit">Filter</button>
+    <button class="btn-small" type="button" id="ab-reset">Reset filters</button>
+  </form>
+  <p class="mon-sub" id="ab-note" role="status" aria-live="polite">Loading bans…</p>
+  <div class="scroll-x">
+    <table class="data-table ab-table">
+      <thead><tr>
+        <th aria-sort="none"><button type="button" data-ab-sort="ip">Address</button></th>
+        <th aria-sort="descending"><button type="button" data-ab-sort="ts">Banned at</button></th>
+        <th aria-sort="none"><button type="button" data-ab-sort="until">Scheduled end</button></th>
+        <th aria-sort="none"><button type="button" data-ab-sort="strike">Ban step</button></th>
+        <th aria-sort="none"><button type="button" data-ab-sort="score">Ban score</button></th>
+        <th>What it did</th>
+      </tr></thead>
+      <tbody id="ap-bans" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+  <div class="ab-toolbar ab-pagination">
+    <button class="btn-small" type="button" id="ab-prev" disabled>Previous</button>
+    <span id="ab-page" data-i18n-skip translate="no"></span>
+    <button class="btn-small" type="button" id="ab-next" disabled>Next</button>
+  </div>
+  <p class="mon-sub">History contains applied adaptive bans, including repeats. The scheduled end is not proof of when a ban was lifted.</p>
+  <section id="ab-detail" class="ab-detail" hidden aria-labelledby="ab-detail-title">
+    <div class="card-header"><h3 id="ab-detail-title" tabindex="-1" data-i18n-skip translate="no"></h3><button class="btn-small" type="button" id="ab-close">Close details</button></div>
+    <p id="ab-detail-note" class="mon-sub" role="status" data-i18n-skip translate="no"></p>
+    <h4>Findings recorded at the ban</h4>
+    <p id="ab-evidence-note" class="mon-sub" data-i18n-skip translate="no"></p>
+    <div class="scroll-x"><table class="data-table"><thead><tr><th>When</th><th>Finding</th><th>Site</th><th>Detail</th><th>Points</th></tr></thead><tbody id="ab-evidence" data-i18n-skip translate="no"></tbody></table></div>
+    <div class="ab-toolbar">
+      <h4>Requests before the ban</h4>
+      <label>Look back<select id="ab-hours"><option value="1">1 hour</option><option value="6">6 hours</option><option value="24">24 hours</option><option value="168">7 days</option></select></label>
+      <a id="ab-explorer" class="btn-small" href="/security/requests">Open request log</a>
+      <a id="ab-ip-page" class="btn-small" href="#">Address details and unban</a>
+    </div>
+    <p class="mon-sub">Requests are shown newest first, up to the recorded ban time. Findings are saved separately and may outlive the request log.</p>
+    <p id="ab-requests-note" class="mon-sub" role="status" data-i18n-skip translate="no"></p>
+    <div class="scroll-x"><table class="data-table"><thead><tr><th>When</th><th>Method</th><th>Site</th><th>Path</th><th>Status</th><th>Client</th></tr></thead><tbody id="ab-requests" data-i18n-skip translate="no"></tbody></table></div>
+    <button class="btn-small" type="button" id="ab-more" hidden>Older requests</button>
+  </section>
+</section>
+
+
+
 
 <div class="ap-banner" id="ap-mode">
   Monitor mode — findings are recorded and scored, but nothing is blocked.
@@ -108,35 +162,6 @@
   <div class="ap-cards" id="ap-quality"></div>
   <div class="mon-sub" id="ap-quality-networks" data-i18n-skip translate="no"></div>
   <div class="mon-sub" id="ap-quality-waiting"></div>
-</div>
-
-<div class="card" id="ap-bans-card" hidden>
-  <div class="card-header">
-    <h2>Banned right now</h2>
-    <span class="mon-sub" id="ap-bans-note" data-i18n-skip translate="no"></span>
-  </div>
-  <div  class="u-p-12px-16px">
-    <p class="u-mt-0 mon-sub" >
-      How long each one has left, on this engine's own schedule. The ban list
-      on the HAProxy page shows the stick table's expiry instead, which is the
-      table's own lifetime and says days about a ban that lifts within the
-      hour.
-    </p>
-    <div  class="scroll-x">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Address</th>
-            <th>Lifts in</th>
-            <th>Strike</th>
-            <th>Score</th>
-            <th>What it did</th>
-          </tr>
-        </thead>
-        <tbody id="ap-bans"></tbody>
-      </table>
-    </div>
-  </div>
 </div>
 
 <div class="card" id="ap-warnings-card" hidden>
@@ -287,5 +312,6 @@
 </div>
 
 <script src="{{ url_for('static', filename='js/adaptive_core.js') }}"></script>
+<script src="{{ url_for('static', filename='js/adaptive_bans.js') }}"></script>
 <script src="{{ url_for('static', filename='js/adaptive_protection.js') }}"></script>
 {% endblock %}

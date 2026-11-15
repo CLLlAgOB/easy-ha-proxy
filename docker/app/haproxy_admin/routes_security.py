@@ -245,6 +245,21 @@ def api_adaptive_rate_warnings():
         return jsonify(security.unavailable_payload(exc)), 503
 
 
+@bp.get("/api/security/adaptive/bans")
+@bp.get("/api/security/adaptive/ban")
+def api_adaptive_bans():
+    from .guardd_client import guardd_adaptive_bans
+
+    detail = request.path.endswith('/ban')
+    keys = ('id', 'ip', 'at') if detail else ('q', 'since', 'sort', 'direction', 'offset', 'snapshot')
+    params = {key: str(request.args[key])[:100] for key in keys if key in request.args}
+    try:
+        payload = guardd_adaptive_bans(params, detail=detail)
+        return jsonify(payload), 200 if payload.get('ok') else (404 if detail else 400)
+    except GuarddUnavailable as exc:
+        return jsonify(security.unavailable_payload(exc)), 503
+
+
 @bp.get("/api/security/adaptive/ip")
 def api_adaptive_ip():
     address = security.valid_ip(request.args.get("ip"))

@@ -391,57 +391,7 @@
   }
 
   function renderBans(bans) {
-    const card = byId("ap-bans-card");
-    const host = byId("ap-bans");
-    if (!card || !host) return;
-    const rows = bans || [];
-    card.hidden = rows.length === 0;
-    setText("ap-bans-note", rows.length ? String(rows.length) : "");
-    if (!rows.length) return;
-
-    host.textContent = "";
-    rows.forEach((ban) => {
-      const tr = document.createElement("tr");
-
-      const address = document.createElement("td");
-      address.setAttribute("data-i18n-skip", "");
-      address.setAttribute("translate", "no");
-      address.className = "ip-cell";
-      address.textContent = ban.ip;
-      if (ban.likely_false_positive) {
-        const flag = document.createElement("span");
-        flag.className = "ap-flag fp";
-        flag.textContent = uiText("Check this one");
-        address.appendChild(flag);
-      }
-      tr.appendChild(address);
-
-      const left = document.createElement("td");
-      left.setAttribute("data-i18n-skip", "");
-      left.setAttribute("translate", "no");
-      left.textContent = formatLeft(ban.seconds_left);
-      tr.appendChild(left);
-
-      const strike = document.createElement("td");
-      strike.setAttribute("data-i18n-skip", "");
-      strike.setAttribute("translate", "no");
-      strike.textContent = String(ban.strikes || 1);
-      tr.appendChild(strike);
-
-      const score = document.createElement("td");
-      score.setAttribute("data-i18n-skip", "");
-      score.setAttribute("translate", "no");
-      score.textContent = String(ban.score == null ? "" : ban.score);
-      tr.appendChild(score);
-
-      const why = document.createElement("td");
-      why.setAttribute("data-i18n-skip", "");
-      why.setAttribute("translate", "no");
-      why.textContent = (ban.categories || []).join(", ") || "—";
-      tr.appendChild(why);
-
-      host.appendChild(tr);
-    });
+    window.EasyHaProxyBans.setActive(bans);
   }
 
   function renderSummary(summary) {
@@ -945,6 +895,7 @@
     } catch (error) {
       showUnavailable(Boolean(error.unavailable));
       renderTable([]);
+      window.EasyHaProxyBans.setActive(null);
     }
   }
 

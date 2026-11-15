@@ -194,7 +194,26 @@
     return Number(item.points) > 0 ? `+${item.points}` : `0 · ${(label || identity)(item.reason)}`;
   }
 
+  function banRows(rows, filters) {
+    const query = String(filters.q || "").trim().toLowerCase();
+    const key = ["ip", "ts", "until", "score", "strike"].includes(filters.sort) ? filters.sort : "ts";
+    const direction = filters.direction === "asc" ? 1 : -1;
+    return (rows || []).map((row) => ({...row, ts: row.ts ?? row.banned_at, strike: row.strike ?? row.strikes}))
+      .filter((row) => Number(row.ts) >= Number(filters.since || 0) &&
+        (!query || `${row.ip} ${(row.categories || []).join(" ")}`.toLowerCase().includes(query)))
+      .sort((a, b) => direction * (key === "ip" ? String(a.ip).localeCompare(String(b.ip)) :
+        (Number(a[key] || 0) - Number(b[key] || 0))) || String(a.ip).localeCompare(String(b.ip)));
+  }
+
+  function banRequestParams(ban, hours) {
+    const span = [1, 6, 24, 168].includes(Number(hours)) ? Number(hours) : 1;
+    return {client: ban.ip, since: Math.max(0, Number(ban.ts) - span * 3600),
+      until: Number(ban.ts), hide_admin: "0", limit: 100};
+  }
+
   return {
+    banRows,
+    banRequestParams,
     STATES,
     UNITS,
     MAX_LADDER_STEPS,

@@ -4312,6 +4312,59 @@ class SecurityDatabase:
             feed.append(item)
         return feed
 
+    def adaptive_ban_history(self, *, query="", since=0, sort="ts", direction="desc",
+                             offset=0, snapshot=0, limit=50):
+        """Applied adaptive bans, sorted and filtered before pagination.
+
+        Pin pages to a decision id so new bans do not shift an open history.
+        Query values are bound; SQL identifiers come only from this allowlist.
+        """
+        columns = {"ts": "ts", "ip": "ip", "score": "score", "strike": "strike", "until": "until"}
+        if sort not in columns or direction not in {"asc", "desc"}:
+            raise ValueError("Invalid ban history sort")
+        with self._lock:
+            snapshot = snapshot or self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM ban_decisions").fetchone()[0]
+            where = "source = 'adaptive' AND action = 'applied' AND outcome = 'applied' AND id <= ? AND ts >= ?"
+            values = [snapshot, since]
+            if query:
+                where += " AND (instr(ip, ?) > 0 OR instr(lower(reason), lower(?)) > 0)"
+                values.extend([query, query])
+            total = self._conn.execute(f"SELECT COUNT(*) FROM ban_decisions WHERE {where}", values).fetchone()[0]
+            rows = self._conn.execute(
+                "SELECT id, ts, ip, until, strike, score, reason FROM ban_decisions "
+                f"WHERE {where} ORDER BY {columns[sort]} {direction}, id {direction} LIMIT ? OFFSET ?",
+                (*values, limit, offset),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            try:
+                reason = json.loads(item.pop("reason") or "{}")
+            except (TypeError, ValueError):
+                reason = {}
+            item["categories"] = decision_summary(reason if isinstance(reason, dict) else {}).get("categories", [])
+            items.append(item)
+        return {"bans": items, "total": total, "snapshot": snapshot, "offset": offset, "limit": limit}
+
+    def adaptive_ban_detail(self, *, decision_id=0, ip="", at=0):
+        # Never substitute a different strike for the one the operator opened.
+        where, values = ("id = ?", (decision_id,)) if decision_id else ("ip = ? AND ts = ?", (ip, at))
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, ts, ip, until, strike, score, reason FROM ban_decisions "
+                f"WHERE {where} AND source = 'adaptive' AND action = 'applied' AND outcome = 'applied' "
+                "ORDER BY id DESC LIMIT 1", values,
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            reason = json.loads(item["reason"] or "{}")
+        except (TypeError, ValueError):
+            reason = {}
+        item["reason"] = reason if isinstance(reason, dict) else {}
+        return item
+
     def prune_decisions(self, before: int, keep: int, now: int = 0) -> int:
         """Drop decisions older than `before`, then the oldest beyond `keep`
         rows -- but never one whose ban is still in force (until > now): a
@@ -9920,6 +9973,32 @@ class GuardHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
             except Exception as exc:  # pylint: disable=broad-except
                 self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path in {"/api/v1/guard/adaptive/bans", "/api/v1/guard/adaptive/ban"}:
+            query = parse_qs(urlparse(self.path).query or "")
+            def value(name, default=""):
+                return query.get(name, [default])[0]
+            try:
+                if path.endswith("/bans"):
+                    payload = database.adaptive_ban_history(
+                        query=value("q")[:100], since=max(0, int(value("since", "0"))),
+                        sort=value("sort", "ts"), direction=value("direction", "desc"),
+                        offset=min(1000000, max(0, int(value("offset", "0")))),
+                        snapshot=min(2**62, max(0, int(value("snapshot", "0")))),
+                    )
+                else:
+                    decision_id = min(2**62, max(0, int(value("id", "0"))))
+                    ip = str(ipaddress.ip_address(value("ip"))) if not decision_id else ""
+                    decision = database.adaptive_ban_detail(decision_id=decision_id, ip=ip,
+                                                           at=max(0, int(value("at", "0"))))
+                    if decision is None:
+                        self._send_json(404, {"ok": False, "error": "This ban record is no longer available"})
+                        return
+                    payload = {"ban": decision}
+                self._send_json(200, {"ok": True, **payload})
+            except (ValueError, OverflowError):
+                self._send_json(400, {"ok": False, "error": "Invalid ban history filters"})
             return
 
         if path == "/api/v1/guard/decisions/feed":

@@ -80,6 +80,11 @@ def guardd_rate_warnings(limit: int = 100) -> Dict[str, Any]:
     return _get_json("/api/v1/guard/rate-warnings", params={"limit": limit})
 
 
+def guardd_adaptive_bans(params: Dict[str, Any], *, detail=False) -> Dict[str, Any]:
+    return _guardd().get("/api/v1/guard/adaptive/" + ("ban" if detail else "bans"),
+                         params=params, timeout=5, require_object=True, check_status=False)
+
+
 def guardd_decisions(address: str, limit: int = 20) -> Dict[str, Any]:
     """Every ban decision about one address, newest first, with its reason."""
 
