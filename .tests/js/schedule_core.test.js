@@ -18,6 +18,8 @@ test("one maintenance window replaces individual installation restart and reboot
   assert.equal(result.tasks[0].label, "Unified software maintenance");
   assert.equal(result.tasks[0].start, Date.parse("2026-11-08T01:00:00Z"));
   assert.equal(result.tasks[0].end, Date.parse("2026-11-08T02:00:00Z"));
+  assert.equal(result.maintenance.state, "enabled");
+  assert.equal(result.maintenance.hours, "01:00–02:00");
 });
 const clock = create({zone: "Europe/Moscow"}, "en-GB");
 const now = Date.parse("2026-11-07T21:00:00Z"); // midnight MSK
@@ -28,10 +30,50 @@ test("saving unified consent during a window displays the next full window", () 
   const install = result.tasks.find((task) => task.id === "project-install");
   assert.equal(install.start, Date.parse("2026-11-09T01:00:00+03:00"));
   assert.equal(install.end, Date.parse("2026-11-09T02:00:00+03:00"));
+  assert.equal(result.maintenance.state, "enabled");
+  assert.equal(result.maintenance.next.opened, install.start);
 });
 const security = {available: true, policy: {mode: "daily", start: 2, end: 3, interval: 2},
   schedule: {next_check: now / 1000 + 1800, next_install: "2026-11-08T02:00:00+03:00"},
   automatic_reboot: {available: true, enabled: true, next_window: "2026-11-08T03:00:00+03:00"}};
+test("a saved disabled common window remains visible without inventing a scheduled run", () => {
+  const result = build({updates: {settings: {auto_install: {enabled: false, unified: true, start: 1, end: 2}}}, security}, clock, now);
+  assert.deepEqual(result.maintenance, {state: "disabled", hours: "01:00–02:00", next: null});
+  assert.deepEqual(result.tasks, []);
+  assert(result.disabled.some((item) => item.label === "Unified software maintenance"));
+  assert(!result.disabled.some((item) => item.label === "Project update installation"));
+});
+test("the common window is still shown when update status fails but security status succeeds", () => {
+  const result = build({security: {...security, maintenance_window: {
+    enabled: true, start: 1, end: 2, updated_at: 1
+  }}}, clock, now);
+  assert.equal(result.maintenance.hours, "01:00–02:00");
+  assert.equal(result.maintenance.state, "enabled");
+  assert.deepEqual(result.tasks.map((task) => task.label), ["Unified software maintenance"]);
+});
+test("an explicit separate-schedule setting takes priority over a stale security response", () => {
+  const result = build({updates: {settings: {auto_install: {enabled: true, unified: false, start: 1, end: 2}}},
+    security: {...security, maintenance_window: {enabled: true, start: 3, end: 4}}}, clock, now);
+  assert.equal(result.maintenance.state, "separate");
+  assert.equal(result.maintenance.hours, null);
+  assert(result.tasks.some((task) => task.label === "Project update installation"));
+  assert(!result.tasks.some((task) => task.label === "Unified software maintenance"));
+});
+test("an open cross-midnight common window retains its full hours and opening instant", () => {
+  const result = build({updates: {settings: {auto_install: {enabled: true, unified: true, start: 23, end: 2}}}}, clock, now);
+  assert.equal(result.maintenance.hours, "23:00–02:00");
+  assert.equal(result.maintenance.state, "open");
+  assert.equal(result.maintenance.next.opened, Date.parse("2026-11-07T23:00:00+03:00"));
+  assert.equal(result.tasks[0].start, now);
+  assert.equal(clock.time(result.maintenance.next.end), "02:00:00");
+});
+test("missing or invalid common settings do not fabricate a window", () => {
+  assert.equal(build({}, clock, now).maintenance.state, "unavailable");
+  const result = build({updates: {settings: {auto_install: {enabled: true, unified: true, start: 1, end: 1}}}}, clock, now);
+  assert.equal(result.maintenance.state, "invalid");
+  assert.equal(result.maintenance.hours, null);
+  assert.deepEqual(result.tasks, []);
+});
 test("disabled panel backups do not turn an inert timer firing into a backup", () => {
   const result = build({backups: {schedule: {enabled: false, timer: {next_run_at: now / 1000 + 3600},
     other_timers: [{unit: "example-backup.timer", active: true, next_run_at: now / 1000 + 12000}]}}}, clock, now);

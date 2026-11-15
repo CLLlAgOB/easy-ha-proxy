@@ -19,6 +19,22 @@
   }
   const when = (task) => clock.dateTime(task.start) + (task.end ? " – " + clock.dateTime(task.end) : "");
   function draw(model) {
+    const maintenance = model.maintenance;
+    const states = {
+      enabled: "Enabled. Every day in the server time zone.",
+      open: "The maintenance window is open. New stages may start until it closes.",
+      disabled: "The unified window is configured, but automatic maintenance is disabled.",
+      separate: "A unified window has not been selected. Separate schedules apply.",
+      invalid: "The saved maintenance window could not be verified. Check the update settings.",
+      unavailable: "Maintenance window settings could not be read."
+    };
+    el("maintenance-hours").textContent = maintenance.hours ? `${maintenance.hours} · ${clock.zone}` : "—";
+    el("maintenance-state").textContent = t(states[maintenance.state]);
+    el("maintenance-next").hidden = !maintenance.next;
+    el("maintenance-next").textContent = maintenance.next ? t(maintenance.state === "open"
+      ? "Current window: {start} – {end}" : "Next window: {start} – {end}", {
+      start: clock.dateTime(maintenance.next.opened), end: clock.dateTime(maintenance.next.end)
+    }) : "";
     el("period").textContent = `${clock.dateTime(model.now)} – ${clock.dateTime(model.until)}`;
     const timeline = el("timeline"); timeline.replaceChildren();
     const label = node("div", t("Task"), "plan-axis-label"); timeline.append(label);

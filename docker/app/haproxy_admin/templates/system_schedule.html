@@ -7,6 +7,14 @@
      data-backups-url="{{ url_for('system_backups.schedule_view') }}" data-geoip-url="{{ url_for('routes.haproxy_geoip_status') }}"
      data-updates-page="{{ url_for('system_updates.page') }}" data-security-page="{{ url_for('os_security.page') }}"
      data-backups-page="{{ url_for('system_backups.page') }}" data-geoip-page="{{ url_for('routes.haproxy_geoip_page') }}">
+  <section class="card" aria-labelledby="plan-maintenance-title">
+    <div class="card-header"><h2 id="plan-maintenance-title">Unified maintenance window</h2><a href="{{ url_for('system_updates.page') }}">Open settings</a></div>
+    <p id="plan-maintenance-hours" class="updates-hero-summary notranslate" data-i18n-skip translate="no">—</p>
+    <p id="plan-maintenance-state" role="status" data-i18n-skip translate="no">Loading…</p>
+    <p id="plan-maintenance-next" class="text-muted" data-i18n-skip translate="no" hidden></p>
+    <p>One window for project and OS updates, supported HAProxy updates, service restarts and necessary server reboots.</p>
+    <p class="text-muted">An installation already started and container recovery finish after the window closes. New stages and a reboot not yet started wait for the next window.</p>
+  </section>
   <section class="card">
     <div class="card-header"><div><h2>Next 24 hours</h2><p id="plan-period" class="text-muted" data-i18n-skip translate="no"></p></div><button type="button" class="btn btn-small" id="plan-refresh">Refresh</button></div>
     <p>All times use the server time zone shown above. Windows and conditional tasks show when a start is allowed; busy maintenance can postpone execution.</p>

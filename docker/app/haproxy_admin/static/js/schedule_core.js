@@ -32,21 +32,40 @@
       }
       return null;
     }
-    const u = data.updates;
-    const unified = u?.settings?.auto_install?.unified === true;
+    const u = data.updates, s = data.security;
+    const install = u?.settings?.auto_install;
+    // Both owners expose the common policy. A failed update-status request
+    // must not hide it when OS security returned the same saved settings.
+    const common = typeof install?.unified === "boolean" ? install
+      : s?.maintenance_window ? {...s.maintenance_window, unified: true} : null;
+    const unified = common?.unified === true;
+    let maintenanceWindow = unified ? windowFor(common.start, common.end) : null;
+    if (maintenanceWindow && seconds(common.updated_at) > maintenanceWindow.opened)
+      maintenanceWindow = windowFor(common.start, common.end, maintenanceWindow.end);
+    const maintenance = {
+      state: !common ? "unavailable" : !unified ? "separate" : !maintenanceWindow ? "invalid"
+        : common.enabled !== true ? "disabled" : maintenanceWindow.opened <= now ? "open" : "enabled",
+      hours: unified && maintenanceWindow
+        ? `${String(common.start).padStart(2, "0")}:00–${String(common.end).padStart(2, "0")}:00` : null,
+      next: unified && common.enabled === true ? maintenanceWindow : null
+    };
     if (u) {
       const settings = u.settings || {};
       if (settings.auto_check_hours > 0) add("project-check", "Project update check", stamp(settings.next_auto_check_at),
         t("Every {hours} hours", {hours: settings.auto_check_hours}), "updates");
       else off("Project update check", "updates", settings.auto_check_hours === 0 ? "Disabled" : "Next start has not been verified");
-      const install = settings.auto_install;
-      if (install?.enabled) {
-        let window = windowFor(install.start, install.end);
-        if (unified && window && seconds(install.updated_at) > window.opened) window = windowFor(install.start, install.end, window.end);
-        add("project-install", unified ? "Unified software maintenance" : "Project update installation", window?.start,
-          t(unified ? "Updates, application, service restarts and necessary reboot; new stages only inside the window"
-            : install.os ? "Allowed window; verified updates and operating-system packages" : "Allowed window; verified updates only"), "updates", window?.end);
-      } else off("Project update installation", "updates", install ? "Disabled" : "Next start has not been verified");
+      if (!unified) {
+        if (install?.enabled) {
+          const window = windowFor(install.start, install.end);
+          add("project-install", "Project update installation", window?.start,
+            t(install.os ? "Allowed window; verified updates and operating-system packages" : "Allowed window; verified updates only"), "updates", window?.end);
+        } else off("Project update installation", "updates", install ? "Disabled" : "Next start has not been verified");
+      }
+    }
+    if (unified) {
+      if (common.enabled === true) add("project-install", "Unified software maintenance", maintenance.next?.start,
+        t("Updates, application, service restarts and necessary reboot; new stages only inside the window"), "updates", maintenance.next?.end);
+      else off("Unified software maintenance", "updates");
     }
     const b = data.backups?.schedule;
     if (b) {
@@ -60,7 +79,6 @@
       }
       if (!b.timer) off("Other backup timers", "backups", "Update host services to discover other backup timers");
     }
-    const s = data.security;
     if (s && !unified) {
       const policy = s.policy || {}, schedule = s.schedule || {}, reboot = s.automatic_reboot;
       if (!s.available || s.recovery_required || s.configuring) off("OS security maintenance", "security", "Security schedule is not ready");
@@ -99,7 +117,7 @@
       else off("GeoIP database update", "geoip");
     }
     tasks.sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
-    return {tasks, visible: tasks.filter((task) => task.start < until && (task.end || task.start) >= now - 60000), disabled, now, until};
+    return {tasks, visible: tasks.filter((task) => task.start < until && (task.end || task.start) >= now - 60000), disabled, maintenance, now, until};
   }
   return {build};
 });
