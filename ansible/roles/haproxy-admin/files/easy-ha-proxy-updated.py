@@ -626,6 +626,10 @@ def active_job() -> dict[str, Any] | None:
 
 
 def recover_stale_jobs() -> None:
+    # PID 1 owns these children. They may still be installing packages or
+    # restoring containers after this broker crashed. Keep their markers and
+    # output intact, and do not accept new work until they have finished.
+    stop_orphan_transient_jobs()
     for job in list_jobs():
         if job.get("status") in ACTIVE_STATUSES:
             update_job(
@@ -633,6 +637,8 @@ def recover_stale_jobs() -> None:
                 status="interrupted",
                 completed_at=utc_now(),
                 error="the update broker restarted before the job completed",
+                output={"log": read_file_tail(JOBS_DIR / f".{identifier(job['id'], 'job id')}.output")
+                        or (job.get('output') or {}).get('log', '')},
             )
     for marker in (ACTIVE_MARKER, RESTART_REQUEST_MARKER):
         try:
@@ -648,14 +654,14 @@ def recover_stale_jobs() -> None:
                 path.unlink()
         except FileNotFoundError:
             pass
-    stop_orphan_transient_jobs()
 
 
 def stop_orphan_transient_jobs() -> None:
     """Transient job units outlive a crashed broker; reconcile them at start.
 
-    Their jobs were just marked interrupted, so a still-running child would
-    otherwise race the next operation for the same managed state.
+    Wait for live children before cleaning up finished units. Stopping an
+    installer kills its entire cgroup, including dpkg and container recovery.
+    Startup stays closed to new work while the old operation has custody.
     """
 
     if not transient_jobs_supported():
@@ -677,12 +683,27 @@ def stop_orphan_transient_jobs() -> None:
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
-        LOG.warning("Could not list orphan transient update jobs")
-        return
+        raise UpdatedError("Could not inspect surviving update jobs") from None
+    if result.returncode:
+        raise UpdatedError("Could not inspect surviving update jobs")
     for line in result.stdout.decode("utf-8", "replace").splitlines():
         unit = line.split()[0] if line.split() else ""
         if unit.startswith("easy-ha-proxy-updated-job-"):
-            LOG.warning("Stopping orphan transient update job %s", unit)
+            LOG.warning("Waiting for surviving update job %s", unit)
+            while True:
+                if SHUTDOWN_REQUESTED.is_set():
+                    raise UpdatedError("Broker stopped while waiting for surviving update jobs")
+                properties = systemctl_properties(unit, ["LoadState", "ActiveState", "SubState", "Job"])
+                if properties.get("LoadState") == "not-found":
+                    break
+                active = properties.get("ActiveState")
+                if not active:
+                    raise UpdatedError("Could not inspect surviving update job " + unit)
+                pending = (properties.get("Job") or "0").split()[0] != "0"
+                if not pending and (active in {"inactive", "failed"}
+                                    or (active == "active" and properties.get("SubState") == "exited")):
+                    break
+                time.sleep(0.5)
             stop_transient_unit(unit)
 
 
@@ -3564,6 +3585,11 @@ def os_security_worker(job_id, lock_fd, action, policy=None, *, maintenance_revi
             result = {}
         if code or result.get('ok') is not True or result.get('request_id') != job_id:
             raise UpdatedError(str(result.get('error') or 'OS security operation failed; review the job log'), code='verification_failed')
+        if action == 'restart' or (action == 'restart-cycle' and result.get('applied')):
+            if (result.get('applied') is not True or result.get('verified') is not True
+                    or result.get('unresolved') or result.get('failed_services')):
+                raise UpdatedError('Service restarts remain unverified; review remaining services in OS security',
+                                   code='verification_failed')
         if action in {'install', 'cycle', 'configure'}:
             LATEST_PLAN_PATH.unlink(missing_ok=True)
         update_job(job_id, status='completed', completed_at=utc_now(), result={'message': str(result.get('message') or '')}, output={'log': log})

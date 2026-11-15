@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -23,6 +23,28 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "docker/app"))
 import haproxy_admin
 from haproxy_admin import authelia_acl
+
+
+class AutheliaReadinessTests(unittest.TestCase):
+    def test_http_errors_and_connection_errors_wait_before_retrying(self):
+        from flask import Flask
+        for response in (Mock(ok=False, status_code=503), OSError('connection refused')):
+            with self.subTest(response=response), Flask(__name__).app_context(), \
+                    patch.object(authelia_acl.requests, 'get', side_effect=[response, Mock(ok=True)]) as get, \
+                    patch.object(authelia_acl.time, 'sleep') as sleep:
+                self.assertTrue(authelia_acl._wait_for_authelia_healthy(interval=0.25))
+                self.assertEqual(get.call_count, 2)
+                sleep.assert_called_once_with(0.25)
+
+    def test_http_errors_stop_at_the_deadline(self):
+        from flask import Flask
+        with Flask(__name__).app_context(), \
+                patch.object(authelia_acl.requests, 'get', return_value=Mock(ok=False)) as get, \
+                patch.object(authelia_acl.time, 'monotonic', side_effect=[0, 0, 1, 2]), \
+                patch.object(authelia_acl.time, 'sleep') as sleep:
+            self.assertFalse(authelia_acl._wait_for_authelia_healthy(timeout=2))
+            self.assertEqual(get.call_count, 2)
+            self.assertEqual(sleep.call_count, 2)
 
 
 class ACLForm(HTMLParser):

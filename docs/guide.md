@@ -497,8 +497,14 @@ does not cancel the host job. Configuration backups are not VM/data snapshots,
 and runtime package downgrades are not attempted automatically.
 
 An unsuccessful runtime upgrade still attempts to restore containers and
-records a failure. Interrupted/failed recovery blocks the next automatic
-cycle for review. To restore the recorded container set without installing or
+records a failure. If installation has not started and the original containers
+are restored successfully, the next window can retry without manual recovery.
+An installation failure or interrupted/failed recovery blocks the next automatic
+cycle for review. After a broker crash, surviving systemd jobs are allowed to
+finish, including container restoration. The update API remains unavailable
+while the broker waits; new operations cannot overlap the surviving job.
+The interrupted broker job retains the child's output for operator review.
+To restore the recorded container set without installing or
 downgrading packages, after resolving any package-manager problem run:
 
 ```bash

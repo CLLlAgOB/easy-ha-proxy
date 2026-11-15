@@ -76,6 +76,67 @@ def available(component_id: str, candidate: str = "new") -> dict:
     }
 
 
+class SurvivingUpdateJobTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.addCleanup(mock.patch.stopall)
+        for name, value in {'JOBS_DIR': self.root, 'ACTIVE_MARKER': self.root / 'active',
+                            'RESTART_REQUEST_MARKER': self.root / 'restart',
+                            'SHUTDOWN_REQUESTED': mock.Mock(is_set=mock.Mock(return_value=False))}.items():
+            mock.patch.object(UPDATED, name, value).start()
+        UPDATED.ACTIVE_MARKER.write_text('job_id=' + 'a'*32)
+        self.output = self.root / ('.' + 'a'*32 + '.output')
+        self.output.write_text('packages installed; containers restored')
+        self.unit = 'easy-ha-proxy-updated-job-123456789abc.service'
+        mock.patch.object(UPDATED, 'transient_jobs_supported', return_value=True).start()
+        self.list_units = mock.patch.object(UPDATED.subprocess, 'run', return_value=types.SimpleNamespace(
+            returncode=0, stdout=(self.unit + ' loaded activating start\n').encode())).start()
+        mock.patch.object(UPDATED, 'list_jobs', return_value=[{'id':'a'*32, 'status':'running'}]).start()
+        self.updated = mock.patch.object(UPDATED, 'update_job').start()
+        self.stop = mock.patch.object(UPDATED, 'stop_transient_unit').start()
+
+    def test_restart_waits_for_installer_and_restoration_before_clearing_custody(self):
+        states = [
+            {'LoadState':'loaded', 'ActiveState':'inactive', 'SubState':'dead', 'Job':'12 start'},
+            {'LoadState':'loaded', 'ActiveState':'activating', 'SubState':'start'},
+            {'LoadState':'loaded', 'ActiveState':'deactivating', 'SubState':'stop'},
+            {'LoadState':'loaded', 'ActiveState':'active', 'SubState':'exited'},
+        ]
+        def waiting(_delay):
+            self.stop.assert_not_called()
+            self.updated.assert_not_called()
+            self.assertTrue(UPDATED.ACTIVE_MARKER.exists())
+            self.assertTrue(self.output.exists())
+        with mock.patch.object(UPDATED, 'systemctl_properties', side_effect=states), \
+                mock.patch.object(UPDATED.time, 'sleep', side_effect=waiting) as sleep:
+            UPDATED.recover_stale_jobs()
+        self.assertEqual(sleep.call_count, 3)
+        self.stop.assert_called_once_with(self.unit)
+        self.assertFalse(UPDATED.ACTIVE_MARKER.exists())
+        self.assertEqual(self.updated.call_args.kwargs['status'], 'interrupted')
+        self.assertIn('containers restored', self.updated.call_args.kwargs['output']['log'])
+
+    def test_unavailable_systemd_never_discards_custody_or_kills_the_child(self):
+        for failure in (OSError('systemd unavailable'), types.SimpleNamespace(returncode=1, stdout=b'')):
+            with self.subTest(failure=failure):
+                self.list_units.side_effect = failure if isinstance(failure, Exception) else None
+                self.list_units.return_value = failure
+                with self.assertRaises(UPDATED.UpdatedError):
+                    UPDATED.recover_stale_jobs()
+                self.stop.assert_not_called()
+                self.updated.assert_not_called()
+                self.assertTrue(UPDATED.ACTIVE_MARKER.exists())
+
+    def test_unknown_unit_state_never_stops_a_potentially_live_installer(self):
+        with mock.patch.object(UPDATED, 'systemctl_properties', return_value={}):
+            with self.assertRaises(UPDATED.UpdatedError):
+                UPDATED.recover_stale_jobs()
+        self.stop.assert_not_called()
+        self.updated.assert_not_called()
+
+
 class UpdateBrokerProtocolTests(unittest.TestCase):
     def test_request_fields_and_component_allowlist_are_exact(self) -> None:
         self.assertEqual(

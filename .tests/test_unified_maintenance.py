@@ -293,6 +293,24 @@ class RuntimeMaintenance(unittest.TestCase):
         with self.assertRaisesRegex(guard.UpgradeRefused, 'window closed'):
             guard.perform_maintenance(self.root, REVISION, 123456)
         self.assertEqual([event[0] for event in self.events], ['download', 'stop', 'restore'])
+        record = json.loads((self.root / 'runtime-maintenance.json').read_text())
+        self.assertEqual(record['phase'], 'recovered')
+        self.assertFalse(record['installation_started'])
+        self.assertTrue(record['restored'])
+        self.consent.side_effect = None
+        with patch.object(guard.time, 'time', return_value=record['completed_at'] + 86400):
+            guard.perform_maintenance(self.root, REVISION, 223456)
+        self.assertEqual([event[0] for event in self.events],
+                         ['download', 'stop', 'restore', 'download', 'stop', 'install', 'restore'])
+
+    def test_closed_window_with_failed_restoration_still_requires_recovery(self):
+        self.consent.side_effect = [None, None, guard.UpgradeRefused('window closed')]
+        self.restore.side_effect = RuntimeError('container failed to start')
+        with self.assertRaisesRegex(guard.UpgradeRefused, 'container failed to start'):
+            guard.perform_maintenance(self.root, REVISION, 123456)
+        self.consent.side_effect = None
+        with self.assertRaisesRegex(guard.UpgradeRefused, 'requires recovery'):
+            guard.perform_maintenance(self.root, REVISION, 223456)
 
     def test_download_failure_or_changed_candidates_never_stops_containers(self):
         self.upgrade.side_effect = guard.UpgradeRefused('download failed')

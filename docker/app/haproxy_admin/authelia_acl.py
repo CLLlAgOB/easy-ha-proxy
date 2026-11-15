@@ -121,14 +121,15 @@ def _wait_for_authelia_healthy(timeout: float = 30.0, interval: float = 1.0) -> 
 
     current_app.logger.info("Waiting for Authelia health at %s", url)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             resp = requests.get(url, timeout=2.0)
             if resp.ok:
                 return True
         except Exception:
-            time.sleep(interval)
+            pass
+        time.sleep(interval)
     return False
 
 

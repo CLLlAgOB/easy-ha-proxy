@@ -471,10 +471,26 @@ class RestartJobs(security_tests.SecurityJobs if s else unittest.TestCase):
     def test_restart_worker_uses_the_fixed_native_executor_and_shared_lock(self):
         (broker.SOURCE_DIR/'installer/service_restarts.py').write_text('SERVICE_RESTART_PROTOCOL = 1\n')
         broker.dispatch({'action':'os_security_restart','confirmation':'SECURITY'})
-        run=self.execute()
+        run=self.execute((0, json.dumps({'ok': True, 'request_id': 'a'*32, 'applied': True,
+                                        'verified': True, 'unresolved': [], 'failed_services': []})))
         self.assertEqual(run.call_args.args[1][:3],['/usr/bin/python3',str(broker.SOURCE_DIR/'installer/service_restarts.py'),'restart'])
         self.assertFalse(broker.OPERATION_THREAD_LOCK.locked())
         self.failed.assert_not_called()
+
+    def test_unresolved_restarts_cannot_complete_the_broker_job(self):
+        (broker.SOURCE_DIR/'installer/service_restarts.py').write_text('SERVICE_RESTART_PROTOCOL = 1\n')
+        for details in ({'applied': True, 'verified': False, 'unresolved': ['cron.service']},
+                        {'applied': True, 'verified': True, 'unresolved': ['cron.service']},
+                        {'applied': True, 'verified': True, 'failed_services': ['cron.service']},
+                        {}):
+            with self.subTest(details=details):
+                self.failed.reset_mock()
+                self.updated.reset_mock()
+                broker.dispatch({'action':'os_security_restart','confirmation':'SECURITY'})
+                self.execute((0, json.dumps({'ok': True, 'request_id': 'a'*32, **details})))
+                self.failed.assert_called_once()
+                self.assertFalse(any(call.kwargs.get('status') == 'completed' for call in self.updated.call_args_list))
+                self.assertFalse(broker.OPERATION_THREAD_LOCK.locked())
 
 
 @unittest.skipUnless(s, 'Linux restart status')

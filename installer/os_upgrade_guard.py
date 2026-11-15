@@ -230,6 +230,7 @@ def perform_maintenance(root, revision, deadline, *, allow_runtime_change=True):
         record['backup'] = str(backup)
         write_record(journal, record)
     failure = None
+    installation_started = False
     try:
         if changes:
             record['phase'] = 'stopping'
@@ -243,6 +244,7 @@ def perform_maintenance(root, revision, deadline, *, allow_runtime_change=True):
         record['phase'] = 'upgrading'
         if runtimes:
             write_record(journal, record)
+        installation_started = True
         run_upgrade(['/usr/bin/apt-get', '-y', '--no-remove', '--with-new-pkgs',
                      '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'])
     except Exception as error:
@@ -256,7 +258,14 @@ def perform_maintenance(root, revision, deadline, *, allow_runtime_change=True):
                 pass  # A failed journal write must never prevent restoring containers.
             try:
                 restore_containers(containers)
-                record.update(phase='failed' if failure else 'completed', restored=True, completed_at=time.time())
+                # A refusal before APT started needs no package recovery once
+                # the original containers are healthy again. Allow next night's
+                # cycle, while retaining the refusal in the journal.
+                phase = ('failed' if installation_started else 'recovered') if failure else 'completed'
+                record.update(phase=phase, restored=True, installation_started=installation_started,
+                              completed_at=time.time())
+                if failure:
+                    record['error'] = str(failure)
             except Exception as error:
                 record.update(phase='recovery_required', restored=False, error=str(error), completed_at=time.time())
                 failure = error
