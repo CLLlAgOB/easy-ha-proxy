@@ -408,9 +408,18 @@ the host, the panel and the Authelia images, as the project tested them --
 once a night inside a window of the gateway's local hours (03:00-05:00 unless
 changed), through the same plan, selection, guards and worker as the Install
 button. A second box, also off by default, adds the operating-system
-packages: every available package update, Docker and containerd included,
-installed after easy-ha-proxy's own the way the Install button does it
-(containers keep running through Docker's live-restore, HAProxy stays held).
+packages, installed after easy-ha-proxy's own. HAProxy packages are held on
+Debian and Ubuntu, independently of the controlled updater's platform support.
+Automatic Docker, containerd and runc updates are limited to patch updates in
+the installed major/minor release line and require verified Docker live-restore.
+A new runtime release line, an unverified version or missing HAProxy protection
+refuses the OS installation and raises an alert; review and install those
+updates manually. Docker live-restore reduces downtime for supported patch
+updates; it does not guarantee uninterrupted operation for every package.
+Other packages may restart services, and package upgrades have no automatic
+rollback. Every ordinary APT installation attempt invalidates earlier service
+restart checks, including partially failed installations, so the next permitted
+restart pass checks the new state.
 It never updates HAProxy and never reboots: a reboot the packages ask for is
 left to the automatic reboot setting on the OS security page, or to you. A
 failure or a refusal (pending HAProxy changes, say) raises `update.failed`;

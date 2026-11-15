@@ -50,19 +50,23 @@ def policy(root):
 
 
 def last_install(root):
-    """When security packages were last installed (or an installation began).
+    """When managed packages were last installed (or an installation began).
 
     A pass that finished before then has not seen what that installation
     replaced, so tonight's window is not done yet.
     """
     path = root / 'status.json'
-    if not path.exists():
-        return 0
     try:
-        status = read_json(path)
+        status = read_json(path) if path.exists() else {}
     except (OSError, ValueError, SecurityError):
-        return 0
+        status = {}
     values = [status.get(key) for key in ('last_install_at', 'last_install_attempt')]
+    package_path = root / 'package-install.json'
+    if os.path.lexists(package_path):
+        attempted = read_json(package_path).get('last_install_attempt')
+        if type(attempted) not in (int, float) or not 0 < attempted < float('inf'):
+            raise SecurityError('The OS package installation record is invalid')
+        values.append(attempted)
     return max([value for value in values if type(value) in (int, float)] or [0])
 
 

@@ -3353,6 +3353,9 @@ def command_update(args: argparse.Namespace) -> None:
     require_root()
     hold_maintenance_lock()
     component = "ui" if args.ui_only else args.component
+    automatic_os = getattr(args, "automatic_os", False)
+    if automatic_os and component != "os":
+        raise InstallerError("Automatic OS upgrade guards require the os component.")
     expected_source_revision = normalize_source_revision(
         getattr(args, "expected_source_revision", None)
     )
@@ -3445,14 +3448,12 @@ def command_update(args: argparse.Namespace) -> None:
         tags = UPDATE_TAGS
     else:
         tags = update_tags_for_args(args)
-    run_playbook(
-        tags,
-        extra_vars=(
-            {"haproxy_admin_sync_managed_config": "true"}
-            if managed_pending and component == "all"
-            else None
-        ),
-    )
+    extra_vars = {}
+    if managed_pending and component == "all":
+        extra_vars["haproxy_admin_sync_managed_config"] = "true"
+    if automatic_os:
+        extra_vars["easy_ha_proxy_automatic_os_upgrade"] = True
+    run_playbook(tags, extra_vars=extra_vars or None)
     if component == "all" or changes_tags:
         # Everything the source asked for has been applied.
         record_applied_source(directory)
@@ -3747,6 +3748,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_parser = subparsers.add_parser("update", help="update source and apply changes")
     update_parser.add_argument("--ui-only", action="store_true")
+    update_parser.add_argument("--automatic-os", action="store_true", help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--component",
         choices=sorted(UPDATE_COMPONENT_TAGS),

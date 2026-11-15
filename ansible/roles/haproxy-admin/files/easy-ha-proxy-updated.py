@@ -2174,6 +2174,8 @@ def apply_worker(
                     image_channel=image_channel,
                     expected_source_revision=expected_source_revision,
                 )
+                if component == 'os' and load_job(job_id, include_log=False).get('scheduled') is True:
+                    command.append('--automatic-os')
                 returncode, output = run_command(
                     job_id,
                     command,
@@ -2870,7 +2872,7 @@ def service_restart_record():
 
 
 def os_security_last_install():
-    """When security packages were last installed (or an installation began).
+    """When managed packages were last installed (or an installation began).
 
     Mirrors service_restarts.last_install: a restart pass that finished before
     then has not seen what the installation replaced.
@@ -2879,8 +2881,16 @@ def os_security_last_install():
     try:
         status = safe_json_file(path) if os.path.lexists(path) else {}
     except (OSError, ValueError, TypeError, UpdatedError):
-        return 0
+        status = {}
     values = [status.get(key) for key in ('last_install_at', 'last_install_attempt')]
+    # The ordinary APT path is separate from unattended-upgrades, but its
+    # installations invalidate the same service-restart evidence.
+    package_path = OS_SECURITY_ROOT / 'package-install.json'
+    if os.path.lexists(package_path):
+        attempted = safe_json_file(package_path).get('last_install_attempt')
+        if type(attempted) not in (int, float) or not 0 < attempted < float('inf'):
+            raise UpdatedError('The OS package installation record is invalid', code='conflict')
+        values.append(attempted)
     return max([value for value in values if type(value) in (int, float)] or [0])
 
 

@@ -54,7 +54,13 @@ class AptCacheSpeedTests(unittest.TestCase):
         upgrade = next(
             t for t in tasks if t.get("name") == "Update and upgrade apt packages"
         )
-        self.assertEqual(upgrade["apt"]["cache_valid_time"], 0)
+        refresh = next(t for t in tasks if t.get("name") == "Refresh APT metadata before reviewing the package upgrade")
+        guard = next(t for t in tasks if "ansible.builtin.script" in t)
+        self.assertEqual(refresh["apt"]["cache_valid_time"], 0)
+        self.assertTrue(refresh["apt"]["update_cache"])
+        self.assertLess(tasks.index(refresh), tasks.index(guard))
+        self.assertLess(tasks.index(guard), tasks.index(upgrade))
+        self.assertFalse(upgrade["apt"]["update_cache"])
         self.assertTrue(upgrade["apt"]["upgrade"])
 
 

@@ -216,7 +216,10 @@
           easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images; operating-system packages only when the second box is ticked. HAProxy and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
         </p>
         <p class="updates-hero-meta">
-          With operating-system packages: every available package update is installed after easy-ha-proxy's own, Docker and containerd included. Containers keep running while Docker restarts; HAProxy stays held. A reboot the packages ask for is left to the automatic reboot setting on the OS security page, or to you.
+          Operating-system packages install after easy-ha-proxy's own updates. HAProxy packages stay held on Debian and Ubuntu. Automatic Docker and containerd runtime updates require the installed release line and verified Docker live-restore; a new release line requires manual installation. If these checks fail, the OS installation is refused and an alert is raised.
+        </p>
+        <p class="updates-hero-meta">
+          Docker live-restore reduces downtime for supported patch updates; other package updates may restart services. Package upgrades have no automatic rollback. A reboot the packages ask for is left to the automatic reboot setting on the OS security page, or to you.
         </p>
       </div>
     </div>

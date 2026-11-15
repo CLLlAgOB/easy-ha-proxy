@@ -52,15 +52,28 @@
     name: haproxy
     tasks_from: protection
 
+- name: Refresh APT metadata before reviewing the package upgrade
+  become: true
+  apt:
+    update_cache: yes
+    cache_valid_time: 0
+
+- name: Verify package upgrade safety and record the installation attempt
+  ansible.builtin.script:
+    cmd: >-
+      {{ (playbook_dir ~ '/../installer/os_upgrade_guard.py') | quote }}
+      {{ '--automatic' if easy_ha_proxy_automatic_os_upgrade | default(false) | bool else '' }}
+      --state-root {{ ((updated_state_root | default('/var/lib/easy-ha-proxy/update-web')) ~ '/os-security') | quote }}
+    executable: /usr/bin/python3
+  when: not ansible_check_mode
+
 - name: Update and upgrade apt packages
   become: true
   environment:
     DEBIAN_FRONTEND: noninteractive
   apt:
-    update_cache: yes
-    # A deliberate OS upgrade must see the freshest package versions, so
-    # override the play-wide cache validity window here.
-    cache_valid_time: 0
+    # Reuse precisely the metadata the guard just reviewed.
+    update_cache: no
     upgrade: yes
     force_apt_get: yes
 

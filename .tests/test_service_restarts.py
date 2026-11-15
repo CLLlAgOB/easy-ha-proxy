@@ -246,6 +246,31 @@ class ServiceRestarts(unittest.TestCase):
         (self.root / 'status.json').write_text(json.dumps({'last_install_attempt': later.timestamp() + 60}))
         self.assertEqual(s.fallback_services(self.root, now=checked), [])
 
+    def test_ordinary_apt_installation_invalidates_a_completed_restart_pass(self):
+        self.scan.return_value = self.restart('dbus.service')
+        s.run('restart-cycle', self.root, now=self.now)
+        self.assertEqual(s.fallback_services(self.root, now=self.now), ['dbus.service'])
+        moment = self.now + dt.timedelta(minutes=5)
+        (self.root / 'package-install.json').write_text(json.dumps({'last_install_attempt': moment.timestamp()}))
+        with patch.object(broker, 'OS_SECURITY_ROOT', self.root), \
+             patch.object(broker, 'safe_json_file', side_effect=lambda p: json.loads(p.read_text())):
+            self.assertEqual(s.last_install(self.root), moment.timestamp())
+            self.assertEqual(broker.os_security_last_install(), moment.timestamp())
+            self.assertTrue(s.due(self.policy, self.state(), moment, BOOT, s.last_install(self.root))[0])
+            self.assertTrue(broker.service_restart_due(self.policy, self.state(), moment)[0])
+            self.assertEqual(s.fallback_services(self.root, now=moment), [])
+
+    def test_invalid_package_record_never_reuses_successful_restart_evidence(self):
+        s.run('restart-cycle', self.root, now=self.now)
+        for value in (None, True, 'yesterday', -1, float('inf')):
+            (self.root / 'package-install.json').write_text(json.dumps({'last_install_attempt': value}))
+            with self.subTest(value=value), patch.object(broker, 'OS_SECURITY_ROOT', self.root), \
+                 patch.object(broker, 'safe_json_file', side_effect=lambda p: json.loads(p.read_text())):
+                with self.assertRaises(s.SecurityError):
+                    s.last_install(self.root)
+                with self.assertRaises(broker.UpdatedError):
+                    broker.os_security_last_install()
+
     def test_an_installation_outside_the_window_waits_for_the_next_one(self):
         s.run('restart-cycle', self.root, now=self.now)
         noon = self.now.replace(hour=12)
