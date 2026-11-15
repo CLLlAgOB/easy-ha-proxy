@@ -971,6 +971,11 @@
     const box = byId("updates-auto-install");
     if (!box || !settings || typeof settings !== "object") return;
     autoInstall = settings;
+    const haproxyPolicy = byId("updates-haproxy-install-policy");
+    haproxyPolicy.textContent = t(settings.enabled === true && settings.unified === true
+      ? "When unified maintenance is enabled, supported HAProxy patches and library reloads are applied automatically inside its window. Branch and provider migrations require a separate action."
+      : "HAProxy updates require an explicit selection. They are excluded from automatic installation.");
+    haproxyPolicy.hidden = false;
     const start = byId("updates-auto-install-start");
     const end = byId("updates-auto-install-end");
     hourOptions(start);

@@ -1,6 +1,7 @@
 {
   "meta": {"code": "ru", "label": "Русский"},
   "messages": {
+    "When unified maintenance is enabled, supported HAProxy patches and library reloads are applied automatically inside its window. Branch and provider migrations require a separate action.": "При включённом общем окне поддерживаемые исправления HAProxy и обновлённые библиотеки применяются автоматически в его пределах. Смена ветки или поставщика выполняется отдельно.",
     "HAProxy is excluded from OS package updates in the panel, including manual installation. Controlled updates require Ubuntu 24.04 ARM64 or AMD64. On this platform, update HAProxy separately over SSH or the server console and restore package holds afterwards.": "Пакеты HAProxy исключены из обновлений ОС в панели, в том числе при ручной установке. Управляемое обновление поддерживается на Ubuntu 24.04 ARM64 и AMD64. На этой платформе обновите HAProxy отдельно через SSH или консоль сервера, затем верните удержание пакетов (hold).",
     "Manual HAProxy maintenance on this platform": "Ручное обновление HAProxy на этой платформе",
     "HAProxy packages stay held on Debian and Ubuntu. Installing OS packages in this panel does not update them. This platform has no controlled HAProxy updater; a separate operator action is required.": "На Debian и Ubuntu пакеты HAProxy удерживаются (hold). Установка пакетов ОС в панели их не обновляет. Для этой платформы управляемое обновление HAProxy не поддерживается — нужна отдельная ручная операция.",
