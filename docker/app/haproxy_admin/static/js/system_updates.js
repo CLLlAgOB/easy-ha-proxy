@@ -956,6 +956,7 @@
     hourOptions(end);
     if (!box.dataset.dirty) {
       box.checked = settings.enabled === true;
+      byId("updates-auto-install-os").checked = settings.os === true;
       start.value = String(settings.start);
       end.value = String(settings.end);
     }
@@ -973,6 +974,7 @@
     const end = byId("updates-auto-install-end");
     const dirty = Boolean(autoInstall) && (
       box.checked !== (autoInstall.enabled === true)
+      || byId("updates-auto-install-os").checked !== (autoInstall.os === true)
       || start.value !== String(autoInstall.start)
       || end.value !== String(autoInstall.end)
     );
@@ -987,6 +989,7 @@
     try {
       const response = await postJson(endpoints.autoInstall, {
         enabled: box.checked,
+        os: byId("updates-auto-install-os").checked,
         start: Number(byId("updates-auto-install-start").value),
         end: Number(byId("updates-auto-install-end").value)
       });
@@ -1551,7 +1554,7 @@
   byId("updates-save-channels").addEventListener("click", saveChannels);
   byId("updates-save-auto-check").addEventListener("click", saveAutoCheck);
   byId("updates-save-auto-install").addEventListener("click", saveAutoInstall);
-  ["updates-auto-install", "updates-auto-install-start", "updates-auto-install-end"].forEach((id) => {
+  ["updates-auto-install", "updates-auto-install-os", "updates-auto-install-start", "updates-auto-install-end"].forEach((id) => {
     byId(id).addEventListener("change", updateAutoInstallControls);
   });
   byId("updates-auto-check").addEventListener("change", updateAutoCheckControls);

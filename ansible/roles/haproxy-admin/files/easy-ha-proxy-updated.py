@@ -335,7 +335,7 @@ def derive_release_channel(
 REQUEST_FIELDS = {
     "status": frozenset({"action", "job_id"}),
     "set_settings": frozenset({"action", "auto_check_hours"}),
-    "set_auto_install": frozenset({"action", "enabled", "start", "end"}),
+    "set_auto_install": frozenset({"action", "enabled", "start", "end", "os"}),
     "summary": frozenset({"action"}),
     "start_check": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
@@ -1747,10 +1747,13 @@ def settings_payload() -> dict[str, Any]:
     }
 
 
-# Automatic installation, off until the page turns it on. Only easy-ha-proxy's
+# Automatic installation, off until the page turns it on. easy-ha-proxy's
 # own updates -- the host source, the panel image, the Authelia stack images,
-# as the project tested them -- never the operating system's packages, and
-# never a reboot: those stay with the operator. Once a night, inside a window
+# as the project tested them -- and, only with a second switch of its own, the
+# operating system's packages (the os component: apt upgrade with Docker's
+# live-restore and the HAProxy hold, the same as the Install button). Never
+# HAProxy and never a reboot: a reboot the packages ask for is left to the
+# automatic reboot policy, or to the operator. Once a night, inside a window
 # of the gateway's local hours, through exactly the path the Install button
 # takes: a fresh plan, the same selection rules, the same guards. A failed
 # installation raises update.failed like any other; a refused one too.
@@ -1758,6 +1761,8 @@ AUTO_INSTALL_WINDOW = (3, 5)
 AUTO_INSTALL_PATH = STATE_ROOT / "auto-install.json"
 AUTO_INSTALL_STATE: dict[str, Any] = {"night": None}
 AUTO_INSTALL_EXCLUDED = frozenset({"os", "haproxy"})
+# Only the second switch takes the operating system's packages along.
+AUTO_INSTALL_OS = "os"
 
 
 def auto_install_settings() -> dict[str, Any]:
@@ -1770,7 +1775,12 @@ def auto_install_settings() -> dict[str, Any]:
         and 0 <= start <= 23 and 0 <= end <= 23 and start != end
     ):
         start, end = AUTO_INSTALL_WINDOW
-    return {"enabled": settings.get("auto_install") is True, "start": start, "end": end}
+    return {
+        "enabled": settings.get("auto_install") is True,
+        "start": start,
+        "end": end,
+        "os": settings.get("auto_install_os") is True,
+    }
 
 
 def set_auto_install(request: dict[str, Any]) -> dict[str, Any]:
@@ -1779,16 +1789,21 @@ def set_auto_install(request: dict[str, Any]) -> dict[str, Any]:
     end = request.get("end")
     if not isinstance(enabled, bool):
         raise UpdatedError("enabled must be true or false", code="invalid")
+    # An older panel does not send the second switch; it keeps its value.
+    with_os = request.get("os", auto_install_settings()["os"])
+    if not isinstance(with_os, bool):
+        raise UpdatedError("os must be true or false", code="invalid")
     for value in (start, end):
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
             raise UpdatedError("the window is given in whole hours, 0 to 23", code="invalid")
     if start == end:
         raise UpdatedError("the window must not start and end at the same hour", code="invalid")
     settings = read_settings()
-    settings.update(auto_install=enabled, auto_install_start=start, auto_install_end=end)
+    settings.update(auto_install=enabled, auto_install_start=start, auto_install_end=end,
+                    auto_install_os=with_os)
     atomic_json(SETTINGS_PATH, settings)
-    LOG.info("Automatic installation %s, window %02d:00-%02d:00",
-             "on" if enabled else "off", start, end)
+    LOG.info("Automatic installation %s, window %02d:00-%02d:00, operating-system packages %s",
+             "on" if enabled else "off", start, end, "included" if with_os else "excluded")
     return {"ok": True, "settings": settings_payload()}
 
 
@@ -1809,14 +1824,25 @@ def install_night(local: dt.datetime, start: int, end: int) -> str:
     return opened.isoformat()
 
 
-def auto_install_selection(plan: dict[str, Any]) -> list[str]:
-    """What the Install button's "select all" would take, without the OS.
+def auto_install_selection(plan: dict[str, Any], with_os: bool = False) -> list[str]:
+    """What the Install button's "select all" would take, without HAProxy.
 
     The changes-only update when the plan offers it, with the container
     images beside it; else the complete stack, which brings the services,
-    the daemons and the panel with it; else each actionable component.
+    the daemons and the panel with it; else each actionable component. The
+    operating system's packages come last, and only when asked for.
     """
 
+    selection = project_selection(plan)
+    os_entry = plan_component_map(plan).get(AUTO_INSTALL_OS) or {}
+    if with_os and os_entry.get("state") == "available" and os_entry.get("actionable") is True:
+        # APT runs last, as the Install button orders it: it can leave the
+        # host waiting for a reboot.
+        selection.append(AUTO_INSTALL_OS)
+    return selection
+
+
+def project_selection(plan: dict[str, Any]) -> list[str]:
     available = plan_component_map(plan)
     actionable = [
         component_id
@@ -1869,7 +1895,7 @@ def auto_install_once() -> str:
             report_alert("update.failed", "auto-install",
                          "The automatic installation could not check for updates")
             return "check-failed"
-    components = auto_install_selection(plan)
+    components = auto_install_selection(plan, with_os=auto_install_settings()["os"])
     if not components:
         record_auto_install("nothing")
         return "nothing"

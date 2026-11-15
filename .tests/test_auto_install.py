@@ -2,9 +2,11 @@
 
 The operator asked for automatic installation (2026-10-29), and chose its
 bounds (2026-11-03): only easy-ha-proxy's own updates -- the host, the panel,
-the Authelia images, as the project tested them -- never the operating
-system's packages and never a reboot; in a night window of the gateway's
-hours, 03:00-05:00 unless changed; off until turned on. It takes the Install
+the Authelia images, as the project tested them -- and never a reboot; in a
+night window of the gateway's hours, 03:00-05:00 unless changed; off until
+turned on. On 2026-11-15 the operator asked for the operating system's
+packages too, behind a second switch that is off until turned on: Docker's
+own repository has no security archive, so its fixes otherwise wait. It takes the Install
 button's own path: a fresh plan, the same selection and guards, the same
 worker. A failure or a refusal raises update.failed.
 """
@@ -79,6 +81,25 @@ class TheRules(unittest.TestCase):
     def test_only_the_os_is_nothing(self):
         self.assertEqual(self.broker.auto_install_selection({"components": [component("os")]}), [])
 
+    def test_the_second_switch_adds_the_os_last(self):
+        plan = {"components": [
+            component("all", scope={"ready": True, "tags": ["ha-cfg"]}),
+            component("os"), component("admin-container"), component("haproxy"),
+        ]}
+        self.assertEqual(self.broker.auto_install_selection(plan, with_os=True),
+                         ["changes", "admin-container", "os"])
+        self.assertEqual(self.broker.auto_install_selection({"components": [component("os")]}, with_os=True),
+                         ["os"])
+
+    def test_the_second_switch_takes_only_an_installable_os(self):
+        for state in ("current", "unknown", "blocked"):
+            plan = {"components": [component("admin-container"), component("os", state=state)]}
+            self.assertEqual(self.broker.auto_install_selection(plan, with_os=True), ["admin-container"])
+
+    def test_haproxy_never_installs_itself(self):
+        plan = {"components": [component("haproxy"), component("os")]}
+        self.assertEqual(self.broker.auto_install_selection(plan, with_os=True), ["os"])
+
 
 @unittest.skipIf(WINDOWS, "the broker needs fcntl")
 class TheSchedule(unittest.TestCase):
@@ -123,6 +144,28 @@ class TheSchedule(unittest.TestCase):
             self.broker.auto_install_tick(at(3, 2))
         self.assertEqual(once.call_count, 2)
 
+    def test_the_os_switch_is_off_until_turned_on_and_kept(self):
+        self.turn_on()
+        self.assertFalse(self.broker.auto_install_settings()["os"])
+        self.broker.set_auto_install({"action": "set_auto_install", "enabled": True,
+                                      "start": 3, "end": 5, "os": True})
+        self.assertTrue(self.broker.auto_install_settings()["os"])
+        # A panel that does not know the switch yet leaves it as it was.
+        self.turn_on(start=2, end=4)
+        self.assertTrue(self.broker.auto_install_settings()["os"])
+        with self.assertRaises(self.broker.UpdatedError):
+            self.broker.set_auto_install({"action": "set_auto_install", "enabled": True,
+                                          "start": 3, "end": 5, "os": "yes"})
+
+    def test_the_night_takes_the_os_when_switched_on(self):
+        self.broker.set_auto_install({"action": "set_auto_install", "enabled": True,
+                                      "start": 3, "end": 5, "os": True})
+        plan = {"id": "a" * 32, "components": [component("admin-container"), component("os")]}
+        with mock.patch.object(self.broker, "load_latest_plan", return_value=plan),                 mock.patch.object(self.broker, "plan_is_expired", return_value=False),                 mock.patch.object(self.broker, "validate_selection") as validate,                 mock.patch.object(self.broker, "acquire_operation", return_value=7),                 mock.patch.object(self.broker, "new_job", return_value={"id": "b" * 32}),                 mock.patch.object(self.broker, "apply_worker") as worker,                 mock.patch.object(self.broker, "load_job", return_value={"status": "completed"}),                 mock.patch.object(self.broker, "ACTIVE_MARKER", Path("/nonexistent/marker")),                 mock.patch.object(self.broker, "reboot_guard_present", return_value=False):
+            self.assertEqual(self.broker.auto_install_once(), "installed")
+        validate.assert_called_once_with(plan, ["admin-container", "os"])
+        worker.assert_called_once_with("b" * 32, 7, plan, ["admin-container", "os"])
+
     def test_a_window_without_hours_is_refused(self):
         with self.assertRaises(self.broker.UpdatedError):
             self.turn_on(start=4, end=4)
@@ -163,9 +206,12 @@ class ThePage(unittest.TestCase):
     def test_the_page_offers_it_and_says_its_bounds(self):
         template = (APP / "templates/system_updates.html").read_text(encoding="utf-8")
         self.assertIn('id="updates-auto-install"', template)
-        self.assertIn("HAProxy, operating-system packages and reboots stay with you.", template)
+        self.assertIn("HAProxy and reboots stay with you.", template)
+        self.assertIn('id="updates-auto-install-os"', template)
         routes = (APP / "routes_updates.py").read_text(encoding="utf-8")
-        self.assertIn('"set_auto_install": ("update.auto_install"', routes)
+        self.assertIn('"set_auto_install": ("update.auto_install", ("enabled", "start", "end", "os"))', routes)
+        script = (APP / "static/js/system_updates.js").read_text(encoding="utf-8")
+        self.assertIn('os: byId("updates-auto-install-os").checked', script)
 
 
 if __name__ == "__main__":

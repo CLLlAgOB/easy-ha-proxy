@@ -77,7 +77,7 @@ AUDITED_ACTIONS = {
     ),
     "start_apply": ("update.apply", ("plan_id", "components")),
     "set_settings": ("update.settings", ("auto_check_hours",)),
-    "set_auto_install": ("update.auto_install", ("enabled", "start", "end")),
+    "set_auto_install": ("update.auto_install", ("enabled", "start", "end", "os")),
     "reboot": ("system.reboot", ("expected_boot_id",)),
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
     "prepare_haproxy_migration": ("update.haproxy_prepare", ("target_branch",)),
@@ -247,18 +247,24 @@ def save_settings():
 
 @bp_system_updates.post("/api/auto-install")
 def save_auto_install():
-    """Whether easy-ha-proxy's own updates install themselves, and in which
-    hours of the night; the broker refuses anything else as well."""
-    payload = _json_payload({"enabled", "start", "end"})
+    """Whether easy-ha-proxy's own updates install themselves, whether the
+    operating system's packages go with them, and in which hours of the
+    night; the broker refuses anything else as well."""
+    payload = _json_payload({"enabled", "start", "end"}, {"os"})
     enabled, start, end = payload["enabled"], payload["start"], payload["end"]
-    if not isinstance(enabled, bool):
+    if not isinstance(enabled, bool) or not isinstance(payload.get("os", False), bool):
         abort(400, description="enabled must be true or false")
     for value in (start, end):
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
             abort(400, description="the window is given in whole hours, 0 to 23")
     if start == end:
         abort(400, description="the window must not start and end at the same hour")
-    return _call_daemon({"action": "set_auto_install", "enabled": enabled, "start": start, "end": end})
+    request_payload = {"action": "set_auto_install", "enabled": enabled, "start": start, "end": end}
+    # A page loaded before the switch existed does not send it; the broker
+    # then keeps the saved value instead of turning it off.
+    if "os" in payload:
+        request_payload["os"] = payload["os"]
+    return _call_daemon(request_payload)
 
 
 @bp_system_updates.post("/api/apply")

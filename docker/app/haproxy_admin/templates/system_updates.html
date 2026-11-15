@@ -199,6 +199,10 @@
           <input type="checkbox" id="updates-auto-install">
           Install easy-ha-proxy updates automatically
         </label>
+        <label class="updates-field-label">
+          <input type="checkbox" id="updates-auto-install-os">
+          Also install operating-system packages
+        </label>
         <div class="updates-channel-line">
           <span>Install window from</span>
           <select id="updates-auto-install-start" class="form-input" data-i18n-skip translate="no"></select>
@@ -209,7 +213,10 @@
         <div id="updates-auto-install-status" class="result-message" role="status" aria-live="polite"></div>
         <p id="updates-auto-install-last" class="updates-hero-meta"></p>
         <p class="updates-hero-meta">
-          Only easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images. HAProxy, operating-system packages and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
+          easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images; operating-system packages only when the second box is ticked. HAProxy and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
+        </p>
+        <p class="updates-hero-meta">
+          With operating-system packages: every available package update is installed after easy-ha-proxy's own, Docker and containerd included. Containers keep running while Docker restarts; HAProxy stays held. A reboot the packages ask for is left to the automatic reboot setting on the OS security page, or to you.
         </p>
       </div>
     </div>

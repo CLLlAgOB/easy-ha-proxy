@@ -273,6 +273,22 @@ class UpdateRouteContractTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(AbortCalled):
                 ROUTES.save_channels()
 
+    def test_auto_install_passes_the_os_switch_only_when_the_page_sends_it(self) -> None:
+        window = {"enabled": True, "start": 3, "end": 5}
+        for payload in ({**window, "os": True}, {**window, "os": False}, window):
+            REQUEST.get_json = lambda silent=True, value=payload: dict(value)
+            with self.subTest(payload=payload), mock.patch.object(
+                ROUTES, "updated_request", return_value={"ok": True, "settings": {}},
+            ) as daemon:
+                _response, status = ROUTES.save_auto_install()
+            self.assertEqual(status, 200)
+            # Without the field the broker keeps the saved value.
+            daemon.assert_called_once_with({"action": "set_auto_install", **payload})
+        for payload in ({**window, "os": "yes"}, {**window, "command": "sh"}):
+            REQUEST.get_json = lambda silent=True, value=payload: dict(value)
+            with self.subTest(payload=payload), self.assertRaises(AbortCalled):
+                ROUTES.save_auto_install()
+
     def test_apply_has_a_fixed_component_allowlist_and_exact_confirmation(self) -> None:
         base = {
             "plan_id": "a" * 32,

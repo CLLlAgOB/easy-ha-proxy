@@ -41,7 +41,7 @@
       const install = settings.auto_install;
       if (install?.enabled) {
         const window = windowFor(install.start, install.end);
-        add("project-install", "Project update installation", window?.start, t("Allowed window; verified updates only"), "updates", window?.end);
+        add("project-install", "Project update installation", window?.start, t(install.os ? "Allowed window; verified updates and operating-system packages" : "Allowed window; verified updates only"), "updates", window?.end);
       } else off("Project update installation", "updates", install ? "Disabled" : "Next start has not been verified");
     }
     const b = data.backups?.schedule;

@@ -22,6 +22,7 @@
   "Project update check": "Проверка обновлений проекта",
   "Project update installation": "Установка обновлений проекта",
   "Allowed window; verified updates only": "Разрешённое окно; только проверенные обновления",
+  "Allowed window; verified updates and operating-system packages": "Разрешённое окно; проверенные обновления и пакеты ОС",
   "Panel backup": "Бэкап по расписанию панели",
   "Systemd timer; delay up to {minutes} minutes": "Таймер systemd; задержка до {minutes} минут",
   "Systemd timer": "Таймер systemd",

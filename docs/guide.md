@@ -403,13 +403,18 @@ the `update.available` alert in step: raised when something can be installed,
 resolved by the check after it was.
 
 Automatic installation is off until a `superadmin` turns it on in the same
-**Settings** fold, per gateway. It installs only easy-ha-proxy's own updates --
+**Settings** fold, per gateway. It installs easy-ha-proxy's own updates --
 the host, the panel and the Authelia images, as the project tested them --
-never the operating-system packages and never a reboot; once a night inside a
-window of the gateway's local hours (03:00-05:00 unless changed), through the
-same plan, selection, guards and worker as the Install button. A failure or a
-refusal (pending HAProxy changes, say) raises `update.failed`; the page shows
-the last outcome. A check also reports, as information only, when Redis has
+once a night inside a window of the gateway's local hours (03:00-05:00 unless
+changed), through the same plan, selection, guards and worker as the Install
+button. A second box, also off by default, adds the operating-system
+packages: every available package update, Docker and containerd included,
+installed after easy-ha-proxy's own the way the Install button does it
+(containers keep running through Docker's live-restore, HAProxy stays held).
+It never updates HAProxy and never reboots: a reboot the packages ask for is
+left to the automatic reboot setting on the OS security page, or to you. A
+failure or a refusal (pending HAProxy changes, say) raises `update.failed`;
+the page shows the last outcome. A check also reports, as information only, when Redis has
 released a newer version upstream than the one the project pins -- nothing is
 pulled or re-pinned for it -- and an image counts as current only when its
 container actually runs the same layers, not merely when the tag was pulled.

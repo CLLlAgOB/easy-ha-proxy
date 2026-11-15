@@ -27,6 +27,12 @@ test("project installation windows cross midnight in the server zone", () => {
   const install = result.tasks.find((v) => v.id === "project-install");
   assert.equal(install.start, now); assert.equal(clock.time(install.end), "02:00:00");
 });
+test("project installation says when it takes the operating-system packages too", () => {
+  const settings = (os) => ({updates: {settings: {auto_check_hours: 0, auto_install: {enabled: true, start: 23, end: 2, os}}}});
+  const condition = (os) => build(settings(os), clock, now).tasks.find((v) => v.id === "project-install").condition;
+  assert.match(condition(false), /verified updates only/);
+  assert.match(condition(true), /verified updates and operating-system packages/);
+});
 test("pending reboot shows its actual countdown, recovery hides security installation", () => {
   const result = build({security: {...security, recovery_required: true, automatic_reboot: {
     enabled: true, pending: {due_at: "2026-11-08T00:01:00+03:00"}}}}, clock, now);
