@@ -37,7 +37,13 @@ class TheOrder(unittest.TestCase):
         reboot = position('id="updates-reboot-card"')
         self.assertLess(history, haproxy)
         self.assertLess(haproxy, reboot)
-        cards = re.findall(r'<(?:section|details) [^>]*id="(updates-[a-z-]+)"', PAGE)
+        # Cards are the page's own blocks; a fold inside a card (the manual
+        # HAProxy procedure inside the HAProxy card) is not one of them.
+        cards = [
+            re.search(r'\bid="(updates-[a-z-]+)"', tag).group(1)
+            for tag in re.findall(r'<(?:section|details) [^>]*>', PAGE)
+            if re.search(r'\bclass="(?:[^"]* )?card(?: [^"]*)?"', tag) and 'id="updates-' in tag
+        ]
         self.assertEqual(cards[-2:], ["updates-haproxy-card", "updates-reboot-card"])
 
 
