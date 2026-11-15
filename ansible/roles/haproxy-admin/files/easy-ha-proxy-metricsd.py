@@ -1240,6 +1240,7 @@ class MetricsDatabase:
                     f"{columns}, PRIMARY KEY (bucket_ts, object_id)) WITHOUT ROWID"
                 )
             self._add_missing_metric_columns(cursor)
+            self._add_object_address(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_metric_1m_object "
                 "ON metric_1m (object_id, bucket_ts)"
@@ -1278,6 +1279,20 @@ class MetricsDatabase:
                 LOG.info("Migrated metrics database to schema v%d", current)
             cursor.execute("UPDATE schema_version SET version = ?", (current,))
             cursor.close()
+
+    @staticmethod
+    def _add_object_address(cursor: sqlite3.Cursor) -> None:
+        """The address a server was last reported at (HAProxy's addr).
+
+        Additive like the metric columns and for the same reason: an older
+        build ignores it. It lets a renamed server keep its history
+        (Collector._continue_renamed).
+        """
+
+        existing = {str(row["name"]) for row in cursor.execute("PRAGMA table_info(objects)")}
+        if "address" not in existing:
+            cursor.execute("ALTER TABLE objects ADD COLUMN address TEXT NOT NULL DEFAULT ''")
+            LOG.info("Added objects.address")
 
     @staticmethod
     def _add_missing_metric_columns(cursor: sqlite3.Cursor) -> None:
@@ -1331,6 +1346,52 @@ class MetricsDatabase:
             ).fetchone()
             cursor.close()
         return int(row["id"])
+
+    def object_exists(self, kind: str, proxy: str, server: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM objects WHERE kind = ? AND proxy = ? AND server = ?",
+                (kind, proxy, server),
+            ).fetchone()
+        return row is not None
+
+    def load_server_addresses(self) -> Dict[int, str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, address FROM objects WHERE kind = 'server' AND address != ''"
+            ).fetchall()
+        return {int(row["id"]): str(row["address"]) for row in rows}
+
+    def set_object_address(self, object_id: int, address: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE objects SET address = ? WHERE id = ?", (address, object_id)
+            )
+
+    def rename_candidate(
+        self, proxy: str, address: str, present: set
+    ) -> Optional[Tuple[int, str]]:
+        """The one server of this backend last seen at this address and no
+        longer reported under its own name, or None when it is not one."""
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, server FROM objects "
+                "WHERE kind = 'server' AND proxy = ? AND address = ?",
+                (proxy, address),
+            ).fetchall()
+        candidates = [
+            (int(row["id"]), str(row["server"]))
+            for row in rows
+            if str(row["server"]) not in present
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def rename_server(self, object_id: int, server: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE objects SET server = ? WHERE id = ?", (server, object_id)
+            )
 
     # -- baselines --------------------------------------------------------
 
@@ -2870,6 +2931,9 @@ class Collector:
         # and in how many polls in a row (see _retire_missing).
         self._missing: Dict[int, Tuple[int, int]] = {}
         self._seen_since_start: set = set()
+        # The address each server was last reported at, to tell a renamed
+        # server from a new one.
+        self._addresses: Dict[int, str] = {}
         # Previous (total, idle) jiffies. CPU is a rate, so the first poll
         # after a start has nothing to compare against and reports nothing.
         self._cpu_previous: Optional[Tuple[int, int]] = None
@@ -2940,6 +3004,7 @@ class Collector:
         self.load_monitors()
         self._baselines = self.database.load_baselines()
         self._last_states = self.database.load_last_states()
+        self._addresses = self.database.load_server_addresses()
         self._thread = threading.Thread(
             target=self._run, name="metricsd-collector", daemon=True
         )
@@ -3016,6 +3081,7 @@ class Collector:
             self._bucket_reported = False
             observed = 0
             present: set = set()
+            self._continue_renamed(rows)
             for row in rows:
                 identity = classify(row)
                 if identity is None:
@@ -3518,6 +3584,11 @@ class Collector:
 
         if kind in ("server", "backend"):
             self._track_state(object_id, (row.get("status") or "").strip(), now)
+        if kind == "server":
+            address = (row.get("addr") or "").strip()
+            if address and self._addresses.get(object_id) != address:
+                self._addresses[object_id] = address
+                self.database.set_object_address(object_id, address)
 
     def _delta(self, object_id: int, metric: str, current: int, now: int) -> int:
         """Turn an absolute counter into a per-interval delta.
@@ -3542,6 +3613,41 @@ class Collector:
         if now - last_ts > max_gap:
             return 0
         return current - last_value
+
+    def _continue_renamed(self, rows: List[Dict[str, str]]) -> None:
+        """A server reported under a new name at the address of one that is
+        gone from the same backend is that server, renamed.
+
+        Moving a site to a backend set renamed its servers (main to srv1, bkp
+        to backup1) while they stayed the same machines. The history now
+        carries on under the new name instead of starting over beside a
+        removed copy. Only an unambiguous match: one server of the backend at
+        that address, absent under its old name, and the new name unknown.
+        """
+
+        names: Dict[str, set] = {}
+        for row in rows:
+            identity = classify(row)
+            if identity and identity[0] == "server":
+                names.setdefault(identity[1], set()).add(identity[2])
+        for row in rows:
+            identity = classify(row)
+            if identity is None or identity[0] != "server" or identity in self._object_ids:
+                continue
+            _, proxy, server = identity
+            address = (row.get("addr") or "").strip()
+            if not address or self.config.excluded(proxy):
+                continue
+            if self.database.object_exists("server", proxy, server):
+                continue
+            candidate = self.database.rename_candidate(proxy, address, names[proxy])
+            if candidate is None:
+                continue
+            object_id, old = candidate
+            self.database.rename_server(object_id, server)
+            self._object_ids.pop(("server", proxy, old), None)
+            self._object_ids[identity] = object_id
+            LOG.info("Server %s/%s continues as %s (same address %s)", proxy, old, server, address)
 
     def _retire_missing(self, present: set, now: int) -> None:
         """End the timeline of a backend or server HAProxy no longer reports.

@@ -1714,6 +1714,83 @@ class RemovedObjectTests(CollectorTestCase):
         self.assertLess(removed[0][1], 1000)
 
 
+def payload_lines(header, rows):
+    return "\n".join((header, *rows)) + "\n"
+
+
+class RenamedServerTests(CollectorTestCase):
+    """A server renamed at the same address keeps its history: moving a site
+    to a backend set renamed main to srv1 and bkp to backup1, and nothing
+    about the machines behind them changed."""
+
+    @staticmethod
+    def stats(*servers):
+        header = HEADER + ",addr"
+        rows = [stat_row("be_site", name, status=status) + "," + address
+                for name, address, status in servers]
+        return payload_lines(header, rows)
+
+    def servers(self):
+        connection = sqlite3.connect(str(self.database.path))
+        try:
+            return connection.execute(
+                "SELECT id, server, address FROM objects WHERE kind = 'server' ORDER BY id"
+            ).fetchall()
+        finally:
+            connection.close()
+
+    def states(self):
+        connection = sqlite3.connect(str(self.database.path))
+        try:
+            return connection.execute(
+                "SELECT o.server, e.previous_state, e.state FROM server_state_events e "
+                "JOIN objects o ON o.id = e.object_id ORDER BY e.id"
+            ).fetchall()
+        finally:
+            connection.close()
+
+    def test_a_server_renamed_at_the_same_address_keeps_its_history(self):
+        before = self.stats(("main", "10.0.0.1:443", "UP"), ("bkp", "10.0.0.2:443", "UP"))
+        self.poll(before, now=600)
+        ids = {server: object_id for object_id, server, _ in self.servers()}
+        after = self.stats(("srv1", "10.0.0.1:443", "UP"), ("backup1", "10.0.0.2:443", "UP"))
+        for now in (610, 620, 630, 640):
+            self.poll(after, now=now)
+        self.assertEqual(
+            self.servers(),
+            [(ids["main"], "srv1", "10.0.0.1:443"), (ids["bkp"], "backup1", "10.0.0.2:443")],
+        )
+        # One UP each, from the first poll; no removal, no new start.
+        self.assertEqual(self.states(), [("srv1", "", "UP"), ("backup1", "", "UP")])
+        timeline = self.database.state_timeline(site="", since=0, until=700)
+        servers = {o["server"]: o for o in timeline["objects"] if o["kind"] == "server"}
+        self.assertEqual(set(servers), {"srv1", "backup1"})
+        self.assertEqual(servers["srv1"]["spans"][-1]["start"], 600)
+
+    def test_a_new_address_is_a_new_server(self):
+        self.poll(self.stats(("main", "10.0.0.1:443", "UP")), now=600)
+        for now in (610, 620, 630):
+            self.poll(self.stats(("srv1", "10.0.0.9:443", "UP")), now=now)
+        names = [server for _, server, _ in self.servers()]
+        self.assertEqual(names, ["main", "srv1"])
+        self.assertIn(("main", "UP", metricsd.REMOVED_STATE), self.states())
+
+    def test_two_old_servers_at_one_address_are_not_guessed_between(self):
+        self.poll(self.stats(("a", "10.0.0.1:443", "UP"), ("b", "10.0.0.1:443", "UP")), now=600)
+        self.poll(self.stats(("c", "10.0.0.1:443", "UP")), now=610)
+        self.assertEqual(sorted(server for _, server, _ in self.servers()), ["a", "b", "c"])
+
+    def test_a_server_still_reported_is_not_taken_over(self):
+        self.poll(self.stats(("main", "10.0.0.1:443", "UP")), now=600)
+        self.poll(self.stats(("main", "10.0.0.1:443", "UP"), ("extra", "10.0.0.1:443", "UP")), now=610)
+        self.assertEqual([server for _, server, _ in self.servers()], ["main", "extra"])
+
+    def test_a_changed_address_is_remembered(self):
+        self.poll(self.stats(("main", "10.0.0.1:443", "UP")), now=600)
+        self.poll(self.stats(("main", "10.0.0.5:443", "UP")), now=610)
+        self.assertEqual(self.servers()[0][2], "10.0.0.5:443")
+
+
 class MigrationTests(CollectorTestCase):
     def test_an_older_database_is_migrated_in_place(self):
         path = str(self.database.path)
