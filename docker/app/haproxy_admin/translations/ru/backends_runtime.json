@@ -11,6 +11,26 @@
     "Drain": "Вывод из-под нагрузки",
     "Maintenance": "Обслуживание",
     "Weight": "Вес",
-    "These controls change the running HAProxy immediately. The state is saved and restored across reloads and restarts, so a server left in maintenance stays in maintenance until you put it back — including after a reboot.": "Эти переключатели меняют работающий HAProxy сразу. Состояние сохраняется и восстанавливается при reload и перезапуске, поэтому сервер, оставленный на обслуживании, останется на обслуживании, пока вы не вернёте его сами — в том числе после перезагрузки машины."
+    "These controls change the running HAProxy immediately. The state is saved and restored across reloads and restarts, so a server left in maintenance stays in maintenance until you put it back — including after a reboot.": "Эти переключатели меняют работающий HAProxy сразу. Состояние сохраняется и восстанавливается при reload и перезапуске, поэтому сервер, оставленный на обслуживании, останется на обслуживании, пока вы не вернёте его сами — в том числе после перезагрузки машины.",
+    "Available · check failures": "Доступен · сбои проверок",
+    "Unavailable · recovering": "Недоступен · восстанавливается",
+    "Not accepting traffic": "Не принимает трафик",
+    "No health checks": "Без проверок доступности",
+    "Server status unknown": "Состояние неизвестно",
+    "HAProxy health-check state": "Состояние проверки HAProxy",
+    "Last health check": "Последняя проверка",
+    "The fraction counts health checks, not backend servers.": "Дробь относится к проверкам доступности, а не к количеству бэкендов.",
+    "Health check: connection failed": "Проверка: ошибка соединения",
+    "Health check: connection timed out": "Проверка: таймаут соединения",
+    "Health check: TLS handshake timed out": "Проверка: таймаут TLS-рукопожатия",
+    "Health check: TLS handshake failed": "Проверка: ошибка TLS-рукопожатия",
+    "Health check: response timed out": "Проверка: таймаут ответа",
+    "Health check: unexpected HTTP status": "Проверка: неожиданный HTTP-статус",
+    "Health check: invalid response": "Проверка: некорректный ответ",
+    "Health check: socket error": "Проверка: ошибка сокета",
+    "Health check: external check failed": "Проверка: ошибка внешней команды",
+    "Health check: external check timed out": "Проверка: таймаут внешней команды",
+    "Server available": "Доступен",
+    "Server unavailable": "Недоступен"
   }
 }
