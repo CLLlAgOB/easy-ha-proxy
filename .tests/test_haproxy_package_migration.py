@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -355,6 +356,64 @@ class Boundaries(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(m.MigrationError, 'Persisted guard decisions differ'):
                         engine.check_guard()
+
+    def test_first_step_page_must_match_its_persisted_code_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = m.Engine()
+            engine.directory = Path(directory)
+            database = engine.directory / 'guard.sqlite'
+            engine.state = {'guard_database': str(database)}
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE ip_state(ip TEXT, banned_until INTEGER, ban_code INTEGER)')
+                connection.execute('CREATE TABLE manual_bans(ip TEXT, expires_at INTEGER)')
+            for persisted, runtime, accepted in [(41, 41, True), (41, 40, False), (40, 41, False),
+                                                  (40, 40, True), (0, 40, True), (0, 41, False),
+                                                  (None, 40, True), (50, 50, False), (99, 99, False)]:
+                with self.subTest(persisted=persisted, runtime=runtime):
+                    with sqlite3.connect(database) as connection:
+                        connection.execute('DELETE FROM ip_state')
+                        connection.execute('INSERT INTO ip_state VALUES(?,?,?)',
+                                           ('198.51.100.22', int(time.time()) + 3600, persisted))
+                    with patch.object(m, 'table_rows', return_value=iter([
+                            ('198.51.100.22', 30000, {'gpc0': 1, 'gpt0': runtime})])):
+                        m.snapshot_tables(Path('/unused'), engine.directory / 'tables.sqlite', {'tbl_ban': ''})
+                    if accepted:
+                        engine.check_guard()
+                    else:
+                        with self.assertRaisesRegex(m.MigrationError, 'Persisted guard decisions differ'):
+                            engine.check_guard()
+
+    def test_manual_bans_do_not_accept_adaptive_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = m.Engine()
+            engine.directory = Path(directory)
+            database = engine.directory / 'guard.sqlite'
+            engine.state = {'guard_database': str(database)}
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE ip_state(ip TEXT, banned_until INTEGER, ban_code INTEGER)')
+                connection.execute('CREATE TABLE manual_bans(ip TEXT, expires_at INTEGER)')
+                connection.execute('INSERT INTO manual_bans VALUES(?,?)', ('198.51.100.22', int(time.time())+3600))
+            for runtime in (40, 41, 50):
+                with self.subTest(runtime=runtime), patch.object(m, 'table_rows', return_value=iter([
+                        ('198.51.100.22', 30000, {'gpc0': 1, 'gpt0': runtime})])):
+                    m.snapshot_tables(Path('/unused'), engine.directory / 'tables.sqlite', {'tbl_ban': ''})
+                if runtime == 50:
+                    engine.check_guard()
+                else:
+                    with self.assertRaises(m.MigrationError):
+                        engine.check_guard()
+
+    def test_cli_reports_the_original_failure_alongside_the_safe_abort_summary(self):
+        engine = m.Engine()
+        engine.state = {'id': 'a'*32, 'phase': 'aborted', 'failure': 'Persisted guard decisions differ'}
+        with patch.object(m.os, 'geteuid', return_value=0), patch.object(m.os, 'umask'), \
+                patch.object(m, 'Engine', return_value=engine), \
+                patch.object(engine, 'migrate', side_effect=m.MigrationError('Migration aborted before the package switch')), \
+                patch.object(sys, 'stderr', new_callable=io.StringIO) as output:
+            self.assertEqual(m.main(['migrate']), 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['failure'], engine.state['failure'])
+        self.assertEqual(result['phase'], 'aborted')
 
 
 if __name__ == '__main__':
