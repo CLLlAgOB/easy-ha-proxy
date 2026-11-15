@@ -275,7 +275,8 @@ class UpdateRouteContractTests(unittest.TestCase):
 
     def test_auto_install_passes_the_os_switch_only_when_the_page_sends_it(self) -> None:
         window = {"enabled": True, "start": 3, "end": 5}
-        for payload in ({**window, "os": True}, {**window, "os": False}, window):
+        for payload in ({**window, "os": True}, {**window, "os": False}, window,
+                        {**window, 'unified':True, 'runtime':True}):
             REQUEST.get_json = lambda silent=True, value=payload: dict(value)
             with self.subTest(payload=payload), mock.patch.object(
                 ROUTES, "updated_request", return_value={"ok": True, "settings": {}},
@@ -284,7 +285,8 @@ class UpdateRouteContractTests(unittest.TestCase):
             self.assertEqual(status, 200)
             # Without the field the broker keeps the saved value.
             daemon.assert_called_once_with({"action": "set_auto_install", **payload})
-        for payload in ({**window, "os": "yes"}, {**window, "command": "sh"}):
+        for payload in ({**window, "os": "yes"}, {**window, "command": "sh"},
+                        {**window, 'unified':'yes'}, {**window, 'runtime':1}):
             REQUEST.get_json = lambda silent=True, value=payload: dict(value)
             with self.subTest(payload=payload), self.assertRaises(AbortCalled):
                 ROUTES.save_auto_install()

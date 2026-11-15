@@ -3356,6 +3356,13 @@ def command_update(args: argparse.Namespace) -> None:
     automatic_os = getattr(args, "automatic_os", False)
     if automatic_os and component != "os":
         raise InstallerError("Automatic OS upgrade guards require the os component.")
+    runtime_revision = getattr(args, 'runtime_maintenance', None)
+    window_revision = runtime_revision or getattr(args, 'maintenance_revision', None)
+    runtime_deadline = getattr(args, 'maintenance_until', None)
+    if window_revision is not None or runtime_deadline is not None:
+        if (not automatic_os or not re.fullmatch('[0-9a-f]{32}', str(window_revision or ''))
+                or type(runtime_deadline) not in (int, float) or not 0 < runtime_deadline < float('inf')):
+            raise InstallerError('Runtime maintenance requires automatic OS mode and a valid window lease.')
     expected_source_revision = normalize_source_revision(
         getattr(args, "expected_source_revision", None)
     )
@@ -3453,6 +3460,11 @@ def command_update(args: argparse.Namespace) -> None:
         extra_vars["haproxy_admin_sync_managed_config"] = "true"
     if automatic_os:
         extra_vars["easy_ha_proxy_automatic_os_upgrade"] = True
+    if runtime_revision:
+        extra_vars['easy_ha_proxy_runtime_maintenance_revision'] = runtime_revision
+    if window_revision:
+        extra_vars['easy_ha_proxy_maintenance_revision'] = window_revision
+        extra_vars['easy_ha_proxy_runtime_maintenance_until'] = runtime_deadline
     run_playbook(tags, extra_vars=extra_vars or None)
     if component == "all" or changes_tags:
         # Everything the source asked for has been applied.
@@ -3749,6 +3761,9 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser = subparsers.add_parser("update", help="update source and apply changes")
     update_parser.add_argument("--ui-only", action="store_true")
     update_parser.add_argument("--automatic-os", action="store_true", help=argparse.SUPPRESS)
+    update_parser.add_argument('--runtime-maintenance', help=argparse.SUPPRESS)
+    update_parser.add_argument('--maintenance-revision', help=argparse.SUPPRESS)
+    update_parser.add_argument('--maintenance-until', type=float, help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--component",
         choices=sorted(UPDATE_COMPONENT_TAGS),

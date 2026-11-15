@@ -2,8 +2,33 @@
 const test = require("node:test"), assert = require("node:assert/strict");
 const create = require("../../docker/app/haproxy_admin/static/js/server_time.js");
 const {build} = require("../../docker/app/haproxy_admin/static/js/schedule_core.js");
+
+test("one maintenance window replaces individual installation restart and reboot schedules", () => {
+  const now = Date.parse("2026-11-08T00:00:00Z");
+  const clock = {
+    parse: (v) => new Date(v),
+    toLocalInput: (v) => new Date(v).toISOString().slice(0, 16),
+    fromLocalInput: (v) => Date.parse(v + "Z")
+  };
+  const result = build({updates: {settings: {auto_check_hours: 0, auto_install: {enabled: true, unified: true, start: 1, end: 2}}},
+    security: {available: true, policy: {mode: "daily", start: 3, interval: 4}, schedule: {next_install: "2026-11-08T03:00:00Z"},
+      service_restarts: {available: true, enabled: true, next_window: "2026-11-08T04:00:00Z"},
+      automatic_reboot: {enabled: true, next_window: "2026-11-08T05:00:00Z"}}}, clock, now);
+  assert.deepEqual(result.tasks.map((item) => item.id), ["project-install"]);
+  assert.equal(result.tasks[0].label, "Unified software maintenance");
+  assert.equal(result.tasks[0].start, Date.parse("2026-11-08T01:00:00Z"));
+  assert.equal(result.tasks[0].end, Date.parse("2026-11-08T02:00:00Z"));
+});
 const clock = create({zone: "Europe/Moscow"}, "en-GB");
 const now = Date.parse("2026-11-07T21:00:00Z"); // midnight MSK
+test("saving unified consent during a window displays the next full window", () => {
+  const during = Date.parse("2026-11-08T01:30:00+03:00");
+  const result = build({updates: {settings: {auto_install: {enabled: true, unified: true,
+    start: 1, end: 2, updated_at: during / 1000}}}}, clock, during);
+  const install = result.tasks.find((task) => task.id === "project-install");
+  assert.equal(install.start, Date.parse("2026-11-09T01:00:00+03:00"));
+  assert.equal(install.end, Date.parse("2026-11-09T02:00:00+03:00"));
+});
 const security = {available: true, policy: {mode: "daily", start: 2, end: 3, interval: 2},
   schedule: {next_check: now / 1000 + 1800, next_install: "2026-11-08T02:00:00+03:00"},
   automatic_reboot: {available: true, enabled: true, next_window: "2026-11-08T03:00:00+03:00"}};

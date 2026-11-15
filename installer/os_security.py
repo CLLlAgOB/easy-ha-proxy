@@ -21,6 +21,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import maintenance_window
 
 PROTOCOL = 1
 SETTINGS_PROTOCOL = 1
@@ -464,7 +465,7 @@ def installer_available():
     return Path('/usr/bin/unattended-upgrade').is_file()
 
 
-def run(action, root, requested=None):
+def run(action, root, requested=None, *, maintenance_revision=None):
     distro, codename = platform()
     try:
         import apt
@@ -515,6 +516,8 @@ def run(action, root, requested=None):
             if not installer_available():
                 raise SecurityError('The security installer is not installed; save the policy again')
             if any(not row['protected'] and not row['held'] for row in before):
+                if maintenance_revision is not None:
+                    maintenance_window.require(root, read_json, maintenance_revision, local_time())
                 print('EHP-PROGRESS phase=playbook', flush=True)
                 with tempfile.TemporaryDirectory(prefix='os-security-', dir=root) as temporary:
                     _, log = command(['/usr/bin/unattended-upgrade', '--verbose', '--minimal-upgrade-steps'], timeout=5400,
@@ -549,6 +552,7 @@ def main():
     parser.add_argument('--start', type=int, default=3)
     parser.add_argument('--end', type=int, default=5)
     parser.add_argument('--request-id', default='')
+    parser.add_argument('--maintenance-revision')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('OS security maintenance must run as root')
@@ -563,7 +567,8 @@ def main():
         args.maintenance_lock.parent.mkdir(parents=True, exist_ok=True)
         with os.fdopen(os.open(args.maintenance_lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            result = run(args.action, args.state_root, {'mode': args.mode, 'interval': args.interval, 'start': args.start, 'end': args.end})
+            options = {'maintenance_revision': args.maintenance_revision} if args.maintenance_revision is not None else {}
+            result = run(args.action, args.state_root, {'mode': args.mode, 'interval': args.interval, 'start': args.start, 'end': args.end}, **options)
         print(json.dumps({'ok': True, 'request_id': args.request_id, **result}), flush=True)
         return 0
     except (SecurityError, OSError, ValueError, subprocess.SubprocessError) as error:

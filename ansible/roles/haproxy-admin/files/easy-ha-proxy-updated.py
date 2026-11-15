@@ -14,6 +14,7 @@ import errno
 import fcntl
 import grp
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -335,7 +336,7 @@ def derive_release_channel(
 REQUEST_FIELDS = {
     "status": frozenset({"action", "job_id"}),
     "set_settings": frozenset({"action", "auto_check_hours"}),
-    "set_auto_install": frozenset({"action", "enabled", "start", "end", "os"}),
+    "set_auto_install": frozenset({"action", "enabled", "start", "end", "os", "unified", "runtime"}),
     "summary": frozenset({"action"}),
     "start_check": frozenset(
         {"action", "image_channel", "source_channel", "release_channel"}
@@ -1763,6 +1764,20 @@ AUTO_INSTALL_STATE: dict[str, Any] = {"night": None}
 AUTO_INSTALL_EXCLUDED = frozenset({"os", "haproxy"})
 # Only the second switch takes the operating system's packages along.
 AUTO_INSTALL_OS = "os"
+MAINTENANCE_CYCLE = threading.Event()
+
+
+def maintenance_module():
+    path = trusted_source('maintenance_window.py')
+    spec = importlib.util.spec_from_file_location('easy_ha_proxy_maintenance_window', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def unified_policy():
+    settings = read_settings()
+    return maintenance_module().policy(settings) if settings.get('auto_install_unified') is True else None
 
 
 def auto_install_settings() -> dict[str, Any]:
@@ -1780,6 +1795,9 @@ def auto_install_settings() -> dict[str, Any]:
         "start": start,
         "end": end,
         "os": settings.get("auto_install_os") is True,
+        "unified": settings.get('auto_install_unified') is True,
+        "runtime": settings.get('auto_install_runtime') is True,
+        'updated_at': settings.get('maintenance_updated_at'),
     }
 
 
@@ -1793,6 +1811,13 @@ def set_auto_install(request: dict[str, Any]) -> dict[str, Any]:
     with_os = request.get("os", auto_install_settings()["os"])
     if not isinstance(with_os, bool):
         raise UpdatedError("os must be true or false", code="invalid")
+    options = {key: request.get(key, auto_install_settings()[key]) for key in ('unified', 'runtime')}
+    if any(type(value) is not bool for value in options.values()):
+        raise UpdatedError('maintenance options must be true or false', code='invalid')
+    if options['unified'] and (enabled or not auto_install_settings()['unified']):
+        security = os_security_snapshot()
+        if security.get('error') or security.get('recovery_required') or security['policy']['mode'] == 'system':
+            raise UpdatedError('Enable managed OS security before enabling the unified maintenance window', code='dependency')
     for value in (start, end):
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
             raise UpdatedError("the window is given in whole hours, 0 to 23", code="invalid")
@@ -1800,7 +1825,9 @@ def set_auto_install(request: dict[str, Any]) -> dict[str, Any]:
         raise UpdatedError("the window must not start and end at the same hour", code="invalid")
     settings = read_settings()
     settings.update(auto_install=enabled, auto_install_start=start, auto_install_end=end,
-                    auto_install_os=with_os)
+                    auto_install_os=with_os or options['unified'], auto_install_unified=options['unified'],
+                    auto_install_runtime=options['runtime'], maintenance_revision=uuid.uuid4().hex,
+                    maintenance_updated_at=time.time())
     atomic_json(SETTINGS_PATH, settings)
     LOG.info("Automatic installation %s, window %02d:00-%02d:00, operating-system packages %s",
              "on" if enabled else "off", start, end, "included" if with_os else "excluded")
@@ -1895,7 +1922,12 @@ def auto_install_once() -> str:
             report_alert("update.failed", "auto-install",
                          "The automatic installation could not check for updates")
             return "check-failed"
-    components = auto_install_selection(plan, with_os=auto_install_settings()["os"])
+    options = auto_install_settings()
+    if options['unified'] and (plan_component_map(plan).get('os') or {}).get('state') not in {'current', 'available'}:
+        record_auto_install('refused', error='The OS package plan is unverified')
+        report_alert('update.failed', 'unified-maintenance', 'The OS package plan is unverified; installation was refused')
+        return 'refused'
+    components = auto_install_selection(plan, with_os=options['os'] or options['unified'])
     if not components:
         record_auto_install("nothing")
         return "nothing"
@@ -1909,12 +1941,22 @@ def auto_install_once() -> str:
         report_alert("update.failed", "auto-install",
                      "The automatic installation was refused", str(exc)[:1000])
         return "refused"
-    job = new_job("apply", components=components, plan_id=plan["id"], scheduled=True)
+    extra = {}
+    unified = unified_policy()
+    if unified:
+        window = maintenance_module().current(unified, os_security_local_time())
+        if not window:
+            release_operation(lock_fd)
+            return 'deferred'
+        extra['maintenance'] = {**window, 'revision': unified['id'], 'runtime': unified['runtime']}
+    job = new_job("apply", components=components, plan_id=plan["id"], scheduled=True, **extra)
     record_auto_install("started", components=components, job_id=job["id"])
     # The same worker as the Install button; it reports a failure itself.
-    apply_worker(job["id"], lock_fd, plan, components)
-    status = str(load_job(job["id"], include_log=False).get("status") or "")
-    outcome = "installed" if status == "completed" else "failed"
+    options = {'maintenance': extra['maintenance']} if extra else {}
+    apply_worker(job["id"], lock_fd, plan, components, **options)
+    result = load_job(job["id"], include_log=False)
+    status = str(result.get("status") or "")
+    outcome = 'deferred' if (result.get('result') or {}).get('deferred_components') else "installed" if status == "completed" else "failed"
     record_auto_install(outcome, components=components, job_id=job["id"])
     return outcome
 
@@ -1923,6 +1965,8 @@ def auto_install_tick(now: dt.datetime | None = None) -> str | None:
     """Called each minute by the schedule; None when it is not the time."""
 
     settings = auto_install_settings()
+    if settings['unified']:
+        return unified_maintenance_tick(now)
     if not settings["enabled"]:
         return None
     local = (now or dt.datetime.now()).astimezone()
@@ -1935,6 +1979,126 @@ def auto_install_tick(now: dt.datetime | None = None) -> str | None:
     if outcome != "busy":
         AUTO_INSTALL_STATE["night"] = night
     return outcome
+
+
+def unified_security_stage(action):
+    descriptor = acquire_operation()
+    try:
+        value = unified_policy()
+        if not value or not maintenance_module().current(value, os_security_local_time()):
+            raise UpdatedError('The maintenance window closed before application', code='window_closed')
+        job = new_job('security-' + action, components=['os'], scheduled=True)
+    except Exception:
+        release_operation(descriptor)
+        raise
+    os_security_worker(job['id'], descriptor, action, maintenance_revision=value['id'])
+    result = load_job(job['id'], include_log=False)
+    if result.get('status') != 'completed':
+        if 'window' in str(result.get('error', '')).lower() and 'closed' in str(result.get('error', '')).lower():
+            raise UpdatedError('The maintenance window closed before application', code='window_closed')
+        raise UpdatedError('Unified maintenance could not finish the service or security stage')
+
+
+def unified_reboot(value, window):
+    if time.time() + REBOOT_DELAY_SECONDS >= window['closes_at']:
+        return 'deferred'
+    if not REBOOT_REQUIRED_PATH.exists() and not service_reboot_reason():
+        return 'completed'
+    descriptor = acquire_operation()
+    try:
+        current = unified_policy()
+        if not current or current['id'] != value['id'] or not maintenance_module().current(current, os_security_local_time()):
+            return 'deferred'
+        atomic_json(OS_SECURITY_ROOT / 'maintenance-reboot.json', {
+            **maintenance_module().restart_policy(value), 'allow_service_reboot': True,
+            'attempt': {'window': window['key'], 'state': 'scheduled', 'at': time.time()},
+        })
+        request_reboot({'confirmation': REBOOT_CONFIRMATION, 'expected_boot_id': current_boot_id(), 'actor': 'unified-maintenance'},
+                       automatic={'unified': True, 'policy_revision': value['id'], 'window': window['key']},
+                       held_lock=descriptor)
+        return 'reboot-scheduled'
+    finally:
+        release_operation(descriptor)
+
+
+def unified_maintenance_tick(now=None):
+    value = unified_policy()
+    if not value or not value['enabled']:
+        return None
+    window = maintenance_module().current(value, now or os_security_local_time())
+    if not window or SHUTDOWN_REQUESTED.is_set() or ACTIVE_MARKER.exists() or reboot_guard_present():
+        return None
+    path = STATE_ROOT / 'maintenance-cycle.json'
+    previous = safe_json_file(path) if path.exists() else {}
+    if previous.get('night') == window['key'] and previous.get('revision') == value['id'] and previous.get('outcome') != 'busy':
+        if previous.get('outcome') == 'running':
+            previous.update(outcome='interrupted', completed_at=utc_now())
+            atomic_json(path, previous)
+            report_alert('update.failed', 'unified-maintenance', 'Unified maintenance was interrupted; review recovery status')
+            record_auto_install('interrupted')
+        return None  # Persistent, including a failed/interrupted cycle: never repeat destructive work in a loop.
+    if not OPERATION_THREAD_LOCK.acquire(blocking=False):
+        return 'busy'
+    OPERATION_THREAD_LOCK.release()
+    record = {'night': window['key'], 'revision': value['id'], 'started_at': utc_now(), 'outcome': 'running'}
+    atomic_json(path, record)
+    MAINTENANCE_CYCLE.set()
+    outcome = 'completed'
+    try:
+        runtime_state = OS_SECURITY_ROOT / 'runtime-maintenance.json'
+        if runtime_state.exists() and safe_json_file(runtime_state).get('phase') not in {'completed', 'recovered'}:
+            raise UpdatedError('Runtime maintenance requires operator recovery before another automatic cycle')
+        for stage in ('updates', 'security', 'haproxy', 'services', 'reboot'):
+            current = unified_policy()
+            if (not current or current['id'] != value['id']
+                    or not maintenance_module().current(current, os_security_local_time())):
+                outcome = 'deferred'
+                break
+            record['stage'] = stage
+            atomic_json(path, record)
+            if stage == 'updates':
+                answer = auto_install_once()
+                if answer not in {'installed', 'nothing'}:
+                    outcome = answer if answer in {'busy', 'deferred'} else 'failed'
+                    break
+            elif stage == 'security':
+                unified_security_stage('install')
+            elif stage == 'haproxy':
+                if auto_check_once() != 'done':
+                    raise UpdatedError('Could not check HAProxy after installing system packages')
+                plan = load_latest_plan()
+                entry = plan_component_map(plan).get('haproxy') or {}
+                if entry.get('state') == 'available' and entry.get('actionable') is True:
+                    descriptor = acquire_operation()
+                    job = new_job('apply', components=['haproxy'], plan_id=plan['id'], scheduled=True,
+                                  maintenance={**window, 'revision': value['id'], 'runtime': value['runtime']})
+                    apply_worker(job['id'], descriptor, plan, ['haproxy'],
+                                 maintenance={**window, 'revision': value['id'], 'runtime': value['runtime']})
+                    if load_job(job['id'], include_log=False).get('status') != 'completed':
+                        raise UpdatedError('Controlled HAProxy application did not complete')
+                elif entry.get('state') in {'unknown', 'blocked'}:
+                    details = entry.get('details') or {}
+                    installed = entry.get('current_version') or entry.get('installed')
+                    candidate = entry.get('available_version') or entry.get('available')
+                    if (details.get('needs_reload') or (candidate and installed and candidate != installed)
+                            or details.get('qualified') is True):
+                        raise UpdatedError('Pending HAProxy application requires operator review')
+            elif stage == 'services':
+                unified_security_stage('restart')
+            else:
+                outcome = unified_reboot(value, window)
+        record.update(outcome=outcome, completed_at=utc_now())
+    except Exception as error:
+        deferred = isinstance(error, UpdatedError) and error.code == 'window_closed'
+        record.update(outcome='deferred' if deferred else 'failed', error=str(error)[:1000], completed_at=utc_now())
+        if not deferred:
+            report_alert('update.failed', 'unified-maintenance', 'Unified maintenance failed', str(error)[:1000])
+    finally:
+        atomic_json(path, record)
+        record_auto_install(record['outcome'])
+        MAINTENANCE_CYCLE.clear()
+        request_self_restart_if_needed()
+    return record['outcome']
 
 
 def set_settings(request: dict[str, Any]) -> dict[str, Any]:
@@ -1974,9 +2138,18 @@ def seconds_until_auto_check(now: float) -> float | None:
 def auto_check_loop() -> None:
     started = time.time()
     while True:
+        try:
+            if SETTINGS_PATH.exists():
+                safe_json_file(SETTINGS_PATH)  # A corrupt policy must not reactivate old independent schedules.
+            unified = auto_install_settings()['unified']
+        except Exception:
+            LOG.exception('The maintenance policy could not be read')
+            if STOP_EVENT.wait(AUTO_CHECK_POLL_SECONDS):
+                return
+            continue
         answer = ''
         try:
-            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+            if not unified and time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
                 answer = os_security_tick()
         except Exception:
             answer = 'failed'
@@ -1987,12 +2160,12 @@ def auto_check_loop() -> None:
         except Exception:
             LOG.exception('The OS security watch failed')
         try:
-            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+            if not unified and time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
                 service_restart_tick()
         except Exception:
             LOG.exception('Scheduled service restarts failed')
         try:
-            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+            if not unified and time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
                 auto_reboot_tick()
         except Exception:
             LOG.exception('Scheduled automatic reboot failed')
@@ -2056,6 +2229,8 @@ def update_command(
 
 
 def request_self_restart_if_needed() -> None:
+    if MAINTENANCE_CYCLE.is_set():
+        return
     if not RESTART_REQUEST_MARKER.exists():
         return
     try:
@@ -2083,7 +2258,7 @@ def request_self_restart_if_needed() -> None:
         pass
 
 
-def apply_haproxy_patch(job_id, plan, log_prefix):
+def apply_haproxy_patch(job_id, plan, log_prefix, *, maintenance=None):
     entry = plan_component_map(plan).get('haproxy') or {}
     details = entry.get('details') or {}
     expected = entry.get('available_version') or entry.get('available')
@@ -2091,11 +2266,16 @@ def apply_haproxy_patch(job_id, plan, log_prefix):
         raise UpdatedError('The reviewed HAProxy version is unavailable', code='stale_plan')
     python = PYTHON_PATH if PYTHON_PATH.is_file() else Path('/usr/bin/python3')
     command = [str(python), str(trusted_source('haproxy_package_migrate.py')), 'patch', '--expected-version', expected]
+    if isinstance(maintenance, dict):
+        command.extend(['--maintenance-revision', maintenance['revision'], '--maintenance-until', str(maintenance['closes_at']),
+                        '--maintenance-state-root', str(OS_SECURITY_ROOT)])
     if details.get('needs_reload') is True:
         command.append('--reinstall')
     previous = haproxy_operation()
     code, output = run_command(job_id, command, timeout=JOB_TIMEOUT_SECONDS, log_prefix=log_prefix)
     result = haproxy_operation()
+    if maintenance and result and result.get('phase') == 'prepared' and time.time() >= maintenance['closes_at']:
+        raise UpdatedError('The maintenance window closed before HAProxy application', code='window_closed')
     if result and result.get('id') != (previous or {}).get('id'):
         update_job(job_id, result={'haproxy': result})
     if (code or not result or result.get('id') == (previous or {}).get('id')
@@ -2109,8 +2289,10 @@ def apply_worker(
     lock_fd: int,
     plan: dict[str, Any],
     components: list[str],
+    *, maintenance=None,
 ) -> None:
     combined_log = ""
+    component_seconds: dict[str, int] = {}
     haproxy_result = None
     lock_reacquired = True
     try:
@@ -2144,8 +2326,14 @@ def apply_worker(
         source_channel = str(plan.get("source_channel"))
         image_channel = str(plan.get("image_channel"))
         expected_source_revision = reviewed_source_revision(plan, components)
-        component_seconds: dict[str, int] = {}
+        deferred_components = []
         for index, component in enumerate(components):
+            if isinstance(maintenance, dict):
+                current = unified_policy()
+                if (not current or current['id'] != maintenance.get('revision')
+                        or not maintenance_module().current(current, os_security_local_time())):
+                    deferred_components = components[index:]
+                    break
             begun = time.monotonic()
             update_job(
                 job_id,
@@ -2160,7 +2348,8 @@ def apply_worker(
                 # PID-1-owned child; it takes the lock itself before any work.
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 lock_reacquired = False
-                haproxy_result, output = apply_haproxy_patch(job_id, plan, sanitize_log(combined_log + heading))
+                options = {'maintenance': maintenance} if isinstance(maintenance, dict) else {}
+                haproxy_result, output = apply_haproxy_patch(job_id, plan, sanitize_log(combined_log + heading), **options)
                 try:
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     lock_reacquired = True
@@ -2176,6 +2365,10 @@ def apply_worker(
                 )
                 if component == 'os' and load_job(job_id, include_log=False).get('scheduled') is True:
                     command.append('--automatic-os')
+                    if isinstance(maintenance, dict):
+                        flag = '--runtime-maintenance' if maintenance.get('runtime') is True else '--maintenance-revision'
+                        command.extend([flag, str(maintenance['revision']),
+                                        '--maintenance-until', str(maintenance['closes_at'])])
                 returncode, output = run_command(
                     job_id,
                     command,
@@ -2189,8 +2382,10 @@ def apply_worker(
                 )
             component_seconds[component] = int(time.monotonic() - begun)
         reboot_required = Path("/var/run/reboot-required").exists()
+        applied_components = components[:len(component_seconds)]
         result: dict[str, Any] = {
-            "components": components,
+            "components": applied_components,
+            'deferred_components': deferred_components,
             "reboot_required": reboot_required,
             # How long each part took, for the next installation's estimate.
             "component_seconds": component_seconds,
@@ -2209,12 +2404,12 @@ def apply_worker(
                 # before the update; not whatever the metadata says.
                 branch=(str(plan["branch"]) if plan.get("branch") else None),
             )
-            validate_applied_container_digests(plan, refreshed_payload, components)
+            validate_applied_container_digests(plan, refreshed_payload, applied_components)
             refreshed = store_plan(refreshed_payload)
             report_availability(refreshed)
             result["refreshed_plan_id"] = refreshed["id"]
         except Exception as exc:  # noqa: BLE001 - update already succeeded
-            if container_components_for_selection(components):
+            if container_components_for_selection(applied_components):
                 raise
             result["recheck_error"] = str(exc)[:4096]
             try:
@@ -2230,7 +2425,12 @@ def apply_worker(
             result=result,
         )
     except Exception as exc:  # noqa: BLE001 - stored as bounded job failure
-        finish_failed(job_id, exc, combined_log)
+        if isinstance(exc, UpdatedError) and exc.code == 'window_closed' and isinstance(maintenance, dict):
+            update_job(job_id, status='completed', completed_at=utc_now(), current_component=None,
+                       result={'components': components[:len(component_seconds)],
+                               'deferred_components': components[len(component_seconds):]}, output={'log':combined_log})
+        else:
+            finish_failed(job_id, exc, combined_log)
     finally:
         try:
             ACTIVE_MARKER.unlink()
@@ -2860,6 +3060,9 @@ def service_restart_tool():
 
 
 def service_restart_record():
+    unified = unified_policy()
+    if unified:
+        return maintenance_module().restart_policy(unified)
     path = OS_SECURITY_ROOT / 'restart-policy.json'
     if not os.path.lexists(path):
         return {'enabled': False, 'time': '02:15', 'id': None, 'updated_at': 0}
@@ -3334,7 +3537,7 @@ def os_security_watch(now=None, last_answer=''):
     return reason
 
 
-def os_security_worker(job_id, lock_fd, action, policy=None):
+def os_security_worker(job_id, lock_fd, action, policy=None, *, maintenance_revision=None):
     log = ''
     try:
         if haproxy_transaction_active():
@@ -3345,6 +3548,8 @@ def os_security_worker(job_id, lock_fd, action, policy=None):
         os.chmod(ACTIVE_MARKER, 0o600)
         command = ['/usr/bin/python3', str(tool), action, '--state-root', str(OS_SECURITY_ROOT),
                    '--maintenance-lock', str(MAINTENANCE_LOCK_PATH), '--request-id', job_id]
+        if maintenance_revision is not None:
+            command.extend(['--maintenance-revision', maintenance_revision])
         if policy:
             for key in ('mode', 'interval', 'start', 'end'):
                 command.extend(['--' + key, str(policy[key])])
@@ -3378,6 +3583,8 @@ def start_os_security(request, *, scheduled=False):
               'os_security_restart_check': 'restart-check', 'os_security_restart': 'restart',
               'os_security_restart_cycle': 'restart-cycle'}[request['action']]
     policy = os_security_policy(request) if action == 'configure' else None
+    if policy and policy['mode'] == 'system' and unified_policy():
+        raise UpdatedError('Disable the unified maintenance window before returning updates to Linux', code='dependency')
     if action in {'install', 'configure', 'restart'} and request.get('confirmation') != 'SECURITY':
         raise UpdatedError('Type SECURITY to confirm OS security management')
     os_security_tool()
@@ -3443,6 +3650,7 @@ def os_security_response(request):
     result['schedule'] = os_security_schedule(result)
     result['automatic_reboot'] = auto_reboot_snapshot()
     result['service_restarts'] = service_restart_snapshot()
+    result['maintenance_window'] = unified_policy()
     result['boot_id'] = current_boot_id()
     if request.get('job_id'):
         job = load_job(identifier(request['job_id'], 'job id'))
@@ -3619,7 +3827,9 @@ def request_reboot(request: dict[str, Any], *, automatic=None, held_lock=None) -
                 "boot_id": boot_id,
             }
         if automatic is not None and not REBOOT_REQUIRED_PATH.exists():
-            if not auto_reboot_record().get('allow_service_reboot') or not service_reboot_reason():
+            unified = unified_policy() if automatic.get('unified') is True else None
+            allowed = bool(unified and unified['enabled'] and unified['id'] == automatic.get('policy_revision'))
+            if not (allowed or auto_reboot_record().get('allow_service_reboot')) or not service_reboot_reason():
                 raise UpdatedError('the operating system does not currently require a reboot', code='not_required')
             automatic.update(reason='services', restart_policy_revision=service_restart_record()['id'])
         if BACKUPD_RESTORE_ACTIVE_MARKER.exists():

@@ -64,6 +64,10 @@
       {{ (playbook_dir ~ '/../installer/os_upgrade_guard.py') | quote }}
       {{ '--automatic' if easy_ha_proxy_automatic_os_upgrade | default(false) | bool else '' }}
       --state-root {{ ((updated_state_root | default('/var/lib/easy-ha-proxy/update-web')) ~ '/os-security') | quote }}
+      {{ ('--runtime-maintenance ' ~ (easy_ha_proxy_runtime_maintenance_revision | quote) ~ ' --maintenance-until ' ~ (easy_ha_proxy_runtime_maintenance_until | string | quote))
+         if easy_ha_proxy_runtime_maintenance_revision | default('') | length > 0 else
+         ('--maintenance-revision ' ~ (easy_ha_proxy_maintenance_revision | quote) ~ ' --maintenance-until ' ~ (easy_ha_proxy_runtime_maintenance_until | string | quote))
+         if easy_ha_proxy_maintenance_revision | default('') | length > 0 else '' }}
     executable: /usr/bin/python3
   when: not ansible_check_mode
 
@@ -76,6 +80,9 @@
     update_cache: no
     upgrade: yes
     force_apt_get: yes
+  when:
+    - easy_ha_proxy_maintenance_revision | default('') | length == 0
+    - easy_ha_proxy_runtime_maintenance_revision | default('') | length == 0
 
 # A systemd/timesyncd package upgrade can leave systemd-timesyncd stopped
 # (observed on Ubuntu 24.04). Authelia refuses to start without a synchronized

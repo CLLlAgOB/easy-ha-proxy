@@ -83,7 +83,7 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
             {
                 "status": frozenset({"action", "job_id"}),
                 "set_settings": frozenset({"action", "auto_check_hours"}),
-                "set_auto_install": frozenset({"action", "enabled", "start", "end", "os"}),
+                "set_auto_install": frozenset({"action", "enabled", "start", "end", "os", "unified", "runtime"}),
                 "summary": frozenset({"action"}),
                 "start_check": frozenset(
                     {"action", "image_channel", "source_channel", "release_channel"}

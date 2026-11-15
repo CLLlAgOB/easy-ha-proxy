@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import stat
 import time
+import maintenance_window
 
 from os_security import SecurityError, assert_managed, atomic, command, local_time, maintenance_guard, read_json
 
@@ -88,10 +89,11 @@ def fire(root, lock, marker, required, unit, *, now=None):
         if owned.get('unit') != unit or not isinstance(automatic, dict) or not automatic:
             return 'obsolete'
         policy = None
+        policy_path = root / ('maintenance-reboot.json' if automatic.get('unified') is True else 'reboot-policy.json')
         result = 'deferred'
         error_text = ''
         try:
-            policy = read_policy(root / 'reboot-policy.json')
+            policy = read_policy(policy_path)
             if (owned.get('boot_id') != BOOT.read_text().strip() or policy.get('enabled') is not True
                     or policy.get('id') != automatic.get('policy_revision')
                     or (policy.get('attempt') or {}).get('window') != automatic.get('window')
@@ -99,8 +101,14 @@ def fire(root, lock, marker, required, unit, *, now=None):
                 result = 'canceled'
                 return result
             local = now or local_time()
-            anchor, key = window(local, policy['time'])
-            if key != automatic.get('window') or not 0 <= local.timestamp() - anchor.timestamp() < 3600:
+            if automatic.get('unified') is True:
+                consent = maintenance_window.read(root, read_json)
+                active = maintenance_window.current(consent, local) if consent else None
+                permitted = bool(active and consent['id'] == policy['id'] and active['key'] == automatic.get('window'))
+            else:
+                anchor, key = window(local, policy['time'])
+                permitted = key == automatic.get('window') and 0 <= local.timestamp() - anchor.timestamp() < 3600
+            if not permitted:
                 result = 'missed'
                 return result
             service_reason = automatic.get('reason') == 'services' and policy.get('allow_service_reboot', False)
@@ -119,7 +127,7 @@ def fire(root, lock, marker, required, unit, *, now=None):
                         result = 'not_required'
                         return result
                 policy['attempt'].update(state='triggered', at=time.time(), error=None)
-                atomic(root / 'reboot-policy.json', policy)
+                atomic(policy_path, policy)
                 command(['/usr/bin/systemctl', 'reboot'], timeout=30)
             result = 'triggered'
             return result
@@ -131,7 +139,7 @@ def fire(root, lock, marker, required, unit, *, now=None):
             if result != 'triggered':
                 if policy and policy.get('id') == automatic.get('policy_revision'):
                     policy['attempt'] = {'window': automatic.get('window'), 'state': result, 'at': time.time(), 'error': error_text}
-                    atomic(root / 'reboot-policy.json', policy)
+                    atomic(policy_path, policy)
                 marker.unlink(missing_ok=True)
 
 

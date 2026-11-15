@@ -195,9 +195,18 @@
 
       {# Off until turned on, per gateway. #}
       <div class="updates-setting" id="updates-auto-install-block">
+        <h3>Maintenance window</h3>
+        <label class="updates-field-label">
+          <input type="checkbox" id="updates-auto-install-unified">
+          Use one window for all software updates and their application
+        </label>
+        <label class="updates-field-label">
+          <input type="checkbox" id="updates-auto-install-runtime">
+          Allow Docker and containerd release changes with container downtime
+        </label>
         <label class="updates-field-label">
           <input type="checkbox" id="updates-auto-install">
-          Install easy-ha-proxy updates automatically
+          Enable automatic maintenance
         </label>
         <label class="updates-field-label">
           <input type="checkbox" id="updates-auto-install-os">
@@ -213,6 +222,13 @@
         <div id="updates-auto-install-status" class="result-message" role="status" aria-live="polite"></div>
         <p id="updates-auto-install-last" class="updates-hero-meta"></p>
         <p class="updates-hero-meta">
+          The unified window replaces separate managed security, service restart and reboot times. It installs project and OS updates, applies eligible HAProxy patches, restarts services and reboots only when necessary. Enable managed OS security first. Existing individual policies resume when unified maintenance is disabled.
+        </p>
+        <p class="updates-hero-meta">
+          New stages start only inside the window. An installation already in progress and restoration of stopped containers finish even after the window closes. A reboot not yet started waits for the next window. Runtime release maintenance can interrupt all Docker services, including sign-in and this panel; the host continues the job independently of your browser.
+        </p>
+        <div id="updates-separate-schedules">
+        <p class="updates-hero-meta">
           easy-ha-proxy's own updates, as the project tested them: the host, the panel and the Authelia images; operating-system packages only when the second box is ticked. HAProxy and reboots stay with you. Once a night inside these hours of the gateway's clock, the same way as the Install button; a failure or a refusal raises an alert (update.failed).
         </p>
         <p class="updates-hero-meta">
@@ -221,6 +237,7 @@
         <p class="updates-hero-meta">
           Docker live-restore reduces downtime for supported patch updates; other package updates may restart services. Package upgrades have no automatic rollback. A reboot the packages ask for is left to the automatic reboot setting on the OS security page, or to you.
         </p>
+        </div>
       </div>
     </div>
   </details>

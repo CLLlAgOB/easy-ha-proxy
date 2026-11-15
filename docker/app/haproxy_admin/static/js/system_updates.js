@@ -930,6 +930,10 @@
   // Automatic installation: on or off, and the night window it keeps to.
   let autoInstall = null;
   const AUTO_INSTALL_OUTCOMES = {
+    completed: "Unified maintenance completed",
+    deferred: "Remaining maintenance waits for the next window",
+    interrupted: "Maintenance was interrupted; review recovery status",
+    "reboot-scheduled": "Maintenance completed; reboot scheduled",
     installed: "Last automatic installation: installed",
     failed: "Last automatic installation: failed",
     refused: "Last automatic installation: refused",
@@ -957,6 +961,8 @@
     if (!box.dataset.dirty) {
       box.checked = settings.enabled === true;
       byId("updates-auto-install-os").checked = settings.os === true;
+      byId("updates-auto-install-unified").checked = settings.unified === true;
+      byId("updates-auto-install-runtime").checked = settings.runtime === true;
       start.value = String(settings.start);
       end.value = String(settings.end);
     }
@@ -972,13 +978,20 @@
     if (!box) return;
     const start = byId("updates-auto-install-start");
     const end = byId("updates-auto-install-end");
+    if (byId("updates-auto-install-unified").checked) byId("updates-auto-install-os").checked = true;
     const dirty = Boolean(autoInstall) && (
+      // Unified maintenance includes OS installation regardless of the legacy switch.
       box.checked !== (autoInstall.enabled === true)
       || byId("updates-auto-install-os").checked !== (autoInstall.os === true)
+      || byId("updates-auto-install-unified").checked !== (autoInstall.unified === true)
+      || byId("updates-auto-install-runtime").checked !== (autoInstall.runtime === true)
       || start.value !== String(autoInstall.start)
       || end.value !== String(autoInstall.end)
     );
     box.dataset.dirty = dirty ? "1" : "";
+    byId("updates-auto-install-runtime").disabled = !byId("updates-auto-install-unified").checked;
+    byId("updates-auto-install-os").disabled = byId("updates-auto-install-unified").checked;
+    byId("updates-separate-schedules").style.display = byId("updates-auto-install-unified").checked ? "none" : "";
     byId("updates-save-auto-install").disabled = !autoInstall || !dirty || requestRunning
       || start.value === end.value;
   }
@@ -989,7 +1002,9 @@
     try {
       const response = await postJson(endpoints.autoInstall, {
         enabled: box.checked,
-        os: byId("updates-auto-install-os").checked,
+        os: byId("updates-auto-install-unified").checked || byId("updates-auto-install-os").checked,
+        unified: byId("updates-auto-install-unified").checked,
+        runtime: byId("updates-auto-install-runtime").checked,
         start: Number(byId("updates-auto-install-start").value),
         end: Number(byId("updates-auto-install-end").value)
       });
@@ -1554,8 +1569,14 @@
   byId("updates-save-channels").addEventListener("click", saveChannels);
   byId("updates-save-auto-check").addEventListener("click", saveAutoCheck);
   byId("updates-save-auto-install").addEventListener("click", saveAutoInstall);
-  ["updates-auto-install", "updates-auto-install-os", "updates-auto-install-start", "updates-auto-install-end"].forEach((id) => {
-    byId(id).addEventListener("change", updateAutoInstallControls);
+  ["updates-auto-install", "updates-auto-install-os", "updates-auto-install-unified", "updates-auto-install-runtime", "updates-auto-install-start", "updates-auto-install-end"].forEach((id) => {
+    byId(id).addEventListener("change", () => {
+      if (id === "updates-auto-install-unified" && byId(id).checked && !autoInstall?.unified) {
+        byId("updates-auto-install-start").value = "1";
+        byId("updates-auto-install-end").value = "2";
+      }
+      updateAutoInstallControls();
+    });
   });
   byId("updates-auto-check").addEventListener("change", updateAutoCheckControls);
   byId("updates-reboot-confirm").addEventListener("input", updateRebootButton);

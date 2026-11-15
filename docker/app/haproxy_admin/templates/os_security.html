@@ -8,6 +8,10 @@
      data-reboot-policy-url="{{ url_for('os_security.automatic_reboot') }}" data-reboot-cancel-url="{{ url_for('system_updates.cancel_reboot') }}"
      data-restart-policy-url="{{ url_for('os_security.restart_policy') }}" data-restart-check-url="{{ url_for('os_security.restart_check') }}"
      data-restart-url="{{ url_for('os_security.restart_services') }}">
+  <p class="card" id="oss-unified-note" hidden>
+    A unified maintenance window controls installations, service restarts and necessary reboots. Change its hours on the Software updates page; individual schedule times are inactive.
+    <a href="{{ url_for('system_updates.page') }}">Software updates</a>
+  </p>
   <section class="card">
     <div class="card-header"><h2>Security updates for Linux</h2><button type="button" class="btn" id="oss-check">Check security updates</button></div>
     <p>Install security fixes from trusted Ubuntu or Debian repositories. Container images and HAProxy use their own update controls.</p>

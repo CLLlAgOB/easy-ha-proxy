@@ -97,6 +97,10 @@
     el("restart-check").disabled = restartsBlocked || recovery;
     el("restart-now").disabled = restartsBlocked || recovery || snapshot?.policy?.mode === "system" || !snapshot?.status?.restart?.services?.length;
     el("restarts-unsaved").textContent = restartsDirty ? t("Changes have not been saved.") : "";
+    el("mode").querySelector('option[value="system"]').disabled = Boolean(snapshot?.maintenance_window);
+    if (snapshot?.maintenance_window) {
+      for (const name of ["start", "end", "reboot-enabled", "reboot-time", "reboot-services", "reboot-save", "restarts-enabled", "restarts-time", "restarts-save"]) el(name).disabled = true;
+    }
   }
   function currentSettings() {
     const policy = snapshot.policy || {}, live = snapshot.live_settings, schedule = snapshot.schedule || {};
@@ -221,6 +225,7 @@
     } finally { restartsSending = false; await poll(); }
   }
   function render() {
+    el("unified-note").hidden = !snapshot?.maintenance_window;
     if (!snapshot) { controls(); return; }
     const policy = snapshot.policy || {}, status = snapshot.status || {};
     const jobs = snapshot.jobs || [], active = snapshot.active_job;
@@ -245,6 +250,12 @@
     if (drift) el("native").textContent = t("Linux update settings differ from the managed policy. Review the current settings before installing fixes.");
     el("native").classList.toggle("text-danger", Boolean(drift));
     currentSettings();
+    if (snapshot.maintenance_window) {
+      const window = snapshot.maintenance_window;
+      const label = window.enabled ? t("Unified window: {start}–{end}", {start: hour(window.start), end: hour(window.end)})
+        : t("Automatic maintenance is disabled");
+      for (const name of ["current-install", "current-reboot", "current-restarts"]) el(name).textContent = label;
+    }
     renderReboot();
     renderRestarts();
     el("timezone").textContent = snapshot.server_timezone || "—";

@@ -98,6 +98,18 @@ class ServiceRestarts(unittest.TestCase):
         self.assertTrue(self.state()['applied'])
         self.assertFalse(s.due(self.policy, self.state(), self.now, BOOT)[0])
 
+    def test_scheduled_restarts_check_consent_and_manual_restart_keeps_its_explicit_override(self):
+        self.scan.return_value = self.restart('cron.service')
+        with patch.object(s.maintenance_window, 'require', side_effect=ValueError('window closed')) as consent:
+            with self.assertRaisesRegex(ValueError, 'window closed'):
+                s.run('restart', self.root, now=self.now, maintenance_revision='a'*32)
+            consent.assert_called_once()
+            self.command.assert_not_called()
+            consent.reset_mock()
+            s.run('restart', self.root, now=self.now)
+            consent.assert_not_called()
+            self.assertEqual(self.command.call_args_list[0].args[0][0], '/usr/sbin/needrestart')
+
     def test_failures_never_supply_reboot_evidence(self):
         for failure in ('scan', 'command', 'health', 'unresolved'):
             with self.subTest(failure=failure):

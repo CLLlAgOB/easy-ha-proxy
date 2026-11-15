@@ -402,7 +402,7 @@ changes it (off, 6 h, 12 h, a day, 3 days, a week) without Ansible -- and keeps
 the `update.available` alert in step: raised when something can be installed,
 resolved by the check after it was.
 
-Automatic installation is off until a `superadmin` turns it on in the same
+With separate schedules, automatic installation is off until a `superadmin` turns it on in the same
 **Settings** fold, per gateway. It installs easy-ha-proxy's own updates --
 the host, the panel and the Authelia images, as the project tested them --
 once a night inside a window of the gateway's local hours (03:00-05:00 unless
@@ -427,6 +427,52 @@ the page shows the last outcome. A check also reports, as information only, when
 released a newer version upstream than the one the project pins -- nothing is
 pulled or re-pinned for it -- and an image counts as current only when its
 container actually runs the same layers, not merely when the tag was pulled.
+
+The **Unified maintenance window** option uses one pair of hours for automatic
+project/OS installation, eligible controlled HAProxy patches, service restarts
+and any necessary reboot. Enable managed OS security first (notification mode
+is sufficient); native Linux management must not run an independent installer.
+Select the unified option and enable automatic maintenance on the Software
+updates page. The initial suggested window is **01:00–02:00 in the server's
+time zone**. A newly saved policy starts with the next full window. Individual
+security/restart/reboot schedules are inactive while this mode is selected;
+their saved settings resume when it is deselected. Read-only update checks,
+backups, certificate renewal and GeoIP timers retain their own schedules.
+
+The cycle installs the project and OS updates, checks and installs security
+fixes, rechecks HAProxy after library changes, applies an eligible HAProxy
+patch/reload through the controlled path, restarts services and finally
+requests a reboot only when Linux or verified deferred services require it.
+It does not perform a distribution upgrade or an unsupported HAProxy provider
+migration. A cycle's outcome is persistent, so a broker restart does not repeat
+an installation that already ran that night.
+
+Every new stage rechecks the window and consent. At 02:00 no new stage starts:
+an active package installation and restoration of stopped containers finish,
+but a reboot not yet begun waits for the next window. Even the final reboot
+executor rechecks the policy, clock, APT locks and need for reboot. A short
+window can therefore leave installation/application pending for the next night;
+the interface reports this as deferred rather than fully applied.
+
+The additional **Allow Docker and containerd release changes with container
+downtime** option authorizes cold runtime upgrades. Packages are downloaded
+before downtime, running containers and configuration backups are recorded,
+and at least ten minutes must remain before starting a release change. The
+host systemd job stops the running containers, upgrades packages, restarts
+exactly that set and verifies their running/health states. Containers that
+were stopped by the operator are left stopped. All Docker services on this
+host, including sign-in and the panel, may be unavailable; closing the browser
+does not cancel the host job. Configuration backups are not VM/data snapshots,
+and runtime package downgrades are not attempted automatically.
+
+An unsuccessful runtime upgrade still attempts to restore containers and
+records a failure. Interrupted/failed recovery blocks the next automatic
+cycle for review. To restore the recorded container set without installing or
+downgrading packages, after resolving any package-manager problem run:
+
+```bash
+sudo python3 /opt/easy-ha-proxy/source/installer/os_upgrade_guard.py --recover-runtime
+```
 
 Every page's footer names the host build and the panel build -- each as its
 commit's time and short hash -- and warns when the panel was built from other

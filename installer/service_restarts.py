@@ -14,6 +14,7 @@ import time
 
 from os_security import ROOT, LOCK, SecurityError, assert_managed, atomic, command, local_time, maintenance_guard, platform, read_json, restart_status
 from auto_reboot import package_locks
+import maintenance_window
 
 SERVICE_RESTART_PROTOCOL = 1
 TIME = re.compile(r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
@@ -38,6 +39,9 @@ EXCLUSIONS = ("$nrconf{override_rc}{qr(^(haproxy|docker|containerd|easy-ha-proxy
 
 
 def policy(root):
+    unified = maintenance_window.read(root, read_json)
+    if unified:
+        return maintenance_window.restart_policy(unified)
     path = root / 'restart-policy.json'
     if not path.exists():
         return {'enabled': False, 'time': '02:15', 'id': None, 'updated_at': 0}
@@ -174,12 +178,12 @@ def fallback_services(root, *, now=None, restart=None):
     return sorted(set(services))
 
 
-def run(action, root, *, now=None):
+def run(action, root, *, now=None, maintenance_revision=None):
     platform()
-    return execute(action, root, now=now)
+    return execute(action, root, now=now, maintenance_revision=maintenance_revision)
 
 
-def execute(action, root, *, now=None):
+def execute(action, root, *, now=None, maintenance_revision=None):
     managed = read_json(root / 'policy.json') if (root / 'policy.json').exists() else {}
     if action != 'restart-check':
         assert_managed(managed)
@@ -216,6 +220,8 @@ def execute(action, root, *, now=None):
             # Preserve native and operator exclusions; add protection for the
             # network and the workers that currently own maintenance custody.
             if automatic:
+                if maintenance_revision is not None:
+                    maintenance_window.require(root, read_json, maintenance_revision, local_time())
                 print('EHP-PROGRESS phase=playbook', flush=True)
                 with tempfile.TemporaryDirectory(prefix='service-restarts-', dir=root) as temporary:
                     config = Path(temporary) / 'needrestart.conf'
@@ -256,6 +262,7 @@ def main():
     parser.add_argument('--state-root', type=Path, default=ROOT)
     parser.add_argument('--maintenance-lock', type=Path, default=LOCK)
     parser.add_argument('--request-id', default='')
+    parser.add_argument('--maintenance-revision')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Service restarts require root')
@@ -267,7 +274,8 @@ def main():
             args.maintenance_lock.parent.mkdir(parents=True, exist_ok=True)
             with os.fdopen(os.open(args.maintenance_lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'w') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                result = run(args.action, args.state_root)
+                options = {'maintenance_revision': args.maintenance_revision} if args.maintenance_revision is not None else {}
+                result = run(args.action, args.state_root, **options)
         print(json.dumps({'ok': True, 'request_id': args.request_id, **result}), flush=True)
         return 0
     except (SecurityError, OSError, ValueError, subprocess.SubprocessError) as error:

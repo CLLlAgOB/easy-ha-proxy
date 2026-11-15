@@ -362,6 +362,17 @@ class SecurityExecution(unittest.TestCase):
         self.assertEqual(argv, ['/usr/bin/unattended-upgrade', '--verbose', '--minimal-upgrade-steps'])
         self.assertIn('APT_CONFIG', self.command.call_args.kwargs['env'])
 
+    def test_scheduled_install_checks_its_consent_but_explicit_manual_install_can_override_the_window(self):
+        with patch.object(s.maintenance_window, 'require', side_effect=ValueError('window closed')) as consent:
+            with self.assertRaisesRegex(ValueError, 'window closed'):
+                s.run('install', self.root, maintenance_revision='a'*32)
+            consent.assert_called_once()
+            self.command.assert_not_called()
+            consent.reset_mock()
+            s.run('install', self.root)
+            consent.assert_not_called()
+            self.assertEqual(self.command.call_args.args[0][0], '/usr/bin/unattended-upgrade')
+
     def test_daily_cycle_installs_only_in_the_selected_hour_and_persists_failed_attempt(self):
         self.policy.update(mode='daily', start=2, end=3)
         (self.root / 'policy.json').write_text(json.dumps({'phase': 'ready', 'policy': self.policy}))

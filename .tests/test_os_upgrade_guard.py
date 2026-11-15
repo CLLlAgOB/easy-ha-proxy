@@ -39,6 +39,14 @@ class PackageSafety(unittest.TestCase):
             self.assertEqual(argv[0], '/source with spaces/ansible/../installer/os_upgrade_guard.py')
             self.assertEqual('--automatic' in argv, automatic)
             self.assertEqual(argv[-2:], ['--state-root', '/state with spaces/os-security'])
+        for runtime in (False, True):
+            command = environment.from_string(task['ansible.builtin.script']['cmd']).render(
+                playbook_dir='/source with spaces/ansible', easy_ha_proxy_automatic_os_upgrade=True,
+                easy_ha_proxy_maintenance_revision='a'*32, easy_ha_proxy_runtime_maintenance_until=123456,
+                easy_ha_proxy_runtime_maintenance_revision='a'*32 if runtime else '')
+            argv = shlex.split(command)
+            self.assertIn('--runtime-maintenance' if runtime else '--maintenance-revision', argv)
+            self.assertEqual(argv[-2:], ['--maintenance-until', '123456'])
 
     def test_haproxy_holds_apply_on_every_supported_distribution(self):
         task = yaml.safe_load((ROOT / 'ansible/roles/haproxy/tasks/protection.yml').read_text())[0]
@@ -156,8 +164,10 @@ class ScheduledWorker(unittest.TestCase):
         broker = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = broker
         spec.loader.exec_module(broker)
-        for scheduled in (False, True):
-            with self.subTest(scheduled=scheduled), tempfile.TemporaryDirectory() as temporary:
+        for scheduled, maintenance in ((False, None), (True, None),
+                                       (True, {'revision':'a'*32, 'closes_at':123456, 'runtime':False}),
+                                       (True, {'revision':'a'*32, 'closes_at':123456, 'runtime':True})):
+            with self.subTest(scheduled=scheduled, maintenance=maintenance), tempfile.TemporaryDirectory() as temporary:
                 plan = {'source_channel': 'local', 'image_channel': 'latest', 'components': []}
                 with patch.object(broker, 'ACTIVE_MARKER', Path(temporary) / 'active'), \
                      patch.object(broker.time, 'sleep'), \
@@ -171,11 +181,17 @@ class ScheduledWorker(unittest.TestCase):
                      patch.object(broker, 'update_job'), \
                      patch.object(broker, 'release_operation'), \
                      patch.object(broker, 'request_self_restart_if_needed'), \
+                     patch.object(broker, 'unified_policy', return_value={'id':'a'*32}), \
+                     patch.object(broker, 'maintenance_module') as clock, \
                      patch.object(broker, 'finish_failed') as failed, \
                      patch.object(broker, 'run_command', return_value=(0, '')) as run:
-                    broker.apply_worker('a'*32, 7, plan, ['os'])
+                    clock.return_value.current.return_value = True
+                    broker.apply_worker('a'*32, 7, plan, ['os'], maintenance=maintenance)
                 failed.assert_not_called()
                 self.assertEqual('--automatic-os' in run.call_args.args[1], scheduled)
+                if maintenance:
+                    self.assertIn('--runtime-maintenance' if maintenance['runtime'] else '--maintenance-revision', run.call_args.args[1])
+                    self.assertEqual(run.call_args.args[1][-2:], ['--maintenance-until', '123456'])
 
 
 if __name__ == '__main__':

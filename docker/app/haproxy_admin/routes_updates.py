@@ -77,7 +77,7 @@ AUDITED_ACTIONS = {
     ),
     "start_apply": ("update.apply", ("plan_id", "components")),
     "set_settings": ("update.settings", ("auto_check_hours",)),
-    "set_auto_install": ("update.auto_install", ("enabled", "start", "end", "os")),
+    "set_auto_install": ("update.auto_install", ("enabled", "start", "end", "os", "unified", "runtime")),
     "reboot": ("system.reboot", ("expected_boot_id",)),
     "cancel_reboot": ("system.reboot_cancel", ("expected_boot_id",)),
     "prepare_haproxy_migration": ("update.haproxy_prepare", ("target_branch",)),
@@ -250,9 +250,9 @@ def save_auto_install():
     """Whether easy-ha-proxy's own updates install themselves, whether the
     operating system's packages go with them, and in which hours of the
     night; the broker refuses anything else as well."""
-    payload = _json_payload({"enabled", "start", "end"}, {"os"})
+    payload = _json_payload({"enabled", "start", "end"}, {"os", "unified", "runtime"})
     enabled, start, end = payload["enabled"], payload["start"], payload["end"]
-    if not isinstance(enabled, bool) or not isinstance(payload.get("os", False), bool):
+    if not isinstance(enabled, bool) or any(type(payload.get(key, False)) is not bool for key in ('os', 'unified', 'runtime')):
         abort(400, description="enabled must be true or false")
     for value in (start, end):
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23:
@@ -262,8 +262,9 @@ def save_auto_install():
     request_payload = {"action": "set_auto_install", "enabled": enabled, "start": start, "end": end}
     # A page loaded before the switch existed does not send it; the broker
     # then keeps the saved value instead of turning it off.
-    if "os" in payload:
-        request_payload["os"] = payload["os"]
+    for key in ('os', 'unified', 'runtime'):
+        if key in payload:
+            request_payload[key] = payload[key]
     return _call_daemon(request_payload)
 
 

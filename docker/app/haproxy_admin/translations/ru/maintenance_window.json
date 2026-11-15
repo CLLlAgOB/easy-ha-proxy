@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Maintenance window": "Окно обслуживания",
+    "Enable automatic maintenance": "Включить автоматическое обслуживание",
+    "Use one window for all software updates and their application": "Единое окно для всех обновлений ПО и их применения",
+    "Allow Docker and containerd release changes with container downtime": "Разрешить переходы Docker и containerd между ветками с простоем контейнеров",
+    "The unified window replaces separate managed security, service restart and reboot times. It installs project and OS updates, applies eligible HAProxy patches, restarts services and reboots only when necessary. Enable managed OS security first. Existing individual policies resume when unified maintenance is disabled.": "Единое окно заменяет отдельное время управляемых обновлений безопасности, перезапуска служб и перезагрузки. В нём устанавливаются обновления проекта и ОС, применяются поддерживаемые исправления HAProxy, перезапускаются службы и при необходимости сервер. Сначала включите управление безопасностью ОС. После отключения единого окна снова действуют отдельные расписания.",
+    "New stages start only inside the window. An installation already in progress and restoration of stopped containers finish even after the window closes. A reboot not yet started waits for the next window. Runtime release maintenance can interrupt all Docker services, including sign-in and this panel; the host continues the job independently of your browser.": "Новые этапы запускаются только в пределах окна. Начатая установка и восстановление остановленных контейнеров завершаются и после его закрытия. Ещё не начатая перезагрузка ждёт следующего окна. Переход Docker между ветками может прервать все контейнерные сервисы, включая вход и эту панель; задание на хосте продолжается независимо от браузера.",
+    "A unified maintenance window controls installations, service restarts and necessary reboots. Change its hours on the Software updates page; individual schedule times are inactive.": "Установкой, перезапуском служб и необходимой перезагрузкой управляет единое окно обслуживания. Его время задаётся на странице обновлений ПО; отдельное время расписаний не действует.",
+    "Unified window: {start}–{end}": "Единое окно: {start}–{end}",
+    "Unified software maintenance": "Единое обслуживание ПО",
+    "Updates, application, service restarts and necessary reboot; new stages only inside the window": "Обновления, применение, перезапуск служб и необходимая перезагрузка; новые этапы только внутри окна",
+    "Unified maintenance completed": "Единое обслуживание завершено",
+    "Remaining maintenance waits for the next window": "Оставшееся обслуживание перенесено на следующее окно",
+    "Maintenance was interrupted; review recovery status": "Обслуживание прервано; проверьте состояние восстановления",
+    "Maintenance completed; reboot scheduled": "Обслуживание завершено; перезагрузка запланирована",
+    "Enable managed OS security before enabling the unified maintenance window": "Перед включением единого окна включите управление безопасностью ОС",
+    "Disable the unified maintenance window before returning updates to Linux": "Перед возвратом управления обновлениями Linux отключите единое окно обслуживания",
+    "Automatic maintenance is disabled": "Автоматическое обслуживание выключено"
+  }
+}

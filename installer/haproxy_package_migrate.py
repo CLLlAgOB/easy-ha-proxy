@@ -1363,7 +1363,7 @@ Pin-Priority: 100
         self.state['rollback_verified'] = True
         self.finish('rolled_back')
 
-    def apply(self, identifier, *, exercise_rollback=False):
+    def apply(self, identifier, *, exercise_rollback=False, before_change=None):
         with self.locked():
             self.load(identifier)
             if self.state['phase'] != 'prepared':
@@ -1381,6 +1381,8 @@ Pin-Priority: 100
             if packages.get('libssl-awslc') != self.state['tls_baseline']:
                 raise MigrationError('The TLS dependency changed after preparation')
             self.health()
+            if before_change is not None:
+                before_change()
             self.arm('apply')
             _, watchdog = self.units()
             try:
@@ -1554,6 +1556,9 @@ def main(argv=None):
     parser.add_argument('--expected-version')
     parser.add_argument('--reinstall', action='store_true')
     parser.add_argument('--web-progress', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--maintenance-revision')
+    parser.add_argument('--maintenance-until', type=float)
+    parser.add_argument('--maintenance-state-root', type=Path, default=Path('/var/lib/easy-ha-proxy/update-web/os-security'))
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error('This operator command must run as root')
@@ -1583,9 +1588,18 @@ def main(argv=None):
                     print('EHP-PROGRESS phase=' + value, flush=True)
 
             engine.observer = progress
+            def check_window():
+                import maintenance_window
+                from os_security import read_json, local_time
+                value = maintenance_window.read(args.maintenance_state_root, read_json)
+                if (not value or value['id'] != args.maintenance_revision
+                        or not maintenance_window.current(value, local_time())
+                        or args.maintenance_until is None or time.time() >= args.maintenance_until):
+                    raise MigrationError('The unified maintenance window closed before HAProxy application')
             with engine.locked():
                 prepared = engine.prepare_patch(args.expected_version, reinstall=args.reinstall)
-                result = engine.apply(prepared['id'], exercise_rollback=args.exercise_rollback)
+                options = {'before_change': check_window} if args.maintenance_revision is not None else {}
+                result = engine.apply(prepared['id'], exercise_rollback=args.exercise_rollback, **options)
         elif not args.id:
             parser.error('--id is required')
         elif args.action == 'apply':

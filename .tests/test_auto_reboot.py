@@ -72,6 +72,32 @@ class RebootExecutor(unittest.TestCase):
         self.fire()
         self.assertEqual(self.command.call_count, 1)
 
+    def test_unified_timer_rechecks_the_window_and_preserves_the_individual_policy(self):
+        now = self.now.replace(hour=1, minute=59)
+        self.policy.update(time='01:00', attempt={'window':'2026-11-08','state':'scheduled'})
+        (self.root / 'maintenance-reboot.json').write_text(json.dumps(self.policy))
+        owned = {**self.owned, 'automatic': {**self.owned['automatic'], 'unified':True, 'window':'2026-11-08'}}
+        self.marker.write_text(json.dumps(owned))
+        consent = {'enabled':True, 'id':'b'*32, 'start':1, 'end':2, 'updated_at':1}
+        original = (self.root / 'reboot-policy.json').read_text()
+        with patch.object(r.maintenance_window, 'read', return_value=consent):
+            self.assertEqual(self.fire(now=now.replace(hour=2, minute=0)), 'missed')
+        self.command.assert_not_called()
+        self.assertEqual((self.root / 'reboot-policy.json').read_text(), original)
+        self.marker.write_text(json.dumps(owned))
+        (self.root / 'maintenance-reboot.json').write_text(json.dumps(self.policy))
+        with patch.object(r.maintenance_window, 'read', return_value=consent):
+            self.assertEqual(self.fire(now=now), 'triggered')
+        self.command.assert_called_once()
+
+    def test_revoked_unified_consent_never_reboots_even_with_a_valid_timer(self):
+        self.policy.update(time='01:00', attempt={'window':'2026-11-08','state':'scheduled'})
+        (self.root / 'maintenance-reboot.json').write_text(json.dumps(self.policy))
+        self.marker.write_text(json.dumps({**self.owned, 'automatic': {**self.owned['automatic'], 'unified':True, 'window':'2026-11-08'}}))
+        with patch.object(r.maintenance_window, 'read', return_value={'enabled':False, 'id':'b'*32, 'start':1, 'end':2, 'updated_at':1}):
+            self.assertEqual(self.fire(now=self.now.replace(hour=1)), 'missed')
+        self.command.assert_not_called()
+
     def test_disabled_replaced_or_canceled_policy_and_previous_boot_never_reboot(self):
         for change in ({'enabled': False}, {'id': 'c'*32}, {'attempt': {'window':'2026-11-08 03:00','state':'canceled'}}, {'old_boot':True}):
             with self.subTest(change=change):

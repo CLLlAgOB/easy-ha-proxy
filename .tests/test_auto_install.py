@@ -209,9 +209,9 @@ class ThePage(unittest.TestCase):
         self.assertIn("HAProxy and reboots stay with you.", template)
         self.assertIn('id="updates-auto-install-os"', template)
         routes = (APP / "routes_updates.py").read_text(encoding="utf-8")
-        self.assertIn('"set_auto_install": ("update.auto_install", ("enabled", "start", "end", "os"))', routes)
+        self.assertIn('"set_auto_install": ("update.auto_install", ("enabled", "start", "end", "os", "unified", "runtime"))', routes)
         script = (APP / "static/js/system_updates.js").read_text(encoding="utf-8")
-        self.assertIn('os: byId("updates-auto-install-os").checked', script)
+        self.assertIn('byId("updates-auto-install-os").checked', script)
 
 
 if __name__ == "__main__":
