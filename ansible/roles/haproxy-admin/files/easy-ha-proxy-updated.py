@@ -2170,8 +2170,10 @@ def auto_check_loop() -> None:
             continue
         answer = ''
         try:
-            if not unified and time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
-                answer = os_security_tick()
+            if time.time() >= started + AUTO_CHECK_DELAY_SECONDS:
+                # The unified window owns installations, not checks: the
+                # check keeps running on its interval and after each boot.
+                answer = os_security_check_tick() if unified else os_security_tick()
         except Exception:
             answer = 'failed'
             LOG.exception('Scheduled OS security maintenance failed')
@@ -3478,7 +3480,10 @@ def os_security_notifications(snapshot):
                             summary='OS security updates are available', detail=f'{count} package(s) require a security update.')
         restart = status.get('restart') or {}
         if not restart.get('error'):
-            _ALERTS.observe("os.security_restart", 'host', active=bool(restart.get('reboot_required') or restart.get('services')),
+            pending = bool(restart.get('reboot_required') or restart.get('services'))
+            if restart_check_predates_boot(restart):
+                pending = False  # the reboot since restarted everything
+            _ALERTS.observe("os.security_restart", 'host', active=pending,
                             summary=('Security updates require a server reboot' if restart.get('reboot_required')
                                      else 'Some services require a restart after security updates'),
                             detail=', '.join(restart.get('services') or []))
@@ -3664,6 +3669,61 @@ def os_security_tick(now=None):
     return 'started'
 
 
+def boot_started_at() -> float:
+    """When this boot began (btime in /proc/stat), 0 when it cannot be read."""
+
+    try:
+        for line in Path("/proc/stat").read_text(encoding="ascii").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except (OSError, ValueError, IndexError, UnicodeError):
+        pass
+    return 0.0
+
+
+def restart_check_predates_boot(restart: Any) -> bool:
+    """Whether a restart finding was made before the current boot.
+
+    A reboot restarts every service and activates the installed kernel, so
+    what such a check listed no longer holds. Shown as current, it kept "some
+    services require a restart" up all day after the night's reboot.
+    """
+
+    if not isinstance(restart, dict):
+        return False
+    checked = restart.get("checked_at")
+    boot = boot_started_at()
+    return type(checked) in (int, float) and boot > 0 and checked < boot
+
+
+def os_security_check_tick(now=None):
+    """Checks only, for the unified window: installing waits for the window.
+
+    Due on the policy's interval, and at once (after the startup delay) when
+    the last finding predates this boot. A failed check waits 30 minutes.
+    """
+
+    snapshot = os_security_snapshot()
+    policy, status = snapshot['policy'], snapshot.get('status') or {}
+    if not snapshot['available'] or snapshot['recovery_required'] or policy['mode'] == 'system':
+        return 'disabled'
+    stamp = (now or os_security_local_time()).timestamp()
+    last_attempt = float(status.get('last_attempt') or 0)
+    stale = restart_check_predates_boot(status.get('restart'))
+    due = stamp - float(status.get('last_success') or 0) >= policy['interval'] * 3600
+    if stale and last_attempt < boot_started_at():
+        due = True
+    elif stamp - last_attempt < 1800:
+        return 'waiting'
+    if not due and not stale:
+        return 'waiting'
+    try:
+        start_os_security({'action': 'os_security_check'}, scheduled=True)
+    except UpdatedError as error:
+        return error.code
+    return 'started'
+
+
 def os_security_response(request):
     result = {'ok': True, **os_security_snapshot()}
     result['jobs'] = [job for job in list_jobs() if job.get('operation', '').startswith('security-')][:10]
@@ -3678,6 +3738,9 @@ def os_security_response(request):
     result['service_restarts'] = service_restart_snapshot()
     result['maintenance_window'] = unified_policy()
     result['boot_id'] = current_boot_id()
+    status = result.get('status')
+    if isinstance(status, dict) and restart_check_predates_boot(status.get('restart')):
+        status['restart'] = {**status['restart'], 'before_boot': True}
     if request.get('job_id'):
         job = load_job(identifier(request['job_id'], 'job id'))
         if not job.get('operation', '').startswith('security-'):

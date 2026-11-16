@@ -21,6 +21,8 @@
     "Enable managed OS security before enabling the unified maintenance window": "Перед включением единого окна включите управление безопасностью ОС",
     "Disable the unified maintenance window before returning updates to Linux": "Перед возвратом управления обновлениями Linux отключите единое окно обслуживания",
     "Automatic maintenance is disabled": "Автоматическое обслуживание выключено",
-    "Automatic maintenance is disabled. With the unified window selected, the separate schedules for security installation, service restarts and reboots are paused as well, so nothing runs automatically.": "Автоматическое обслуживание выключено. При выбранном общем окне отдельные расписания установки исправлений безопасности, перезапуска служб и перезагрузки тоже приостановлены, поэтому автоматически ничего не выполняется."
+    "Automatic maintenance is disabled. With the unified window selected, the separate schedules for security installation, service restarts and reboots are paused as well, so nothing runs automatically.": "Автоматическое обслуживание выключено. При выбранном общем окне отдельные расписания установки исправлений безопасности, перезапуска служб и перезагрузки тоже приостановлены, поэтому автоматически ничего не выполняется.",
+    "The last check was made before the server rebooted, and the reboot restarted every service. A new check runs shortly after startup.": "Последняя проверка была до перезагрузки сервера, а перезагрузка перезапустила все службы. Новая проверка выполняется вскоре после запуска.",
+    "The last service restart run was before the server rebooted, and the reboot restarted every service.": "Последний перезапуск служб был до перезагрузки сервера, а перезагрузка перезапустила все службы."
   }
 }

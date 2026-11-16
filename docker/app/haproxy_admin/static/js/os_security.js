@@ -205,12 +205,16 @@
     el("restarts-next").textContent = restarts.next_window ? date(restarts.next_window) : "—";
     el("restarts-last").textContent = date(status.last_attempt);
     el("restarts-done").textContent = status.restarted ? String(status.restarted.length) : "—";
+    // A run from an earlier boot describes services the reboot has
+    // restarted since; its lists are history, not work left to do.
+    const earlierBoot = Boolean(status.boot_id && snapshot.boot_id && status.boot_id !== snapshot.boot_id);
     el("restarts-state").textContent = t(restarts.error || status.error || (!restarts.available ? "Update host services before managing service restarts"
       : status.state === "running" ? "Service restart maintenance is running."
+        : earlierBoot ? "The last service restart run was before the server rebooted, and the reboot restarted every service."
         : status.unresolved?.length ? "Some services remain unresolved. Automatic reboot fallback is blocked."
           : status.deferred?.length ? "Some services remain deliberately deferred. Review the service list and reboot policy."
             : status.state === "ready" ? "The last service restart run was verified." : "No service restart maintenance has run yet."));
-    el("restarts-state").classList.toggle("text-danger", Boolean(restarts.error || status.error || status.unresolved?.length));
+    el("restarts-state").classList.toggle("text-danger", Boolean(restarts.error || status.error || (!earlierBoot && status.unresolved?.length)));
   }
   async function changeRestarts(body) {
     if (restartsSending || restartsPending) return;
@@ -270,15 +274,15 @@
     el("package-note").textContent = t(status.state === "unknown" ? "The listed packages are from an earlier check; current security status is unknown."
       : status.package_count > 200 ? "Showing the first 200 security packages. The total includes all packages." : "");
     const restart = status.restart;
-    el("restart").textContent = t(!restart ? "Not checked yet." : restart.error || (restart.reboot_required
+    el("restart").textContent = t(!restart ? "Not checked yet." : restart.before_boot ? "The last check was made before the server rebooted, and the reboot restarted every service. A new check runs shortly after startup." : restart.error || (restart.reboot_required
       ? "A server reboot is required to activate installed updates." : restart.services?.length
         ? "Some services still use replaced files. Apply their controlled restart." : "No pending restart was found in the last check."))
       // An unknown kernel state no longer stops service restarts; it is shown as its own sentence.
-      + (restart && !restart.error && restart.kernel_warning ? " " + t(restart.kernel_warning) : "");
+      + (restart && !restart.before_boot && !restart.error && restart.kernel_warning ? " " + t(restart.kernel_warning) : "");
     const actionLabels = {automatic: "Automatic restart in the maintenance window", protected: "Controlled maintenance required",
       deferred: "Deferred; scheduled reboot only with explicit permission", unknown: "Review this service before restarting it",
       unresolved: "Restart remains unresolved; automatic reboot fallback is blocked"};
-    el("services").replaceChildren(...(restart?.services || []).map((service) => {
+    el("services").replaceChildren(...(restart?.before_boot ? [] : restart?.services || []).map((service) => {
       const row = document.createElement("tr"), name = document.createElement("td"), action = document.createElement("td");
       name.textContent = service;
       const kind = snapshot.service_restarts?.status?.unresolved?.includes(service) ? "unresolved" : restart.details?.find((item) => item.service === service)?.kind;
