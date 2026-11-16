@@ -80,12 +80,15 @@ class TrustedSource(unittest.TestCase):
     def test_authelia_names_require_success_and_never_use_client_headers(self):
         template = (ROOT / "ansible/roles/haproxy/templates/haproxy.cfg.j2").read_text(encoding="utf-8")
         rules = [r for r in template.splitlines() if "set-var(txn.log_auth_user)" in r]
-        self.assertEqual(len(rules), 3)
-        for rule in rules[:2]:
+        # Protected sites, /access_granted and the bare portal opened by a
+        # signed-in visitor take the name from Authelia's answer; the last
+        # one is the panel's own.
+        self.assertEqual(len(rules), 4)
+        for rule in rules[:3]:
             self.assertIn("var(req.auth_response_header.remote_user)", rule)
             self.assertIn("{ var(txn.auth_response_successful) -m bool }", rule)
             self.assertNotIn("req.hdr(", rule)
-        self.assertIn("AuthOK !admin_control_plane_probe", rules[2])
+        self.assertIn("AuthOK !admin_control_plane_probe", rules[3])
 
 
 @unittest.skipIf(sys.platform == "win32", "the panel needs POSIX")
