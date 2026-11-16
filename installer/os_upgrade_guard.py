@@ -151,10 +151,16 @@ def run_upgrade(argv):
 
 
 def container_state(identity):
-    template = ('{"id":{{json .Id}},"name":{{json .Name}},"status":{{json .State.Status}},'
-                '"paused":{{json .State.Paused}},"health":'
-                '{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}}')
-    value = json.loads(run(['/usr/bin/docker', 'inspect', '--format', template, identity]))
+    # The whole record, read in Python. A Go template that tests
+    # .State.Health fails outright on Docker 29 for a container without a
+    # health check ("map has no entry for key"), and one such container
+    # refused every OS installation of the night.
+    records = json.loads(run(['/usr/bin/docker', 'inspect', '--type', 'container', identity]))
+    record = records[0] if isinstance(records, list) and len(records) == 1 and isinstance(records[0], dict) else {}
+    state = record.get('State') if isinstance(record.get('State'), dict) else {}
+    health = state.get('Health') if isinstance(state.get('Health'), dict) else None
+    value = {'id': record.get('Id'), 'name': record.get('Name'), 'status': state.get('Status'),
+             'paused': state.get('Paused') is True, 'health': health.get('Status') if health else None}
     if not re.fullmatch('[0-9a-f]{64}', str(value.get('id', ''))):
         raise UpgradeRefused('A container identity could not be verified')
     return value
