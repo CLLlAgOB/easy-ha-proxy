@@ -486,6 +486,10 @@ frontend fe_https
 {% if aut_domain is defined and authelia_enabled %}
     acl host_authelia hdr(host) -i {{ aut_domain }}
     acl path_access_granted path -i /access_granted
+    {# The bare portal, opened without a return link: the address of someone
+       already signed in is authorized there too (see the rules below). #}
+    acl path_portal_root path /
+    acl portal_has_query query -m found
 {% endif %}
 
 {% set all_hosts = [] %}
@@ -1057,6 +1061,16 @@ frontend fe_https
     http-request deny status 503 if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool }
     http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
     http-request set-var(txn.log_auth_user) var(req.auth_response_header.remote_user),bytes(0,256),url_enc if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+    {# Signing in on the portal itself lands on /access_granted (Authelia's
+       default redirection), but a visitor who is already signed in only saw
+       "you are signed in" and their address -- a new one after a network
+       change -- stayed unauthorized. The session is asked about as if for
+       /access_granted, the one portal path Authelia's rules allow; a signed-in
+       visitor is sent there, everyone else gets the portal as before. #}
+    http-request set-header X-Forwarded-URI /access_granted if host_authelia path_portal_root !portal_has_query METH_GET
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if host_authelia path_portal_root !portal_has_query METH_GET
+    http-request set-header X-Forwarded-URI / if host_authelia path_portal_root !portal_has_query METH_GET
+    http-request redirect location /access_granted code 302 if host_authelia path_portal_root !portal_has_query METH_GET { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
 {% endif %}
 {% endif %}
 
