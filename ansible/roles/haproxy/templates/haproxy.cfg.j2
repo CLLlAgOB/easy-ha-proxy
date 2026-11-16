@@ -1065,17 +1065,12 @@ frontend fe_https
        default redirection), but a visitor who is already signed in only saw
        "you are signed in" and their address -- a new one after a network
        change -- stayed unauthorized. The session is asked about as if for
-       /access_granted, the one portal path Authelia's rules allow, and a
-       signed-in visitor's address is authorized right here. The portal still
-       opens as it is: redirecting to /access_granted made its own page --
-       the way to the settings, the second-factor methods -- unreachable. #}
+       /access_granted, the one portal path Authelia's rules allow; a signed-in
+       visitor is sent there, everyone else gets the portal as before. #}
     http-request set-header X-Forwarded-URI /access_granted if host_authelia path_portal_root !portal_has_query METH_GET
-    {# No headers are copied into the portal's own request: the answer is
-       read from the variables only. #}
-    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * - - if host_authelia path_portal_root !portal_has_query METH_GET
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if host_authelia path_portal_root !portal_has_query METH_GET
     http-request set-header X-Forwarded-URI / if host_authelia path_portal_root !portal_has_query METH_GET
-    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_portal_root !portal_has_query METH_GET { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
-    http-request set-var(txn.log_auth_user) var(req.auth_response_header.remote_user),bytes(0,256),url_enc if host_authelia path_portal_root !portal_has_query METH_GET { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+    http-request redirect location /access_granted code 302 if host_authelia path_portal_root !portal_has_query METH_GET { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
 {% endif %}
 {% endif %}
 

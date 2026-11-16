@@ -39,9 +39,7 @@ class TheMark(unittest.TestCase):
 
     def test_nothing_else_writes_the_table(self):
         template = (ROOT / "ansible/roles/haproxy/templates/haproxy.cfg.j2").read_text(encoding="utf-8")
-        # Protected sites, the portal's /access_granted, and the bare portal
-        # opened by someone already signed in -- each behind a signed-in user.
-        self.assertEqual(template.count("src_inc_gpc0(tbl_ip_auth)"), 3)
+        self.assertEqual(template.count("src_inc_gpc0(tbl_ip_auth)"), 2)
 
     def test_access_is_unchanged(self):
         # Only the mark moved: an allowed request is still let through.

@@ -81,26 +81,25 @@ class AccessGateTemplateTests(unittest.TestCase):
         # Opening aut.<domain> while already signed in only showed "you are
         # signed in"; a changed address stayed unauthorized. The session is
         # asked about as /access_granted, the one portal path Authelia's
-        # rules allow, and the address is authorized in place. No redirect:
-        # sending the visitor to /access_granted hid the portal's settings.
+        # rules allow, and a signed-in visitor is sent there.
         condition = "host_authelia path_portal_root !portal_has_query METH_GET"
         self.assertIn("acl path_portal_root path /\n", TEMPLATE)
         self.assertIn("acl portal_has_query query -m found\n", TEMPLATE)
         override = TEMPLATE.index(f"set-header X-Forwarded-URI /access_granted if {condition}")
-        check = TEMPLATE.index(f"lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * - - if {condition}")
+        check = TEMPLATE.index(f"lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * "
+                               f"remote-user,remote-groups,remote-name,remote-email - if {condition}")
         restore = TEMPLATE.index(f"set-header X-Forwarded-URI / if {condition}")
         redirect = TEMPLATE.index(
-            f"set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if {condition} "
+            f"redirect location /access_granted code 302 if {condition} "
             "{ var(txn.auth_response_successful) -m bool } "
             "{ var(req.auth_response_header.remote_user) -m len gt 0 }")
         self.assertLess(override, check)
         self.assertLess(check, restore)
         self.assertLess(restore, redirect)
-        # Nobody is denied or redirected on this path: signed in or not, the
-        # portal opens as it is.
-        block = TEMPLATE[override:TEMPLATE.index("{% endif %}", redirect)]
+        # A visitor who is not signed in gets the portal: nothing denies or
+        # redirects to the login page on this path.
+        block = TEMPLATE[override:redirect]
         self.assertNotIn("http-request deny", block)
-        self.assertNotIn("http-request redirect", block)
         self.assertNotIn("auth_response_location", block)
 
     def test_web_save_auto_adds_and_activates_gate_rule(self) -> None:
