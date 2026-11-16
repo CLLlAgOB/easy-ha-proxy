@@ -153,7 +153,9 @@ class TheWatch(unittest.TestCase):
     def test_the_schedule_looks_on_every_pass(self):
         source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py").read_text(encoding="utf-8")
         loop = source[source.index("def auto_check_loop()"):source.index("def update_command(")]
-        self.assertIn("answer = os_security_tick()", loop)
+        # Separate schedules run the full tick, the unified window its
+        # check-only one; either answer reaches the watch.
+        self.assertIn("answer = os_security_check_tick() if unified else os_security_tick()", loop)
         self.assertIn("os_security_watch(last_answer=answer)", loop)
 
 
