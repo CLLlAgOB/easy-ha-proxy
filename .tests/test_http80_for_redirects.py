@@ -33,6 +33,14 @@ class PortEighty(unittest.TestCase):
         config = render([site("shop", "shop.example.test")], enable_http80=True)
         self.assertIn(LISTENER, config)
 
+    def test_admin_redirect_preserves_acme_and_unknown_host_handling(self):
+        config = render([], enable_http80=True)
+        frontend = config.split(LISTENER, 1)[1].split('\nbackend ', 1)[0]
+        self.assertIn('acl host_admin hdr(host) -i admin.example.test', frontend)
+        self.assertIn('http-request redirect scheme https code 301 if host_admin !acme_challenge_http', frontend)
+        self.assertIn('http-request return status 404', frontend)
+        self.assertIn('use_backend be_http_challenge if acme_challenge_http', frontend)
+
     def test_one_redirecting_site_among_others_is_enough(self):
         config = render([
             site("shop", "shop.example.test"),
