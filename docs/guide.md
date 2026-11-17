@@ -511,6 +511,13 @@ downgrading packages, after resolving any package-manager problem run:
 sudo python3 /opt/easy-ha-proxy/source/installer/os_upgrade_guard.py --recover-runtime
 ```
 
+Recovery attempts every recorded container even if another is missing or fails
+to start, with up to three start attempts and a health-check wait. If an old ID
+has disappeared, an already running replacement with the exact recorded name
+can satisfy recovery; a stopped replacement is never started from a stale ID.
+Unresolved containers and command errors remain in the maintenance journal,
+and further automatic runtime upgrades stay blocked until recovery succeeds.
+
 Every page's footer names the host build and the panel build -- each as its
 commit's time and short hash -- and warns when the panel was built from other
 web files than the host has.

@@ -41,8 +41,15 @@ class UpgradeRefused(RuntimeError):
 def run(argv):
     result = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False,
                             env={**os.environ, 'LC_ALL': 'C', 'DEBIAN_FRONTEND': 'noninteractive'})
-    if result.returncode or len(result.stdout) > 2 * 1024 * 1024:
-        raise UpgradeRefused('The package upgrade preflight failed: ' + Path(argv[0]).name)
+    command = ' '.join([Path(argv[0]).name, *argv[1:2]])
+    if result.returncode:
+        # Keep enough context to diagnose a failed restore without recording
+        # credentials from repository URLs or unbounded command output.
+        detail = re.sub(r'https?://\S+', '[repository]', result.stderr or '')
+        detail = ' '.join(detail.split())[:2000]
+        raise UpgradeRefused(f'Command failed: {command} (exit {result.returncode}): {detail}')
+    if len(result.stdout) > 2 * 1024 * 1024:
+        raise UpgradeRefused(f'Command output exceeds the safety limit: {command}')
     return result.stdout
 
 
@@ -176,19 +183,68 @@ def running_containers():
     return result
 
 
-def restore_containers(containers):
-    run(['/usr/bin/systemctl', 'start', 'docker.service'])
-    for item in containers:
+def recovery_container_state(item):
+    try:
         current = container_state(item['id'])
-        if current['status'] != 'running':
-            run(['/usr/bin/docker', 'start', item['id']])
+    except UpgradeRefused:
+        # An updater may have recreated a service since the snapshot. Verify
+        # that the old ID is really gone before considering its exact name.
+        name = item.get('name', '')
+        if not isinstance(name, str) or not re.fullmatch(r'/[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+            raise
+        identities = run(['/usr/bin/docker', 'ps', '-a', '--no-trunc', '--format', '{{.ID}}']).split()
+        if any(not re.fullmatch('[0-9a-f]{64}', identity) for identity in identities) or item['id'] in identities:
+            raise
+        current = container_state(name)
+        # A replacement is only observed, never started by stale journal
+        # identity. A stopped replacement still needs operator recovery.
+        if (current.get('name') != name or current['id'] == item['id']
+                or current['status'] != 'running' or current['paused']):
+            raise UpgradeRefused(f'Replacement container is not running: {name}') from None
+    if current['id'] == item['id']:
+        return current
+    if current.get('name') != item.get('name'):
+        raise UpgradeRefused('A recovery container identity could not be verified')
+    return current
+
+
+def restore_containers(containers):
+    # One missing container or transient start failure must not leave every
+    # later dependency stopped. Try the whole snapshot before reporting errors.
     until = time.monotonic() + 180
+    try:
+        run(['/usr/bin/systemctl', 'start', 'docker.service'])
+    except (UpgradeRefused, OSError, subprocess.SubprocessError):
+        # Docker may already be recovering after its package restart. The
+        # per-container checks below retry and retain the actual Docker error.
+        pass
+    starts = {}
+    errors = {}
     while True:
-        states = [container_state(item['id']) for item in containers]
-        if all(item['status'] == 'running' and not item['paused'] and item['health'] in (None, 'healthy') for item in states):
+        pending = []
+        for item in containers:
+            label = item.get('name') or item['id'][:12]
+            try:
+                current = recovery_container_state(item)
+                if (current['id'] == item['id'] and current['status'] in {'created', 'exited'}
+                        and starts.get(item['id'], 0) < 3):
+                    starts[item['id']] = starts.get(item['id'], 0) + 1
+                    run(['/usr/bin/docker', 'start', item['id']])
+                    current = container_state(item['id'])
+                if (current['status'] != 'running' or current['paused']
+                        or current['health'] not in (None, 'healthy')):
+                    detail = f'{label}: status={current["status"]}, health={current["health"]}, paused={current["paused"]}'
+                    if item['id'] in errors:
+                        detail += '; last error: ' + errors[item['id']]
+                    pending.append(detail)
+            except (UpgradeRefused, OSError, ValueError, subprocess.SubprocessError) as error:
+                errors[item['id']] = str(error)
+                pending.append(f'{label}: {error}')
+        if not pending:
             return
         if time.monotonic() >= until:
-            raise UpgradeRefused('Some containers did not recover; further runtime updates require operator recovery')
+            raise UpgradeRefused('Some containers did not recover; further runtime updates require operator recovery: '
+                                 + '; '.join(pending)[:8000])
         time.sleep(2)
 
 
