@@ -1198,6 +1198,11 @@ frontend fe_http80
 
     acl acme_challenge_http path_beg /.well-known/acme-challenge/
 
+{% if admin_domain is defined %}
+    acl host_admin hdr(host) -i {{ admin_domain }}
+    http-request redirect scheme https code 301 if host_admin !acme_challenge_http
+{% endif %}
+
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}

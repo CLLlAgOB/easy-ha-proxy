@@ -142,7 +142,7 @@
   .geoip-value-error, .mon-bad { color: var(--error); }
   .geoip-value-success { color: var(--success); }
   .ap-NORMAL, .la-allow, .al-ok, .au-success, .dp-ready, .rt-ready, .rq-2xx, .la-s2, .mon-2xx, .badge.ok, .tag-ok { background: var(--success-bg); color: var(--success); }
-  .ap-WATCH, .ap-SUSPICIOUS, .la-warn, .al-warning, .au-denied, .dp-missing, .rt-drain, .rq-4xx, .la-s4, .mon-4xx, .badge.mid, .tag-warn { background: var(--warning-bg); color: var(--warning); }
+  .ap-WATCH, .ap-SUSPICIOUS, .la-warn, .al-warning, .au-denied, .dp-missing, .rt-drain, .rt-warning, .rq-4xx, .la-s4, .mon-4xx, .badge.mid, .tag-warn { background: var(--warning-bg); color: var(--warning); }
   .ap-HIGH_RISK, .ap-HOSTILE, .la-ban, .la-bad, .al-critical, .au-failure, .rt-down, .rq-5xx, .la-s5, .mon-5xx, .badge.bad, .tag-bad { background: var(--error-bg); color: var(--error); }
   .rq-3xx, .la-s3, .mon-3xx { background: var(--accent-soft); color: var(--accent-primary); }
   .ap-pill.fp, .ap-pill.noenforce, .rt-maint, .al-info { background: var(--surface-2); color: var(--text-secondary); }
@@ -239,6 +239,7 @@
   .rt-backend { border: 1px solid var(--border); border-radius: 9px; padding: 18px; margin-bottom: 16px; }
   .rt-backend:last-child { margin-bottom: 0; }
   .rt-server { justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--border); }
+  .rt-check-reason { display: block; color: var(--text-secondary); max-width: 250px; margin-top: 6px; line-height: 1.5; }
   .rt-id { font: 12px Consolas, monospace; color: var(--text-secondary); }
   .rt-name { display: flex; flex-direction: column; gap: 4px; min-width: 140px; overflow-wrap: anywhere; }
   .rt-name small { color: var(--text-secondary); font-size: 11px; }

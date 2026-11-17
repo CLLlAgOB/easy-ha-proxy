@@ -43,12 +43,36 @@
     notice.hidden = !message;
   }
 
-  function stateClass(server) {
-    const status = (server.status || "").toUpperCase();
-    if (server.admin_state === "maint") return "rt-maint";
-    if (server.admin_state === "drain") return "rt-drain";
-    if (status.startsWith("DOWN")) return "rt-down";
-    return "rt-ready";
+  const CHECK_FAILURES = {
+    L4CON: "Health check: connection failed",
+    L4TOUT: "Health check: connection timed out",
+    L6TOUT: "Health check: TLS handshake timed out",
+    L6RSP: "Health check: TLS handshake failed",
+    L7TOUT: "Health check: response timed out",
+    L7STS: "Health check: unexpected HTTP status",
+    L7RSP: "Health check: invalid response",
+    SOCKERR: "Health check: socket error",
+    PROCERR: "Health check: external check failed",
+    PROCTOUT: "Health check: external check timed out"
+  };
+
+  function serverStatus(server) {
+    const status = String(server.status || "").trim().toUpperCase();
+    const check = String(server.check_status || "").replace(/^\*\s*/, "").trim().toUpperCase();
+    const failure = CHECK_FAILURES[check] || "";
+    const transitional = /\b\d+\/\d+\b/.test(status);
+    if (server.admin_state === "maint") return {label: "Maintenance", tone: "rt-maint", failure};
+    if (server.admin_state === "drain") return {label: "Drain", tone: "rt-drain", failure};
+    if (/^DOWN\b/.test(status)) return {
+      label: transitional ? "Unavailable · recovering" : "Server unavailable", tone: "rt-down", failure
+    };
+    if (/^UP\b/.test(status)) return {
+      label: transitional || failure ? "Available · check failures" : "Server available",
+      tone: transitional || failure ? "rt-warning" : "rt-ready", failure
+    };
+    if (/^NOLB\b/.test(status)) return {label: "Not accepting traffic", tone: "rt-drain", failure};
+    if (status === "NO CHECK") return {label: "No health checks", tone: "rt-maint", failure};
+    return {label: "Server status unknown", tone: "rt-maint", failure};
   }
 
   async function post(path, body) {
@@ -101,12 +125,23 @@
     row.appendChild(name);
 
     const state = document.createElement("div");
+    const health = serverStatus(server);
     const pill = document.createElement("span");
-    pill.className = `rt-state ${stateClass(server)}`;
+    pill.className = `rt-state ${health.tone}`;
     pill.setAttribute("data-i18n-skip", "");
     pill.setAttribute("translate", "no");
-    pill.textContent = server.status || "—";
+    pill.textContent = uiText(health.label);
+    pill.title = `${uiText("HAProxy health-check state")}: ${server.status || "—"}. ` +
+      `${uiText("Last health check")}: ${server.check_status || "—"}. ` +
+      uiText("The fraction counts health checks, not backend servers.");
     state.appendChild(pill);
+    if (health.failure) {
+      const reason = document.createElement("small");
+      reason.className = "rt-check-reason";
+      reason.setAttribute("data-i18n-skip", "");
+      reason.textContent = uiText(health.failure);
+      state.appendChild(reason);
+    }
     row.appendChild(state);
 
     const sessions = document.createElement("div");
