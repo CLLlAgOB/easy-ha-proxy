@@ -526,6 +526,11 @@ def run(action, root, requested=None, *, maintenance_revision=None):
             cache.open(None)
         after = security_packages(cache, distro, codename, apt_pkg.version_compare)
         remaining = {row['name']: row for row in after}
+        # Only carry forward candidates that survived an installation pass.
+        # A later check can find a new candidate for the very same package.
+        reviewed = {row['name']: row['candidate'] for row in before} if install else previous.get('unapplied_packages', {})
+        unapplied = {row['name']: row['candidate'] for row in after
+                     if reviewed.get(row['name']) == row['candidate']}
         installed = sum(row['name'] not in remaining or apt_pkg.version_compare(remaining[row['name']]['installed'], row['installed']) > 0 for row in before) if install else 0
         state.update(state='ready', error=None, checked_at=time.time(), packages=after[:200], package_count=len(after),
                      eligible_count=sum(not row['protected'] and not row['held'] for row in after),
@@ -535,7 +540,8 @@ def run(action, root, requested=None, *, maintenance_revision=None):
                                     'shutdown': apt_pkg.config.find_b('Unattended-Upgrade::InstallOnShutdown', False)},
                      last_install_at=time.time() if install else previous.get('last_install_at'),
                      last_success=time.time())
-        atomic(status_path, state)
+        atomic(status_path, {**state, 'unapplied_packages': unapplied})
+        state.pop('unapplied_packages', None)
         return {'message': 'OS security installation finished; review remaining updates and restarts' if install else 'OS security check completed', **state}
     except Exception as error:
         atomic(status_path, {**state, 'state': 'unknown', 'error': str(error)[:500]})

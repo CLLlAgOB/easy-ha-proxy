@@ -3375,6 +3375,7 @@ def os_security_snapshot():
             result['status'] = {key: status.get(key) for key in (
                 'state', 'error', 'last_attempt', 'checked_at', 'last_success', 'platform', 'packages',
                 'package_count', 'eligible_count', 'restart', 'native_timer', 'native_policy', 'installed_count', 'last_install_at', 'last_install_attempt')}
+            result['status']['unapplied_count'] = len(status.get('unapplied_packages') or {})
         path = OS_SECURITY_ROOT / 'restart-status.json'
         if os.path.lexists(path):
             service = safe_json_file(path)
@@ -3476,8 +3477,21 @@ def os_security_notifications(snapshot):
             return  # Unknown never resolves an existing security incident.
         count = status.get('package_count')
         if type(count) is int:
-            _ALERTS.observe("os.security_updates", 'host', active=count > 0,
-                            summary='OS security updates are available', detail=f'{count} package(s) require a security update.')
+            mode = (snapshot.get('policy') or OS_SECURITY_DEFAULT)['mode']
+            settings = auto_install_settings() if mode != 'system' else {}
+            automatic = (settings['enabled'] if settings.get('unified')
+                         else mode in {'auto', 'daily', 'window'})
+            if count == 0:
+                _ALERTS.observe("os.security_updates", 'host', active=False,
+                                summary='No OS security updates are pending')
+            elif not automatic:
+                _ALERTS.observe("os.security_updates", 'host', active=True,
+                                summary='OS security updates are available',
+                                detail=f'{count} package(s) require a security update.')
+            elif unapplied := status.get('unapplied_count'):
+                _ALERTS.observe("os.security_updates", 'host', active=True,
+                                summary='OS security updates remain after an installation attempt',
+                                detail=f'{unapplied} package(s) still require a security update after an installation attempt.')
         restart = status.get('restart') or {}
         if not restart.get('error'):
             pending = bool(restart.get('reboot_required') or restart.get('services'))
