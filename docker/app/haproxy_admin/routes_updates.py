@@ -89,7 +89,7 @@ AUDITED_ACTIONS = {
     "set_service_restarts": ("os.service_restart_policy", ("enabled", "time")),
     "os_security_restart": ("os.service_restart", ()),
     "ssh_protection_monitor": ("ssh.monitoring", ("enabled",)),
-    "ssh_protection_configure": ("ssh.protection", ("operation",)),
+    "ssh_protection_configure": ("ssh.protection", ("operation", "policy")),
     "ssh_protection_unban": ("ssh.unban", ("ip",)),
 }
 

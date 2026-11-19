@@ -568,6 +568,7 @@ class CatalogueTests(unittest.TestCase):
             "backup.space_low", "update.available", "mail.delivery_failed",
             "os.security_updates", "os.security_restart", "os.security_check_failed",
             "os.security_stalled", "security.weekly_summary", "udp.failover",
+            "ssh.protection_lost", "ssh.ban_burst",
         }
         self.assertEqual(set(alertd.RULES_BY_NAME), expected)
 
@@ -945,7 +946,8 @@ class ProducerWiringTests(unittest.TestCase):
         "easy-ha-proxy-guardd.py": ("security.hostile_ip", "security.burst",
                                     "security.engine_failing", "security.weekly_summary"),
         "easy-ha-proxy-backupd.py": ("backup.failed", "restore.failed"),
-        "easy-ha-proxy-updated.py": ("update.failed", "update.available", "os.security_updates", "os.security_restart", "os.security_check_failed", "os.security_stalled"),
+        "easy-ha-proxy-updated.py": ("update.failed", "update.available", "os.security_updates", "os.security_restart",
+                                    "os.security_check_failed", "os.security_stalled", "ssh.protection_lost", "ssh.ban_burst"),
         "haproxy-controld.py": ("config.apply_failed", "udp.failover"),
         "haproxy-certd.py": ("certificate.renewal_failed",),
         "haproxy-healthd.py": ("site.down",),

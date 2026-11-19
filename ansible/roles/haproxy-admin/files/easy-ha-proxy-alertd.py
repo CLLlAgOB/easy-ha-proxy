@@ -277,6 +277,11 @@ RULES: Tuple[Rule, ...] = (
     Rule("os.security_stalled", KIND_LEVEL, SEVERITY_WARNING,
          "OS security updates are not running", trigger_delay=0,
          repeat_after=86400, stale_after=3600),
+    Rule("ssh.protection_lost", KIND_LEVEL, SEVERITY_WARNING,
+         "SSH blocking could not be verified", trigger_delay=120,
+         repeat_after=86400, stale_after=600),
+    Rule("ssh.ban_burst", KIND_LEVEL, SEVERITY_WARNING,
+         "Burst of SSH blocks", trigger_delay=0, repeat_after=3600, stale_after=600),
     Rule("config.apply_failed", KIND_EVENT, SEVERITY_CRITICAL,
          "HAProxy apply or reload failed", auto_clear=3600),
     # A UDP forward whose main backend stopped answering, sending to its

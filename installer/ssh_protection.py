@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import configparser
 import contextlib
 import fcntl
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -29,6 +31,11 @@ JOURNAL_MATCH = '_SYSTEMD_UNIT=ssh.service + _SYSTEMD_UNIT=sshd.service + _COMM=
 COUNTERS = {'Currently failed': 'currently_failed', 'Total failed': 'total_failed',
             'Currently banned': 'currently_banned', 'Total banned': 'total_banned'}
 MAX_BANS = 200
+DEFAULT_POLICY = {'maxretry': 5, 'findtime': 600, 'bantime': 3600}
+OPENSSH_FIELDS = {'passwordauthentication', 'kbdinteractiveauthentication', 'permitrootlogin',
+                  'persourcepenalties', 'pubkeyauthentication', 'authenticationmethods',
+                  'allowusers', 'allowgroups', 'denyusers', 'denygroups'}
+BAN_TIME = re.compile(r'(\S+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \+ (-?\d+) = (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)')
 
 
 def quick(*argv):
@@ -55,16 +62,48 @@ def trusted_addresses(values):
     return list(dict.fromkeys(address(value, network=True) for value in values))
 
 
-def openssh_settings():
-    code, output = quick('/usr/sbin/sshd', '-T')
+def validated_policy(policy):
+    if (not isinstance(policy, dict) or policy.keys() != DEFAULT_POLICY.keys()
+            or any(type(value) is not int for value in policy.values())
+            or not 2 <= policy['maxretry'] <= 50
+            or not 60 <= policy['findtime'] <= 86400 or policy['findtime'] % 60
+            or not 60 <= policy['bantime'] <= 604800 or policy['bantime'] % 60):
+        raise ValueError('Invalid SSH blocking thresholds')
+    return policy
+
+
+def openssh_settings(*options):
+    code, output = quick('/usr/sbin/sshd', '-T', *options)
     if code:
         return {}
-    allowed = {'passwordauthentication', 'kbdinteractiveauthentication', 'permitrootlogin', 'persourcepenalties'}
-    return {key: value for line in output.splitlines() if ' ' in line
-            for key, value in [line.split(' ', 1)] if key in allowed}
+    settings = {}
+    for line in output.splitlines():
+        key, _, value = line.partition(' ')
+        if key in OPENSSH_FIELDS and value:
+            settings[key] = (settings.get(key, '') + ' ' + value).strip()[:2048]
+    return settings
 
 
-def listening_ports():
+def check_connection(user, source, hostname=None, local_address=None, port=None):
+    if not isinstance(user, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}\$?', user):
+        raise ValueError('Enter a valid SSH username')
+    source = address(source)
+    if hostname and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,252}', hostname):
+        raise ValueError('Enter a valid client hostname')
+    fields = [f'user={user}', f'addr={source}', f'host={hostname or source}']
+    if local_address:
+        fields.append('laddr=' + address(local_address))
+    if port:
+        if not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+            raise ValueError('Enter a valid local SSH port')
+        fields.append('lport=' + port)
+    settings = openssh_settings('-C', ','.join(fields))
+    if not settings:
+        raise SecurityError('OpenSSH settings could not be evaluated for this connection')
+    return settings
+
+
+def listening_endpoints():
     ss = shutil.which('ss', path='/usr/sbin:/usr/bin:/sbin:/bin')
     if not ss:
         return []
@@ -79,17 +118,22 @@ def listening_ports():
         if code:
             return []
         endpoints.extend(re.findall(r'(\S+)\s+\(Stream\)', sockets))
-    ports = {int(match[1]) for endpoint in endpoints if (match := re.search(r':(\d{1,5})$', endpoint))}
+    return sorted({endpoint for endpoint in endpoints if re.fullmatch(r'[\w.:%*\[\]-]+:\d{1,5}', endpoint)})[:32]
+
+
+def listening_ports(endpoints=None):
+    ports = {int(endpoint.rsplit(':', 1)[1]) for endpoint in (listening_endpoints() if endpoints is None else endpoints)}
     return sorted(port for port in ports if 0 < port <= 65535)
 
 
-def config_text(enabled, ports=(), backend=None, trusted=()):
+def config_text(enabled, ports=(), backend=None, trusted=(), policy=None):
     text = HEADER + '[sshd]\nenabled = ' + ('true' if enabled else 'false') + '\n'
     if backend:
+        policy = DEFAULT_POLICY if policy is None else policy
         text += ('port = ' + ','.join(map(str, ports)) + '\n'
                  + f'backend = {backend}\n'
                  + 'action = iptables-multiport[name=sshd, port="%(port)s", protocol=tcp]\n'
-                 + 'findtime = 600\nmaxretry = 5\nbantime = 3600\n'
+                 + ''.join(f'{key} = {policy[key]}\n' for key in ('findtime', 'maxretry', 'bantime'))
                  + 'ignoreip = ' + ' '.join(('127.0.0.0/8', '::1', *trusted)) + '\n')
         filter_args = '_daemon="sshd(?:-session|-auth)?"'
         if backend == 'systemd':
@@ -121,10 +165,11 @@ def managed_config():
     ports = [int(port) for port in section.get('port', '').split(',') if port]
     backend = section.get('backend')
     trusted = trusted_addresses(section.get('ignoreip', '').split()[2:])
+    policy = validated_policy({key: section.getint(key, fallback=value) for key, value in DEFAULT_POLICY.items()})
     if (backend not in {None, 'systemd', 'polling'} or any(not 0 < port <= 65535 for port in ports)
-            or text != config_text(enabled, ports, backend, trusted)):
+            or text != config_text(enabled, ports, backend, trusted, policy)):
         raise SecurityError('An existing Fail2ban configuration requires administrator review')
-    return {'text': text, 'enabled': enabled, 'ports': ports, 'backend': backend, 'trusted': trusted}
+    return {'text': text, 'enabled': enabled, 'ports': ports, 'backend': backend, 'trusted': trusted, 'policy': policy}
 
 
 def unmodified_package_defaults(path, text):
@@ -173,10 +218,114 @@ def jail_status():
     return {**{name: int(values[key]) for key, name in COUNTERS.items()}, 'banned': bans}
 
 
-def snapshot():
-    result = {'state': 'not_installed', 'managed': False, 'trusted': [], 'openssh': openssh_settings()}
+def ban_times(addresses):
+    if not addresses:
+        return {}
+    code, output = quick(CLIENT, 'get', 'sshd', 'banip', '--with-time')
+    if code:
+        return {}
+    active = set(addresses)
+    result = {}
+    for line in output.splitlines():
+        match = BAN_TIME.fullmatch(line.strip())
+        if not match:
+            continue
+        ip, started, duration, expires = match.groups()
+        try:
+            ip = address(ip)
+        except ValueError:
+            continue
+        if ip in active:
+            result[ip] = {'started': started, 'expires': expires if duration != '-1' else None, 'permanent': duration == '-1'}
+    return result
+
+
+def effective_jail_policy():
+    keys = ('maxretry', 'findtime', 'bantime', 'ignoreip')
+    with ThreadPoolExecutor(max_workers=len(keys)) as pool:
+        queries = {key: pool.submit(quick, CLIENT, 'get', 'sshd', key) for key in keys}
+    result = {}
+    for key, query in queries.items():
+        code, output = query.result()
+        value = output.strip()
+        if not code and key == 'ignoreip' and value.startswith(('These IP addresses/networks are ignored:', 'No IP address/network is ignored')):
+            matches = re.findall(r'^[`|]- (\S{1,253})$', value, re.M)
+            result['trusted'] = matches[:50]
+        elif not code and re.fullmatch(r'-?\d{1,12}', value):
+            result[key] = int(value)
+    return result
+
+
+def firewall_family(family, ports, banned):
+    tool = '/usr/sbin/iptables-save' if family == 4 else '/usr/sbin/ip6tables-save'
+    code, rules = quick(tool, '-t', 'filter')
+    if code:
+        return 'unknown'
+    hook = False
+    earlier_input = False
+    priority_uncertain = False
+    blocked = set()
+    reached_return = False
+    try:
+        for line in rules.splitlines():
+            if line.startswith('-A INPUT '):
+                args = shlex.split(line)
+                if (not hook and len(args) == 10 and args[2:7] == ['-p', 'tcp', '-m', 'multiport', '--dports']
+                        and args[8:] == ['-j', 'f2b-sshd'] and set(args[7].split(',')) == {str(port) for port in ports}):
+                    hook = True
+                    priority_uncertain = earlier_input
+                earlier_input = True
+            elif not reached_return and line.startswith('-A f2b-sshd '):
+                args = shlex.split(line)
+                if args[2:] == ['-j', 'RETURN']:
+                    reached_return = True
+                if (args[2:3] == ['-s'] and
+                        args[4:] in (['-j', 'DROP'], ['-j', 'REJECT'],
+                                     ['-j', 'REJECT', '--reject-with', 'icmp-port-unreachable'],
+                                     ['-j', 'REJECT', '--reject-with', 'icmp6-port-unreachable'])):
+                    network = ipaddress.ip_network(args[3])
+                    if network.prefixlen == network.max_prefixlen:
+                        blocked.add(str(network.network_address))
+    except ValueError:
+        return 'unknown'
+    if banned:
+        if not hook or not banned <= blocked:
+            return 'missing'
+        return 'order_unknown' if priority_uncertain else 'verified'
+    return 'idle'
+
+
+def firewall_status(configured, live, status):
+    if not live:
+        return {'state': 'unknown'}
+    if set(live) != set(configured):
+        return {'state': 'ports_changed'}
+    addresses = {4: set(), 6: set()}
+    for value in status['banned']:
+        addresses[ipaddress.ip_address(value).version].add(value)
+    families = {str(family): firewall_family(family, configured, values) if values else 'idle'
+                for family, values in addresses.items()}
+    observed = set(families.values())
+    if 'missing' in observed:
+        state = 'missing'
+    elif 'unknown' in observed:
+        state = 'unknown'
+    elif 'order_unknown' in observed:
+        state = 'order_unknown'
+    elif status['currently_banned'] > len(status['banned']):
+        state = 'partial'
+    else:
+        state = 'verified' if 'verified' in observed else 'idle'
+    return {'state': state, 'families': families}
+
+
+def snapshot(*, monitor=False):
+    result = {'state': 'not_installed', 'managed': False, 'trusted': [], 'policy': DEFAULT_POLICY}
+    if not monitor:
+        result['openssh'] = openssh_settings()
     try:
         installed = Path(CLIENT).is_file()
+        status = None
         if installed:
             _, unit = quick(SYSTEMCTL, 'show', '--property=ActiveState', '--value', UNIT)
             status = jail_status()
@@ -189,8 +338,16 @@ def snapshot():
         local = managed_config()
         if local:
             result.update(managed=True, managed_enabled=local['enabled'], trusted=local['trusted'],
-                          ports=local['ports'], backend=local['backend'])
+                          ports=local['ports'], backend=local['backend'], policy=local['policy'])
         result['external_config'] = external_ssh_config()
+        if not monitor or (status and local and local['enabled'] and not result['external_config']):
+            result['listeners'] = listening_endpoints()
+        if status is not None:
+            if not monitor:
+                result['ban_times'] = ban_times(status['banned'])
+                result['effective_policy'] = effective_jail_policy()
+            result['firewall'] = (firewall_status(local['ports'], listening_ports(result['listeners']), status)
+                                  if local and local['enabled'] and not result['external_config'] else {'state': 'external'})
     except (OSError, ValueError, configparser.Error, SecurityError) as error:
         result['error'] = str(error)
     return result
@@ -229,7 +386,7 @@ def verify_ssh_jail(running, enabled):
     raise SecurityError('The Fail2ban SSH rule could not be verified')
 
 
-def set_protection(action, trusted):
+def set_protection(action, trusted, policy=None):
     platform()
     local = managed_config()
     if external_ssh_config():
@@ -246,12 +403,16 @@ def set_protection(action, trusted):
     if active is not None and (not local or not local['enabled']):
         raise SecurityError('SSH protection is configured outside the panel')
     if enabled:
+        policy = validated_policy(policy) if policy is not None else (local or {}).get('policy', DEFAULT_POLICY)
         ports = listening_ports()
         if not ports:
             raise SecurityError('No active OpenSSH listening port was found')
+        if len(ports) > 15:
+            raise SecurityError('The firewall action supports up to 15 SSH ports')
         backend = log_backend()
     else:
         ports, backend, trusted = local['ports'], local['backend'], local['trusted']
+        policy = local['policy']
 
     if action == 'install':
         maintenance_guard()
@@ -271,7 +432,7 @@ def set_protection(action, trusted):
             for firewall in ('iptables', 'ip6tables'):
                 if quick(firewall, '-w', '2', '-S', 'INPUT')[0]:
                     raise SecurityError('The server firewall could not be checked for SSH blocking')
-        atomic(DROP_IN, config_text(enabled, ports, backend, trusted))
+        atomic(DROP_IN, config_text(enabled, ports, backend, trusted, policy))
         command([CLIENT, '-t'])
         reload_ssh_jail(running, enabled)
         verify_ssh_jail(running, enabled)
@@ -292,15 +453,22 @@ def set_protection(action, trusted):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('status', 'install', 'enable', 'disable', 'unban'))
+    parser.add_argument('action', choices=('status', 'monitor', 'check-connection', 'install', 'enable', 'disable', 'unban'))
     parser.add_argument('--trusted', nargs='*', default=[])
     parser.add_argument('--ip')
+    parser.add_argument('--policy', type=json.loads)
+    parser.add_argument('--user')
+    parser.add_argument('--hostname')
+    parser.add_argument('--local-address')
+    parser.add_argument('--port')
     parser.add_argument('--maintenance-lock', type=Path)
     parser.add_argument('--request-id')
     args = parser.parse_args()
     try:
-        if args.action == 'status':
-            result = snapshot()
+        if args.action in ('status', 'monitor'):
+            result = snapshot(monitor=args.action == 'monitor')
+        elif args.action == 'check-connection':
+            result = {'openssh': check_connection(args.user, args.ip, args.hostname, args.local_address, args.port)}
         elif args.action == 'unban':
             ip = address(args.ip)
             code, _ = quick(CLIENT, 'set', 'sshd', 'unbanip', ip)
@@ -315,7 +483,7 @@ def main():
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise SecurityError('Another maintenance operation is active') from None
-                result = {'message': set_protection(args.action, trusted_addresses(args.trusted))}
+                result = {'message': set_protection(args.action, trusted_addresses(args.trusted), args.policy)}
         print(json.dumps({'ok': True, 'request_id': args.request_id, **result}))
         return 0
     except (OSError, ValueError, configparser.Error, SecurityError) as error:

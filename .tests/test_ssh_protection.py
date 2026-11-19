@@ -10,6 +10,59 @@ import ssh_protection as ssh
 
 
 class SshProtectionTests(unittest.TestCase):
+    def test_firewall_matches_ports_and_active_ips_for_both_families(self):
+        hook = '-A INPUT -p tcp -m multiport --dports 22,2222 -j f2b-sshd\n'
+        ipv4 = hook + '-A f2b-sshd -s 192.0.2.2/32 -j REJECT --reject-with icmp-port-unreachable\n'
+        ipv6 = hook + '-A f2b-sshd -s 2001:db8::2/128 -j REJECT --reject-with icmp6-port-unreachable\n'
+        status = {'banned': ['192.0.2.2', '2001:db8::2'], 'currently_banned': 2}
+        with patch.object(ssh, 'quick', side_effect=[(0, ipv4), (0, ipv6)]) as query:
+            self.assertEqual(ssh.firewall_status([22, 2222], [2222, 22], status),
+                             {'state': 'verified', 'families': {'4': 'verified', '6': 'verified'}})
+            self.assertEqual(query.call_args_list, [call('/usr/sbin/iptables-save', '-t', 'filter'),
+                                                   call('/usr/sbin/ip6tables-save', '-t', 'filter')])
+        with patch.object(ssh, 'quick', side_effect=[(0, ipv4), (0, hook)]):
+            self.assertEqual(ssh.firewall_status([22, 2222], [22, 2222], status)['state'], 'missing')
+        with patch.object(ssh, 'quick') as query:
+            self.assertEqual(ssh.firewall_status([22], [2222], status)['state'], 'ports_changed')
+            self.assertEqual(ssh.firewall_status([22], [22], {'banned': [], 'currently_banned': 0})['state'], 'idle')
+            query.assert_not_called()
+
+    def test_firewall_does_not_claim_rules_below_earlier_verdicts(self):
+        hook = '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd\n'
+        block = '-A f2b-sshd -s 192.0.2.2/32 -j DROP\n'
+        with patch.object(ssh, 'quick', return_value=(0, '-A INPUT -j ACCEPT\n' + hook + block)):
+            self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'order_unknown')
+        with patch.object(ssh, 'quick', return_value=(0, hook + '-A f2b-sshd -j RETURN\n' + block)):
+            self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'missing')
+
+    def test_ban_times_are_taken_from_fail2ban_and_permanent_bans_have_no_expiry(self):
+        output = ('192.0.2.1 \t2026-11-19 11:00:00 + 3600 = 2026-11-19 12:00:00\n'
+                  '2001:0db8::1 \t2026-11-19 11:10:00 + -1 = 9999-12-31 23:59:59\n'
+                  '192.0.2.9 \t2026-11-19 11:10:00 + 3600 = 2026-11-19 12:10:00')
+        with patch.object(ssh, 'quick', return_value=(0, output)):
+            self.assertEqual(ssh.ban_times(['192.0.2.1', '2001:db8::1']), {
+                '192.0.2.1': {'started': '2026-11-19 11:00:00', 'expires': '2026-11-19 12:00:00', 'permanent': False},
+                '2001:db8::1': {'started': '2026-11-19 11:10:00', 'expires': None, 'permanent': True},
+            })
+
+    def test_connection_check_uses_match_arguments_and_rejects_extra_fields(self):
+        with patch.object(ssh, 'quick', return_value=(0, 'passwordauthentication no\nallowusers operator\nallowusers backup\n')) as query:
+            self.assertEqual(ssh.check_connection('operator', '2001:0db8::2', 'vpn.example.test', '192.0.2.5', '22'),
+                             {'passwordauthentication': 'no', 'allowusers': 'operator backup'})
+            with self.assertRaises(ValueError):
+                ssh.check_connection('operator,addr=192.0.2.1', '192.0.2.2')
+        query.assert_called_once_with('/usr/sbin/sshd', '-T', '-C',
+                                      'user=operator,addr=2001:db8::2,host=vpn.example.test,laddr=192.0.2.5,lport=22')
+
+    def test_managed_policy_reads_existing_default_files_and_new_thresholds(self):
+        policy = {'maxretry': 8, 'findtime': 900, 'bantime': 7200}
+        for settings in [None, policy]:
+            config = ssh.config_text(True, [22], 'systemd', [], settings)
+            with self.subTest(policy=settings), patch.object(ssh, 'read_config', return_value=config):
+                self.assertEqual(ssh.managed_config()['policy'], settings or ssh.DEFAULT_POLICY)
+        with self.assertRaises(ValueError):
+            ssh.validated_policy(dict(policy, bantime=-1))
+
     def test_status_reports_only_valid_addresses_from_the_ssh_rule(self):
         output = """Status for the jail: sshd
 |- Filter
