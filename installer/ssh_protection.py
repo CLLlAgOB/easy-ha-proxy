@@ -268,6 +268,7 @@ def firewall_family(family, ports, banned):
     hook = False
     earlier_input = False
     priority_uncertain = False
+    earlier_jail_rule = False
     blocked = set()
     reached_return = False
     try:
@@ -289,7 +290,16 @@ def firewall_family(family, ports, banned):
                                      ['-j', 'REJECT', '--reject-with', 'icmp6-port-unreachable'])):
                     network = ipaddress.ip_network(args[3])
                     if network.prefixlen == network.max_prefixlen:
-                        blocked.add(str(network.network_address))
+                        ip = str(network.network_address)
+                        blocked.add(ip)
+                        if ip in banned and earlier_jail_rule:
+                            priority_uncertain = True
+                elif not reached_return:
+                    # An administrator rule can accept or return before the
+                    # generated block, or jump to a chain we do not inspect.
+                    # Its mere presence below the INPUT hook is not proof
+                    # that a later block will be reached.
+                    earlier_jail_rule = True
     except ValueError:
         return 'unknown'
     if banned:

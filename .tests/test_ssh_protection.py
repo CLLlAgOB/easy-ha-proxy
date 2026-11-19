@@ -51,6 +51,22 @@ class SshProtectionTests(unittest.TestCase):
         self.assertTrue(all('--dport 80 ' in line or '--dport 443 ' in line
                             for line in rules.splitlines() if line.startswith('-A HP_BAN ')))
 
+    def test_firewall_does_not_verify_a_block_bypassed_inside_the_jail_chain(self):
+        hook = '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd\n'
+        block = '-A f2b-sshd -s 192.0.2.2/32 -j DROP\n'
+        for earlier in ('-j ACCEPT', '-s 192.0.2.0/24 -j RETURN', '-j custom-chain'):
+            with self.subTest(earlier=earlier), patch.object(
+                ssh, 'quick', return_value=(0, hook + '-A f2b-sshd ' + earlier + '\n' + block)
+            ):
+                self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'order_unknown')
+
+    def test_later_rules_do_not_make_an_already_reached_block_uncertain(self):
+        rules = ('-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd\n'
+                 '-A f2b-sshd -s 192.0.2.2/32 -j DROP\n'
+                 '-A f2b-sshd -j ACCEPT\n')
+        with patch.object(ssh, 'quick', return_value=(0, rules)):
+            self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'verified')
+
     def test_ban_times_are_taken_from_fail2ban_and_permanent_bans_have_no_expiry(self):
         output = ('192.0.2.1 \t2026-11-19 11:00:00 + 3600 = 2026-11-19 12:00:00\n'
                   '2001:0db8::1 \t2026-11-19 11:10:00 + -1 = 9999-12-31 23:59:59\n'

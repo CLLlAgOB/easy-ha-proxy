@@ -307,8 +307,9 @@ MAX_CHANGED_FILES = 20
 def _status_entries(stdout: str) -> list[tuple[str, str]] | None:
     """(status, path) per entry of ``git status --porcelain=v1 -z``.
 
-    None when an entry is a rename or a copy, or cannot be read: those are
-    never taken as already upstream.
+    None for staged changes, conflicts, renames, copies or unreadable entries.
+    The worktree comparison cannot establish that index content is upstream,
+    and resetting the checkout would discard that content too.
     """
     entries: list[tuple[str, str]] = []
     for item in stdout.split("\0"):
@@ -317,7 +318,7 @@ def _status_entries(stdout: str) -> list[tuple[str, str]] | None:
         if len(item) < 4 or item[2] != " ":
             return None
         status, path = item[:2], item[3:]
-        if "R" in status or "C" in status or not path or path.startswith("/") or ".." in path.split("/"):
+        if status not in {" M", " D", " T", "??"} or not path or path.startswith("/") or ".." in path.split("/"):
             return None
         entries.append((status, path))
     return entries

@@ -9,8 +9,8 @@ corrected.
 
 The update replaces the source with the next revision. Files the next revision
 already holds byte for byte lose nothing, so they no longer block it. A file
-that differs, a rename, or changes on top of the newest revision still block,
-and the blocked plan now names the files.
+that differs, staged changes, a rename, or changes on top of the newest
+revision still block, and the blocked plan now names the files.
 """
 
 from __future__ import annotations
@@ -132,6 +132,20 @@ class WithRealGit(unittest.TestCase):
         self.assertEqual(component["state"], "blocked")
         self.assertNotIn("_local_changes", component)
 
+    def test_staged_content_is_not_discarded_when_worktree_matches_upstream(self):
+        self.edit({"installer/guard.py": "private staged change\n"})
+        git("add", "installer/guard.py", cwd=self.installed)
+        self.edit({"installer/guard.py": FIX})
+        component = self.probe()
+        self.assertEqual(component["state"], "blocked")
+        self.assertNotIn("_local_changes", component)
+        self.assertEqual(git("show", ":installer/guard.py", cwd=self.installed), "private staged change")
+
+    def test_a_staged_deletion_with_a_recreated_file_stays_blocked(self):
+        git("rm", "installer/guard.py", cwd=self.installed)
+        self.edit({"installer/guard.py": FIX})
+        self.assertNotIn("_local_changes", self.probe())
+
 
 class TheStatusEntries(unittest.TestCase):
     def test_entries_are_read_from_nul_separated_output(self):
@@ -144,6 +158,11 @@ class TheStatusEntries(unittest.TestCase):
         self.assertIsNone(update_plan._status_entries(" M ../outside\0"))
         self.assertIsNone(update_plan._status_entries(" M /etc/passwd\0"))
         self.assertIsNone(update_plan._status_entries("bad\0"))
+
+    def test_staged_changes_and_unmerged_entries_stay_blocked(self):
+        for status in ("MM", "M ", "AM", "D ", "UU", "AA", "UD"):
+            with self.subTest(status=status):
+                self.assertIsNone(update_plan._status_entries(status + " a.py\0"))
 
 
 class ThePlan(unittest.TestCase):
