@@ -144,6 +144,25 @@ class LevelConditionTests(EngineTestCase):
         self.observe("site.down", active=False)
         self.assertEqual(len(self.channel.sent), 2)
 
+    def test_authelia_recovery_has_a_positive_subject(self):
+        self.observe("authelia.unavailable", subject="authelia")
+        self.advance(121)
+        self.observe("authelia.unavailable", subject="authelia")
+        self.observe("authelia.unavailable", subject="authelia", active=False, summary="Authelia is answering")
+        self.assertIn("RESOLVED critical: Authelia is answering (authelia)", self.channel.sent[-1][0])
+
+    def test_authelia_recovery_stays_in_history_if_the_outage_was_not_delivered(self):
+        self.channel.ok = False
+        self.observe("authelia.unavailable", subject="authelia")
+        self.advance(121)
+        self.observe("authelia.unavailable", subject="authelia")
+        self.channel.ok = True
+        self.observe("authelia.unavailable", subject="authelia", active=False)
+        self.assertEqual(len(self.channel.sent), 1)
+        recovered = self.history()[0]
+        self.assertEqual(recovered["transition"], "recovered")
+        self.assertEqual(recovered["delivered"], "")
+
     def test_a_second_outage_fires_again(self):
         self.observe("site.down")
         self.advance(301)
@@ -549,6 +568,7 @@ class CatalogueTests(unittest.TestCase):
             "backup.space_low", "update.available", "mail.delivery_failed",
             "os.security_updates", "os.security_restart", "os.security_check_failed",
             "os.security_stalled", "security.weekly_summary", "udp.failover",
+            "ssh.protection_lost", "ssh.ban_burst",
         }
         self.assertEqual(set(alertd.RULES_BY_NAME), expected)
 
@@ -926,7 +946,8 @@ class ProducerWiringTests(unittest.TestCase):
         "easy-ha-proxy-guardd.py": ("security.hostile_ip", "security.burst",
                                     "security.engine_failing", "security.weekly_summary"),
         "easy-ha-proxy-backupd.py": ("backup.failed", "restore.failed"),
-        "easy-ha-proxy-updated.py": ("update.failed", "update.available", "os.security_updates", "os.security_restart", "os.security_check_failed", "os.security_stalled"),
+        "easy-ha-proxy-updated.py": ("update.failed", "update.available", "os.security_updates", "os.security_restart",
+                                    "os.security_check_failed", "os.security_stalled", "ssh.protection_lost", "ssh.ban_burst"),
         "haproxy-controld.py": ("config.apply_failed", "udp.failover"),
         "haproxy-certd.py": ("certificate.renewal_failed",),
         "haproxy-healthd.py": ("site.down",),

@@ -211,6 +211,7 @@ class Rule:
     # not because something is wrong: it is sent whatever the minimum
     # severity, which would otherwise hold back everything informational.
     report: bool = False
+    recovery_title: str = ""
 
 
 RULES: Tuple[Rule, ...] = (
@@ -221,7 +222,7 @@ RULES: Tuple[Rule, ...] = (
     Rule("response.slow", KIND_LEVEL, SEVERITY_WARNING,
          "Response time above the threshold", trigger_delay=300),
     Rule("authelia.unavailable", KIND_LEVEL, SEVERITY_CRITICAL,
-         "Authelia is not answering", trigger_delay=120),
+         "Authelia is not answering", trigger_delay=120, recovery_title="Authelia is answering"),
     Rule("monitoring.storage", KIND_LEVEL, SEVERITY_WARNING,
          "Monitoring storage is under pressure", trigger_delay=0),
     Rule("monitoring.paused", KIND_LEVEL, SEVERITY_WARNING,
@@ -262,7 +263,7 @@ RULES: Tuple[Rule, ...] = (
          repeat_after=7 * 86400, stale_after=8 * 86400),
       Rule("os.security_updates", KIND_LEVEL, SEVERITY_WARNING,
            "OS security updates are available", trigger_delay=0,
-           repeat_after=86400, stale_after=8 * 86400),
+           repeat_after=86400, stale_after=8 * 86400, recovery_title="No OS security updates are pending"),
       Rule("os.security_restart", KIND_LEVEL, SEVERITY_WARNING,
            "Security updates require a restart", trigger_delay=0,
            repeat_after=86400, stale_after=8 * 86400),
@@ -276,6 +277,11 @@ RULES: Tuple[Rule, ...] = (
     Rule("os.security_stalled", KIND_LEVEL, SEVERITY_WARNING,
          "OS security updates are not running", trigger_delay=0,
          repeat_after=86400, stale_after=3600),
+    Rule("ssh.protection_lost", KIND_LEVEL, SEVERITY_WARNING,
+         "SSH blocking could not be verified", trigger_delay=120,
+         repeat_after=86400, stale_after=600),
+    Rule("ssh.ban_burst", KIND_LEVEL, SEVERITY_WARNING,
+         "Burst of SSH blocks", trigger_delay=0, repeat_after=3600, stale_after=600),
     Rule("config.apply_failed", KIND_EVENT, SEVERITY_CRITICAL,
          "HAProxy apply or reload failed", auto_clear=3600),
     # A UDP forward whose main backend stopped answering, sending to its
@@ -1297,6 +1303,10 @@ class AlertEngine:
         # two messages for one thing the operator had already acted on.
         if allowed and transition == TRANSITION_RECOVERED and severity == SEVERITY_INFO:
             allowed, reason = False, "information: no message when it ends"
+        if allowed and transition == TRANSITION_RECOVERED:
+            row = self.database.get_state(rule.name, subject)
+            if row is not None and not row["notify_count"]:
+                allowed, reason = False, "no notification was delivered for this incident"
         if not allowed:
             self.database.add_event(
                 {
@@ -1393,7 +1403,8 @@ class AlertEngine:
         # ALERT made every new release look like an incident.
         if severity == SEVERITY_INFO and transition in (TRANSITION_FIRED, TRANSITION_REPEATED):
             verb = "INFO"
-        head = f"[{self.hostname}] {verb} {severity}: {rule.title}"
+        title = rule.recovery_title if transition == TRANSITION_RECOVERED and rule.recovery_title else rule.title
+        head = f"[{self.hostname}] {verb} {severity}: {title}"
         if subject and subject != "-":
             head += f" ({subject})"
         when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now))

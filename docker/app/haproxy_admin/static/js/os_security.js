@@ -60,26 +60,27 @@
     return data;
   }
   function controls() {
+    const unified = Boolean(snapshot?.maintenance_window);
     const blocked = sending || running || Boolean(pending) || restartsSending || Boolean(restartsPending) || rebootSending || Boolean(rebootPending) || !snapshot?.available || Boolean(snapshot?.automatic_reboot?.pending);
     const recovery = Boolean(snapshot?.recovery_required);
     el("mode").querySelector('option[value="daily"]').disabled = snapshot?.daily_supported !== true;
     const daily = el("mode").value === "daily";
-    el("hours").hidden = !["window", "daily"].includes(el("mode").value);
+    el("hours").hidden = unified || !["window", "daily"].includes(el("mode").value);
     el("hours").classList.toggle("is-daily", daily);
     el("end-label").hidden = daily;
-    el("daily-note").hidden = !daily;
+    el("daily-note").hidden = unified || !daily;
     el("start-label").textContent = t(daily ? "Install at (server time)" : "Install from");
     el("interval").disabled = el("mode").value === "system" || blocked;
-    el("mode").disabled = blocked;
-    el("start").disabled = blocked; el("end").disabled = blocked;
+    el("mode").disabled = blocked || unified;
+    el("start").disabled = blocked || unified; el("end").disabled = blocked || unified;
     el("check").disabled = blocked || recovery;
-    el("save").disabled = blocked || (recovery && el("mode").value !== "system");
-    el("restore").hidden = !recovery;
+    el("save").disabled = blocked || (unified && (recovery || !dirty)) || (recovery && el("mode").value !== "system");
+    el("restore").hidden = unified || !recovery;
     el("restore").disabled = blocked;
     el("unsaved").textContent = dirty ? t("Changes have not been saved.") : "";
     el("install").disabled = blocked || recovery || snapshot?.policy?.mode === "system" || !snapshot?.status?.eligible_count;
     const reboot = snapshot?.automatic_reboot;
-    const rebootBlocked = rebootSending || Boolean(rebootPending) || restartsSending || Boolean(restartsPending) || sending || running || Boolean(pending) || !reboot?.available;
+    const rebootBlocked = unified || rebootSending || Boolean(rebootPending) || restartsSending || Boolean(restartsPending) || sending || running || Boolean(pending) || !reboot?.available;
     el("reboot-enabled").disabled = rebootBlocked;
     el("reboot-enabled").querySelector('option[value="1"]').disabled = snapshot?.policy?.mode === "system";
     el("reboot-time").disabled = rebootBlocked || el("reboot-enabled").value === "0";
@@ -90,17 +91,15 @@
     el("reboot-cancel").disabled = rebootSending || Boolean(rebootPending) || sending || running;
     el("reboot-mode-note").hidden = snapshot?.policy?.mode !== "system";
     const restartsBlocked = blocked || !snapshot?.service_restarts?.available;
-    el("restarts-enabled").disabled = restartsBlocked;
+    el("restarts-enabled").disabled = restartsBlocked || unified;
     el("restarts-enabled").querySelector('option[value="1"]').disabled = snapshot?.policy?.mode === "system";
-    el("restarts-time").disabled = restartsBlocked || el("restarts-enabled").value === "0";
-    el("restarts-save").disabled = restartsBlocked || !restartsDirty;
+    el("restarts-time").disabled = restartsBlocked || unified || el("restarts-enabled").value === "0";
+    el("restarts-save").disabled = restartsBlocked || unified || !restartsDirty;
     el("restart-check").disabled = restartsBlocked || recovery;
-    el("restart-now").disabled = restartsBlocked || recovery || snapshot?.policy?.mode === "system" || !snapshot?.status?.restart?.services?.length;
+    el("restart-now").disabled = restartsBlocked || recovery || snapshot?.policy?.mode === "system" ||
+      Boolean(snapshot?.status?.restart?.before_boot) || !snapshot?.status?.restart?.services?.length;
     el("restarts-unsaved").textContent = restartsDirty ? t("Changes have not been saved.") : "";
-    el("mode").querySelector('option[value="system"]').disabled = Boolean(snapshot?.maintenance_window);
-    if (snapshot?.maintenance_window) {
-      for (const name of ["start", "end", "reboot-enabled", "reboot-time", "reboot-services", "reboot-save", "restarts-enabled", "restarts-time", "restarts-save"]) el(name).disabled = true;
-    }
+    el("mode").querySelector('option[value="system"]').disabled = unified;
   }
   function currentSettings() {
     const policy = snapshot.policy || {}, live = snapshot.live_settings, schedule = snapshot.schedule || {};
@@ -164,6 +163,7 @@
     const at = reboot.pending?.due_at;
     el("reboot-state").textContent = reboot.error ? t(reboot.error) : !reboot.available ? t("Update host services before configuring automatic reboots")
       : reboot.pending ? t("A reboot is pending for {time}. It can still be canceled.").replace("{time}", date(at))
+        : snapshot.maintenance_window ? ""
         : reboot.attempt?.state === "deferred" ? t("The reboot was deferred because maintenance could not finish safely.") + " " + t(reboot.attempt.error || "")
           : reboot.attempt?.state === "canceled" ? t("The automatic reboot was canceled for this time window.")
             : reboot.enabled ? t(reboot.allow_service_reboot ? "Scheduled reboots also cover verified deferred services after successful restart maintenance."
@@ -228,8 +228,27 @@
       else { storeRestarts(null); restartsMessage(error.message, true); }
     } finally { restartsSending = false; await poll(); }
   }
+  function renderMaintenance() {
+    const maintenance = snapshot.maintenance_window;
+    const unified = Boolean(maintenance);
+    el("unified-note").hidden = !unified;
+    el("current-settings").hidden = unified;
+    el("policy-card").hidden = false;
+    for (const name of ["mode-field", "policy-note", "install-hint", "policy-timezone",
+      "reboot-schedule", "reboot-next-field", "restarts-schedule", "restarts-next-field"]) el(name).hidden = unified;
+    el("check-note").hidden = !unified;
+    el("policy-title").textContent = t(unified ? "Security check schedule" : "Security update policy");
+    el("save").textContent = t(unified ? "Save check interval" : "Save security policy");
+    if (!maintenance) return;
+    const values = {start: hour(maintenance.start), end: hour(maintenance.end), timezone: snapshot.server_timezone || "—"};
+    el("window-state").textContent = t(maintenance.enabled
+      ? "Active daily · {start}–{end} · {timezone}" : "Paused · Saved window {start}–{end} · {timezone}", values);
+    el("window-state").classList.toggle("text-warning", !maintenance.enabled);
+    el("window-paused").hidden = maintenance.enabled;
+    el("window-actions").hidden = !maintenance.enabled;
+    el("unified-recovery").hidden = !snapshot.recovery_required;
+  }
   function render() {
-    el("unified-note").hidden = !snapshot?.maintenance_window;
     if (!snapshot) { controls(); return; }
     const policy = snapshot.policy || {}, status = snapshot.status || {};
     const jobs = snapshot.jobs || [], active = snapshot.active_job;
@@ -253,13 +272,9 @@
       (live.timer_active || live.upgrade_interval !== "0" || live.automatic_reboot || live.install_on_shutdown);
     if (drift) el("native").textContent = t("Linux update settings differ from the managed policy. Review the current settings before installing fixes.");
     el("native").classList.toggle("text-danger", Boolean(drift));
+    el("native").hidden = Boolean(snapshot.maintenance_window && !drift);
     currentSettings();
-    if (snapshot.maintenance_window) {
-      const window = snapshot.maintenance_window;
-      const label = window.enabled ? t("Unified window: {start}–{end}", {start: hour(window.start), end: hour(window.end)})
-        : t("Automatic maintenance is disabled");
-      for (const name of ["current-install", "current-reboot", "current-restarts"]) el(name).textContent = label;
-    }
+    renderMaintenance();
     renderReboot();
     renderRestarts();
     el("timezone").textContent = snapshot.server_timezone || "—";
@@ -273,6 +288,7 @@
     }
     el("package-note").textContent = t(status.state === "unknown" ? "The listed packages are from an earlier check; current security status is unknown."
       : status.package_count > 200 ? "Showing the first 200 security packages. The total includes all packages." : "");
+    el("package-details").hidden = !tbody.children.length;
     const restart = status.restart;
     el("restart").textContent = t(!restart ? "Not checked yet." : restart.before_boot ? "The last check was made before the server rebooted, and the reboot restarted every service. A new check runs shortly after startup." : restart.error || (restart.reboot_required
       ? "A server reboot is required to activate installed updates." : restart.services?.length
@@ -289,6 +305,7 @@
       action.textContent = t(actionLabels[kind] || "Classification is checked before service restart maintenance");
       row.append(name, action); return row;
     }));
+    el("services-table").hidden = !el("services").children.length;
     if (pending) {
       const job = jobs.find((item) => item.operation === pending.operation && !pending.known.includes(item.id) &&
         new Date(item.created_at).getTime() >= (pending.serverStarted || 0) - 30000);
@@ -346,9 +363,15 @@
   });
   el("policy-form").addEventListener("submit", (event) => {
     event.preventDefault(); if (el("save").disabled) return;
+    const interval = Number(el("interval").value);
+    if (snapshot.maintenance_window) {
+      const {mode, start: savedStart, end: savedEnd} = snapshot.policy;
+      start("policy", {mode, interval, start: savedStart, end: savedEnd, confirmation: "SECURITY"}, "security-configure");
+      return;
+    }
     if (!window.confirm(t("Apply this security update policy?"))) return;
     const startHour = Number(el("start").value);
-    start("policy", {mode: el("mode").value, interval: Number(el("interval").value), start: Number(el("start").value),
+    start("policy", {mode: el("mode").value, interval, start: Number(el("start").value),
       end: el("mode").value === "daily" ? (startHour + 1) % 24 : Number(el("end").value), confirmation: "SECURITY"}, "security-configure");
   });
   for (const key of ["mode", "interval", "start", "end"]) el(key).addEventListener("change", () => { dirty = true; controls(); });
@@ -372,9 +395,21 @@
     start("policy", {mode: "system", interval: 4, start: 3, end: 5, confirmation: "SECURITY"}, "security-configure");
   });
   el("install").addEventListener("click", () => {
-    if (!el("install").disabled && window.confirm(t("Install available security fixes now, outside the configured schedule? Automatic reboots follow the separate reboot policy.")))
+    if (el("install").disabled) return;
+    const maintenance = snapshot.maintenance_window;
+    const prompt = maintenance
+      ? maintenance.enabled ? "Install available security fixes now? Automatic reboots follow the unified maintenance window."
+        : "Install available security fixes now? Automatic reboots are paused."
+      : "Install available security fixes now, outside the configured schedule? Automatic reboots follow the separate reboot policy.";
+    if (window.confirm(t(prompt)))
       start("install", {confirmation: "SECURITY"}, "security-install");
   });
+  function openScheduleFromHash() {
+    const id = window.location.hash.substring(1);
+    if (id === "oss-reboot-schedule" || id === "oss-restarts-schedule") document.getElementById(id).open = true;
+  }
+  window.addEventListener("hashchange", openScheduleFromHash);
+  openScheduleFromHash();
   el("log-details").addEventListener("toggle", () => { if (el("log-details").open) poll(); });
   controls(); poll();
 })();

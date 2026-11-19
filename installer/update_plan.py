@@ -300,12 +300,67 @@ def _valid_branch(branch: str) -> bool:
 
 
 SOURCE_REVISION_MARKER = ".easy-ha-proxy-source-revision"
+# How many locally changed files a blocked source names.
+MAX_CHANGED_FILES = 20
+
+
+def _status_entries(stdout: str) -> list[tuple[str, str]] | None:
+    """(status, path) per entry of ``git status --porcelain=v1 -z``.
+
+    None for staged changes, conflicts, renames, copies or unreadable entries.
+    The worktree comparison cannot establish that index content is upstream,
+    and resetting the checkout would discard that content too.
+    """
+    entries: list[tuple[str, str]] = []
+    for item in stdout.split("\0"):
+        if not item:
+            continue
+        if len(item) < 4 or item[2] != " ":
+            return None
+        status, path = item[:2], item[3:]
+        if status not in {" M", " D", " T", "??"} or not path or path.startswith("/") or ".." in path.split("/"):
+            return None
+        entries.append((status, path))
+    return entries
+
+
+def _local_changes_upstream(
+    installed: Path, candidate: Path, entries: list[tuple[str, str]]
+) -> bool:
+    """Whether every locally changed file already is what the candidate has.
+
+    A fix tried by hand on a gateway and then committed leaves the checkout
+    with exactly the files the next revision brings. Replacing them loses
+    nothing, so they need not block the update; one file that differs does.
+    """
+
+    for _status, relative in entries:
+        here, there = installed / relative, candidate / relative
+        if here.is_symlink() or there.is_symlink():
+            if not (here.is_symlink() and there.is_symlink() and os.readlink(here) == os.readlink(there)):
+                return False
+            continue
+        if not here.exists() and not there.exists():
+            continue
+        if not (here.is_file() and there.is_file()):
+            return False
+        try:
+            if here.read_bytes() != there.read_bytes():
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _git_checkout_revision(
     *, source_dir: Path, branch: str, runner: Runner
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Return (revision, None) or (None, blocking-component) for a git checkout."""
+    """Return (revision, None) or (None, blocking-component) for a git checkout.
+
+    A blocking component for local changes names the files, and carries the
+    installed revision and the entries (under "_local_changes") so the plan
+    can still see whether the next revision already holds those changes.
+    """
 
     revision_result = runner.run(
         ("git", "-C", str(source_dir), "rev-parse", "HEAD"),
@@ -340,7 +395,8 @@ def _git_checkout_revision(
             "core.fileMode=false",
             "status",
             "--porcelain=v1",
-            "--untracked-files=normal",
+            "-z",
+            "--untracked-files=all",
         ),
         timeout=GIT_TIMEOUT,
     )
@@ -352,9 +408,10 @@ def _git_checkout_revision(
             current_version=local_revision,
             details={"reason": "git-status-failed", "error": _short_error(status_result)},
         )
-    changes = [line for line in status_result.stdout.splitlines() if line.strip()]
+    changes = [item for item in status_result.stdout.split("\0") if item.strip()]
     if changes:
-        return None, _component(
+        entries = _status_entries(status_result.stdout)
+        component = _component(
             "all",
             "blocked",
             "The managed source has local content changes and will not be replaced automatically.",
@@ -363,9 +420,13 @@ def _git_checkout_revision(
                 "reason": "local-source-changes",
                 "branch": branch,
                 "changed_paths": len(changes),
+                "changed_files": sorted(item[3:] for item in changes)[:MAX_CHANGED_FILES],
                 "network_checked": False,
             },
         )
+        if entries:
+            component["_local_changes"] = entries
+        return None, component
     return local_revision, None
 
 
@@ -456,7 +517,11 @@ def _probe_source(
             source_dir=source_dir, branch=branch, runner=runner
         )
         if dirty_component is not None:
-            return dirty_component
+            if "_local_changes" not in dirty_component:
+                return dirty_component
+            # Whether the next revision already holds these changes is
+            # decided once it has been fetched (build_update_plan).
+            local_revision = str(dirty_component["current_version"])
         origin_result = runner.run(
             ("git", "-C", str(source_dir), "remote", "get-url", "origin"),
             timeout=GIT_TIMEOUT,
@@ -467,6 +532,7 @@ def _probe_source(
             else repository
         )
     else:
+        dirty_component = None
         # A synced/tarball install keeps no .git. The packaging step records the
         # exact commit in a marker file so the remote branch can still be
         # compared without a checkout (option B). The candidate clone below uses
@@ -478,6 +544,11 @@ def _probe_source(
             return marker_component
         origin = repository
 
+    if dirty_component is not None and (
+        not origin or any(character in origin for character in "\r\n\x00")
+    ):
+        dirty_component.pop("_local_changes", None)
+        return dirty_component
     if not origin or any(character in origin for character in "\r\n\x00"):
         return _component(
             "all",
@@ -498,6 +569,11 @@ def _probe_source(
         timeout=GIT_TIMEOUT,
     )
     remote_match = _REVISION_RE.search(remote_result.stdout.lower())
+    if dirty_component is not None and (remote_result.returncode != 0 or not remote_match):
+        # Without the next revision nothing can be compared: the local
+        # changes stay the reason.
+        dirty_component.pop("_local_changes", None)
+        return dirty_component
     if remote_result.returncode != 0 or not remote_match:
         return _component(
             "all",
@@ -511,6 +587,13 @@ def _probe_source(
             },
         )
     remote_revision = remote_match.group(0)
+    if dirty_component is not None:
+        if local_revision == remote_revision:
+            dirty_component.pop("_local_changes", None)
+            return dirty_component
+        dirty_component["available_version"] = remote_revision
+        dirty_component["details"]["network_checked"] = True
+        return dirty_component
     if local_revision == remote_revision:
         return _component(
             "all",
@@ -2109,7 +2192,8 @@ def build_update_plan(
     with tempfile.TemporaryDirectory(prefix="easy-ha-proxy-update-plan.") as temporary:
         candidate_source: Path | None = None
         candidate_error: str | None = None
-        if source["state"] == "available":
+        local_changes = source.pop("_local_changes", None)
+        if source["state"] == "available" or (local_changes and source.get("available_version")):
             candidate_source, candidate_error = _remote_candidate(
                 source_dir=Path(source_dir),
                 repository=repository,
@@ -2118,6 +2202,26 @@ def build_update_plan(
                 destination=Path(temporary) / "source",
                 runner=command_runner,
             )
+        if local_changes and source["state"] == "blocked":
+            if candidate_source is not None and _local_changes_upstream(
+                Path(source_dir), candidate_source, local_changes
+            ):
+                source = _component(
+                    "all",
+                    "available",
+                    # The usual words, so the page translates them; the
+                    # details say the local changes are already upstream.
+                    "A different remote managed source revision is available.",
+                    current_version=source.get("current_version"),
+                    available_version=source["available_version"],
+                    details={
+                        "branch": resolved_branch,
+                        "local_changes": "in-candidate",
+                        "changed_files": source["details"].get("changed_files", []),
+                    },
+                )
+            else:
+                candidate_source = None
         comparison_source = candidate_source or Path(source_dir)
         image_changes = _source_image_changes(
             Path(source_dir), candidate_source, variables

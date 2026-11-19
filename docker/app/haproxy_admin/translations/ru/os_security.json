@@ -126,6 +126,9 @@
     "OS security updates are available": "Доступны исправления безопасности ОС",
     "Security updates require a restart": "Для применения исправлений нужен перезапуск",
     "OS security updates could not be checked": "Не удалось проверить исправления безопасности ОС",
-    "OS security updates are not running": "Исправления безопасности ОС не устанавливаются"
+    "OS security updates are not running": "Исправления безопасности ОС не устанавливаются",
+    "No OS security updates are pending": "Ожидающих исправлений безопасности ОС нет",
+    "OS security updates remain after an installation attempt": "После попытки установки остались исправления безопасности ОС",
+    "Security updates are left to the automatic installation": "Исправления установит автоматическая установка"
   }
 }

@@ -525,7 +525,7 @@
 /* Distribution security maintenance. */
 .os-security-page { display: grid; gap: 20px; }
 .os-security-page .card { margin: 0; min-width: 0; }
-.os-security-page :is(#oss-reboot-policy, #oss-restarts-policy) { scroll-margin-top: 140px; }
+.os-security-page :is(#oss-reboot-schedule, #oss-restarts-schedule) { scroll-margin-top: 140px; }
 .os-security-page .card-header, .oss-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .os-security-page .card-header { justify-content: space-between; }
 .oss-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 18px; margin: 20px 0; }
@@ -537,6 +537,11 @@
 .oss-current-grid dt { color: var(--text-secondary); margin-bottom: 6px; }
 .oss-current-grid dd { margin: 0; overflow-wrap: anywhere; }
 .oss-actions { margin-top: 12px; }
+.oss-window-state { font-weight: 600; }
+#updates-auto-install-block { scroll-margin-top: 120px; }
+.os-security-page details + details { margin-top: 12px; }
+.os-security-page details > summary { cursor: pointer; }
+.ssh-trusted { display: grid; gap: 8px; max-width: 52rem; }
 .oss-packages { max-height: 420px; overflow: auto; margin-top: 18px; }
 .oss-packages th { position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; }
 .oss-packages td { overflow-wrap: anywhere; }

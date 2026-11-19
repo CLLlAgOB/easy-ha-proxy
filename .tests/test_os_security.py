@@ -302,6 +302,43 @@ class SecurityBroker(unittest.TestCase):
             broker.os_security_notifications({'status': {'state': 'ready', 'package_count': 0, 'restart': {'error': 'unknown'}}})
             self.assertFalse(any(c.args[0] == 'os.security_restart' for c in alerts.observe.call_args_list))
 
+    def test_availability_waits_for_installation_only_in_automatic_modes(self):
+        alerts = Mock()
+        with patch.object(broker, '_ALERTS', alerts), patch.object(broker, 'auto_install_settings') as settings:
+            for mode, unified, enabled, expect_notice in (
+                ('system', False, False, True),
+                ('notify', False, False, True),
+                ('auto', False, False, False),
+                ('daily', False, False, False),
+                ('window', False, False, False),
+                ('notify', True, True, False),
+                ('daily', True, False, True),
+            ):
+                with self.subTest(mode=mode, unified=unified, enabled=enabled):
+                    alerts.reset_mock()
+                    settings.return_value = {'unified': unified, 'enabled': enabled}
+                    broker.os_security_notifications({'policy': {'mode': mode}, 'status': {
+                        'state': 'ready', 'package_count': 1, 'last_install_at': 1000}})
+                    calls = [c.kwargs for c in alerts.observe.call_args_list if c.args[0] == 'os.security_updates']
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0]['active'], expect_notice)
+                    # Waiting for the automatic installation closes an older
+                    # incident quietly instead of reporting it resolved.
+                    self.assertEqual(calls[0].get('retired', False), not expect_notice)
+
+    def test_automatic_mode_reports_unapplied_fixes_and_clears_when_none_are_pending(self):
+        alerts = Mock()
+        snapshot = {'policy': {'mode': 'auto'}, 'status': {
+            'state': 'ready', 'package_count': 2, 'unapplied_count': 1}}
+        with patch.object(broker, '_ALERTS', alerts), patch.object(broker, 'auto_install_settings', return_value={}):
+            broker.os_security_notifications(snapshot)
+            snapshot['status'].update(package_count=0, unapplied_count=0)
+            broker.os_security_notifications(snapshot)
+        warning, recovery = [c.kwargs for c in alerts.observe.call_args_list if c.args[0] == 'os.security_updates']
+        self.assertTrue(warning['active'])
+        self.assertIn('1 package(s) still require', warning['detail'])
+        self.assertFalse(recovery['active'])
+
     def test_restart_notification_distinguishes_services_from_a_whole_server_reboot(self):
         alerts = Mock()
         with patch.object(broker, '_ALERTS', alerts):
@@ -357,10 +394,28 @@ class SecurityExecution(unittest.TestCase):
         result = s.run('cycle', self.root)
         self.assertEqual(result['installed_count'], 1)
         self.assertEqual(result['package_count'], 0)
+        self.assertEqual(json.loads((self.root / 'status.json').read_text())['unapplied_packages'], {})
         self.assertTrue(result['restart']['reboot_required'])
         argv = self.command.call_args.args[0]
         self.assertEqual(argv, ['/usr/bin/unattended-upgrade', '--verbose', '--minimal-upgrade-steps'])
         self.assertIn('APT_CONFIG', self.command.call_args.kwargs['env'])
+
+    def test_only_candidates_left_after_an_installation_pass_are_carried_forward(self):
+        status_path = self.root / 'status.json'
+        self.policy['mode'] = 'auto'
+        (self.root / 'policy.json').write_text(json.dumps({'phase': 'ready', 'policy': self.policy}))
+        s.run('check', self.root)
+        self.assertEqual(json.loads(status_path.read_text())['unapplied_packages'], {})
+        s.run('cycle', self.root)
+        expected = {self.row['name']: self.row['candidate']}
+        self.assertEqual(json.loads(status_path.read_text())['unapplied_packages'], expected)
+        new_package = {**self.row, 'name': 'another:amd64'}
+        self.packages.return_value = [self.row, new_package]
+        self.assertEqual(s.run('check', self.root)['package_count'], 2)
+        self.assertEqual(json.loads(status_path.read_text())['unapplied_packages'], expected)
+        self.packages.return_value = [{**self.row, 'candidate': '3'}, new_package]
+        self.assertEqual(s.run('check', self.root)['package_count'], 2)
+        self.assertEqual(json.loads(status_path.read_text())['unapplied_packages'], {})
 
     def test_scheduled_install_checks_its_consent_but_explicit_manual_install_can_override_the_window(self):
         with patch.object(s.maintenance_window, 'require', side_effect=ValueError('window closed')) as consent:

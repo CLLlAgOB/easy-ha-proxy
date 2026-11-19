@@ -1594,6 +1594,13 @@
   byId("updates-save-channels").addEventListener("click", saveChannels);
   byId("updates-save-auto-check").addEventListener("click", saveAutoCheck);
   byId("updates-save-auto-install").addEventListener("click", saveAutoInstall);
+  function openMaintenanceSettings() {
+    if (window.location.hash !== "#updates-auto-install-block") return;
+    byId("updates-settings").open = true;
+    requestAnimationFrame(() => byId("updates-auto-install-block").scrollIntoView({block: "start"}));
+  }
+  window.addEventListener("hashchange", openMaintenanceSettings);
+  openMaintenanceSettings();
   ["updates-auto-install", "updates-auto-install-os", "updates-auto-install-unified", "updates-auto-install-runtime", "updates-auto-install-start", "updates-auto-install-end"].forEach((id) => {
     byId(id).addEventListener("change", () => {
       if (id === "updates-auto-install-unified" && byId(id).checked && !autoInstall?.unified) {

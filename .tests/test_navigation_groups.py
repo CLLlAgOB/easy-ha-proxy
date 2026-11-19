@@ -45,6 +45,7 @@ EXPECTED_ENDPOINTS = {
     "routes.adaptive_bans_page",
     "routes.detection_rules_page",
     "routes.request_log_page",
+    "ssh_security.page",
     "routes.alerts_page",
     "routes.audit_page",
     "routes.system_health_page",

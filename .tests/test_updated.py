@@ -138,6 +138,43 @@ class SurvivingUpdateJobTests(unittest.TestCase):
 
 
 class UpdateBrokerProtocolTests(unittest.TestCase):
+    def test_ssh_watch_reports_firewall_loss_and_burst_then_clears_after_disabling(self) -> None:
+        statuses = [
+            {'state': 'active', 'managed': True, 'managed_enabled': True, 'total_banned': 2,
+             'firewall': {'state': 'missing'}},
+            {'state': 'active', 'managed': True, 'managed_enabled': True, 'total_banned': 13,
+             'firewall': {'state': 'verified'}},
+            {'state': 'jail_disabled', 'managed': True, 'managed_enabled': False},
+        ]
+        alerts = mock.Mock()
+        with (mock.patch.object(UPDATED, '_ALERTS', alerts),
+              mock.patch.object(UPDATED, 'ACTIVE_MARKER', mock.Mock(exists=mock.Mock(return_value=False))),
+              mock.patch.object(UPDATED.STOP_EVENT, 'wait', side_effect=[False, False, False, True]),
+              mock.patch.object(UPDATED, 'ssh_monitoring_enabled', return_value=True),
+              mock.patch.object(UPDATED, 'ssh_protection_query', side_effect=statuses),
+              mock.patch.object(UPDATED.time, 'monotonic', side_effect=[100, 160])):
+            UPDATED.ssh_protection_watch_loop()
+        self.assertEqual([(args[0], kwargs['active']) for args, kwargs in alerts.observe.call_args_list], [
+            ('ssh.protection_lost', True), ('ssh.ban_burst', False),
+            ('ssh.protection_lost', False), ('ssh.ban_burst', True),
+            ('ssh.protection_lost', False), ('ssh.ban_burst', False),
+        ])
+
+    def test_ssh_status_answers_when_fail2ban_cannot_be_read(self) -> None:
+        # The page must stay usable, above all its "pause monitoring" switch.
+        failure = UPDATED.UpdatedError('Could not read Fail2ban on the server', code='verification_failed')
+        with (mock.patch.object(UPDATED, 'ssh_monitoring_enabled', return_value=True),
+              mock.patch.object(UPDATED, 'list_jobs', return_value=[]),
+              mock.patch.object(UPDATED, 'ssh_protection_query', side_effect=failure)):
+            result = UPDATED.ssh_protection_status({'action': 'ssh_protection_status'})
+        self.assertEqual(result, {'ok': True, 'monitoring': True, 'job': None, 'state': 'unavailable',
+                                  'error': 'Could not read Fail2ban on the server'})
+        with (mock.patch.object(UPDATED, 'ssh_monitoring_enabled', return_value=True),
+              mock.patch.object(UPDATED, 'list_jobs', return_value=[]),
+              mock.patch.object(UPDATED, 'ssh_protection_query',
+                                return_value={'ok': True, 'request_id': None, 'state': 'active'})):
+            self.assertEqual(UPDATED.ssh_protection_status({})['state'], 'active')
+
     def test_request_fields_and_component_allowlist_are_exact(self) -> None:
         self.assertEqual(
             UPDATED.REQUEST_FIELDS,
@@ -165,6 +202,11 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
                 "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
                 "start_haproxy_transition": frozenset({"action", "target_branch", "confirmed"}),
                 "os_security_status": frozenset({"action", "job_id"}),
+                "ssh_protection_status": frozenset({"action", "job_id"}),
+                "ssh_protection_connection": frozenset({"action", "user", "ip", "hostname", "local_address", "port"}),
+                "ssh_protection_monitor": frozenset({"action", "enabled"}),
+                "ssh_protection_configure": frozenset({"action", "operation", "trusted", "policy"}),
+                "ssh_protection_unban": frozenset({"action", "ip"}),
                 "os_security_check": frozenset({"action"}),
                 "os_security_install": frozenset({"action", "confirmation"}),
                 "os_security_configure": frozenset({"action", "mode", "interval", "start", "end", "confirmation"}),
