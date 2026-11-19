@@ -3498,6 +3498,13 @@ def os_security_notifications(snapshot):
                 _ALERTS.observe("os.security_updates", 'host', active=True,
                                 summary='OS security updates remain after an installation attempt',
                                 detail=f'{unapplied} package(s) still require a security update after an installation attempt.')
+            else:
+                # Fixes are pending but the next automatic installation owns
+                # them: an incident left from the notify-only mode, or about
+                # a version that has since been superseded, closes quietly.
+                # "Resolved" would claim that nothing is pending.
+                _ALERTS.observe("os.security_updates", 'host', active=False, retired=True,
+                                summary='Security updates are left to the automatic installation')
         restart = status.get('restart') or {}
         if not restart.get('error'):
             pending = bool(restart.get('reboot_required') or restart.get('services'))
@@ -3805,7 +3812,13 @@ def ssh_protection_status(request):
         job = next((value for value in list_jobs() if value.get('operation') == SSH_PROTECTION_JOB), None)
     result = {'ok': True, 'monitoring': enabled, 'job': job}
     if enabled:
-        result.update(ssh_protection_query('status'))
+        try:
+            result.update(ssh_protection_query('status'))
+        except UpdatedError as error:
+            # The page still answers, so the operator can pause monitoring
+            # or read the last job while Fail2ban cannot be read.
+            result.update(state='unavailable', error=str(error))
+        result['ok'] = True
     return result
 
 

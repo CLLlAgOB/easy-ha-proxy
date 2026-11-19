@@ -35,6 +35,22 @@ class SshProtectionTests(unittest.TestCase):
         with patch.object(ssh, 'quick', return_value=(0, hook + '-A f2b-sshd -j RETURN\n' + block)):
             self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'missing')
 
+    def test_the_panel_http_ban_chain_before_the_hook_keeps_blocks_verified(self):
+        # iptables-haproxy-ban.service inserts HP_BAN at INPUT position 1 and
+        # it only drops ports 80 and 443; on hosts where iptables is legacy
+        # it sits above the Fail2ban hook after every reboot.
+        hook = '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd\n'
+        block = '-A f2b-sshd -s 192.0.2.2/32 -j REJECT --reject-with icmp-port-unreachable\n'
+        with patch.object(ssh, 'quick', return_value=(0, '-A INPUT -j HP_BAN\n' + hook + block)):
+            self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'verified')
+        with patch.object(ssh, 'quick', return_value=(0, '-A INPUT -j HP_BAN\n-A INPUT -j ACCEPT\n' + hook + block)):
+            self.assertEqual(ssh.firewall_family(4, [22], {'192.0.2.2'}), 'order_unknown')
+        rules = (Path(__file__).resolve().parents[1] / 'ansible/roles/haproxy-admin/files/haproxy_ban.rules').read_text()
+        verdicts = [line.split(' -j ', 1)[1].split()[0] for line in rules.splitlines() if line.startswith('-A HP_BAN ')]
+        self.assertTrue(verdicts and set(verdicts) <= {'DROP', 'REJECT', 'RETURN'})
+        self.assertTrue(all('--dport 80 ' in line or '--dport 443 ' in line
+                            for line in rules.splitlines() if line.startswith('-A HP_BAN ')))
+
     def test_ban_times_are_taken_from_fail2ban_and_permanent_bans_have_no_expiry(self):
         output = ('192.0.2.1 \t2026-11-19 11:00:00 + 3600 = 2026-11-19 12:00:00\n'
                   '2001:0db8::1 \t2026-11-19 11:10:00 + -1 = 9999-12-31 23:59:59\n'

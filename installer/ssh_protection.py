@@ -35,6 +35,10 @@ DEFAULT_POLICY = {'maxretry': 5, 'findtime': 600, 'bantime': 3600}
 OPENSSH_FIELDS = {'passwordauthentication', 'kbdinteractiveauthentication', 'permitrootlogin',
                   'persourcepenalties', 'pubkeyauthentication', 'authenticationmethods',
                   'allowusers', 'allowgroups', 'denyusers', 'denygroups'}
+# The panel's own HTTP ban chain (iptables-haproxy-ban.service) is inserted
+# first in INPUT and only drops ports 80 and 443, so it cannot pass an SSH
+# connection that Fail2ban blocks.
+HARMLESS_INPUT_RULES = frozenset({'-A INPUT -j HP_BAN'})
 BAN_TIME = re.compile(r'(\S+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \+ (-?\d+) = (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)')
 
 
@@ -268,7 +272,7 @@ def firewall_family(family, ports, banned):
     reached_return = False
     try:
         for line in rules.splitlines():
-            if line.startswith('-A INPUT '):
+            if line.startswith('-A INPUT ') and line.strip() not in HARMLESS_INPUT_RULES:
                 args = shlex.split(line)
                 if (not hook and len(args) == 10 and args[2:7] == ['-p', 'tcp', '-m', 'multiport', '--dports']
                         and args[8:] == ['-j', 'f2b-sshd'] and set(args[7].split(',')) == {str(port) for port in ports}):

@@ -115,6 +115,8 @@
     "retired": "больше не проверяется",
     "Adaptive protection is not working": "Адаптивная защита не работает",
     "Adaptive protection: the week": "Адаптивная защита: неделя",
-    "A UDP forward runs on its backup backend": "UDP-форвард работает через резервный бэкенд"
+    "A UDP forward runs on its backup backend": "UDP-форвард работает через резервный бэкенд",
+    "Authelia is answering": "Authelia отвечает",
+    "no notification was delivered for this incident": "об этом инциденте не было доставлено ни одного уведомления"
   }
 }

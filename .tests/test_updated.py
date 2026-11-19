@@ -160,6 +160,21 @@ class UpdateBrokerProtocolTests(unittest.TestCase):
             ('ssh.protection_lost', False), ('ssh.ban_burst', False),
         ])
 
+    def test_ssh_status_answers_when_fail2ban_cannot_be_read(self) -> None:
+        # The page must stay usable, above all its "pause monitoring" switch.
+        failure = UPDATED.UpdatedError('Could not read Fail2ban on the server', code='verification_failed')
+        with (mock.patch.object(UPDATED, 'ssh_monitoring_enabled', return_value=True),
+              mock.patch.object(UPDATED, 'list_jobs', return_value=[]),
+              mock.patch.object(UPDATED, 'ssh_protection_query', side_effect=failure)):
+            result = UPDATED.ssh_protection_status({'action': 'ssh_protection_status'})
+        self.assertEqual(result, {'ok': True, 'monitoring': True, 'job': None, 'state': 'unavailable',
+                                  'error': 'Could not read Fail2ban on the server'})
+        with (mock.patch.object(UPDATED, 'ssh_monitoring_enabled', return_value=True),
+              mock.patch.object(UPDATED, 'list_jobs', return_value=[]),
+              mock.patch.object(UPDATED, 'ssh_protection_query',
+                                return_value={'ok': True, 'request_id': None, 'state': 'active'})):
+            self.assertEqual(UPDATED.ssh_protection_status({})['state'], 'active')
+
     def test_request_fields_and_component_allowlist_are_exact(self) -> None:
         self.assertEqual(
             UPDATED.REQUEST_FIELDS,

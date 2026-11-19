@@ -319,8 +319,12 @@ class SecurityBroker(unittest.TestCase):
                     settings.return_value = {'unified': unified, 'enabled': enabled}
                     broker.os_security_notifications({'policy': {'mode': mode}, 'status': {
                         'state': 'ready', 'package_count': 1, 'last_install_at': 1000}})
-                    self.assertEqual(any(c.args[0] == 'os.security_updates'
-                                         for c in alerts.observe.call_args_list), expect_notice)
+                    calls = [c.kwargs for c in alerts.observe.call_args_list if c.args[0] == 'os.security_updates']
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0]['active'], expect_notice)
+                    # Waiting for the automatic installation closes an older
+                    # incident quietly instead of reporting it resolved.
+                    self.assertEqual(calls[0].get('retired', False), not expect_notice)
 
     def test_automatic_mode_reports_unapplied_fixes_and_clears_when_none_are_pending(self):
         alerts = Mock()
