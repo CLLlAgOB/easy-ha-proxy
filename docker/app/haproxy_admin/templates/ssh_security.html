@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}SSH protection{% endblock %}
+{% block header_title %}SSH protection{% endblock %}
+{% block content %}
+<div id="ssh-protection-app" class="os-security-page"
+     data-status-url="{{ url_for('ssh_security.status') }}"
+     data-monitoring-url="{{ url_for('ssh_security.monitoring') }}"
+     data-protection-url="{{ url_for('ssh_security.protection') }}"
+     data-unban-url="{{ url_for('ssh_security.unban') }}">
+  <section class="card">
+    <div class="card-header">
+      <h2>Fail2ban on this server</h2>
+      <button class="btn btn-secondary" type="button" id="ssh-monitoring" hidden></button>
+    </div>
+    <p id="ssh-state" role="status" data-i18n-skip translate="no">{{ _('Reading SSH protection status…') }}</p>
+    <p id="ssh-owner" class="text-muted" hidden data-i18n-skip translate="no"></p>
+    <p id="ssh-message" role="status" aria-live="polite" data-i18n-skip translate="no"></p>
+    <p id="ssh-error" class="text-danger" role="status" hidden data-i18n-skip translate="no"></p>
+    <dl class="oss-current-grid" id="ssh-counters" hidden>
+      <div><dt>Current failed attempts</dt><dd id="ssh-currently-failed">—</dd></div>
+      <div><dt>Total failed attempts</dt><dd id="ssh-total-failed">—</dd></div>
+      <div><dt>Currently blocked IP addresses</dt><dd id="ssh-currently-banned">—</dd></div>
+      <div><dt>Total IP blocks</dt><dd id="ssh-total-banned">—</dd></div>
+    </dl>
+    <details id="ssh-job-details" hidden>
+      <summary>Last SSH protection operation</summary>
+      <p id="ssh-job" data-i18n-skip translate="no"></p>
+      <pre id="ssh-job-log" class="config-technical-output mono" hidden data-i18n-skip translate="no"></pre>
+    </details>
+  </section>
+  <section class="card" id="ssh-configuration" hidden>
+    <h2>Configure SSH blocking</h2>
+    <p>Block an IP for one hour after five failed SSH attempts within ten minutes.</p>
+    <form id="ssh-configuration-form">
+      <label class="ssh-trusted" for="ssh-trusted">
+        <span>Trusted IP addresses and subnets</span>
+        <textarea class="form-input" id="ssh-trusted" rows="3" maxlength="2100" aria-describedby="ssh-trusted-help" data-i18n-skip translate="no"></textarea>
+      </label>
+      <p id="ssh-trusted-help" class="text-muted">Enter IPv4 or IPv6 addresses and CIDR subnets separated by spaces or new lines. Include the address you use to administer this server if it is stable.</p>
+      <div class="oss-actions">
+        <button class="btn" type="submit" id="ssh-configure" hidden></button>
+        <button class="btn btn-secondary" type="button" id="ssh-disable" hidden>Disable SSH blocking</button>
+      </div>
+    </form>
+  </section>
+  <section class="card" id="ssh-blocks" hidden>
+    <h2>SSH blocks</h2>
+    <p id="ssh-blocks-note" class="text-muted" data-i18n-skip translate="no"></p>
+    <div class="table-scroll oss-packages" id="ssh-blocks-table" hidden>
+      <table><thead><tr><th>IP address</th><th>Action</th></tr></thead><tbody id="ssh-banned"></tbody></table>
+    </div>
+  </section>
+  <section class="card" id="ssh-openssh" hidden>
+    <h2>OpenSSH settings</h2>
+    <p class="text-muted">These values come from the global OpenSSH configuration. Rules for specific users or addresses may set different values.</p>
+    <dl class="oss-current-grid">
+      <div><dt>Password authentication</dt><dd id="ssh-passwordauthentication" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Keyboard-interactive authentication</dt><dd id="ssh-kbdinteractiveauthentication" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Root login</dt><dd id="ssh-permitrootlogin" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>OpenSSH connection penalties</dt><dd id="ssh-persourcepenalties" data-i18n-skip translate="no">—</dd></div>
+    </dl>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ url_for('static', filename='js/ssh_security.js') }}"></script>{% endblock %}

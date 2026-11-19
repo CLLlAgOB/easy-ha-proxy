@@ -66,6 +66,7 @@ from .authelia_acl import bp_authelia_acl
 from .routes_backup import bp_system_backups
 from .routes_updates import bp_system_updates
 from .routes_os_security import bp_os_security
+from .routes_ssh_security import bp_ssh_security
 from .routes_schedule import bp_schedule
 from .routes_access_portal import bp_access_portal
 from . import build_info, updates_badge
@@ -390,6 +391,7 @@ def create_app() -> Flask:
     app.register_blueprint(bp_system_backups)
     app.register_blueprint(bp_system_updates)
     app.register_blueprint(bp_os_security)
+    app.register_blueprint(bp_ssh_security)
     app.register_blueprint(bp_schedule)
     app.register_blueprint(bp_access_portal)
 

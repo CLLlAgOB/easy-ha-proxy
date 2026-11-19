@@ -1,0 +1,23 @@
+{
+  "meta": {"code": "ru", "label": "Русский"},
+  "messages": {
+    "Change maintenance window": "Изменить окно обслуживания",
+    "Active daily · {start}–{end} · {timezone}": "Включено ежедневно · {start}–{end} · {timezone}",
+    "Paused · Saved window {start}–{end} · {timezone}": "Приостановлено · Сохранённое окно {start}–{end} · {timezone}",
+    "Automatic installations, service restarts and reboots are paused. Security checks still follow their own interval.": "Автоматическая установка, перезапуск служб и перезагрузка приостановлены. Проверки исправлений идут по своему интервалу.",
+    "Security updates": "Исправления безопасности",
+    "Install available fixes during the window.": "Доступные исправления устанавливаются в этом окне.",
+    "Restart eligible services after updates.": "Службы, которые можно перезапустить автоматически, перезапускаются после обновлений.",
+    "Reboot if Linux requires it or verified services still require a reboot.": "Сервер перезагружается, если этого требует Linux или проверка показала, что службам нужна перезагрузка сервера.",
+    "Separate installation, restart and reboot schedules resume when you turn off unified maintenance on the Software updates page.": "Отдельные расписания установки, перезапуска служб и перезагрузки снова действуют после отключения общего окна на странице «Обновления ПО».",
+    "Turn off unified maintenance on the Software updates page to restore Linux update settings.": "Чтобы восстановить настройки обновлений Linux, отключите общее окно на странице «Обновления ПО».",
+    "Checks look for available security fixes at this interval, including outside the maintenance window.": "Проверка доступных исправлений выполняется с заданным интервалом, в том числе вне окна обслуживания.",
+    "Save check interval": "Сохранить интервал проверки",
+    "Configure a separate reboot schedule": "Настроить отдельное расписание перезагрузки",
+    "Configure a separate service restart schedule": "Настроить отдельное расписание перезапуска служб",
+    "Show packages": "Показать пакеты",
+    "Service restart details": "Подробности перезапуска служб",
+    "Install available security fixes now? Automatic reboots follow the unified maintenance window.": "Установить доступные исправления сейчас? Автоматическая перезагрузка выполняется в общем окне обслуживания.",
+    "Install available security fixes now? Automatic reboots are paused.": "Установить доступные исправления сейчас? Автоматические перезагрузки приостановлены."
+  }
+}

@@ -15,6 +15,7 @@ import fcntl
 import grp
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import os
@@ -355,6 +356,10 @@ REQUEST_FIELDS = {
     "apply_haproxy_migration": frozenset({"action", "plan_id", "confirmation"}),
     "start_haproxy_transition": frozenset({"action", "target_branch", "confirmed"}),
     "os_security_status": frozenset({"action", "job_id"}),
+    "ssh_protection_status": frozenset({"action", "job_id"}),
+    "ssh_protection_monitor": frozenset({"action", "enabled"}),
+    "ssh_protection_configure": frozenset({"action", "operation", "trusted"}),
+    "ssh_protection_unban": frozenset({"action", "ip"}),
     "os_security_check": frozenset({"action"}),
     "os_security_install": frozenset({"action", "confirmation"}),
     "os_security_configure": frozenset({"action", "mode", "interval", "start", "end", "confirmation"}),
@@ -3765,6 +3770,95 @@ def os_security_response(request):
     return result
 
 
+SSH_PROTECTION_MONITOR = STATE_ROOT / 'ssh-protection-monitor.json'
+SSH_PROTECTION_JOB = 'ssh-protection'
+
+
+def ssh_protection_command(operation):
+    return ['/usr/bin/python3', str(trusted_source('ssh_protection.py')), operation]
+
+
+def ssh_protection_query(operation, *options):
+    try:
+        result = subprocess.run([*ssh_protection_command(operation), *options], capture_output=True,
+                                timeout=9, check=False, env=child_environment())
+        payload = json.loads(result.stdout)
+        if isinstance(payload, dict):
+            if not result.returncode and payload.get('ok') is True:
+                return payload
+            if payload.get('error'):
+                raise UpdatedError(str(payload['error']), code='verification_failed')
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    raise UpdatedError('Could not read Fail2ban on the server', code='verification_failed')
+
+
+def ssh_protection_status(request):
+    enabled = (not SSH_PROTECTION_MONITOR.exists()
+               or safe_json_file(SSH_PROTECTION_MONITOR).get('enabled') is not False)
+    requested = request.get('job_id')
+    if requested is not None:
+        job = load_job(identifier(requested, 'job id'))
+        if job.get('operation') != SSH_PROTECTION_JOB:
+            raise UpdatedError('SSH protection job was not found', code='not_found')
+    else:
+        job = next((value for value in list_jobs() if value.get('operation') == SSH_PROTECTION_JOB), None)
+    result = {'ok': True, 'monitoring': enabled, 'job': job}
+    if enabled:
+        result.update(ssh_protection_query('status'))
+    return result
+
+
+def ssh_protection_worker(job_id, lock_fd, argv):
+    log = ''
+    try:
+        update_job(job_id, status='running', started_at=utc_now())
+        ACTIVE_MARKER.write_text(f'job_id={job_id}\n', encoding='utf-8')
+        os.chmod(ACTIVE_MARKER, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        code, log = run_command(job_id, argv, timeout=900)
+        payload = json.loads(log.strip().splitlines()[-1])
+        if code or payload.get('ok') is not True or payload.get('request_id') != job_id:
+            raise UpdatedError(payload.get('error') or 'Could not configure SSH protection; review the job log')
+        update_job(job_id, status='completed', completed_at=utc_now(),
+                   result={'message': payload['message']}, output={'log': log})
+    except (ValueError, IndexError, AttributeError):
+        finish_failed(job_id, UpdatedError('Could not configure SSH protection; review the job log'), log, alert=False)
+    except Exception as error:
+        finish_failed(job_id, error, log, alert=False)
+    finally:
+        try:
+            if argv[2] == 'install':
+                LATEST_PLAN_PATH.unlink(missing_ok=True)
+            ACTIVE_MARKER.unlink(missing_ok=True)
+        finally:
+            release_operation(lock_fd)
+
+
+def configure_ssh_protection(request):
+    operation, trusted = request.get('operation'), request.get('trusted')
+    if operation not in ('install', 'enable', 'disable') or not isinstance(trusted, list) or len(trusted) > 32:
+        raise UpdatedError('Invalid SSH protection operation')
+    addresses = []
+    for value in trusted:
+        if not isinstance(value, str) or not 1 <= len(value) <= 64 or '%' in value:
+            raise UpdatedError('Enter a valid IPv4 or IPv6 address or subnet')
+        try:
+            addresses.append(str(ipaddress.ip_network(value, strict=False) if '/' in value else ipaddress.ip_address(value)))
+        except ValueError:
+            raise UpdatedError('Enter a valid IPv4 or IPv6 address or subnet') from None
+    argv = ssh_protection_command(operation)
+    lock_fd = acquire_operation(allow_security_recovery=operation != 'install')
+    try:
+        job = new_job(SSH_PROTECTION_JOB)
+        argv.extend(['--maintenance-lock', str(MAINTENANCE_LOCK_PATH), '--request-id', job['id'], '--trusted', *addresses])
+        start_thread(ssh_protection_worker, job['id'], lock_fd, argv)
+        return {'ok': True, 'job_id': job['id'], 'job': public_job(job, include_log=False)}
+    except Exception:
+        release_operation(lock_fd)
+        raise
+
+
 def status_response(request: dict[str, Any]) -> dict[str, Any]:
     requested = request.get("job_id")
     jobs = (
@@ -4083,6 +4177,28 @@ def dispatch(request: Any) -> dict[str, Any]:
         return start_haproxy_transition(request)
     if action == 'os_security_status':
         return os_security_response(request)
+    if action == 'ssh_protection_status':
+        return ssh_protection_status(request)
+    if action == 'ssh_protection_monitor':
+        if type(request.get('enabled')) is not bool:
+            raise UpdatedError('Invalid SSH monitoring setting')
+        atomic_json(SSH_PROTECTION_MONITOR, {'enabled': request['enabled']})
+        return {'ok': True}
+    if action == 'ssh_protection_configure':
+        return configure_ssh_protection(request)
+    if action == 'ssh_protection_unban':
+        ip = request.get('ip')
+        if not isinstance(ip, str) or not 1 <= len(ip) <= 64 or '%' in ip:
+            raise UpdatedError('Invalid IP address')
+        try:
+            ip = str(ipaddress.ip_address(ip))
+        except ValueError:
+            raise UpdatedError('Invalid IP address') from None
+        lock_fd = acquire_operation(allow_security_recovery=True, allow_scheduled_reboot=True)
+        try:
+            return ssh_protection_query('unban', '--ip', ip)
+        finally:
+            release_operation(lock_fd)
     if action in {'os_security_check', 'os_security_install', 'os_security_configure', 'os_security_restart_check', 'os_security_restart'}:
         return start_os_security(request)
     return start_apply(request)
