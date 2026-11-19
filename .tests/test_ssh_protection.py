@@ -1,5 +1,6 @@
 """Regression tests for scoped Fail2ban configuration and status parsing."""
 
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -68,6 +69,32 @@ class SshProtectionTests(unittest.TestCase):
                   patch.object(ssh, 'platform'), patch.object(ssh, 'read_config', side_effect=Path.read_text)):
                 with self.assertRaisesRegex(ssh.SecurityError, 'outside the panel'):
                     ssh.set_protection('enable', [])
+
+    def test_ubuntu_package_defaults_are_only_accepted_with_the_installed_checksum(self):
+        # The Ubuntu Noble package enables sshd and provides global defaults.
+        stock = ('[DEFAULT]\nbanaction = nftables\nbanaction_allports = nftables[type=allports]\n'
+                 'backend = systemd\n\n[sshd]\nenabled = true\n')
+        checksum = hashlib.md5(stock.encode(), usedforsecurity=False).hexdigest()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            defaults = root / 'jail.d/defaults-debian.conf'
+            defaults.parent.mkdir()
+            defaults.write_bytes(stock.encode())
+            drop_in = defaults.with_name('99-easy-ha-proxy-sshd.local')
+            drop_in.write_bytes(ssh.config_text(False).encode())
+            conffiles = f' {defaults} {checksum}\n'
+            with (patch.object(ssh, 'CONFIG', root), patch.object(ssh, 'DROP_IN', drop_in),
+                  patch.object(ssh, 'read_config', side_effect=Path.read_text),
+                  patch.object(ssh, 'quick', return_value=(0, conffiles)) as query):
+                self.assertFalse(ssh.external_ssh_config())
+                query.assert_called_once_with('/usr/bin/dpkg-query', '--show', '--showformat=${Conffiles}', 'fail2ban')
+                defaults.write_bytes(stock.replace('enabled = true', 'enabled = false').encode())
+                self.assertTrue(ssh.external_ssh_config())
+                defaults.write_bytes(stock.encode())
+                query.return_value = (0, conffiles.rstrip() + ' obsolete\n')
+                self.assertTrue(ssh.external_ssh_config())
+                query.return_value = (1, '')
+                self.assertTrue(ssh.external_ssh_config())
 
     def test_trusted_addresses_canonicalize_cidrs_and_reject_config_content(self):
         self.assertEqual(ssh.trusted_addresses(['2001:db8::1/64', '2001:db8::/64', '192.0.2.4']),

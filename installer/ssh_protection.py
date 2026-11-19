@@ -5,6 +5,7 @@ import argparse
 import configparser
 import contextlib
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -103,7 +104,7 @@ def read_config(path):
     info = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 256 * 1024:
         raise SecurityError('An existing Fail2ban configuration requires administrator review')
-    return path.read_text(encoding='utf-8')
+    return path.read_bytes().decode('utf-8')
 
 
 def managed_config():
@@ -126,18 +127,27 @@ def managed_config():
     return {'text': text, 'enabled': enabled, 'ports': ports, 'backend': backend, 'trusted': trusted}
 
 
+def unmodified_package_defaults(path, text):
+    code, conffiles = quick('/usr/bin/dpkg-query', '--show', '--showformat=${Conffiles}', 'fail2ban')
+    if code:
+        return False
+    # dpkg stores an MD5 for each shipped conffile to detect local edits.
+    checksum = hashlib.md5(text.encode('utf-8'), usedforsecurity=False).hexdigest()
+    return any(line.strip().rsplit(maxsplit=1) == [str(path), checksum] for line in conffiles.splitlines())
+
+
 def external_ssh_config():
     paths = [CONFIG / 'jail.local', *DROP_IN.parent.glob('*.conf'), *DROP_IN.parent.glob('*.local')]
     for path in paths:
         if path == DROP_IN or not os.path.lexists(path):
             continue
         text = read_config(path)
+        if path == DROP_IN.parent / 'defaults-debian.conf':
+            if unmodified_package_defaults(path, text):
+                continue
+            return True
         parser = configparser.ConfigParser(interpolation=None, strict=False)
         parser.read_string(text)
-        if (path.parent == DROP_IN.parent and path.name == 'defaults-debian.conf'
-                and set(parser.sections()) == {'sshd'} and not parser.defaults()
-                and dict(parser['sshd']) == {'enabled': 'true'}):
-            continue
         if {'ignoreip', 'ignorecommand'} & parser.defaults().keys() or parser.has_section('INCLUDES') or any(
             name.lower().startswith(('sshd', 'openssh')) or
             re.match(r'^sshd(?:\s|\[|$)', parser[name].get('filter', '').strip(), re.IGNORECASE)
