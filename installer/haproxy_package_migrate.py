@@ -1179,14 +1179,17 @@ class Engine:
 
     def health(self):
         text = self.paths.config.read_text()
-        admin = re.findall(r'^\s+acl host_admin hdr\(host\) -i ([A-Za-z0-9.-]+)\s*$', text, re.M)
+        # The HTTP redirect and HTTPS frontend may declare the same host.
+        admin_hosts = {host.lower() for host in re.findall(
+            r'^\s+acl host_admin hdr\(host\) -i ([A-Za-z0-9.-]+)\s*$', text, re.M)}
         authentication = re.findall(r'^\s+acl host_authelia hdr\(host\) -i ([A-Za-z0-9.-]+)\s*$', text, re.M)
-        if len(admin) != 1:
+        if len(admin_hosts) != 1:
             raise MigrationError('No unique administration hostname')
-        if local_probe(admin[0], '/api/control-plane-health') != 200:
+        admin, = admin_hosts
+        if local_probe(admin, '/api/control-plane-health') != 200:
             raise MigrationError('The administration control-plane probe failed')
         # A loopback probe must not grant anonymous access to the ordinary UI.
-        if local_probe(admin[0], '/') not in (301, 302, 303, 307, 308, 401, 403):
+        if local_probe(admin, '/') not in (301, 302, 303, 307, 308, 401, 403):
             raise MigrationError('Anonymous access to the administration UI changed')
         if authentication and local_probe(authentication[0], '/api/health') != 200:
             raise MigrationError('The real authentication service is not healthy')

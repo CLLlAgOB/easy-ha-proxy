@@ -37,6 +37,25 @@ backend tbl_ip_auth
 
 @unittest.skipUnless(m, 'Linux migration command')
 class Boundaries(unittest.TestCase):
+    def test_health_accepts_redirect_for_same_host_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'haproxy.cfg'
+            engine = m.Engine(m.Paths(config=config))
+            https = 'frontend fe_https\n    acl host_admin hdr(host) -i admin.example.test\n'
+            http = 'frontend fe_http80\n    acl host_admin hdr(host) -i '
+            config.write_text(https + http + 'ADMIN.example.test\n')
+            with patch.object(m, 'local_probe', side_effect=[200, 302]) as probe, \
+                    patch.object(m, 'runtime', return_value='# pxname,svname\nbe_admin,BACKEND\n'):
+                engine.health()
+                self.assertEqual([args for args, _ in probe.call_args_list], [
+                    ('admin.example.test', '/api/control-plane-health'), ('admin.example.test', '/')])
+            for text in ('frontend fe_https\n', https + http + 'another.example.test\n'):
+                config.write_text(text)
+                with self.subTest(text=text), patch.object(m, 'local_probe') as probe:
+                    with self.assertRaisesRegex(m.MigrationError, 'No unique administration hostname'):
+                        engine.health()
+                    probe.assert_not_called()
+
     def test_combined_transition_holds_the_actual_lock_across_refresh_prepare_and_apply(self):
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / 'maintenance.lock'
