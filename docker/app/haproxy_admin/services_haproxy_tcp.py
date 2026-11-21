@@ -308,12 +308,28 @@ def _delete_tcp_proxy(name: str) -> Tuple[bool, str]:
         return False, f"The entry could not be kept in the trash, so nothing was deleted: {exc}"
     ok, msg = update_yaml_file("tcp", content)
     if not ok:
-        trash.drop(kept)
+        if trash.settle(kept, _tcp_in_source(name)):
+            return False, f"{msg} The TCP proxy is gone from tcp.yml all the same; it was kept in the trash."
         return ok, msg
+    trash.commit(kept)
     return ok, f"{msg} The TCP proxy was moved to the trash and can be restored there."
 
 
-def restore_tcp_proxy(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
+def _tcp_in_source(name: str) -> bool:
+    """Whether tcp.yml, as it is now on disk, still has this proxy."""
+    try:
+        data = _load_yaml(TCP_YAML)
+    except Exception:  # pylint: disable=broad-except
+        return False  # unreadable: keep the copy
+    proxies = data.get("tcp_proxies")
+    if proxies is None:
+        proxies = data.get("tcp")
+    return isinstance(proxies, list) and any(
+        isinstance(p, dict) and p.get("name") == name for p in proxies
+    )
+
+
+def restore_tcp_proxy(entry: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
     """Put a deleted TCP proxy back, held to the rules a new one would be."""
     with source_lock("tcp"):
         data = _load_yaml(TCP_YAML)
@@ -323,10 +339,10 @@ def restore_tcp_proxy(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
         if proxies is None:
             proxies = []
         if not isinstance(proxies, list):
-            return False, 'Invalid tcp.yml structure (expected a tcp_proxies/tcp list)', ""
+            return False, 'Invalid tcp.yml structure (expected a tcp_proxies/tcp list)', {}
         conflict = tcp_identity_conflict(entry, proxies)
         if conflict:
-            return False, conflict, ""
+            return False, conflict, {}
         proxies.append(entry)
         data["tcp_proxies"] = proxies
         content = yaml.safe_dump(
@@ -336,4 +352,4 @@ def restore_tcp_proxy(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
             default_flow_style=False,
         )
         ok, msg = update_yaml_file("tcp", content)
-        return ok, msg, ""
+        return ok, msg, {}

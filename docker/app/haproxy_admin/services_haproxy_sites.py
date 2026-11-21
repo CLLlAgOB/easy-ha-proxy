@@ -531,19 +531,51 @@ def _delete_site_by_name(name: str) -> Tuple[bool, str]:
     )
     from . import trash
 
-    # Kept first: a deletion whose entry cannot be kept does not happen.
+    # Kept first: a deletion whose entry cannot be kept does not happen. The
+    # access page goes aside before the write and is named in the item, so
+    # a site in the trash never loses the page it had; if that cannot be
+    # recorded, the page goes back and nothing is deleted.
     try:
         kept = trash.keep("site", name, removed)
     except trash.TrashError as exc:
         return False, f"The entry could not be kept in the trash, so nothing was deleted: {exc}"
-    ok, msg = update_yaml_file("websites", content)
-    if not ok:
-        trash.drop(kept)
-        return ok, msg
     stored = _discard_access_page(name)
     if stored:
-        trash.annotate(kept, access_page=stored)
+        try:
+            trash.annotate(kept, access_page=stored)
+        except trash.TrashError as exc:
+            _put_access_page_back(name, stored)
+            trash.drop(kept)
+            return False, f"The entry could not be kept in the trash, so nothing was deleted: {exc}"
+    ok, msg = update_yaml_file("websites", content)
+    if not ok:
+        if trash.settle(kept, _site_in_source(name)):
+            return False, f"{msg} The site is gone from websites.yml all the same; it was kept in the trash."
+        if stored:
+            _put_access_page_back(name, stored)
+        return ok, msg
+    trash.commit(kept)
     return ok, f"{msg} The site was moved to the trash and can be restored there."
+
+
+def _site_in_source(name: str) -> bool:
+    """Whether websites.yml, as it is now on disk, still has this site."""
+    try:
+        sites = _load_yaml(WEBSITES_YAML).get("sites") or []
+    except Exception:  # pylint: disable=broad-except
+        return False  # unreadable: keep the copy
+    return isinstance(sites, list) and any(
+        isinstance(s, dict) and s.get("name") == name for s in sites
+    )
+
+
+def _put_access_page_back(name: str, stored: str) -> None:
+    try:
+        from . import access_portal
+
+        access_portal.restore(name, stored)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("The access page of site %r could not be put back", name, exc_info=True)
 
 
 # What the trash page shows when a restored service site has no login rule.
@@ -553,19 +585,22 @@ GATE_RULE_WARNING = (
 )
 
 
-def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
+def restore_site(entry: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
     """Put a deleted site back, held to the rules a new one would be.
 
-    The third value is a warning for a restore that went only part of the way.
+    The third value says how the rest went: "access_page" (restored, gone or
+    failed) and "warning" for a restore that went only part of the way.
     """
+    info: Dict[str, Any] = {}
+    page = str((extra or {}).get("access_page") or "")
     with source_lock("websites"):
         data = _load_yaml(WEBSITES_YAML)
         sites = data.get("sites") or []
         if not isinstance(sites, list):
-            return False, 'Invalid websites.yml structure (expected a sites list)', ""
+            return False, 'Invalid websites.yml structure (expected a sites list)', info
         conflict = site_identity_conflict(entry, sites)
         if conflict:
-            return False, conflict, ""
+            return False, conflict, info
         sites.append(entry)
         data["sites"] = sites
         content = yaml.safe_dump(
@@ -575,6 +610,12 @@ def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
             default_flow_style=False,
         )
         ok, msg = update_yaml_file("websites", content)
+        if ok and page:
+            # Still under the websites lock: a deletion and a new site of the
+            # same name both wait for it, so the page cannot land on another site.
+            from . import trash
+
+            info["access_page"] = trash.restore_access_page(str(entry.get("name") or ""), page)
     if ok and entry.get("access_gate") is True:
         domain = str(entry.get("domain") or "")
         names = [domain] + [
@@ -582,8 +623,10 @@ def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
         ]
         rule_ok, rule_msg = _ensure_access_gate_authelia_rule(names)
         message = _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
-        return True, message, "" if rule_ok else GATE_RULE_WARNING
-    return ok, msg, ""
+        if not rule_ok:
+            info["warning"] = GATE_RULE_WARNING
+        return True, message, info
+    return ok, msg, info
 
 
 def _discard_access_page(name: str) -> Optional[str]:

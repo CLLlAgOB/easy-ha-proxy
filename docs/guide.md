@@ -910,7 +910,11 @@ is saved.
 The copy is taken before the deletion; if it cannot be taken, nothing is
 deleted. It is dropped again only when a failed deletion removed nothing, so the
 trash never holds something still in service, and a deletion that stopped
-part-way (certbot, for one, removes the renewal settings first) keeps its copy.
+part-way (certbot, for one, removes the renewal settings first) keeps its copy,
+and restoring it puts the whole copy back over exactly what was left behind.
+Emptying the trash in the middle of a deletion cannot take the copy: it is
+listed only once the deletion has gone through. A restored file never replaces
+one created meanwhile.
 Files are restored under a temporary name and renamed into place only when
 whole. Restoring goes through the same
 checks as creating: a site, proxy or forward whose name, domain or port has

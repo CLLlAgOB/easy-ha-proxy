@@ -392,12 +392,30 @@ def _delete_udp(name: str) -> Tuple[bool, str]:
     data["udp_forwards"] = new_list
     ok, msg = _write_and_apply(data)
     if not ok:
-        trash.drop(kept)
+        # An apply whose rollback also failed leaves udp.yml without the
+        # forward; then the copy is all there is.
+        if trash.settle(kept, _udp_in_source(name)):
+            return False, f"{msg} The UDP forward is gone from udp.yml all the same; it was kept in the trash."
         return ok, msg
+    trash.commit(kept)
     return ok, f"{msg} The UDP forward was moved to the trash and can be restored there."
 
 
-def restore_udp_forward(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
+def _udp_in_source(name: str) -> bool:
+    """Whether udp.yml, as it is now on disk, still has this forward."""
+    try:
+        data = _load_yaml(UDP_YAML)
+    except Exception:  # pylint: disable=broad-except
+        return False  # unreadable: keep the copy
+    forwards = data.get("udp_forwards")
+    if forwards is None:
+        forwards = data.get("udp")
+    return isinstance(forwards, list) and any(
+        isinstance(f, dict) and f.get("name") == name for f in forwards
+    )
+
+
+def restore_udp_forward(entry: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
     """Put a deleted UDP forward back and apply it, as adding one does."""
     with source_lock("udp"):
         data = _load_yaml(UDP_YAML)
@@ -407,23 +425,23 @@ def restore_udp_forward(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
         if forwards is None:
             forwards = []
         if not isinstance(forwards, list):
-            return False, "Invalid udp.yml structure (expected a udp_forwards list)", ""
+            return False, "Invalid udp.yml structure (expected a udp_forwards list)", {}
         name = str(entry.get("name") or "")
         if any(f.get("name") == name for f in forwards):
-            return False, f"UDP forward with name={name!r} already exists", ""
+            return False, f"UDP forward with name={name!r} already exists", {}
         try:
             start, end, _value = _parse_port_range(entry.get("listen_port"), "listen_port")
         except ValueError as exc:
-            return False, str(exc), ""
+            return False, str(exc), {}
         overlap = _overlapping_forward(forwards, start=start, end=end)
         if overlap:
-            return False, overlap, ""
+            return False, overlap, {}
         if entry.get("enabled", True):
             conflict = udp_listen_port_conflict(start, end)
             if conflict:
-                return False, conflict, ""
+                return False, conflict, {}
         forwards.append(entry)
         data.pop("udp", None)
         data["udp_forwards"] = forwards
         ok, msg = _write_and_apply(data)
-        return ok, msg, ""
+        return ok, msg, {}

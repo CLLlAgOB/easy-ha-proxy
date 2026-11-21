@@ -109,21 +109,24 @@ def api_trash_settings():
     payload = request.get_json(silent=True) or {}
     if not _superadmin():
         return _denied("trash.settings", "settings")
+    # Both keepers under one lock: two changes interleaved could otherwise
+    # each answer "saved" and leave the panel and certd on different terms.
     try:
-        days = trash.set_keep_days(payload.get("keep_days"))
+        with trash.settings_lock():
+            days = trash.set_keep_days(payload.get("keep_days"))
+            error = ""
+            try:
+                answer = trash_settings(days)
+                if not answer.get("ok"):
+                    error = str(answer.get("error") or "certd refused")
+            except CertdUnavailable as exc:
+                LOG.warning("certd unavailable: %s", exc)
+                error = "The certificate service does not answer"
     except trash.TrashError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except OSError as exc:
         LOG.warning("trash settings not saved: %s", exc)
         return jsonify({"ok": False, "error": "The trash settings could not be saved"}), 500
-    error = ""
-    try:
-        answer = trash_settings(days)
-        if not answer.get("ok"):
-            error = str(answer.get("error") or "certd refused")
-    except CertdUnavailable as exc:
-        LOG.warning("certd unavailable: %s", exc)
-        error = "The certificate service does not answer"
     record_request(
         "trash.settings",
         object_type="trash",
@@ -217,9 +220,9 @@ def api_trash_empty():
         errors.append(str(exc))
     try:
         answer = trash_purge(everything=True)
-        if answer.get("ok"):
-            removed += int(answer.get("removed") or 0)
-        else:
+        # What certd really deleted, also when some of it could not be.
+        removed += int(answer.get("removed") or 0)
+        if not answer.get("ok"):
             errors.append(str(answer.get("error") or "certd refused"))
     except CertdUnavailable as exc:
         errors.append(f"certd unavailable: {exc}")

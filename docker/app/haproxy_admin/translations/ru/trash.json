@@ -49,6 +49,9 @@
     "The trash settings could not be saved": "Не удалось сохранить настройки корзины",
     "The entry could not be kept in the trash, so nothing was deleted:": "Не удалось сохранить запись в корзине, поэтому ничего не удалено:",
     "The site is back, but its Authelia login rule could not be added; add a one_factor rule for it on the Authelia access rules page.": "Сайт восстановлен, но добавить для него правило входа Authelia не удалось; добавьте правило one_factor для этого сайта на странице правил доступа Authelia.",
-    "Saved for sites and forwards, but not for certificates:": "Сохранено для сайтов и пробросов, но не для сертификатов:"
+    "Saved for sites and forwards, but not for certificates:": "Сохранено для сайтов и пробросов, но не для сертификатов:",
+    "The site is gone from websites.yml all the same; it was kept in the trash.": "Сайта всё равно уже нет в websites.yml; его копия сохранена в корзине.",
+    "The TCP proxy is gone from tcp.yml all the same; it was kept in the trash.": "TCP-прокси всё равно уже нет в tcp.yml; его копия сохранена в корзине.",
+    "The UDP forward is gone from udp.yml all the same; it was kept in the trash.": "UDP-проброса всё равно уже нет в udp.yml; его копия сохранена в корзине."
   }
 }

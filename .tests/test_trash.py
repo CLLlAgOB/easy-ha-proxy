@@ -24,7 +24,7 @@ copy was gone. Held here:
 from __future__ import annotations
 
 import copy
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import importlib.util
 import io
 import json
@@ -289,6 +289,61 @@ class DeletedEntriesAreKept(PanelFixture):
         self.assertEqual(trash.items(), [])
         self.assertEqual(self.names("websites", "sites"), ["blog", "shop"])
 
+    def test_emptying_the_trash_during_a_deletion_cannot_take_the_copy(self):
+        def save_after_someone_empties(kind, text):
+            trash.empty()
+            return self.save(kind, text)
+
+        with mock.patch.object(sites, "update_yaml_file", side_effect=save_after_someone_empties):
+            self.assertTrue(sites.delete_site_by_name("shop")[0])
+        self.assertEqual([(i["kind"], i["name"]) for i in trash.items()], [("site", "shop")])
+
+    def test_a_udp_forward_gone_after_a_failed_rollback_stays_in_the_trash(self):
+        def apply_then_fail_to_roll_back(data):
+            self.data["udp"] = copy.deepcopy(data)  # the new udp.yml stays
+            return False, "Applying the UDP rules failed and restoring udp.yml also failed"
+
+        with mock.patch.object(udp, "_write_and_apply", side_effect=apply_then_fail_to_roll_back):
+            ok, message = udp.delete_udp_forward("dns")
+        self.assertFalse(ok)
+        self.assertIn("kept in the trash", message)
+        self.assertEqual(self.data["udp"]["udp_forwards"], [])
+        self.assertEqual([(i["kind"], i["name"]) for i in trash.items()], [("udp", "dns")])
+
+    def test_a_term_switched_off_just_before_a_listing_is_honoured(self):
+        sites.delete_site_by_name("shop")
+        item = trash.items()[0]
+        trash.set_keep_days(30, now=item["deleted_at"])
+        locked = trash._locked
+
+        @contextmanager
+        def another_request_switched_it_off_first():
+            with locked() as directory:
+                (directory / trash.SETTINGS).write_text('{"keep_days": 0}', encoding="utf-8")
+                yield directory
+
+        with mock.patch.object(trash, "_locked", another_request_switched_it_off_first):
+            listed = trash.items(now=item["deleted_at"] + 31 * DAY)
+        self.assertEqual([i["id"] for i in listed], [item["id"]])
+
+    def test_changes_of_the_term_take_turns(self):
+        order = []
+
+        def change(label, hold):
+            with trash.settings_lock():
+                order.append(f"{label} in")
+                time.sleep(hold)
+                order.append(f"{label} out")
+
+        first = threading.Thread(target=change, args=("first", 0.3))
+        first.start()
+        time.sleep(0.1)
+        second = threading.Thread(target=change, args=("second", 0))
+        second.start()
+        first.join(5)
+        second.join(5)
+        self.assertEqual(order, ["first in", "first out", "second in", "second out"])
+
     def test_a_service_site_restored_without_its_login_rule_says_so(self):
         self.gate_rule.return_value = (False, "authelia is down")
         self.data["websites"]["sites"].append(
@@ -327,6 +382,45 @@ class TheAccessPageComesBack(PanelFixture):
         access_portal.upload("door", "helper.exe", io.BytesIO(b"attachment bytes"))
         sites.delete_site_by_name("door")
         return self.root / "portals" / access_portal.TRASH
+
+    def test_the_page_comes_back_while_the_site_is_still_locked(self):
+        # Done after the site's restore released the lock, the page could land
+        # on a new site of the same name created in between.
+        kept = self.door()
+        state = {"locked": False, "seen": None}
+
+        @contextmanager
+        def websites_lock(_kind):
+            state["locked"] = True
+            try:
+                yield
+            finally:
+                state["locked"] = False
+
+        real = trash.restore_access_page
+
+        def restore_page(name, stored):
+            state["seen"] = state["locked"]
+            return real(name, stored)
+
+        with mock.patch.object(sites, "source_lock", websites_lock), \
+                mock.patch.object(trash, "restore_access_page", side_effect=restore_page):
+            result = trash.restore(trash.items()[0]["id"])
+        self.assertEqual(result.get("access_page"), "restored")
+        self.assertIs(state["seen"], True)
+        self.assertEqual(list(kept.iterdir()), [])
+
+    def test_a_page_that_cannot_be_recorded_goes_back_and_nothing_is_deleted(self):
+        self.data["websites"]["sites"].append(
+            {"name": "door", "domain": "door.example.test", "access_gate": True})
+        access_portal.upload("door", "helper.exe", io.BytesIO(b"attachment bytes"))
+        with mock.patch.object(trash, "annotate", side_effect=trash.TrashError("disk full")):
+            ok, message = sites.delete_site_by_name("door")
+        self.assertFalse(ok)
+        self.assertIn("nothing was deleted", message)
+        self.assertIn("door", self.names("websites", "sites"))
+        self.assertEqual(len(access_portal.settings("door")["files"]), 1)
+        self.assertEqual(trash.items(), [])
 
     def test_deleting_a_site_for_good_deletes_its_attachments(self):
         kept = self.door()
@@ -497,6 +591,108 @@ class CertdKeepsWhatItDeletes(CertdFixture):
         self.assertIn("part-way", answer["error"])
         self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [answer["trash_id"]])
 
+    def test_restoring_puts_the_whole_lineage_back_over_what_certbot_left(self):
+        le = self.lineage()
+
+        def run(_cmd, timeout=None):
+            (le / "renewal" / "shop.example.test.conf").unlink()
+            return mock.Mock(returncode=1, stdout="", stderr="archive busy")
+
+        with mock.patch.object(CERTD, "_run_bounded", side_effect=run):
+            _, answer = CERTD.handle_delete_le({"lineage": "shop.example.test"})
+        status, restored = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 200, restored)
+        self.assertTrue((le / "renewal" / "shop.example.test.conf").is_file())
+        cert = le / "live" / "shop.example.test" / "cert.pem"
+        self.assertTrue(cert.is_symlink() and cert.read_bytes().startswith(b"-----BEGIN CERTIFICATE"))
+        names = [p.name for p in (le / "live").iterdir()] + [p.name for p in (le / "archive").iterdir()]
+        self.assertEqual(sorted(names), ["shop.example.test", "shop.example.test"], "nothing set aside left over")
+
+    def test_leftovers_that_changed_since_are_not_replaced(self):
+        le = self.lineage()
+
+        def run(_cmd, timeout=None):
+            (le / "renewal" / "shop.example.test.conf").unlink()
+            return mock.Mock(returncode=1, stdout="", stderr="archive busy")
+
+        with mock.patch.object(CERTD, "_run_bounded", side_effect=run):
+            _, answer = CERTD.handle_delete_le({"lineage": "shop.example.test"})
+        newer = le / "archive" / "shop.example.test" / "cert2.pem"
+        newer.write_bytes(b"issued since")
+        status, refused = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual(newer.read_bytes(), b"issued since")
+        self.assertEqual(len(CERTD.list_trash()["items"]), 1)
+
+    def test_a_certificate_created_during_a_restore_is_not_overwritten(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        target.write_bytes(self.pem())
+        _, answer = CERTD.handle_delete_haproxy({"path": str(target)})
+        copy_owned = CERTD._copy_owned
+
+        def copy_while_another_request_writes(source, destination):
+            copy_owned(source, destination)
+            target.write_bytes(b"issued meanwhile")
+
+        with mock.patch.object(CERTD, "_copy_owned", side_effect=copy_while_another_request_writes):
+            status, refused = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual(target.read_bytes(), b"issued meanwhile")
+        self.assertEqual([p.name for p in target.parent.iterdir()], [target.name])
+        self.assertEqual(len(CERTD.list_trash()["items"]), 1)
+
+    def test_rename_noreplace_without_renameat2_still_refuses(self):
+        source = self.root / "certs" / "new.pem"
+        source.write_bytes(b"new")
+        taken = self.root / "certs" / "taken.pem"
+        taken.write_bytes(b"in service")
+        with mock.patch.object(CERTD.ctypes, "CDLL", side_effect=OSError("no libc")):
+            with self.assertRaises(FileExistsError):
+                CERTD._rename_noreplace(source, taken)
+            self.assertEqual(taken.read_bytes(), b"in service")
+            CERTD._rename_noreplace(source, self.root / "certs" / "free.pem")
+        self.assertEqual((self.root / "certs" / "free.pem").read_bytes(), b"new")
+        self.assertFalse(source.exists())
+
+    def test_emptying_during_a_deletion_cannot_take_the_copy(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        target.write_bytes(self.pem())
+        kept = CERTD._trash_put("haproxy_cert", target.name, [target])
+        self.assertEqual(CERTD.handle_trash_purge({"all": True})[1]["removed"], 0)
+        self.assertEqual(CERTD.list_trash()["items"], [], "a pending copy is not listed")
+        target.unlink()
+        CERTD._trash_commit(kept)
+        self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [kept])
+
+    def test_a_pending_copy_left_by_a_crash_is_listed_after_an_hour(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        target.write_bytes(self.pem())
+        kept = CERTD._trash_put("haproxy_cert", target.name, [target])
+        with CERTD.TRASH_LOCK:
+            CERTD._trash_purge_locked(time.time() + 3601)
+        self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [kept])
+
+    def test_emptying_reports_what_it_could_not_delete(self):
+        for name in ("a", "b"):
+            target = self.root / "certs" / f"{name}.pem"
+            target.write_bytes(self.pem(f"{name}.example.test"))
+            CERTD.handle_delete_haproxy({"path": str(target)})
+        stuck = CERTD.list_trash()["items"][0]["id"]
+        real_rmtree = shutil.rmtree
+
+        def rmtree(path, *args, **kwargs):
+            if Path(path).name == stuck and not kwargs.get("ignore_errors"):
+                raise PermissionError("immutable")
+            return real_rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(CERTD.shutil, "rmtree", side_effect=rmtree):
+            status, answer = CERTD.handle_trash_purge({"all": True})
+        self.assertEqual(status, 500)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["removed"], 1)
+        self.assertIn("immutable", answer["error"])
+        self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [stuck])
+
     def test_a_failed_deletion_that_removed_nothing_drops_its_copy(self):
         target = self.root / "certs" / "shop.example.test.pem"
         target.write_bytes(self.pem())
@@ -522,9 +718,10 @@ class CertdKeepsWhatItDeletes(CertdFixture):
         before = CERTD._trash_listing([tree])
         (tree / "ca.key").unlink()
         self.assertEqual(CERTD._trash_settle(kept, before, [tree]), kept)
-        self.assertEqual(len(CERTD.list_trash()["items"]), 1)
-        self.assertIsNone(CERTD._trash_settle(kept, CERTD._trash_listing([tree]), [tree]))
-        self.assertEqual(CERTD.list_trash()["items"], [])
+        self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [kept])
+        untouched = CERTD._trash_put("internal_ca", "internal", [tree])
+        self.assertIsNone(CERTD._trash_settle(untouched, CERTD._trash_listing([tree]), [tree]))
+        self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [kept])
 
     def test_a_restore_cut_short_leaves_no_half_file_and_can_be_retried(self):
         target = self.root / "certs" / "shop.example.test.pem"
@@ -554,6 +751,7 @@ class CertdKeepsWhatItDeletes(CertdFixture):
         pem.write_bytes(self.pem("partner.example.test").split(b"-----BEGIN PRIVATE")[0])
         kept = CERTD._trash_put("external_ca", "partner", [pem])
         pem.unlink()
+        CERTD._trash_commit(kept)
         outcome = {}
 
         def restore():

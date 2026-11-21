@@ -24,6 +24,8 @@ from __future__ import annotations
 import base64
 import contextlib
 import configparser
+import ctypes
+import errno
 import email.parser
 import email.policy
 import io
@@ -767,6 +769,7 @@ def delete_dns_provider(name: str, actor: str = "") -> Dict[str, Any]:
     except OSError:
         _trash_settle(kept, before, [path])
         raise
+    _trash_commit(kept)
     return {"name": path.stem, "deleted": existed, "trash_id": kept}
 
 
@@ -1965,6 +1968,7 @@ def delete_cert_delivery(name: Any, actor: str = "") -> Dict[str, Any]:
         # A half-removed target keeps its copy.
         _trash_settle(kept, before, paths)
         raise
+    _trash_commit(kept)
     return {"name": checked, "deleted": True, "trash_id": kept}
 
 
@@ -3394,6 +3398,7 @@ def delete_standby_certificate(domain: Any, slot: Any, actor: str = "") -> Dict[
     except OSError:
         _trash_settle(kept, before, [path])
         raise
+    _trash_commit(kept)
     holder = path.parent
     if holder.is_dir() and not any(holder.iterdir()):
         holder.rmdir()
@@ -3975,6 +3980,7 @@ def handle_internal_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
                     ),
                 }
             return 500, {"ok": False, "error": f"cannot delete the internal certificate authority: {exc}"}
+        _trash_commit(kept)
     return 200, {"ok": True, "message": "Internal certificate authority moved to the trash."}
 
 
@@ -4127,6 +4133,7 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
     except OSError as exc:
         _trash_settle(kept, before, [path])
         return 500, {"ok": False, "error": f"cannot delete the certificate authority: {exc}"}
+    _trash_commit(kept)
     # Leaving a deleted authority in the client-auth list would keep its names
     # in an issuers file that nothing can regenerate.
     trusted = _load_client_auth_ids()
@@ -4944,6 +4951,7 @@ def handle_delete_haproxy(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     except OSError as exc:
         _trash_settle(kept, before, [target])
         return 200, {"ok": False, "error": f"failed to delete {target}: {exc}"}
+    _trash_commit(kept)
 
     return 200, {
         "ok": True,
@@ -5006,12 +5014,14 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     partial = ""
     if ok:
         _dns_binding_path(lineage).unlink(missing_ok=True)
+        _trash_commit(kept)
     else:
         kept = _trash_settle(kept, before, pieces)
         if kept:
             partial = (
                 "certbot stopped part-way through the deletion; the copy taken "
-                "before it started is in the trash"
+                "before it started is in the trash, and restoring it puts the "
+                "whole lineage back over what certbot left"
             )
 
     return 200, {
@@ -5038,6 +5048,10 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 # still in service, and a half-done deletion never loses the only copy.
 # Owners and modes go back as they were: HAProxy, certbot and the delivery
 # worker each read these files under rules of their own.
+#
+# A copy waits as .pending-<id> until its deletion has gone through
+# (_trash_commit): nothing lists, purges or empties it meanwhile, so emptying
+# the trash during a deletion cannot take the only copy.
 #
 # Lock order, for every path that takes more than one: CA_LOCK, then
 # _STANDBY_SWITCH_LOCK, then TRASH_LOCK. Deletions hold their own lock and
@@ -5126,10 +5140,51 @@ def _trash_settle(kept: Optional[str], before: List[str], paths: Sequence[Path])
     one left.
     """
 
-    if kept and _trash_listing(paths) == before:
+    if not kept:
+        return None
+    left = _trash_listing(paths)
+    if left == before:
         _trash_drop(kept)
         return None
+    # What the failed deletion left behind, so a restore can tell those
+    # leftovers from something created since and put the whole copy back
+    # over them.
+    _trash_update_extra(kept, leftovers=left)
+    _trash_commit(kept)
     return kept
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Rename source to target, failing with FileExistsError if target exists.
+
+    os.rename replaces a file that appeared at the target in the meantime --
+    a certificate issued while a restore was copying would have been
+    overwritten by the old one from the trash.
+    """
+
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    except (OSError, AttributeError):
+        renameat2 = None
+    if renameat2 is not None:
+        at_fdcwd, rename_noreplace = -100, 1
+        if renameat2(at_fdcwd, os.fsencode(str(source)), at_fdcwd, os.fsencode(str(target)), rename_noreplace) == 0:
+            return
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
+            raise FileExistsError(code, os.strerror(code), str(target))
+        if code not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
+            raise OSError(code, os.strerror(code), str(target))
+    # No renameat2 (or a filesystem without it): a hard link cannot replace
+    # anything; a directory is checked first, which leaves a far narrower gap.
+    if source.is_dir() and not source.is_symlink():
+        if os.path.lexists(target):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(target))
+        os.rename(source, target)
+        return
+    os.link(source, target, follow_symlinks=False)
+    os.unlink(source)
 
 
 def trash_keep_days() -> int:
@@ -5222,7 +5277,7 @@ def _trash_put(
             (staging / "meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
             )
-            staging.replace(root / item_id)
+            staging.replace(_trash_pending_dir(item_id))
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -5230,11 +5285,41 @@ def _trash_put(
     return item_id
 
 
+def _trash_pending_dir(item_id: str) -> Path:
+    if not _TRASH_ID_RE.fullmatch(str(item_id or "")):
+        raise ValueError("unknown trash item")
+    return _trash_root() / f".pending-{item_id}"
+
+
+def _trash_commit(item_id: Optional[str]) -> None:
+    """The deletion went through: list the copy."""
+
+    if not item_id:
+        return
+    try:
+        with TRASH_LOCK:
+            os.replace(_trash_pending_dir(item_id), _trash_item_dir(item_id))
+    except (OSError, ValueError):
+        # Still on disk; the purge lists a pending copy after an hour.
+        LOG.exception("cannot list trash item %s yet", item_id)
+
+
+def _trash_update_extra(item_id: str, **extra: Any) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        with TRASH_LOCK:
+            meta_path = _trash_pending_dir(item_id) / "meta.json"
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["extra"] = dict(meta.get("extra") or {}, **extra)
+            temporary = meta_path.with_name(".meta.json.tmp")
+            temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            temporary.replace(meta_path)
+
+
 def _trash_drop(item_id: str) -> None:
-    """Forget an item whose deletion did not go through."""
+    """Forget a pending copy whose deletion did not go through."""
 
     with TRASH_LOCK:
-        shutil.rmtree(_trash_item_dir(item_id), ignore_errors=True)
+        shutil.rmtree(_trash_pending_dir(item_id), ignore_errors=True)
 
 
 def _trash_item_dir(item_id: str) -> Path:
@@ -5279,13 +5364,18 @@ def _trash_purge_locked(now: Optional[float] = None) -> int:
         elif entry.name.startswith(".tmp-") and now - entry.stat().st_mtime > 3600:
             # A copy cut short by a crash.
             shutil.rmtree(entry, ignore_errors=True)
+        elif entry.name.startswith(".pending-") and now - entry.stat().st_mtime > 3600:
+            # A deletion cut short by a crash may well have gone through.
+            if _TRASH_ID_RE.fullmatch(entry.name[len(".pending-"):]):
+                with contextlib.suppress(OSError):
+                    os.replace(entry, root / entry.name[len(".pending-"):])
     return removed
 
 
 def list_trash() -> Dict[str, Any]:
     items: List[Dict[str, Any]] = []
-    days = trash_keep_days()
     with TRASH_LOCK:
+        days = trash_keep_days()
         _trash_purge_locked()
         root = _trash_root()
         if root.is_dir():
@@ -5364,12 +5454,20 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
             raise ValueError("damaged trash item")
         targets = _trash_targets(meta)
         taken = [str(target) for _, target, _ in targets if os.path.lexists(target)]
-        if taken:
+        # A deletion that stopped part-way (certbot removes the renewal
+        # settings first) left pieces of the very thing in the trash. Exactly
+        # those pieces, and nothing new, are moved aside and replaced by the
+        # whole copy; anything else in the way is refused.
+        leftovers = (meta.get("extra") or {}).get("leftovers")
+        replacing = bool(taken) and isinstance(leftovers, list) and _trash_listing(
+            [Path(str(entry.get("path") or "")) for entry in meta["paths"]]
+        ) == sorted(str(value) for value in leftovers)
+        if taken and not replacing:
             raise ValueError(
                 "something of the same name is in place now; delete or rename it first: "
                 + ", ".join(taken)
             )
-        if meta["kind"] == "internal_ca":
+        if meta["kind"] == "internal_ca" and not replacing:
             key_path, cert_path = _internal_ca_paths()
             if key_path.exists() or cert_path.exists():
                 raise ValueError(
@@ -5382,6 +5480,7 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
         # never makes the place look taken to the next attempt.
         written: List[Path] = []
         staged: List[Path] = []
+        aside: List[Tuple[Path, Path]] = []
         try:
             for source, target, entry in targets:
                 if not target.parent.exists():
@@ -5390,17 +5489,32 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
                     with contextlib.suppress(OSError, TypeError):
                         os.chown(target.parent, int(entry["parent_uid"]), int(entry["parent_gid"]))
                     written.append(target.parent)
+                if replacing and os.path.lexists(target):
+                    moved = target.parent / f".replaced-{os.urandom(6).hex()}"
+                    os.rename(target, moved)
+                    aside.append((moved, target))
                 temporary = target.parent / f".restore-{os.urandom(6).hex()}"
                 staged.append(temporary)
                 _copy_owned(source, temporary)
-                os.rename(temporary, target)
+                try:
+                    _rename_noreplace(temporary, target)
+                except FileExistsError as exc:
+                    raise ValueError(
+                        f"{target} appeared while it was being restored; nothing was replaced"
+                    ) from exc
                 staged.remove(temporary)
                 written.append(target)
         except BaseException:
             for path in staged + list(reversed(written)):
                 with contextlib.suppress(OSError):
                     _remove_path(path)
+            for moved, target in reversed(aside):
+                with contextlib.suppress(OSError):
+                    os.rename(moved, target)
             raise
+        for moved, _target in aside:
+            with contextlib.suppress(OSError):
+                _remove_path(moved)
         shutil.rmtree(_trash_item_dir(item_id), ignore_errors=True)
     notes: List[str] = []
     if meta["kind"] == "external_ca" and (meta.get("extra") or {}).get("client_auth"):
@@ -5429,13 +5543,20 @@ def purge_trash(item_id: Optional[str] = None) -> Dict[str, Any]:
             shutil.rmtree(_trash_item_dir(item_id))
             return {"removed": 1, "kind": meta["kind"], "name": meta.get("name") or ""}
         removed = 0
+        failed: List[str] = []
         root = _trash_root()
         if root.is_dir():
             for entry in root.iterdir():
                 if _TRASH_ID_RE.fullmatch(entry.name) and not entry.is_symlink() and entry.is_dir():
-                    shutil.rmtree(entry, ignore_errors=True)
+                    # Counted only when it is gone: a copy with a key left on
+                    # the disk is not "deleted for good".
+                    try:
+                        shutil.rmtree(entry)
+                    except OSError as exc:
+                        failed.append(f"{entry.name}: {exc}")
+                        continue
                     removed += 1
-        return {"removed": removed}
+        return {"removed": removed, "failed": failed}
 
 
 def _cert_details(path: Path) -> Dict[str, Any]:
@@ -5500,7 +5621,14 @@ def handle_trash_purge(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     if not item_id and body.get("all") is not True:
         return 400, {"ok": False, "error": "id or all is required"}
     try:
-        return 200, {"ok": True, **purge_trash(item_id or None)}
+        result = purge_trash(item_id or None)
+        if result.get("failed"):
+            return 500, {
+                "ok": False,
+                **result,
+                "error": f"{len(result['failed'])} items could not be deleted: " + "; ".join(result["failed"]),
+            }
+        return 200, {"ok": True, **result}
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
     except OSError as exc:

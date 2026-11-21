@@ -11,7 +11,11 @@ aside by certd in a trash of its own; the page shows both.
 
 One JSON file per deleted entry, private to the panel. The entry is written
 here before the source is rewritten without it: when it cannot be kept,
-nothing is deleted. Items stay until the trash is emptied, unless the
+nothing is deleted. Until the deletion has gone through it waits as
+<id>.pending, which nothing lists, empties or purges -- so emptying the trash
+in the middle of a deletion cannot take the only copy -- and commit() makes it
+<id>.json. A deletion that failed drops it again, unless the entry turned
+out to be gone from its source anyway. Items stay until the trash is emptied, unless the
 operator set a term (keep_days); then an item older than that is gone, both
 from the list and for a restore by its id. A deleted site's access page waits
 in access_portal's own trash for as long as the site waits here, and goes
@@ -38,6 +42,10 @@ KINDS = ("site", "tcp", "udp")
 _ID = re.compile(r"^(?P<at>[0-9]{1,12})-[a-f0-9]{12}$")
 CLAIM = ".restoring"
 CLAIM_SECONDS = 600
+PENDING = ".pending"
+# A worker that died in the middle of a deletion left its item pending; after
+# this long it is listed, since the deletion may well have gone through.
+PENDING_SECONDS = 3600
 SETTINGS = "settings.json"
 # 0 keeps items until someone empties the trash; otherwise the days they stay.
 DEFAULT_KEEP_DAYS = 0
@@ -59,6 +67,23 @@ def _directory() -> Path:
     if directory.is_symlink() or not directory.is_dir():
         raise TrashError("Invalid trash directory")
     return directory
+
+
+@contextmanager
+def settings_lock() -> Iterator[None]:
+    """One change of the term at a time, across workers, for both keepers.
+
+    The panel's file and certd's are written one after the other; two changes
+    interleaved could each answer "saved" and leave the two on different
+    terms. A lock of its own: certd is asked while it is held.
+    """
+    directory = _directory()
+    fd = os.open(directory / ".settings.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -93,6 +118,10 @@ def _path(directory: Path, item_id: str) -> Path:
     if not _ID.fullmatch(str(item_id or "")):
         raise TrashError("Unknown trash item")
     return directory / f"{item_id}.json"
+
+
+def _pending(directory: Path, item_id: str) -> Path:
+    return _path(directory, item_id).with_suffix(PENDING)
 
 
 def _read(path: Path) -> Optional[Dict[str, Any]]:
@@ -177,8 +206,20 @@ def _expires_at(at: int, days: int) -> int:
 
 
 def _purge_locked(directory: Path, now: float, days: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Drop expired items; what went, so their access pages can follow outside the lock."""
+    """Drop expired items; what went, so their access pages can follow outside the lock.
+
+    The term is read here, under the lock that set_keep_days writes it under:
+    one read before the lock could purge by a term already switched off.
+    """
     days = keep_days() if days is None else days
+    for pending in directory.glob(f"*{PENDING}"):
+        try:
+            stale = now - pending.stat().st_mtime > PENDING_SECONDS
+        except OSError:
+            continue
+        if stale and _ID.fullmatch(pending.stem) and not pending.is_symlink():
+            with suppress(FileNotFoundError):
+                os.replace(pending, pending.with_suffix(".json"))
     # A worker that died between claiming an item and putting it back left
     # the claim behind; after a while the item is offered again. A claim is
     # touched when it is taken, so its age is the restore's, not the item's.
@@ -236,7 +277,8 @@ def referenced_pages() -> Set[str]:
     directory = root()
     if directory.is_symlink() or not directory.is_dir():
         return names
-    for path in list(directory.glob("*.json")) + list(directory.glob(f"*{CLAIM}")):
+    found = list(directory.glob("*.json")) + list(directory.glob(f"*{CLAIM}"))
+    for path in found + list(directory.glob(f"*{PENDING}")):
         if not _ID.fullmatch(path.stem):
             continue
         item = _read(path)
@@ -249,9 +291,10 @@ def keep(kind: str, name: str, entry: Dict[str, Any], extra: Optional[Dict[str, 
          now: Optional[float] = None) -> str:
     """Set an entry aside before it is deleted; its id. Raises when it cannot be kept.
 
-    The caller deletes only after this returned, and calls drop() if the
-    deletion then fails, so the trash never holds an entry still in service
-    and a deletion never loses the only copy.
+    The item is pending: the caller deletes only after this returned, then
+    calls commit(), or settle() when the deletion failed -- so the trash
+    never lists an entry still in service, and a deletion never loses the
+    only copy.
     """
     if kind not in KINDS or not isinstance(entry, dict):
         raise TrashError("Unknown trash kind")
@@ -259,7 +302,7 @@ def keep(kind: str, name: str, entry: Dict[str, Any], extra: Optional[Dict[str, 
     item_id = f"{int(now)}-{uuid.uuid4().hex[:12]}"
     try:
         with _locked() as directory:
-            _write(_path(directory, item_id), {
+            _write(_pending(directory, item_id), {
                 "id": item_id,
                 "kind": kind,
                 "name": str(name),
@@ -278,19 +321,32 @@ def keep(kind: str, name: str, entry: Dict[str, Any], extra: Optional[Dict[str, 
     return item_id
 
 
-def annotate(item_id: str, **extra: Any) -> bool:
-    """Add to an item's extra after the deletion went through (the access page)."""
+def annotate(item_id: str, **extra: Any) -> None:
+    """Add to a pending item's extra (the access page it took along). Raises on failure."""
     try:
         with _locked() as directory:
-            path = _path(directory, item_id)
+            path = _pending(directory, item_id)
             item = _read(path)
             if item is None:
-                return False
+                raise TrashError("Unknown trash item")
             item["extra"] = dict(item.get("extra") or {}, **extra)
             _write(path, item)
+    except TrashError:
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.warning("The trash item %s could not be updated", item_id, exc_info=True)
+        raise TrashError(str(exc) or exc.__class__.__name__) from exc
+
+
+def commit(item_id: str) -> bool:
+    """The deletion went through: list the item."""
+    try:
+        with _locked() as directory:
+            os.replace(_pending(directory, item_id), _path(directory, item_id))
         return True
     except Exception:  # pylint: disable=broad-except
-        LOG.warning("The trash item %s could not be updated", item_id, exc_info=True)
+        # Still on disk as pending; the purge lists it after PENDING_SECONDS.
+        LOG.error("The trash item %s could not be listed yet", item_id, exc_info=True)
         return False
 
 
@@ -298,9 +354,23 @@ def drop(item_id: str) -> None:
     """Forget an item whose deletion did not go through."""
     try:
         with _locked() as directory:
-            _path(directory, item_id).unlink(missing_ok=True)
+            _pending(directory, item_id).unlink(missing_ok=True)
     except Exception:  # pylint: disable=broad-except
         LOG.warning("The trash item %s could not be dropped", item_id, exc_info=True)
+
+
+def settle(item_id: str, still_in_source: bool) -> bool:
+    """After a failed deletion: drop the copy only when the entry is still in its source.
+
+    A write that failed can still have replaced the file -- the UDP apply
+    whose rollback also failed left udp.yml without the forward -- and then
+    the copy is all there is. True when the copy was kept.
+    """
+    if still_in_source:
+        drop(item_id)
+        return False
+    commit(item_id)
+    return True
 
 
 def _summary(item: Dict[str, Any], days: int) -> Dict[str, Any]:
@@ -330,8 +400,8 @@ def _summary(item: Dict[str, Any], days: int) -> Dict[str, Any]:
 def items(now: Optional[float] = None) -> List[Dict[str, Any]]:
     """What can be put back, newest first. Expired entries go on the way."""
     now = time.time() if now is None else now
-    days = keep_days()
     with _locked() as directory:
+        days = keep_days()
         gone = _purge_locked(directory, now, days)
         found = [_read(path) for path in directory.glob("*.json") if _ID.fullmatch(path.stem)]
     _forget_pages(gone)
@@ -349,7 +419,7 @@ def purge(now: Optional[float] = None) -> int:
     return len(gone)
 
 
-def _restorers() -> Dict[str, Callable[[Dict[str, Any]], Tuple[bool, str, str]]]:
+def _restorers() -> Dict[str, Callable[[Dict[str, Any], Dict[str, Any]], Tuple[bool, str, Dict[str, Any]]]]:
     from .services_haproxy_sites import restore_site
     from .services_haproxy_tcp import restore_tcp_proxy
     from .services_haproxy_udp import restore_udp_forward
@@ -399,8 +469,12 @@ def restore(item_id: str, now: Optional[float] = None) -> Dict[str, Any]:
             with suppress(FileNotFoundError):
                 os.replace(claim, path)
 
+    # A site takes its access page back inside its own restore, under the
+    # websites lock: done after it, the page could land on a new site of the
+    # same name created in between. The claim is still there meanwhile, so
+    # access_portal's purge sees the page as one a trash item names.
     try:
-        ok, message, warning = _restorers()[item["kind"]](item["entry"])
+        ok, message, info = _restorers()[item["kind"]](item["entry"], dict(item.get("extra") or {}))
     except Exception:
         give_back()
         raise
@@ -408,18 +482,13 @@ def restore(item_id: str, now: Optional[float] = None) -> Dict[str, Any]:
         give_back()
         return {"ok": False, "error": message, "kind": item["kind"], "name": item["name"]}
     result = {"ok": True, "message": message, "kind": item["kind"], "name": item["name"]}
-    if warning:
-        result["warning"] = warning
-    page = _page_of(item)
-    if page:
-        # Before the claim goes: while it is there, access_portal's purge
-        # still sees the page as one a trash item names.
-        result["access_page"] = _restore_access_page(item["name"], page)
+    result.update({key: value for key, value in (info or {}).items() if value})
     claim.unlink(missing_ok=True)
     return result
 
 
-def _restore_access_page(name: str, stored: str) -> str:
+def restore_access_page(name: str, stored: str) -> str:
+    """Give a restored site the page it took into the trash: restored, gone or failed."""
     try:
         from . import access_portal
 

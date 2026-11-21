@@ -145,10 +145,14 @@ class TheSite(unittest.TestCase):
         self.assertTrue(sites.delete_site_by_name("support")[0])
         self.discard.assert_called_once_with("support")
 
-    def test_a_refused_delete_sets_nothing_aside(self):
+    def test_a_refused_delete_puts_the_page_back(self):
+        # The page goes aside before the write, so a site in the trash never
+        # lacks it; a write that is refused gives it straight back.
+        self.discard.return_value = "a" * 64 + "-1-abcdef01"
         self.write.side_effect = lambda _kind, _text: (False, "locked")
-        self.assertFalse(sites.delete_site_by_name("support")[0])
-        self.discard.assert_not_called()
+        with patch.object(store, "restore") as put_back:
+            self.assertFalse(sites.delete_site_by_name("support")[0])
+        put_back.assert_called_once_with("support", "a" * 64 + "-1-abcdef01")
 
     def test_a_missing_site_sets_nothing_aside(self):
         self.assertFalse(sites.delete_site_by_name("nobody")[0])
