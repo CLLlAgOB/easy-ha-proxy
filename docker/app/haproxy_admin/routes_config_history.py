@@ -28,6 +28,8 @@ def config_history_page():
 
 @bp.get("/api/haproxy/config/versions")
 def api_config_versions():
+    if not _superadmin():
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
     try:
         limit = int(request.args.get("limit", 50))
     except (TypeError, ValueError):
@@ -46,6 +48,8 @@ def api_config_versions():
 
 @bp.get("/api/haproxy/config/versions/diff")
 def api_config_version_diff():
+    if not _superadmin():
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
     left = str(request.args.get("left") or "").strip()
     right = str(request.args.get("right") or history.APPLIED).strip()
     if not left:

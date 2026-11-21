@@ -473,7 +473,7 @@
           <td  class="text-right">
             {% if entry.pinned %}
             <form method="post"
-                  onsubmit="return confirm('{{ entry.domain }} → Let's Encrypt?');" class="inline">
+                  data-confirm="{{ entry.domain }} → Let's Encrypt?" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="release_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -483,7 +483,7 @@
             </form>
             {% elif entry.can_be_put_away %}
             <form method="post"
-                  onsubmit="return confirm('{{ entry.domain }}?');" class="inline">
+                  data-confirm="{{ entry.domain }}?" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="adopt_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -512,7 +512,7 @@
           <td  class="text-right nowrap">
             {% if spare.usable and entry.pinned != spare.slot %}
             <form method="post"
-                  onsubmit="return confirm('{{ entry.domain }} → {{ spare.slot }}?');" class="inline">
+                  data-confirm="{{ entry.domain }} → {{ spare.slot }}?" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="activate_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">
@@ -522,7 +522,7 @@
             {% endif %}
             {% if entry.pinned != spare.slot %}
             <form method="post"
-                  onsubmit="return confirm('{{ spare.slot }}?');" class="inline">
+                  data-confirm="{{ spare.slot }}?" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="action" value="delete_standby">
               <input type="hidden" name="standby_domain" value="{{ entry.domain }}">

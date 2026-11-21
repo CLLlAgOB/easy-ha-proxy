@@ -46,6 +46,7 @@
         </p>
         <div  class="flex u-gap-2 items-center">
             <form method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="delete">
                 <button type="submit" class="btn btn-danger">
                     Yes, delete
@@ -68,6 +69,7 @@
     </div>
 
     <form method="post" id="site-edit-form" data-original-name="{{ original_name }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="save">
         <input type="hidden" id="site_name" value="{{ site.name }}">
         {# The site as this page loaded it: a save after someone else's is refused, not written over it. #}

@@ -443,6 +443,57 @@ def _validate_site(site: Any, index: int) -> None:
         )
         validate_host(server.get("host"), f"sites[{index}].servers[{srv_index}].host")
         validate_port(server.get("port"), f"sites[{index}].servers[{srv_index}].port")
+        weight = server.get("weight")
+        if weight is not None:
+            if isinstance(weight, bool):
+                raise ValueError(f"sites[{index}].servers[{srv_index}].weight must be an integer")
+            try:
+                weight_int = int(weight)
+            except (TypeError, ValueError):
+                raise ValueError(f"sites[{index}].servers[{srv_index}].weight must be an integer") from None
+            if not 0 <= weight_int <= 256:
+                raise ValueError(
+                    f"sites[{index}].servers[{srv_index}].weight must be between 0 and 256"
+                )
+    for host_key in ("backend_host", "backend_sni", "verify_host"):
+        val = site.get(host_key)
+        if val is not None and str(val).strip():
+            text = str(val).strip()
+            if len(text) > 253 or re.search(r"[\s#\"'`\\]", text):
+                raise ValueError(f"sites[{index}].{host_key}: invalid hostname")
+    ssl_ca = site.get("backend_ssl_ca")
+    if ssl_ca is not None and str(ssl_ca).strip():
+        ca_text = str(ssl_ca).strip()
+        if (
+            not ca_text.startswith("/")
+            or len(ca_text) > 512
+            or re.search(r"[\s#\"'`]", ca_text)
+            or ".." in ca_text.split("/")
+        ):
+            raise ValueError(f"sites[{index}].backend_ssl_ca: invalid CA file path")
+    health_uri = site.get("health_uri")
+    if health_uri is not None and str(health_uri).strip():
+        uri_text = str(health_uri).strip()
+        if not uri_text.startswith("/") or len(uri_text) > 512 or re.search(r"[\s#\"'`]", uri_text):
+            raise ValueError(f"sites[{index}].health_uri: must start with '/' and contain no spaces")
+    health_status = site.get("health_status")
+    if health_status is not None and str(health_status).strip():
+        st_text = str(health_status).strip()
+        if not re.fullmatch(r"[1-5][0-9]{2}", st_text):
+            raise ValueError(f"sites[{index}].health_status: must be an HTTP status code (100-599)")
+    add_headers = site.get("add_headers")
+    if add_headers is not None:
+        if not isinstance(add_headers, dict) or len(add_headers) > 64:
+            raise ValueError(f"sites[{index}].add_headers must be a mapping of at most 64 headers")
+        for hdr_name, hdr_val in add_headers.items():
+            hname = str(hdr_name or "").strip()
+            hval = str(hdr_val if hdr_val is not None else "")
+            if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", hname):
+                raise ValueError(f"sites[{index}].add_headers: invalid header name {hname!r}")
+            if len(hval) > 2048 or '"' in hval or "\\" in hval or "#" in hval:
+                raise ValueError(
+                    f"sites[{index}].add_headers[{hname!r}]: header value contains unsafe characters"
+                )
     validate_backend_tuning(site, f"sites[{index}]")
 
 
@@ -568,6 +619,35 @@ def _no_shared_haproxy_names(entries: list[Any], label: str) -> None:
                 f"{label}: {name!r} and {seen[key]!r} give the same HAProxy name"
             )
         seen[key] = name
+
+
+PROTECTED_VARS_KEYS = frozenset({
+    "authelia_enabled",
+    "admin_authelia_enabled",
+    "root_domain",
+    "admin_domain",
+    "aut_domain",
+    "haproxy_certs_dir",
+    "haproxy_socket",
+    "haproxy_socket_group",
+    "haproxy_server_state_file",
+    "whitelist_global_file",
+    "whitelist_geo_file",
+    "admin_ips_file",
+    "backend_ssl_verify_ca_file",
+    "admin_password",
+})
+
+
+def validate_protected_vars_unchanged(
+    existing: dict[str, Any], candidate: dict[str, Any]
+) -> None:
+    """Prevent raw vars.yml edits or uploads from altering read-only security/path settings."""
+    for key in sorted(PROTECTED_VARS_KEYS):
+        if existing.get(key) != candidate.get(key):
+            raise ValueError(
+                f"Protected variable {key!r} cannot be modified from the web interface"
+            )
 
 
 def validate_config_data(kind: str, data: dict[str, Any]) -> None:

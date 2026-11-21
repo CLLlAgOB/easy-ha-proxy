@@ -38,6 +38,8 @@ def dns_providers_page():
 
 @bp.get("/api/haproxy/dns-providers")
 def api_dns_providers():
+    if not _superadmin():
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
     try:
         return jsonify(dns_providers_list())
     except CertdUnavailable as exc:

@@ -34,7 +34,9 @@
   const originalFetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
     const options = Object.assign({}, init || {});
-    const method = String(options.method || "GET").toUpperCase();
+    const method = String(
+      options.method || (typeof Request !== "undefined" && input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
     const url = typeof input === "string" ? input : input.url;
     const target = new URL(url, window.location.href);
 

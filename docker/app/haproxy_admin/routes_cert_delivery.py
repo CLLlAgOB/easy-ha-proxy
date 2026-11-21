@@ -49,6 +49,8 @@ def cert_delivery_page():
 
 @bp.get("/api/haproxy/cert-delivery")
 def api_cert_delivery_list():
+    if not _superadmin():
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
     try:
         payload = cert_deliveries_list()
     except CertdUnavailable as exc:

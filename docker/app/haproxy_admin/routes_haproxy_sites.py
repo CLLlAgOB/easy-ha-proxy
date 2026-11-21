@@ -1,6 +1,6 @@
+import logging
 # haproxy_admin/routes_haproxy_sites.py
 
-import traceback
 from flask import jsonify, request
 
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
@@ -34,7 +34,7 @@ def haproxy_site_save():
     try:
         payload = request.get_json(force=True, silent=False)
     except Exception:
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         return jsonify(
             {"ok": False, "error": 'Invalid JSON in request'}
         ), 400

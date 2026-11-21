@@ -621,7 +621,11 @@ def _save_with_revision(content: bytes, expected_revision: str) -> dict[str, Any
                 "revision": current_revision,
             }
         try:
-            _parse_vars(content)
+            existing_data = _parse_vars(current)
+            candidate_data = _parse_vars(content)
+            from .validation import validate_protected_vars_unchanged
+
+            validate_protected_vars_unchanged(existing_data, candidate_data)
         except ValueError as exc:
             return {"ok": False, "error": str(exc), "revision": current_revision}
         if content == current:

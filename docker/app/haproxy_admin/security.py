@@ -18,6 +18,7 @@ STATIC_CACHE_SECONDS = 31536000
 ADMIN_GROUPS: FrozenSet[str] = frozenset({"admins", "superadmin"})
 SUPERADMIN_PREFIXES = (
     "/haproxy",
+    "/api/haproxy/",
     "/authelia",
     "/system/backups",
     "/system/updates",
@@ -152,6 +153,7 @@ def apply_security_headers(response):
         )
     response.headers.setdefault("Cache-Control", "no-store")
     response.headers.setdefault("Pragma", "no-cache")
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")

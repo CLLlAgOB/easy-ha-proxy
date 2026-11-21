@@ -1,7 +1,7 @@
+import logging
 # routes_haproxy_udp.py
 # Kernel-NAT UDP forwarding (variant A): list/add/delete page + JSON endpoints.
 
-import traceback
 
 from flask import flash, jsonify, redirect, render_template, request, url_for
 
@@ -85,7 +85,7 @@ def haproxy_udp_page():
                     revision=(request.form.get("revision") or "").strip() or None,
                 )
             except Exception:
-                traceback.print_exc()
+                logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
                 ok, msg = False, "Internal error while saving the UDP forward"
             record_request(
                 "udp_forward.update" if before else "udp_forward.create",
@@ -155,7 +155,7 @@ def haproxy_udp_save():
             revision=str(payload.get("revision") or "").strip() or None,
         )
     except Exception as exc:
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "udp_forward.update" if before else "udp_forward.create",
             object_type="udp_forward",
@@ -182,7 +182,7 @@ def haproxy_udp_delete(name):
     try:
         ok, msg = delete_udp_forward(name)
     except Exception as exc:
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         _record_udp_delete(name, False, exc)
         return jsonify({"ok": False, "error": "Internal error while deleting UDP forward"}), 500
 

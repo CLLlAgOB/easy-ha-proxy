@@ -31,11 +31,13 @@ def haproxy_backends_page():
 
 @bp.get("/api/haproxy/backends")
 def api_haproxy_backends():
+    if not _superadmin():
+        return jsonify({"ok": False, "error": "superadmin required"}), 403
     try:
         return jsonify({"ok": True, "backends": runtime.list_backends()})
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception:  # pylint: disable=broad-except
         LOG.exception("backend listing failed")
-        return jsonify({"ok": False, "error": str(exc)}), 502
+        return jsonify({"ok": False, "error": "Backend status could not be loaded"}), 502
 
 
 @bp.post("/api/haproxy/backends/state")

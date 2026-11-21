@@ -1,8 +1,8 @@
+import logging
 # routes_backend_presets.py
 # Backend sets: one page to keep named address lists that sites, TCP proxies
 # and UDP forwards can pick instead of typing the addresses again.
 
-import traceback
 
 from flask import flash, redirect, render_template, request, url_for
 
@@ -56,7 +56,7 @@ def backend_presets_page():
             try:
                 ok, msg = delete_preset(name)
             except Exception:
-                traceback.print_exc()
+                logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
                 ok, msg = False, "Internal error while deleting the backend set"
             record_request(
                 "backend_set.delete", object_type="backend_set", object_id=name,
@@ -74,7 +74,7 @@ def backend_presets_page():
             try:
                 ok, msg = save_preset(form_preset, original_name, revision)
             except Exception:
-                traceback.print_exc()
+                logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
                 ok, msg = False, "Internal error while saving the backend set"
             record_request(
                 "backend_set.update" if original_name else "backend_set.create",

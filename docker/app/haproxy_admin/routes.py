@@ -1,3 +1,4 @@
+import logging
 from flask import (
     Blueprint,
     Response,
@@ -16,7 +17,6 @@ from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
 from .utils import grep_last_logs_for_ip
 from .cache import get_country_code
 import os
-import traceback
 
 from .services import (
     get_tables,
@@ -623,7 +623,7 @@ def authelia_bans():
             else:
                 message, code = "Unknown unban action", 400
         except Exception as e:  # pylint: disable=broad-except
-            traceback.print_exc()
+            logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
             message, code = str(e), 500
 
         if action in ("unban_user", "unban_ip"):
@@ -697,7 +697,7 @@ def api_backends():
     try:
         return jsonify(get_backends_status())
     except Exception as e:
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         return jsonify({'error': str(e)}), 500
 
 
@@ -706,5 +706,5 @@ def api_ip_auth():
     try:
         return jsonify(get_ip_auth_table())
     except Exception as e:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         return jsonify({'error': str(e)}), 500

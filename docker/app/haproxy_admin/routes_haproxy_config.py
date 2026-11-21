@@ -1,3 +1,4 @@
+import logging
 # routes_haproxy_config.py
 
 from flask import (
@@ -12,7 +13,6 @@ from flask import (
 )
 
 from pathlib import Path
-import traceback
 import io
 import base64
 import hashlib
@@ -313,7 +313,7 @@ def haproxy_download_cfg(source):
         try:
             cfg_text = render_haproxy_cfg()
         except Exception as e:  # pylint: disable=broad-except
-            traceback.print_exc()
+            logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
             return Response(
                 f"Failed to generate configuration: {e}",
                 status=500,
@@ -331,7 +331,7 @@ def haproxy_download_cfg(source):
                 mimetype="text/plain",
             )
         except OSError as e:  # pylint: disable=broad-except
-            traceback.print_exc()
+            logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
             return Response(
                 f"Failed to read {HAPROXY_CFG_PATH}: {e}",
                 status=500,
@@ -421,7 +421,7 @@ def haproxy_config_diff():
             }
         )
     except Exception as e:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         return (
             jsonify(
                 {
@@ -441,7 +441,7 @@ def haproxy_configuration_state():
     except Exception:  # pylint: disable=broad-except
         # Configuration contents and daemon diagnostics must not be reflected
         # into a page-wide polling endpoint.
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         return (
             jsonify(
                 {
@@ -478,11 +478,11 @@ def haproxy_config_page():
         try:
             ensure_applied_state_baseline(cfg_text)
         except Exception:  # pylint: disable=broad-except
-            traceback.print_exc()
+            logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         try:
             diff_summary = get_config_diff_summary(cfg_text)
         except Exception:  # pylint: disable=broad-except
-            traceback.print_exc()
+            logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
             diff_summary = None
     except Exception as e:  # pylint: disable=broad-except
         error = f"Configuration generation error: {e}"
@@ -493,7 +493,7 @@ def haproxy_config_page():
         vars_yaml = vars_model["yaml"]
         vars_revision = vars_model["revision"]
     except Exception as exc:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         if error:
             error = f"{error}\nvars.yml editor error: {exc}"
         else:
@@ -677,7 +677,7 @@ def haproxy_config_apply():
         try:
             diff_summary = get_config_diff_summary(cfg_text)
         except Exception:  # pylint: disable=broad-except
-            traceback.print_exc()
+            logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
             diff_summary = None
 
         # An apply is the moment the running gateway changes, so it is recorded
@@ -748,7 +748,7 @@ def haproxy_config_apply():
         )
 
     except Exception as e:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "config.apply",
             object_type="haproxy",
@@ -836,7 +836,7 @@ def haproxy_config_confirm():
         # commit-only operation and must never trigger another reload.
         save_applied_state_strict(cfg_text)
     except Exception as exc:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         warnings.append(
             "The configuration is confirmed and remains active, but its "
             f"applied-state snapshot could not be saved: {exc}"
@@ -900,7 +900,7 @@ def haproxy_config_upload():
     try:
         ok, msg = update_yaml_file(kind, content)
     except Exception as e:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "config.upload",
             object_type="yaml",
@@ -993,7 +993,7 @@ def haproxy_config_revert():
     try:
         ok, msg = revert_to_last_applied_state()
     except Exception as e:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "config.revert",
             object_type="haproxy",
@@ -1243,7 +1243,7 @@ def acme_email_view():
     try:
         return jsonify(get_acme_email())
     except Exception as exc:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
@@ -1261,7 +1261,7 @@ def acme_email_save():
     try:
         result = save_acme_email(payload.get("email"), payload.get("revision"))
     except Exception as exc:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "acme_email.update",
             object_type="haproxy",
@@ -1744,6 +1744,13 @@ def haproxy_site_edit(name):
         # ─── Deleting the site ──────────────────────────────────────
         if action == "delete":
             ok, msg = delete_site_by_name(name)
+            record_request(
+                "site.delete",
+                object_type="site",
+                object_id=name,
+                result=RESULT_SUCCESS if ok else RESULT_FAILURE,
+                detail="" if ok else str(msg)[:500],
+            )
             if ok:
                 # deleted: back to the list of sites
                 return redirect(url_for("routes.haproxy_sites_page"))
@@ -1909,7 +1916,7 @@ def haproxy_site_issue_cert(name):
         return jsonify(res), 200
 
     except Exception as e:  # pylint: disable=broad-except
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         res = {
             "ok": False,
             "status": "ERROR",

@@ -1536,6 +1536,12 @@ def _replace_yaml_source(kind: str, path: Path, content: str) -> Tuple[bool, str
         if not isinstance(data, dict):
             return False, 'The YAML root must be a mapping'
         validate_config_data(kind, data)
+        if kind == "vars" and path.exists():
+            existing_vars = _load_yaml(path)
+            if isinstance(existing_vars, dict):
+                from .validation import validate_protected_vars_unchanged
+
+                validate_protected_vars_unchanged(existing_vars, data)
     except Exception as e:
         return False, f"YAML validation error: {e}"
 
@@ -1568,77 +1574,6 @@ def _replace_yaml_source(kind: str, path: Path, content: str) -> Tuple[bool, str
         return False, f"Failed to write {path}: {e}"
 
     return True, f"File {path.name} updated successfully"
-
-
-def add_site_minimal(
-    name: str,
-    domain: str,
-    backend_ip: str,
-    backend_port: str,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, str]:
-    with source_lock("websites"):
-        return _add_site_minimal(name, domain, backend_ip, backend_port, extra)
-
-
-def _add_site_minimal(
-    name: str,
-    domain: str,
-    backend_ip: str,
-    backend_port: str,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, str]:
-    """
-    Adds a site:
-      - required fields: name, domain, backend_ip, backend_port
-      - extra: further fields (backend_host, backend_ssl and so on), if given
-
-    Everything else comes from site_defaults in the template.
-    """
-    try:
-        port_int = int(backend_port)
-    except ValueError:
-        return False, 'backend_port must be a number'
-
-    if not (1 <= port_int <= 65535):
-        return False, 'backend_port must be between 1 and 65535'
-
-    data = _load_yaml(WEBSITES_YAML)
-    sites = data.get("sites") or []
-    if not isinstance(sites, list):
-        sites = []
-
-    new_site: Dict[str, Any] = {
-        "name": name,
-        "domain": domain,
-        "backend_ip": backend_ip,
-        "backend_port": port_int,
-    }
-
-    # Add the extra keys, if given
-    if extra:
-        for k, v in extra.items():
-            if v is not None:
-                new_site[k] = v
-    # A site that came with its server list (a backend set) has no single backend.
-    if new_site.get("servers"):
-        new_site.pop("backend_ip", None)
-        new_site.pop("backend_port", None)
-
-    conflict = site_identity_conflict(new_site, sites)
-    if conflict:
-        return False, conflict
-    sites.append(new_site)
-    data["sites"] = sites
-
-    content = yaml.safe_dump(
-        data,
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-    )
-    ok, msg = update_yaml_file("websites", content)
-    return ok, msg
 
 
 def _rotate_backups(directory: Path, pattern: str, keep: int) -> None:

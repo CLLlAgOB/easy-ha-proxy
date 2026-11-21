@@ -1,7 +1,7 @@
+import logging
 # routes_haproxy_tcp.py
 # JSON endpoints for the TCP proxies (the edit page).
 
-import traceback
 from flask import jsonify, request
 
 from .audit import RESULT_FAILURE, RESULT_SUCCESS, record_request, summarize
@@ -72,7 +72,7 @@ def haproxy_tcp_save():
         )
         return jsonify({"ok": False, "conflict": True, "error": str(exc)}), 409
     except Exception as exc:
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "tcp_proxy.update" if before else "tcp_proxy.create",
             object_type="tcp_proxy",
@@ -104,7 +104,7 @@ def haproxy_tcp_delete(name):
     try:
         ok, msg = delete_tcp_proxy(name)
     except Exception as exc:
-        traceback.print_exc()
+        logging.getLogger("haproxy-admin").exception("Unhandled exception in route")
         record_request(
             "tcp_proxy.delete",
             object_type="tcp_proxy",
