@@ -16,6 +16,10 @@ from . import services_config_history as history
 LOG = logging.getLogger("haproxy-admin")
 
 
+def _superadmin() -> bool:
+    return bool(getattr(g, "is_superadmin", False))
+
+
 def _client_ip() -> str:
     forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")
     return (forwarded[0] if forwarded else "").strip() or (request.remote_addr or "")
