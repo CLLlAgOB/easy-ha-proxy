@@ -881,6 +881,10 @@ EVENT_HARD_FLOOR = "HARD_FLOOR_EPISODE"
 # The same, by a trusted address: kept as a record, never weighed (a trusted
 # address is not punished for load until D09b says how).
 EVENT_HARD_FLOOR_TRUSTED = "HARD_FLOOR_TRUSTED"
+# Multiple distinct offending IPv4 addresses from the same /24 subnet within a
+# short window. Never punishes silent/innocent neighbors in the subnet: it is
+# emitted only on an address that already produced its own hostile finding.
+EVENT_SUBNET_CAMPAIGN = "SUBNET_CAMPAIGN"
 # Actions rather than findings: they carry no weight and never feed the score.
 EVENT_BAN_APPLIED = "BAN_APPLIED"
 EVENT_BAN_LIFTED = "BAN_LIFTED"
@@ -923,6 +927,10 @@ DEFAULT_WEIGHTS: Dict[str, int] = {
     # Recorded under both policies, weighed only under the u02 ban policy
     # (see u02_policy).
     EVENT_HARD_FLOOR: 0,
+    # Coordinated /24 campaign boost: combined with a single probable scanner
+    # finding (35 + 25 = 60), escalates the third and subsequent hostile IPs in
+    # the same /24 straight to the ban threshold without banning the whole /24.
+    EVENT_SUBNET_CAMPAIGN: 25,
 }
 
 # One category is one finding. Fifty different /wp-* URLs say "looked for
@@ -969,7 +977,23 @@ COOLDOWN_SECONDS: Dict[str, int] = {
     # One record per ten minutes of a flood, not one per read.
     EVENT_HARD_FLOOR: 600,
     EVENT_HARD_FLOOR_TRUSTED: 600,
+    EVENT_SUBNET_CAMPAIGN: 1800,
 }
+
+# IPv4 /24 subnet campaign correlation limits (bounded memory, CGNAT-safe).
+SUBNET_CAMPAIGN_WINDOW = 1800
+SUBNET_CAMPAIGN_MIN_IPS = 3
+SUBNET_CAMPAIGN_MAX_SUBNETS = 1024
+SUBNET_CAMPAIGN_MAX_IPS_PER_SUBNET = 32
+SUBNET_CAMPAIGN_TRIGGERS: frozenset = frozenset({
+    EVENT_SCANNER_PATH,
+    EVENT_SCANNER_DECISIVE,
+    EVENT_QUERY_INJECTION,
+    EVENT_WIDE_ENUM,
+    EVENT_MASS_ENUM,
+    EVENT_LOW_AND_SLOW,
+    EVENT_HARD_FLOOR,
+})
 
 # Thresholds for the derived detections.
 MULTI_CATEGORY_MIN = 3
@@ -1197,6 +1221,8 @@ class ParsedRequest:
     # Present when the template logs it (log_user_agent); "" on older lines.
     user_agent: str = ""
     authenticated_user: str = ""
+    # HTTP version from the request line ("HTTP/1.0", "HTTP/1.1", "HTTP/2.0").
+    protocol: str = ""
 
     # A refusal counts as "already handled" only when it was about who the
     # client is, not about what it sent. 451 is a geo block, 401 a failed IP
@@ -1477,6 +1503,7 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
         ban_reason=ban_reason,
         user_agent=user_agent,
         authenticated_user=authenticated_username(remainder[:tail.start()]),
+        protocol=tail.group("proto"),
     )
 
 
@@ -3042,6 +3069,8 @@ DETECTION_NEW_RULES = {
     "observe:script-injection": "Script or event-handler markup in a parameter; observation by default",
     "observe:encoded-sensitive-path": "A sensitive path appears after a second decode; observation by default",
     "observe:service-api-probe": "Container, cloud metadata or diagnostic API route; observation by default",
+    "observe:proto-ua-mismatch": "Modern browser User-Agent over HTTP/1.0; observation by default",
+    "observe:unusual-method-probe": "Unusual or WebDAV HTTP method outside the host profile; observation by default",
     "behavior:slow-enumeration": "24 distinct missing paths, 90% failures, three half-hour windows within six hours",
 }
 DETECTION_WARNING_RULES = {
@@ -3059,6 +3088,31 @@ SERVICE_API_PROBE = re.compile(
     r"^/(?:v[0-9]{1,2}(?:\.[0-9]{1,2})?/(?:containers/(?:json|[^/]{1,80}/json)|images/json|info|version)"
     r"|v2/_catalog|latest/meta-data(?:/[^?]*)?|computemetadata/v1(?:/[^?]*)?"
     r"|actuator/(?:env|heapdump|configprops|mappings))(?:/|$)", re.I)
+
+# Modern desktop/mobile browsers have not spoken HTTP/1.0 for over a decade;
+# claiming a current Chrome/Firefox/Edge/Safari UA over HTTP/1.0 is a strong
+# fingerprint of a naive HTTP client masquerading as a browser.
+_MODERN_BROWSER_UA = re.compile(
+    r"(?:Chrome|Firefox|Edg)/(?:[89]\d|[1-9]\d{2,})\."
+    r"|Version/(?:1[4-9]|[2-9]\d)\.\d+[^/\r\n]{0,60}Safari/"
+)
+_ALWAYS_UNUSUAL_METHODS = frozenset({"TRACE", "TRACK", "CONNECT", "DEBUG"})
+_WEBDAV_METHODS = frozenset(DETECTION_PROFILES["webdav"]["methods"])
+
+
+def is_proto_ua_mismatch(protocol: str, user_agent: str) -> bool:
+    return protocol == "HTTP/1.0" and bool(user_agent) and bool(_MODERN_BROWSER_UA.search(user_agent))
+
+
+def is_unusual_method_probe(method: str, profile: str) -> bool:
+    if not method:
+        return False
+    if method in _ALWAYS_UNUSUAL_METHODS:
+        return True
+    if method in _WEBDAV_METHODS:
+        allowed = DETECTION_PROFILES.get(profile, DETECTION_PROFILES["web"])["methods"]
+        return method not in allowed
+    return False
 
 
 def observation_flags(uri: str) -> Tuple[str, ...]:
@@ -3335,7 +3389,13 @@ class DetectionContext:
                 event = (EVENT_SCANNER_PATH if name == "observe:service-api-probe" else
                          EVENT_SCANNER_DECISIVE if name == "observe:encoded-sensitive-path" else EVENT_QUERY_INJECTION)
                 found.append((name, name.split(":", 1)[1], "observe", event))
-        for rule in config.rules_by_host.get(request.host.lower().rstrip("."), ()):
+        if is_proto_ua_mismatch(request.protocol, request.user_agent):
+            found.append(("observe:proto-ua-mismatch", "proto-ua-mismatch", "observe", EVENT_SCANNER_PATH))
+        host_key = request.host.lower().rstrip(".")
+        host_profile = config["profiles"].get(host_key, "web")
+        if is_unusual_method_probe(request.method, host_profile):
+            found.append(("observe:unusual-method-probe", "unusual-method-probe", "observe", EVENT_SCANNER_PATH))
+        for rule in config.rules_by_host.get(host_key, ()):
             if scope_matches(rule, request):
                 found.append((rule["id"], rule["category"], rule["mode"], EVENT_SCANNER_DECISIVE if category_is_decisive(rule["category"]) else EVENT_SCANNER_PATH))
         results = []
@@ -3764,46 +3824,213 @@ class UnknownHosts:
 
 
 class IpMemory:
-    """LRU over addresses, with a hard ceiling on both dimensions."""
+    """Elastic two-segment LRU (SLRU) over addresses with a hard ceiling.
+
+    One-hit addresses from a botnet or spoofed-source flood enter the
+    probation segment and only evict other probation entries; repeat or
+    flagged addresses live in the protected segment (capped at 75% of
+    max_ips) so slow scanners cannot be flushed out of working memory.
+    When the protected segment is not full, probation uses the remaining
+    capacity up to max_ips.
+    """
 
     def __init__(self, max_ips: int, max_paths: int) -> None:
-        self.max_ips = max_ips
+        self.max_ips = max(1, int(max_ips))
         self.max_paths = max_paths
-        self._entries: "OrderedDict[str, IpActivity]" = OrderedDict()
+        # Keep at least 25% (minimum 1 slot) available for probation churn so
+        # new clients can always enter and earn promotion.
+        self._protected_limit = (
+            max(0, self.max_ips - max(1, self.max_ips // 4))
+            if self.max_ips > 1 else 0
+        )
+        self._probation: "OrderedDict[str, IpActivity]" = OrderedDict()
+        self._protected: "OrderedDict[str, IpActivity]" = OrderedDict()
         self._lock = threading.Lock()
         self.evictions = 0
 
+    def _promote_locked(self, ip: str, activity: IpActivity) -> None:
+        if self._protected_limit <= 0:
+            self._probation[ip] = activity
+            self._probation.move_to_end(ip)
+            return
+        self._protected[ip] = activity
+        self._protected.move_to_end(ip)
+        while len(self._protected) > self._protected_limit:
+            demoted_ip, demoted_act = self._protected.popitem(last=False)
+            self._probation[demoted_ip] = demoted_act
+            self._probation.move_to_end(demoted_ip)
+
+    def _enforce_cap_locked(self) -> None:
+        while len(self._probation) + len(self._protected) > self.max_ips:
+            if self._probation:
+                self._probation.popitem(last=False)
+            else:
+                self._protected.popitem(last=False)
+            self.evictions += 1
+
     def touch(self, ip: str, ts: int) -> IpActivity:
         with self._lock:
-            activity = self._entries.get(ip)
-            if activity is None:
-                activity = IpActivity(first_seen=ts)
-                self._entries[ip] = activity
-            activity.last_seen = ts
-            self._entries.move_to_end(ip)
-            while len(self._entries) > self.max_ips:
-                self._entries.popitem(last=False)
-                self.evictions += 1
+            activity = self._protected.get(ip)
+            if activity is not None:
+                activity.last_seen = ts
+                self._protected.move_to_end(ip)
+                return activity
+            activity = self._probation.pop(ip, None)
+            if activity is not None:
+                activity.last_seen = ts
+                self._promote_locked(ip, activity)
+                self._enforce_cap_locked()
+                return activity
+            activity = IpActivity(first_seen=ts, last_seen=ts)
+            self._probation[ip] = activity
+            self._enforce_cap_locked()
             return activity
+
+    def promote(self, ip: str) -> None:
+        """Move a flagged one-hit address into the protected segment."""
+        with self._lock:
+            activity = self._probation.pop(ip, None)
+            if activity is None:
+                return
+            self._promote_locked(ip, activity)
+            self._enforce_cap_locked()
 
     def get(self, ip: str) -> Optional[IpActivity]:
         with self._lock:
-            return self._entries.get(ip)
+            activity = self._protected.get(ip)
+            if activity is not None:
+                return activity
+            return self._probation.get(ip)
 
     def prune(self, older_than: int) -> int:
         with self._lock:
-            stale = [
-                ip
-                for ip, activity in self._entries.items()
-                if activity.last_seen < older_than
-            ]
-            for ip in stale:
-                self._entries.pop(ip, None)
-        return len(stale)
+            removed = 0
+            for segment in (self._probation, self._protected):
+                stale = [
+                    ip
+                    for ip, activity in segment.items()
+                    if activity.last_seen < older_than
+                ]
+                for ip in stale:
+                    segment.pop(ip, None)
+                removed += len(stale)
+        return removed
+
+    def segment_counts(self) -> Tuple[int, int]:
+        with self._lock:
+            return len(self._protected), len(self._probation)
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._entries)
+            return len(self._probation) + len(self._protected)
+
+
+_CGNAT_NET = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def ipv4_subnet24(ip: str) -> str:
+    """Return the /24 prefix for a routable IPv4 address, or '' otherwise.
+
+    Skips IPv6, loopback, link-local, multicast, unspecified, and RFC 6598
+    carrier-grade NAT (100.64.0.0/10) where unrelated customers share blocks.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    if addr.version != 4:
+        return ""
+    if (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+        or addr in _CGNAT_NET
+    ):
+        return ""
+    octets = addr.packed
+    return f"{octets[0]}.{octets[1]}.{octets[2]}.0/24"
+
+
+class SubnetCorrelator:
+    """Bounded IPv4 /24 campaign tracker.
+
+    Tracks distinct offending IPv4 addresses per /24 over a rolling window.
+    Does not ban whole subnets; only reports when an already-offending address
+    belongs to a /24 with multiple concurrent offenders.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_seconds: int = SUBNET_CAMPAIGN_WINDOW,
+        min_ips: int = SUBNET_CAMPAIGN_MIN_IPS,
+        max_subnets: int = SUBNET_CAMPAIGN_MAX_SUBNETS,
+        max_ips_per_subnet: int = SUBNET_CAMPAIGN_MAX_IPS_PER_SUBNET,
+    ) -> None:
+        self.window_seconds = max(60, int(window_seconds))
+        self.min_ips = max(2, int(min_ips))
+        self.max_subnets = max(16, int(max_subnets))
+        self.max_ips_per_subnet = max(self.min_ips, int(max_ips_per_subnet))
+        self._subnets: "OrderedDict[str, OrderedDict[str, int]]" = OrderedDict()
+        self._lock = threading.Lock()
+        self.triggers = 0
+
+    def observe(self, ip: str, now: int) -> Tuple[str, int]:
+        subnet = ipv4_subnet24(ip)
+        if not subnet:
+            return "", 0
+        cutoff = now - self.window_seconds
+        with self._lock:
+            peers = self._subnets.get(subnet)
+            if peers is None:
+                peers = self._subnets[subnet] = OrderedDict()
+                while len(self._subnets) > self.max_subnets:
+                    self._subnets.popitem(last=False)
+            self._subnets.move_to_end(subnet)
+            stale = [peer for peer, seen in peers.items() if seen < cutoff]
+            for peer in stale:
+                del peers[peer]
+            peers[ip] = now
+            peers.move_to_end(ip)
+            while len(peers) > self.max_ips_per_subnet:
+                peers.popitem(last=False)
+            count = len(peers)
+            if count >= self.min_ips:
+                self.triggers += 1
+            return subnet, count
+
+    def prune(self, now: int) -> int:
+        cutoff = now - self.window_seconds
+        removed = 0
+        with self._lock:
+            empty: List[str] = []
+            for subnet, peers in self._subnets.items():
+                stale = [peer for peer, seen in peers.items() if seen < cutoff]
+                for peer in stale:
+                    del peers[peer]
+                if not peers:
+                    empty.append(subnet)
+            for subnet in empty:
+                del self._subnets[subnet]
+                removed += 1
+        return removed
+
+    def summary(self, now: int) -> Dict[str, Any]:
+        cutoff = now - self.window_seconds
+        with self._lock:
+            hot = 0
+            for peers in self._subnets.values():
+                active = sum(1 for seen in peers.values() if seen >= cutoff)
+                if active >= self.min_ips:
+                    hot += 1
+            return {
+                "tracked_subnets": len(self._subnets),
+                "hot_subnets": hot,
+                "triggers": self.triggers,
+                "min_ips": self.min_ips,
+                "window_seconds": self.window_seconds,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -3834,6 +4061,16 @@ class LogCursor:
             "offset": self.offset,
             "rotations": self.rotations,
         }
+
+    def has_pending(self) -> bool:
+        """Cheap stat-only check for log growth, rotation, or truncation."""
+        try:
+            stat = os.stat(self.path)
+        except OSError:
+            return False
+        if self.inode == 0:
+            return True
+        return int(stat.st_ino) != self.inode or int(stat.st_size) != self.offset
 
     def read(self, max_bytes: int) -> List[str]:
         """Return complete lines, leaving a partial trailing line for later."""
@@ -4551,15 +4788,23 @@ class SecurityDatabase:
         """
         with self._lock:
             bans = self._conn.execute(
-                "SELECT ip, ts, until, strike, score FROM ban_decisions "
+                "SELECT ip, ts, until, strike, score, reason FROM ban_decisions "
                 "WHERE action = 'applied' AND source = 'adaptive' AND ts >= ? ORDER BY ts",
                 (since,),
             ).fetchall()
             first = self._conn.execute("SELECT MIN(ts) AS value FROM ban_decisions").fetchone()["value"]
-            lifted_by_operator = self._conn.execute(
-                "SELECT COUNT(*) AS value FROM ban_decisions "
+            operator_lifts = self._conn.execute(
+                "SELECT ip, ts FROM ban_decisions "
                 "WHERE action = 'lifted' AND source = 'operator' AND ts >= ?", (since,),
-            ).fetchone()["value"]
+            ).fetchall()
+            lifted_by_operator = len(operator_lifts)
+            lifted_ts_by_ip: Dict[str, List[int]] = {}
+            for row in operator_lifts:
+                lifted_ts_by_ip.setdefault(row["ip"], []).append(int(row["ts"]))
+            auth_rows = self._conn.execute(
+                "SELECT ip, authenticated_at FROM ip_state WHERE authenticated_at > 0"
+            ).fetchall()
+            auth_at_by_ip = {row["ip"]: int(row["authenticated_at"]) for row in auth_rows}
             marks = ",".join("?" * len(SIGNATURE_EVENTS))
             quiet = (EVENT_BAN_APPLIED, EVENT_BAN_LIFTED, EVENT_LEGACY_BAN, EVENT_LEGACY_BAN_LIFTED)
             not_quiet = ",".join("?" * len(quiet))
@@ -4601,8 +4846,54 @@ class SecurityDatabase:
         crowded = sorted(((count, name) for name, count in networks.items() if count >= QUALITY_NETWORK_MIN),
                          reverse=True)
         steps: Dict[str, int] = {}
+        signal_stats: Dict[str, Dict[str, int]] = {}
         for ban in bans:
             steps[str(ban["strike"])] = steps.get(str(ban["strike"]), 0) + 1
+            ban_ip = ban["ip"]
+            ban_ts = int(ban["ts"])
+            ban_until = max(int(ban["until"]), ban_ts + 86400)
+            was_lifted = any(ban_ts <= t <= ban_until for t in lifted_ts_by_ip.get(ban_ip, ()))
+            auth_after = auth_at_by_ip.get(ban_ip, 0) > ban_ts
+            disputed = was_lifted or auth_after
+            reason_raw = ban["reason"] or "{}"
+            evidence = []
+            with contextlib.suppress(ValueError, TypeError):
+                parsed_reason = json.loads(reason_raw)
+                if isinstance(parsed_reason, dict) and isinstance(parsed_reason.get("evidence"), list):
+                    evidence = parsed_reason["evidence"]
+            seen_signals: Set[str] = set()
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+                ev_type = str(item.get("event_type") or "")
+                if not ev_type:
+                    continue
+                cat = str(item.get("category") or "")
+                sig = f"{ev_type}:{cat}" if cat else ev_type
+                seen_signals.add(sig)
+            for sig in seen_signals:
+                entry = signal_stats.setdefault(
+                    sig, {"bans": 0, "lifted_by_operator": 0, "authenticated_after": 0, "disputed": 0}
+                )
+                entry["bans"] += 1
+                if was_lifted:
+                    entry["lifted_by_operator"] += 1
+                if auth_after:
+                    entry["authenticated_after"] += 1
+                if disputed:
+                    entry["disputed"] += 1
+        by_signal = [
+            {
+                "signal": sig,
+                "bans": st["bans"],
+                "lifted_by_operator": st["lifted_by_operator"],
+                "authenticated_after": st["authenticated_after"],
+                "disputed": st["disputed"],
+                "fp_rate": round(st["disputed"] / st["bans"], 3) if st["bans"] else 0.0,
+            }
+            for sig, st in signal_stats.items()
+        ]
+        by_signal.sort(key=lambda row: (-row["disputed"], -row["bans"], row["signal"]))
         covered = max(0, now - max(since, int(first or now)))
         return {
             "since": since,
@@ -4620,6 +4911,7 @@ class SecurityDatabase:
             "probers_never_banned": int(unbanned),
             "networks": [{"network": name, "addresses": count} for count, name in crowded[:QUALITY_NETWORKS_SHOWN]],
             "addresses_in_networks": sum(count for count, _ in crowded),
+            "by_signal": by_signal[:25],
         }
 
     def last_applied_ban(self, ip: str) -> Optional[Dict[str, int]]:
@@ -6185,6 +6477,10 @@ LOGGED_AGENT_OTHER = re.compile(r"[^a-z0-9./;:_-]")
 LIVE_CACHE_SECONDS = 2.0
 LIVE_WANTED_SECONDS = 120
 LIVE_FAST_TICK_SECONDS = 2.0
+# Sub-poll wake interval when checking for new access-log bytes so decisive
+# findings can be enforced within ~1s instead of waiting out the full poll
+# interval; costs a single stat() syscall when idle.
+FAST_REACTION_TICK_SECONDS = 1.0
 # The admin panel's own backend. On a quiet gateway the page watching the
 # traffic is most of it -- the panel polls -- so it is left out unless asked.
 LIVE_ADMIN_BACKEND = "be_admin"
@@ -7255,6 +7551,14 @@ class EnforcementQueue:
                 if queue.get(ip) == generation:
                     del queue[ip]
 
+    def has_urgent(self) -> bool:
+        with self._lock:
+            return bool(self._urgent)
+
+    def urgent_batch(self, limit: int) -> List[Tuple[str, int]]:
+        with self._lock:
+            return list(itertools.islice(self._urgent.items(), max(1, int(limit))))
+
     def status(self) -> Dict[str, int]:
         with self._lock:
             return {"urgent": len(self._urgent), "ordinary": len(self._ordinary),
@@ -7314,6 +7618,7 @@ class GuardEngine:
         self.legacy_lifted = 0
         self.manual_restored = 0
         self.memory = IpMemory(config.max_tracked_ips, config.max_paths_per_ip)
+        self.subnet_correlator = SubnetCorrelator()
         self.catch_all = CatchAllPages()
         self.candidates = PathCandidates()
         self.unknown_hosts = UnknownHosts()
@@ -7379,6 +7684,7 @@ class GuardEngine:
             self._enforcement_scan_after = (int(after[0]), str(after[1]))
             self._enforcement_scan_before = int(scan.get("before", 0))
         self._enforcement_checked = 0
+        self.fast_enforcements = 0
         self._recover_enforcement_checks()
 
     # -- lifecycle --------------------------------------------------------
@@ -7651,24 +7957,32 @@ class GuardEngine:
                     time.monotonic() + self.config.maintenance_interval_seconds
                 )
             deadline = started + interval
+            tick = min(FAST_REACTION_TICK_SECONDS, LIVE_FAST_TICK_SECONDS)
             while not self._stop.is_set():
                 remaining = deadline - time.monotonic()
-                if remaining <= 0.5:
+                if remaining <= 0.25:
                     break
-                if self.live is None or not self.live.wanted():
-                    self._stop.wait(remaining)
+                if self._stop.wait(min(tick, remaining)):
                     break
-                # Someone is watching: read the new lines every couple of
-                # seconds instead of every interval -- out of the same budget.
-                if self._stop.wait(min(LIVE_FAST_TICK_SECONDS, remaining)):
-                    break
-                share = int(self.config.log_read_bytes_per_cycle * LIVE_FAST_TICK_SECONDS / interval)
+                live_watching = self.live is not None and self.live.wanted()
+                if not live_watching and not self.cursor.has_pending():
+                    continue
+                share = max(
+                    64 * 1024,
+                    int(self.config.log_read_bytes_per_cycle * tick / max(1, interval)),
+                )
                 allowance = min(share, self.config.log_read_bytes_per_cycle - self._cycle_bytes)
                 if allowance > 0:
+                    now_tick = _utc_now()
                     try:
-                        self.ingest_log(_utc_now(), max_bytes=allowance)
+                        self.ingest_log(now_tick, max_bytes=allowance)
                     except Exception:  # pylint: disable=broad-except
                         LOG.debug("fast log read failed", exc_info=True)
+                    if self.enforcer.allowed and self.enforcement_queue.has_urgent():
+                        try:
+                            self.apply_urgent_enforcement(now_tick)
+                        except Exception:  # pylint: disable=broad-except
+                            LOG.debug("fast enforcement tick failed", exc_info=True)
             self._cycle_bytes = 0
 
     # -- collection -------------------------------------------------------
@@ -8459,6 +8773,22 @@ class GuardEngine:
         )
         self._queue_enforcement_check(ip, event_type, handled)
         self.events_recorded += 1
+        if event_type in DEFAULT_WEIGHTS:
+            self.memory.promote(ip)
+        if not handled and event_type in SUBNET_CAMPAIGN_TRIGGERS:
+            subnet, peers = self.subnet_correlator.observe(ip, now)
+            if peers >= self.subnet_correlator.min_ips:
+                self._emit(
+                    ip,
+                    EVENT_SUBNET_CAMPAIGN,
+                    now,
+                    source="guardd",
+                    category="subnet",
+                    site=site,
+                    detail=f"subnet={subnet} peers={peers}",
+                    handled=False,
+                    fingerprint=f"{ip}|{EVENT_SUBNET_CAMPAIGN}|{subnet}",
+                )
         return True
 
     def _check_multi_category(
@@ -8700,7 +9030,11 @@ class GuardEngine:
         if handled and event_type not in REFUSAL_DOES_NOT_EXCUSE:
             return
         self.enforcement_queue.mark(
-            ip, urgent=self.scoring_policy().weight(event_type) >= WOULD_BAN_SCORE,
+            ip,
+            urgent=(
+                self.scoring_policy().weight(event_type) >= WOULD_BAN_SCORE
+                or event_type == EVENT_SUBNET_CAMPAIGN
+            ),
         )
 
     def _recover_enforcement_checks(self) -> None:
@@ -9018,84 +9352,125 @@ class GuardEngine:
                 LOG.info("Re-asserted the ban on %s, gone from the table", ip)
 
         for row in self._enforcement_rows(now, scheduled):
-            ip = row["ip"]
-            if row["score"] < WOULD_BAN_SCORE:
-                continue
-            after_page = False
-            if scheduled.get(ip, 0) > now:
-                # Serving its ban. Only a first step shown as a page is
-                # looked at again: signatures on different paths after the
-                # page are a scanner going on, not a person.
-                if not (
-                    codes.get(ip) == ADAPTIVE_PAGE_CODE
-                    and standing.get(ip) == ADAPTIVE_PAGE_CODE
-                    and self.database.signature_paths_since(ip, self.database.last_ban_ts(ip))
-                    >= PAGE_ESCALATION_PATHS
-                ):
-                    continue
-                after_page = True
-            if standing.get(ip, ADAPTIVE_BAN_CODE) not in ADAPTIVE_CODES:
-                # Already banned by an operator or by HAProxy's own rules:
-                # not overwritten; decided again once that ban is over.
-                continue
-            blockers = self.ban_blockers(row, now)
-            if blockers:
-                continue
-            # Findings decay over hours, so a score that justified one ban is
-            # still there when it expires. Requiring fresh evidence keeps the
-            # progressive ladder counting repeat incidents rather than simply
-            # measuring how long a single scan stays in the window.
-            last_ban = self.database.last_ban_ts(ip)
-            floor = last_ban
-            if not after_page:
-                # A first step shown as a page lets the address through to
-                # HAProxy, so a person can try the same thing again while
-                # it lasts. That is not a new incident: after such a ban has
-                # run its course, only findings from after its end count.
-                last = self.database.last_applied_ban(ip)
-                if last and last["code"] == ADAPTIVE_PAGE_CODE:
-                    floor = max(floor, min(int(last["until"]), now))
-            if last_ban and self.database.newest_finding_ts(ip) <= floor:
-                continue
-            duration = self.ban_duration(ip, now)
-            level = self.strike_level(ip, now)
-            code = ADAPTIVE_PAGE_CODE if (self.first_step_page and level == 0 and not after_page) else ADAPTIVE_BAN_CODE
-            reason = self.decision_reason(row)
-            if after_page:
-                reason["after_page"] = True
-            # The reason is written down before anything is applied, and
-            # what happened after: a crash between the two leaves a pending
-            # decision the next cycle settles (settle_pending_decisions).
-            decision = self.database.record_decision(
-                ip, now, "applied", "adaptive", "pending",
-                code=code, until=now + duration,
-                strike=level + 1, score=int(row["score"]),
-                policy=self.ban_policy, reason=reason,
-            )
-            if not self.enforcer.ban(ip, code=code):
-                self.database.settle_decision(decision, "failed")
-                self.enforcement_queue.mark(ip, urgent=True)
-                continue
-            categories = ", ".join(sorted(row.get("categories") or {}))
-            self.database.commit_ban(
-                decision, ip, now + duration, code, now,
-                f"score={row['score']} seconds={duration} [{categories}]"
-                + (" after the page" if after_page else ""),
-            )
-            self.events_recorded += 1
-            applied.append(ip)
-            LOG.warning(
-                "Adaptive ban applied to %s for %ds (score %d)%s",
-                ip,
-                duration,
-                row["score"],
-                " -- a page first" if code == ADAPTIVE_PAGE_CODE
-                else " -- went on after the page" if after_page else "",
-            )
-            self._report_ban(ip, duration, row, categories)
+            self._apply_row_decision(row, now, scheduled, codes, standing, applied)
         if applied:
             self._check_burst(len(applied), now)
         return {"applied": applied, "lifted": lifted, "enforcing": True}
+
+    def apply_urgent_enforcement(self, now: Optional[int] = None) -> Dict[str, Any]:
+        """Fast-path enforcement for urgent findings between full poll cycles.
+
+        Only runs when enforcement is active and at least one urgent IP is
+        queued. Reuses the exact same per-row decision logic and lock as the
+        full cycle, without running table expiry sweeps or background scans.
+        """
+        with self._decisions:
+            now = now or _utc_now()
+            if not self.enforcer.allowed or not self.enforcement_queue.has_urgent():
+                return {"applied": [], "enforcing": self.enforcer.allowed}
+            scheduled = self.database.scheduled_bans()
+            codes = self.database.scheduled_ban_codes()
+            standing = self.enforcer.active_bans()
+            policy = self.scoring_policy()
+            applied: List[str] = []
+            pending = self.enforcement_queue.urgent_batch(ENFORCEMENT_BATCH)
+            for ip, generation in pending:
+                row = self.reputation(ip, now, policy, scheduled)
+                self._apply_row_decision(row, now, scheduled, codes, standing, applied)
+                self.enforcement_queue.acknowledge(ip, generation)
+            if applied:
+                self.fast_enforcements += len(applied)
+                self._check_burst(len(applied), now)
+            return {"applied": applied, "enforcing": True}
+
+    def _apply_row_decision(
+        self,
+        row: Dict[str, Any],
+        now: int,
+        scheduled: Dict[str, int],
+        codes: Dict[str, int],
+        standing: Dict[str, int],
+        applied: List[str],
+    ) -> bool:
+        ip = row["ip"]
+        if row["score"] < WOULD_BAN_SCORE:
+            return False
+        after_page = False
+        if scheduled.get(ip, 0) > now:
+            # Serving its ban. Only a first step shown as a page is
+            # looked at again: signatures on different paths after the
+            # page are a scanner going on, not a person.
+            if not (
+                codes.get(ip) == ADAPTIVE_PAGE_CODE
+                and standing.get(ip) == ADAPTIVE_PAGE_CODE
+                and self.database.signature_paths_since(ip, self.database.last_ban_ts(ip))
+                >= PAGE_ESCALATION_PATHS
+            ):
+                return False
+            after_page = True
+        if standing.get(ip, ADAPTIVE_BAN_CODE) not in ADAPTIVE_CODES:
+            # Already banned by an operator or by HAProxy's own rules:
+            # not overwritten; decided again once that ban is over.
+            return False
+        blockers = self.ban_blockers(row, now)
+        if blockers:
+            return False
+        # Findings decay over hours, so a score that justified one ban is
+        # still there when it expires. Requiring fresh evidence keeps the
+        # progressive ladder counting repeat incidents rather than simply
+        # measuring how long a single scan stays in the window.
+        last_ban = self.database.last_ban_ts(ip)
+        floor = last_ban
+        if not after_page:
+            # A first step shown as a page lets the address through to
+            # HAProxy, so a person can try the same thing again while
+            # it lasts. That is not a new incident: after such a ban has
+            # run its course, only findings from after its end count.
+            last = self.database.last_applied_ban(ip)
+            if last and last["code"] == ADAPTIVE_PAGE_CODE:
+                floor = max(floor, min(int(last["until"]), now))
+        if last_ban and self.database.newest_finding_ts(ip) <= floor:
+            return False
+        duration = self.ban_duration(ip, now)
+        level = self.strike_level(ip, now)
+        code = ADAPTIVE_PAGE_CODE if (self.first_step_page and level == 0 and not after_page) else ADAPTIVE_BAN_CODE
+        reason = self.decision_reason(row)
+        if after_page:
+            reason["after_page"] = True
+        # The reason is written down before anything is applied, and
+        # what happened after: a crash between the two leaves a pending
+        # decision the next cycle settles (settle_pending_decisions).
+        decision = self.database.record_decision(
+            ip, now, "applied", "adaptive", "pending",
+            code=code, until=now + duration,
+            strike=level + 1, score=int(row["score"]),
+            policy=self.ban_policy, reason=reason,
+        )
+        if not self.enforcer.ban(ip, code=code):
+            self.database.settle_decision(decision, "failed")
+            self.enforcement_queue.mark(ip, urgent=True)
+            return False
+        categories = ", ".join(sorted(row.get("categories") or {}))
+        self.database.commit_ban(
+            decision, ip, now + duration, code, now,
+            f"score={row['score']} seconds={duration} [{categories}]"
+            + (" after the page" if after_page else ""),
+        )
+        scheduled[ip] = now + duration
+        codes[ip] = code
+        standing[ip] = code
+        self.events_recorded += 1
+        applied.append(ip)
+        LOG.warning(
+            "Adaptive ban applied to %s for %ds (score %d)%s",
+            ip,
+            duration,
+            row["score"],
+            " -- a page first" if code == ADAPTIVE_PAGE_CODE
+            else " -- went on after the page" if after_page else "",
+        )
+        self._report_ban(ip, duration, row, categories)
+        return True
 
     def _check_burst(self, banned: int, now: int) -> None:
         """security.burst: many addresses banned in a few minutes.
@@ -9651,6 +10026,7 @@ class GuardEngine:
         if any(deleted.values()):
             self.database.incremental_vacuum()
         pruned = self.memory.prune(now - 6 * 3600)
+        self.subnet_correlator.prune(now)
         self.candidates.prune(now - CANDIDATE_TTL)
         self.unknown_hosts.prune(now - UNKNOWN_HOSTS_TTL)
         self.detection.persist(now, force=True)
@@ -9675,6 +10051,7 @@ class GuardEngine:
         now = _utc_now()
         last_poll = self.last_poll_ts
         stale_after = max(60, self.config.poll_interval_seconds * 6)
+        protected_ips, probation_ips = self.memory.segment_counts()
         return {
             "mode": self.enforcer.mode,
             "configured_mode": self.config.mode,
@@ -9699,11 +10076,14 @@ class GuardEngine:
                 "last_error": self.cursor.last_error,
             },
             "memory": {
-                "tracked_ips": len(self.memory),
+                "tracked_ips": protected_ips + probation_ips,
+                "protected_ips": protected_ips,
+                "probation_ips": probation_ips,
                 "max_tracked_ips": self.memory.max_ips,
                 "max_paths_per_ip": self.memory.max_paths,
                 "evictions": self.memory.evictions,
             },
+            "subnet_correlation": self.subnet_correlator.summary(now),
             "exclusions": {
                 "networks": self.exclusions.network_count,
                 "authenticated": self.exclusions.authenticated_count,
@@ -9713,6 +10093,7 @@ class GuardEngine:
             "enforcement_checks": {
                 **self.enforcement_queue.status(),
                 "checked_last_cycle": self._enforcement_checked,
+                "fast_enforcements": self.fast_enforcements,
                 "batch_limit": ENFORCEMENT_BATCH,
                 "sweep_after": self._enforcement_scan_after,
                 "sweep_before": self._enforcement_scan_before,

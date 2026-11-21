@@ -2456,5 +2456,289 @@ class PausingEnforcementIsNotAnAmnesty(EnforcementTestCase):
         )
 
 
+class SegmentedIpMemoryTests(unittest.TestCase):
+    def test_one_hit_flood_does_not_evict_repeat_or_promoted_scanners(self):
+        memory = guardd.IpMemory(max_ips=20, max_paths=4)
+        # Repeat visitor earns promotion into the protected segment.
+        memory.touch("198.51.100.1", 100)
+        memory.touch("198.51.100.1", 101)
+        # Flagged one-hit scanner explicitly promoted into protected.
+        memory.touch("198.51.100.2", 102)
+        memory.promote("198.51.100.2")
+
+        # Flood 500 single-shot botnet IPs.
+        for i in range(500):
+            memory.touch(f"203.0.{i // 250}.{i % 250 + 1}", 200 + i)
+
+        self.assertEqual(len(memory), 20)
+        self.assertIsNotNone(memory.get("198.51.100.1"))
+        self.assertIsNotNone(memory.get("198.51.100.2"))
+        protected, probation = memory.segment_counts()
+        self.assertEqual(protected, 2)
+        self.assertEqual(probation, 18)
+
+    def test_protected_segment_leaves_room_for_probation(self):
+        memory = guardd.IpMemory(max_ips=12, max_paths=4)
+        for i in range(20):
+            ip = f"198.51.100.{i + 1}"
+            memory.touch(ip, 100 + i)
+            memory.touch(ip, 200 + i)
+        self.assertEqual(len(memory), 12)
+        protected, probation = memory.segment_counts()
+        self.assertLessEqual(protected, 9)
+        self.assertGreaterEqual(probation, 3)
+
+    def test_prune_removes_stale_entries_from_both_segments(self):
+        memory = guardd.IpMemory(max_ips=10, max_paths=4)
+        memory.touch("198.51.100.1", 100)
+        memory.touch("198.51.100.1", 101)  # protected, stale
+        memory.touch("198.51.100.2", 102)  # probation, stale
+        memory.touch("198.51.100.3", 5000)  # probation, fresh
+        memory.touch("198.51.100.4", 5000)
+        memory.touch("198.51.100.4", 5001)  # protected, fresh
+        self.assertEqual(memory.prune(1000), 2)
+        self.assertEqual(len(memory), 2)
+        self.assertIsNone(memory.get("198.51.100.1"))
+        self.assertIsNone(memory.get("198.51.100.2"))
+        self.assertIsNotNone(memory.get("198.51.100.3"))
+        self.assertIsNotNone(memory.get("198.51.100.4"))
+
+
+class FastReactionEnforcementTests(EnforcementTestCase):
+    def test_log_cursor_has_pending_detects_growth_and_truncation(self):
+        path = Path(self.directory.name) / "fast.log"
+        path.write_text("initial\n", encoding="utf-8")
+        cursor = guardd.LogCursor(str(path), {})
+        self.assertTrue(cursor.has_pending())
+        self.assertEqual(cursor.read(4096), [])
+        self.assertFalse(cursor.has_pending())
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("new line\n")
+        self.assertTrue(cursor.has_pending())
+        self.assertEqual(cursor.read(4096), ["new line"])
+        self.assertFalse(cursor.has_pending())
+        # Truncate in place
+        path.write_text("x\n", encoding="utf-8")
+        self.assertTrue(cursor.has_pending())
+
+    def test_urgent_enforcement_bans_immediately_in_enforce_and_never_in_monitor(self):
+        now = 1_000_000
+        req = guardd.ParsedRequest(
+            client_ip="203.0.113.44",
+            status=404,
+            frontend="fe_https",
+            backend="be_site/s1",
+            method="GET",
+            path="/.env",
+            host="app.example.com",
+        )
+        self.engine.observe_request(req, now)
+        self.assertTrue(self.engine.enforcement_queue.has_urgent())
+
+        # Monitor mode guarantee: fast path never touches tbl_ban.
+        monitor_res = self.engine.apply_urgent_enforcement(now + 1)
+        self.assertEqual(monitor_res["applied"], [])
+        self.assertNotIn("203.0.113.44", self.table)
+
+        # Switching to enforce lets urgent fast path ban a fresh attacker immediately.
+        self.engine.set_mode(guardd.MODE_ENFORCE, now + 2)
+        req2 = guardd.ParsedRequest(
+            client_ip="203.0.113.45",
+            status=404,
+            frontend="fe_https",
+            backend="be_site/s1",
+            method="GET",
+            path="/.env",
+            host="app.example.com",
+        )
+        self.engine.observe_request(req2, now + 3)
+        fast_res = self.engine.apply_urgent_enforcement(now + 3)
+        self.assertIn("203.0.113.45", fast_res["applied"])
+        self.assertIn("203.0.113.45", self.table)
+        self.assertEqual(self.engine.health()["enforcement_checks"]["fast_enforcements"], 1)
+
+
+class SubnetCampaignCorrelationTests(EnforcementTestCase):
+    def test_ipv4_subnet24_skips_ipv6_loopback_and_cgnat(self):
+        self.assertEqual(guardd.ipv4_subnet24("203.0.113.42"), "203.0.113.0/24")
+        self.assertEqual(guardd.ipv4_subnet24("2001:db8::1"), "")
+        self.assertEqual(guardd.ipv4_subnet24("127.0.0.1"), "")
+        self.assertEqual(guardd.ipv4_subnet24("169.254.1.5"), "")
+        self.assertEqual(guardd.ipv4_subnet24("100.64.10.20"), "")
+        self.assertEqual(guardd.ipv4_subnet24("not-an-ip"), "")
+
+    def test_third_offender_in_same_slash24_escalates_while_innocent_neighbor_stays_clean(self):
+        now = 1_000_000
+
+        def probe(ip, ts):
+            self.engine.observe_request(
+                guardd.ParsedRequest(
+                    client_ip=ip,
+                    status=404,
+                    frontend="fe_https",
+                    backend="be_site/s1",
+                    method="GET",
+                    path="/wp-login.php",
+                    host="app.example.com",
+                ),
+                ts,
+            )
+
+        # First two scanners in 198.51.100.0/24 stay at probable score (35).
+        probe("198.51.100.11", now)
+        probe("198.51.100.12", now + 10)
+        self.assertEqual(self.engine.reputation("198.51.100.11", now + 10)["score"], 35)
+        self.assertEqual(self.engine.reputation("198.51.100.12", now + 10)["score"], 35)
+
+        # Third distinct scanner in the same /24 triggers SUBNET_CAMPAIGN (35 + 25 = 60).
+        probe("198.51.100.13", now + 20)
+        rep3 = self.engine.reputation("198.51.100.13", now + 20)
+        self.assertEqual(rep3["score"], 60)
+        self.assertTrue(rep3["would_ban"])
+
+        # Innocent neighbor in the exact same /24 making normal requests scores 0.
+        self.engine.observe_request(
+            guardd.ParsedRequest(
+                client_ip="198.51.100.99",
+                status=200,
+                frontend="fe_https",
+                backend="be_site/s1",
+                method="GET",
+                path="/index.html",
+                host="app.example.com",
+            ),
+            now + 25,
+        )
+        rep_clean = self.engine.reputation("198.51.100.99", now + 25)
+        self.assertEqual(rep_clean["score"], 0)
+        self.assertFalse(rep_clean["would_ban"])
+
+        summary = self.engine.subnet_correlator.summary(now + 30)
+        self.assertEqual(summary["hot_subnets"], 1)
+        self.assertGreaterEqual(summary["triggers"], 1)
+
+    def test_subnet_correlator_expires_old_peers(self):
+        corr = guardd.SubnetCorrelator(window_seconds=600, min_ips=3)
+        self.assertEqual(corr.observe("198.51.100.1", 1000), ("198.51.100.0/24", 1))
+        self.assertEqual(corr.observe("198.51.100.2", 1010), ("198.51.100.0/24", 2))
+        # After window elapses, earlier peers drop out.
+        self.assertEqual(corr.observe("198.51.100.3", 2000), ("198.51.100.0/24", 1))
+        self.assertEqual(corr.prune(3000), 1)
+
+
+class ProtocolAndMethodAnomalyTests(EnforcementTestCase):
+    def test_parse_access_line_captures_http_protocol(self):
+        line = (
+            "203.0.113.7:54321 [21/Nov/2026:10:00:00.000] "
+            "fe_https~ be_site/s1 0/0/1/2/3 200 512 ---- 1/1/1/1/0 0/0 "
+            "host=app.example.com ua=Mozilla/5.0_Chrome/128.0.0.0_Safari/537.36 "
+            "auth_user=- GET / HTTP/1.0"
+        )
+        parsed = guardd.parse_access_line(line)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.protocol, "HTTP/1.0")
+        self.assertTrue(guardd.is_proto_ua_mismatch(parsed.protocol, parsed.user_agent))
+        self.assertFalse(guardd.is_proto_ua_mismatch("HTTP/1.1", parsed.user_agent))
+        self.assertFalse(guardd.is_proto_ua_mismatch("HTTP/2.0", parsed.user_agent))
+
+    def test_proto_ua_mismatch_is_observe_by_default_and_scores_when_enforced(self):
+        now = 1_000_000
+        req = guardd.ParsedRequest(
+            client_ip="203.0.113.55",
+            status=200,
+            frontend="fe_https",
+            backend="be_site/s1",
+            method="GET",
+            path="/",
+            host="app.example.com",
+            user_agent="Mozilla/5.0 (Windows NT 10.0) Chrome/130.0.0.0 Safari/537.36",
+            protocol="HTTP/1.0",
+        )
+        # Default: observe only, zero score.
+        self.engine.observe_request(req, now)
+        self.assertEqual(self.engine.reputation("203.0.113.55", now)["score"], 0)
+        stats = {row["id"]: row for row in self.engine.detection.summary()["stats"]}
+        self.assertEqual(stats["observe:proto-ua-mismatch"]["observe"], 1)
+
+        # Operator promotes rule to enforce.
+        cfg = self.engine.detection.summary()["config"]
+        cfg["modes"]["observe:proto-ua-mismatch"] = "enforce"
+        self.engine.detection.replace(cfg)
+        self.engine.observe_request(req, now + 2)
+        self.assertEqual(
+            self.engine.reputation("203.0.113.55", now + 2)["score"],
+            guardd.DEFAULT_WEIGHTS[guardd.EVENT_SCANNER_PATH],
+        )
+
+    def test_unusual_method_probe_respects_host_profile(self):
+        now = 1_000_000
+        webdav_req = guardd.ParsedRequest(
+            client_ip="203.0.113.56",
+            status=405,
+            frontend="fe_https",
+            backend="be_site/s1",
+            method="PROPFIND",
+            path="/remote.php/dav",
+            host="files.example.com",
+            protocol="HTTP/1.1",
+        )
+        # Default 'web' profile flags PROPFIND.
+        matches_web = self.engine.detection.inspect(webdav_req, now, record=False)
+        self.assertIn("observe:unusual-method-probe", {m["id"] for m in matches_web})
+
+        # Assigning 'webdav' profile to files.example.com allows PROPFIND.
+        cfg = self.engine.detection.summary()["config"]
+        cfg["profiles"]["files.example.com"] = "webdav"
+        self.engine.detection.replace(cfg)
+        matches_dav = self.engine.detection.inspect(webdav_req, now + 2, record=False)
+        self.assertNotIn("observe:unusual-method-probe", {m["id"] for m in matches_dav})
+
+        # TRACE is always flagged even on webdav hosts.
+        trace_req = guardd.ParsedRequest(
+            client_ip="203.0.113.56",
+            status=405,
+            frontend="fe_https",
+            backend="be_site/s1",
+            method="TRACE",
+            path="/",
+            host="files.example.com",
+            protocol="HTTP/1.1",
+        )
+        matches_trace = self.engine.detection.inspect(trace_req, now + 3, record=False)
+        self.assertIn("observe:unusual-method-probe", {m["id"] for m in matches_trace})
+
+
+class QualitySignalBreakdownTests(EnforcementTestCase):
+    def test_quality_reports_per_signal_disputed_and_fp_rate(self):
+        now = 1_000_000
+        self.engine.set_mode(guardd.MODE_ENFORCE, now)
+        for ip in ("203.0.113.71", "203.0.113.72"):
+            self.engine.observe_request(
+                guardd.ParsedRequest(
+                    client_ip=ip,
+                    status=404,
+                    frontend="fe_https",
+                    backend="be_site/s1",
+                    method="GET",
+                    path="/.env",
+                    host="app.example.com",
+                ),
+                now,
+            )
+        self.engine.apply_enforcement(now + 1)
+        # Operator manually unbans one of the two addresses.
+        self.engine.forget_ban("203.0.113.71", now + 20)
+
+        report = self.database.quality(now - 3600, now + 30)
+        by_sig = {row["signal"]: row for row in report["by_signal"]}
+        key = f"{guardd.EVENT_SCANNER_DECISIVE}:secrets"
+        self.assertIn(key, by_sig)
+        secrets = by_sig[key]
+        self.assertEqual(secrets["bans"], 2)
+        self.assertEqual(secrets["lifted_by_operator"], 1)
+        self.assertEqual(secrets["disputed"], 1)
+        self.assertEqual(secrets["fp_rate"], 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
