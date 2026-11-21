@@ -11,7 +11,10 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from .request_log import RequestLog
 
 from .constants import (
     ADAPTIVE_BAN_CODE,

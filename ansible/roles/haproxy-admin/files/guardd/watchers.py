@@ -11,11 +11,14 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from .constants import LOG
 from .parser import live_refusal
 from .scoring import HAPROXY_CONFIG_PATH, _THRESHOLD_RE, normalize_host
+
+if TYPE_CHECKING:
+    from .parser import ParsedRequest
 
 # ---------------------------------------------------------------------------
 # Rate warnings for trusted addresses (observed only)

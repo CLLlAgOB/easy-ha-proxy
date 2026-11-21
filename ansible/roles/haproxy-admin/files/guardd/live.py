@@ -10,9 +10,13 @@ import threading
 import time
 from collections import Counter, OrderedDict, deque
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from .constants import _clamp_int
+
+if TYPE_CHECKING:
+    from .parser import ParsedRequest
+    from .request_log import RequestQuery
 from .parser import (
     LIVE_ADMIN_BACKENDS,
     LOGGED_AGENT_OTHER,

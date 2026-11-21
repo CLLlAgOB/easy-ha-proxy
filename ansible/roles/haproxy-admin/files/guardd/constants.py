@@ -12,8 +12,11 @@ import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, unquote_plus
+
+if TYPE_CHECKING:
+    from .storage import SecurityDatabase
 
 LOG = logging.getLogger("easy-ha-proxy-guardd")
 

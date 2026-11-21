@@ -14,9 +14,13 @@ from array import array
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 from . import constants as _constants
+
+if TYPE_CHECKING:
+    from .scoring import ExclusionModel
+    from .storage import SecurityDatabase
 from .constants import (
     CANDIDATE_MAX_ADDRESSES,
     CANDIDATE_MAX_PATHS,
