@@ -357,7 +357,7 @@ status_check_managed_artifacts:
   - name: "haproxy-lua-http"
     label: "HAProxy Lua HTTP library"
     path: "/etc/haproxy/lua/haproxy-lua-http/http.lua"
-    expected_checksum: "2065af8b6825533b035a023dc00441c164f6321a4203e855497d38d041b9b042"
+    expected_checksum: "e1ef01995fb040f82cad2e142d01662d1209fed81c19a6c9768d19924eb0efde"
     enabled: "{{ authelia_enabled | default(false) | bool }}"
 
   - name: "haproxy-json-lua"
@@ -369,7 +369,7 @@ status_check_managed_artifacts:
   - name: "haproxy-auth-request-lua"
     label: "HAProxy auth-request Lua library"
     path: "/etc/haproxy/lua/auth-request.lua"
-    expected_checksum: "b9cf3dc143ff201f285a104ef9eef5f2aff9a8e9b828fb520f84dc499b57dfd5"
+    expected_checksum: "f2a504a543ee14d85253df55a68bda418fc3ebc918b8f424f8140395f3faeb75"
     enabled: "{{ authelia_enabled | default(false) | bool }}"
 
 #################################################################
