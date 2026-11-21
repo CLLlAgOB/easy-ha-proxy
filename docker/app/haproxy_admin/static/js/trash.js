@@ -24,6 +24,8 @@
   };
   let items = [];
   let busy = false;
+  let keepDays = 0;
+  let certdKeepDays = null;
 
   function byId(id) {
     return document.getElementById(id);
@@ -93,7 +95,7 @@
       cell(row, detail || "—");
       cell(row, when(item.deleted_at));
       cell(row, item.deleted_by || "—");
-      cell(row, when(item.expires_at));
+      cell(row, Number(item.expires_at) > 0 ? when(item.expires_at) : t("When the trash is emptied"));
       const actions = cell(row, "");
       const holder = document.createElement("div");
       holder.className = "cd-actions";
@@ -123,7 +125,10 @@
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
       items = Array.isArray(payload.items) ? payload.items : [];
+      keepDays = Number(payload.keep_days) || 0;
+      certdKeepDays = Number.isInteger(payload.certd_keep_days) ? payload.certd_keep_days : null;
       showErrors(payload.errors);
+      showSettings();
     } catch (error) {
       showErrors([String(error.message || error)]);
     }
@@ -166,6 +171,9 @@
     run(async () => {
       const payload = await post("/api/haproxy/trash/restore", { source: item.source, id: item.id });
       let message = `${t("Restored")}: ${item.name}.`;
+      if (payload.warning) {
+        message += " " + t(payload.warning);
+      }
       if (payload.apply_needed) {
         message += " " + t("Apply the configuration to put it into HAProxy.");
       }
@@ -175,7 +183,7 @@
       (payload.notes || []).forEach((note) => {
         message += ` ${note}.`;
       });
-      say(message, false);
+      say(message, Boolean(payload.warning));
       if (payload.apply_needed) {
         document.dispatchEvent(new CustomEvent("easy-ha-proxy:config-state-changed"));
       }
@@ -199,9 +207,78 @@
     });
   }
 
+  let settingsTouched = false;
+
+  function sayAboutSettings(message, isError) {
+    const host = byId("tr-settings-result");
+    if (!host) return;
+    host.textContent = message || "";
+    host.style.color = isError ? "var(--error)" : "";
+  }
+
+  function showTerm() {
+    const term = byId("tr-keep-term");
+    const group = byId("tr-term-group");
+    if (group) group.hidden = !(term && term.checked);
+  }
+
+  function showSettings() {
+    if (settingsTouched) return;
+    const forever = byId("tr-keep-forever");
+    const term = byId("tr-keep-term");
+    const days = byId("tr-keep-days");
+    if (forever) forever.checked = keepDays <= 0;
+    if (term) term.checked = keepDays > 0;
+    if (days && keepDays > 0) days.value = String(keepDays);
+    showTerm();
+    if (certdKeepDays !== null && certdKeepDays !== keepDays) {
+      sayAboutSettings(
+        t("The certificate service keeps its items on another term. Save the setting again to align it."),
+        true
+      );
+    }
+  }
+
+  function saveSettings(event) {
+    event.preventDefault();
+    const term = byId("tr-keep-term");
+    const input = byId("tr-keep-days");
+    let wanted = 0;
+    if (term && term.checked) {
+      wanted = Number(input ? input.value : "");
+      if (!Number.isInteger(wanted) || wanted < 1 || wanted > Number(input.max || 3650)) {
+        sayAboutSettings(t("The term must be a whole number of days from 1 to 3650."), true);
+        return;
+      }
+      const shorter = keepDays <= 0 || wanted < keepDays;
+      if (shorter && !window.confirm(t("Items older than the term are deleted for good at once. Save?"))) {
+        return;
+      }
+    }
+    run(async () => {
+      try {
+        const payload = await post("/api/haproxy/trash/settings", { keep_days: wanted });
+        keepDays = Number(payload.keep_days) || 0;
+        certdKeepDays = keepDays;
+        settingsTouched = false;
+        sayAboutSettings(t("Saved."), false);
+      } catch (error) {
+        sayAboutSettings(t(String(error.message || error)), true);
+      }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     const empty = byId("tr-empty");
     if (empty) empty.addEventListener("click", emptyTrash);
+    const form = byId("tr-settings");
+    if (form) {
+      form.addEventListener("submit", saveSettings);
+      form.addEventListener("change", () => {
+        settingsTouched = true;
+        showTerm();
+      });
+    }
     load();
   });
 })();

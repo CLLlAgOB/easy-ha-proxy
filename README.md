@@ -140,7 +140,7 @@ Step by step: [Quick Start](docs/quickstart.md) · every option:
   detection rules, a page instead of silence on the first ban step (so a real
   person can tell you), rate limits, bans in HAProxy and in the firewall.
 - **Observability.** Dashboard, monitoring history, live activity, request log,
-  configuration history and change log, a 30-day trash for deleted sites,
+  configuration history and change log, a trash for deleted sites,
   forwards and certificates, email alerts, Prometheus `/metrics`.
 - **Operations.** Updates from the panel, including OS security updates, with an
   optional night-time auto-install (off by default). Encrypted backup and

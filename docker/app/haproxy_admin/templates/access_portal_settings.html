@@ -23,7 +23,7 @@
     <p><span>Certificate</span>: {{ cert.short }} <a href="{{ url_for('routes.haproxy_certs_page') }}">Certificates</a></p>
     <div class="portal-actions"><button class="btn btn-primary" type="submit">Save service site</button></div>
   </form>
-  <details class="u-mt-4"><summary>Delete service site</summary><p>Deleting this site removes its published route after the next HAProxy configuration apply.</p><p>Its instructions and attachments stop being published at once and are removed for good after 30 days.</p><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="delete"><input type="hidden" name="revision" value="{{ site_revision }}"><button type="submit" class="btn btn-danger">Confirm deletion</button></form></details>
+  <details class="u-mt-4"><summary>Delete service site</summary><p>Deleting this site removes its published route after the next HAProxy configuration apply.</p><p>Its instructions and attachments stop being published at once and go to the trash with the site.</p><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="delete"><input type="hidden" name="revision" value="{{ site_revision }}"><button type="submit" class="btn btn-danger">Confirm deletion</button></form></details>
 </section>
 <div id="portal-editor" class="portal-editor" data-settings-url="{{ url_for('access_portal.settings', name=site.name) }}" data-upload-url="{{ url_for('access_portal.upload', name=site.name) }}">
   <section class="card">

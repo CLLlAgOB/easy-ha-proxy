@@ -173,7 +173,7 @@ class TheSite(unittest.TestCase):
 class ThePage(unittest.TestCase):
     def test_the_operator_is_told_before_deleting(self):
         page = (ROOT / "docker/app/haproxy_admin/templates/access_portal_settings.html").read_text(encoding="utf-8")
-        sentence = "Its instructions and attachments stop being published at once and are removed for good after 30 days."
+        sentence = "Its instructions and attachments stop being published at once and go to the trash with the site."
         self.assertIn(sentence, page)
         import json
 

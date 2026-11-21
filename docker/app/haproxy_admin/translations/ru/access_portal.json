@@ -23,7 +23,7 @@
     "Delete service site": "Удалить служебный сайт",
     "Confirm deletion": "Подтвердить удаление",
     "Deleting this site removes its published route after the next HAProxy configuration apply.": "После удаления сайт перестанет обслуживаться при следующем применении конфигурации HAProxy.",
-    "Its instructions and attachments stop being published at once and are removed for good after 30 days.": "Его инструкция и вложения перестают публиковаться сразу и окончательно удаляются через 30 дней.",
+    "Its instructions and attachments stop being published at once and go to the trash with the site.": "Его инструкция и вложения перестают публиковаться сразу и попадают в корзину вместе с сайтом.",
     "Backend address": "Адрес бэкенда",
     "This service site also proxies to a backend of its own, from before service sites were separated from proxy sites. Its other proxy settings are kept as they are.": "Этот служебный сайт ещё и проксирует на собственный бэкенд: он создан до разделения служебных и проксируемых сайтов. Остальные его настройки проксирования сохраняются без изменений.",
     "This service site also proxies to several backends of its own. They are kept as they are and cannot be changed in this editor.": "Этот служебный сайт ещё и проксирует на несколько собственных бэкендов. Они сохраняются без изменений, в этом редакторе их изменить нельзя.",

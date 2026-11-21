@@ -392,9 +392,10 @@ def add_site_minimal(
     domain: str,
     backend_ip: str,
     backend_port: str,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     with source_lock("websites"):
-        return _add_site_minimal(name, domain, backend_ip, backend_port)
+        return _add_site_minimal(name, domain, backend_ip, backend_port, extra)
 
 
 def _add_site_minimal(
@@ -402,10 +403,12 @@ def _add_site_minimal(
     domain: str,
     backend_ip: str,
     backend_port: str,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
     Adds a minimal site:
       - name, domain, backend_ip, backend_port
+      - extra: further fields for a proxy site, such as a backend set
     Everything else comes from site_defaults in the template.
 
     An empty backend_ip and backend_port make an access gate (access_gate):
@@ -471,6 +474,13 @@ def _add_site_minimal(
         "backend_ip": backend_ip,
         "backend_port": port_int,
     }
+    for key, value in (extra or {}).items():
+        if value is not None:
+            new_site[key] = value
+    # A site that came with its server list (a backend set) has no single backend.
+    if new_site.get("servers"):
+        new_site.pop("backend_ip", None)
+        new_site.pop("backend_port", None)
     conflict = site_identity_conflict(new_site, sites)
     if conflict:
         return False, conflict
@@ -519,26 +529,43 @@ def _delete_site_by_name(name: str) -> Tuple[bool, str]:
         sort_keys=False,
         default_flow_style=False,
     )
+    from . import trash
+
+    # Kept first: a deletion whose entry cannot be kept does not happen.
+    try:
+        kept = trash.keep("site", name, removed)
+    except trash.TrashError as exc:
+        return False, f"The entry could not be kept in the trash, so nothing was deleted: {exc}"
     ok, msg = update_yaml_file("websites", content)
-    if ok:
-        stored = _discard_access_page(name)
-        from . import trash
+    if not ok:
+        trash.drop(kept)
+        return ok, msg
+    stored = _discard_access_page(name)
+    if stored:
+        trash.annotate(kept, access_page=stored)
+    return ok, f"{msg} The site was moved to the trash and can be restored there."
 
-        trash.put("site", name, removed, {"access_page": stored or ""})
-        msg = f"{msg} The site was moved to the trash and can be restored there."
-    return ok, msg
+
+# What the trash page shows when a restored service site has no login rule.
+GATE_RULE_WARNING = (
+    "The site is back, but its Authelia login rule could not be added; add a "
+    "one_factor rule for it on the Authelia access rules page."
+)
 
 
-def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str]:
-    """Put a deleted site back, held to the rules a new one would be."""
+def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str, str]:
+    """Put a deleted site back, held to the rules a new one would be.
+
+    The third value is a warning for a restore that went only part of the way.
+    """
     with source_lock("websites"):
         data = _load_yaml(WEBSITES_YAML)
         sites = data.get("sites") or []
         if not isinstance(sites, list):
-            return False, 'Invalid websites.yml structure (expected a sites list)'
+            return False, 'Invalid websites.yml structure (expected a sites list)', ""
         conflict = site_identity_conflict(entry, sites)
         if conflict:
-            return False, conflict
+            return False, conflict, ""
         sites.append(entry)
         data["sites"] = sites
         content = yaml.safe_dump(
@@ -554,8 +581,9 @@ def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str]:
             str(a).strip() for a in (entry.get("alt_names") or []) if str(a).strip()
         ]
         rule_ok, rule_msg = _ensure_access_gate_authelia_rule(names)
-        return True, _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
-    return ok, msg
+        message = _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
+        return True, message, "" if rule_ok else GATE_RULE_WARNING
+    return ok, msg, ""
 
 
 def _discard_access_page(name: str) -> Optional[str]:

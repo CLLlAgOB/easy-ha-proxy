@@ -522,6 +522,27 @@ class ThePages(_Files):
         listing = self.client.get("/haproxy/backend-sets", headers=self.headers).get_data(as_text=True)
         self.assertIn("/haproxy/tcp/rdp/edit", listing)
 
+    def test_the_short_site_form_adds_a_site_with_and_without_a_set(self):
+        # The route once called the sites service with the set's fields as a
+        # fifth argument it did not take, so every add from this form was a 500.
+        plain = self.client.post("/haproxy/sites", headers=self.headers, data={
+            "action": "add", "domain": "plain.example.test", "site_type": "normal",
+            "backend_ip": "198.51.100.30", "backend_port": "8080"})
+        self.assertEqual(plain.status_code, 302, plain.get_data(as_text=True)[:500])
+        self.assertTrue(sets.save_preset(UPLINKS)[0])
+        with_set = self.client.post("/haproxy/sites", headers=self.headers, data={
+            "action": "add", "domain": "uplinks.example.test", "site_type": "normal",
+            "backend_ip": "", "backend_port": "8443", "servers_preset": "Two uplinks"})
+        self.assertEqual(with_set.status_code, 302, with_set.get_data(as_text=True)[:500])
+        sites = {site["name"]: site for site in self.load(self.websites)["sites"]}
+        self.assertEqual((sites["plain.example.test"]["backend_ip"], sites["plain.example.test"]["backend_port"]),
+                         ("198.51.100.30", 8080))
+        grouped = sites["uplinks.example.test"]
+        self.assertEqual(grouped["servers_preset"], "Two uplinks")
+        self.assertEqual([server["host"] for server in grouped["servers"]], ["198.51.100.10", "203.0.113.20"])
+        self.assertEqual(grouped["servers"][0]["port"], 8443)
+        self.assertNotIn("backend_ip", grouped)
+
 
 class TheWiring(unittest.TestCase):
     def test_editors_lists_and_forms_offer_the_sets(self):

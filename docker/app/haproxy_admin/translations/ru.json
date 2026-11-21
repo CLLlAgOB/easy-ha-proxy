@@ -615,7 +615,7 @@
     "There are no rules yet.": "Правил пока нет.",
     "There are no sites yet.": "Сайтов пока нет.",
     "There are no users yet": "Пользователей пока нет",
-    "It goes to the trash and can be restored there for 30 days.": "Он попадёт в корзину, откуда его можно восстановить в течение 30 дней.",
+    "It goes to the trash and can be restored from there.": "Он попадёт в корзину, откуда его можно восстановить.",
     "This action removes the entry from": "Это действие удалит запись из",
     "This is the secure default. The diagnostics button is hidden and": "Это безопасное состояние по умолчанию. Кнопка диагностики скрыта, а",
     "This is the secure default. The diagnostics button is hidden and\n    routes exposing technical data are unavailable.": "Это безопасное состояние по умолчанию. Кнопка диагностики скрыта, а\n    маршруты с техническими данными недоступны.",

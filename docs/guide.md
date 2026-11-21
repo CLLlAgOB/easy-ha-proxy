@@ -888,13 +888,18 @@ confirmed.
 
 ### Trash
 
-Deleting something used to be final. Now what a deletion removes is kept for
-30 days on **Configuration → Trash**, from where it can be put back or deleted
-for good:
+Deleting something used to be final. Now what a deletion removes is kept on
+**Configuration → Trash**, from where it can be put back or deleted for good.
+By default items stay until the trash is emptied; under **Keeping** on the same
+page a term can be set instead (for example 30 days), after which items are
+deleted for good automatically -- checked hourly, and an item past its term
+can no longer be restored. Items already older than a new term go as soon as it
+is saved.
 
 - HTTP and service sites, TCP proxies and UDP forwards -- kept by the panel in
   `/var/lib/haproxy-admin/trash/`, one file per deleted entry. A service site
-  gets its access page and attachments back too, while they are still kept.
+  takes its access page and attachments along and gets them back on restore;
+  deleting the site for good deletes them too.
 - HAProxy certificates, Let's Encrypt certificates (the whole lineage: live
   links, every archived copy and the renewal settings), standby certificates,
   external and internal certificate authorities, DNS profiles and certificate
@@ -902,8 +907,12 @@ for good:
   `/var/lib/easy-ha-proxy/cert-trash/`, root-only, with owners and modes
   recorded so files go back exactly as they were.
 
-The copy is taken before the deletion and dropped if the deletion fails, so the
-trash never holds something still in service. Restoring goes through the same
+The copy is taken before the deletion; if it cannot be taken, nothing is
+deleted. It is dropped again only when a failed deletion removed nothing, so the
+trash never holds something still in service, and a deletion that stopped
+part-way (certbot, for one, removes the renewal settings first) keeps its copy.
+Files are restored under a temporary name and renamed into place only when
+whole. Restoring goes through the same
 checks as creating: a site, proxy or forward whose name, domain or port has
 been taken meanwhile stays in the trash, and so does a file whose place is
 occupied. A restored site or TCP proxy is saved but not yet in HAProxy -- apply
@@ -912,8 +921,8 @@ adding one is. A restored HAProxy certificate file is picked up at the next
 apply or reload, just as its deletion was.
 
 The page lists names and dates only; keys and credentials never leave the
-daemon. Restoring and deleting for good are superadmin-only and recorded in the
-change log.
+daemon. Restoring, deleting for good and changing the term are superadmin-only
+and recorded in the change log.
 
 ### Change log
 

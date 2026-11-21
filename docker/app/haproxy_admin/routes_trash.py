@@ -14,7 +14,7 @@ from flask import g, jsonify, render_template, request
 
 from . import trash
 from .audit import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS, record_request
-from .certd_client import CertdUnavailable, trash_list, trash_purge, trash_restore
+from .certd_client import CertdUnavailable, trash_list, trash_purge, trash_restore, trash_settings
 from .routes import bp
 
 LOG = logging.getLogger("haproxy-admin")
@@ -36,14 +36,20 @@ def _denied(action: str, object_id: str = ""):
     return jsonify({"ok": False, "error": "superadmin required"}), 403
 
 
+@bp.before_app_request
+def _start_trash_purger():
+    # The term is kept on a panel nobody opens, too.
+    trash.ensure_purger()
+
+
 def _certd_items() -> Dict[str, Any]:
     try:
         payload = trash_list()
     except CertdUnavailable as exc:
         LOG.warning("certd unavailable: %s", exc)
-        return {"items": [], "error": "The certificate service does not answer"}
+        return {"items": [], "error": "The certificate service does not answer", "keep_days": None}
     if not payload.get("ok"):
-        return {"items": [], "error": str(payload.get("error") or "unknown error")}
+        return {"items": [], "error": str(payload.get("error") or "unknown error"), "keep_days": None}
     items: List[Dict[str, Any]] = []
     for item in payload.get("items") or []:
         if not isinstance(item, dict):
@@ -65,12 +71,13 @@ def _certd_items() -> Dict[str, Any]:
             "deleted_by": str(item.get("deleted_by") or ""),
             "expires_at": int(item.get("expires_at") or 0),
         })
-    return {"items": items, "error": ""}
+    keep_days = payload.get("keep_days")
+    return {"items": items, "error": "", "keep_days": keep_days if isinstance(keep_days, int) else None}
 
 
 @bp.get("/haproxy/trash")
 def trash_page():
-    return render_template("trash.html", keep_days=trash.KEEP_SECONDS // 86400)
+    return render_template("trash.html", max_keep_days=trash.MAX_KEEP_DAYS)
 
 
 @bp.get("/api/haproxy/trash")
@@ -89,9 +96,50 @@ def api_trash_list():
     return jsonify({
         "ok": True,
         "items": merged,
-        "keep_days": trash.KEEP_SECONDS // 86400,
+        "keep_days": trash.keep_days(),
+        # Shown when certd keeps its items on another term than the panel's
+        # (it was down when the term was last saved): saving again aligns them.
+        "certd_keep_days": certd["keep_days"],
         "errors": [message for message in (panel_error, certd["error"]) if message],
     })
+
+
+@bp.post("/api/haproxy/trash/settings")
+def api_trash_settings():
+    payload = request.get_json(silent=True) or {}
+    if not _superadmin():
+        return _denied("trash.settings", "settings")
+    try:
+        days = trash.set_keep_days(payload.get("keep_days"))
+    except trash.TrashError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except OSError as exc:
+        LOG.warning("trash settings not saved: %s", exc)
+        return jsonify({"ok": False, "error": "The trash settings could not be saved"}), 500
+    error = ""
+    try:
+        answer = trash_settings(days)
+        if not answer.get("ok"):
+            error = str(answer.get("error") or "certd refused")
+    except CertdUnavailable as exc:
+        LOG.warning("certd unavailable: %s", exc)
+        error = "The certificate service does not answer"
+    record_request(
+        "trash.settings",
+        object_type="trash",
+        object_id="settings",
+        result=RESULT_FAILURE if error else RESULT_SUCCESS,
+        summary="kept until emptied" if days == 0 else f"kept for {days} days",
+        detail=error[:500],
+    )
+    if error:
+        return jsonify({
+            "ok": False,
+            "keep_days": days,
+            "error": f"Saved for sites and forwards, but not for certificates: {error}",
+            "partial": True,
+        }), 502
+    return jsonify({"ok": True, "keep_days": days})
 
 
 def _target() -> tuple[str, str]:

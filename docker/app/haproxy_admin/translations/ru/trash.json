@@ -7,7 +7,7 @@
     "Trash": "Корзина",
     "Deleted sites, TCP proxies, UDP forwards, certificates, certificate authorities, DNS profiles and certificate delivery targets wait here before they are removed for good. Restoring puts an item back exactly as it was, provided nothing of the same name has taken its place.": "Удалённые сайты, TCP-прокси, UDP-пробросы, сертификаты, центры сертификации, DNS-профили и цели доставки сертификатов хранятся здесь, прежде чем будут удалены окончательно. Восстановление возвращает объект в точности таким, каким он был, если его место не занял объект с тем же именем.",
     "Deleted items": "Удалённые объекты",
-    "Items are deleted for good automatically 30 days after they were deleted.": "Через 30 дней после удаления объекты удаляются окончательно автоматически.",
+    "Keeping": "Хранение",
     "A restored site or TCP proxy is saved but not yet in HAProxy: apply the configuration afterwards. A restored UDP forward is applied at once.": "Восстановленный сайт или TCP-прокси сохраняется, но ещё не попадает в HAProxy: после восстановления примените конфигурацию. Восстановленный UDP-проброс применяется сразу.",
     "Details": "Подробности",
     "Deleted by": "Кто удалил",
@@ -35,6 +35,20 @@
     "The UDP forward was moved to the trash and can be restored there.": "UDP-проброс перемещён в корзину, оттуда его можно восстановить.",
     "HAProxy certificate moved to the trash:": "Сертификат HAProxy перемещён в корзину:",
     "External certificate authority moved to the trash:": "Внешний центр сертификации перемещён в корзину:",
-    "Internal certificate authority moved to the trash.": "Внутренний центр сертификации перемещён в корзину."
+    "Internal certificate authority moved to the trash.": "Внутренний центр сертификации перемещён в корзину.",
+    "Keep deleted items until the trash is emptied": "Хранить удалённые объекты до очистки корзины",
+    "Delete items for good automatically after a term": "Автоматически удалять объекты навсегда по истечении срока",
+    "Term, days": "Срок, дней",
+    "Items older than the term are deleted for good as soon as it is saved.": "Объекты старше срока удаляются навсегда сразу после его сохранения.",
+    "When the trash is emptied": "При очистке корзины",
+    "The certificate service keeps its items on another term. Save the setting again to align it.": "Служба сертификатов хранит свои объекты по другому сроку. Сохраните настройку ещё раз, чтобы сроки совпали.",
+    "The term must be a whole number of days from 1 to 3650.": "Срок должен быть целым числом дней от 1 до 3650.",
+    "Items older than the term are deleted for good at once. Save?": "Объекты старше срока будут сразу удалены навсегда. Сохранить?",
+    "The term must be a whole number of days": "Срок должен быть целым числом дней",
+    "The term must be between 1 and 3650 days, or 0 to keep items until the trash is emptied": "Срок должен быть от 1 до 3650 дней или 0, чтобы хранить объекты до очистки корзины",
+    "The trash settings could not be saved": "Не удалось сохранить настройки корзины",
+    "The entry could not be kept in the trash, so nothing was deleted:": "Не удалось сохранить запись в корзине, поэтому ничего не удалено:",
+    "The site is back, but its Authelia login rule could not be added; add a one_factor rule for it on the Authelia access rules page.": "Сайт восстановлен, но добавить для него правило входа Authelia не удалось; добавьте правило one_factor для этого сайта на странице правил доступа Authelia.",
+    "Saved for sites and forwards, but not for certificates:": "Сохранено для сайтов и пробросов, но не для сертификатов:"
   }
 }

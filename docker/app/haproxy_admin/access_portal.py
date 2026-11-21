@@ -20,10 +20,12 @@ MAX_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_FILES = 10
 ID = re.compile(r'^[a-f0-9]{32}$')
 LANGUAGES = frozenset({'auto', 'en', 'ru'})
-# Where a deleted site's instructions and attachments wait before they are
-# removed for good. Long enough to notice a site deleted by mistake and take
-# its files back out of a backup or out of here; short enough that half a
-# gigabyte per deleted site does not stay on the disk and in every backup.
+# Where a deleted site's instructions and attachments wait. A site in the
+# panel's trash keeps them for as long as it stays there: the trash removes
+# them with the site. What no trash item names (pages set aside before a new
+# site of the same name, or by a version without the trash) goes after
+# TRASH_SECONDS, so half a gigabyte per site does not stay on the disk and in
+# every backup.
 TRASH = '.deleted'
 TRASH_SECONDS = 30 * 86400
 _TRASHED = re.compile(r'^[a-f0-9]{64}-(?P<at>[0-9]{1,12})-[a-f0-9]{8}$')
@@ -49,11 +51,18 @@ def purge(now=None):
         return 0
     now = time.time() if now is None else now
     removed = 0
+    kept = None
     for entry in trash.iterdir():
         match = _TRASHED.fullmatch(entry.name)
         if match is None or entry.is_symlink() or not entry.is_dir():
             continue  # nothing this module put there
         if now - int(match.group('at')) >= TRASH_SECONDS:
+            if kept is None:
+                from . import trash as panel_trash
+
+                kept = panel_trash.referenced_pages()
+            if entry.name in kept:
+                continue  # its site is in the trash; it goes with the site
             shutil.rmtree(entry, ignore_errors=True)
             removed += 1
     return removed
@@ -106,6 +115,19 @@ def restore(site, stored):
             return False
         shutil.rmtree(target)
     os.replace(source, target)
+    return True
+
+
+def forget(site, stored):
+    """Remove for good the page a site took into the trash with it."""
+    match = _TRASHED.fullmatch(str(stored or ''))
+    name = hashlib.sha256(site.encode('utf-8')).hexdigest()
+    if match is None or not stored.startswith(name + '-'):
+        return False
+    source = root() / TRASH / stored
+    if source.is_symlink() or not source.is_dir():
+        return False
+    shutil.rmtree(source)
     return True
 
 

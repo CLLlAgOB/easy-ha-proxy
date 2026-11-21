@@ -140,6 +140,12 @@ def trash_purge(item_id: str = "", everything: bool = False) -> Dict[str, Any]:
     return _dns_request("trash/purge", {"id": item_id})
 
 
+def trash_settings(keep_days: Optional[int] = None) -> Dict[str, Any]:
+    """certd's term for its trash; with keep_days, set it first."""
+    payload: Dict[str, Any] = {} if keep_days is None else {"keep_days": int(keep_days)}
+    return _dns_request("trash/settings", payload)
+
+
 def _delivery_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """A request to certd's certificate delivery section.
 

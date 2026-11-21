@@ -1,4 +1,4 @@
-"""A deletion can be undone for thirty days.
+"""A deletion can be undone until the trash is emptied, or for a term.
 
 Deleting a site, a TCP proxy or a UDP forward used to rewrite its YAML
 without the entry, and deleting a certificate, an authority, a DNS profile
@@ -6,15 +6,19 @@ or a delivery target removed its files on the host: in both cases the only
 copy was gone. Held here:
 
 * what a deletion removes is set aside first -- by the panel for the YAML
-  entries, by certd for the files -- and a deletion that fails leaves
-  nothing behind in the trash;
+  entries, by certd for the files; when it cannot be, nothing is deleted;
+  a deletion that fails having removed nothing leaves nothing behind in the
+  trash, and one that stopped part-way keeps its copy;
 * restoring puts it back through the rules a new entry would meet, and is
   refused, with the item kept, when something of the same name has taken
   its place;
 * files come back where they were, symlinks as symlinks, and certd never
   restores outside its own directories even from a tampered item;
-* nothing is kept longer than thirty days, and nothing secret ever leaves
-  certd in the listing.
+* items stay until the trash is emptied unless a term is set; past the term
+  an item is gone, from the list and for a restore by its id, and nothing
+  secret ever leaves certd in the listing;
+* a restore never deadlocks against a deletion, never leaves half a file in
+  place, and a service site restored without its login rule says so.
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -122,7 +128,7 @@ class DeletedEntriesAreKept(PanelFixture):
         listed = trash.items()
         self.assertEqual([(i["kind"], i["name"]) for i in listed], [("site", "shop")])
         self.assertIn("www.shop.example.test", listed[0]["detail"])
-        self.assertEqual(listed[0]["expires_at"] - listed[0]["deleted_at"], 30 * DAY)
+        self.assertEqual(listed[0]["expires_at"], 0, "kept until the trash is emptied")
 
         result = trash.restore(listed[0]["id"])
         self.assertTrue(result["ok"], result)
@@ -177,10 +183,36 @@ class DeletedEntriesAreKept(PanelFixture):
              "backends": [{"ip": "192.0.2.21", "port": 5432}]})
         self.assertFalse(trash.restore(trash.items()[0]["id"])["ok"])
 
-    def test_nothing_is_kept_past_its_term(self):
+    def test_items_stay_until_emptied_unless_a_term_is_set(self):
         sites.delete_site_by_name("shop")
         item = trash.items()[0]
+        self.assertEqual(trash.keep_days(), 0)
+        self.assertEqual(len(trash.items(now=item["deleted_at"] + 400 * DAY)), 1)
+        self.assertEqual(trash.set_keep_days(30, now=item["deleted_at"] + DAY), 30)
+        self.assertEqual(trash.items(now=item["deleted_at"] + DAY)[0]["expires_at"],
+                         item["deleted_at"] + 30 * DAY)
         self.assertEqual(trash.items(now=item["deleted_at"] + 30 * DAY), [])
+
+    def test_an_item_past_its_term_cannot_be_restored_by_its_id(self):
+        sites.delete_site_by_name("shop")
+        item = trash.items()[0]
+        trash.set_keep_days(30, now=item["deleted_at"])
+        with self.assertRaises(trash.TrashError):
+            trash.restore(item["id"], now=item["deleted_at"] + 31 * DAY)
+        self.assertEqual(self.names("websites", "sites"), ["blog"])
+        self.assertEqual(trash.items(now=item["deleted_at"]), [], "and it is gone")
+
+    def test_a_shorter_term_takes_older_items_at_once_and_bad_terms_are_refused(self):
+        sites.delete_site_by_name("shop")
+        item = trash.items()[0]
+        trash.set_keep_days(10, now=item["deleted_at"] + 11 * DAY)
+        self.assertEqual(trash.items(now=item["deleted_at"]), [])
+        for bad in (-1, 3651, "ten", None, 1.5):
+            with self.subTest(bad=bad), self.assertRaises(trash.TrashError):
+                trash.set_keep_days(bad)
+        self.assertEqual(trash.keep_days(), 10)
+        trash.set_keep_days(0)
+        self.assertEqual(trash.keep_days(), 0)
 
     def test_items_can_be_deleted_for_good(self):
         sites.delete_site_by_name("shop")
@@ -198,11 +230,25 @@ class DeletedEntriesAreKept(PanelFixture):
             with self.assertRaises(trash.TrashError):
                 trash.restore(bad)
 
-    def test_a_trash_that_cannot_be_written_does_not_fail_the_delete(self):
+    def test_an_entry_that_cannot_be_kept_is_not_deleted(self):
+        # A full disk used to lose the entry: the YAML was rewritten first and
+        # the page still said it could be restored.
         os.environ["HAPROXY_ADMIN_TRASH_DIR"] = "/proc/no-such-place/trash"
         with self.assertLogs("haproxy-admin", level="WARNING"):
-            self.assertTrue(sites.delete_site_by_name("shop")[0])
-        self.assertEqual(self.names("websites", "sites"), ["blog"])
+            for ok, message in (sites.delete_site_by_name("shop"), tcp.delete_tcp_proxy("db"),
+                                udp.delete_udp_forward("dns")):
+                self.assertFalse(ok)
+                self.assertIn("nothing was deleted", message)
+        self.assertEqual(self.names("websites", "sites"), ["shop", "blog"])
+        self.assertEqual(self.names("tcp", "tcp_proxies"), ["db"])
+        self.assertEqual(self.names("udp", "udp_forwards"), ["dns"])
+
+    def test_a_failed_tcp_or_udp_write_keeps_nothing(self):
+        with mock.patch.object(tcp, "update_yaml_file", return_value=(False, "locked")), \
+                mock.patch.object(udp, "_write_and_apply", return_value=(False, "apply failed")):
+            self.assertFalse(tcp.delete_tcp_proxy("db")[0])
+            self.assertFalse(udp.delete_udp_forward("dns")[0])
+        self.assertEqual(trash.items(), [])
 
     def test_a_failed_restore_puts_the_item_back(self):
         sites.delete_site_by_name("shop")
@@ -222,6 +268,35 @@ class DeletedEntriesAreKept(PanelFixture):
         old = item["deleted_at"] - 3600
         os.utime(claim, (old, old))
         self.assertEqual([i["id"] for i in trash.items()], [item["id"]])
+
+    def test_a_restore_of_an_old_item_is_not_taken_for_an_abandoned_one(self):
+        # The claim is a rename, which keeps the item's mtime: a listing during
+        # the restore of an item older than ten minutes took it back.
+        sites.delete_site_by_name("shop")
+        item = trash.items()[0]
+        stored = self.root / "trash" / f"{item['id']}.json"
+        old = time.time() - DAY
+        os.utime(stored, (old, old))
+        seen = []
+
+        def save_while_listing(kind, text):
+            seen.append(trash.items())
+            return self.save(kind, text)
+
+        with mock.patch.object(sites, "update_yaml_file", side_effect=save_while_listing):
+            self.assertTrue(trash.restore(item["id"])["ok"])
+        self.assertEqual(seen, [[]], "invisible while it is being restored")
+        self.assertEqual(trash.items(), [])
+        self.assertEqual(self.names("websites", "sites"), ["blog", "shop"])
+
+    def test_a_service_site_restored_without_its_login_rule_says_so(self):
+        self.gate_rule.return_value = (False, "authelia is down")
+        self.data["websites"]["sites"].append(
+            {"name": "door", "domain": "door.example.test", "access_gate": True})
+        sites.delete_site_by_name("door")
+        result = trash.restore(trash.items()[0]["id"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["warning"], sites.GATE_RULE_WARNING)
 
 
 @unittest.skipUnless(trash, "Linux file locking")
@@ -245,6 +320,41 @@ class TheAccessPageComesBack(PanelFixture):
         result = trash.restore(trash.items()[0]["id"])
         self.assertTrue(result["ok"])
         self.assertEqual(result.get("access_page"), "gone")
+
+    def door(self):
+        self.data["websites"]["sites"].append(
+            {"name": "door", "domain": "door.example.test", "access_gate": True})
+        access_portal.upload("door", "helper.exe", io.BytesIO(b"attachment bytes"))
+        sites.delete_site_by_name("door")
+        return self.root / "portals" / access_portal.TRASH
+
+    def test_deleting_a_site_for_good_deletes_its_attachments(self):
+        kept = self.door()
+        self.assertEqual(len(list(kept.iterdir())), 1)
+        trash.remove(trash.items()[0]["id"])
+        self.assertEqual(list(kept.iterdir()), [])
+
+    def test_emptying_the_trash_deletes_the_attachments_too(self):
+        kept = self.door()
+        trash.empty()
+        self.assertEqual(list(kept.iterdir()), [])
+
+    def test_a_page_waits_as_long_as_its_site_and_goes_with_its_term(self):
+        kept = self.door()
+        later = time.time() + 400 * DAY
+        access_portal.purge(later)
+        self.assertEqual(len(list(kept.iterdir())), 1, "its site is still in the trash")
+        trash.set_keep_days(30, now=later)
+        self.assertEqual(list(kept.iterdir()), [])
+
+    def test_a_page_no_item_names_goes_after_the_old_term(self):
+        kept = self.door()
+        trash.empty()
+        access_portal.upload("door", "helper.exe", io.BytesIO(b"attachment bytes"))
+        access_portal.discard("door")
+        self.assertEqual(len(list(kept.iterdir())), 1)
+        access_portal.purge(time.time() + 31 * DAY)
+        self.assertEqual(list(kept.iterdir()), [])
 
 
 class CertdFixture(unittest.TestCase):
@@ -371,6 +481,120 @@ class CertdKeepsWhatItDeletes(CertdFixture):
         self.assertFalse(answer["ok"])
         self.assertEqual(CERTD.list_trash()["items"], [])
 
+    def test_a_certbot_delete_that_stops_part_way_keeps_its_copy(self):
+        # certbot removes the renewal settings first; failing after that used
+        # to throw away the only copy of them.
+        le = self.lineage()
+
+        def run(_cmd, timeout=None):
+            (le / "renewal" / "shop.example.test.conf").unlink()
+            return mock.Mock(returncode=1, stdout="", stderr="archive busy")
+
+        with mock.patch.object(CERTD, "_run_bounded", side_effect=run):
+            status, answer = CERTD.handle_delete_le({"lineage": "shop.example.test"})
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["trash_id"])
+        self.assertIn("part-way", answer["error"])
+        self.assertEqual([i["id"] for i in CERTD.list_trash()["items"]], [answer["trash_id"]])
+
+    def test_a_failed_deletion_that_removed_nothing_drops_its_copy(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        target.write_bytes(self.pem())
+        real_unlink = Path.unlink
+
+        def refuse(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("read-only")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", refuse):
+            status, answer = CERTD.handle_delete_haproxy({"path": str(target)})
+        self.assertFalse(answer["ok"])
+        self.assertTrue(target.exists())
+        self.assertEqual(CERTD.list_trash()["items"], [])
+
+    def test_a_half_removed_tree_keeps_its_copy(self):
+        tree = self.root / "ca" / "internal"
+        tree.mkdir(parents=True)
+        (tree / "ca.key").write_text("key")
+        (tree / "ca.crt").write_text("crt")
+        kept = CERTD._trash_put("internal_ca", "internal", [tree])
+        before = CERTD._trash_listing([tree])
+        (tree / "ca.key").unlink()
+        self.assertEqual(CERTD._trash_settle(kept, before, [tree]), kept)
+        self.assertEqual(len(CERTD.list_trash()["items"]), 1)
+        self.assertIsNone(CERTD._trash_settle(kept, CERTD._trash_listing([tree]), [tree]))
+        self.assertEqual(CERTD.list_trash()["items"], [])
+
+    def test_a_restore_cut_short_leaves_no_half_file_and_can_be_retried(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        data = self.pem()
+        target.write_bytes(data)
+        status, answer = CERTD.handle_delete_haproxy({"path": str(target)})
+
+        def disk_full(source, destination):
+            Path(destination).write_bytes(b"-----BEGIN CERT")
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(CERTD, "_copy_owned", side_effect=disk_full):
+            status, failed = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 500, failed)
+        self.assertFalse(os.path.lexists(target))
+        self.assertEqual(list(target.parent.iterdir()), [], "no temporary file left behind")
+        status, restored = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 200, restored)
+        self.assertEqual(target.read_bytes(), data)
+
+    def test_a_ca_restore_takes_the_locks_in_the_order_deletions_do(self):
+        # A CA deletion holds CA_LOCK and then takes TRASH_LOCK; a restore that
+        # held TRASH_LOCK while waiting for CA_LOCK deadlocked against it.
+        external = self.root / "ca" / "external"
+        external.mkdir(parents=True)
+        pem = external / "partner.pem"
+        pem.write_bytes(self.pem("partner.example.test").split(b"-----BEGIN PRIVATE")[0])
+        kept = CERTD._trash_put("external_ca", "partner", [pem])
+        pem.unlink()
+        outcome = {}
+
+        def restore():
+            try:
+                outcome["result"] = CERTD.restore_trash_item(kept)
+            except Exception as exc:  # pragma: no cover - reported below
+                outcome["error"] = exc
+
+        with mock.patch.object(CERTD, "_load_client_auth_ids", return_value=[]):
+            CERTD.CA_LOCK.acquire()
+            try:
+                worker = threading.Thread(target=restore)
+                worker.start()
+                time.sleep(0.3)
+                self.assertTrue(worker.is_alive(), "waits for CA_LOCK")
+                got = CERTD.TRASH_LOCK.acquire(blocking=False)
+                self.assertTrue(got, "without holding TRASH_LOCK meanwhile")
+                CERTD.TRASH_LOCK.release()
+            finally:
+                CERTD.CA_LOCK.release()
+            worker.join(10)
+        self.assertNotIn("error", outcome)
+        self.assertTrue(pem.is_file())
+
+    def test_the_term_is_a_setting_and_an_expired_item_cannot_be_restored(self):
+        self.assertEqual(CERTD.handle_trash_settings({})[1]["keep_days"], 0)
+        target = self.root / "certs" / "a.pem"
+        target.write_bytes(self.pem("a.example.test"))
+        status, answer = CERTD.handle_delete_haproxy({"path": str(target)})
+        self.assertEqual(CERTD.list_trash()["items"][0]["expires_at"], 0)
+        self.assertEqual(CERTD.handle_trash_settings({"keep_days": 30})[1]["keep_days"], 30)
+        self.assertEqual(CERTD.list_trash()["keep_days"], 30)
+        self.assertEqual(CERTD.handle_trash_settings({"keep_days": -1})[0], 400)
+        self.assertEqual(CERTD.handle_trash_settings({"keep_days": "x"})[0], 400)
+        later = time.time() + 31 * DAY
+        with mock.patch.object(CERTD.time, "time", return_value=later):
+            status, refused = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 400)
+        self.assertFalse(target.exists())
+        self.assertEqual(CERTD.list_trash()["items"], [])
+
     def test_dns_profiles_and_delivery_targets_come_back(self):
         CERTD.DNS_CREDENTIALS_DIR.mkdir()
         profile = CERTD.DNS_CREDENTIALS_DIR / "cloud.ini"
@@ -427,6 +651,10 @@ class CertdKeepsWhatItDeletes(CertdFixture):
         CERTD.handle_delete_haproxy({"path": str(target)})
         item = CERTD.list_trash()["items"][0]
         with CERTD.TRASH_LOCK:
+            CERTD._trash_purge_locked(item["deleted_at"] + 400 * DAY)
+        self.assertEqual(len(CERTD.list_trash()["items"]), 1, "kept until emptied by default")
+        CERTD.set_trash_keep_days(30)
+        with CERTD.TRASH_LOCK:
             CERTD._trash_purge_locked(item["deleted_at"] + 30 * DAY)
         self.assertEqual(CERTD.list_trash()["items"], [])
         for bad in ("../../etc", "", "x"):
@@ -456,13 +684,14 @@ class ThePage(unittest.TestCase):
     def test_every_deletion_that_now_goes_to_the_trash_says_so(self):
         edit = (self.APP / "templates" / "haproxy_site_edit.html").read_text(encoding="utf-8")
         self.assertNotIn("This action cannot be undone.", edit)
-        self.assertIn("It goes to the trash and can be restored there for 30 days.", edit)
+        self.assertIn("It goes to the trash and can be restored from there.", edit)
         certs = (self.APP / "static" / "js" / "haproxy_certs.js").read_text(encoding="utf-8")
         self.assertNotIn("Permanently delete", certs)
 
     def test_the_page_and_its_api_are_superadmin_only(self):
         routes = (self.APP / "routes_trash.py").read_text(encoding="utf-8")
-        for handler in ("api_trash_list", "api_trash_restore", "api_trash_delete", "api_trash_empty"):
+        for handler in ("api_trash_list", "api_trash_restore", "api_trash_delete", "api_trash_empty",
+                        "api_trash_settings"):
             body = routes.split(f"def {handler}(")[1].split("\n@bp.")[0]
             self.assertIn("_superadmin()", body, handler)
 

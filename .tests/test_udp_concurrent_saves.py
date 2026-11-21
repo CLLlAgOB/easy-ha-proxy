@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import importlib
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -41,6 +42,10 @@ class TwoSaves(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "udp.yml"
         self.path.write_text("udp_forwards: []\n", encoding="utf-8")
+        # A deletion keeps the entry in the trash first, and does not happen without it.
+        environment = mock.patch.dict(os.environ, {"HAPROXY_ADMIN_TRASH_DIR": str(Path(directory.name) / "trash")})
+        environment.start()
+        self.addCleanup(environment.stop)
         for target in (self.udp, self.config):
             patcher = mock.patch.object(target, "UDP_YAML", self.path)
             patcher.start()
