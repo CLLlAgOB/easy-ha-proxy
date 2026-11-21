@@ -18,12 +18,13 @@ sys.path.insert(0, str(ROOT / "docker" / "app"))
 
 from test_request_log import StoreTestCase, guardd  # noqa: E402
 from test_request_log_filters import traffic_lines  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
 if not WINDOWS:
     from haproxy_admin import services_security as security  # noqa: E402
 
-SOURCE = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+SOURCE = guardd_source()
 APP = ROOT / "docker/app/haproxy_admin"
 TEN = 1786528800  # 2026-08-12 10:00 UTC, where the traffic starts
 

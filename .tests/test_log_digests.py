@@ -17,6 +17,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = ROOT / "ansible/roles/haproxy-admin/files"
@@ -165,7 +167,7 @@ class TheDigest(unittest.TestCase):
         self.assertEqual(sum(minutes[0]["backends"]["be_shop"]), 1)
 
     def test_the_daemon_answers_for_it(self):
-        source = (FILES / "easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         handler = source.split('if path == "/api/v1/guard/digest":')[1].split("return\n")[0]
         self.assertIn("engine.digests.complete(since, now)", handler)
         self.assertIn('"bounds_ms": list(DIGEST_BOUNDS_MS)', handler)

@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
 
 from test_live_activity import guardd, line  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 MIB = guardd.MIB
 
@@ -117,7 +118,7 @@ class ReadingBack(unittest.TestCase):
         self.assertEqual(engine.continue_refill(), 0)
 
     def test_the_collector_starts_it_in_the_background(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         run = source.split("    def _run(self) -> None:")[1].split("while not self._stop.is_set()")[0]
         self.assertIn('name="guardd-refill"', run)
         self.assertIn("daemon=True", run)

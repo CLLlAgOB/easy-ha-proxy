@@ -20,6 +20,8 @@ import json
 import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -191,7 +193,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("guardd_signatures.changed", tasks)
 
     def test_the_daemon_loads_it_before_reading_any_log(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("def main()")[1][:600]
         self.assertIn("load_signatures()", block)
 

@@ -13,6 +13,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,9 +122,7 @@ class IngestTests(StoreTestCase):
     def test_records_are_written_in_one_batch_per_cycle(self):
         # One statement per cycle rather than one per line: at the measured
         # 27k lines/s a per-line transaction would dominate the poll budget.
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("def flush")[1].split("def _size")[0]
         self.assertIn("executemany", block)
         self.assertNotIn("for ", block)
@@ -266,9 +266,7 @@ class BudgetTests(StoreTestCase):
 
 
 class WiringTests(unittest.TestCase):
-    SOURCE = (
-        ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-    ).read_text(encoding="utf-8")
+    SOURCE = guardd_source()
 
     def test_the_store_is_optional_and_off_by_default(self):
         self.assertFalse(guardd.GuardConfig().request_log_enabled)

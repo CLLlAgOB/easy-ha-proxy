@@ -17,6 +17,8 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -224,7 +226,7 @@ class PublishedInOneStep(unittest.TestCase):
         self.assertIn("/late", guardd.SCANNER_PATHS)
 
     def test_the_publisher_builds_new_tables_rather_than_clearing(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         body = source.split("def publish_signatures()")[1].split(
             "def apply_overrides")[0]
         self.assertIn("global SCANNER_SEGMENTS, SCANNER_PATHS", body)
@@ -234,7 +236,7 @@ class PublishedInOneStep(unittest.TestCase):
 
 class TheSocketOffersIt(unittest.TestCase):
     def test_both_verbs_are_routed(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         self.assertIn('if path == "/api/v1/guard/signatures":', source)
         # Reading is open to the same caller as the rest of the page data;
         # writing is not.
@@ -242,13 +244,13 @@ class TheSocketOffersIt(unittest.TestCase):
         self.assertIn("_control_auth_ok()", write[:400])
 
     def test_a_typo_is_reported_as_such_not_as_a_fault(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         write = source.split('if path == "/api/v1/guard/signatures":')[2][:1400]
         self.assertIn("except ValueError as exc:", write)
         self.assertIn('"error": str(exc)', write)
 
     def test_startup_applies_the_file_before_the_overrides(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         main = source.split("def main()")[1]
         self.assertLess(main.index("load_signatures()"),
                         main.index("apply_overrides(load_overrides"))

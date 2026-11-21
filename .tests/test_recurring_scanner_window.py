@@ -22,6 +22,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
+from _guardd_source import guardd_source  # noqa: E402
 if sys.platform != "win32":
     import test_guardd as base
     guardd = base.guardd
@@ -112,7 +113,7 @@ class TheEarlierVisit(unittest.TestCase):
         self.assertEqual(self.database.last_signature(IP, now - guardd.RECURRING_WINDOW, now - guardd.RECURRING_GAP), 1000)
 
     def test_the_rule_asks_the_index(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         body = source[source.index("    def _check_recurring("):source.index("    def _check_enumeration_breadth(")]
         self.assertIn("self.database.last_signature(ip, now - RECURRING_WINDOW, now - RECURRING_GAP)", body)
         self.assertNotIn("events_for", body)

@@ -24,6 +24,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
 sys.path.insert(0, str(ROOT / "docker" / "app"))
+from _guardd_source import guardd_source  # noqa: E402
 if sys.platform != "win32":
     import test_guardd as base
     guardd = base.guardd
@@ -247,14 +248,14 @@ class KeepingHAProxyInStep(unittest.TestCase):
         self.assertGreater(state["segments"], 0)
 
     def test_the_cycle_keeps_it_in_step(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         poll = source[source.index("    def poll(self) -> Dict[str, int]:"):source.index("    def read_tables(self)")]
         self.assertIn("self.sync_shield(now)", poll)
 
 
 class OnlyTheShieldChangesAList(unittest.TestCase):
     def test_list_commands_live_in_one_class(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         start = source.index("class PathShield:")
         end = source.index("class Enforcer:")
         outside = source[:start] + source[end:]

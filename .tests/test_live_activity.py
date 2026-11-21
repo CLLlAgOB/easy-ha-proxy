@@ -36,6 +36,7 @@ GUARDD_PATH = ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
 CONTROLD_PATH = ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py"
 UNIT = ROOT / "ansible/roles/haproxy-admin/templates/easy-ha-proxy-guardd.service.j2"
 sys.path.insert(0, str(ROOT / "docker" / "app"))
+from _guardd_source import guardd_source  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("guardd_live", GUARDD_PATH)
 guardd = importlib.util.module_from_spec(SPEC)
@@ -169,7 +170,7 @@ class TheBuffer(unittest.TestCase):
                 guardd.banned_now("/run/haproxy/admin.sock")
 
     def test_the_api_reads_the_ban_table_only_when_asked(self):
-        source = GUARDD_PATH.read_text(encoding="utf-8")
+        source = guardd_source()
         handler = source.split('if path in ("/api/v1/guard/live", "/api/v1/guard/attackers"):')[1][:1500]
         self.assertIn('if live_filters(raw).get("banned"):', handler)
         self.assertIn("banned_now(engine.config.haproxy_socket)", handler)
@@ -246,7 +247,7 @@ class TheEngine(unittest.TestCase):
         self.assertGreater(self.engine.cursor.lag_bytes, 0)
 
     def test_the_fast_ticks_share_the_cycles_budget(self):
-        source = GUARDD_PATH.read_text(encoding="utf-8")
+        source = guardd_source()
         loop = source.split("def _run(self) -> None:")[1].split("\n    def ")[0]
         self.assertIn("self.live.wanted()", loop)
         self.assertIn("self.config.log_read_bytes_per_cycle - self._cycle_bytes", loop)

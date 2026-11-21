@@ -19,6 +19,8 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +105,7 @@ class ServedPathTests(unittest.TestCase):
                 self.assertFalse(guardd.is_served(status))
 
     def test_the_rule_is_applied_before_a_finding_is_emitted(self):
-        source = GUARDD.read_text(encoding="utf-8").split("    def observe_request(", 1)[1]
+        source = guardd_source().split("    def observe_request(", 1)[1]
         # Up to the branch that emits the finding, however much sits between.
         block = source.split("category = classify_path(request.path)")[1].split(
             "        if category:\n"
@@ -119,7 +121,7 @@ class ServedPathTests(unittest.TestCase):
         # everything alike -- one gateway returned the same 1477 bytes for
         # /.env, /backup.sql and /phpinfo.php -- or a genuine leak. Neither
         # is a reason to stop scoring the client that asked.
-        source = GUARDD.read_text(encoding="utf-8").split("    def observe_request(", 1)[1]
+        source = guardd_source().split("    def observe_request(", 1)[1]
         # Up to the branch that emits the finding, however much sits between.
         block = source.split("category = classify_path(request.path)")[1].split(
             "        if category:\n"
@@ -128,7 +130,7 @@ class ServedPathTests(unittest.TestCase):
         self.assertIn("not category_is_decisive(category)", guard)
 
     def test_the_emitted_event_follows_the_tier(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("activity.note_category(category, now)")[1][:400]
         self.assertIn("category_is_decisive(category)", block)
         self.assertIn("EVENT_SCANNER_DECISIVE", block)
@@ -136,7 +138,7 @@ class ServedPathTests(unittest.TestCase):
     def test_the_fingerprint_follows_the_event(self):
         # Sharing one fingerprint across both tiers would let a decisive
         # finding be swallowed by the cooldown of a probable one.
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         self.assertIn('fingerprint=f"{ip}|{event}|{category}|{int(bool(handled))}"', source)
 
 

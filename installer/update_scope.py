@@ -100,6 +100,7 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
     # Adaptive protection.
     (f"{_ADMIN}/files/easy-ha-proxy-guardd.py", ("ha-adm-guardd",)),
+    (f"{_ADMIN}/files/guardd/*", ("ha-adm-guardd",)),
     (f"{_ADMIN}/files/scanner-signatures.json", ("ha-adm-guardd",)),
     (f"{_ADMIN}/templates/guardd.json.j2", ("ha-adm-guardd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-guardd.service.j2", ("ha-adm-guardd",)),

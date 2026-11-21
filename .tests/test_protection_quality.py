@@ -22,6 +22,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
+from _guardd_source import guardd_source  # noqa: E402
 if sys.platform != "win32":
     import test_guardd as base
     guardd = base.guardd
@@ -176,7 +177,7 @@ class TheReport(unittest.TestCase):
         self.assertIn("3 signature candidates and 2 host names that look like traps", detail)
 
     def test_the_cycle_looks_every_time(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         poll = source[source.index("    def poll(self) -> Dict[str, int]:"):source.index("    def read_tables(self)")]
         self.assertIn("self.weekly_summary_tick(now)", poll)
 

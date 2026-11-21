@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "docker" / "app"))
 
 from haproxy_admin import guardd_client  # noqa: E402
 from haproxy_admin import services  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 
 NOW = 1_800_000_000
@@ -156,9 +157,7 @@ class TheEngineServesTheScheduleCheaply(unittest.TestCase):
     def test_the_endpoint_reads_the_schedule_and_not_the_review(self):
         # The dashboard polls. The shadow review scores up to two hundred
         # addresses to answer a different question; this must not call it.
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split('if path == "/api/v1/guard/bans/schedule":')[1]
         block = block.split("        if path ==")[0]
         self.assertIn("scheduled_bans()", block)

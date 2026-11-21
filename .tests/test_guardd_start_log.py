@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+SOURCE = guardd_source()
 
 
 class TheStartLine(unittest.TestCase):

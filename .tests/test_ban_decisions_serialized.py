@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
 
 from test_guardd import EngineTestCase, guardd  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 IP = "203.0.113.9"
 
@@ -107,7 +108,7 @@ class Decisions(EngineTestCase):
         self.assertEqual(self.table.rows[IP], (1, guardd.ADAPTIVE_BAN_CODE))
 
     def test_the_cycle_unban_and_mode_change_share_one_lock(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         for method in ("def apply_enforcement(", "def forget_ban(", "def set_mode("):
             body = source.split(method)[1].split("\n    def ")[0]
             with self.subTest(method=method):

@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -576,9 +578,7 @@ class MonitorGuaranteeTests(EngineTestCase):
         self.assertFalse(health["enforcement_possible"])
 
     def test_the_daemon_never_writes_to_a_stick_table_in_this_release(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         # Every mutating runtime command has to live inside Enforcer, which is
         # gated on the mode; nothing else may construct one.
         # Comments are skipped: a comment cannot issue a command, and a
@@ -1463,9 +1463,7 @@ class RetentionTests(EngineTestCase):
         self.assertTrue(self.database.cooldown_passed("ip|site|RATE", 1100, 60))
 
     def test_the_daemon_never_issues_a_full_vacuum(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         import re
 
         for statement in re.findall(
@@ -1540,9 +1538,7 @@ class BanAlertTests(unittest.TestCase):
 
     def test_the_import_is_optional(self):
         # A daemon must not fail to start because the client is not installed.
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         self.assertIn("except Exception:  # pragma: no cover", source)
         self.assertIn("AlertClient = None", source)
 

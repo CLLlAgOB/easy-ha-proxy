@@ -19,6 +19,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "docker" / "app"))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 def load_guardd():
@@ -71,25 +72,19 @@ class ThresholdParsingTests(unittest.TestCase):
         self.assertEqual(GUARDD.read_thresholds(str(self.path / "absent.cfg")), {})
 
     def test_a_table_with_no_known_ceiling_is_not_scored(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("def ingest_rate_tables")[1].split("    def ")[0]
         self.assertIn("if limit is None:", block)
         self.assertIn("continue", block.split("if limit is None:")[1][:400])
 
     def test_the_reading_must_beat_the_ceiling(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("def ingest_rate_tables")[1].split("    def ")[0]
         self.assertIn("if value <= limit:", block)
         self.assertNotIn("if value <= 0:", block)
 
     def test_the_finding_carries_both_numbers(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
-        ).read_text(encoding="utf-8")
+        source = guardd_source()
         self.assertIn('detail=f"{field_prefix}={value} limit={limit}"', source)
 
 

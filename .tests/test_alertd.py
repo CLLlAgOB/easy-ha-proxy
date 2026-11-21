@@ -17,6 +17,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def load_alertd():
@@ -960,8 +961,10 @@ class ProducerWiringTests(unittest.TestCase):
     }
 
     def test_each_producer_reports_its_own_conditions(self):
+        from _guardd_source import daemon_source
+
         for name, rules in sorted(self.EXPECTED.items()):
-            source = (self.FILES / name).read_text(encoding="utf-8")
+            source = daemon_source(name)
             for rule in rules:
                 self.assertIn(f'"{rule}"', source, f"{name}: {rule}")
 
@@ -971,9 +974,11 @@ class ProducerWiringTests(unittest.TestCase):
                 self.assertIn(rule, alertd.RULES_BY_NAME, rule)
 
     def test_the_client_is_optional_everywhere(self):
+        from _guardd_source import daemon_source
+
         # A daemon must never fail to start because alertd is not installed.
         for name in self.EXPECTED:
-            source = (self.FILES / name).read_text(encoding="utf-8")
+            source = daemon_source(name)
             self.assertIn("AlertClient = None", source, name)
 
     def test_every_producer_unit_carries_the_socket_and_the_token(self):
@@ -988,9 +993,11 @@ class ProducerWiringTests(unittest.TestCase):
             self.assertIn("ALERTD_SOCKET_PATH=", text, unit.name)
 
     def test_reporting_never_uses_a_bare_call(self):
+        from _guardd_source import daemon_source
+
         # Every call site has to be inside something that swallows failure.
         for name in self.EXPECTED:
-            source = (self.FILES / name).read_text(encoding="utf-8")
+            source = daemon_source(name)
             self.assertTrue(
                 "report_alert" in source
                 or "_report_to_alerts" in source

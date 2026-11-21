@@ -146,6 +146,7 @@ class WhatAChangeNeeds(unittest.TestCase):
     def test_a_daemon_change_runs_its_stage(self):
         scope = update_scope.scope_for([
             "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py",
+            "ansible/roles/haproxy-admin/files/guardd/engine.py",
             "ansible/roles/haproxy-admin/files/scanner-signatures.json",
             ".tests/test_guardd.py",
             "README.md",
@@ -153,7 +154,7 @@ class WhatAChangeNeeds(unittest.TestCase):
         self.assertFalse(scope["full"])
         self.assertEqual(scope["tags"], ["ha-adm-guardd", "status"])
         self.assertEqual(scope["steps"], ["Adaptive protection"])
-        self.assertEqual(scope["changed"], 4)
+        self.assertEqual(scope["changed"], 5)
 
     def test_the_template_refreshes_haproxy_and_the_web_applications_copy(self):
         scope = update_scope.scope_for(["ansible/roles/haproxy/templates/haproxy.cfg.j2"])

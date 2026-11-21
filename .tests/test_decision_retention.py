@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "installer"))
 
 import full_backup  # noqa: E402
 import test_guardd as base  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 guardd = base.guardd
 IP = "203.0.113.9"
@@ -66,7 +67,7 @@ class TheSweep(base.EngineTestCase):
         self.assertEqual(self.decisions(), [])
 
     def test_the_maintenance_pass_says_what_now_is(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("    def run_maintenance(self)")[1].split("    def ")[0]
         self.assertIn("keep=DECISIONS_KEEP_ROWS, now=now", block)
 
@@ -113,7 +114,7 @@ class TheAlert(base.EngineTestCase):
         self.failing(guardd.ENGINE_FAILING_AFTER)  # does not raise
 
     def test_every_cycle_reports(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         loop = source.split("    def _run(self) -> None:")[1].split("    def poll(self)")[0]
         self.assertLess(loop.index("self.poll()"), loop.index("self.report_failing()"))
         self.assertLess(loop.index("self.report_failing()"), loop.index("run_maintenance"))

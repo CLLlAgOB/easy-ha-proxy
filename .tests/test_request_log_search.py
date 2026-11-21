@@ -27,9 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
 
 from test_request_log import StoreTestCase, guardd, line  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
-SOURCE = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+SOURCE = guardd_source()
 
 
 class TheTimeItHappened(StoreTestCase):

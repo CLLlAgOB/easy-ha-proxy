@@ -11,6 +11,16 @@
     mode: "0755"
   register: guardd_script
 
+- name: "easy-ha-proxy-guardd | Install guardd package"
+  ansible.builtin.copy:
+    src: guardd/
+    dest: /usr/local/sbin/guardd/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  register: guardd_package
+
 # Beside the daemon rather than inside it, so the list can be replaced
 # without rebuilding anything -- the useful part of it is the part that keeps
 # up with what is actually being probed.
@@ -65,6 +75,7 @@
     state: restarted
   when: >-
     guardd_script.changed
+    or guardd_package.changed
     or guardd_unit.changed
     or guardd_cfg.changed
     or guardd_signatures.changed

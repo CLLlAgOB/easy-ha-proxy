@@ -25,6 +25,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,14 +110,14 @@ class TheValueNeverLeaves(unittest.TestCase):
         self.assertNotIn(secret, verdict)
 
     def test_the_parsed_request_carries_the_verdict_not_the_query(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         self.assertIn("query_flag: str = \"\"", source)
         self.assertIn("query_flag=classify_query(uri)", source)
         # No field anywhere holds the query itself.
         self.assertNotIn("query: str", source)
 
     def test_the_emitted_detail_is_the_path(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("    def observe_request(", 1)[1].split("if request.query_flag and permitted(", 1)[1].split(
             "category = classify_path")[0]
         self.assertIn("detail=request.path", block)
@@ -131,7 +133,7 @@ class HowItScores(unittest.TestCase):
         # A path the site answers is evidence the path is real. An injection
         # the site answered 200 is evidence it may have worked, which is the
         # opposite of a reason to let the client alone.
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split("    def observe_request(", 1)[1].split("if request.query_flag and permitted(", 1)[1].split(
             "category = classify_path")[0]
         code = " ".join(
@@ -142,7 +144,7 @@ class HowItScores(unittest.TestCase):
         self.assertNotIn("is_served", code)
 
     def test_it_is_emitted_under_its_own_fingerprint(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         self.assertIn(
             'fingerprint=f"{ip}|{EVENT_QUERY_INJECTION}|{request.query_flag}"',
             source,

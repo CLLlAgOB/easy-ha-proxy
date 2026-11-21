@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / ".tests"))
 sys.path.insert(0, str(ROOT / "docker" / "app"))
 
 from test_live_activity import guardd, line, record  # noqa: E402
+from _guardd_source import guardd_source  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
 if not WINDOWS:
@@ -155,7 +156,7 @@ class AfterARestart(unittest.TestCase):
 
     def test_read_back_is_bounded(self):
         self.assertLessEqual(guardd.LIVE_REFILL_BYTES, 32 * 1024 * 1024)
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py").read_text(encoding="utf-8")
+        source = guardd_source()
         run = source.split("    def _run(self) -> None:")[1].split("while not self._stop.is_set()")[0]
         self.assertIn("self.refill_live(time.time())", run)
 

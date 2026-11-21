@@ -39,6 +39,8 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _guardd_source import guardd_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,7 +147,7 @@ class BothDerivedFindingsPassIt(unittest.TestCase):
     """The bug was that these two emitted without the flag at all."""
 
     def setUp(self):
-        self.source = GUARDD.read_text(encoding="utf-8")
+        self.source = guardd_source()
 
     def block(self, function: str) -> str:
         return self.source.split(f"def {function}(")[1].split("\n    def ")[0]
@@ -299,7 +301,7 @@ class DrivenThroughTheEngine(unittest.TestCase):
 
 class TheScoreIsActuallyZero(unittest.TestCase):
     def test_a_handled_event_contributes_nothing_and_says_why(self):
-        source = GUARDD.read_text(encoding="utf-8")
+        source = guardd_source()
         block = source.split(
             'if int(event.get("handled", 0)) and event_type not in REFUSAL_DOES_NOT_EXCUSE:'
         )[1][:600]
