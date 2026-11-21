@@ -10620,7 +10620,7 @@ def main() -> None:
         shutdown_event.wait()
         if received_signal:
             LOG.info("Received signal %s; shutting down", received_signal[0])
-        server.shutdown()
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     threading.Thread(target=_shutdown_watcher, daemon=True).start()
 

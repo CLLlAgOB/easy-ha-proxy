@@ -537,6 +537,9 @@ class DeploymentChannelTests(unittest.TestCase):
                 "  *'/opt/easy-ha-proxy/source'*'sha256sum'*)\n"
                 "    printf '%064d\\n' 0\n"
                 "    ;;\n"
+                "  *'mktemp -d /tmp/easy-ha-proxy-stage'*)\n"
+                "    printf '/tmp/easy-ha-proxy-stage.test01\\n'\n"
+                "    ;;\n"
                 "esac\n",
                 encoding="utf-8",
             )

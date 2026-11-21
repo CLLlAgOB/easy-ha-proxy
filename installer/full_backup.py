@@ -736,68 +736,68 @@ def _run_openssl_enc(
 
 
 def openssl_crypt(source: Path, destination: Path, password: str, *, decrypt: bool) -> None:
-    if not decrypt:
-        raw_cipher = destination.with_name(f".{destination.name}.raw.{os.getpid()}")
-        try:
-            _run_openssl_enc(source, raw_cipher, password, decrypt=False)
-            mac_salt = os.urandom(_ENC_V2_SALT_LEN)
+    if decrypt:
+        with source.open("rb") as in_handle:
+            header = in_handle.read(_ENC_V2_HEADER_LEN)
+        if header.startswith(_ENC_V2_MAGIC):
+            if len(header) < _ENC_V2_HEADER_LEN:
+                raise WrongPassphrase(
+                    "Cannot decrypt backup: wrong passphrase or damaged file."
+                )
+            mac_salt = header[len(_ENC_V2_MAGIC) : len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN]
+            expected_tag = header[len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN :]
             mac_key = _derive_mac_key(password, mac_salt)
-            prefix = _ENC_V2_MAGIC + mac_salt
-            tag = _compute_stream_mac(mac_key, prefix, raw_cipher)
-            fd = os.open(
-                destination,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
+            actual_tag = _compute_stream_mac(
+                mac_key,
+                header[: len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN],
+                source,
+                offset=_ENC_V2_HEADER_LEN,
             )
-            with os.fdopen(fd, "wb") as out_handle:
-                out_handle.write(prefix + tag)
-                with raw_cipher.open("rb") as in_handle:
+            if not hmac.compare_digest(actual_tag, expected_tag):
+                raise WrongPassphrase(
+                    "Cannot decrypt backup: wrong passphrase or damaged file."
+                )
+            raw_cipher = destination.with_name(f".{destination.name}.cipher.{os.getpid()}")
+            try:
+                fd = os.open(
+                    raw_cipher,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                with os.fdopen(fd, "wb") as out_handle, source.open("rb") as in_handle:
+                    in_handle.seek(_ENC_V2_HEADER_LEN)
                     shutil.copyfileobj(in_handle, out_handle, length=65536)
-                out_handle.flush()
-                os.fsync(out_handle.fileno())
-        finally:
-            raw_cipher.unlink(missing_ok=True)
+                _run_openssl_enc(raw_cipher, destination, password, decrypt=True)
+            finally:
+                raw_cipher.unlink(missing_ok=True)
+            os.chmod(destination, 0o600)
+            return
+
+        # Legacy v1 archive (raw OpenSSL Salted__ format): keep readable.
+        _run_openssl_enc(source, destination, password, decrypt=True)
         os.chmod(destination, 0o600)
         return
 
-    with source.open("rb") as in_handle:
-        header = in_handle.read(_ENC_V2_HEADER_LEN)
-    if header.startswith(_ENC_V2_MAGIC):
-        if len(header) < _ENC_V2_HEADER_LEN:
-            raise WrongPassphrase(
-                "Cannot decrypt backup: wrong passphrase or damaged file."
-            )
-        mac_salt = header[len(_ENC_V2_MAGIC) : len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN]
-        expected_tag = header[len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN :]
+    raw_cipher = destination.with_name(f".{destination.name}.raw.{os.getpid()}")
+    try:
+        _run_openssl_enc(source, raw_cipher, password, decrypt=False)
+        mac_salt = os.urandom(_ENC_V2_SALT_LEN)
         mac_key = _derive_mac_key(password, mac_salt)
-        actual_tag = _compute_stream_mac(
-            mac_key,
-            header[: len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN],
-            source,
-            offset=_ENC_V2_HEADER_LEN,
+        prefix = _ENC_V2_MAGIC + mac_salt
+        tag = _compute_stream_mac(mac_key, prefix, raw_cipher)
+        fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
         )
-        if not hmac.compare_digest(actual_tag, expected_tag):
-            raise WrongPassphrase(
-                "Cannot decrypt backup: wrong passphrase or damaged file."
-            )
-        raw_cipher = destination.with_name(f".{destination.name}.cipher.{os.getpid()}")
-        try:
-            fd = os.open(
-                raw_cipher,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-            with os.fdopen(fd, "wb") as out_handle, source.open("rb") as in_handle:
-                in_handle.seek(_ENC_V2_HEADER_LEN)
+        with os.fdopen(fd, "wb") as out_handle:
+            out_handle.write(prefix + tag)
+            with raw_cipher.open("rb") as in_handle:
                 shutil.copyfileobj(in_handle, out_handle, length=65536)
-            _run_openssl_enc(raw_cipher, destination, password, decrypt=True)
-        finally:
-            raw_cipher.unlink(missing_ok=True)
-        os.chmod(destination, 0o600)
-        return
-
-    # Legacy v1 archive (raw OpenSSL Salted__ format): keep readable.
-    _run_openssl_enc(source, destination, password, decrypt=True)
+            out_handle.flush()
+            os.fsync(out_handle.fileno())
+    finally:
+        raw_cipher.unlink(missing_ok=True)
     os.chmod(destination, 0o600)
 
 
@@ -941,13 +941,6 @@ def validate_bundle_member(member: tarfile.TarInfo) -> None:
         or member.islnk()
     ):
         raise BackupError(f"Unsafe special bundle entry: {member.name}")
-    if member.mode & 0o6000:
-        raise BackupError(f"Unsafe setuid/setgid bundle entry: {member.name}")
-    if any(
-        key.startswith("SCHILY.xattr.security.")
-        for key in (member.pax_headers or {})
-    ):
-        raise BackupError(f"Unsafe security xattr in bundle entry: {member.name}")
     if member.issym() or member.islnk():
         link = PurePosixPath(member.linkname)
         if not member.linkname or link.is_absolute():
@@ -1024,7 +1017,18 @@ def _outer_member_policy(member: tarfile.TarInfo, name: str) -> None:
         raise BackupError(f"Outer backup member is not a regular file: {name}")
 
 
+def _reject_privileged_payload_attributes(member: tarfile.TarInfo) -> None:
+    if member.mode & 0o6000:
+        raise BackupError(f"Unsafe setuid/setgid payload entry: {member.name}")
+    if any(
+        key.startswith("SCHILY.xattr.security.")
+        for key in (member.pax_headers or {})
+    ):
+        raise BackupError(f"Unsafe security xattr in payload entry: {member.name}")
+
+
 def _core_member_policy(member: tarfile.TarInfo, name: str) -> None:
+    _reject_privileged_payload_attributes(member)
     path = "/" + name.lstrip("/")
     allowed = _core_payload_path_allowed(path)
     if member.isdir():
@@ -1042,6 +1046,7 @@ def _core_member_policy(member: tarfile.TarInfo, name: str) -> None:
 
 
 def _ssh_member_policy(member: tarfile.TarInfo, name: str) -> None:
+    _reject_privileged_payload_attributes(member)
     path = "/" + name.lstrip("/")
     allowed = _ssh_payload_path_allowed(path)
     if member.isdir():

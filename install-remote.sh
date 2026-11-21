@@ -833,8 +833,6 @@ if [[ "${ask_pass}" == true ]]; then
   scp_options+=("${password_options[@]}")
 fi
 
-ensure_remote_stage_dir
-
 controller_source_root="${source_root:-${script_dir}}"
 case "${remote_action}" in
   language|promote-production)
@@ -905,6 +903,7 @@ if [[ "${activate_current_source}" == true ]]; then
 fi
 
 if [[ "${stage_install_source}" == true ]]; then
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -953,6 +952,7 @@ EOF
   fi
   [[ "${confirmation}" == "STAGE" ]] || die "Legacy staging cancelled."
 
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   temporary_config_archive="$(mktemp -t easy-ha-proxy-config.XXXXXX.tgz)"
 
@@ -1023,6 +1023,7 @@ EOF
   fi
   [[ "${confirmation}" == "SYNC" ]] || die "Source synchronization cancelled."
 
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -1108,6 +1109,7 @@ EOF
       "${product}" >&2
   fi
 
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -1158,6 +1160,7 @@ EOF
 fi
 
 if [[ "${activate_current_source}" == true ]]; then
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -1197,6 +1200,7 @@ if [[ "${activate_current_source}" == true ]]; then
     "${product}" "${backup_source}"
 fi
 
+ensure_remote_stage_dir
 printf '[%s] Uploading installer to %s\n' "${product}" "${target}"
 scp "${scp_options[@]}" \
   "${temporary_installer}" \

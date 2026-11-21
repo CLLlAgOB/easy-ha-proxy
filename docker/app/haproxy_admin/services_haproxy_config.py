@@ -26,7 +26,6 @@ from jinja2 import Environment, FileSystemLoader
 import yaml  # could be replaced with ruamel.yaml if needed
 from .validation import (
     control_plane_domains,
-    site_identity_conflict,
     validate_config_data,
     validate_control_plane_transition,
 )

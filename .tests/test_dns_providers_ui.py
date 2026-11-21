@@ -41,7 +41,8 @@ class RouteGuardTests(unittest.TestCase):
 
     def test_both_mutating_routes_require_superadmin(self):
         self.assertEqual(self.source.count("@bp.post"), 2)
-        self.assertEqual(self.source.count("_superadmin()"), 3)
+        # Helper definition + 1 GET listing route + 2 POST mutating routes.
+        self.assertEqual(self.source.count("_superadmin()"), 4)
 
     def test_every_outcome_is_audited(self):
         for action in ("dns_provider.save", "dns_provider.delete"):
