@@ -4,25 +4,25 @@ import socket
 import json
 import subprocess
 import logging
-import sys
 import signal
 import grp
 import errno
 import ipaddress
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 SOCKET_PATH = os.environ.get(
     "AUTHELIA_BANS_SOCKET",
-    "{{ authelia_bans_socket_path | default('/run/authelia-bansd.sock') }}"
+    "/run/authelia-bansd.sock",
 )
 SCRIPT_PATH = os.environ.get(
     "AUTHELIA_BANS_SCRIPT",
-    "{{ authelia_bans_script_path | default('/usr/local/sbin/authelia-bans.sh') }}"
+    "/usr/local/sbin/authelia-bans.sh",
 )
 SOCKET_GROUP = os.environ.get(
     "AUTHELIA_BANS_SOCKET_GROUP",
-    "{{ authelia_bans_socket_group | default('haproxy-admin') }}"
+    "haproxy-admin",
 )
 LOG_LEVEL = os.environ.get("AUTHELIA_BANS_LOG_LEVEL", "INFO").upper()
 
@@ -38,7 +38,7 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 COMMAND_TIMEOUT = env_int("AUTHELIA_BANS_COMMAND_TIMEOUT", 5, 1, 60)
 MAX_REQUEST_BYTES = env_int("AUTHELIA_BANS_MAX_REQUEST_BYTES", 65536, 1024, 1048576)
 MAX_WORKERS = env_int("AUTHELIA_BANS_MAX_WORKERS", 4, 1, 16)
-USERNAME_RE = re.compile(r"^[a-zA-Z0-9._@-]+$")
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,127}$")
 
 log = logging.getLogger("authelia-bansd")
 
@@ -184,8 +184,37 @@ def serve() -> None:
     workers = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="bansd")
     log.info("listening on %s", SOCKET_PATH)
 
+    stop_event = threading.Event()
+    received_signal = []
+
     def shutdown(signum, frame):  # noqa: ANN001, D401, ARG001
-        log.info("shutting down on signal %s", signum)
+        if not received_signal:
+            received_signal.append(signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    sock.settimeout(1.0)
+
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _ = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                if stop_event.is_set():
+                    break
+                raise
+            try:
+                workers.submit(handle_connection, conn)
+            except RuntimeError:
+                conn.close()
+    finally:
+        if received_signal:
+            log.info("shutting down on signal %s", received_signal[0])
         try:
             sock.close()
         except Exception:  # noqa: BLE001
@@ -196,22 +225,6 @@ def serve() -> None:
                 os.unlink(SOCKET_PATH)
         except Exception:  # noqa: BLE001
             pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
-
-    while True:
-        try:
-            conn, _ = sock.accept()
-        except OSError as e:
-            if e.errno == errno.EINTR:
-                continue
-            raise
-        try:
-            workers.submit(handle_connection, conn)
-        except RuntimeError:
-            conn.close()
 
 
 def main() -> None:

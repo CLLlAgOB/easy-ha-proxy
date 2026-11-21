@@ -52,6 +52,7 @@ import json
 import stat
 import ssl
 import shutil
+import signal
 import hashlib
 import secrets
 from collections import defaultdict
@@ -1592,6 +1593,23 @@ def _file_tail_scan(ip: str, limit: int, chunk_size: int, max_bytes: int) -> lis
         return []
 
 
+_LOGS_IP_CACHE_MAX = 512
+_LOGS_IP_CACHE_MAX_LIMIT = 2000
+
+
+def _logs_ip_cache_put(key: tuple[str, int], lines: list[str]) -> None:
+    now = time.time()
+    with _LOGS_IP_CACHE_LOCK:
+        if len(_LOGS_IP_CACHE) >= _LOGS_IP_CACHE_MAX:
+            expired = [k for k, (exp, _v) in _LOGS_IP_CACHE.items() if exp <= now]
+            for k in expired:
+                _LOGS_IP_CACHE.pop(k, None)
+            while len(_LOGS_IP_CACHE) >= _LOGS_IP_CACHE_MAX:
+                oldest = next(iter(_LOGS_IP_CACHE))
+                _LOGS_IP_CACHE.pop(oldest, None)
+        _LOGS_IP_CACHE[key] = (now + LOGS_IP_CACHE_SECONDS, lines)
+
+
 def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     """
     How it works:
@@ -1602,9 +1620,10 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
     When nothing matches (and DEBUG_ON_EMPTY=1), a diagnostic block is returned.
     """
+    limit = max(1, min(int(limit), _LOGS_IP_CACHE_MAX_LIMIT))
     # 0) a short cache (useful when the UI or a client repeats the request after a timeout)
     if LOGS_IP_CACHE_SECONDS > 0:
-        key = (ip, int(limit))
+        key = (ip, limit)
         now = time.time()
         with _LOGS_IP_CACHE_LOCK:
             item = _LOGS_IP_CACHE.get(key)
@@ -1615,8 +1634,7 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
     file_lines = _file_tail_for_ip(ip, limit=limit)
     if file_lines:
         if LOGS_IP_CACHE_SECONDS > 0:
-            with _LOGS_IP_CACHE_LOCK:
-                _LOGS_IP_CACHE[(ip, int(limit))] = (time.time() + LOGS_IP_CACHE_SECONDS, file_lines)
+            _logs_ip_cache_put((ip, limit), file_lines)
         return file_lines
 
     # 2) check the ban
@@ -1651,8 +1669,7 @@ def grep_last_logs_for_ip(ip: str, limit: int = LOG_LIMIT) -> list[str]:
 
         if j_lines:
             if LOGS_IP_CACHE_SECONDS > 0:
-                with _LOGS_IP_CACHE_LOCK:
-                    _LOGS_IP_CACHE[(ip, int(limit))] = (time.time() + LOGS_IP_CACHE_SECONDS, j_lines)
+                _logs_ip_cache_put((ip, limit), j_lines)
             return j_lines
 
         if DEBUG_ON_EMPTY and dbg:
@@ -4871,6 +4888,7 @@ def handle_client(conn: socket.socket) -> None:
 
                 ip = parts[0].strip()
                 n = int(parts[1]) if len(parts) >= 2 else LOG_LIMIT
+                n = max(1, min(n, _LOGS_IP_CACHE_MAX_LIMIT))
 
                 # validate the IP
                 ipaddress.ip_address(ip)
@@ -4942,20 +4960,58 @@ def control_socket_loop() -> None:
         LOG.error("Failed to bind/listen on %s: %s", sock_path, e)
         return
 
-    def _client_worker(c: socket.socket) -> None:
-        with c:
-            handle_client(c)
+    shutdown_event = threading.Event()
+    received_signal: list[int] = []
 
+    def _handle_signal(signum: int, _frame: object) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, _handle_signal)
+
+    client_slots = threading.BoundedSemaphore(32)
+
+    def _client_worker(c: socket.socket) -> None:
+        try:
+            with c:
+                handle_client(c)
+        finally:
+            client_slots.release()
+
+    srv.settimeout(1.0)
     try:
-        while True:
-            conn, _ = srv.accept()
-            threading.Thread(
-                target=_client_worker,
-                args=(conn,),
-                daemon=True,
-                name="controld-client",
-            ).start()
+        while not shutdown_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if shutdown_event.is_set():
+                    break
+                raise
+            if not client_slots.acquire(blocking=False):
+                with conn:
+                    with contextlib.suppress(OSError):
+                        conn.settimeout(1.0)
+                        conn.sendall(b"ERROR busy\n")
+                continue
+            try:
+                threading.Thread(
+                    target=_client_worker,
+                    args=(conn,),
+                    daemon=True,
+                    name="controld-client",
+                ).start()
+            except Exception:
+                client_slots.release()
+                conn.close()
+                raise
     finally:
+        if received_signal:
+            LOG.info("Received signal %s; shutting down", received_signal[0])
         try:
             srv.close()
         finally:

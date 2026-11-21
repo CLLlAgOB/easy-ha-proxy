@@ -3139,8 +3139,74 @@ def serve() -> None:
 
     LOG.info("authelia-configd listening on %s", SOCKET_PATH)
 
+    stop_event = threading.Event()
+    received_signal: List[int] = []
+
     def _sigterm(signum, frame):
-        LOG.info("Got signal %s, shutting down", signum)
+        if not received_signal:
+            received_signal.append(signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _sigterm)
+    signal.signal(signal.SIGINT, _sigterm)
+    srv.settimeout(1.0)
+
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if stop_event.is_set():
+                    break
+                break
+
+            with conn:
+                try:
+                    peer_uid = _socket_peer_uid(conn)
+                    conn.settimeout(15)
+                    data = b""
+                    while b"\n" not in data:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                        if len(data) > MAX_REQUEST_BYTES:
+                            raise ValueError("request is too large")
+
+                    if not data:
+                        continue
+
+                    line = data.split(b"\n", 1)[0].decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+                    if not line:
+                        continue
+
+                    try:
+                        req = json.loads(line)
+                    except Exception as exc:  # noqa: BLE001
+                        resp = {"ok": False, "error": f"invalid json: {exc}"}
+                    else:
+                        # Never log request bodies: mail_update may contain a new
+                        # SMTP password. The action is enough for diagnostics.
+                        action_name = req.get("action") if isinstance(req, dict) else None
+                        LOG.debug("Request action=%r", action_name)
+                        resp = handle_request(req, peer_uid=peer_uid)
+
+                except Exception as exc:  # noqa: BLE001
+                    LOG.exception("request handling failed")
+                    resp = {"ok": False, "error": f"internal error: {exc}"}
+
+                resp_line = json.dumps(resp, ensure_ascii=False) + "\n"
+                try:
+                    conn.sendall(resp_line.encode("utf-8"))
+                except Exception:
+                    pass
+    finally:
+        if received_signal:
+            LOG.info("Got signal %s, shutting down", received_signal[0])
         try:
             srv.close()
         except Exception:
@@ -3150,58 +3216,6 @@ def serve() -> None:
                 os.unlink(SOCKET_PATH)
         except Exception:
             pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _sigterm)
-    signal.signal(signal.SIGINT, _sigterm)
-
-    while True:
-        try:
-            conn, _ = srv.accept()
-        except OSError:
-            break
-
-        with conn:
-            try:
-                peer_uid = _socket_peer_uid(conn)
-                conn.settimeout(15)
-                data = b""
-                while b"\n" not in data:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                    if len(data) > MAX_REQUEST_BYTES:
-                        raise ValueError("request is too large")
-
-                if not data:
-                    continue
-
-                line = data.split(b"\n", 1)[0].decode(
-                    "utf-8", errors="replace"
-                ).strip()
-                if not line:
-                    continue
-
-                try:
-                    req = json.loads(line)
-                except Exception as exc:  # noqa: BLE001
-                    resp = {"ok": False, "error": f"invalid json: {exc}"}
-                else:
-                    # Never log request bodies: mail_update may contain a new
-                    # SMTP password. The action is enough for diagnostics.
-                    LOG.debug("Request action=%r", req.get("action"))
-                    resp = handle_request(req, peer_uid=peer_uid)
-
-            except Exception as exc:  # noqa: BLE001
-                LOG.exception("request handling failed")
-                resp = {"ok": False, "error": f"internal error: {exc}"}
-
-            resp_line = json.dumps(resp, ensure_ascii=False) + "\n"
-            try:
-                conn.sendall(resp_line.encode("utf-8"))
-            except Exception:
-                pass
 
 
 def main() -> None:

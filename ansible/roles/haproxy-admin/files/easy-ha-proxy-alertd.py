@@ -45,6 +45,7 @@ import socket
 import sqlite3
 import ssl
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -446,14 +447,23 @@ def save_config(path: str, config: AlertConfig) -> None:
     """Write the settings file atomically, root-owned."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
     payload = json.dumps(config.as_dict(), ensure_ascii=False, indent=2) + "\n"
-    with open(temporary, "w", encoding="utf-8") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.chmod(temporary, 0o640)
-    os.replace(temporary, target)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(target.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o640)
+            os.fsync(stream.fileno())
+        os.replace(tmp_name, target)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +883,10 @@ class EmailChannel(Channel):
 
 
 
+def _has_control_chars(value: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
 def resolve_webhook_target(url: str, *, allow_private: bool) -> Tuple[str, str, int, str]:
     """Validate a webhook URL and pin it to one address.
 
@@ -883,7 +897,10 @@ def resolve_webhook_target(url: str, *, allow_private: bool) -> Tuple[str, str, 
     closes the rebinding hole: checking the name and then letting the HTTP
     client resolve it again would validate one answer and connect to another.
     """
-    parsed = urlparse((url or "").strip())
+    raw_url = (url or "").strip()
+    if _has_control_chars(raw_url) or any(ch.isspace() for ch in raw_url):
+        raise ValueError("the webhook URL contains invalid characters")
+    parsed = urlparse(raw_url)
     if parsed.scheme != "https":
         raise ValueError("the webhook URL must use https")
     if not parsed.hostname:
@@ -909,6 +926,9 @@ def resolve_webhook_target(url: str, *, allow_private: bool) -> Tuple[str, str, 
             address = ipaddress.ip_address(candidate)
         except ValueError:
             continue
+        # Python 3.10 reports is_loopback / is_link_local as False for
+        # IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1); unwrap first.
+        address = getattr(address, "ipv4_mapped", None) or address
         if address.is_loopback or address.is_link_local or address.is_multicast:
             # 169.254.169.254 is the cloud metadata service; loopback is every
             # other daemon on this host.
@@ -925,6 +945,8 @@ def resolve_webhook_target(url: str, *, allow_private: bool) -> Tuple[str, str, 
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
+        if _has_control_chars(path) or any(ch.isspace() for ch in path):
+            raise ValueError("the webhook path contains invalid characters")
         return parsed.hostname, candidate, port, path
 
     raise ValueError("the webhook host did not resolve to a usable address")
@@ -950,14 +972,22 @@ class WebhookChannel(Channel):
             return False, str(exc)
 
         document = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        host_header = f"[{hostname}]" if ":" in hostname else hostname
+        if port != 443:
+            host_header = f"{host_header}:{port}"
         headers = [
-            f"Host: {hostname}",
+            f"Host: {host_header}",
             "Content-Type: application/json; charset=utf-8",
             f"Content-Length: {len(document)}",
             f"User-Agent: {WEBHOOK_USER_AGENT}",
             "Connection: close",
         ]
         if config.webhook_header_name and config.webhook_header_value:
+            if (
+                not _HEADER_NAME_RE.fullmatch(config.webhook_header_name)
+                or _has_control_chars(config.webhook_header_value)
+            ):
+                return False, "webhook header contains invalid characters"
             headers.append(
                 f"{config.webhook_header_name}: {config.webhook_header_value}"
             )
@@ -1033,6 +1063,7 @@ class AlertEngine:
             channels if channels is not None else [EmailChannel(), WebhookChannel()]
         )
         self._lock = threading.Lock()
+        self._config_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_prune = 0
@@ -1119,17 +1150,16 @@ class AlertEngine:
             with self._lock:
                 return self._retire(rule, subject, summary)
 
-        with self._lock:
-            return self._apply(
-                rule,
-                subject,
-                bool(active),
-                severity,
-                summary,
-                detail,
-                override_delay,
-                recipient,
-            )
+        return self._apply(
+            rule,
+            subject,
+            bool(active),
+            severity,
+            summary,
+            detail,
+            override_delay,
+            recipient,
+        )
 
     def _retire(self, rule: Rule, subject: str, summary: str) -> Dict[str, Any]:
         """Close what an object no longer checked still holds, quietly."""
@@ -1157,86 +1187,51 @@ class AlertEngine:
         override_delay: Optional[int] = None,
         recipient: str = "",
     ) -> Dict[str, Any]:
-        now = _utc_now()
-        settings = self.config.settings_for(rule)
-        delay = settings.trigger_delay if override_delay is None else override_delay
-        row = self.database.get_state(rule.name, subject)
-        state = str(row["state"]) if row else STATE_OK
-        since = int(row["since_ts"]) if row else now
-        first_seen = int(row["first_seen_ts"]) if row else now
-        last_notified = int(row["last_notified_ts"]) if row else 0
-        notify_count = int(row["notify_count"]) if row else 0
+        pending_delivery: Optional[Tuple[int, str, str]] = None
+        with self._lock:
+            now = _utc_now()
+            settings = self.config.settings_for(rule)
+            delay = settings.trigger_delay if override_delay is None else override_delay
+            row = self.database.get_state(rule.name, subject)
+            state = str(row["state"]) if row else STATE_OK
+            since = int(row["since_ts"]) if row else now
+            first_seen = int(row["first_seen_ts"]) if row else now
+            last_notified = int(row["last_notified_ts"]) if row else 0
+            notify_count = int(row["notify_count"]) if row else 0
 
-        transition = ""
+            transition = ""
 
-        if not active:
-            if state == STATE_FIRING:
-                transition = TRANSITION_RECOVERED
-                state = STATE_OK
-                since = now
-            elif state == STATE_PENDING:
-                # It never fired, so there is nothing to recover from.
-                state = STATE_OK
-                since = now
-        else:
-            if state == STATE_OK:
-                state = STATE_PENDING
-                since = now
-                first_seen = now
-                notify_count = 0
-            if state == STATE_PENDING and now - since >= delay:
-                state = STATE_FIRING
-                since = now
-                transition = TRANSITION_FIRED
-            elif state == STATE_FIRING and _severity_rank(severity) > _severity_rank(
-                str(row["severity"]) if row else severity
-            ):
-                # It got worse. A partial outage becoming a total one is news
-                # on its own and should not wait for the repeat window. This
-                # cannot loop: the new severity is stored with the state.
-                transition = TRANSITION_ESCALATED
-            elif state == STATE_FIRING and (
-                now - last_notified >= settings.repeat_after
-            ):
-                transition = TRANSITION_REPEATED
+            if not active:
+                if state == STATE_FIRING:
+                    transition = TRANSITION_RECOVERED
+                    state = STATE_OK
+                    since = now
+                elif state == STATE_PENDING:
+                    # It never fired, so there is nothing to recover from.
+                    state = STATE_OK
+                    since = now
+            else:
+                if state == STATE_OK:
+                    state = STATE_PENDING
+                    since = now
+                    first_seen = now
+                    notify_count = 0
+                if state == STATE_PENDING and now - since >= delay:
+                    state = STATE_FIRING
+                    since = now
+                    transition = TRANSITION_FIRED
+                elif state == STATE_FIRING and _severity_rank(severity) > _severity_rank(
+                    str(row["severity"]) if row else severity
+                ):
+                    # It got worse. A partial outage becoming a total one is news
+                    # on its own and should not wait for the repeat window. This
+                    # cannot loop: the new severity is stored with the state.
+                    transition = TRANSITION_ESCALATED
+                elif state == STATE_FIRING and (
+                    now - last_notified >= settings.repeat_after
+                ):
+                    transition = TRANSITION_REPEATED
 
-        self.database.put_state(
-            {
-                "rule": rule.name,
-                "subject": subject,
-                "state": state,
-                "severity": severity,
-                "since_ts": since,
-                "first_seen_ts": first_seen,
-                "last_seen_ts": now,
-                "last_notified_ts": last_notified,
-                "notify_count": notify_count,
-                "summary": summary,
-                "detail": detail,
-                "trigger_delay": override_delay,
-                "recipient": recipient,
-            }
-        )
-
-        # An acknowledgement covers one occurrence: once it is over, the next
-        # one is news again. Written only when there is one to clear, since
-        # producers report "still fine" every minute.
-        if (
-            state == STATE_OK
-            and row is not None
-            and "acknowledged_ts" in row.keys()
-            and int(row["acknowledged_ts"] or 0)
-        ):
-            self.database.clear_acknowledgement(rule.name, subject)
-
-        result = {"rule": rule.name, "subject": subject, "state": state}
-        if not transition:
-            return result
-
-        notified = self._notify(
-            rule, subject, transition, severity, summary, detail, now, recipient
-        )
-        if notified:
             self.database.put_state(
                 {
                     "rule": rule.name,
@@ -1246,14 +1241,87 @@ class AlertEngine:
                     "since_ts": since,
                     "first_seen_ts": first_seen,
                     "last_seen_ts": now,
-                    "last_notified_ts": now,
-                    "notify_count": notify_count + 1,
+                    "last_notified_ts": last_notified,
+                    "notify_count": notify_count,
                     "summary": summary,
                     "detail": detail,
                     "trigger_delay": override_delay,
                     "recipient": recipient,
                 }
             )
+
+            # An acknowledgement covers one occurrence: once it is over, the next
+            # one is news again. Written only when there is one to clear, since
+            # producers report "still fine" every minute.
+            if (
+                state == STATE_OK
+                and row is not None
+                and "acknowledged_ts" in row.keys()
+                and int(row["acknowledged_ts"] or 0)
+            ):
+                self.database.clear_acknowledgement(rule.name, subject)
+
+            result: Dict[str, Any] = {
+                "rule": rule.name,
+                "subject": subject,
+                "state": state,
+            }
+            if not transition:
+                return result
+
+            pending_delivery = self._prepare_notify(
+                rule, subject, transition, severity, summary, detail, now
+            )
+
+        notified = False
+        if pending_delivery is not None:
+            event_id, mail_subject, body = pending_delivery
+            # Perform channel I/O outside self._lock so slow SMTP or webhook
+            # calls cannot stall concurrent observations from other daemons.
+            delivered, errors = self.deliver(mail_subject, body, recipient=recipient)
+            notified = bool(delivered)
+            with self._lock:
+                self.database.set_delivery(
+                    event_id, ",".join(delivered), "; ".join(errors)
+                )
+                if notified:
+                    current = self.database.get_state(rule.name, subject)
+                    if current is not None:
+                        self.database.put_state(
+                            {
+                                "rule": rule.name,
+                                "subject": subject,
+                                "state": str(current["state"]),
+                                "severity": str(current["severity"]),
+                                "since_ts": int(current["since_ts"]),
+                                "first_seen_ts": int(current["first_seen_ts"]),
+                                "last_seen_ts": int(current["last_seen_ts"]),
+                                "last_notified_ts": now,
+                                "notify_count": int(current["notify_count"]) + 1,
+                                "summary": str(current["summary"]),
+                                "detail": str(current["detail"]),
+                                "trigger_delay": current["trigger_delay"],
+                                "recipient": str(current["recipient"]),
+                            }
+                        )
+                    else:
+                        self.database.put_state(
+                            {
+                                "rule": rule.name,
+                                "subject": subject,
+                                "state": state,
+                                "severity": severity,
+                                "since_ts": since,
+                                "first_seen_ts": first_seen,
+                                "last_seen_ts": now,
+                                "last_notified_ts": now,
+                                "notify_count": notify_count + 1,
+                                "summary": summary,
+                                "detail": detail,
+                                "trigger_delay": override_delay,
+                                "recipient": recipient,
+                            }
+                        )
         result["transition"] = transition
         result["notified"] = notified
         return result
@@ -1282,7 +1350,7 @@ class AlertEngine:
             return "acknowledged"
         return ""
 
-    def _notify(
+    def _prepare_notify(
         self,
         rule: Rule,
         subject: str,
@@ -1291,8 +1359,7 @@ class AlertEngine:
         summary: str,
         detail: str,
         now: int,
-        recipient: str = "",
-    ) -> bool:
+    ) -> Optional[Tuple[int, str, str]]:
         allowed, reason = self._should_notify(rule, severity)
         if allowed:
             quiet = self._quiet_reason(rule, subject, transition, now)
@@ -1316,7 +1383,7 @@ class AlertEngine:
                     "delivered": "", "delivery_error": reason,
                 }
             )
-            return False
+            return None
 
         # Storm control counts what already went out, so a burst produces the
         # first few notifications and then one line per suppressed alert in the
@@ -1334,7 +1401,7 @@ class AlertEngine:
                     ),
                 }
             )
-            return False
+            return None
 
         event_id = self.database.add_event(
             {
@@ -1347,6 +1414,25 @@ class AlertEngine:
         mail_subject, body = self.render(
             rule, subject, transition, severity, summary, detail, now
         )
+        return event_id, mail_subject, body
+
+    def _notify(
+        self,
+        rule: Rule,
+        subject: str,
+        transition: str,
+        severity: str,
+        summary: str,
+        detail: str,
+        now: int,
+        recipient: str = "",
+    ) -> bool:
+        prepared = self._prepare_notify(
+            rule, subject, transition, severity, summary, detail, now
+        )
+        if prepared is None:
+            return False
+        event_id, mail_subject, body = prepared
         delivered, errors = self.deliver(mail_subject, body, recipient=recipient)
         self.database.set_delivery(event_id, ",".join(delivered), "; ".join(errors))
         return bool(delivered)
@@ -1716,63 +1802,66 @@ class AlertEngine:
     def update_config(self, payload: Dict[str, Any]) -> AlertConfig:
         if not isinstance(payload, dict):
             raise ValueError("a JSON object is required")
-        merged = self.config.as_dict()
-        for key in ("enabled", "email_enabled"):
-            if key in payload:
-                merged[key] = payload[key] is not False
-        if "recipient" in payload:
-            recipient = str(payload.get("recipient") or "").strip()
-            if recipient and not _EMAIL_RE.fullmatch(recipient):
-                raise ValueError("the recipient is not a valid email address")
-            merged["recipient"] = recipient
-        for key in ("min_severity", "portal_min_severity"):
-            if key in payload:
-                severity = str(payload.get(key) or "").strip().lower()
-                if severity not in SEVERITIES:
-                    raise ValueError(f"{key} must be info, warning or critical")
-                merged[key] = severity
-        if "webhook_allow_private" in payload:
-            merged["webhook_allow_private"] = (
-                payload["webhook_allow_private"] is True
-            )
-        if "webhook_url" in payload:
-            url = str(payload.get("webhook_url") or "").strip()
-            if url:
-                # Validated on the way in rather than at the first alert, so a
-                # typo is a form error and not a silently missed notification.
-                resolve_webhook_target(
-                    url, allow_private=bool(merged.get("webhook_allow_private"))
+        with self._config_lock:
+            merged = self.config.as_dict()
+            for key in ("enabled", "email_enabled"):
+                if key in payload:
+                    merged[key] = payload[key] is not False
+            if "recipient" in payload:
+                recipient = str(payload.get("recipient") or "").strip()
+                if recipient and not _EMAIL_RE.fullmatch(recipient):
+                    raise ValueError("the recipient is not a valid email address")
+                merged["recipient"] = recipient
+            for key in ("min_severity", "portal_min_severity"):
+                if key in payload:
+                    severity = str(payload.get(key) or "").strip().lower()
+                    if severity not in SEVERITIES:
+                        raise ValueError(f"{key} must be info, warning or critical")
+                    merged[key] = severity
+            if "webhook_allow_private" in payload:
+                merged["webhook_allow_private"] = (
+                    payload["webhook_allow_private"] is True
                 )
-            merged["webhook_url"] = url
-        if "webhook_header_name" in payload:
-            name = str(payload.get("webhook_header_name") or "").strip()
-            if name and not _HEADER_NAME_RE.fullmatch(name):
-                raise ValueError("the header name may use letters, digits and -")
-            merged["webhook_header_name"] = name
-        if "webhook_header_value" in payload:
-            # An unchanged secret is never sent back to the browser, so the
-            # browser echoes the mask; that must not overwrite the real value.
-            value = str(payload.get("webhook_header_value") or "")
-            if value != "***":
-                merged["webhook_header_value"] = value
-        rules = payload.get("rules")
-        if rules is not None:
-            if not isinstance(rules, dict):
-                raise ValueError("rules must be an object")
-            for name, value in rules.items():
-                if name not in RULES_BY_NAME:
-                    raise ValueError(f"unknown rule: {name}")
-                if not isinstance(value, dict):
-                    raise ValueError(f"rule {name} must be an object")
-            merged.setdefault("rules", {}).update(
-                {str(name): value for name, value in rules.items()}
-            )
+            if "webhook_url" in payload:
+                url = str(payload.get("webhook_url") or "").strip()
+                if url:
+                    # Validated on the way in rather than at the first alert, so a
+                    # typo is a form error and not a silently missed notification.
+                    resolve_webhook_target(
+                        url, allow_private=bool(merged.get("webhook_allow_private"))
+                    )
+                merged["webhook_url"] = url
+            if "webhook_header_name" in payload:
+                name = str(payload.get("webhook_header_name") or "").strip()
+                if name and not _HEADER_NAME_RE.fullmatch(name):
+                    raise ValueError("the header name may use letters, digits and -")
+                merged["webhook_header_name"] = name
+            if "webhook_header_value" in payload:
+                # An unchanged secret is never sent back to the browser, so the
+                # browser echoes the mask; that must not overwrite the real value.
+                value = str(payload.get("webhook_header_value") or "")
+                if value != "***":
+                    if _has_control_chars(value):
+                        raise ValueError("the header value contains invalid characters")
+                    merged["webhook_header_value"] = value
+            rules = payload.get("rules")
+            if rules is not None:
+                if not isinstance(rules, dict):
+                    raise ValueError("rules must be an object")
+                for name, value in rules.items():
+                    if name not in RULES_BY_NAME:
+                        raise ValueError(f"unknown rule: {name}")
+                    if not isinstance(value, dict):
+                        raise ValueError(f"rule {name} must be an object")
+                merged.setdefault("rules", {}).update(
+                    {str(name): value for name, value in rules.items()}
+                )
 
-        config = load_config_from_dict(merged)
-        save_config(CONFIG_PATH, config)
-        with self._lock:
-            self.config = config
-        return config
+            config = load_config_from_dict(merged)
+            save_config(CONFIG_PATH, config)
+            with self._lock:
+                self.config = config
+            return config
 
 
 def mail_queue_stuck(output: str, now: int) -> List[Dict[str, Any]]:
@@ -2084,9 +2173,22 @@ def main() -> None:
     # Without this, systemd's SIGTERM kills the process outright and leaves the
     # socket file behind: a client connecting during the restart window reaches
     # a path that exists and answers nothing.
+    shutdown_event = threading.Event()
+    received_signal: List[int] = []
+
+    def _shutdown_watcher() -> None:
+        shutdown_event.wait()
+        sig = received_signal[0] if received_signal else 0
+        if sig:
+            LOG.info("Received signal %s; shutting down", sig)
+        server.shutdown()
+
+    threading.Thread(target=_shutdown_watcher, daemon=True).start()
+
     def _shutdown(signum: int, _frame: Any) -> None:
-        LOG.info("Received signal %s; shutting down", signum)
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        if not received_signal:
+            received_signal.append(signum)
+        shutdown_event.set()
 
     for signal_number in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(ValueError, OSError):

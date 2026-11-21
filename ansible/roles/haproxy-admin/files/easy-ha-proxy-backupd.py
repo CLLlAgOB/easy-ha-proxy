@@ -18,12 +18,14 @@ import fcntl
 import grp
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -2027,11 +2029,11 @@ def copy_recovery_source(job_id: str) -> Path:
         ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
     )
     for root, directories, files in os.walk(destination):
-        os.chown(root, 0, 0)
+        os.chown(root, 0, 0, follow_symlinks=False)
         for name in directories:
-            os.chown(os.path.join(root, name), 0, 0)
+            os.chown(os.path.join(root, name), 0, 0, follow_symlinks=False)
         for name in files:
-            os.chown(os.path.join(root, name), 0, 0)
+            os.chown(os.path.join(root, name), 0, 0, follow_symlinks=False)
     return destination
 
 
@@ -2624,10 +2626,16 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
         return save_s3_destination(request, name, path_target, existing_probe)
 
     host = str(request.get("host") or "").strip()
-    if not host or len(host) > 253 or any(ch.isspace() for ch in host):
+    if (
+        not host
+        or host.startswith("-")
+        or len(host) > 253
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in host)
+        or not re.fullmatch(r"[A-Za-z0-9._:\[\]-]+", host)
+    ):
         raise BackupdError("a host is required", code="invalid")
     user = str(request.get("user") or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user):
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}", user):
         raise BackupdError("the user name is not valid", code="invalid")
     try:
         port = int(request.get("port") or 22)
@@ -2714,6 +2722,68 @@ def save_destination(request: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "destination": public_destination(record)}
 
 
+def _validate_s3_ip(candidate: str) -> None:
+    """Reject loopback, link-local, multicast, unspecified and reserved IPs."""
+    address = ipaddress.ip_address(candidate)
+    unwrapped = getattr(address, "ipv4_mapped", None) or address
+    if (
+        unwrapped.is_loopback
+        or unwrapped.is_link_local
+        or unwrapped.is_multicast
+        or unwrapped.is_unspecified
+        or unwrapped.is_reserved
+    ):
+        raise BackupdError(
+            "the S3 endpoint resolves to a forbidden address", code="invalid"
+        )
+
+
+def _validate_s3_endpoint_host(hostname: str) -> None:
+    """Syntactic and literal-IP checks for an S3 endpoint host."""
+    host = (hostname or "").strip().lower().rstrip(".")
+    if (
+        not host
+        or len(host) > 253
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in host)
+    ):
+        raise BackupdError("the endpoint host is not valid", code="invalid")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise BackupdError(
+            "the S3 endpoint cannot target localhost", code="invalid"
+        )
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    _validate_s3_ip(host)
+
+
+def resolve_s3_address(hostname: str, port: int) -> str:
+    """Resolve and validate an S3 endpoint host, returning a pinned IP."""
+    _validate_s3_endpoint_host(hostname)
+    try:
+        infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise BackupdError(
+            f"the S3 endpoint host does not resolve: {exc}", code="invalid"
+        ) from exc
+    selected = ""
+    for info in infos:
+        candidate = info[4][0]
+        try:
+            _validate_s3_ip(candidate)
+        except ValueError:
+            continue
+        if not selected:
+            selected = candidate
+    if not selected:
+        raise BackupdError(
+            "the S3 endpoint host did not resolve to a usable address",
+            code="invalid",
+        )
+    return selected
+
+
 def save_s3_destination(
     request: dict[str, Any],
     name: str,
@@ -2723,11 +2793,24 @@ def save_s3_destination(
     import urllib.parse
 
     endpoint = str(request.get("endpoint") or "").strip().rstrip("/")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in endpoint):
+        raise BackupdError("the endpoint URL is not valid", code="invalid")
     parsed = urllib.parse.urlparse(endpoint)
-    if parsed.scheme not in ("https", "http") or not parsed.netloc:
+    if parsed.scheme not in ("https", "http") or not parsed.netloc or not parsed.hostname:
         raise BackupdError(
             "the endpoint must be a full https:// URL", code="invalid"
         )
+    if parsed.username or parsed.password:
+        raise BackupdError(
+            "the endpoint URL must not include credentials", code="invalid"
+        )
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        raise BackupdError("the endpoint port is not valid", code="invalid") from None
+    if not 1 <= port <= 65535:
+        raise BackupdError("the endpoint port is out of range", code="invalid")
+    _validate_s3_endpoint_host(parsed.hostname)
     allow_insecure = bool(request.get("allow_insecure"))
     if parsed.scheme == "http" and not allow_insecure:
         raise BackupdError(
@@ -2860,7 +2943,7 @@ def _checked(record: dict[str, Any], result: subprocess.CompletedProcess) -> sub
 
 def run_sftp(record: dict[str, Any], batch: str) -> subprocess.CompletedProcess:
     command = sftp_base_command(record, "/usr/bin/sftp")
-    command += ["-b", "-", f"{record['user']}@{record['host']}"]
+    command += ["-b", "-", "--", f"{record['user']}@{record['host']}"]
     return _checked(record, subprocess.run(
         command,
         input=batch.encode("utf-8"),
@@ -2873,7 +2956,7 @@ def run_sftp(record: dict[str, Any], batch: str) -> subprocess.CompletedProcess:
 
 def run_ssh(record: dict[str, Any], remote_command: list[str]) -> subprocess.CompletedProcess:
     command = sftp_base_command(record, "/usr/bin/ssh")
-    command += [f"{record['user']}@{record['host']}", "--"] + remote_command
+    command += ["--", f"{record['user']}@{record['host']}"] + remote_command
     return _checked(record, subprocess.run(
         command,
         capture_output=True,
@@ -2913,7 +2996,7 @@ def normalize_remote_dir(value: Any) -> str:
     if not text or text in (".", "./"):
         return "."
     parts = [part for part in text.split("/") if part not in ("", ".")]
-    if ".." in parts or len(text) > 512 or any(ord(ch) < 32 for ch in text):
+    if ".." in parts or len(text) > 512 or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
         raise BackupdError("the remote path must be free of '..'", code="invalid")
     joined = "/".join(parts)
     if text.startswith("/"):
@@ -2930,6 +3013,8 @@ def remote_join(directory: str, name: str) -> str:
 
 def remote_quote(value: str) -> str:
     """Quote a path for the sftp batch language, which splits on whitespace."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise BackupdError("the remote path contains control characters", code="invalid")
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
@@ -2976,7 +3061,7 @@ def verify_remote_copy(
     if mode == "transfer":
         return True, "transfer", ""
 
-    probe = run_ssh(record, ["sha256sum", "--", remote_file])
+    probe = run_ssh(record, ["sha256sum", "--", shlex.quote(remote_file)])
     if probe.returncode == 0:
         answer = (probe.stdout or b"").decode("utf-8", "replace").split()
         # A server restricted to SFTP answers every command with a banner and
@@ -3218,8 +3303,11 @@ def s3_request(
     import urllib.parse
 
     endpoint = urllib.parse.urlparse(record["endpoint"])
-    if endpoint.scheme not in ("https", "http"):
+    if endpoint.scheme not in ("https", "http") or not endpoint.hostname:
         raise BackupdError("the endpoint must be http or https", code="invalid")
+    if endpoint.username or endpoint.password:
+        raise BackupdError("the endpoint URL must not include credentials", code="invalid")
+    _validate_s3_endpoint_host(endpoint.hostname)
     if endpoint.scheme == "http" and not record.get("allow_insecure"):
         raise BackupdError(
             "the endpoint is plain http; enable 'allow insecure' only for a"
@@ -3273,11 +3361,32 @@ def s3_request(
 
     target = canonical_uri + (f"?{canonical_query}" if canonical_query else "")
     if endpoint.scheme == "https":
-        connection = http.client.HTTPSConnection(
+        class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+            def connect(self) -> None:
+                pinned = resolve_s3_address(self.host, self.port)
+                raw = socket.create_connection(
+                    (pinned, self.port), self.timeout, self.source_address
+                )
+                try:
+                    self.sock = self._context.wrap_socket(
+                        raw, server_hostname=self.host
+                    )
+                except Exception:
+                    raw.close()
+                    raise
+
+        connection = _PinnedHTTPSConnection(
             host, timeout=S3_TIMEOUT_SECONDS, context=ssl.create_default_context()
         )
     else:
-        connection = http.client.HTTPConnection(host, timeout=S3_TIMEOUT_SECONDS)
+        class _PinnedHTTPConnection(http.client.HTTPConnection):
+            def connect(self) -> None:
+                pinned = resolve_s3_address(self.host, self.port)
+                self.sock = socket.create_connection(
+                    (pinned, self.port), self.timeout, self.source_address
+                )
+
+        connection = _PinnedHTTPConnection(host, timeout=S3_TIMEOUT_SECONDS)
     try:
         connection.request(method, target, body=body, headers=send_headers)
         response = connection.getresponse()

@@ -49,6 +49,7 @@ from pathlib import Path
 import re
 import socket
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -290,8 +291,22 @@ def load_forwards(path: str) -> list[dict]:
     if yaml is None:
         raise SystemExit("PyYAML is required (install python3-yaml)")
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise SystemExit(f"cannot read {path}: not a regular file")
+            if st.st_size > 1024 * 1024:
+                raise SystemExit(f"cannot read {path}: file is too large")
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -402,6 +417,7 @@ def _run(args: list[str], *, check: bool = True, binary: str | None = None) -> s
         check=check,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
 
@@ -425,6 +441,7 @@ def _run_restore(commands: list[list[str]], *, binary: str | None = None,
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(

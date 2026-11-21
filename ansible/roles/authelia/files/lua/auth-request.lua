@@ -79,11 +79,25 @@ end
 
 -- header_match checks whether the provided header matches the pattern.
 -- pattern is a comma-separated list of Lua Patterns.
+local HOP_BY_HOP_HEADERS = {
+	["content-length"] = true,
+	["host"] = true,
+	["connection"] = true,
+	["keep-alive"] = true,
+	["proxy-authenticate"] = true,
+	["proxy-authorization"] = true,
+	["proxy-connection"] = true,
+	["te"] = true,
+	["trailer"] = true,
+	["transfer-encoding"] = true,
+	["upgrade"] = true,
+}
+
 function header_match(header, pattern)
-	if header == "content-length" or header == "host" or pattern == "-" then
+	if HOP_BY_HOP_HEADERS[header:lower()] or pattern == "-" then
 		return false
 	end
-	for p in pattern:gmatch("[^,]*") do
+	for p in pattern:gmatch("[^,]+") do
 		if header:match(p) then
 			return true
 		end

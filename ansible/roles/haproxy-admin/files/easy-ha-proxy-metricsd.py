@@ -20,6 +20,7 @@ import logging
 import os
 import pwd
 import re
+import signal
 import socket
 import sqlite3
 import threading
@@ -3941,6 +3942,8 @@ class MetricsHandler(BaseHTTPRequestHandler):
             if length <= 0 or length > 65536:
                 raise ValueError("invalid Content-Length")
             payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
             labels = payload.get("labels")
             if not isinstance(labels, dict):
                 raise ValueError("labels must be an object")
@@ -4230,6 +4233,13 @@ def main() -> None:
         # honest: "enabled: false" is a configuration state, not a crash.
         LOG.info("Monitoring is disabled in %s; idling", CONFIG_PATH)
         stop = threading.Event()
+
+        def _idle_stop(_signum: int, _frame: Any) -> None:
+            stop.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, _idle_stop)
         with contextlib.suppress(KeyboardInterrupt):
             stop.wait()
         return
@@ -4265,6 +4275,26 @@ def main() -> None:
         _set_socket_perms(SOCKET_PATH, SOCKET_GROUP)
     except Exception as exc:  # pylint: disable=broad-except
         LOG.warning("Failed to set socket permissions: %s", exc)
+
+    shutdown_event = threading.Event()
+    received_signal: List[int] = []
+
+    def _shutdown_watcher() -> None:
+        shutdown_event.wait()
+        if received_signal:
+            LOG.info("Received signal %s; shutting down", received_signal[0])
+        server.shutdown()
+
+    threading.Thread(target=_shutdown_watcher, daemon=True).start()
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, _handle_signal)
 
     try:
         server.serve_forever()

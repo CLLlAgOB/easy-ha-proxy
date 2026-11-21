@@ -32,6 +32,7 @@ import os
 import pwd
 import grp
 import re
+import signal
 import socket
 import stat
 import subprocess
@@ -1228,6 +1229,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(400, {"ok": False, "error": f"bad json: {e}"})
             return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"ok": False, "error": "payload must be a JSON object"})
+            return
 
         kind = (payload.get("kind") or "").strip().lower()
         name = (payload.get("name") or "").strip()
@@ -1737,13 +1741,18 @@ class SiteAlertEngine(threading.Thread):
             )
             return False
         sender = state["from"]
+        if any(ch in sender for ch in ("\r", "\n")):
+            LOG.warning("site-alerts: invalid sender; alert not sent")
+            return False
         to = recipient if _ALERT_EMAIL_RE.fullmatch(recipient) else state["to"]
         if not _ALERT_EMAIL_RE.fullmatch(to):
             LOG.warning("site-alerts: no valid recipient; alert not sent")
             return False
+        one_line = subject.replace("\r", " ").replace("\n", " ")[:200]
+        clean_body = body.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
         message = (
-            f"From: {sender}\r\nTo: {to}\r\nSubject: {subject}\r\n"
-            "Content-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
+            f"From: {sender}\r\nTo: {to}\r\nSubject: {one_line}\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n" + clean_body + "\r\n"
         )
         lock_dir = os.path.dirname(SITE_ALERTS_MAIL_LOCK)
         try:
@@ -1988,6 +1997,28 @@ def main() -> None:
         _set_socket_perms(SOCKET_PATH, SOCKET_GROUP)
     except Exception as e:
         LOG.warning("Failed to set socket permissions: %s", e)
+
+    shutdown_event = threading.Event()
+    received_signal: List[int] = []
+
+    def _shutdown_watcher() -> None:
+        shutdown_event.wait()
+        if received_signal:
+            LOG.info("Received signal %s; shutting down", received_signal[0])
+        server.shutdown()
+
+    threading.Thread(target=_shutdown_watcher, daemon=True).start()
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle_signal)
+        except (ValueError, OSError):
+            pass
 
     try:
         server.serve_forever()

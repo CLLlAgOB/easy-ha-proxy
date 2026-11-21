@@ -4425,6 +4425,7 @@ def serve() -> None:
             if not CONNECTION_SLOTS.acquire(blocking=False):
                 with connection:
                     try:
+                        connection.settimeout(1)
                         connection.sendall(
                             b'{"ok":false,"error":"too many active requests",'
                             b'"error_code":"busy"}\n'

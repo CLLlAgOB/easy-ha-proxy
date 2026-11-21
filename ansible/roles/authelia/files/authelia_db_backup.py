@@ -18,16 +18,30 @@ means the caller must not let the new image start.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import os
 from pathlib import Path
 import re
 import sqlite3
 import sys
+from urllib.parse import quote as url_quote
 
 
 PREFIX = "authelia-db-"
 SUFFIX = ".sqlite3"
+
+
+def _fsync_path(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sqlite_ro_uri(path: Path) -> str:
+    return f"file:{url_quote(str(path), safe='/')}?mode=ro"
 
 
 def backup(source: Path, directory: Path, label: str, keep: int) -> Path | None:
@@ -42,15 +56,21 @@ def backup(source: Path, directory: Path, label: str, keep: int) -> Path | None:
     descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(descriptor)
     try:
-        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as origin, \
-                sqlite3.connect(partial) as copy:
-            origin.backup(copy)
-        with sqlite3.connect(f"file:{partial}?mode=ro", uri=True) as check:
+        with contextlib.closing(
+            sqlite3.connect(_sqlite_ro_uri(source), uri=True)
+        ) as origin, contextlib.closing(sqlite3.connect(partial)) as copy:
+            origin.backup(copy, pages=256, sleep=0.05)
+        with contextlib.closing(
+            sqlite3.connect(_sqlite_ro_uri(partial), uri=True)
+        ) as check:
             result = check.execute("PRAGMA integrity_check").fetchone()
         if not result or result[0] != "ok":
             raise RuntimeError(f"the copy failed its integrity check: {result!r}")
         os.chmod(partial, 0o600)
+        _fsync_path(partial)
         os.replace(partial, target)
+        with contextlib.suppress(OSError):
+            _fsync_path(directory)
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
@@ -65,7 +85,7 @@ def prune(directory: Path, keep: int) -> None:
         if path.is_file() and path.name.startswith(PREFIX) and path.name.endswith(SUFFIX)
     )
     for path in copies[: max(len(copies) - max(keep, 1), 0)]:
-        path.unlink()
+        path.unlink(missing_ok=True)
 
 
 def main(argv: list[str]) -> int:

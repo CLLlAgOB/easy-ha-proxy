@@ -97,11 +97,6 @@ class AlertClient:
                 and now - previous[1] < RESEND_UNCHANGED_SECONDS
             ):
                 return True
-            self._last[key] = (signature, now)
-            # The map is keyed by rule and subject, both of which are bounded
-            # by the producer, but a runaway subject must not grow it forever.
-            if len(self._last) > 2000:
-                self._last.clear()
 
         payload: Dict[str, Any] = {"rule": rule, "subject": subject}
         if active is not None:
@@ -118,7 +113,16 @@ class AlertClient:
             payload["trigger_delay"] = int(trigger_delay)
         if recipient:
             payload["recipient"] = recipient
-        return self._post("/api/v1/alerts/notify", payload)
+        delivered = self._post("/api/v1/alerts/notify", payload)
+        if delivered:
+            with self._lock:
+                # The map is keyed by rule and subject, both of which are
+                # bounded by the producer, but a runaway subject must not grow
+                # it forever.
+                if len(self._last) >= 2000:
+                    self._last.clear()
+                self._last[key] = (signature, time.monotonic())
+        return delivered
 
     def clear(
         self, rule: str, subject: str, *, summary: str = "", recipient: str = ""
@@ -156,8 +160,12 @@ class AlertClient:
         except OSError as exc:
             # One warning per outage rather than one per cycle: the alert
             # daemon being down must not itself flood the journal.
-            if not self._warned:
-                self._warned = True
+            should_warn = False
+            with self._lock:
+                if not self._warned:
+                    self._warned = True
+                    should_warn = True
+            if should_warn:
                 LOG.warning(
                     "alertd unreachable at %s (%s); notifications are paused",
                     self.socket_path,
@@ -168,6 +176,7 @@ class AlertClient:
             LOG.debug("alert submission failed: %s", exc)
             return False
 
-        self._warned = False
+        with self._lock:
+            self._warned = False
         head = b"".join(chunks).split(b"\r\n", 1)[0]
         return b" 200 " in head

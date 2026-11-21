@@ -5868,9 +5868,10 @@ class CertdHandler(BaseHTTPRequestHandler):
         if not data:
             return {}
         try:
-            return json.loads(data.decode("utf-8"))
+            parsed = json.loads(data.decode("utf-8"))
         except Exception:
             return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -6275,18 +6276,38 @@ def main() -> None:
         uid = pwd.getpwnam("root").pw_uid
         gid = grp.getgrnam(GROUP_NAME).gr_gid
         os.chown(SOCKET_PATH, uid, gid)
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.warning("Failed to set socket ownership on %s: %s", SOCKET_PATH, exc)
     try:
         os.chmod(SOCKET_PATH, 0o660)
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.warning("Failed to set socket permissions on %s: %s", SOCKET_PATH, exc)
 
     # The expiry watch: one, for as long as the daemon runs.
     expiry_watch = CertificateExpiryWatch()
     expiry_watch.start()
     trash_purge = TrashPurge()
     trash_purge.start()
+
+    shutdown_event = threading.Event()
+    received_signal: List[int] = []
+
+    def _shutdown_watcher() -> None:
+        shutdown_event.wait()
+        if received_signal:
+            LOG.info("Received signal %s; shutting down", received_signal[0])
+        server.shutdown()
+
+    threading.Thread(target=_shutdown_watcher, daemon=True).start()
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, _handle_signal)
 
     try:
         LOG.info("haproxy-certd is listening on unix://%s", SOCKET_PATH)

@@ -706,15 +706,20 @@ def load_overrides(database: "SecurityDatabase") -> Dict[str, Any]:
         return {"added": {}, "disabled": []}
 
 
+_OVERRIDES_LOCK = threading.Lock()
+_REQUESTS_LOCK = threading.RLock()
+
+
 def store_overrides(database: "SecurityDatabase", data: Any) -> Dict[str, Any]:
     """Validate, persist and apply in one step, so the three cannot diverge."""
 
     checked = validate_overrides(data)
-    database.set_state(SIGNATURE_OVERRIDES_KEY, json.dumps(checked))
-    # Reload the shipped list first: a signature that was disabled and is now
-    # enabled again has to come back, and only the file has it.
-    load_signatures(SIGNATURE_SOURCE)
-    apply_overrides(checked)
+    with _OVERRIDES_LOCK:
+        database.set_state(SIGNATURE_OVERRIDES_KEY, json.dumps(checked))
+        # Reload the shipped list first: a signature that was disabled and is now
+        # enabled again has to come back, and only the file has it.
+        load_signatures(SIGNATURE_SOURCE)
+        apply_overrides(checked)
     LOG.info(
         "signature overrides updated: %d added, %d suppressed",
         len(checked["added"]),
@@ -8181,20 +8186,22 @@ class GuardEngine:
             self.digests.add(request, ended, now)
             if self.live is not None:
                 live.append(live_record(request, ended))
-            if self.requests is not None:
-                # Diagnostics and scoring are separate concerns that happen to
-                # need the same read of the same file. The request log keeps
-                # everything, including what the engine excludes: an operator
-                # looking for their own failed request must be able to find it.
-                # Its time is the syslog stamp, as on the live page and the
-                # charts, so a link between them means the same minutes.
-                self.requests.add(request, ts)
+            with _REQUESTS_LOCK:
+                if self.requests is not None:
+                    # Diagnostics and scoring are separate concerns that happen to
+                    # need the same read of the same file. The request log keeps
+                    # everything, including what the engine excludes: an operator
+                    # looking for their own failed request must be able to find it.
+                    # Its time is the syslog stamp, as on the live page and the
+                    # charts, so a link between them means the same minutes.
+                    self.requests.add(request, ts)
             self.observe_request(request, now, ts)
         self.lines_parsed += parsed
         if self.live is not None:
             self.live.extend(live)
-        if self.requests is not None:
-            self.requests.flush(now)
+        with _REQUESTS_LOCK:
+            if self.requests is not None:
+                self.requests.flush(now)
         return len(lines)
 
     def observe_request(self, request: ParsedRequest, now: int,
@@ -9924,69 +9931,70 @@ class GuardHandler(BaseHTTPRequestHandler):
 
         if path in ("/api/v1/guard/requests", "/api/v1/guard/requests/status",
                     "/api/v1/guard/requests/summary"):
-            requests = getattr(self.server, "requests", None)
-            # With the record off, a search is answered from the live buffer:
-            # the last hour or so, so a link from the live page or the charts
-            # still finds its requests.
-            memory = engine.live if requests is None and not path.endswith("/status") else None
-            if requests is None and memory is None:
-                self._send_json(
-                    404,
-                    {"ok": False, "enabled": False, "error": "the request log is off"},
-                )
-                return
-            try:
-                if path.endswith("/status"):
+            with _REQUESTS_LOCK:
+                requests = getattr(self.server, "requests", None)
+                # With the record off, a search is answered from the live buffer:
+                # the last hour or so, so a link from the live page or the charts
+                # still finds its requests.
+                memory = engine.live if requests is None and not path.endswith("/status") else None
+                if requests is None and memory is None:
                     self._send_json(
-                        200, {"ok": True, "ts": _utc_now(), **requests.status()}
+                        404,
+                        {"ok": False, "enabled": False, "error": "the request log is off"},
                     )
                     return
-                query = parse_qs(urlparse(self.path).query or "")
+                try:
+                    if path.endswith("/status"):
+                        self._send_json(
+                            200, {"ok": True, "ts": _utc_now(), **requests.status()}
+                        )
+                        return
+                    query = parse_qs(urlparse(self.path).query or "")
 
-                def one(name: str) -> str:
-                    return (query.get(name, [""])[0] or "").strip()
+                    def one(name: str) -> str:
+                        return (query.get(name, [""])[0] or "").strip()
 
-                def yes(name: str) -> bool:
-                    return one(name).lower() in ("1", "true", "yes", "on")
+                    def yes(name: str) -> bool:
+                        return one(name).lower() in ("1", "true", "yes", "on")
 
-                filters = dict(
-                    since=_clamp_int(one("since"), default=0, min_v=0, max_v=2_000_000_000),
-                    until=_clamp_int(one("until"), default=0, min_v=0, max_v=2_000_000_000),
-                    client=one("client"),
-                    status=one("status"),
-                    host=one("host"),
-                    backend=one("backend"),
-                    request_id=one("request_id"),
-                    method=one("method").upper(),
-                    path=one("path"),
-                    hide_admin=yes("hide_admin"),
-                    refused=yes("refused"),
-                    slower=_clamp_int(one("slower"), default=0, min_v=0, max_v=86_400_000),
-                    agent=one("agent"),
-                )
-                if path.endswith("/summary"):
+                    filters = dict(
+                        since=_clamp_int(one("since"), default=0, min_v=0, max_v=2_000_000_000),
+                        until=_clamp_int(one("until"), default=0, min_v=0, max_v=2_000_000_000),
+                        client=one("client"),
+                        status=one("status"),
+                        host=one("host"),
+                        backend=one("backend"),
+                        request_id=one("request_id"),
+                        method=one("method").upper(),
+                        path=one("path"),
+                        hide_admin=yes("hide_admin"),
+                        refused=yes("refused"),
+                        slower=_clamp_int(one("slower"), default=0, min_v=0, max_v=86_400_000),
+                        agent=one("agent"),
+                    )
+                    if path.endswith("/summary"):
+                        if requests is None:
+                            payload = memory.summarize_requests(RequestQuery.build(**filters))
+                        else:
+                            payload = requests.summary(**filters)
+                        self._send_json(200, {"ok": True, "enabled": requests is not None,
+                                              "ts": _utc_now(), **payload})
+                        return
+                    count = one("count").lower() not in ("0", "false", "no", "off")
+                    limit = _clamp_int(one("limit"), default=100, min_v=1, max_v=500)
+                    before = _clamp_int(one("before"), default=0, min_v=-(2 ** 62), max_v=2 ** 62)
                     if requests is None:
-                        payload = memory.summarize_requests(RequestQuery.build(**filters))
-                    else:
-                        payload = requests.summary(**filters)
-                    self._send_json(200, {"ok": True, "enabled": requests is not None,
-                                          "ts": _utc_now(), **payload})
-                    return
-                count = one("count").lower() not in ("0", "false", "no", "off")
-                limit = _clamp_int(one("limit"), default=100, min_v=1, max_v=500)
-                before = _clamp_int(one("before"), default=0, min_v=-(2 ** 62), max_v=2 ** 62)
-                if requests is None:
-                    payload = memory.search_requests(
-                        RequestQuery.build(**filters), before=before, limit=limit, count=count,
+                        payload = memory.search_requests(
+                            RequestQuery.build(**filters), before=before, limit=limit, count=count,
+                        )
+                        self._send_json(200, {"ok": True, "enabled": False, "ts": _utc_now(), **payload})
+                        return
+                    payload = requests.search(
+                        **filters, before=max(0, before), count=count, limit=limit,
                     )
-                    self._send_json(200, {"ok": True, "enabled": False, "ts": _utc_now(), **payload})
-                    return
-                payload = requests.search(
-                    **filters, before=max(0, before), count=count, limit=limit,
-                )
-                self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
-            except Exception as exc:  # pylint: disable=broad-except
-                self._send_json(500, {"ok": False, "error": str(exc)})
+                    self._send_json(200, {"ok": True, "ts": _utc_now(), **payload})
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._send_json(500, {"ok": False, "error": str(exc)})
             return
 
         if path in {"/api/v1/guard/adaptive/bans", "/api/v1/guard/adaptive/ban"}:
@@ -10166,6 +10174,8 @@ class GuardHandler(BaseHTTPRequestHandler):
                 if length <= 0 or length > 4096:
                     raise ValueError("invalid Content-Length")
                 payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+                if not isinstance(payload, dict):
+                    raise ValueError("expected an object")
             except ValueError as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
                 return
@@ -10470,28 +10480,29 @@ def _request_log_wanted(database: "SecurityDatabase", config: GuardConfig) -> bo
 
 def _set_request_log(server: "GuardServer", engine: "GuardEngine", enabled: bool):
     """Turn the store on or off now, and remember the choice."""
-    engine.database.set_state(REQUEST_LOG_OVERRIDE_KEY, "on" if enabled else "off")
-    if enabled and server.requests is None:
-        store = RequestLog(REQUEST_LOG_PATH, engine.config)
-        server.requests = store
-        engine.requests = store
-        LOG.warning("Request log enabled from the web interface")
-    elif not enabled and server.requests is not None:
-        store = server.requests
-        server.requests = None
-        engine.requests = None
-        # Anything already queued is written before the handle goes away;
-        # dropping it would lose requests the operator can see in the page
-        # right now.
-        with contextlib.suppress(Exception):
-            store.flush()
-        with contextlib.suppress(Exception):
-            store.close()
-        LOG.warning("Request log disabled from the web interface")
-    return {
-        "enabled": server.requests is not None,
-        "configured": bool(engine.config.request_log_enabled),
-    }
+    with _REQUESTS_LOCK:
+        engine.database.set_state(REQUEST_LOG_OVERRIDE_KEY, "on" if enabled else "off")
+        if enabled and server.requests is None:
+            store = RequestLog(REQUEST_LOG_PATH, engine.config)
+            server.requests = store
+            engine.requests = store
+            LOG.warning("Request log enabled from the web interface")
+        elif not enabled and server.requests is not None:
+            store = server.requests
+            server.requests = None
+            engine.requests = None
+            # Anything already queued is written before the handle goes away;
+            # dropping it would lose requests the operator can see in the page
+            # right now.
+            with contextlib.suppress(Exception):
+                store.flush()
+            with contextlib.suppress(Exception):
+                store.close()
+            LOG.warning("Request log disabled from the web interface")
+        return {
+            "enabled": server.requests is not None,
+            "configured": bool(engine.config.request_log_enabled),
+        }
 
 
 class GuardServer(ThreadingMixIn, UnixStreamServer):
@@ -10553,8 +10564,16 @@ def main() -> None:
     if config.mode == MODE_OFF and not want_requests:
         LOG.info("Adaptive protection is off in %s; idling", CONFIG_PATH)
         stop = threading.Event()
+
+        def _idle_stop(_signum: int, _frame: Any) -> None:
+            stop.set()
+
+        for signal_number in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal_number, _idle_stop)
         with contextlib.suppress(KeyboardInterrupt):
             stop.wait()
+        database.close()
         return
 
     requests = RequestLog(REQUEST_LOG_PATH, config) if want_requests else None
@@ -10594,9 +10613,21 @@ def main() -> None:
     # where it stands: databases not closed, the request log's last cycle
     # not written. A backup stops this daemon to archive its databases
     # whole, so it now shuts down as the alert engine does.
+    shutdown_event = threading.Event()
+    received_signal: List[int] = []
+
+    def _shutdown_watcher() -> None:
+        shutdown_event.wait()
+        if received_signal:
+            LOG.info("Received signal %s; shutting down", received_signal[0])
+        server.shutdown()
+
+    threading.Thread(target=_shutdown_watcher, daemon=True).start()
+
     def _shutdown(signum: int, _frame: Any) -> None:
-        LOG.info("Received signal %s; shutting down", signum)
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        if not received_signal:
+            received_signal.append(signum)
+        shutdown_event.set()
 
     for signal_number in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(ValueError, OSError):
