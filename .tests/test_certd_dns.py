@@ -44,6 +44,9 @@ class CredentialsTestCase(unittest.TestCase):
         le_root = mock.patch.object(certd, "LETSENCRYPT_ROOT_DIR", Path(self.directory.name) / "letsencrypt")
         le_root.start()
         self.addCleanup(le_root.stop)
+        trash = mock.patch.object(certd, "TRASH_DIR", Path(self.directory.name) / "trash")
+        trash.start()
+        self.addCleanup(trash.stop)
 
     def save(self, **overrides):
         payload = {

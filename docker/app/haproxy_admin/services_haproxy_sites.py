@@ -502,14 +502,14 @@ def _delete_site_by_name(name: str) -> Tuple[bool, str]:
         return False, 'Invalid websites.yml structure (expected a sites list)'
 
     new_sites: List[Dict[str, Any]] = []
-    removed = False
+    removed: Optional[Dict[str, Any]] = None
     for s in sites:
-        if s.get("name") == name:
-            removed = True
+        if removed is None and s.get("name") == name:
+            removed = s
             continue
         new_sites.append(s)
 
-    if not removed:
+    if removed is None:
         return False, f"Site {name!r} was not found"
 
     data["sites"] = new_sites
@@ -521,11 +521,44 @@ def _delete_site_by_name(name: str) -> Tuple[bool, str]:
     )
     ok, msg = update_yaml_file("websites", content)
     if ok:
-        _discard_access_page(name)
+        stored = _discard_access_page(name)
+        from . import trash
+
+        trash.put("site", name, removed, {"access_page": stored or ""})
+        msg = f"{msg} The site was moved to the trash and can be restored there."
     return ok, msg
 
 
-def _discard_access_page(name: str) -> None:
+def restore_site(entry: Dict[str, Any]) -> Tuple[bool, str]:
+    """Put a deleted site back, held to the rules a new one would be."""
+    with source_lock("websites"):
+        data = _load_yaml(WEBSITES_YAML)
+        sites = data.get("sites") or []
+        if not isinstance(sites, list):
+            return False, 'Invalid websites.yml structure (expected a sites list)'
+        conflict = site_identity_conflict(entry, sites)
+        if conflict:
+            return False, conflict
+        sites.append(entry)
+        data["sites"] = sites
+        content = yaml.safe_dump(
+            data,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+        ok, msg = update_yaml_file("websites", content)
+    if ok and entry.get("access_gate") is True:
+        domain = str(entry.get("domain") or "")
+        names = [domain] + [
+            str(a).strip() for a in (entry.get("alt_names") or []) if str(a).strip()
+        ]
+        rule_ok, rule_msg = _ensure_access_gate_authelia_rule(names)
+        return True, _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
+    return ok, msg
+
+
+def _discard_access_page(name: str) -> Optional[str]:
     """Take a site's access-page instructions and files out of service.
 
     They are stored under the site's name, so a site created later with the
@@ -535,9 +568,11 @@ def _discard_access_page(name: str) -> None:
     try:
         from . import access_portal
 
-        access_portal.discard(name)
+        stored = access_portal.discard(name)
+        return stored if isinstance(stored, str) else None
     except Exception:  # pylint: disable=broad-except
         logger.warning("The access-page storage of site %r could not be set aside", name, exc_info=True)
+        return None
 
 
 def delete_site(name: str) -> Tuple[bool, str]:

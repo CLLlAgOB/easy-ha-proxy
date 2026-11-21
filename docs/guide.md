@@ -886,6 +886,35 @@ rejected restore leaves nothing behind.
 Nothing writes or deletes history itself: a version exists because a change was
 confirmed.
 
+### Trash
+
+Deleting something used to be final. Now what a deletion removes is kept for
+30 days on **Configuration → Trash**, from where it can be put back or deleted
+for good:
+
+- HTTP and service sites, TCP proxies and UDP forwards -- kept by the panel in
+  `/var/lib/haproxy-admin/trash/`, one file per deleted entry. A service site
+  gets its access page and attachments back too, while they are still kept.
+- HAProxy certificates, Let's Encrypt certificates (the whole lineage: live
+  links, every archived copy and the renewal settings), standby certificates,
+  external and internal certificate authorities, DNS profiles and certificate
+  delivery targets -- kept by the certificate daemon on the host in
+  `/var/lib/easy-ha-proxy/cert-trash/`, root-only, with owners and modes
+  recorded so files go back exactly as they were.
+
+The copy is taken before the deletion and dropped if the deletion fails, so the
+trash never holds something still in service. Restoring goes through the same
+checks as creating: a site, proxy or forward whose name, domain or port has
+been taken meanwhile stays in the trash, and so does a file whose place is
+occupied. A restored site or TCP proxy is saved but not yet in HAProxy -- apply
+the configuration afterwards; a restored UDP forward is applied at once, as
+adding one is. A restored HAProxy certificate file is picked up at the next
+apply or reload, just as its deletion was.
+
+The page lists names and dates only; keys and credentials never leave the
+daemon. Restoring and deleting for good are superadmin-only and recorded in the
+change log.
+
 ### Change log
 
 **Change log** answers who changed what, when, from what to what, and whether

@@ -26,8 +26,8 @@ document.addEventListener("DOMContentLoaded", function () {
       form.addEventListener("submit", function (ev) {
         var lineage = form.getAttribute("data-lineage") || "";
         var msg = lineage
-          ? "Permanently delete the Let's Encrypt certificate " + lineage + "?"
-          : "Permanently delete the Let's Encrypt certificate?";
+          ? "Delete the Let's Encrypt certificate " + lineage + "?"
+          : "Delete the Let's Encrypt certificate?";
         if (!window.confirm(msg)) {
           ev.preventDefault();
         }

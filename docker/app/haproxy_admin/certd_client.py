@@ -75,6 +75,18 @@ class CertdUnavailable(RuntimeError):
     """certd does not answer."""
 
 
+def _actor() -> str:
+    """Who is deleting, so certd's trash can say who did."""
+    try:
+        from flask import g, has_request_context
+
+        if has_request_context():
+            return str(getattr(g, "remote_user", "") or "")
+    except Exception:  # pylint: disable=broad-except
+        pass
+    return ""
+
+
 def _dns_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """A request to certd's DNS provider section.
 
@@ -110,7 +122,22 @@ def dns_provider_save(
 
 
 def dns_provider_delete(name: str) -> Dict[str, Any]:
-    return _dns_request("dns-providers/delete", {"name": name})
+    return _dns_request("dns-providers/delete", {"name": name, "actor": _actor()})
+
+
+def trash_list() -> Dict[str, Any]:
+    """What certd has set aside: certificates, authorities and their settings."""
+    return _dns_request("trash", {})
+
+
+def trash_restore(item_id: str) -> Dict[str, Any]:
+    return _dns_request("trash/restore", {"id": item_id})
+
+
+def trash_purge(item_id: str = "", everything: bool = False) -> Dict[str, Any]:
+    if everything:
+        return _dns_request("trash/purge", {"all": True})
+    return _dns_request("trash/purge", {"id": item_id})
 
 
 def _delivery_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,7 +198,7 @@ def cert_delivery_save(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def cert_delivery_delete(name: str) -> Dict[str, Any]:
-    return _delivery_request("deliveries/delete", {"name": name})
+    return _delivery_request("deliveries/delete", {"name": name, "actor": _actor()})
 
 
 def cert_delivery_test(name: str) -> Dict[str, Any]:
@@ -685,7 +712,7 @@ def release_to_letsencrypt(domain: str) -> Dict[str, Any]:
 
 def delete_standby_certificate(domain: str, slot: str) -> Dict[str, Any]:
     url = f"{CERTD_API_BASE}/certs/standby/delete"
-    payload = {"domain": (domain or "").strip(), "slot": (slot or "").strip()}
+    payload = {"domain": (domain or "").strip(), "slot": (slot or "").strip(), "actor": _actor()}
     try:
         response = _post(url, json=payload, timeout=30.0)
         data = response.json()
@@ -728,7 +755,7 @@ def delete_internal_ca(confirmation: str) -> Dict[str, Any]:
     try:
         response = _post(
             url,
-            json={"confirmation": (confirmation or "").strip()},
+            json={"confirmation": (confirmation or "").strip(), "actor": _actor()},
             timeout=30.0,
         )
         data = response.json()
@@ -824,7 +851,7 @@ def delete_external_ca(ca_id: str) -> Dict[str, Any]:
     """Delete an imported public CA bundle."""
     url = f"{CERTD_API_BASE}/certs/ca/delete-external"
     try:
-        response = _post(url, json={"ca_id": ca_id}, timeout=10.0)
+        response = _post(url, json={"ca_id": ca_id, "actor": _actor()}, timeout=10.0)
         data = response.json()
     except Exception as exc:  # pylint: disable=broad-except
         return {"ok": False, "error": f"haproxy-certd request failed: {exc}"}
@@ -928,7 +955,7 @@ def delete_haproxy_cert(path: str) -> Dict[str, Any]:
         return {"ok": False, "error": "empty path"}
 
     url = f"{CERTD_API_BASE}/certs/delete-haproxy"
-    payload = {"path": path}
+    payload = {"path": path, "actor": _actor()}
 
     try:
         resp = _post(url, json=payload, timeout=10.0)
@@ -964,7 +991,7 @@ def delete_le_cert(lineage: str) -> Dict[str, Any]:
         return {"ok": False, "error": "empty lineage"}
 
     url = f"{CERTD_API_BASE}/certs/delete-le"
-    payload = {"lineage": lineage}
+    payload = {"lineage": lineage, "actor": _actor()}
 
     try:
         resp = _post(url, json=payload, timeout=60.0)

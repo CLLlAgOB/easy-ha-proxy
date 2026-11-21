@@ -314,6 +314,7 @@ class InstrumentationTests(unittest.TestCase):
         "routes_ssh_security.py": ("ssh.monitoring", "ssh.protection", "ssh.unban"),
         "routes_runtime.py": ("backend.state", "backend.weight"),
         "routes_config_history.py": ("config.restore",),
+        "routes_trash.py": ("trash.restore", "trash.delete", "trash.empty"),
         "routes_access_portal.py": ("access_portal.settings", "access_portal.upload", "access_portal.delete"),
         "routes_dns_providers.py": ("dns_provider.save", "dns_provider.delete"),
         "routes_alerts.py": ("alerts.config", "alerts.test"),

@@ -64,6 +64,7 @@ class CertificateAuthorityTests(unittest.TestCase):
         CERTD.HAPROXY_CERTS_DIR = (root / "certs").resolve()
         CERTD.CA_ROOT_DIR = (root / "certificate-authorities").resolve()
         CERTD.LETSENCRYPT_ROOT_DIR = (root / "letsencrypt").resolve()
+        CERTD.TRASH_DIR = (root / "trash").resolve()
         CERTD.CERTBOT_BIN = root / "certbot"
         CERTD.CERTBOT_BIN.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         CERTD.CERTD_DRY_RUN = True

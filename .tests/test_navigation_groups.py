@@ -32,6 +32,7 @@ EXPECTED_ENDPOINTS = {
     "routes.haproxy_udp_page",
     "routes.haproxy_config_page",
     "routes.config_history_page",
+    "routes.trash_page",
     "routes.haproxy_geoip_page",
     "routes.haproxy_certs_page",
     "routes.dns_providers_page",

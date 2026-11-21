@@ -281,14 +281,14 @@ def _delete_tcp_proxy(name: str) -> Tuple[bool, str]:
         return False, 'Invalid tcp.yml structure (expected a tcp_proxies/tcp list)'
 
     new_list: List[Dict[str, Any]] = []
-    removed = False
+    removed: Optional[Dict[str, Any]] = None
     for t in proxies:
-        if t.get("name") == name:
-            removed = True
+        if removed is None and t.get("name") == name:
+            removed = t
             continue
         new_list.append(t)
 
-    if not removed:
+    if removed is None:
         return False, f"TCP proxy with name={name!r} not found"
 
     data["tcp_proxies"] = new_list
@@ -300,4 +300,34 @@ def _delete_tcp_proxy(name: str) -> Tuple[bool, str]:
         default_flow_style=False,
     )
     ok, msg = update_yaml_file("tcp", content)
+    if ok:
+        from . import trash
+
+        trash.put("tcp", name, removed)
+        msg = f"{msg} The TCP proxy was moved to the trash and can be restored there."
     return ok, msg
+
+
+def restore_tcp_proxy(entry: Dict[str, Any]) -> Tuple[bool, str]:
+    """Put a deleted TCP proxy back, held to the rules a new one would be."""
+    with source_lock("tcp"):
+        data = _load_yaml(TCP_YAML)
+        proxies = data.get("tcp_proxies")
+        if proxies is None:
+            proxies = data.get("tcp")
+        if proxies is None:
+            proxies = []
+        if not isinstance(proxies, list):
+            return False, 'Invalid tcp.yml structure (expected a tcp_proxies/tcp list)'
+        conflict = tcp_identity_conflict(entry, proxies)
+        if conflict:
+            return False, conflict
+        proxies.append(entry)
+        data["tcp_proxies"] = proxies
+        content = yaml.safe_dump(
+            data,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+        return update_yaml_file("tcp", content)

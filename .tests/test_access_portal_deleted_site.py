@@ -124,6 +124,11 @@ class TheStorage(unittest.TestCase):
 @unittest.skipUnless(store, "Linux application imports")
 class TheSite(unittest.TestCase):
     def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        env = patch.dict(os.environ, {"HAPROXY_ADMIN_TRASH_DIR": str(Path(folder.name) / "trash")})
+        env.start()
+        self.addCleanup(env.stop)
         self.data = {"sites": [{"name": "support", "domain": "support.example.test", "access_gate": True}]}
         self.addCleanup(patch.stopall)
         patch.object(sites, "source_lock", side_effect=lambda _kind: nullcontext()).start()

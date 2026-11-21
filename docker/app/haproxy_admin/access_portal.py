@@ -78,7 +78,34 @@ def discard(site, now=None):
         trash.mkdir(mode=0o700, exist_ok=True)
         if trash.is_symlink() or not trash.is_dir():
             raise ValueError('Invalid portal storage directory')
-        os.replace(directory, trash / f'{directory.name}-{int(now)}-{uuid.uuid4().hex[:8]}')
+        stored = f'{directory.name}-{int(now)}-{uuid.uuid4().hex[:8]}'
+        os.replace(directory, trash / stored)
+    # The name it waits under, so a site restored from the panel's trash can
+    # take its page back. Truthy, as the True this used to return.
+    return stored
+
+
+def restore(site, stored):
+    """Give a restored site back the page it had when it was deleted.
+
+    False when there is nothing to give back: the files have waited out
+    their term, or the site has a page of its own again by now.
+    """
+    match = _TRASHED.fullmatch(str(stored or ''))
+    name = hashlib.sha256(site.encode('utf-8')).hexdigest()
+    if match is None or not stored.startswith(name + '-'):
+        return False
+    source = root() / TRASH / stored
+    if source.is_symlink() or not source.is_dir():
+        return False
+    target = root() / name
+    if target.is_symlink():
+        return False
+    if target.is_dir():
+        if any(entry.name != '.lock' for entry in target.iterdir()):
+            return False
+        shutil.rmtree(target)
+    os.replace(source, target)
     return True
 
 

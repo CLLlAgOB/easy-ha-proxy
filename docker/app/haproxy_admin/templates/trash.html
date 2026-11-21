@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}Trash{% endblock %}
+{% block header_title %}Trash{% endblock %}
+
+{% block content %}
+
+
+<div class="notice-info rt-notice">
+  Deleted sites, TCP proxies, UDP forwards, certificates, certificate authorities, DNS profiles and certificate delivery targets wait here before they are removed for good. Restoring puts an item back exactly as it was, provided nothing of the same name has taken its place.
+</div>
+
+<div class="cd-banner error" id="tr-errors" hidden data-i18n-skip translate="no"></div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Deleted items</h2>
+    <span class="mon-sub" id="tr-count" data-i18n-skip translate="no"></span>
+  </div>
+
+  <p class="mon-sub">
+    Items are deleted for good automatically 30 days after they were deleted.
+  </p>
+
+  <p class="mon-sub">
+    A restored site or TCP proxy is saved but not yet in HAProxy: apply the configuration afterwards. A restored UDP forward is applied at once.
+  </p>
+
+  <div class="table-wrap">
+    <table class="backup-table">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Name</th>
+          <th>Details</th>
+          <th>Deleted</th>
+          <th>Deleted by</th>
+          <th>Removed for good</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tr-body" data-i18n-skip translate="no">
+        <tr><td colspan="7" class="muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="ap-sim-actions">
+    <button class="btn btn-danger" type="button" id="tr-empty" disabled>Empty the trash</button>
+    <span class="mon-sub" id="tr-result" data-i18n-skip translate="no"></span>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/trash.js') }}"></script>
+{% endblock %}

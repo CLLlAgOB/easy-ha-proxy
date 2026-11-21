@@ -747,15 +747,27 @@ def save_dns_provider(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": name, "provider": provider}
 
 
-def delete_dns_provider(name: str) -> Dict[str, Any]:
+def delete_dns_provider(name: str, actor: str = "") -> Dict[str, Any]:
     path = _dns_profile_path(str(name or "").strip().lower())
     used = _dns_profile_lineages(path.stem)
     if used:
         raise ValueError("this DNS profile is used for automatic renewal by " + ", ".join(used))
     existed = path.exists()
-    with contextlib.suppress(FileNotFoundError):
-        path.unlink()
-    return {"name": path.stem, "deleted": existed}
+    kept = None
+    if existed:
+        provider = _read_dns_profile(path).get("provider") or ""
+        kept = _trash_put(
+            "dns_provider", path.stem, [path], actor=actor,
+            details={"provider": provider},
+        )
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    except OSError:
+        if kept:
+            _trash_drop(kept)
+        raise
+    return {"name": path.stem, "deleted": existed, "trash_id": kept}
 
 
 def _dns_provider_of(name: str) -> str:
@@ -1713,9 +1725,11 @@ def handle_dns_provider_save(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]
 
 def handle_dns_provider_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     try:
-        removed = delete_dns_provider(body.get("name"))
+        removed = delete_dns_provider(body.get("name"), str(body.get("actor") or ""))
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
+    except OSError as exc:
+        return 500, {"ok": False, "error": f"cannot delete the DNS profile: {exc}"}
     return 200, {"ok": True, **removed}
 
 
@@ -1926,14 +1940,33 @@ def _write_delivery_secret(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def delete_cert_delivery(name: Any) -> Dict[str, Any]:
+def delete_cert_delivery(name: Any, actor: str = "") -> Dict[str, Any]:
     checked = _delivery_name(name)
-    for path in _delivery_paths(checked):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-    return {"name": checked, "deleted": True}
+    paths = _delivery_paths(checked)
+    kept = None
+    if any(path.exists() for path in paths):
+        details: Dict[str, Any] = {}
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            record = json.loads(paths[0].read_text(encoding="utf-8"))
+            details = {
+                key: record.get(key)
+                for key in ("lineage", "host", "format", "transport")
+                if isinstance(record.get(key), (str, int))
+            }
+        kept = _trash_put("cert_delivery", checked, list(paths), actor=actor, details=details)
+    present = [path for path in paths if path.exists()]
+    try:
+        for path in paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+    except OSError:
+        # Dropped only if nothing went yet; a half-removed target keeps its copy.
+        if kept and all(path.exists() for path in present):
+            _trash_drop(kept)
+        raise
+    return {"name": checked, "deleted": True, "trash_id": kept}
 
 
 def test_cert_delivery(name: Any) -> Dict[str, Any]:
@@ -2163,9 +2196,11 @@ def handle_delivery_save(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
 def handle_delivery_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     try:
-        removed = delete_cert_delivery(body.get("name"))
+        removed = delete_cert_delivery(body.get("name"), str(body.get("actor") or ""))
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
+    except OSError as exc:
+        return 500, {"ok": False, "error": f"cannot delete the delivery target: {exc}"}
     return 200, {"ok": True, **removed}
 
 
@@ -3337,7 +3372,7 @@ def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
     return result
 
 
-def delete_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
+def delete_standby_certificate(domain: Any, slot: Any, actor: str = "") -> Dict[str, Any]:
     checked_domain = _standby_key(domain)
     checked_slot = _standby_slot(slot)
     if read_pin(checked_domain) == checked_slot:
@@ -3346,7 +3381,20 @@ def delete_standby_certificate(domain: Any, slot: Any) -> Dict[str, Any]:
             "before removing it"
         )
     path = _standby_path(checked_domain, checked_slot)
-    path.unlink(missing_ok=True)
+    kept = None
+    if path.is_file():
+        details = _cert_details(path)
+        details["slot"] = checked_slot
+        kept = _trash_put(
+            "standby", f"{checked_domain} ({checked_slot})", [path],
+            actor=actor, details=details,
+        )
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        if kept:
+            _trash_drop(kept)
+        raise
     holder = path.parent
     if holder.is_dir() and not any(holder.iterdir()):
         holder.rmdir()
@@ -3702,7 +3750,7 @@ def handle_standby_release(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 def handle_standby_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     try:
         return 200, delete_standby_certificate(
-            body.get("domain"), body.get("slot")
+            body.get("domain"), body.get("slot"), str(body.get("actor") or "")
         )
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
@@ -3907,8 +3955,19 @@ def handle_internal_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
                     {"path": str(path), "domains": names} for path, names in affected
                 ],
             }
-        shutil.rmtree(key_path.parent)
-    return 200, {"ok": True, "message": "Internal certificate authority deleted."}
+        try:
+            kept = _trash_put(
+                "internal_ca", "internal", [key_path.parent],
+                actor=str(body.get("actor") or ""), details=_cert_details(cert_path),
+            )
+        except (OSError, ValueError) as exc:
+            return 500, {"ok": False, "error": f"cannot keep a copy in the trash, nothing deleted: {exc}"}
+        try:
+            shutil.rmtree(key_path.parent)
+        except OSError as exc:
+            _trash_drop(kept)
+            return 500, {"ok": False, "error": f"cannot delete the internal certificate authority: {exc}"}
+    return 200, {"ok": True, "message": "Internal certificate authority moved to the trash."}
 
 
 class UploadedFile:
@@ -4044,7 +4103,21 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         return 400, {"ok": False, "error": str(exc)}
     if not path.is_file():
         return 404, {"ok": False, "error": "certificate authority was not found"}
-    path.unlink()
+    trusted_before = ca_id in _load_client_auth_ids()
+    try:
+        details = _cert_details(path)
+        kept = _trash_put(
+            "external_ca", ca_id, [path],
+            actor=str(body.get("actor") or ""), details=details,
+            extra={"client_auth": trusted_before},
+        )
+    except (OSError, ValueError) as exc:
+        return 500, {"ok": False, "error": f"cannot keep a copy in the trash, nothing deleted: {exc}"}
+    try:
+        path.unlink()
+    except OSError as exc:
+        _trash_drop(kept)
+        return 500, {"ok": False, "error": f"cannot delete the certificate authority: {exc}"}
     # Leaving a deleted authority in the client-auth list would keep its names
     # in an issuers file that nothing can regenerate.
     trusted = _load_client_auth_ids()
@@ -4053,7 +4126,7 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         status, response = handle_ca_client_auth({"ids": remaining})
         if not response.get("ok"):
             return status, response
-    return 200, {"ok": True, "message": f"External certificate authority deleted: {ca_id}"}
+    return 200, {"ok": True, "message": f"External certificate authority moved to the trash: {ca_id}"}
 
 
 # ───────────────────── one upload, sorted by what it turns out to be ─────
@@ -4850,14 +4923,23 @@ def handle_delete_haproxy(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         return 200, {"ok": False, "error": f"file not found: {target}"}
 
     try:
+        kept = _trash_put(
+            "haproxy_cert", target.name, [target],
+            actor=str(body.get("actor") or ""), details=_cert_details(target),
+        )
+    except (OSError, ValueError) as exc:
+        return 200, {"ok": False, "error": f"cannot keep a copy in the trash, nothing deleted: {exc}"}
+    try:
         target.unlink()
     except OSError as exc:
+        _trash_drop(kept)
         return 200, {"ok": False, "error": f"failed to delete {target}: {exc}"}
 
     return 200, {
         "ok": True,
-        "message": f"HAProxy certificate deleted: {target}",
+        "message": f"HAProxy certificate moved to the trash: {target}",
         "path": str(target),
+        "trash_id": kept,
     }
 
 
@@ -4880,6 +4962,30 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         "--non-interactive",
     ]
 
+    # Everything certbot is about to remove: the lineage's live links, its
+    # archive of every issued copy, its renewal settings, and the DNS profile
+    # binding this daemon keeps beside them.
+    le_root = _get_letsencrypt_root_dir()
+    pieces = [
+        le_root / "live" / lineage,
+        le_root / "archive" / lineage,
+        le_root / "renewal" / f"{lineage}.conf",
+        _dns_binding_path(lineage),
+    ]
+    kept = None
+    if any(os.path.lexists(piece) for piece in pieces[:3]):
+        try:
+            kept = _trash_put(
+                "letsencrypt", lineage, pieces,
+                actor=str(body.get("actor") or ""),
+                details=_cert_details(le_root / "live" / lineage / "cert.pem"),
+            )
+        except (OSError, ValueError) as exc:
+            return 200, {
+                "ok": False,
+                "error": f"cannot keep a copy in the trash, nothing deleted: {exc}",
+            }
+
     LOG.info("Running certbot delete: %s", " ".join(cmd))
 
     proc = _run_bounded(cmd, timeout=CERTBOT_QUICK_TIMEOUT_SECONDS)
@@ -4888,14 +4994,369 @@ def handle_delete_le(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     ok = rc == 0
     if ok:
         _dns_binding_path(lineage).unlink(missing_ok=True)
+    elif kept:
+        _trash_drop(kept)
+        kept = None
 
     return 200, {
+        "trash_id": kept,
         "ok": ok,
         "rc": rc,
         "cmd": " ".join(cmd),
         "stdout": proc.stdout,
         "stderr": proc.stderr,
     }
+
+
+# ───────────────────── the trash ─────────────────────
+#
+# A deletion here used to be final: a certificate unlinked, a lineage handed
+# to `certbot delete`, an authority's directory removed. Now everything a
+# deletion is about to remove is copied aside first, and the panel's trash
+# page can put it back for TRASH_SECONDS.
+#
+# The copy is taken before the deletion and dropped again if the deletion
+# fails, so the trash never holds something that is still in service, and a
+# half-done deletion never loses the only copy. Owners and modes go back as
+# they were: HAProxy, certbot and the delivery worker each read these files
+# under rules of their own.
+#
+# Never inside the crt directory: HAProxy loads every file there, and one
+# that is not a certificate is a fatal configuration error. Only metadata
+# ever leaves this daemon -- never a key, never a credential.
+
+TRASH_DIR = Path(
+    os.environ.get("HAPROXY_CERTD_TRASH_DIR", "/var/lib/easy-ha-proxy/cert-trash")
+)
+TRASH_SECONDS = 30 * 86400
+TRASH_KINDS = (
+    "haproxy_cert",
+    "letsencrypt",
+    "standby",
+    "external_ca",
+    "internal_ca",
+    "dns_provider",
+    "cert_delivery",
+)
+_TRASH_ID_RE = re.compile(r"^(?P<at>[0-9]{1,12})-[a-f0-9]{12}$")
+TRASH_LOCK = threading.RLock()
+
+
+def _trash_root(create: bool = False) -> Path:
+    if create:
+        TRASH_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(TRASH_DIR, 0o700)
+    if TRASH_DIR.is_symlink():
+        raise ValueError("invalid trash directory")
+    return TRASH_DIR
+
+
+def _copy_owned(source: Path, destination: Path) -> None:
+    """Copy a file, a symlink or a directory tree with its owners and modes."""
+
+    if source.is_symlink():
+        os.symlink(os.readlink(source), destination)
+        os.lchown(destination, source.lstat().st_uid, source.lstat().st_gid)
+        return
+    if source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+        for walk_root, dirs, files in os.walk(source):
+            relative = Path(walk_root).relative_to(source)
+            for name in [""] + dirs + files:
+                origin = Path(walk_root) / name if name else Path(walk_root)
+                target = destination / relative / name if name else destination / relative
+                info = origin.lstat()
+                os.lchown(target, info.st_uid, info.st_gid)
+        return
+    shutil.copy2(source, destination)
+    info = source.stat()
+    os.chown(destination, info.st_uid, info.st_gid)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _trash_put(
+    kind: str,
+    name: str,
+    paths: Sequence[Path],
+    *,
+    actor: str = "",
+    details: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Copy what a deletion is about to remove; the item's id.
+
+    Written under a temporary name and renamed into place, so the trash
+    never lists half an item.
+    """
+
+    if kind not in TRASH_KINDS:
+        raise ValueError("unknown trash kind")
+    present = [path for path in paths if os.path.lexists(path)]
+    if not present:
+        raise ValueError("nothing to keep in the trash")
+    now = int(time.time())
+    item_id = f"{now}-{os.urandom(6).hex()}"
+    with TRASH_LOCK:
+        root = _trash_root(create=True)
+        staging = Path(tempfile.mkdtemp(prefix=".tmp-", dir=root))
+        try:
+            entries = []
+            for index, path in enumerate(present):
+                stored = str(index)
+                _copy_owned(path, staging / stored)
+                parent = path.parent.stat()
+                entries.append({
+                    "path": str(path),
+                    "stored": stored,
+                    "parent_mode": stat.S_IMODE(parent.st_mode),
+                    "parent_uid": parent.st_uid,
+                    "parent_gid": parent.st_gid,
+                })
+            meta = {
+                "id": item_id,
+                "kind": kind,
+                "name": str(name),
+                "deleted_at": now,
+                "deleted_by": str(actor or "")[:200],
+                "details": details or {},
+                "extra": extra or {},
+                "paths": entries,
+            }
+            (staging / "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
+            )
+            staging.replace(root / item_id)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        _trash_purge_locked(now)
+    return item_id
+
+
+def _trash_drop(item_id: str) -> None:
+    """Forget an item whose deletion did not go through."""
+
+    with TRASH_LOCK:
+        shutil.rmtree(_trash_item_dir(item_id), ignore_errors=True)
+
+
+def _trash_item_dir(item_id: str) -> Path:
+    if not _TRASH_ID_RE.fullmatch(str(item_id or "")):
+        raise ValueError("unknown trash item")
+    return _trash_root() / str(item_id)
+
+
+def _trash_meta(item_id: str) -> Dict[str, Any]:
+    directory = _trash_item_dir(item_id)
+    meta_path = directory / "meta.json"
+    if directory.is_symlink() or meta_path.is_symlink() or not meta_path.is_file():
+        raise ValueError("unknown trash item")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(meta, dict) or meta.get("kind") not in TRASH_KINDS:
+        raise ValueError("unknown trash item")
+    if not isinstance(meta.get("paths"), list):
+        raise ValueError("unknown trash item")
+    return meta
+
+
+def _trash_purge_locked(now: Optional[float] = None) -> int:
+    root = _trash_root()
+    if not root.is_dir():
+        return 0
+    now = time.time() if now is None else now
+    removed = 0
+    for entry in root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        match = _TRASH_ID_RE.fullmatch(entry.name)
+        if match is not None:
+            if now - int(match.group("at")) >= TRASH_SECONDS:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        elif entry.name.startswith(".tmp-") and now - entry.stat().st_mtime > 3600:
+            # A copy cut short by a crash.
+            shutil.rmtree(entry, ignore_errors=True)
+    return removed
+
+
+def list_trash() -> Dict[str, Any]:
+    items: List[Dict[str, Any]] = []
+    with TRASH_LOCK:
+        _trash_purge_locked()
+        root = _trash_root()
+        if root.is_dir():
+            for entry in root.iterdir():
+                if not _TRASH_ID_RE.fullmatch(entry.name):
+                    continue
+                try:
+                    meta = _trash_meta(entry.name)
+                except (OSError, ValueError):
+                    continue
+                items.append({
+                    "id": meta["id"],
+                    "kind": meta["kind"],
+                    "name": meta.get("name") or "",
+                    "details": meta.get("details") or {},
+                    "deleted_at": int(meta.get("deleted_at") or 0),
+                    "deleted_by": meta.get("deleted_by") or "",
+                    "expires_at": int(meta.get("deleted_at") or 0) + TRASH_SECONDS,
+                })
+    items.sort(key=lambda item: (item["deleted_at"], item["id"]), reverse=True)
+    return {"items": items, "keep_seconds": TRASH_SECONDS}
+
+
+_TRASH_ROOTS = {
+    "haproxy_cert": lambda: [_get_haproxy_certs_dir()],
+    "letsencrypt": lambda: [_get_letsencrypt_root_dir()],
+    "standby": lambda: [_certs_available_root()],
+    "external_ca": lambda: [_get_ca_root_dir()],
+    "internal_ca": lambda: [_get_ca_root_dir()],
+    "dns_provider": lambda: [DNS_CREDENTIALS_DIR],
+    "cert_delivery": lambda: [DELIVERY_DIR],
+}
+
+
+def _trash_targets(meta: Dict[str, Any]) -> List[Tuple[Path, Path, Dict[str, Any]]]:
+    """Where each stored piece goes back to, refused outside its own home."""
+
+    directory = _trash_item_dir(meta["id"])
+    bases = [base.resolve() for base in _TRASH_ROOTS[meta["kind"]]()]
+    targets = []
+    for entry in meta["paths"]:
+        if not isinstance(entry, dict):
+            raise ValueError("damaged trash item")
+        target = Path(str(entry.get("path") or ""))
+        stored = str(entry.get("stored") or "")
+        if not target.is_absolute() or not stored.isdigit():
+            raise ValueError("damaged trash item")
+        resolved_parent = target.parent.resolve()
+        candidate = resolved_parent / target.name
+        if not any(candidate == base or base in candidate.parents for base in bases):
+            raise ValueError(f"refusing to restore outside the certificate directories: {target}")
+        source = directory / stored
+        if not os.path.lexists(source):
+            raise ValueError("damaged trash item")
+        targets.append((source, candidate, entry))
+    return targets
+
+
+def restore_trash_item(item_id: str) -> Dict[str, Any]:
+    with TRASH_LOCK, _STANDBY_SWITCH_LOCK, contextlib.ExitStack() as held:
+        meta = _trash_meta(item_id)
+        if meta["kind"] in ("internal_ca", "external_ca"):
+            # Not reentrant, and the client-trust rebuild below takes it
+            # again: held only while the files go back.
+            held.enter_context(CA_LOCK)
+        targets = _trash_targets(meta)
+        taken = [str(target) for _, target, _ in targets if os.path.lexists(target)]
+        if taken:
+            raise ValueError(
+                "something of the same name is in place now; delete or rename it first: "
+                + ", ".join(taken)
+            )
+        if meta["kind"] == "internal_ca":
+            key_path, cert_path = _internal_ca_paths()
+            if key_path.exists() or cert_path.exists():
+                raise ValueError(
+                    "a new internal certificate authority has been created since; "
+                    "it has to be deleted before the old one can come back"
+                )
+        written: List[Path] = []
+        try:
+            for source, target, entry in targets:
+                if not target.parent.exists():
+                    target.parent.mkdir(parents=True, mode=int(entry.get("parent_mode") or 0o700))
+                    os.chmod(target.parent, int(entry.get("parent_mode") or 0o700))
+                    with contextlib.suppress(OSError, TypeError):
+                        os.chown(target.parent, int(entry["parent_uid"]), int(entry["parent_gid"]))
+                    written.append(target.parent)
+                _copy_owned(source, target)
+                written.append(target)
+        except BaseException:
+            for path in reversed(written):
+                with contextlib.suppress(OSError):
+                    _remove_path(path)
+            raise
+        shutil.rmtree(_trash_item_dir(item_id), ignore_errors=True)
+    notes: List[str] = []
+    if meta["kind"] == "external_ca" and (meta.get("extra") or {}).get("client_auth"):
+        ca_id = str(meta.get("name") or "")
+        trusted = _load_client_auth_ids()
+        if ca_id and ca_id not in trusted:
+            status, response = handle_ca_client_auth({"ids": trusted + [ca_id]})
+            if not response.get("ok"):
+                notes.append(
+                    "it was trusted for client certificates before; trust it again "
+                    "on the certificates page (" + str(response.get("error") or status) + ")"
+                )
+    LOG.info("Restored %s %s from the trash", meta["kind"], meta.get("name"))
+    return {
+        "kind": meta["kind"],
+        "name": meta.get("name") or "",
+        "paths": [str(target) for _, target, _ in targets],
+        "notes": notes,
+    }
+
+
+def purge_trash(item_id: Optional[str] = None) -> Dict[str, Any]:
+    with TRASH_LOCK:
+        if item_id:
+            meta = _trash_meta(item_id)
+            shutil.rmtree(_trash_item_dir(item_id))
+            return {"removed": 1, "kind": meta["kind"], "name": meta.get("name") or ""}
+        removed = 0
+        root = _trash_root()
+        if root.is_dir():
+            for entry in root.iterdir():
+                if _TRASH_ID_RE.fullmatch(entry.name) and not entry.is_symlink() and entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                    removed += 1
+        return {"removed": removed}
+
+
+def _cert_details(path: Path) -> Dict[str, Any]:
+    """What the trash page shows about a certificate: names and expiry."""
+
+    with contextlib.suppress(Exception):
+        item = _build_cert_item_for_list(path)
+        if item:
+            return {"domains": item.get("domains") or [], "not_after": item.get("not_after")}
+    return {}
+
+
+def handle_trash_list(_body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        return 200, {"ok": True, **list_trash()}
+    except (OSError, ValueError) as exc:
+        return 500, {"ok": False, "error": f"cannot read the trash: {exc}"}
+
+
+def handle_trash_restore(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    try:
+        restored = restore_trash_item(str(body.get("id") or ""))
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except OSError as exc:
+        return 500, {"ok": False, "error": f"cannot restore: {exc}"}
+    return 200, {"ok": True, **restored}
+
+
+def handle_trash_purge(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    item_id = str(body.get("id") or "")
+    if not item_id and body.get("all") is not True:
+        return 400, {"ok": False, "error": "id or all is required"}
+    try:
+        return 200, {"ok": True, **purge_trash(item_id or None)}
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except OSError as exc:
+        return 500, {"ok": False, "error": f"cannot delete: {exc}"}
 
 
 # ───────────────────── an HTTP server over a Unix socket ─────────────────────
@@ -5071,6 +5532,12 @@ class CertdHandler(BaseHTTPRequestHandler):
                 status, resp = handle_delivery_save(body)
             elif path == "/api/v1/certs/deliveries/delete":
                 status, resp = handle_delivery_delete(body)
+            elif path == "/api/v1/certs/trash":
+                status, resp = handle_trash_list(body)
+            elif path == "/api/v1/certs/trash/restore":
+                status, resp = handle_trash_restore(body)
+            elif path == "/api/v1/certs/trash/purge":
+                status, resp = handle_trash_purge(body)
             elif path == "/api/v1/certs/deliveries/test":
                 status, resp = handle_delivery_test(body)
             else:

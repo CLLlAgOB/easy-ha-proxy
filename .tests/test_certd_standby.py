@@ -58,6 +58,7 @@ class StandbyFixture(unittest.TestCase):
         CERTD.HAPROXY_CERTS_DIR = (root / "certs").resolve()
         CERTD.CERTS_AVAILABLE_DIR = (root / "certs-available").resolve()
         CERTD.LETSENCRYPT_ROOT_DIR = (root / "letsencrypt").resolve()
+        CERTD.TRASH_DIR = (root / "trash").resolve()
         CERTD.HAPROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
         self.reloads = []

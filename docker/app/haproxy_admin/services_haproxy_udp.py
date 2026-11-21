@@ -376,10 +376,48 @@ def _delete_udp(name: str) -> Tuple[bool, str]:
     if not isinstance(forwards, list):
         return False, "Invalid udp.yml structure (expected a udp_forwards list)"
 
-    new_list = [f for f in forwards if f.get("name") != name]
-    if len(new_list) == len(forwards):
+    removed = next((f for f in forwards if f.get("name") == name), None)
+    if removed is None:
         return False, f"UDP forward with name={name!r} not found"
+    new_list = [f for f in forwards if f.get("name") != name]
 
     data.pop("udp", None)
     data["udp_forwards"] = new_list
-    return _write_and_apply(data)
+    ok, msg = _write_and_apply(data)
+    if ok:
+        from . import trash
+
+        trash.put("udp", name, removed)
+        msg = f"{msg} The UDP forward was moved to the trash and can be restored there."
+    return ok, msg
+
+
+def restore_udp_forward(entry: Dict[str, Any]) -> Tuple[bool, str]:
+    """Put a deleted UDP forward back and apply it, as adding one does."""
+    with source_lock("udp"):
+        data = _load_yaml(UDP_YAML)
+        forwards = data.get("udp_forwards")
+        if forwards is None:
+            forwards = data.get("udp")
+        if forwards is None:
+            forwards = []
+        if not isinstance(forwards, list):
+            return False, "Invalid udp.yml structure (expected a udp_forwards list)"
+        name = str(entry.get("name") or "")
+        if any(f.get("name") == name for f in forwards):
+            return False, f"UDP forward with name={name!r} already exists"
+        try:
+            start, end, _value = _parse_port_range(entry.get("listen_port"), "listen_port")
+        except ValueError as exc:
+            return False, str(exc)
+        overlap = _overlapping_forward(forwards, start=start, end=end)
+        if overlap:
+            return False, overlap
+        if entry.get("enabled", True):
+            conflict = udp_listen_port_conflict(start, end)
+            if conflict:
+                return False, conflict
+        forwards.append(entry)
+        data.pop("udp", None)
+        data["udp_forwards"] = forwards
+        return _write_and_apply(data)

@@ -249,6 +249,7 @@ class CertdTests(unittest.TestCase):
             mock.patch.object(CERTD, "CA_ROOT_DIR", self.ca_root),
             mock.patch.object(CERTD, "MTLS_DIR", self.mtls),
             mock.patch.object(CERTD, "HAPROXY_CFG", self.config),
+            mock.patch.object(CERTD, "TRASH_DIR", root / "trash"),
         ]
         for patch in patches:
             patch.start()

@@ -56,6 +56,7 @@ from . import routes_security  # noqa: F401
 from . import routes_runtime  # noqa: F401
 from . import routes_audit  # noqa: F401
 from . import routes_config_history  # noqa: F401
+from . import routes_trash  # noqa: F401
 from . import routes_cert_delivery  # noqa: F401
 from . import routes_dns_providers  # noqa: F401
 from . import routes_alerts  # noqa: F401
