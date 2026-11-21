@@ -240,7 +240,11 @@ def _purge_locked(directory: Path, now: float, days: Optional[int] = None) -> Li
             continue  # nothing this module wrote
         if _expired(int(match.group("at")), now, days):
             item = _read(path)
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                LOG.warning("Expired trash item %s could not be removed", path.name, exc_info=True)
+                continue
             if item is not None:
                 gone.append(item)
     return gone
@@ -397,8 +401,8 @@ def _summary(item: Dict[str, Any], days: int) -> Dict[str, Any]:
     }
 
 
-def items(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    """What can be put back, newest first. Expired entries go on the way."""
+def list_with_term(now: Optional[float] = None) -> Tuple[List[Dict[str, Any]], int]:
+    """What can be put back (newest first) alongside the term read under the same lock."""
     now = time.time() if now is None else now
     with _locked() as directory:
         days = keep_days()
@@ -407,6 +411,12 @@ def items(now: Optional[float] = None) -> List[Dict[str, Any]]:
     _forget_pages(gone)
     listed = [_summary(item, days) for item in found if item is not None]
     listed.sort(key=lambda item: (item["deleted_at"], item["id"]), reverse=True)
+    return listed, days
+
+
+def items(now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """What can be put back, newest first. Expired entries go on the way."""
+    listed, _days = list_with_term(now)
     return listed
 
 
@@ -483,7 +493,8 @@ def restore(item_id: str, now: Optional[float] = None) -> Dict[str, Any]:
         return {"ok": False, "error": message, "kind": item["kind"], "name": item["name"]}
     result = {"ok": True, "message": message, "kind": item["kind"], "name": item["name"]}
     result.update({key: value for key, value in (info or {}).items() if value})
-    claim.unlink(missing_ok=True)
+    with _locked():
+        claim.unlink(missing_ok=True)
     return result
 
 
@@ -510,19 +521,43 @@ def remove(item_id: str) -> Dict[str, Any]:
     return {"ok": True, "kind": item["kind"], "name": item["name"]}
 
 
+def empty_detailed(now: Optional[float] = None) -> Tuple[int, List[str]]:
+    """Delete everything in this trash for good; (removed count, per-item errors)."""
+    now = time.time() if now is None else now
+    gone: List[Dict[str, Any]] = []
+    failed: List[str] = []
+    removed = 0
+    try:
+        with _locked() as directory:
+            # Recover abandoned restore claims so a crashed restore does not
+            # reappear after the operator emptied the trash.
+            for claim in directory.glob(f"*{CLAIM}"):
+                try:
+                    stale = now - claim.stat().st_mtime > CLAIM_SECONDS
+                except OSError:
+                    continue
+                if stale and _ID.fullmatch(claim.stem) and not claim.is_symlink():
+                    with suppress(OSError):
+                        os.replace(claim, claim.with_suffix(".json"))
+            for path in directory.glob("*.json"):
+                if _ID.fullmatch(path.stem) and not path.is_symlink():
+                    item = _read(path)
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        failed.append(f"{path.stem}: {exc}")
+                        continue
+                    removed += 1
+                    if item is not None:
+                        gone.append(item)
+    finally:
+        _forget_pages(gone)
+    return removed, failed
+
+
 def empty() -> int:
     """Delete everything in this trash for good; how many items went."""
-    gone: List[Dict[str, Any]] = []
-    removed = 0
-    with _locked() as directory:
-        for path in directory.glob("*.json"):
-            if _ID.fullmatch(path.stem) and not path.is_symlink():
-                item = _read(path)
-                path.unlink(missing_ok=True)
-                removed += 1
-                if item is not None:
-                    gone.append(item)
-    _forget_pages(gone)
+    removed, _failed = empty_detailed()
     return removed
 
 

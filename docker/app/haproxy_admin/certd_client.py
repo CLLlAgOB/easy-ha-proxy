@@ -40,7 +40,7 @@ if requests_unixsocket is not None and CERTD_SOCKET_PATH:
     # The usual mode: HTTP over a Unix socket
     encoded = quote_plus(CERTD_SOCKET_PATH)
     CERTD_API_BASE = f"http+unix://{encoded}/api/v1"
-    _session: requests.Session = requests_unixsocket.Session()  # type: ignore[assignment]
+    _use_unix_socket = True
     log.debug("haproxy-certd: using UNIX socket %s", CERTD_SOCKET_PATH)
 else:
     # TCP fallback, only without requests-unixsocket or a socket path.
@@ -48,7 +48,7 @@ else:
         "CERTD_HTTP_BASE",
         "http://127.0.0.1:5001/api/v1",
     )
-    _session = requests.Session()
+    _use_unix_socket = False
     if requests_unixsocket is None:
         log.warning(
             "requests-unixsocket is not installed; using TCP %s",
@@ -61,14 +61,23 @@ else:
         )
 
 
+def _new_session() -> requests.Session:
+    """Short-lived session per request: safe across Gunicorn worker threads."""
+    if _use_unix_socket and requests_unixsocket is not None:
+        return requests_unixsocket.Session()  # type: ignore[return-value]
+    return requests.Session()
+
+
 def _post(url: str, **kwargs) -> requests.Response:
-    """session.post, wrapped for uniformity."""
-    return _session.post(url, **kwargs)
+    """session.post, wrapped for uniformity and thread safety."""
+    with _new_session() as session:
+        return session.post(url, **kwargs)
 
 
 def _get(url: str, **kwargs) -> requests.Response:
-    """session.get, wrapped for uniformity."""
-    return _session.get(url, **kwargs)
+    """session.get, wrapped for uniformity and thread safety."""
+    with _new_session() as session:
+        return session.get(url, **kwargs)
 
 
 class CertdUnavailable(RuntimeError):
@@ -87,7 +96,7 @@ def _actor() -> str:
     return ""
 
 
-def _dns_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _dns_request(path: str, payload: Dict[str, Any], *, timeout: float = 70.0) -> Dict[str, Any]:
     """A request to certd's DNS provider section.
 
     The answer never contains stored secrets: the daemon does not hand them out.
@@ -95,7 +104,7 @@ def _dns_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     url = f"{CERTD_API_BASE}/certs/{path}"
     try:
-        resp = _post(url, json=payload, timeout=70.0)
+        resp = _post(url, json=payload, timeout=timeout)
     except Exception as exc:  # pylint: disable=broad-except
         log.warning("haproxy-certd unreachable (%s): %s", url, exc)
         raise CertdUnavailable(str(exc)) from exc
@@ -143,7 +152,7 @@ def trash_purge(item_id: str = "", everything: bool = False) -> Dict[str, Any]:
 def trash_settings(keep_days: Optional[int] = None) -> Dict[str, Any]:
     """certd's term for its trash; with keep_days, set it first."""
     payload: Dict[str, Any] = {} if keep_days is None else {"keep_days": int(keep_days)}
-    return _dns_request("trash/settings", payload)
+    return _dns_request("trash/settings", payload, timeout=15.0)
 
 
 def _delivery_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:

@@ -57,8 +57,8 @@ def _get_json(
     accepted_error_statuses: tuple[int, ...] = (),
 ) -> Dict[str, Any]:
     url = _base_url() + path
-    s = _session()
-    resp = s.get(url, params=params or {}, timeout=timeout, headers=_headers())
+    with _session() as s:
+        resp = s.get(url, params=params or {}, timeout=timeout, headers=_headers())
     if resp.status_code not in accepted_error_statuses:
         resp.raise_for_status()
     try:
@@ -115,8 +115,8 @@ def healthd_logs_docker(container: str, tail: int = 200, since: int = 3600) -> D
 
 def _post_json(path: str, json_payload: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
     url = _base_url() + path
-    s = _session()
-    resp = s.post(url, json=json_payload, timeout=timeout, headers=_headers())
+    with _session() as s:
+        resp = s.post(url, json=json_payload, timeout=timeout, headers=_headers())
     resp.raise_for_status()
     try:
         return resp.json()

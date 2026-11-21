@@ -1249,7 +1249,6 @@ def _validate_ca_bundle(data: bytes) -> List[x509.Certificate]:
 
 
 def _set_cert_permissions(path: Path) -> None:
-    os.chmod(path, 0o640)
     try:
         import grp
         import pwd
@@ -1257,6 +1256,7 @@ def _set_cert_permissions(path: Path) -> None:
         os.chown(path, pwd.getpwnam("root").pw_uid, grp.getgrnam("haproxy").gr_gid)
     except Exception:  # pragma: no cover - depends on system accounts
         pass
+    os.chmod(path, 0o640)
 
 
 def _reload_haproxy() -> Tuple[Optional[int], str, str]:
@@ -3378,30 +3378,31 @@ def release_to_letsencrypt(domain: Any) -> Dict[str, Any]:
 def delete_standby_certificate(domain: Any, slot: Any, actor: str = "") -> Dict[str, Any]:
     checked_domain = _standby_key(domain)
     checked_slot = _standby_slot(slot)
-    if read_pin(checked_domain) == checked_slot:
-        raise ValueError(
-            "that standby is in service; hand the name back to Let's Encrypt "
-            "before removing it"
-        )
-    path = _standby_path(checked_domain, checked_slot)
-    kept = None
-    if path.is_file():
-        details = _cert_details(path)
-        details["slot"] = checked_slot
-        kept = _trash_put(
-            "standby", f"{checked_domain} ({checked_slot})", [path],
-            actor=actor, details=details,
-        )
-    before = _trash_listing([path])
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        _trash_settle(kept, before, [path])
-        raise
-    _trash_commit(kept)
-    holder = path.parent
-    if holder.is_dir() and not any(holder.iterdir()):
-        holder.rmdir()
+    with _STANDBY_SWITCH_LOCK:
+        if read_pin(checked_domain) == checked_slot:
+            raise ValueError(
+                "that standby is in service; hand the name back to Let's Encrypt "
+                "before removing it"
+            )
+        path = _standby_path(checked_domain, checked_slot)
+        kept = None
+        if path.is_file():
+            details = _cert_details(path)
+            details["slot"] = checked_slot
+            kept = _trash_put(
+                "standby", f"{checked_domain} ({checked_slot})", [path],
+                actor=actor, details=details,
+            )
+        before = _trash_listing([path])
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _trash_settle(kept, before, [path])
+            raise
+        _trash_commit(kept)
+        holder = path.parent
+        if holder.is_dir() and not any(holder.iterdir()):
+            holder.rmdir()
     LOG.info("Deleted standby certificate %s for %s", checked_slot, checked_domain)
     return {"ok": True, "domain": checked_domain, "slot": checked_slot}
 
@@ -4115,25 +4116,26 @@ def handle_external_ca_delete(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]
         path = _ensure_within(external_dir, external_dir / f"{ca_id}.pem")
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
-    if not path.is_file():
-        return 404, {"ok": False, "error": "certificate authority was not found"}
-    trusted_before = ca_id in _load_client_auth_ids()
-    try:
-        details = _cert_details(path)
-        kept = _trash_put(
-            "external_ca", ca_id, [path],
-            actor=str(body.get("actor") or ""), details=details,
-            extra={"client_auth": trusted_before},
-        )
-    except (OSError, ValueError) as exc:
-        return 500, {"ok": False, "error": f"cannot keep a copy in the trash, nothing deleted: {exc}"}
-    before = _trash_listing([path])
-    try:
-        path.unlink()
-    except OSError as exc:
-        _trash_settle(kept, before, [path])
-        return 500, {"ok": False, "error": f"cannot delete the certificate authority: {exc}"}
-    _trash_commit(kept)
+    with CA_LOCK:
+        if not path.is_file():
+            return 404, {"ok": False, "error": "certificate authority was not found"}
+        trusted_before = ca_id in _load_client_auth_ids()
+        try:
+            details = _cert_details(path)
+            kept = _trash_put(
+                "external_ca", ca_id, [path],
+                actor=str(body.get("actor") or ""), details=details,
+                extra={"client_auth": trusted_before},
+            )
+        except (OSError, ValueError) as exc:
+            return 500, {"ok": False, "error": f"cannot keep a copy in the trash, nothing deleted: {exc}"}
+        before = _trash_listing([path])
+        try:
+            path.unlink()
+        except OSError as exc:
+            _trash_settle(kept, before, [path])
+            return 500, {"ok": False, "error": f"cannot delete the certificate authority: {exc}"}
+        _trash_commit(kept)
     # Leaving a deleted authority in the client-auth list would keep its names
     # in an issuers file that nothing can regenerate.
     trusted = _load_client_auth_ids()
@@ -4937,6 +4939,8 @@ def handle_delete_haproxy(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
     if not target.exists():
         return 200, {"ok": False, "error": f"file not found: {target}"}
+    if target == base_dir or not target.is_file():
+        return 200, {"ok": False, "error": f"refusing to delete non-file path: {target}"}
 
     try:
         kept = _trash_put(
@@ -5089,6 +5093,26 @@ def _trash_root(create: bool = False) -> Path:
     return TRASH_DIR
 
 
+def _copy_file_owned(source: Path, destination: Path) -> None:
+    """Copy a regular file without ever exposing it under a looser mode or group."""
+
+    info = source.stat()
+    fd = os.open(str(destination), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as dst:
+            fd = -1
+            with source.open("rb") as src:
+                shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+            os.fchown(dst.fileno(), info.st_uid, info.st_gid)
+            os.fchmod(dst.fileno(), stat.S_IMODE(info.st_mode))
+    finally:
+        if fd != -1:
+            os.close(fd)
+    os.utime(destination, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
 def _copy_owned(source: Path, destination: Path) -> None:
     """Copy a file, a symlink or a directory tree with its owners and modes."""
 
@@ -5097,18 +5121,39 @@ def _copy_owned(source: Path, destination: Path) -> None:
         os.lchown(destination, source.lstat().st_uid, source.lstat().st_gid)
         return
     if source.is_dir():
-        shutil.copytree(source, destination, symlinks=True)
+        dir_infos: List[Tuple[Path, os.stat_result]] = []
+        os.mkdir(destination, 0o700)
+        dir_infos.append((destination, source.lstat()))
         for walk_root, dirs, files in os.walk(source):
-            relative = Path(walk_root).relative_to(source)
-            for name in [""] + dirs + files:
-                origin = Path(walk_root) / name if name else Path(walk_root)
-                target = destination / relative / name if name else destination / relative
-                info = origin.lstat()
-                os.lchown(target, info.st_uid, info.st_gid)
+            root_path = Path(walk_root)
+            relative = root_path.relative_to(source)
+            dst_root = destination / relative if str(relative) != "." else destination
+            for name in dirs:
+                origin = root_path / name
+                target = dst_root / name
+                if origin.is_symlink():
+                    os.symlink(os.readlink(origin), target)
+                    info = origin.lstat()
+                    os.lchown(target, info.st_uid, info.st_gid)
+                else:
+                    os.mkdir(target, 0o700)
+                    dir_infos.append((target, origin.lstat()))
+            for name in files:
+                origin = root_path / name
+                target = dst_root / name
+                if origin.is_symlink():
+                    os.symlink(os.readlink(origin), target)
+                    info = origin.lstat()
+                    os.lchown(target, info.st_uid, info.st_gid)
+                else:
+                    _copy_file_owned(origin, target)
+        # Apply ownership before final modes, deepest directories first.
+        for target, info in reversed(dir_infos):
+            os.chown(target, info.st_uid, info.st_gid)
+            os.chmod(target, stat.S_IMODE(info.st_mode))
+            os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
         return
-    shutil.copy2(source, destination)
-    info = source.stat()
-    os.chown(destination, info.st_uid, info.st_gid)
+    _copy_file_owned(source, destination)
 
 
 def _remove_path(path: Path) -> None:
@@ -5132,6 +5177,19 @@ def _trash_listing(paths: Sequence[Path]) -> List[str]:
     return sorted(found)
 
 
+def _trash_fingerprints(paths: Sequence[Path]) -> List[List[Any]]:
+    """Path and lstat identity of every entry left under paths."""
+
+    found: List[List[Any]] = []
+    for item in _trash_listing(paths):
+        try:
+            info = os.lstat(item)
+        except OSError:
+            continue
+        found.append([item, info.st_ino, info.st_size, info.st_mtime_ns])
+    return found
+
+
 def _trash_settle(kept: Optional[str], before: List[str], paths: Sequence[Path]) -> Optional[str]:
     """After a failed deletion: drop the copy only if nothing at all went.
 
@@ -5149,7 +5207,11 @@ def _trash_settle(kept: Optional[str], before: List[str], paths: Sequence[Path])
     # What the failed deletion left behind, so a restore can tell those
     # leftovers from something created since and put the whole copy back
     # over them.
-    _trash_update_extra(kept, leftovers=left)
+    _trash_update_extra(
+        kept,
+        leftovers=left,
+        leftover_fingerprints=_trash_fingerprints(paths),
+    )
     _trash_commit(kept)
     return kept
 
@@ -5304,15 +5366,31 @@ def _trash_commit(item_id: Optional[str]) -> None:
         LOG.exception("cannot list trash item %s yet", item_id)
 
 
-def _trash_update_extra(item_id: str, **extra: Any) -> None:
-    with contextlib.suppress(OSError, ValueError):
+def _trash_update_extra(item_id: str, **extra: Any) -> bool:
+    try:
         with TRASH_LOCK:
             meta_path = _trash_pending_dir(item_id) / "meta.json"
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             meta["extra"] = dict(meta.get("extra") or {}, **extra)
-            temporary = meta_path.with_name(".meta.json.tmp")
-            temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-            temporary.replace(meta_path)
+            raw = (json.dumps(meta, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+            temporary = meta_path.with_name(f".meta.json.{os.urandom(4).hex()}.tmp")
+            fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    fd = -1
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temporary.replace(meta_path)
+            except BaseException:
+                if fd != -1:
+                    os.close(fd)
+                temporary.unlink(missing_ok=True)
+                raise
+        return True
+    except (OSError, ValueError):
+        LOG.warning("cannot update metadata for pending trash item %s", item_id, exc_info=True)
+        return False
 
 
 def _trash_drop(item_id: str) -> None:
@@ -5352,23 +5430,30 @@ def _trash_purge_locked(now: Optional[float] = None) -> int:
         return 0
     now = time.time() if now is None else now
     days = trash_keep_days()
-    removed = 0
-    for entry in root.iterdir():
+    # First pass: clean abandoned staging dirs and promote stale pending copies
+    # so any promoted copy that has also outlived the term is purged below.
+    for entry in list(root.iterdir()):
         if entry.is_symlink() or not entry.is_dir():
             continue
-        match = _TRASH_ID_RE.fullmatch(entry.name)
-        if match is not None:
-            if _trash_expired(int(match.group("at")), now, days):
-                shutil.rmtree(entry, ignore_errors=True)
-                removed += 1
-        elif entry.name.startswith(".tmp-") and now - entry.stat().st_mtime > 3600:
+        if entry.name.startswith(".tmp-") and now - entry.stat().st_mtime > 3600:
             # A copy cut short by a crash.
             shutil.rmtree(entry, ignore_errors=True)
         elif entry.name.startswith(".pending-") and now - entry.stat().st_mtime > 3600:
             # A deletion cut short by a crash may well have gone through.
-            if _TRASH_ID_RE.fullmatch(entry.name[len(".pending-"):]):
+            promoted_name = entry.name[len(".pending-"):]
+            if _TRASH_ID_RE.fullmatch(promoted_name):
                 with contextlib.suppress(OSError):
-                    os.replace(entry, root / entry.name[len(".pending-"):])
+                    os.replace(entry, root / promoted_name)
+    removed = 0
+    if days <= 0:
+        return 0
+    for entry in list(root.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        match = _TRASH_ID_RE.fullmatch(entry.name)
+        if match is not None and _trash_expired(int(match.group("at")), now, days):
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
     return removed
 
 
@@ -5423,17 +5508,28 @@ def _trash_targets(meta: Dict[str, Any]) -> List[Tuple[Path, Path, Dict[str, Any
             raise ValueError("damaged trash item")
         target = Path(str(entry.get("path") or ""))
         stored = str(entry.get("stored") or "")
-        if not target.is_absolute() or not stored.isdigit():
+        if not target.is_absolute() or target.name in ("", ".", "..") or not stored.isdigit():
             raise ValueError("damaged trash item")
         resolved_parent = target.parent.resolve()
         candidate = resolved_parent / target.name
-        if not any(candidate == base or base in candidate.parents for base in bases):
+        if not any(base in candidate.parents for base in bases):
             raise ValueError(f"refusing to restore outside the certificate directories: {target}")
         source = directory / stored
         if not os.path.lexists(source):
             raise ValueError("damaged trash item")
         targets.append((source, candidate, entry))
     return targets
+
+
+def _trash_staging_dir(target_parent: Path, kind: str) -> Path:
+    """Keep temporary files out of HAProxy's crt directory when on the same filesystem."""
+
+    if kind == "haproxy_cert":
+        trash_root = _trash_root(create=True)
+        with contextlib.suppress(OSError):
+            if trash_root.stat().st_dev == target_parent.stat().st_dev:
+                return trash_root
+    return target_parent
 
 
 def restore_trash_item(item_id: str) -> Dict[str, Any]:
@@ -5453,15 +5549,24 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
         if meta["kind"] != kind:
             raise ValueError("damaged trash item")
         targets = _trash_targets(meta)
-        taken = [str(target) for _, target, _ in targets if os.path.lexists(target)]
+        target_paths = [target for _, target, _ in targets]
+        taken = [str(target) for target in target_paths if os.path.lexists(target)]
         # A deletion that stopped part-way (certbot removes the renewal
         # settings first) left pieces of the very thing in the trash. Exactly
         # those pieces, and nothing new, are moved aside and replaced by the
         # whole copy; anything else in the way is refused.
-        leftovers = (meta.get("extra") or {}).get("leftovers")
-        replacing = bool(taken) and isinstance(leftovers, list) and _trash_listing(
-            [Path(str(entry.get("path") or "")) for entry in meta["paths"]]
-        ) == sorted(str(value) for value in leftovers)
+        extra = meta.get("extra") or {}
+        leftovers = extra.get("leftovers")
+        leftover_fingerprints = extra.get("leftover_fingerprints")
+        replacing = (
+            bool(taken)
+            and isinstance(leftovers, list)
+            and _trash_listing(target_paths) == sorted(str(value) for value in leftovers)
+            and (
+                not isinstance(leftover_fingerprints, list)
+                or _trash_fingerprints(target_paths) == leftover_fingerprints
+            )
+        )
         if taken and not replacing:
             raise ValueError(
                 "something of the same name is in place now; delete or rename it first: "
@@ -5474,10 +5579,10 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
                     "a new internal certificate authority has been created since; "
                     "it has to be deleted before the old one can come back"
                 )
-        # Each piece is copied under a hidden temporary name beside its place
-        # and renamed in only when whole: a copy cut short (a full disk) never
-        # leaves a broken PEM where HAProxy or certbot would read it, and
-        # never makes the place look taken to the next attempt.
+        # Each piece is copied under a hidden temporary name (outside HAProxy's
+        # crt directory when on the same filesystem) and renamed in only when
+        # whole: a copy cut short never leaves a broken PEM where HAProxy or
+        # certbot would read it, and never makes the place look taken.
         written: List[Path] = []
         staged: List[Path] = []
         aside: List[Tuple[Path, Path]] = []
@@ -5489,11 +5594,12 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
                     with contextlib.suppress(OSError, TypeError):
                         os.chown(target.parent, int(entry["parent_uid"]), int(entry["parent_gid"]))
                     written.append(target.parent)
+                stage_dir = _trash_staging_dir(target.parent, meta["kind"])
                 if replacing and os.path.lexists(target):
-                    moved = target.parent / f".replaced-{os.urandom(6).hex()}"
+                    moved = stage_dir / f".replaced-{os.urandom(6).hex()}"
                     os.rename(target, moved)
                     aside.append((moved, target))
-                temporary = target.parent / f".restore-{os.urandom(6).hex()}"
+                temporary = stage_dir / f".restore-{os.urandom(6).hex()}"
                 staged.append(temporary)
                 _copy_owned(source, temporary)
                 try:
@@ -5510,7 +5616,13 @@ def restore_trash_item(item_id: str) -> Dict[str, Any]:
                     _remove_path(path)
             for moved, target in reversed(aside):
                 with contextlib.suppress(OSError):
-                    os.rename(moved, target)
+                    try:
+                        _rename_noreplace(moved, target)
+                    except FileExistsError:
+                        # Something new appeared at target while rolling back:
+                        # never replace it with the old leftover.
+                        LOG.warning("cannot restore leftover %s: %s already exists", moved, target)
+                        _remove_path(moved)
             raise
         for moved, _target in aside:
             with contextlib.suppress(OSError):

@@ -131,13 +131,13 @@ class UnixHttp:
         if with_token and self.token_header and self.token:
             headers[self.token_header] = self.token
         try:
-            session = requests_unixsocket.Session()
-            if method == "GET":
-                response = session.get(self.url(path), params=params or {}, timeout=timeout,
-                                       headers=headers)
-            else:
-                response = session.post(self.url(path), json=body, timeout=timeout,
-                                        headers=headers)
+            with requests_unixsocket.Session() as session:
+                if method == "GET":
+                    response = session.get(self.url(path), params=params or {}, timeout=timeout,
+                                           headers=headers)
+                else:
+                    response = session.post(self.url(path), json=body, timeout=timeout,
+                                            headers=headers)
         except Exception as exc:  # pylint: disable=broad-except
             raise self.unavailable(str(exc)) from exc
 

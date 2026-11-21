@@ -82,7 +82,9 @@ def discard(site, now=None):
     directory = root() / hashlib.sha256(site.encode('utf-8')).hexdigest()
     if directory.is_symlink() or not directory.is_dir():
         return False
-    with _locked(site):
+    with _site_lock(site):
+        if directory.is_symlink() or not directory.is_dir():
+            return False
         trash = root() / TRASH
         trash.mkdir(mode=0o700, exist_ok=True)
         if trash.is_symlink() or not trash.is_dir():
@@ -107,14 +109,17 @@ def restore(site, stored):
     source = root() / TRASH / stored
     if source.is_symlink() or not source.is_dir():
         return False
-    target = root() / name
-    if target.is_symlink():
-        return False
-    if target.is_dir():
-        if any(entry.name != '.lock' for entry in target.iterdir()):
+    with _site_lock(site):
+        if source.is_symlink() or not source.is_dir():
             return False
-        shutil.rmtree(target)
-    os.replace(source, target)
+        target = root() / name
+        if target.is_symlink():
+            return False
+        if target.is_dir():
+            if any(entry.name != '.lock' for entry in target.iterdir()):
+                return False
+            shutil.rmtree(target)
+        os.replace(source, target)
     return True
 
 
@@ -165,11 +170,22 @@ def _open(path, flags, mode=0o600):
 
 
 @contextmanager
-def _locked(site):
-    directory = _directory(site)
-    with os.fdopen(_open(directory / '.lock', os.O_CREAT | os.O_RDWR), 'r+') as lock:
+def _site_lock(site):
+    """Per-site lock outside the site directory so discard/restore never move the lock."""
+    locks = root() / '.locks'
+    locks.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if locks.is_symlink() or not locks.is_dir():
+        raise ValueError('Invalid portal storage directory')
+    lock_path = locks / hashlib.sha256(site.encode('utf-8')).hexdigest()
+    with os.fdopen(_open(lock_path, os.O_CREAT | os.O_RDWR), 'r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        yield directory
+        yield
+
+
+@contextmanager
+def _locked(site):
+    with _site_lock(site):
+        yield _directory(site)
 
 
 def _load(directory):

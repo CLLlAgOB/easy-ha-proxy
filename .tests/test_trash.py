@@ -875,6 +875,75 @@ class CertdKeepsWhatItDeletes(CertdFixture):
         source = CERTD_PATH.read_text(encoding="utf-8")
         self.assertIn(f'"HAPROXY_CERTD_TRASH_DIR", "{default}"', source)
 
+    def test_tampered_dotdot_or_root_target_is_refused(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        target.write_bytes(self.pem())
+        _, answer = CERTD.handle_delete_haproxy({"path": str(target)})
+        meta_path = CERTD.TRASH_DIR / answer["trash_id"] / "meta.json"
+        for bad in (str(self.root / "certs" / ".."), str(self.root / "certs")):
+            meta = json.loads(meta_path.read_text())
+            meta["paths"][0]["path"] = bad
+            meta_path.write_text(json.dumps(meta))
+            status, _ = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+            self.assertEqual(status, 400, bad)
+
+    def test_handle_delete_haproxy_refuses_directory_itself(self):
+        _, answer = CERTD.handle_delete_haproxy({"path": str(self.root / "certs")})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(CERTD.list_trash()["items"], [])
+
+    def test_haproxy_cert_restore_stages_outside_crt_directory(self):
+        target = self.root / "certs" / "shop.example.test.pem"
+        target.write_bytes(self.pem())
+        _, answer = CERTD.handle_delete_haproxy({"path": str(target)})
+        seen_parents = []
+        real_copy = CERTD._copy_owned
+
+        def spy_copy(src, dst):
+            seen_parents.append(Path(dst).parent)
+            return real_copy(src, dst)
+
+        with mock.patch.object(CERTD, "_copy_owned", side_effect=spy_copy):
+            status, restored = CERTD.handle_trash_restore({"id": answer["trash_id"]})
+        self.assertEqual(status, 200, restored)
+        self.assertEqual(seen_parents, [CERTD.TRASH_DIR])
+
+    def test_modified_leftover_is_not_overwritten_on_restore(self):
+        tree = self.root / "ca" / "internal"
+        tree.mkdir(parents=True)
+        (tree / "ca.key").write_text("old-key")
+        (tree / "ca.crt").write_text("old-crt")
+        kept = CERTD._trash_put("internal_ca", "internal", [tree])
+        before = CERTD._trash_listing([tree])
+        (tree / "ca.key").unlink()
+        self.assertEqual(CERTD._trash_settle(kept, before, [tree]), kept)
+        # Operator replaces the remaining cert manually: restore must refuse.
+        (tree / "ca.crt").write_text("operator-replacement-crt")
+        status, refused = CERTD.handle_trash_restore({"id": kept})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual((tree / "ca.crt").read_text(), "operator-replacement-crt")
+
+    def test_rollback_during_replacing_does_not_clobber_new_file(self):
+        tree = self.root / "ca" / "internal"
+        tree.mkdir(parents=True)
+        (tree / "ca.key").write_text("old-key")
+        (tree / "ca.crt").write_text("old-crt")
+        kept = CERTD._trash_put("internal_ca", "internal", [tree])
+        before = CERTD._trash_listing([tree])
+        (tree / "ca.key").unlink()
+        self.assertEqual(CERTD._trash_settle(kept, before, [tree]), kept)
+        real_copy = CERTD._copy_owned
+
+        def race_new_tree(src, dst):
+            real_copy(src, dst)
+            tree.mkdir()
+            (tree / "ca.crt").write_text("brand-new-ca")
+
+        with mock.patch.object(CERTD, "_copy_owned", side_effect=race_new_tree):
+            status, refused = CERTD.handle_trash_restore({"id": kept})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual((tree / "ca.crt").read_text(), "brand-new-ca")
+
 
 class ThePage(unittest.TestCase):
     APP = ROOT / "docker" / "app" / "haproxy_admin"

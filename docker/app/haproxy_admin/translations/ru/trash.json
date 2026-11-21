@@ -52,6 +52,10 @@
     "Saved for sites and forwards, but not for certificates:": "Сохранено для сайтов и пробросов, но не для сертификатов:",
     "The site is gone from websites.yml all the same; it was kept in the trash.": "Сайта всё равно уже нет в websites.yml; его копия сохранена в корзине.",
     "The TCP proxy is gone from tcp.yml all the same; it was kept in the trash.": "TCP-прокси всё равно уже нет в tcp.yml; его копия сохранена в корзине.",
-    "The UDP forward is gone from udp.yml all the same; it was kept in the trash.": "UDP-проброса всё равно уже нет в udp.yml; его копия сохранена в корзине."
+    "The UDP forward is gone from udp.yml all the same; it was kept in the trash.": "UDP-проброса всё равно уже нет в udp.yml; его копия сохранена в корзине.",
+    "Its access page could not be restored.": "Не удалось восстановить его страницу доступа.",
+    "Its access page could not be put back automatically.": "Не удалось автоматически вернуть его страницу доступа.",
+    "Enable Authelia before restoring a service site": "Включите Authelia перед восстановлением служебного сайта",
+    "Unknown trash item": "Запись в корзине не найдена"
   }
 }

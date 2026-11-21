@@ -551,8 +551,8 @@ def _delete_site_by_name(name: str) -> Tuple[bool, str]:
     if not ok:
         if trash.settle(kept, _site_in_source(name)):
             return False, f"{msg} The site is gone from websites.yml all the same; it was kept in the trash."
-        if stored:
-            _put_access_page_back(name, stored)
+        if stored and not _put_access_page_back(name, stored):
+            return False, f"{msg} Its access page could not be put back automatically."
         return ok, msg
     trash.commit(kept)
     return ok, f"{msg} The site was moved to the trash and can be restored there."
@@ -569,13 +569,14 @@ def _site_in_source(name: str) -> bool:
     )
 
 
-def _put_access_page_back(name: str, stored: str) -> None:
+def _put_access_page_back(name: str, stored: str) -> bool:
     try:
         from . import access_portal
 
-        access_portal.restore(name, stored)
+        return bool(access_portal.restore(name, stored))
     except Exception:  # pylint: disable=broad-except
         logger.warning("The access page of site %r could not be put back", name, exc_info=True)
+        return False
 
 
 # What the trash page shows when a restored service site has no login rule.
@@ -594,6 +595,8 @@ def restore_site(entry: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) 
     info: Dict[str, Any] = {}
     page = str((extra or {}).get("access_page") or "")
     with source_lock("websites"):
+        if entry.get("access_gate") is True and _load_yaml(CONFIG_YAML).get("authelia_enabled", True) is False:
+            return False, "Enable Authelia before restoring a service site", info
         data = _load_yaml(WEBSITES_YAML)
         sites = data.get("sites") or []
         if not isinstance(sites, list):
@@ -621,7 +624,11 @@ def restore_site(entry: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) 
         names = [domain] + [
             str(a).strip() for a in (entry.get("alt_names") or []) if str(a).strip()
         ]
-        rule_ok, rule_msg = _ensure_access_gate_authelia_rule(names)
+        try:
+            rule_ok, rule_msg = _ensure_access_gate_authelia_rule(names)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Authelia login rule for restored site %r failed", domain, exc_info=True)
+            rule_ok, rule_msg = False, str(exc)
         message = _with_gate_rule_outcome(msg, domain, rule_ok, rule_msg)
         if not rule_ok:
             info["warning"] = GATE_RULE_WARNING

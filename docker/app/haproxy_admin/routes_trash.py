@@ -75,6 +75,11 @@ def _certd_items() -> Dict[str, Any]:
     return {"items": items, "error": "", "keep_days": keep_days if isinstance(keep_days, int) else None}
 
 
+def _json_body() -> Dict[str, Any]:
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else {}
+
+
 @bp.get("/haproxy/trash")
 def trash_page():
     return render_template("trash.html", max_keep_days=trash.MAX_KEEP_DAYS)
@@ -85,18 +90,22 @@ def api_trash_list():
     if not _superadmin():
         return jsonify({"ok": False, "error": "superadmin required"}), 403
     try:
-        items = trash.items()
+        items, panel_keep_days = trash.list_with_term()
         panel_error = ""
     except (OSError, trash.TrashError) as exc:
         LOG.warning("panel trash unreadable: %s", exc)
-        items, panel_error = [], "The trash of sites and forwards cannot be read"
+        items, panel_keep_days, panel_error = (
+            [],
+            trash.keep_days(),
+            "The trash of sites and forwards cannot be read",
+        )
     certd = _certd_items()
     merged = items + certd["items"]
     merged.sort(key=lambda item: (item["deleted_at"], item["id"]), reverse=True)
     return jsonify({
         "ok": True,
         "items": merged,
-        "keep_days": trash.keep_days(),
+        "keep_days": panel_keep_days,
         # Shown when certd keeps its items on another term than the panel's
         # (it was down when the term was last saved): saving again aligns them.
         "certd_keep_days": certd["keep_days"],
@@ -106,14 +115,18 @@ def api_trash_list():
 
 @bp.post("/api/haproxy/trash/settings")
 def api_trash_settings():
-    payload = request.get_json(silent=True) or {}
+    payload = _json_body()
     if not _superadmin():
         return _denied("trash.settings", "settings")
+    try:
+        days = trash.normalize_keep_days(payload.get("keep_days"))
+    except trash.TrashError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     # Both keepers under one lock: two changes interleaved could otherwise
     # each answer "saved" and leave the panel and certd on different terms.
     try:
         with trash.settings_lock():
-            days = trash.set_keep_days(payload.get("keep_days"))
+            days = trash.set_keep_days(days)
             error = ""
             try:
                 answer = trash_settings(days)
@@ -146,7 +159,7 @@ def api_trash_settings():
 
 
 def _target() -> tuple[str, str]:
-    payload = request.get_json(silent=True) or {}
+    payload = _json_body()
     return str(payload.get("source") or ""), str(payload.get("id") or "")
 
 
@@ -163,9 +176,23 @@ def api_trash_restore():
         else:
             result = trash_restore(item_id)
     except trash.TrashError as exc:
+        record_request(
+            "trash.restore",
+            object_type="trash",
+            object_id=item_id,
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
         return jsonify({"ok": False, "error": str(exc)}), 404
     except CertdUnavailable as exc:
         LOG.warning("certd unavailable: %s", exc)
+        record_request(
+            "trash.restore",
+            object_type="trash",
+            object_id=item_id,
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
         return jsonify({"ok": False, "unavailable": True, "error": str(exc)}), 503
     record_request(
         "trash.restore",
@@ -193,11 +220,32 @@ def api_trash_delete():
     try:
         result = trash.remove(item_id) if source == "panel" else trash_purge(item_id)
     except trash.TrashError as exc:
+        record_request(
+            "trash.delete",
+            object_type="trash",
+            object_id=item_id,
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
         return jsonify({"ok": False, "error": str(exc)}), 404
     except CertdUnavailable as exc:
         LOG.warning("certd unavailable: %s", exc)
+        record_request(
+            "trash.delete",
+            object_type="trash",
+            object_id=item_id,
+            result=RESULT_FAILURE,
+            detail=str(exc)[:500],
+        )
         return jsonify({"ok": False, "unavailable": True, "error": str(exc)}), 503
     if not result.get("ok"):
+        record_request(
+            "trash.delete",
+            object_type=str(result.get("kind") or "trash"),
+            object_id=str(result.get("name") or item_id),
+            result=RESULT_FAILURE,
+            detail=str(result.get("error") or "")[:500],
+        )
         return jsonify(result), 400
     record_request(
         "trash.delete",
@@ -215,7 +263,12 @@ def api_trash_empty():
     errors = []
     removed = 0
     try:
-        removed += trash.empty()
+        panel_removed, panel_failed = trash.empty_detailed()
+        removed += panel_removed
+        if panel_failed:
+            errors.append(
+                f"{len(panel_failed)} items could not be deleted: " + "; ".join(panel_failed)
+            )
     except (OSError, trash.TrashError) as exc:
         errors.append(str(exc))
     try:
@@ -233,4 +286,4 @@ def api_trash_empty():
         result=RESULT_FAILURE if errors else RESULT_SUCCESS,
         detail=(f"{removed} items deleted for good" + ("; " + "; ".join(errors) if errors else ""))[:500],
     )
-    return jsonify({"ok": not errors, "removed": removed, "error": "; ".join(errors)})
+    return jsonify({"ok": not errors, "removed": removed, "error": "; ".join(errors)}), (502 if errors else 200)

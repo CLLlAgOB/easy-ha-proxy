@@ -147,7 +147,9 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.ok === false) {
-      throw new Error(payload.error || `HTTP ${response.status}`);
+      const error = new Error(payload.error || `HTTP ${response.status}`);
+      error.payload = payload;
+      throw error;
     }
     return payload;
   }
@@ -159,7 +161,7 @@
     try {
       await work();
     } catch (error) {
-      say(String(error.message || error), true);
+      say(t(String(error.message || error)), true);
     } finally {
       busy = false;
       await load();
@@ -171,6 +173,7 @@
     run(async () => {
       const payload = await post("/api/haproxy/trash/restore", { source: item.source, id: item.id });
       let message = `${t("Restored")}: ${item.name}.`;
+      let warn = Boolean(payload.warning);
       if (payload.warning) {
         message += " " + t(payload.warning);
       }
@@ -179,11 +182,14 @@
       }
       if (payload.access_page === "gone") {
         message += " " + t("Its access page had already been removed for good.");
+      } else if (payload.access_page === "failed") {
+        message += " " + t("Its access page could not be restored.");
+        warn = true;
       }
       (payload.notes || []).forEach((note) => {
         message += ` ${note}.`;
       });
-      say(message, Boolean(payload.warning));
+      say(message, warn);
       if (payload.apply_needed) {
         document.dispatchEvent(new CustomEvent("easy-ha-proxy:config-state-changed"));
       }
@@ -202,8 +208,19 @@
     if (!items.length) return;
     if (!window.confirm(t("Delete everything in the trash for good? This cannot be undone."))) return;
     run(async () => {
-      const payload = await post("/api/haproxy/trash/empty", {});
-      say(`${t("Items deleted for good")}: ${payload.removed || 0}.`, false);
+      try {
+        const payload = await post("/api/haproxy/trash/empty", {});
+        say(`${t("Items deleted for good")}: ${payload.removed || 0}.`, false);
+      } catch (error) {
+        const removed = Number(error?.payload?.removed || 0);
+        const detail = t(String(error.message || error));
+        say(
+          removed > 0
+            ? `${t("Items deleted for good")}: ${removed}. ${detail}`
+            : detail,
+          true
+        );
+      }
     });
   }
 
