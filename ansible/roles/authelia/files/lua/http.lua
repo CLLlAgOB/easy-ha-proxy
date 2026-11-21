@@ -148,19 +148,19 @@ end
 -- @return Table with parsed keys and values or nil
 local function parse_kv(s, sep)
     if s == nil then return nil end
-    local idx = 1
-    local result = {}
+    idx = 1
+    result = {}
 
     while idx < s:len() do
-        local i, j = s:find(sep, idx)
+        i, j = s:find(sep, idx)
 
         if i == nil then
-            local k, v = string.match(s:sub(idx), "^(.-)=(.*)$")
+            k, v = string.match(s:sub(idx), "^(.-)=(.*)$")
             if k then result[k] = v end
             break
         end
 
-        local k, v = string.match(s:sub(idx, i-1), "^(.-)=(.*)$")
+        k, v = string.match(s:sub(idx, i-1), "^(.-)=(.*)$")
         if k then result[k] = v end
         idx = j + 1
     end
@@ -739,20 +739,18 @@ function M.send(method, t)
                 r.status_code = tonumber(r.status_code)
             else
                 local sep = line:find(":")
-                if sep then
-                    local hdr_name = line:sub(1, sep-1):lower()
-                    local hdr_val = line:sub(sep+1):match("^%s*(.*%S)%s*$") or ""
+                local hdr_name = line:sub(1, sep-1):lower()
+                local hdr_val = line:sub(sep+1):match("^%s*(.*%S)%s*$") or ""
 
-                    if r.headers[hdr_name] == nil then
-                        r.headers[hdr_name] = hdr_val
-                    elseif type(r.headers[hdr_name]) == "table" then
-                        table.insert(r.headers[hdr_name], hdr_val)
-                    else
-                        r.headers[hdr_name] = {
-                            r.headers[hdr_name],
-                            hdr_val
-                        }
-                    end
+                if r.headers[hdr_name] == nil then
+                    r.headers[hdr_name] = hdr_val
+                elseif type(r.headers[hdr_name]) == "table" then
+                    table.insert(r.headers[hdr_name], hdr_val)
+                else
+                    r.headers[hdr_name] = {
+                        r.headers[hdr_name],
+                        hdr_val
+                    }
                 end
             end
         end

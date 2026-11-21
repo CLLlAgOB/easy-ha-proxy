@@ -1032,13 +1032,14 @@ frontend fe_https
 {% set _ = authelia_hosts.append(admin_domain) %}
 {% endif %}
 
+{% set authelia_forward_req_headers = 'x-forwarded-method,x-forwarded-proto,x-forwarded-host,x-forwarded-uri,x-forwarded-for,cookie,authorization,proxy-authorization,accept,origin,user-agent,x-requested-with' %}
 {% if authelia_hosts | length > 0 %}
 {% set admin_probe_condition = ' !admin_control_plane_probe' if admin_domain is defined else '' %}
 {% if admin_domain is defined and (metrics_export_enabled | default(false)) %}
 {% set admin_probe_condition = admin_probe_condition ~ ' !admin_metrics_scrape' %}
 {% endif %}
     acl authelia_protected hdr(host) -i {{ authelia_hosts | unique | join(' ') }}
-    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD {{ authelia_forward_req_headers }} remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
     http-request deny if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
     http-request redirect location %[var(txn.auth_response_location)] if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
     http-request deny status 503 if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool }
@@ -1051,7 +1052,7 @@ frontend fe_https
 {% endif %}
 
 {% if aut_domain is defined %}
-    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if host_authelia path_access_granted
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD {{ authelia_forward_req_headers }} remote-user,remote-groups,remote-name,remote-email - if host_authelia path_access_granted
     http-request deny if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
     http-request redirect location %[var(txn.auth_response_location)] if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
     http-request deny status 503 if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool }
