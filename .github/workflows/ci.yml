@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   udp-forwarding:
@@ -54,6 +54,7 @@ jobs:
   python:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -109,6 +110,7 @@ jobs:
   shell:
     name: Shell syntax and ShellCheck
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -135,6 +137,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -154,6 +157,7 @@ jobs:
   secrets:
     name: Secrets
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -182,6 +186,7 @@ jobs:
   javascript:
     name: JavaScript
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -202,12 +207,13 @@ jobs:
       # a variable nothing reads. Versions pinned, nothing saved to the tree.
       - name: ESLint
         run: |
-          npm install --no-save --no-package-lock eslint@9.39.1 @eslint/js@9.39.1 globals@16.4.0
+          npm install --no-save --no-package-lock --ignore-scripts eslint@9.39.1 @eslint/js@9.39.1 globals@16.4.0
           npx --no-install eslint docker/app/haproxy_admin/static/js .tests/js
 
   ansible:
     name: Ansible syntax
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -254,6 +260,7 @@ jobs:
     name: Build the web application image (pull requests)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -283,6 +290,7 @@ jobs:
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       REPOSITORY: clllagob/haproxy-admin-ui
     steps:

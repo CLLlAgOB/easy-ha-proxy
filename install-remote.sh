@@ -648,25 +648,48 @@ if [[ ! -r "${local_installer_file}" || ! -r "${helper_file}" ]]; then
     die "curl is required when local helper files are unavailable."
 fi
 
-temporary_installer="$(mktemp -t easy-ha-proxy-install-local.XXXXXX.sh)"
-temporary_helper="$(mktemp -t easy-ha-proxy-helper.XXXXXX.sh)"
-remote_output_file="$(mktemp -t easy-ha-proxy-remote-output.XXXXXX.log)"
+local_tmp_dir="$(mktemp -d -t easy-ha-proxy-remote.XXXXXX)"
+chmod 0700 "${local_tmp_dir}"
+temporary_installer="${local_tmp_dir}/install-local.sh"
+temporary_helper="${local_tmp_dir}/helper.sh"
+remote_output_file="${local_tmp_dir}/remote-output.log"
 temporary_source_archive=""
 temporary_config_archive=""
 activate_current_source=false
-control_path="/tmp/easy-ha-proxy-ssh.$$.sock"
-remote_installer="/tmp/easy-ha-proxy-install-local.sh"
-remote_helper="/tmp/easy-ha-proxy-helper.sh"
-remote_source_archive="/tmp/easy-ha-proxy-source.$$.tgz"
-remote_config_archive="/tmp/easy-ha-proxy-config.$$.tgz"
-remote_restore_archive="/tmp/easy-ha-proxy-full-restore.$$.tar.gz.enc"
-remote_recovery_root="/tmp/easy-ha-proxy-recovery.$$"
+control_path="${local_tmp_dir}/ssh.sock"
+remote_stage_dir=""
+remote_installer=""
+remote_helper=""
+remote_source_archive=""
+remote_config_archive=""
+remote_restore_archive=""
+remote_recovery_root=""
 staged_remote_export=""
 ssh_options=()
 scp_options=()
 reboot_probe_options=()
 reboot_monitor_available=false
 reboot_monitor_boot_id=""
+
+ensure_remote_stage_dir() {
+  if [[ -n "${remote_stage_dir}" ]]; then
+    return 0
+  fi
+  remote_stage_dir="$(
+    ssh "${ssh_options[@]}" "${target}" \
+      "umask 077 && mktemp -d /tmp/easy-ha-proxy-stage.XXXXXX" \
+      </dev/null | tr -d '\r' | tail -n 1
+  )"
+  if [[ ! "${remote_stage_dir}" =~ ^/tmp/easy-ha-proxy-stage\.[A-Za-z0-9._-]+$ ]]; then
+    die "Failed to create a private remote staging directory."
+  fi
+  remote_installer="${remote_stage_dir}/install-local.sh"
+  remote_helper="${remote_stage_dir}/helper.sh"
+  remote_source_archive="${remote_stage_dir}/source.tgz"
+  remote_config_archive="${remote_stage_dir}/config.tgz"
+  remote_restore_archive="${remote_stage_dir}/full-restore.tar.gz.enc"
+  remote_recovery_root="${remote_stage_dir}/recovery"
+}
 
 remote_cleanup_as_root() {
   local command_text="$1"
@@ -758,15 +781,8 @@ wait_for_remote_reboot() {
 }
 
 cleanup() {
-  if [[ "${remote_action}" == "stage-legacy" ||
-        "${remote_action}" == "sync-source" ||
-        "${remote_action}" == "language" ||
-        "${remote_action}" == "promote-production" ||
-        "${remote_action}" == "restore-full" ||
-        "${activate_current_source}" == true ||
-        "${stage_install_source}" == true ]]; then
-    remote_cleanup_as_root \
-      "rm -rf ${remote_recovery_root}; rm -f ${remote_source_archive} ${remote_config_archive} ${remote_restore_archive} ${remote_restore_archive}.sha256 ${remote_installer} ${remote_helper}"
+  if [[ -n "${remote_stage_dir}" ]]; then
+    remote_cleanup_as_root "rm -rf ${remote_stage_dir}"
   fi
   if [[ -n "${staged_remote_export}" ]]; then
     remote_cleanup_as_root \
@@ -774,12 +790,9 @@ cleanup() {
   fi
   ssh -S "${control_path}" -O exit "${target}" </dev/null >/dev/null 2>&1 || true
   rm -f \
-    "${temporary_installer}" \
-    "${temporary_helper}" \
     "${temporary_source_archive}" \
-    "${temporary_config_archive}" \
-    "${remote_output_file}" \
-    "${control_path}"
+    "${temporary_config_archive}"
+  rm -rf "${local_tmp_dir}"
 }
 trap cleanup EXIT
 
@@ -806,7 +819,7 @@ common_options=(
   -o "ControlPath=${control_path}"
 )
 ssh_options=(-p "${ssh_port}" "${common_options[@]}")
-scp_options=(-P "${ssh_port}" "${common_options[@]}")
+scp_options=(-p -P "${ssh_port}" "${common_options[@]}")
 if [[ -n "${identity_file}" ]]; then
   ssh_options+=(-i "${identity_file}")
   scp_options+=(-i "${identity_file}")
@@ -819,6 +832,8 @@ if [[ "${ask_pass}" == true ]]; then
   ssh_options+=("${password_options[@]}")
   scp_options+=("${password_options[@]}")
 fi
+
+ensure_remote_stage_dir
 
 controller_source_root="${source_root:-${script_dir}}"
 case "${remote_action}" in
@@ -1245,6 +1260,7 @@ reboot_scheduled="$(
 )"
 if [[ "${reboot_scheduled}" == "1" ]]; then
   wait_for_remote_reboot
+  remote_stage_dir=""
 fi
 
 snapshot_path="$(
@@ -1256,19 +1272,22 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
     die "Remote helper returned an unsafe snapshot path: ${snapshot_path}"
   fi
 
+  ensure_remote_stage_dir
   snapshot_name="${snapshot_path##*/}"
   local_snapshot_dir="${local_snapshot_root%/}/${snapshot_name}"
   local_export="${local_snapshot_dir}/legacy-export.tgz"
-  staged_remote_export="/tmp/easy-ha-proxy-${snapshot_name}-export.$$.tgz"
+  staged_remote_export="${remote_stage_dir}/${snapshot_name}-export.tgz"
 
   install -d -m 0700 "${local_snapshot_root}" "${local_snapshot_dir}"
   chmod 0700 "${local_snapshot_root}" "${local_snapshot_dir}"
   printf '[%s] Preparing protected snapshot export on %s\n' \
     "${product}" "${target}"
-  stage_command="sudo sh -c 'umask 077; "
-  stage_command+="tar -C ${snapshot_path} -czf ${staged_remote_export} "
-  stage_command+="live-config.tar.gz SHA256SUMS manifest.txt' && "
-  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export} && "
+  export_script="umask 077; tar -C ${snapshot_path} -czf ${staged_remote_export} "
+  export_script+="live-config.tar.gz SHA256SUMS manifest.txt"
+  stage_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${export_script}'; "
+  stage_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${export_script}' && "
+  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export}; "
+  stage_command+="else echo 'easy-ha-proxy: root or sudo is required' >&2; exit 1; fi && "
   stage_command+="chmod 0600 ${staged_remote_export}"
   ssh -tt "${ssh_options[@]}" "${target}" "${stage_command}" <&"${input_fd}"
 
@@ -1313,17 +1332,21 @@ if [[ -n "${full_backup_path}" && "${fetch_snapshot}" == true ]]; then
   if [[ ! "${full_backup_path}" =~ ^/var/backups/easy-ha-proxy/full-[0-9TZ]+/easy-ha-proxy-full-[0-9TZ]+\.tar\.gz\.enc$ ]]; then
     die "Remote helper returned an unsafe full-backup path: ${full_backup_path}"
   fi
+  ensure_remote_stage_dir
   full_backup_name="${full_backup_path##*/}"
   full_backup_dir_name="${full_backup_path%/*}"
   full_backup_dir_name="${full_backup_dir_name##*/}"
   local_full_backup_dir="${local_snapshot_root%/}/${full_backup_dir_name}"
   local_full_backup="${local_full_backup_dir}/${full_backup_name}"
-  staged_remote_export="/tmp/${full_backup_name}.$$"
+  staged_remote_export="${remote_stage_dir}/${full_backup_name}"
   install -d -m 0700 "${local_snapshot_root}" "${local_full_backup_dir}"
   chmod 0700 "${local_snapshot_root}" "${local_full_backup_dir}"
-  stage_command="sudo cp ${full_backup_path} ${staged_remote_export} && "
-  stage_command+="sudo cp ${full_backup_path}.sha256 ${staged_remote_export}.sha256 && "
-  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export} ${staged_remote_export}.sha256 && "
+  copy_script="umask 077; cp ${full_backup_path} ${staged_remote_export} && "
+  copy_script+="cp ${full_backup_path}.sha256 ${staged_remote_export}.sha256"
+  stage_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${copy_script}'; "
+  stage_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${copy_script}' && "
+  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export} ${staged_remote_export}.sha256; "
+  stage_command+="else echo 'easy-ha-proxy: root or sudo is required' >&2; exit 1; fi && "
   stage_command+="chmod 0600 ${staged_remote_export} ${staged_remote_export}.sha256"
   ssh -tt "${ssh_options[@]}" "${target}" "${stage_command}" <&"${input_fd}"
   scp "${scp_options[@]}" \

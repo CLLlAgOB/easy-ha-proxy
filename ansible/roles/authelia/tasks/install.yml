@@ -150,6 +150,8 @@
         mode: "0640"
         force: false
       register: authelia_users_t
+      no_log: true
+      diff: false
 
     - name: Allow {{ authelia_log_reader_user }} to read Authelia users file
       ansible.posix.acl:
@@ -268,7 +270,7 @@
       import_tasks: configd.yml
 
     - name: Include Authelia bansd stage
-      import_tasks: bansd.yml    
+      import_tasks: bansd.yml
 
-    - name: Include Authelia bansd stage
-      import_tasks: usersd.yml  
+    - name: Include Authelia usersd stage
+      import_tasks: usersd.yml

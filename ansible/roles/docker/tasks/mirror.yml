@@ -61,6 +61,7 @@
 - name: Wait for Docker restart to complete
   ansible.builtin.pause:
     seconds: 3
+  when: docker_daemon_json_written.changed
 
 # --- Test the pull again ---
 - name: Re-test connectivity to Docker Hub after enabling mirrors

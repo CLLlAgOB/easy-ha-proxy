@@ -11,7 +11,12 @@
 # acme_bootstrap: null -> automatic: DNAT is needed if there is no HAProxy; true/false -> by hand
 - name: Decide if DNAT bootstrap is needed
   set_fact:
-    _enable_bootstrap_dnat: true
+    _enable_bootstrap_dnat: >-
+      {{
+        (acme_bootstrap | bool)
+        if (acme_bootstrap is defined and acme_bootstrap is not none)
+        else (not (haproxy_present | bool))
+      }}
     
 
 # ss runs on its own and lists only listeners on :8000. Piped into grep with

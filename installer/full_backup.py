@@ -9,6 +9,7 @@ import fnmatch
 import getpass
 import glob
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -674,14 +675,48 @@ def read_passphrase(*, confirm: bool, from_stdin: bool = False) -> str:
         print(f"{problem} Try again, or press Ctrl+C to stop.", file=sys.stderr)
 
 
-def openssl_crypt(source: Path, destination: Path, password: str, *, decrypt: bool) -> None:
+_ENC_V2_MAGIC = b"EHP2"
+_ENC_V2_SALT_LEN = 16
+_ENC_V2_MAC_LEN = 32
+_ENC_V2_HEADER_LEN = len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN + _ENC_V2_MAC_LEN
+_ENC_V2_KDF_ITERATIONS = 600_000
+
+
+def _derive_mac_key(password: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        b"easy-ha-proxy-backup-mac-v2:" + salt,
+        _ENC_V2_KDF_ITERATIONS,
+        dklen=32,
+    )
+
+
+def _compute_stream_mac(
+    mac_key: bytes, header_prefix: bytes, ciphertext_path: Path, *, offset: int = 0
+) -> bytes:
+    digest = hmac.new(mac_key, header_prefix, hashlib.sha256)
+    with ciphertext_path.open("rb") as handle:
+        if offset:
+            handle.seek(offset)
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.digest()
+
+
+def _run_openssl_enc(
+    source: Path, destination: Path, password: str, *, decrypt: bool
+) -> None:
     argv = [
         "openssl",
         "enc",
         "-aes-256-cbc",
         "-pbkdf2",
         "-iter",
-        "600000",
+        str(_ENC_V2_KDF_ITERATIONS),
         "-md",
         "sha256",
     ]
@@ -698,6 +733,71 @@ def openssl_crypt(source: Path, destination: Path, password: str, *, decrypt: bo
                 "Cannot decrypt backup: wrong passphrase or damaged file."
             ) from exc
         raise BackupError("Cannot encrypt backup.") from exc
+
+
+def openssl_crypt(source: Path, destination: Path, password: str, *, decrypt: bool) -> None:
+    if not decrypt:
+        raw_cipher = destination.with_name(f".{destination.name}.raw.{os.getpid()}")
+        try:
+            _run_openssl_enc(source, raw_cipher, password, decrypt=False)
+            mac_salt = os.urandom(_ENC_V2_SALT_LEN)
+            mac_key = _derive_mac_key(password, mac_salt)
+            prefix = _ENC_V2_MAGIC + mac_salt
+            tag = _compute_stream_mac(mac_key, prefix, raw_cipher)
+            fd = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(fd, "wb") as out_handle:
+                out_handle.write(prefix + tag)
+                with raw_cipher.open("rb") as in_handle:
+                    shutil.copyfileobj(in_handle, out_handle, length=65536)
+                out_handle.flush()
+                os.fsync(out_handle.fileno())
+        finally:
+            raw_cipher.unlink(missing_ok=True)
+        os.chmod(destination, 0o600)
+        return
+
+    with source.open("rb") as in_handle:
+        header = in_handle.read(_ENC_V2_HEADER_LEN)
+    if header.startswith(_ENC_V2_MAGIC):
+        if len(header) < _ENC_V2_HEADER_LEN:
+            raise WrongPassphrase(
+                "Cannot decrypt backup: wrong passphrase or damaged file."
+            )
+        mac_salt = header[len(_ENC_V2_MAGIC) : len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN]
+        expected_tag = header[len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN :]
+        mac_key = _derive_mac_key(password, mac_salt)
+        actual_tag = _compute_stream_mac(
+            mac_key,
+            header[: len(_ENC_V2_MAGIC) + _ENC_V2_SALT_LEN],
+            source,
+            offset=_ENC_V2_HEADER_LEN,
+        )
+        if not hmac.compare_digest(actual_tag, expected_tag):
+            raise WrongPassphrase(
+                "Cannot decrypt backup: wrong passphrase or damaged file."
+            )
+        raw_cipher = destination.with_name(f".{destination.name}.cipher.{os.getpid()}")
+        try:
+            fd = os.open(
+                raw_cipher,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(fd, "wb") as out_handle, source.open("rb") as in_handle:
+                in_handle.seek(_ENC_V2_HEADER_LEN)
+                shutil.copyfileobj(in_handle, out_handle, length=65536)
+            _run_openssl_enc(raw_cipher, destination, password, decrypt=True)
+        finally:
+            raw_cipher.unlink(missing_ok=True)
+        os.chmod(destination, 0o600)
+        return
+
+    # Legacy v1 archive (raw OpenSSL Salted__ format): keep readable.
+    _run_openssl_enc(source, destination, password, decrypt=True)
     os.chmod(destination, 0o600)
 
 
@@ -739,6 +839,15 @@ def create_backup(args: argparse.Namespace) -> Path:
     )
     with tempfile.TemporaryDirectory(prefix="easy-ha-proxy-backup.") as temporary:
         work = Path(temporary)
+        tmp_free = shutil.disk_usage(work).free
+        tmp_required = _configured_positive_limit(
+            "EASY_HA_PROXY_BACKUP_MIN_TMP_FREE_BYTES", 64 * 1024 * 1024
+        )
+        if tmp_free < tmp_required:
+            raise BackupError(
+                "Not enough temporary disk space to stage the backup: need "
+                f"{_format_bytes(tmp_required)}, have {_format_bytes(tmp_free)}."
+            )
         payload = work / "payload.tar.gz"
         ssh_payload = work / "ssh.tar.gz"
         # Under /var/lib/easy-ha-proxy, so the archive picks it up from there.
@@ -832,6 +941,13 @@ def validate_bundle_member(member: tarfile.TarInfo) -> None:
         or member.islnk()
     ):
         raise BackupError(f"Unsafe special bundle entry: {member.name}")
+    if member.mode & 0o6000:
+        raise BackupError(f"Unsafe setuid/setgid bundle entry: {member.name}")
+    if any(
+        key.startswith("SCHILY.xattr.security.")
+        for key in (member.pax_headers or {})
+    ):
+        raise BackupError(f"Unsafe security xattr in bundle entry: {member.name}")
     if member.issym() or member.islnk():
         link = PurePosixPath(member.linkname)
         if not member.linkname or link.is_absolute():
@@ -1236,39 +1352,64 @@ def inspect_backup(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
+def _read_regular_text_nofollow(path: Path) -> tuple[str, os.stat_result] | None:
+    if path.is_symlink():
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+            fd = -1
+            return handle.read(), st
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def current_authorized_keys() -> dict[Path, tuple[list[str], int, int]]:
     saved: dict[Path, tuple[list[str], int, int]] = {}
     candidates = [Path("/root/.ssh/authorized_keys")]
     candidates.extend(Path(value) for value in glob.glob("/home/*/.ssh/authorized_keys"))
     for path in candidates:
-        if not path.is_file():
+        loaded = _read_regular_text_nofollow(path)
+        if loaded is None:
             continue
-        stat = path.stat()
-        lines = [
-            line
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
-            if line.strip()
-        ]
-        saved[path] = (lines, stat.st_uid, stat.st_gid)
+        text, st = loaded
+        lines = [line for line in text.splitlines() if line.strip()]
+        saved[path] = (lines, st.st_uid, st.st_gid)
     return saved
 
 
 def merge_authorized_keys(saved: dict[Path, tuple[list[str], int, int]]) -> None:
     for path, (old_lines, uid, gid) in saved.items():
+        if path.is_symlink() or path.parent.is_symlink():
+            raise BackupError(f"Refusing to merge symlinked authorized_keys: {path}")
         new_lines: list[str] = []
-        if path.is_file():
-            new_lines = [
-                line
-                for line in path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-                if line.strip()
-            ]
+        loaded = _read_regular_text_nofollow(path)
+        if loaded is not None:
+            text, _st = loaded
+            new_lines = [line for line in text.splitlines() if line.strip()]
         merged = list(dict.fromkeys(new_lines + old_lines))
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_text("\n".join(merged) + "\n", encoding="utf-8")
-        os.chmod(path, 0o600)
-        os.chown(path, uid, gid)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".authorized_keys.", suffix=".tmp", dir=str(path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(merged) + "\n")
+                handle.flush()
+                os.fchmod(handle.fileno(), 0o600)
+                os.fchown(handle.fileno(), uid, gid)
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
 
 
 def extract_payload(payload: Path, members: list[str] | None = None) -> None:
@@ -1276,6 +1417,7 @@ def extract_payload(payload: Path, members: list[str] | None = None) -> None:
         "tar",
         "--acls",
         "--xattrs",
+        "--xattrs-exclude=security.*",
         "--numeric-owner",
         "-xzpf",
         str(payload),
@@ -1651,12 +1793,13 @@ def remove_managed_state(*, include_ssh: bool = False) -> None:
 
 def normalize_restored_config_permissions() -> None:
     config = managed_config_dir()
-    if not config.is_dir():
+    if config.is_symlink() or not config.is_dir():
         return
     os.chmod(config, 0o700)
     for child in config.iterdir():
-        if child.is_file():
-            os.chmod(child, 0o600)
+        if child.is_symlink() or not child.is_file():
+            continue
+        os.chmod(child, 0o600)
 
 
 def _restore_stage(

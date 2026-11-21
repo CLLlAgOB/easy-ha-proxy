@@ -16,6 +16,7 @@
   failed_when: false     # the rc is judged here
   environment:
     HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
+  no_log: true
 
 # 2. Filter and show only ALERT/WARNING ----------------------------
 - name: show pretty syntax error

@@ -443,7 +443,14 @@ def set_protection(action, trusted, policy=None):
     running = quick(CLIENT, 'ping')[0] == 0
     try:
         if enabled:
-            for firewall in ('iptables', 'ip6tables'):
+            firewalls = [
+                shutil.which('iptables', path='/usr/sbin:/sbin:/usr/bin:/bin') or '/usr/sbin/iptables',
+            ]
+            if os.path.exists('/proc/net/if_inet6'):
+                firewalls.append(
+                    shutil.which('ip6tables', path='/usr/sbin:/sbin:/usr/bin:/bin') or '/usr/sbin/ip6tables'
+                )
+            for firewall in firewalls:
                 if quick(firewall, '-w', '2', '-S', 'INPUT')[0]:
                     raise SecurityError('The server firewall could not be checked for SSH blocking')
         atomic(DROP_IN, config_text(enabled, ports, backend, trusted, policy))
@@ -490,6 +497,8 @@ def main():
                 raise SecurityError('The IP could not be unblocked in the Fail2ban SSH rule')
             result = {'message': 'IP removed from SSH blocks.'}
         else:
+            if args.maintenance_lock is None:
+                raise SecurityError('--maintenance-lock is required')
             with contextlib.ExitStack() as stack:
                 lock = os.open(args.maintenance_lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
                 stack.callback(os.close, lock)

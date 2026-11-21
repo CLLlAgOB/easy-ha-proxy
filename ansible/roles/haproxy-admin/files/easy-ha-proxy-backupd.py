@@ -925,6 +925,7 @@ def child_environment(*, recovery_source: Path | None = None) -> dict[str, str]:
         # restore must reconcile only from dependencies and images already on
         # the host; direct controller restores remain network-capable.
         "EASY_HA_PROXY_OFFLINE_RESTORE": "1",
+        "EASY_HA_PROXY_MAINTENANCE_LOCK_HELD": "backupd",
     }
     if recovery_source is not None:
         environment["EASY_HA_PROXY_SOURCE_DIR"] = str(recovery_source)

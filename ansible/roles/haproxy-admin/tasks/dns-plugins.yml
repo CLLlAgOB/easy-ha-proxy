@@ -22,8 +22,20 @@
   changed_when: false
   failed_when: false
 
+- name: "dns-plugins | Validate selected plugin names"
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^[a-z0-9][a-z0-9-]{0,62}$')
+    fail_msg: "Invalid DNS plugin name: {{ item }}"
+  loop: "{{ dns_plugins_enabled | default([]) }}"
+
 - name: "dns-plugins | Install the selected plugin snaps"
-  ansible.builtin.command: "snap install certbot-dns-{{ item }}"
+  ansible.builtin.command:
+    argv:
+      - snap
+      - install
+      - "certbot-dns-{{ item }}"
   loop: "{{ dns_plugins_enabled | default([]) }}"
   when: >-
     ("dns-" ~ item) not in (certbot_plugins_present.stdout | default(''))
@@ -36,12 +48,22 @@
   changed_when: dns_plugin_install.rc == 0
 
 - name: "dns-plugins | Allow certbot plugins to run with root privileges"
-  ansible.builtin.command: snap set certbot trust-plugin-with-root=ok
+  ansible.builtin.command:
+    argv:
+      - snap
+      - set
+      - certbot
+      - trust-plugin-with-root=ok
   when: (dns_plugins_enabled | default([])) | length > 0
   changed_when: false
 
 - name: "dns-plugins | Connect each plugin to certbot"
-  ansible.builtin.command: "snap connect certbot:plugin certbot-dns-{{ item }}"
+  ansible.builtin.command:
+    argv:
+      - snap
+      - connect
+      - "certbot:plugin"
+      - "certbot-dns-{{ item }}"
   loop: "{{ dns_plugins_enabled | default([]) }}"
   changed_when: false
   failed_when: false

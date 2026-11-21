@@ -1662,8 +1662,9 @@ def generate_internal_certificate(directory: Path) -> Path:
     )
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
     target = target_dir / "easy-ha-proxy-internal.pem"
-    shutil.copyfile(combined, target)
-    os.chmod(target, 0o600)
+    # Written to a mode-0600 temporary file and atomically renamed into place,
+    # so the private key is never world-readable and any symlink is replaced.
+    write_text(target, combined.read_text(encoding="utf-8"), mode=0o600)
     exported_ca = internal_ca_export_path()
     # Written beside the target and renamed over it, so a link already at that
     # name is replaced, never followed.
@@ -3521,6 +3522,7 @@ def command_reboot(args: argparse.Namespace) -> None:
     """Schedule a previously deferred operating-system reboot."""
 
     require_root()
+    hold_maintenance_lock()
     if reboot_schedule_is_active():
         print(_("A reboot is already scheduled; the current session will close."))
         print("EASY_HA_PROXY_REBOOT_SCHEDULED=1", flush=True)
@@ -3596,6 +3598,7 @@ def full_backup_script() -> Path:
 
 def command_backup_full(args: argparse.Namespace) -> None:
     require_root()
+    hold_maintenance_lock()
     command = [sys.executable, str(full_backup_script()), "backup"]
     if args.output_dir:
         command.extend(["--output-dir", args.output_dir])
@@ -3614,6 +3617,7 @@ def command_backup_full(args: argparse.Namespace) -> None:
 
 def command_restore_full(args: argparse.Namespace) -> None:
     require_root()
+    hold_maintenance_lock()
     command = [
         sys.executable,
         str(full_backup_script()),

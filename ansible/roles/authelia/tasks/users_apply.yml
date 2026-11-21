@@ -14,11 +14,13 @@
     name: authelia_users_ops_data
   delegate_to: localhost
   run_once: true
+  no_log: true
 
 - name: Authelia | users_apply | set ops var
   set_fact:
     authelia_users_ops: "{{ authelia_users_ops_data.authelia_users_ops | default({}) }}"
   run_once: true
+  no_log: true
 
 - name: Authelia | users_apply | fail if no ops
   assert:
@@ -42,6 +44,7 @@
   slurp:
     path: "{{ authelia_users_host_path }}"
   register: authelia_users_slurp
+  no_log: true
 
 # --- back it up on the controller ---
 
@@ -59,22 +62,26 @@
     src: "{{ authelia_users_host_path }}"
     dest: "{{ authelia_cache_dir | default(playbook_dir + '/cache/authelia-users') }}/{{ inventory_hostname }}-users_database.before.yml"
     flat: true
+  no_log: true
 
 # --- parse the YAML into a structure ---
 
 - name: Authelia | users_apply | parse current users yaml
   set_fact:
     authelia_users_parsed: "{{ authelia_users_slurp.content | b64decode | from_yaml }}"
+  no_log: true
 
 - name: Authelia | users_apply | extract users dict
   set_fact:
     authelia_users_current: "{{ authelia_users_parsed.users | default({}) }}"
+  no_log: true
 
 # --- a working copy of the users dict ---
 
 - name: Authelia | users_apply | init working dict
   set_fact:
     authelia_users_new: "{{ authelia_users_current }}"
+  no_log: true
 
 # --- first delete the users with user_action: delete ---
 
@@ -93,6 +100,7 @@
     label: "{{ item.key }}"
   when:
     - item.value.user_action | default('add') == 'delete'
+  no_log: true
 
 # --- then add/replace ---
 
@@ -155,6 +163,7 @@
     label: "{{ item.key }}"
   when:
     - user_action in ['add', 'replace']
+  no_log: true
 
 # --- build the new YAML and save it on the host ---
 
@@ -162,15 +171,27 @@
   set_fact:
     authelia_users_new_yaml: |
       {{ {'users': authelia_users_new} | to_nice_yaml(indent=2) }}
+  no_log: true
 
 - name: Authelia | users_apply | write updated users file
   copy:
     dest: "{{ authelia_users_host_path }}"
-    owner: root
-    group: root
+    owner: authelia
+    group: authelia
     mode: "0640"
     content: "{{ authelia_users_new_yaml }}"
   register: authelia_users_write
+  no_log: true
+  diff: false
+
+- name: Authelia | users_apply | restore read ACL for log reader
+  ansible.posix.acl:
+    path: "{{ authelia_users_host_path }}"
+    entity: "{{ authelia_log_reader_user }}"
+    etype: user
+    permissions: r
+    state: present
+  when: authelia_log_reader_user is defined and (authelia_log_reader_user | length > 0)
 
 # --- save the "after" copy and restart Authelia ---
 
@@ -180,6 +201,7 @@
     src: "{{ authelia_users_host_path }}"
     dest: "{{ authelia_cache_dir | default(playbook_dir + '/cache/authelia-users') }}/{{ inventory_hostname }}-users_database.after.yml"
     flat: true
+  no_log: true
 
 # - name: Authelia | users_apply | restart authelia if users changed
 #   when: authelia_users_write.changed

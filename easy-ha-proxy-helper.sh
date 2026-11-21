@@ -248,6 +248,9 @@ daemon_units=(
   haproxy-healthd.service
   easy-ha-proxy-backupd.service
   easy-ha-proxy-updated.service
+  easy-ha-proxy-alertd.service
+  easy-ha-proxy-guardd.service
+  easy-ha-proxy-metricsd.service
   authelia-configd.service
   authelia-usersd.service
   authelia-bansd.service
@@ -258,6 +261,9 @@ daemon_labels=(
   "HAProxy health daemon"
   "Full backup and restore daemon"
   "Software update broker"
+  "Alerting daemon"
+  "Adaptive protection daemon"
+  "Metrics collector daemon"
   "Authelia config daemon"
   "Authelia users daemon"
   "Authelia bans daemon"
@@ -268,6 +274,9 @@ daemon_scripts=(
   /usr/local/sbin/haproxy-healthd.py
   /usr/local/sbin/easy-ha-proxy-backupd.py
   /usr/local/sbin/easy-ha-proxy-updated.py
+  /usr/local/sbin/easy-ha-proxy-alertd.py
+  /usr/local/sbin/easy-ha-proxy-guardd.py
+  /usr/local/sbin/easy-ha-proxy-metricsd.py
   /usr/local/sbin/authelia-configd.py
   /usr/local/sbin/authelia-usersd.py
   /usr/local/sbin/authelia-bansd.py
@@ -278,6 +287,9 @@ daemon_sources=(
   ansible/roles/haproxy-admin/files/haproxy-healthd.py
   ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py
   ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py
+  ansible/roles/haproxy-admin/files/easy-ha-proxy-alertd.py
+  ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py
+  ansible/roles/haproxy-admin/files/easy-ha-proxy-metricsd.py
   ansible/roles/authelia/files/authelia-configd.py
   ansible/roles/authelia/files/authelia-usersd.py
   ansible/roles/authelia/files/authelia-bansd.py
@@ -1147,16 +1159,17 @@ source_update_state() {
   origin="${EASY_HA_PROXY_REPOSITORY:-$(yaml_scalar repository "${metadata_file}")}"
   origin="${origin:-https://github.com/CLLlAgOB/easy-ha-proxy.git}"
   installed_fingerprint="$(source_fingerprint "${source_dir}" 2>/dev/null || true)"
-  temporary_update_checkout="$(mktemp -d -t easy-ha-proxy-update-check.XXXXXX)"
+  local tmp_checkout=""
+  tmp_checkout="$(mktemp -d -t easy-ha-proxy-update-check.XXXXXX)"
   if command -v git >/dev/null 2>&1 &&
      GIT_TERMINAL_PROMPT=0 git clone --quiet --depth=1 --branch "${branch}" \
-       "${origin}" "${temporary_update_checkout}/source" 2>/dev/null; then
+       "${origin}" "${tmp_checkout}/source" 2>/dev/null; then
     remote_revision="$(
-      git -C "${temporary_update_checkout}/source" rev-parse HEAD 2>/dev/null ||
+      git -C "${tmp_checkout}/source" rev-parse HEAD 2>/dev/null ||
         true
     )"
     remote_fingerprint="$(
-      source_fingerprint "${temporary_update_checkout}/source" 2>/dev/null ||
+      source_fingerprint "${tmp_checkout}/source" 2>/dev/null ||
         true
     )"
     if [[ -n "${installed_fingerprint}" &&
@@ -1173,6 +1186,7 @@ source_update_state() {
     printf 'unknown|%s||не удалось скачать source для сравнения\n' \
       "${installed_fingerprint}"
   fi
+  rm -rf "${tmp_checkout}"
 }
 
 ensure_remote_source_snapshot() {
@@ -2308,9 +2322,13 @@ EOF
       12) perform_action migrate-domain ;;
       13) perform_action backup-full ;;
       14)
-        [[ "${configuration_mode}" == "test" ]] &&
-          perform_action test-info ||
-          [[ "${language}" == "ru" ]] && printf 'Неизвестный пункт.\n' || printf 'Unknown menu item.\n'
+        if [[ "${configuration_mode}" == "test" ]]; then
+          perform_action test-info
+        elif [[ "${language}" == "ru" ]]; then
+          printf 'Неизвестный пункт.\n'
+        else
+          printf 'Unknown menu item.\n'
+        fi
         ;;
       0) return ;;
       *) [[ "${language}" == "ru" ]] && printf 'Неизвестный пункт.\n' || printf 'Unknown menu item.\n' ;;

@@ -328,6 +328,7 @@
     - apply haproxy
   environment:
     HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
+  no_log: true
 
 # Read the newly rendered ports before the first start or a handler reload.
 - name: "server-state | Refresh administrative state without transport overrides"
@@ -342,5 +343,6 @@
     state: started
   environment:
     HAPROXY_ADMIN_PROXY_SECRET: "{{ haproxy_admin_proxy_secret }}"
+  no_log: true
 
 # "Ensure service running" is NOT done here any more -- the handlers do it all
