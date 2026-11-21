@@ -1,6 +1,24 @@
 ---
 # Installing all of haproxy-admin's helper daemons in one stage
 
+- name: Ensure /etc/easy-ha-proxy directory exists for daemon token file
+  ansible.builtin.file:
+    path: "{{ (daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')) | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render root-only daemon IPC token file
+  ansible.builtin.template:
+    src: daemons.env.j2
+    dest: "{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
 - import_tasks: certd.yml
 - import_tasks: controld.yml
 - import_tasks: backupd.yml

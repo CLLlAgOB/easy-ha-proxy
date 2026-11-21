@@ -43,7 +43,9 @@ import os
 import pwd
 import signal
 import socket
+import stat
 import sys
+import tempfile
 import time
 import re
 from datetime import datetime
@@ -64,6 +66,7 @@ AUTHELIA_CONFIG_PATH = os.environ.get(
 SOCKET_PATH = os.environ.get(
     "AUTHELIA_USERS_SOCKET", "/run/easy-ha-proxy/authelia-usersd.sock")
 MAX_REQUEST_BYTES = 1024 * 1024
+MAX_USERS_FILE_BYTES = 10 * 1024 * 1024
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$")
 EMAIL_RE = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
@@ -120,7 +123,7 @@ def _backup_users_file() -> None:
 
 def _load_users_data() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Loads users_database.yml.
+    Loads users_database.yml without following symbolic links.
 
     Returns (root_data, users_node).
 
@@ -131,11 +134,22 @@ def _load_users_data() -> Tuple[Dict[str, Any], Dict[str, Any]]:
       - the root { users: { user1: {...}, ... } }
       - the root { user1: {...}, user2: {...}, ... }
     """
-    if not os.path.exists(USERS_FILE):
-        raise FileNotFoundError(f"users file not found: {USERS_FILE}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(USERS_FILE, flags)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"users file not found: {USERS_FILE}") from None
 
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    with os.fdopen(fd, "rb") as raw_file:
+        st = os.fstat(raw_file.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"users file is not a regular file: {USERS_FILE}")
+        raw = raw_file.read(MAX_USERS_FILE_BYTES + 1)
+        if len(raw) > MAX_USERS_FILE_BYTES:
+            raise ValueError(f"users file exceeds allowed size: {USERS_FILE}")
+    data = yaml.safe_load(raw.decode("utf-8")) or {}
 
     if not isinstance(data, dict):
         raise ValueError("unexpected YAML structure (root is not a dict)")
@@ -154,10 +168,13 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
     IMPORTANT: the file's owner and mode are not changed -- they stay what
     they were before the save (Ansible manages owner/group/mode).
     """
-    # Remember the current mode and owner, if the file exists.
+    # Remember the current mode and owner, if the file exists (without following symlinks).
     prev_stat = None
     try:
-        prev_stat = os.stat(USERS_FILE)
+        st = os.lstat(USERS_FILE)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"users file is not a regular file: {USERS_FILE}")
+        prev_stat = st
     except FileNotFoundError:
         prev_stat = None
     except OSError as exc:  # noqa: BLE001
@@ -170,12 +187,7 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
     # runs `watch: true` and reloads the users database the instant the file is
     # replaced; if the live path momentarily pointed at this root-owned temp
     # file, that reload would fail with "permission denied" and Authelia would
-    # keep serving the stale in-memory database until the next change. The temp
-    # file is created in the same directory, so it also inherits the directory's
-    # default ACL (which grants the web reader its read access).
-    #
-    # Fall back to the "authelia" account when the previous file is missing so a
-    # first-ever write is still readable by the container.
+    # keep serving the stale in-memory database until the next change.
     if prev_stat is not None:
         target_uid, target_gid = prev_stat.st_uid, prev_stat.st_gid
     else:
@@ -185,9 +197,11 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
         except KeyError:
             target_uid, target_gid = -1, -1
 
-    tmp_path = USERS_FILE + ".tmp"
+    dir_name = os.path.dirname(USERS_FILE) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".users_database.", suffix=".tmp", dir=dir_name)
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
             yaml.safe_dump(
                 root_data,
                 f,
@@ -197,21 +211,22 @@ def _save_users_data(root_data: Dict[str, Any]) -> None:
             )
             f.flush()
             os.fsync(f.fileno())
-
-        if target_uid != -1:
+            if target_uid != -1:
+                try:
+                    os.fchown(f.fileno(), target_uid, target_gid)
+                except OSError as exc:  # noqa: BLE001
+                    LOG.warning("Failed to set owner/group on temp users file: %s", exc)
             try:
-                os.chown(tmp_path, target_uid, target_gid)
+                os.fchmod(f.fileno(), 0o640)
             except OSError as exc:  # noqa: BLE001
-                LOG.warning("Failed to set owner/group on temp users file: %s", exc)
-        try:
-            os.chmod(tmp_path, 0o640)
-        except OSError as exc:  # noqa: BLE001
-            LOG.warning("Failed to set mode on temp users file: %s", exc)
+                LOG.warning("Failed to set mode on temp users file: %s", exc)
 
         # Atomic replacement: the live path always points at a readable file.
         os.replace(tmp_path, USERS_FILE)
         tmp_path = None
     finally:
+        if fd != -1:
+            os.close(fd)
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)

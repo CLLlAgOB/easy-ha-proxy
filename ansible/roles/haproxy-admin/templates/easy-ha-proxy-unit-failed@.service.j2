@@ -9,7 +9,7 @@ After=easy-ha-proxy-alertd.service
 Type=oneshot
 User=root
 Environment="ALERTD_SOCKET_PATH=/run/easy-ha-proxy/easy-ha-proxy-alertd.sock"
-Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-unit-failed.py %i
 # Reporting a failure must never become a failure of its own: a stopped alert
 # daemon costs a notification, and systemd must not start chasing this unit.

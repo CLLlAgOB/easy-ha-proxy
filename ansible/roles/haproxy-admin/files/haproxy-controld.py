@@ -743,6 +743,25 @@ def certs_backup_b64() -> str:
     return b64
 
 
+_CERTBOT_HOOK_KEY_RE = re.compile(
+    r"^\s*(?:pre|post|deploy|renew|manual_auth|manual_cleanup)[_-]hook\s*=",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ALLOWED_LE_RESTORE_DIRS = frozenset({"accounts", "archive", "live", "renewal", "keys", "csr"})
+
+
+def _is_allowed_le_restore_rel(rel: Path) -> bool:
+    parts = rel.parts
+    if len(parts) < 2:
+        return False
+    top = parts[0]
+    if top not in _ALLOWED_LE_RESTORE_DIRS:
+        return False
+    if top == "renewal":
+        return len(parts) == 2 and parts[1].endswith(".conf") and not parts[1].startswith(".")
+    return True
+
+
 def certs_restore_b64(b64: str) -> str:
     """
     Takes a base64 ZIP and unpacks its files into CERTS_HAP_DIR and CERTS_LE_DIR.
@@ -756,6 +775,7 @@ def certs_restore_b64(b64: str) -> str:
     le_root = Path(CERTS_LE_DIR) if CERTS_LE_DIR else None
 
     restored = 0
+    remaining_budget = MAX_ARCHIVE_EXPANDED_BYTES
 
     with zipfile.ZipFile(buf, "r") as zf:
         for info in _validate_zip(zf):
@@ -763,26 +783,52 @@ def certs_restore_b64(b64: str) -> str:
             if info.is_dir():
                 continue
 
+            is_le_renewal = False
             if name.startswith("haproxy_certs/"):
                 rel = Path(name).relative_to("haproxy_certs")
+                if len(rel.parts) != 1 or not rel.name.endswith(".pem") or rel.name.startswith("."):
+                    continue
                 dst = _ensure_within(hap_dir, hap_dir / rel)
             elif name.startswith("letsencrypt/") and le_root:
                 rel = Path(name).relative_to("letsencrypt")
+                if not _is_allowed_le_restore_rel(rel):
+                    continue
+                is_le_renewal = rel.parts[0] == "renewal"
                 dst = _ensure_within(le_root, le_root / rel)
             else:
                 # an unknown prefix is ignored
                 continue
 
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(dst, "wb") as out:
-                remaining = info.file_size
-                while remaining:
-                    chunk = src.read(min(1024 * 1024, remaining))
+            chunks: list[bytes] = []
+            read_total = 0
+            with zf.open(info, "r") as src:
+                while True:
+                    chunk = src.read(65536)
                     if not chunk:
-                        raise ValueError("truncated certificate archive")
-                    out.write(chunk)
-                    remaining -= len(chunk)
-            os.chmod(dst, 0o600)
+                        break
+                    read_total += len(chunk)
+                    if read_total > remaining_budget:
+                        raise ValueError("certificate archive expands beyond the allowed size")
+                    chunks.append(chunk)
+            if read_total != info.file_size:
+                raise ValueError("certificate archive entry size mismatch")
+            remaining_budget -= read_total
+            payload = b"".join(chunks)
+            if is_le_renewal and _CERTBOT_HOOK_KEY_RE.search(payload.decode("utf-8", errors="replace")):
+                LOG.warning("certs-restore: refused renewal config with hook directive: %s", rel)
+                continue
+
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(dst), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    fd = -1
+                    out.write(payload)
+                    out.flush()
+                    os.fsync(out.fileno())
+            finally:
+                if fd != -1:
+                    os.close(fd)
             restored += 1
 
     msg = f"restored {restored} files"
@@ -1849,12 +1895,54 @@ def haproxy_check_config_from_b64(b64: str) -> tuple[int, str, str]:
                 pass
 
 
+def _unfold_haproxy_lines(text: str) -> list[str]:
+    """Join backslash-continued lines the way HAProxy parses them."""
+    logical: list[str] = []
+    pending = ""
+    for raw_line in text.splitlines():
+        if pending:
+            combined = pending + raw_line
+        else:
+            combined = raw_line
+        # Odd count of trailing backslashes means line continuation.
+        stripped_r = combined.rstrip("\r")
+        trailing = len(stripped_r) - len(stripped_r.rstrip("\\"))
+        if trailing % 2 == 1:
+            pending = stripped_r[:-1]
+            continue
+        logical.append(stripped_r)
+        pending = ""
+    if pending:
+        logical.append(pending)
+    return logical
+
+
+def _normalized_prefix_path(raw_path: str, allowed_prefix: str) -> bool:
+    """True when raw_path is an absolute normalized path strictly under allowed_prefix."""
+    if not raw_path or not raw_path.startswith("/") or "\x00" in raw_path:
+        return False
+    if ".." in Path(raw_path).parts:
+        return False
+    normalized = os.path.normpath(raw_path)
+    prefix = allowed_prefix.rstrip("/")
+    return normalized.startswith(prefix + "/")
+
+
 def _enforce_config_policy(raw: bytes) -> None:
     """Keep the config editor from turning HAProxy into a root command runner."""
     text = raw.decode("utf-8")
     forbidden = {
         "program", "pidfile", "module-load", "setuid", "setgid",
-        "external-check",
+        "uid", "gid", "external-check", "external-check-path",
+        "external-check-command", "lua-load-per-thread", "setenv",
+        "presetenv", "ssl-engine", "insecure-fork-wanted",
+        "insecure-setuid-wanted",
+    }
+    section_headers = {
+        "defaults", "frontend", "backend", "listen", "resolvers",
+        "mailers", "peers", "userlist", "cache", "program", "ring",
+        "log-forward", "fcgi-app", "crt-store", "traces",
+        "http-errors", "acme",
     }
     allowed_global = {
         "log", "nbthread", "maxconn", "chroot", "stats", "user", "group",
@@ -1876,11 +1964,12 @@ def _enforce_config_policy(raw: bytes) -> None:
     conditional_body = None
     conditional_body_seen = False
 
-    for raw_line in text.splitlines():
+    for raw_line in _unfold_haproxy_lines(text):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        token = line.split(None, 1)[0].lower()
+        parts = line.split()
+        token = parts[0].lower()
         if conditional_body is not None:
             if not raw_line[:1].isspace():
                 raise ValueError("HAProxy compatibility block must stay inside global")
@@ -1900,14 +1989,17 @@ def _enforce_config_policy(raw: bytes) -> None:
             continue
         if token in forbidden:
             raise ValueError(f"HAProxy directive '{token}' is not allowed")
+        if token == "option" and len(parts) >= 2 and parts[1].lower() == "external-check":
+            raise ValueError("HAProxy directive 'option external-check' is not allowed")
         if token == "global":
             if saw_global:
                 raise ValueError("multiple global sections are not allowed")
             in_global = True
             saw_global = True
             continue
-        if in_global and not raw_line[:1].isspace():
+        if token in section_headers:
             in_global = False
+            continue
         if not in_global:
             continue
 
@@ -1917,29 +2009,25 @@ def _enforce_config_policy(raw: bytes) -> None:
             raise ValueError(f"global directive '{token}' is not allowed")
 
         if token == "user":
-            required["user"] = line == "user haproxy"
+            required["user"] = len(parts) == 2 and parts[1] == "haproxy"
         elif token == "group":
-            required["group"] = line == "group haproxy"
+            required["group"] = len(parts) == 2 and parts[1] == "haproxy"
         elif token == "chroot":
-            required["chroot"] = line == "chroot /var/lib/haproxy"
-        elif token == "stats" and line.startswith("stats socket "):
-            socket_path = line.split()[2]
-            if not socket_path.startswith("/run/haproxy/"):
+            required["chroot"] = len(parts) == 2 and parts[1] == "/var/lib/haproxy"
+        elif token == "stats" and len(parts) >= 2 and parts[1].lower() == "socket":
+            if len(parts) < 3 or not _normalized_prefix_path(parts[2], "/run/haproxy/"):
                 raise ValueError("HAProxy stats socket must stay under /run/haproxy")
         elif token == "lua-load":
-            lua_path = line.split(None, 1)[1].strip()
-            if lua_path != "/etc/haproxy/lua/auth-request.lua":
+            if len(parts) != 2 or parts[1] != "/etc/haproxy/lua/auth-request.lua":
                 raise ValueError("unapproved HAProxy Lua entry point")
         elif token == "lua-prepend-path":
-            lua_path = line.split(None, 1)[1].strip()
-            if not lua_path.startswith("/etc/haproxy/lua/"):
+            if len(parts) != 2 or not _normalized_prefix_path(parts[1], "/etc/haproxy/lua/"):
                 raise ValueError("HAProxy Lua search path must stay under /etc/haproxy/lua")
         elif token == "server-state-file":
             # Pinned to the chroot this policy already requires, so a pasted
             # configuration cannot point HAProxy at an arbitrary file to read
             # as server state.
-            state_path = line.split(None, 1)[1].strip()
-            if not state_path.startswith("/var/lib/haproxy/"):
+            if len(parts) != 2 or not _normalized_prefix_path(parts[1], "/var/lib/haproxy/"):
                 raise ValueError(
                     "HAProxy server state file must stay under /var/lib/haproxy"
                 )

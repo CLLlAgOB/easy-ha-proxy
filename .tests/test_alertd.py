@@ -688,7 +688,13 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("ReadOnlyPaths=", self.unit)
 
     def test_submitting_an_observation_needs_the_shared_token(self):
-        self.assertIn("ALERTD_TOKEN=", self.unit)
+        self.assertIn("EnvironmentFile=-", self.unit)
+        self.assertIn("daemons.env", self.unit)
+        self.assertNotIn('Environment="ALERTD_TOKEN=', self.unit)
+        daemons_env = (
+            ROOT / "ansible/roles/haproxy-admin/templates/daemons.env.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ALERTD_TOKEN=", daemons_env)
         source = (
             ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-alertd.py"
         ).read_text(encoding="utf-8")
@@ -976,7 +982,9 @@ class ProducerWiringTests(unittest.TestCase):
             unit = templates / (name.replace(".py", ".service.j2"))
             self.assertTrue(unit.exists(), unit.name)
             text = unit.read_text(encoding="utf-8")
-            self.assertIn("ALERTD_TOKEN=", text, unit.name)
+            self.assertIn("EnvironmentFile=-", text, unit.name)
+            self.assertIn("daemons.env", text, unit.name)
+            self.assertNotIn('Environment="ALERTD_TOKEN=', text, unit.name)
             self.assertIn("ALERTD_SOCKET_PATH=", text, unit.name)
 
     def test_reporting_never_uses_a_bare_call(self):

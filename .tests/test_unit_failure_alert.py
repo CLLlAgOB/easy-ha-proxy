@@ -228,7 +228,9 @@ class UnitTests(unittest.TestCase):
         unit = (TEMPLATES / "easy-ha-proxy-unit-failed@.service.j2").read_text(
             encoding="utf-8"
         )
-        self.assertIn("ALERTD_TOKEN=", unit)
+        self.assertIn("EnvironmentFile=-", unit)
+        self.assertIn("daemons.env", unit)
+        self.assertNotIn('Environment="ALERTD_TOKEN=', unit)
         self.assertIn("ALERTD_SOCKET_PATH=", unit)
         self.assertIn("easy-ha-proxy-unit-failed.py %i", unit)
         # Without this, a lost notification marks the reporter failed, and

@@ -204,6 +204,36 @@ class HAProxyControlPolicyTests(unittest.TestCase):
         )
         self.controld._enforce_config_policy(inside)
 
+    def test_rejects_unindented_global_directives_and_traversal(self) -> None:
+        attacks = (
+            # Column-0 directive in global must stay governed by global policy.
+            self.base.replace(b"    daemon\n", b"    daemon\nlua-load /opt/haproxy-admin/config/evil.lua\n"),
+            # Path traversal in lua-prepend-path and server-state-file.
+            self.base.replace(
+                b"    daemon\n",
+                b"    daemon\n    lua-prepend-path /etc/haproxy/lua/../../../tmp/?.lua\n",
+            ),
+            self.base.replace(
+                b"    daemon\n",
+                b"    daemon\n    server-state-file /var/lib/haproxy/../../etc/shadow\n",
+            ),
+            # Forbidden option external-check and lua-load-per-thread.
+            self.base + b"    option external-check\n",
+            self.base.replace(
+                b"    daemon\n",
+                b"    daemon\n    lua-load-per-thread /etc/haproxy/lua/auth-request.lua\n",
+            ),
+            # Backslash line continuation cannot smuggle forbidden directives.
+            self.base.replace(
+                b"    daemon\n",
+                b"    daemon\n    lua-load \\\n    /tmp/evil.lua\n",
+            ),
+        )
+        for cfg in attacks:
+            with self.subTest(cfg=cfg):
+                with self.assertRaises(ValueError):
+                    self.controld._enforce_config_policy(cfg)
+
 
 class GeneratedConfigurationPassesItsOwnPolicyTests(unittest.TestCase):
     """The product must not generate a configuration it then refuses.

@@ -270,20 +270,20 @@ def _backup_config_file() -> None:
 
 def _load_config_data() -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
-    Loads configuration.yml.
+    Loads configuration.yml without following symbolic links.
 
     Returns (root_data, rules_list).
 
     root_data is the whole YAML as a dict.
     rules_list is the access_control.rules list (list[dict]).
     """
-    if not os.path.exists(CONFIG_FILE):
+    if not os.path.lexists(CONFIG_FILE):
         raise FileNotFoundError(
             f"Authelia config file not found: {CONFIG_FILE}"
         )
 
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    raw_bytes, _file_stat = _safe_read_file(CONFIG_FILE)
+    data = yaml.safe_load(raw_bytes.decode("utf-8")) or {}
 
     if not isinstance(data, dict):
         raise ValueError("configuration.yml: root is not a dict")
@@ -494,71 +494,45 @@ def _save_config_data(root_data: Dict[str, Any]) -> None:
         except KeyError:
             target_uid, target_gid = -1, -1
 
-    tmp_path = CONFIG_FILE + ".tmp"
-
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(
-            root_data,
-            f,
-            allow_unicode=True,
-            default_flow_style=False,
-            sort_keys=False,
-        )
-        f.flush()
-        os.fsync(f.fileno())
-
-    if target_uid != -1:
-        try:
-            os.chown(tmp_path, target_uid, target_gid)
-        except OSError as exc:  # noqa: BLE001
-            LOG.warning("Failed to set owner/group on temp config file: %s", exc)
+    dir_name = os.path.dirname(CONFIG_FILE) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".configuration.", suffix=".tmp", dir=dir_name)
     try:
-        os.chmod(tmp_path, 0o640)
-    except OSError as exc:  # noqa: BLE001
-        LOG.warning("Failed to set mode on temp config file: %s", exc)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
+            yaml.safe_dump(
+                root_data,
+                f,
+                allow_unicode=True,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+            f.flush()
+            os.fsync(f.fileno())
+            if target_uid != -1:
+                try:
+                    os.fchown(f.fileno(), target_uid, target_gid)
+                except OSError as exc:  # noqa: BLE001
+                    LOG.warning("Failed to set owner/group on temp config file: %s", exc)
+            try:
+                os.fchmod(f.fileno(), 0o640)
+            except OSError as exc:  # noqa: BLE001
+                LOG.warning("Failed to set mode on temp config file: %s", exc)
 
-    try:
         _validate_config_via_authelia(tmp_path)
-    except Exception as exc:  # noqa: BLE001
-        LOG.error("Authelia config validation failed: %s", exc)
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
 
-    # Atomic replacement: the live path always points at a readable file.
-    os.replace(tmp_path, CONFIG_FILE)
-    LOG.info("Config file updated: %s", CONFIG_FILE)
-
-    # The owner and mode are already set on the temp file before the rename;
-    # this block stays as a safety net for unusual default ACLs on the directory.
-    if prev_stat is not None:
-        try:
-            # Owner/group
-            os.chown(CONFIG_FILE, prev_stat.st_uid, prev_stat.st_gid)
-        except PermissionError as exc:  # noqa: BLE001
-            LOG.warning(
-                "Failed to restore owner/group for %s: %s",
-                CONFIG_FILE,
-                exc,
-            )
-        except OSError as exc:  # noqa: BLE001
-            LOG.warning(
-                "OS error while restoring owner/group for %s: %s",
-                CONFIG_FILE,
-                exc,
-            )
-
-        try:
-            # Mode (masked down to 0777)
-            os.chmod(CONFIG_FILE, 0o640)
-        except OSError as exc:  # noqa: BLE001
-            LOG.warning(
-                "Failed to restore mode for %s: %s",
-                CONFIG_FILE,
-                exc,
-            )
+        # Atomic replacement: the live path always points at a readable file
+        # with ownership and mode already set on the FD (no post-replace TOCTOU).
+        os.replace(tmp_path, CONFIG_FILE)
+        tmp_path = ""
+        LOG.info("Config file updated: %s", CONFIG_FILE)
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

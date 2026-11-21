@@ -29,7 +29,7 @@ Environment="AUTHELIA_NOTIFICATION_CLIENT_USER={{ authelia_log_reader_user }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-configd.py', rstrip=false) | hash('sha256') }}"
 
 PrivateTmp=yes
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths={{ authelia_root_dir }} {{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}
 NoNewPrivileges=yes

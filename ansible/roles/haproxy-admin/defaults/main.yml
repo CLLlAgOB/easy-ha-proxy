@@ -175,6 +175,7 @@ haproxy_admin_debug_routes: false
 
 # haproxy-admin .env path containing socket and application settings.
 haproxy_admin_env_file: "{{ haproxy_admin_root_dir }}/.env"
+daemons_env_file: /etc/easy-ha-proxy/daemons.env
 
 # Helper daemon sockets.
 certd_socket_path: /run/easy-ha-proxy/haproxy-certd.sock

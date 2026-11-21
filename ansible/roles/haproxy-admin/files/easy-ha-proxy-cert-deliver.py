@@ -32,6 +32,7 @@ other targets their certificate.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -281,9 +282,26 @@ def ssh_base_command(record: Dict[str, Any], binary: str) -> List[str]:
     ]
 
 
+def _validated_target(record: Dict[str, Any]) -> str:
+    user = str(record.get("user") or "").strip()
+    host = str(record.get("host") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._@\\-]{0,127}", user):
+        raise DeliveryError("delivery target user contains unsupported characters")
+    if not host or len(host) > 253 or host.startswith("-"):
+        raise DeliveryError("delivery target host is invalid")
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            raise DeliveryError("delivery target host is invalid") from None
+    return f"{user}@{host}"
+
+
 def remote_quote(value: str) -> str:
     """Quote a path for the sftp batch language, which splits on whitespace."""
 
+    if re.search(r"[\x00-\x1f\x7f]", value):
+        raise DeliveryError("remote path contains control characters")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -292,7 +310,7 @@ def send(record: Dict[str, Any], artefacts: List[Tuple[Path, str]]) -> None:
     if transport not in TRANSPORTS:
         raise DeliveryError(f"transport must be one of {', '.join(TRANSPORTS)}")
 
-    target = f"{record['user']}@{record['host']}"
+    target = _validated_target(record)
 
     if transport == "sftp":
         batch = "".join(
@@ -300,7 +318,7 @@ def send(record: Dict[str, Any], artefacts: List[Tuple[Path, str]]) -> None:
             for local, name in artefacts
         ) + "quit\n"
         command = ssh_base_command(record, "/usr/bin/sftp")
-        command += ["-b", "-", target]
+        command += ["-b", "-", "--", target]
         result = subprocess.run(
             command, input=batch.encode("utf-8"),
             capture_output=True, timeout=SSH_TIMEOUT_SECONDS, check=False,
@@ -313,7 +331,10 @@ def send(record: Dict[str, Any], artefacts: List[Tuple[Path, str]]) -> None:
             destination = artefacts[0][1]
         else:
             destination = str(record.get("remote_path") or "").rstrip("/") + "/"
+        if re.search(r"[\x00-\x1f\x7f]", destination):
+            raise DeliveryError("remote path contains control characters")
         command = ssh_base_command(record, "/usr/bin/scp")
+        command += ["--"]
         command += [str(local) for local, _ in artefacts]
         command += [f"{target}:{destination}"]
         result = subprocess.run(
@@ -340,8 +361,9 @@ def run_post_command(record: Dict[str, Any]) -> Optional[str]:
     command = str(record.get("post_command") or "").strip()
     if not command:
         return None
+    target = _validated_target(record)
     full = ssh_base_command(record, "/usr/bin/ssh")
-    full += [f"{record['user']}@{record['host']}", "--", command]
+    full += ["--", target, command]
     try:
         result = subprocess.run(
             full, capture_output=True, timeout=SSH_TIMEOUT_SECONDS, check=False

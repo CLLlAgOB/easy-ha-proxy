@@ -21,14 +21,15 @@ SOURCE = DAEMON.read_text(encoding="utf-8")
 class UsersdSourceContractTests(unittest.TestCase):
     def test_ownership_and_mode_are_set_before_the_rename(self) -> None:
         save = SOURCE.split("def _save_users_data", 1)[1].split("\ndef ", 1)[0]
-        chown_at = save.find("os.chown(tmp_path")
-        chmod_at = save.find("os.chmod(tmp_path")
+        self.assertIn("tempfile.mkstemp", save)
+        chown_at = save.find("os.fchown(")
+        chmod_at = save.find("os.fchmod(")
         replace_at = save.find("os.replace(tmp_path")
-        self.assertGreater(chown_at, 0, "temp file must be chowned")
-        self.assertGreater(chmod_at, 0, "temp file must be chmodded")
+        self.assertGreater(chown_at, 0, "temp file must be fchowned")
+        self.assertGreater(chmod_at, 0, "temp file must be fchmodded")
         self.assertGreater(replace_at, 0)
-        self.assertLess(chown_at, replace_at, "chown must precede os.replace")
-        self.assertLess(chmod_at, replace_at, "chmod must precede os.replace")
+        self.assertLess(chown_at, replace_at, "fchown must precede os.replace")
+        self.assertLess(chmod_at, replace_at, "fchmod must precede os.replace")
 
     def test_no_post_rename_chown_on_the_live_file(self) -> None:
         save = SOURCE.split("def _save_users_data", 1)[1].split("\ndef ", 1)[0]

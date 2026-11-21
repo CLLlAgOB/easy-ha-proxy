@@ -29,6 +29,7 @@ import errno
 import email.parser
 import email.policy
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -1888,6 +1889,21 @@ def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
     remote_path = str(payload.get("remote_path") or "").strip()
     if not host or not user or not remote_path:
         raise ValueError("host, user and remote path are all required")
+    if len(host) > 253 or host.startswith("-"):
+        raise ValueError("host must be a valid hostname or IP address")
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            raise ValueError("host must be a valid hostname or IP address") from None
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._@\\-]{0,127}", user):
+        raise ValueError("user contains unsupported characters")
+    if (
+        len(remote_path) > 512
+        or re.search(r"[\x00-\x1f\x7f]", remote_path)
+        or ".." in re.split(r"[/\\]", remote_path)
+    ):
+        raise ValueError("remote_path is invalid")
 
     try:
         port = int(payload.get("port") or 22)
@@ -1895,6 +1911,17 @@ def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("port must be a number") from None
     if not 1 <= port <= 65535:
         raise ValueError("port must be between 1 and 65535")
+
+    post_command = str(payload.get("post_command") or "").strip()
+    if len(post_command) > 2048 or "\x00" in post_command:
+        raise ValueError("post_command is invalid")
+    pfx_password = (
+        str(payload.get("pfx_password"))
+        if payload.get("pfx_password") is not None
+        else existing.get("pfx_password", "")
+    )
+    if len(pfx_password) > 1024 or "\x00" in pfx_password:
+        raise ValueError("pfx_password is invalid")
 
     record = {
         "enabled": bool(payload.get("enabled", True)),
@@ -1905,14 +1932,10 @@ def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
         "user": user,
         "remote_path": remote_path,
         "format": fmt,
-        "post_command": str(payload.get("post_command") or "").strip(),
+        "post_command": post_command,
         # Left as it was unless a new one is sent, so editing a target does
         # not silently clear its password.
-        "pfx_password": (
-            str(payload.get("pfx_password"))
-            if payload.get("pfx_password") is not None
-            else existing.get("pfx_password", "")
-        ),
+        "pfx_password": pfx_password,
         "last_result": existing.get("last_result", {}),
     }
 
@@ -1924,9 +1947,17 @@ def save_cert_delivery(payload: Dict[str, Any]) -> Dict[str, Any]:
         _write_delivery_secret(known_file, str(host_key).strip() + chr(10))
 
     tmp = record_path.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2, ensure_ascii=False)
-    os.chmod(tmp, 0o600)
+    raw_record = json.dumps(record, indent=2, ensure_ascii=False).encode("utf-8")
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            handle = -1
+            stream.write(raw_record)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        if handle != -1:
+            os.close(handle)
     tmp.replace(record_path)
     return _delivery_public(record, name)
 
@@ -1937,9 +1968,14 @@ def _write_delivery_secret(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(handle, text.encode("utf-8"))
+        with os.fdopen(handle, "wb") as stream:
+            handle = -1
+            stream.write(text.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
     finally:
-        os.close(handle)
+        if handle != -1:
+            os.close(handle)
     os.replace(tmp, path)
 
 
@@ -4608,6 +4644,42 @@ def handle_certs_backup(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     }
 
 
+_CERTBOT_HOOK_KEY_RE = re.compile(
+    r"^\s*(?:pre|post|deploy|renew|manual_auth|manual_cleanup)[_-]hook\s*=",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ALLOWED_LE_RESTORE_DIRS = frozenset({"accounts", "archive", "live", "renewal", "keys", "csr"})
+
+
+def _is_allowed_le_restore_rel(rel: Path) -> bool:
+    """Only restore certificate/account/renewal data under /etc/letsencrypt, never hooks or cli.ini."""
+    parts = rel.parts
+    if len(parts) < 2:
+        return False
+    top = parts[0]
+    if top not in _ALLOWED_LE_RESTORE_DIRS:
+        return False
+    if top == "renewal":
+        return len(parts) == 2 and parts[1].endswith(".conf") and not parts[1].startswith(".")
+    return True
+
+
+def _read_zip_member_bounded(zf: zipfile.ZipFile, info: zipfile.ZipInfo, remaining_budget: int) -> bytes:
+    """Read a ZIP entry while strictly enforcing the total decompressed byte cap."""
+    chunks: List[bytes] = []
+    total = 0
+    with zf.open(info, "r") as src:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > remaining_budget:
+                raise ValueError("ZIP archive expands beyond the allowed size")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def handle_certs_restore(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     archive_b64 = (body.get("archive_b64") or "").strip()
 
@@ -4636,6 +4708,7 @@ def handle_certs_restore(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
 
     written_files = 0
     skipped_entries = 0
+    remaining_budget = MAX_ARCHIVE_EXPANDED_BYTES
 
     for info in zf.infolist():
         if info.is_dir():
@@ -4655,9 +4728,15 @@ def handle_certs_restore(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         rel = Path(*member_path.parts[1:])
 
         if top == hap_top:
+            if len(rel.parts) != 1 or not rel.name.endswith(".pem") or rel.name.startswith("."):
+                skipped_entries += 1
+                continue
             target_base = hap_dir
             is_haproxy_cert = True
         elif top == le_top:
+            if not _is_allowed_le_restore_rel(rel):
+                skipped_entries += 1
+                continue
             target_base = le_root
             is_haproxy_cert = False
         elif top == ca_top:
@@ -4674,30 +4753,35 @@ def handle_certs_restore(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
             continue
 
         try:
+            data = _read_zip_member_bounded(zf, info, remaining_budget)
+            remaining_budget -= len(data)
+            if top == le_top and rel.parts[0] == "renewal":
+                if _CERTBOT_HOOK_KEY_RE.search(data.decode("utf-8", errors="replace")):
+                    LOG.warning("Refused certbot renewal config containing hook directive: %s", rel)
+                    skipped_entries += 1
+                    continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+            fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as dst:
+                    fd = -1
+                    dst.write(data)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+            finally:
+                if fd != -1:
+                    os.close(fd)
 
             if is_haproxy_cert:
-                try:
-                    os.chmod(target, 0o640)
-                    try:
-                        import pwd
-                        import grp
-
-                        uid = pwd.getpwnam("root").pw_uid
-                        gid = grp.getgrnam("haproxy").gr_gid
-                        os.chown(target, uid, gid)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                _set_cert_permissions(target)
             elif target_base == ca_root:
                 os.chmod(target, 0o600 if target.name == "ca.key" else 0o644)
             else:
                 os.chmod(target, 0o600)
 
             written_files += 1
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
         except Exception:
             skipped_entries += 1
             continue

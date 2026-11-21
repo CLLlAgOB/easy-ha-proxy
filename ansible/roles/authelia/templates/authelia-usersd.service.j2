@@ -21,7 +21,8 @@ Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role
 
 # Some hardening, but without NoNewPrivileges (root+docker)
 PrivateTmp=yes
-ProtectSystem=full
+ProtectSystem=strict
+ReadWritePaths={{ authelia_root_dir | default('/opt/authelia') }}
 ProtectHome=yes
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes

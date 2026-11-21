@@ -25,17 +25,20 @@ class ConfigdSaveContractTests(unittest.TestCase):
         )[0]
 
     def test_ownership_and_mode_precede_validation_and_rename(self) -> None:
-        chown_at = self.body.find("os.chown(tmp_path")
-        chmod_at = self.body.find("os.chmod(tmp_path")
+        self.assertIn("tempfile.mkstemp", self.body)
+        chown_at = self.body.find("os.fchown(")
+        chmod_at = self.body.find("os.fchmod(")
         validate_at = self.body.find("_validate_config_via_authelia(tmp_path)")
         replace_at = self.body.find("os.replace(tmp_path")
-        self.assertGreater(chown_at, 0, "temp config must be chowned")
-        self.assertGreater(chmod_at, 0, "temp config must be chmodded")
+        self.assertGreater(chown_at, 0, "temp config must be fchowned")
+        self.assertGreater(chmod_at, 0, "temp config must be fchmodded")
         self.assertGreater(validate_at, 0)
         self.assertGreater(replace_at, 0)
-        self.assertLess(chown_at, validate_at, "chown must precede validation")
-        self.assertLess(chmod_at, validate_at, "chmod must precede validation")
+        self.assertLess(chown_at, validate_at, "fchown must precede validation")
+        self.assertLess(chmod_at, validate_at, "fchmod must precede validation")
         self.assertLess(validate_at, replace_at)
+        self.assertNotIn("os.chown(CONFIG_FILE", self.body)
+        self.assertNotIn("os.chmod(CONFIG_FILE", self.body)
 
     def test_falls_back_to_authelia_account_when_no_previous_file(self) -> None:
         self.assertIn('pwd.getpwnam("authelia")', self.body)
