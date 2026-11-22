@@ -67,6 +67,8 @@ pub struct IpActivity {
     pub bad_requests: u64,
     pub reached_backend: bool,
     paths: SmallLru<u32, i64>,
+    /// Up to 16 host names this address asked for.
+    pub hosts: std::collections::HashSet<String>,
     categories: SmallLru<String, i64>,
     pub scanner_hits: u64,
     pub scanner_hits_denied: u64,

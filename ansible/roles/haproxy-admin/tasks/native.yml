@@ -128,6 +128,7 @@
       changed_when: true
 
     - name: "native-daemons | Install easy-ha-proxy-agent binary"
+      register: _native_agent_copy
       ansible.builtin.copy:
         src: /var/lib/easy-ha-proxy/native-staging/sbin/easy-ha-proxy-agent
         dest: "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
@@ -137,6 +138,7 @@
         mode: "0755"
 
     - name: "native-daemons | Install guardd-core binary"
+      register: _native_guardd_copy
       ansible.builtin.copy:
         src: /var/lib/easy-ha-proxy/native-staging/sbin/guardd-core
         dest: "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
@@ -171,3 +173,37 @@
       failed_when: >-
         _guardd_core_smoke.rc != 0
         and ('usage: guardd-core' not in ((_guardd_core_smoke.stdout | default('')) ~ (_guardd_core_smoke.stderr | default(''))))
+
+    # A replaced binary is not picked up by a running service: until a
+    # restart it keeps executing the old file. try-restart touches only units
+    # that are running, so a fresh install (units not there yet) is a no-op.
+    # The update broker is left alone: it supervises the update job running
+    # this playbook, and its own unit task restarts it when that is safe.
+    - name: "native-daemons | Restart running daemons that use the replaced agent binary"
+      ansible.builtin.command:
+        argv: "{{ ['systemctl', 'try-restart'] + _native_agent_units }}"
+      vars:
+        _native_agent_units: >-
+          {{ [
+               ('haproxy-healthd.service' if native_healthd_enabled | default(false) | bool else ''),
+               ('easy-ha-proxy-metricsd.service' if native_metricsd_enabled | default(false) | bool else ''),
+               ('easy-ha-proxy-alertd.service' if native_alertd_enabled | default(false) | bool else ''),
+               ('haproxy-controld.service' if native_controld_enabled | default(false) | bool else ''),
+               ('haproxy-certd.service' if native_certd_enabled | default(false) | bool else ''),
+               ('easy-ha-proxy-backupd.service' if native_backupd_enabled | default(false) | bool else ''),
+               ('authelia-bansd.service' if native_authelia_bansd_enabled | default(false) | bool else ''),
+               ('authelia-usersd.service' if native_authelia_usersd_enabled | default(false) | bool else ''),
+               ('authelia-configd.service' if native_authelia_configd_enabled | default(false) | bool else '')
+             ] | select | list }}
+      when:
+        - _native_agent_copy is changed
+        - _native_agent_units | length > 0
+      changed_when: true
+
+    - name: "native-daemons | Restart guardd when its Rust binary was replaced"
+      ansible.builtin.command:
+        argv: [systemctl, try-restart, easy-ha-proxy-guardd.service]
+      when:
+        - _native_guardd_copy is changed
+        - native_guardd_enabled | default(false) | bool
+      changed_when: true

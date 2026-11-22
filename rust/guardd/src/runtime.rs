@@ -83,7 +83,7 @@ pub fn load_config(path: impl AsRef<Path>) -> GuardConfig {
         .get("mode")
         .and_then(Value::as_str)
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|m| m == MODE_MONITOR || m == MODE_ENFORCE)
+        .filter(|m| m == MODE_MONITOR || m == MODE_ENFORCE || m == "off")
         .unwrap_or_else(|| def.mode.clone());
 
     let limits = obj.get("limits").and_then(Value::as_object);
@@ -207,13 +207,23 @@ pub enum RuntimeError {
     Io(io::Error),
     AnswerTooLarge(String),
     TableUnreadable(String),
+    /// HAProxy refused to remove a ban table entry: the ban still stands.
+    LiftRefused(String),
+}
+
+impl RuntimeError {
+    /// A lift refused, a table read that was not the table, an answer too
+    /// large to have been read whole: the ban's state is unknown (R01/R10).
+    pub fn ban_table_unsure(&self) -> bool {
+        matches!(self, Self::AnswerTooLarge(_) | Self::TableUnreadable(_) | Self::LiftRefused(_))
+    }
 }
 
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "{e}"),
-            Self::AnswerTooLarge(m) | Self::TableUnreadable(m) => write!(f, "{m}"),
+            Self::AnswerTooLarge(m) | Self::TableUnreadable(m) | Self::LiftRefused(m) => write!(f, "{m}"),
         }
     }
 }
@@ -350,11 +360,11 @@ pub fn banned_now(socket_path: &str) -> Result<HashSet<String>, RuntimeError> {
     let rows = read_table(socket_path, "tbl_ban", "")?;
     let mut active = HashSet::new();
     for (ip, fields) in rows {
-        let gpt0 = fields
-            .get("gpt0")
-            .and_then(|v| v.parse::<i64>().ok())
+        let gpc0 = fields
+            .get("gpc0")
+            .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or(0);
-        if gpt0 > 0 {
+        if gpc0 > 0 {
             active.insert(ip);
         }
     }
@@ -393,7 +403,7 @@ mod tests {
                 let mut req = [0u8; 256];
                 let _ = stream.read(&mut req);
                 let resp = "# table: tbl_ban, type: ip, size:1024, used:1\n\
-                    0x1: key=198.51.100.9 use=0 exp=300000 gpt0=40\n";
+                    0x1: key=198.51.100.9 use=0 exp=300000 gpc0=1 gpt0=40\n";
                 let _ = stream.write_all(resp.as_bytes());
             }
         });

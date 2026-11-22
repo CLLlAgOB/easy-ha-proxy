@@ -376,6 +376,14 @@ impl ExclusionModel {
         }
     }
 
+    pub fn network_count(&self) -> usize {
+        self.networks.len()
+    }
+
+    pub fn authenticated_count(&self) -> usize {
+        self.authenticated.len()
+    }
+
     pub fn verdict(&self, ip: &str) -> Verdict {
         if self.authenticated.contains(ip) {
             return Verdict {

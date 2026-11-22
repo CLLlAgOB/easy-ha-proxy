@@ -5,30 +5,40 @@
 //! SLRU per-IP memory (`IpMemory`), IPv4 `/24` campaign correlation
 //! (`SubnetCorrelator`), and rotation-safe incremental log reading (`LogCursor`).
 
+pub mod alerts;
 pub mod api;
+pub mod constants;
+pub mod context;
 pub mod enforcer;
+pub mod engine;
+pub mod haconfig;
+pub mod localtime;
 pub mod live;
+pub mod livebuf;
 pub mod parser;
+pub mod reqlog;
 pub mod runtime;
 pub mod scoring;
+pub mod secdb;
+pub mod sha256;
+pub mod shield;
 pub mod signatures;
-pub mod storage;
 pub mod tracking;
+pub mod watchers;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-pub use api::{constant_time_eq, dispatch_http, DaemonState};
+pub use api::constant_time_eq;
 #[cfg(unix)]
-pub use api::serve_unix_socket;
+pub use api::serve;
+pub use engine::{Engine, Shared};
 pub use enforcer::{
     is_adaptive_code, Enforcer, EnforcementQueue, QueueStatus, ADAPTIVE_BAN_CODE,
     ADAPTIVE_PAGE_CODE, MANUAL_BAN_CODE,
 };
-pub use live::{
-    live_refusal, CompletedMinute, LiveBuffer, LiveMemoryStatus, LiveRecord, MinuteDigests,
-    RefusedCounts, DIGEST_BOUNDS_MS,
-};
+pub use live::{live_refusal, CompletedMinute, MinuteDigests, RefusedCounts, DIGEST_BOUNDS_MS};
+pub use livebuf::{LiveBuffer, LiveRecord};
 pub use parser::{extract_host, parse_access_line, parse_stamp, ParsedRequest};
 pub use runtime::{
     banned_now, list_tables, load_config, parse_table, read_table, runtime_command, GuardConfig,
@@ -42,7 +52,8 @@ pub use signatures::{
     classify_raw_path, is_asset, is_authentication_endpoint, is_proto_ua_mismatch,
     is_unusual_method_probe, normalize_path, user_agent_token, SignatureEngine,
 };
-pub use storage::{RequestLogDb, SecurityDatabase};
+pub use reqlog::RequestLog;
+pub use secdb::SecurityDatabase;
 pub use tracking::{
     format_subnet24, ipv4_subnet24_key, IpActivity, IpMemory, LogCursor, SubnetCorrelator,
     SubnetSummary,

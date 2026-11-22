@@ -65,19 +65,19 @@ struct SignatureFile {
     user_agents: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum CompiledQueryRule {
     FetchAndRun,
     Regex(Regex),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QueryRuleEntry {
     name: String,
     matcher: CompiledQueryRule,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct UserAgentRule {
     written: String,
     category: String,
@@ -96,9 +96,75 @@ pub struct SignatureEngine {
     query_rules: Vec<QueryRuleEntry>,
     ua_automaton: Option<AhoCorasick>,
     ua_rules: Vec<UserAgentRule>,
+    // The shipped list as read, before the operator's rules go on top, so the
+    // two can be merged again whenever the overrides change.
+    shipped_paths: HashMap<String, String>,
+    shipped_segments: HashMap<String, String>,
+    shipped_queries: Vec<QueryRuleEntry>,
+    shipped_agents: Vec<(String, String)>,
+    merged_segments: HashMap<String, String>,
+    pub source: String,
 }
 
 impl SignatureEngine {
+    /// The same shipped list with an operator's additions and suppressions on
+    /// top (Python `publish_signatures`).
+    pub fn with_overrides(&self, added: &[(String, String)], disabled: &[String]) -> Self {
+        let mut segments = self.shipped_segments.clone();
+        let mut paths = self.shipped_paths.clone();
+        for token in disabled {
+            paths.remove(token);
+            segments.remove(token);
+        }
+        for (token, category) in added {
+            if token.starts_with('/') {
+                paths.insert(token.clone(), category.clone());
+            } else {
+                segments.insert(token.clone(), category.clone());
+            }
+        }
+        let mut engine = Self::compile(
+            self.version.clone(),
+            self.decisive.clone(),
+            paths,
+            segments,
+            self.shipped_queries.clone(),
+            self.shipped_agents.clone(),
+        );
+        engine.shipped_paths = self.shipped_paths.clone();
+        engine.shipped_segments = self.shipped_segments.clone();
+        engine.source = self.source.clone();
+        engine
+    }
+
+    /// Segment token -> category, as in force (shipped plus overrides).
+    pub fn segment_map(&self) -> &HashMap<String, String> {
+        &self.merged_segments
+    }
+
+    /// Whole path -> category, as in force.
+    pub fn path_map(&self) -> &HashMap<String, String> {
+        &self.paths
+    }
+
+    pub fn query_rule_names(&self) -> Vec<String> {
+        self.query_rules.iter().map(|r| r.name.clone()).collect()
+    }
+
+    /// (token as written, category) for each User-Agent rule in force.
+    pub fn user_agents(&self) -> Vec<(String, String)> {
+        self.ua_rules.iter().map(|r| (r.written.clone(), r.category.clone())).collect()
+    }
+
+    pub fn decisive_categories(&self) -> &HashSet<String> {
+        &self.decisive
+    }
+
+    /// Every category a path rule can produce.
+    pub fn path_categories(&self) -> HashSet<String> {
+        self.merged_segments.values().chain(self.paths.values()).cloned().collect()
+    }
+
     /// Build an engine with the built-in fallback signatures matching Python `guardd.constants`.
     pub fn builtin() -> Self {
         let mut segments = HashMap::new();
@@ -132,7 +198,9 @@ impl SignatureEngine {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let content = fs::read_to_string(path.as_ref())
             .map_err(|e| format!("cannot read {}: {e}", path.as_ref().display()))?;
-        Self::from_json(&content)
+        let mut engine = Self::from_json(&content)?;
+        engine.source = path.as_ref().display().to_string();
+        Ok(engine)
     }
 
     /// Parse and compile signatures from JSON text.
@@ -217,6 +285,11 @@ impl SignatureEngine {
         query_rules: Vec<QueryRuleEntry>,
         ua_pairs: Vec<(String, String)>,
     ) -> Self {
+        let shipped_paths = paths.clone();
+        let shipped_segments = segments.clone();
+        let shipped_queries = query_rules.clone();
+        let shipped_agents = ua_pairs.clone();
+        let merged_segments = segments.clone();
         let mut segments_exact = HashMap::with_capacity(segments.len());
         let mut segments_lower = HashMap::with_capacity(segments.len());
         let mut prefixes = Vec::new();
@@ -265,6 +338,12 @@ impl SignatureEngine {
             query_rules,
             ua_automaton,
             ua_rules,
+            shipped_paths,
+            shipped_segments,
+            shipped_queries,
+            shipped_agents,
+            merged_segments,
+            source: String::new(),
         }
     }
 

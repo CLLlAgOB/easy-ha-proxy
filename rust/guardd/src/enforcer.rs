@@ -157,7 +157,59 @@ impl Enforcer {
             return Ok(false);
         }
         self.clear_entry(ip)?;
-        self.lifted += 1;
+        Ok(true)
+    }
+
+    /// When the running HAProxy process started; 0 if it cannot be told.
+    pub fn started_at(&self) -> i64 {
+        let Ok(info) = runtime_command(&self.haproxy_socket, "show info") else {
+            return 0;
+        };
+        for line in info.lines() {
+            if let Some(rest) = line.strip_prefix("Start_time_sec:") {
+                return rest.trim().parse().unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    /// Clear a ban HAProxy wrote under the old rules; 0 if it is not one.
+    pub fn lift_legacy(&mut self, ip: &str) -> Result<i64, RuntimeError> {
+        let rows = read_table(&self.haproxy_socket, "tbl_ban", &format!("key {ip}"))?;
+        let Some(fields) = rows.get(ip) else {
+            return Ok(0);
+        };
+        if field_i64(fields, "gpc0") <= 0 {
+            return Ok(0);
+        }
+        let code = field_i64(fields, "gpt0");
+        if !crate::watchers::is_legacy_code(code) {
+            return Ok(0);
+        }
+        self.clear_entry(ip)?;
+        Ok(code)
+    }
+
+    /// Take whatever ban stands on this address off, whoever placed it: the
+    /// entry keeps its code and loses its flag (R09).
+    pub fn release(&mut self, ip: &str) -> Result<bool, RuntimeError> {
+        let rows = read_table(&self.haproxy_socket, "tbl_ban", &format!("key {ip}"))?;
+        let Some(fields) = rows.get(ip) else {
+            return Ok(false);
+        };
+        if field_i64(fields, "gpc0") <= 0 {
+            return Ok(false);
+        }
+        let code = field_i64(fields, "gpt0");
+        let answer = runtime_command(
+            &self.haproxy_socket,
+            &format!("set table tbl_ban key {ip} data.gpc0 0 data.gpt0 {code}"),
+        )?;
+        if !answer.trim().is_empty() {
+            self.failed += 1;
+            let snippet: String = answer.trim().chars().take(200).collect();
+            return Err(RuntimeError::LiftRefused(format!("HAProxy refused to lift the ban on {ip}: {snippet}")));
+        }
         Ok(true)
     }
 
@@ -166,7 +218,7 @@ impl Enforcer {
         if !answer.trim().is_empty() {
             self.failed += 1;
             let snippet: String = answer.trim().chars().take(200).collect();
-            return Err(RuntimeError::TableUnreadable(format!(
+            return Err(RuntimeError::LiftRefused(format!(
                 "HAProxy refused to lift the ban on {ip}: {snippet}"
             )));
         }
@@ -174,12 +226,16 @@ impl Enforcer {
     }
 }
 
+fn field_i64(fields: &HashMap<String, String>, name: &str) -> i64 {
+    fields.get(name).and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueStatus {
-    pub queued: usize,
     pub urgent: usize,
+    pub ordinary: usize,
     pub limit: usize,
-    pub overflowed: u64,
+    pub overflows: u64,
 }
 
 /// Bounded two-tier enforcement queue (`urgent` vs normal) matching Python `guardd.live.EnforcementQueue`.
@@ -252,17 +308,19 @@ impl EnforcementQueue {
             .collect()
     }
 
+    /// Ordinary findings keep a quarter of the batch even during a decisive
+    /// flood (Python `EnforcementQueue.batch`).
     pub fn batch(&self, max_items: usize) -> Vec<(String, u64)> {
-        let mut out = Vec::with_capacity(max_items.min(self.entries.len()));
-        for ip in self.urgent.iter().chain(self.normal.iter()) {
-            if out.len() >= max_items {
-                break;
-            }
-            if let Some(&(_, g)) = self.entries.get(ip) {
-                out.push((ip.clone(), g));
-            }
+        let with_gen = |ip: &String| self.entries.get(ip).map(|&(_, g)| (ip.clone(), g));
+        let mut urgent: Vec<(String, u64)> =
+            self.urgent.iter().filter_map(with_gen).take(max_items - max_items / 4).collect();
+        let ordinary: Vec<(String, u64)> =
+            self.normal.iter().filter_map(with_gen).take(max_items - urgent.len()).collect();
+        if urgent.len() + ordinary.len() < max_items {
+            urgent = self.urgent.iter().filter_map(with_gen).take(max_items - ordinary.len()).collect();
         }
-        out
+        urgent.extend(ordinary);
+        urgent
     }
 
     pub fn acknowledge(&mut self, ip: &str, generation: u64) {
@@ -282,10 +340,10 @@ impl EnforcementQueue {
 
     pub fn status(&self) -> QueueStatus {
         QueueStatus {
-            queued: self.entries.len(),
             urgent: self.urgent.len(),
+            ordinary: self.normal.len(),
             limit: self.limit,
-            overflowed: self.overflowed,
+            overflows: self.overflowed,
         }
     }
 }
