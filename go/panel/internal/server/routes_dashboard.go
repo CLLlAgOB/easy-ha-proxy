@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/netip"
@@ -149,11 +148,13 @@ func (s *Server) handleAttackers(w http.ResponseWriter, r *http.Request) {
 	// Fallback to controld `logs-attackers` when guardd live buffer is off.
 	if s.Pool.ControldPath != "" {
 		raw, cerr := daemons.LineCommand(r.Context(), s.Pool.ControldPath, "logs-attackers", 15*time.Second, 2*1024*1024)
-		if cerr == nil && strings.TrimSpace(raw) != "" {
-			var parsed map[string]any
-			if json.Unmarshal([]byte(strings.TrimSpace(raw)), &parsed) == nil && parsed != nil {
-				s.writeJSON(w, r, http.StatusOK, parsed)
-				return
+		if cerr == nil && strings.HasPrefix(strings.TrimSpace(raw), "OK") {
+			if parsed := decodeControlReply(raw); parsed != nil {
+				if _, failed := parsed["error"]; !failed || parsed["code_400"] != nil {
+					delete(parsed, "ok")
+					s.writeJSON(w, r, http.StatusOK, parsed)
+					return
+				}
 			}
 		}
 	}

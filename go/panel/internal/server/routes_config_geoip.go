@@ -57,15 +57,48 @@ func (s *Server) controldJSON(ctx context.Context, command string, payload map[s
 	if err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(reply)
-	if trimmed == "" {
-		return nil, fmt.Errorf("haproxy-controld returned empty response")
+	return decodeControlReply(reply), nil
+}
+
+// decodeControlReply reads controld's "OK|ERROR <base64-json>" answer the
+// way Flask's _controld_json_request does: a reply that is not that shape is
+// a failure with the text shown, never a crash of the page.
+func decodeControlReply(reply string) map[string]any {
+	response := strings.TrimSpace(reply)
+	prefix, payloadB64, found := strings.Cut(response, " ")
+	var payload map[string]any
+	var decodeErr error
+	if !found || (prefix != "OK" && prefix != "ERROR") {
+		decodeErr = fmt.Errorf("unexpected response prefix")
+	} else if raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payloadB64)); err != nil {
+		decodeErr = err
+	} else if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
+		decodeErr = fmt.Errorf("response payload is not an object")
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-		return nil, fmt.Errorf("haproxy-controld returned invalid JSON: %w", err)
+	if decodeErr != nil {
+		shown := response
+		if len(shown) > 300 {
+			shown = shown[:300]
+		}
+		if shown == "" {
+			shown = "empty"
+		}
+		return map[string]any{"ok": false, "error": fmt.Sprintf("Invalid haproxy-controld response: %s (%v)", shown, decodeErr)}
 	}
-	return parsed, nil
+	if _, ok := payload["ok"]; !ok {
+		payload["ok"] = prefix == "OK"
+	}
+	if prefix == "ERROR" {
+		payload["ok"] = false
+		if _, ok := payload["error"]; !ok {
+			if failure, ok := payload["failure"]; ok && failure != nil && failure != "" {
+				payload["error"] = failure
+			} else {
+				payload["error"] = "control request failed"
+			}
+		}
+	}
+	return payload
 }
 
 func (s *Server) handleConfigVersions(w http.ResponseWriter, r *http.Request) {

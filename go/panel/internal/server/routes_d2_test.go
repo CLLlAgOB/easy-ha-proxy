@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -107,15 +108,15 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 	controldSock := startFakeHAProxyAdmin(t, func(cmd string) string {
 		switch {
 		case strings.HasPrefix(cmd, "config-versions"):
-			return `{"versions":[{"id":"v1"}],"unapplied":false}` + "\n"
+			return controldOK(`{"versions":[{"id":"v1"}],"unapplied":false}`)
 		case cmd == "config-transaction-status":
-			return `{"ok":true,"pending":false}` + "\n"
+			return controldOK(`{"ok":true,"pending":false}`)
 		case cmd == "geoip-status":
-			return `{"ok":true,"available":true}` + "\n"
+			return controldOK(`{"ok":true,"available":true}`)
 		case strings.HasPrefix(cmd, "geoip-schedule "):
-			return `{"ok":true,"schedule":"weekly"}` + "\n"
+			return controldOK(`{"ok":true,"schedule":"weekly"}`)
 		default:
-			return `{"ok":true}` + "\n"
+			return controldOK(`{"ok":true}`)
 		}
 	})
 
@@ -313,4 +314,9 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authelia bans list failed: %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// controldOK answers as haproxy-controld does: "OK <base64(json)>".
+func controldOK(payload string) string {
+	return "OK " + base64.StdEncoding.EncodeToString([]byte(payload)) + "\n"
 }

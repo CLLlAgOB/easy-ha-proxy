@@ -30,13 +30,13 @@ func TestStageD3AuditConfigStoreAndHTMLPages(t *testing.T) {
 	controldSock := startFakeHAProxyAdmin(t, func(cmd string) string {
 		switch {
 		case cmd == "config-transaction-status":
-			return `{"ok":true,"pending":false}` + "\n"
+			return controldOK(`{"ok":true,"pending":false}`)
 		case strings.HasPrefix(cmd, "check-config"):
 			return "OK configuration is valid\n"
 		case strings.HasPrefix(cmd, "begin-config-transaction"):
-			return `{"ok":true,"state":"pending_confirmation","token":"tx-99"}` + "\n"
+			return controldOK(`{"ok":true,"state":"pending_confirmation","token":"tx-99"}`)
 		default:
-			return `{"ok":true}` + "\n"
+			return controldOK(`{"ok":true}`)
 		}
 	})
 

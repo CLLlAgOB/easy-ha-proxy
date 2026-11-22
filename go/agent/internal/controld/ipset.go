@@ -1,9 +1,11 @@
 package controld
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -409,22 +411,96 @@ func (c *Controller) DumpServerState(ctx context.Context) {
 	_ = os.Rename(tmpName, c.Opts.ServerStatePath)
 }
 
-// LogsAttackers returns the current banned attacker entries from HAProxy's ban table.
-func (c *Controller) LogsAttackers(ctx context.Context) ([]StickTableEntry, error) {
-	raw, err := c.haproxyClient().Command(ctx, "show table "+c.Opts.BanTable)
+var (
+	attackerIPRe     = regexp.MustCompile(`(\d{1,3}(?:\.\d{1,3}){3})`)
+	attackerStatusRe = regexp.MustCompile(`\s-?\d+/-?\d+/-?\d+/-?\d+/-?\d+\s(\d{3})\s`)
+)
+
+// LogsAttackers counts the top addresses by HTTP 400 and 451 in the tail of
+// the access log, as Python controld's logs_attackers does: the status is
+// read from its own field after the five timers, never from any " 400 ".
+func (c *Controller) LogsAttackers(_ context.Context) (map[string]any, error) {
+	path := c.Opts.LogFile
+	f, err := os.Open(path)
+	if err != nil {
+		return map[string]any{"error": "Log file not found", "diagnostic": map[string]any{"log_path": path}}, nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	entries, ok := ParseStickTable(raw, c.Opts.BanTable)
-	if !ok {
-		return []StickTableEntry{}, nil
+	size := info.Size()
+	var start int64
+	if c.Opts.LogTailMaxBytes > 0 && size > c.Opts.LogTailMaxBytes {
+		start = size - c.Opts.LogTailMaxBytes
 	}
-	out := make([]StickTableEntry, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e)
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return nil, err
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
-	return out, nil
+	reader := bufio.NewReaderSize(f, 1<<20)
+	if start > 0 {
+		_, _ = reader.ReadString('\n')
+	}
+	diag := map[string]any{"source": "file", "log_path": path, "partial": start > 0, "scanned_bytes": size - start}
+	total, with400, with451, matches := 0, 0, 0, 0
+	a400 := map[string]int{}
+	a451 := map[string]int{}
+	for {
+		line, rerr := reader.ReadString('\n')
+		if line != "" {
+			total++
+			code := ""
+			if m := attackerStatusRe.FindStringSubmatch(line); m != nil {
+				code = m[1]
+			}
+			has400, has451 := code == "400", code == "451"
+			if has400 {
+				with400++
+			}
+			if has451 {
+				with451++
+			}
+			if has400 || has451 {
+				if m := attackerIPRe.FindStringSubmatch(line); m != nil {
+					matches++
+					if has400 {
+						a400[m[1]]++
+					}
+					if has451 {
+						a451[m[1]]++
+					}
+				}
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	diag["total_lines"] = total
+	diag["lines_with_400"] = with400
+	diag["lines_with_451"] = with451
+	diag["ip_matches"] = matches
+	top := func(src map[string]int) []map[string]any {
+		type kv struct {
+			ip string
+			n  int
+		}
+		items := make([]kv, 0, len(src))
+		for k, v := range src {
+			items = append(items, kv{k, v})
+		}
+		sort.SliceStable(items, func(i, j int) bool { return items[i].n > items[j].n })
+		if len(items) > 10 {
+			items = items[:10]
+		}
+		out := make([]map[string]any, 0, len(items))
+		for _, it := range items {
+			out = append(out, map[string]any{"ip": it.ip, "count": it.n})
+		}
+		return out
+	}
+	return map[string]any{"code_400": top(a400), "code_451": top(a451), "diagnostic": diag}, nil
 }
 
 // RunBansLoop continuously synchronizes ban and zero-trust auth ipsets until ctx is canceled.
