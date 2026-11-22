@@ -20,6 +20,7 @@ import (
 
 	"easy-ha-proxy/panel/internal/config"
 	"easy-ha-proxy/panel/internal/daemons"
+	"easy-ha-proxy/panel/internal/geoip"
 	"easy-ha-proxy/panel/internal/haproxy"
 	"easy-ha-proxy/panel/internal/i18n"
 	"easy-ha-proxy/panel/internal/prometheus"
@@ -49,6 +50,7 @@ type Server struct {
 	Cfg      *config.Config
 	Pool     *daemons.Pool
 	Runtime  *haproxy.Runtime
+	GeoIP    *geoip.Reader
 	Catalog  *i18n.Catalog
 	Boundary *security.Boundary
 	Prom     *prometheus.Collector
@@ -88,6 +90,7 @@ func New(cfg *config.Config, pool *daemons.Pool, rt *haproxy.Runtime, cat *i18n.
 		Cfg:      cfg,
 		Pool:     pool,
 		Runtime:  rt,
+		GeoIP:    geoip.NewReader(cfg.GeoIPDBPath),
 		Catalog:  cat,
 		Boundary: boundary,
 		Prom:     prom,
@@ -206,6 +209,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Panel info endpoint (for diagnostics and Stage D verification).
 	mux.HandleFunc("GET /api/panel/info", s.handlePanelInfo)
+
+	// Stage D2 route groups: dashboard, certificates, config/GeoIP, backups,
+	// updates/OS/SSH security, and Authelia daemons.
+	s.registerDashboardRoutes(mux)
+	s.registerCertRoutes(mux)
+	s.registerConfigAndGeoIPRoutes(mux)
+	s.registerBackupRoutes(mux)
+	s.registerUpdateAndSecurityRoutes(mux)
+	s.registerAutheliaRoutes(mux)
 }
 
 func (s *Server) staticHandler() http.Handler {

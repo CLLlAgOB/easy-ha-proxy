@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	Version              = "0.1.0-alpha"
+	Version              = "0.2.0-alpha"
 	DefaultListenAddr    = "0.0.0.0:5000"
 	DefaultSecretFile    = "/var/lib/haproxy-admin/secret_key"
 	DefaultMaxBodyBytes  = 32 * 1024 * 1024
@@ -39,6 +39,10 @@ type Config struct {
 	HAProxyLog       string
 	WhitelistGlobal  string
 	WhitelistGeo     string
+	GeoIPDBPath      string
+	BanTable         string
+	BackupUploadsDir string
+	BackupDownloadsDir string
 	ExcludeExact     []string
 	ExcludePrefix    []string
 	MaxBodyBytes     int64
@@ -89,6 +93,10 @@ func Load() (*Config, error) {
 		HAProxyLog:          envOr("LOG_FILE", "/var/log/haproxy.log"),
 		WhitelistGlobal:     envOr("WHITELIST_GLOBAL_FILE", "/etc/haproxy/whitelist_global.lst"),
 		WhitelistGeo:        envOr("WHITELIST_GEO_FILE", "/etc/haproxy/whitelist_geo.lst"),
+		GeoIPDBPath:         envOr("HAPROXY_ADMIN_GEOIP_DB", "/etc/haproxy/geoip/current/dbip-country-lite.mmdb"),
+		BanTable:            envOr("HAPADM_BAN_TABLE", "abuse_ban"),
+		BackupUploadsDir:    envOr("BACKUPD_UPLOADS_DIR", "/var/lib/easy-ha-proxy/backup-web/uploads"),
+		BackupDownloadsDir:  envOr("BACKUPD_BACKUPS_DIR", "/var/lib/easy-ha-proxy/backup-web/backups"),
 		ExcludeExact:        splitCSV(os.Getenv("UI_EXCLUDE_EXACT")),
 		ExcludePrefix:       splitCSV(os.Getenv("UI_EXCLUDE_PREFIX")),
 		MaxBodyBytes:        DefaultMaxBodyBytes,
