@@ -389,8 +389,10 @@ func Run(opts Options) error {
 		return err
 	}
 	srv := unixrpc.NewServer(opts.AppUID, opts.MaxRequestBytes, opts.MaxResponseBytes, opts.MaxConnections, svc.Dispatch)
+	srv.SocketUser = opts.SocketUser
+	srv.SocketGroup = opts.SocketGroup
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	log.Printf("easy-ha-proxy-updated (Go) listening on %s state=%s", opts.SocketPath, opts.StateRoot)
-	return srv.ListenAndServe(ctx, opts.SocketPath, 0o600)
+	return srv.ListenAndServe(ctx, opts.SocketPath, 0o660)
 }

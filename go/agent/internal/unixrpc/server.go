@@ -8,9 +8,58 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// ResolveUID looks up a local username (pure-Go /etc/passwd) and returns its
+// numeric UID, or fallback if empty or not found.
+func ResolveUID(username string, fallback int) int {
+	name := strings.TrimSpace(username)
+	if name == "" {
+		return fallback
+	}
+	if n, err := strconv.Atoi(name); err == nil && n >= 0 {
+		return n
+	}
+	if u, err := user.Lookup(name); err == nil {
+		if n, err := strconv.Atoi(u.Uid); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return fallback
+}
+
+// ChownSocket applies optional user/group ownership and permissions to a Unix socket.
+func ChownSocket(socketPath, userName, groupName string, mode os.FileMode) {
+	uid := -1
+	gid := -1
+	if u := strings.TrimSpace(userName); u != "" {
+		if n, err := strconv.Atoi(u); err == nil {
+			uid = n
+		} else if info, err := user.Lookup(u); err == nil {
+			if n, err := strconv.Atoi(info.Uid); err == nil {
+				uid = n
+			}
+		}
+	}
+	if g := strings.TrimSpace(groupName); g != "" {
+		if n, err := strconv.Atoi(g); err == nil {
+			gid = n
+		} else if info, err := user.LookupGroup(g); err == nil {
+			if n, err := strconv.Atoi(info.Gid); err == nil {
+				gid = n
+			}
+		}
+	}
+	if uid >= 0 || gid >= 0 {
+		_ = os.Chown(socketPath, uid, gid)
+	}
+	_ = os.Chmod(socketPath, mode)
+}
 
 // Error carries a structured error_code matching backupd and updated wire replies.
 type Error struct {
@@ -34,6 +83,8 @@ type Handler func(ctx context.Context, req map[string]any) (map[string]any, erro
 // Server serves single-line JSON RPC requests over an AF_UNIX stream socket.
 type Server struct {
 	AllowedUIDs      map[int]struct{}
+	SocketUser       string
+	SocketGroup      string
 	MaxRequestBytes  int
 	MaxResponseBytes int
 	MaxConnections   int
@@ -198,7 +249,7 @@ func (s *Server) ListenAndServe(ctx context.Context, socketPath string, mode os.
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(socketPath, mode)
+	ChownSocket(socketPath, s.SocketUser, s.SocketGroup, mode)
 	defer os.Remove(socketPath)
 	return s.Serve(ctx, ln)
 }

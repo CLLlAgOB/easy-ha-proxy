@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 var rebootBlockedExact = map[string]struct{}{
@@ -359,7 +361,11 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(opts.ControlSocket, 0o660)
+	grp := strings.TrimSpace(os.Getenv("HAPROXY_CONTROL_SOCKET_GROUP"))
+	if grp == "" {
+		grp = "hadmin"
+	}
+	unixrpc.ChownSocket(opts.ControlSocket, "", grp, 0o660)
 	defer os.Remove(opts.ControlSocket)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

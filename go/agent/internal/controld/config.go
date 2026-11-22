@@ -81,11 +81,13 @@ func OptionsFromEnv() Options {
 	if udpInterval < 2 {
 		udpInterval = 2
 	}
+	ctrlSock := envOr("HAPROXY_CONTROL_SOCKET", envOr("HAPADM_CONTROL_SOCKET", "/run/easy-ha-proxy/haproxy-controld.sock"))
+	cfgPath := envOr("HAPROXY_CFG", envOr("HAPROXY_CFG_PATH", "/etc/haproxy/haproxy.cfg"))
 	return Options{
-		ControlSocket:           envOr("HAPADM_CONTROL_SOCKET", "/run/haproxy-controld.sock"),
+		ControlSocket:           ctrlSock,
 		HAProxyAdminSocket:      envOr("SOCKET_PATH", "/run/haproxy/admin.sock"),
 		HAProxyBin:              envOr("HAPROXY_BIN", "/usr/sbin/haproxy"),
-		HAProxyCfgPath:          envOr("HAPROXY_CFG_PATH", "/etc/haproxy/haproxy.cfg"),
+		HAProxyCfgPath:          cfgPath,
 		SystemctlBin:            envOr("SYSTEMCTL_BIN", "/usr/bin/systemctl"),
 		IpsetBin:                envOr("IPSET_BIN", "ipset"),
 		ServerStatePath:         envOr("HAPROXY_SERVER_STATE_FILE", "/var/lib/haproxy/server-state"),

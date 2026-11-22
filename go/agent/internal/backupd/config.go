@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 var (
@@ -57,6 +59,8 @@ type Options struct {
 	RebootMarker          string
 	AssistantRebootMarker string
 	RestoreActiveMarker   string
+	SocketUser            string
+	SocketGroup           string
 	AppUID                int
 	MaxRequestBytes       int
 	MinFreeBytes          uint64
@@ -81,15 +85,19 @@ func OptionsFromEnv() Options {
 		}
 		return fallback
 	}
+	sockUser := envOr("BACKUPD_SOCKET_USER", "haproxyadmin")
+	sockGroup := envOr("BACKUPD_APP_GROUP", "hadmin")
 	return Options{
 		SocketPath:            envOr("BACKUPD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock"),
+		SocketUser:            sockUser,
+		SocketGroup:           sockGroup,
 		SpoolRoot:             envOr("BACKUPD_ROOT_DIR", "/var/lib/easy-ha-proxy/backup-web"),
 		SourceDir:             envOr("BACKUPD_SOURCE_DIR", "/opt/easy-ha-proxy/source"),
 		OperationLockPath:     envOr("BACKUPD_OPERATION_LOCK", "/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock"),
 		RebootMarker:          envOr("BACKUPD_REBOOT_MARKER", "/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json"),
 		AssistantRebootMarker: "/run/easy-ha-proxy/reboot-scheduled",
 		RestoreActiveMarker:   envOr("BACKUPD_RESTORE_ACTIVE_MARKER", "/run/easy-ha-proxy/easy-ha-proxy-backupd-restore.active"),
-		AppUID:                os.Getuid(),
+		AppUID:                unixrpc.ResolveUID(sockUser, os.Getuid()),
 		MaxRequestBytes:       envInt("BACKUPD_MAX_REQUEST_BYTES", 64*1024),
 		MinFreeBytes:          uint64(envInt("BACKUPD_MIN_FREE_BYTES", 512*1024*1024)),
 		LowSpaceBytes:         uint64(envInt("BACKUPD_LOW_SPACE_BYTES", 2*1024*1024*1024)),

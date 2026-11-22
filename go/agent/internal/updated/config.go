@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 const ProtocolVersion = 2
@@ -79,6 +81,8 @@ type Options struct {
 	SSHProtectionMonitorPath string
 	BootIDPath               string
 	ShutdownBin              string
+	SocketUser               string
+	SocketGroup              string
 	AppUID                   int
 	MaxRequestBytes          int
 	MaxResponseBytes         int
@@ -104,8 +108,12 @@ func OptionsFromEnv() Options {
 		return fallback
 	}
 	stateRoot := envOr("UPDATED_STATE_ROOT", "/var/lib/easy-ha-proxy/update-web")
+	sockUser := envOr("UPDATED_SOCKET_USER", "haproxyadmin")
+	sockGroup := envOr("UPDATED_APP_GROUP", "hadmin")
 	return Options{
 		SocketPath:               envOr("UPDATED_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-updated.sock"),
+		SocketUser:               sockUser,
+		SocketGroup:              sockGroup,
 		StateRoot:                stateRoot,
 		SourceDir:                envOr("UPDATED_SOURCE_DIR", "/opt/easy-ha-proxy/source"),
 		ConfigDir:                envOr("UPDATED_CONFIG_DIR", "/etc/easy-ha-proxy"),
@@ -117,7 +125,7 @@ func OptionsFromEnv() Options {
 		SSHProtectionMonitorPath: filepath.Join(stateRoot, "ssh-protection-monitor.json"),
 		BootIDPath:               "/proc/sys/kernel/random/boot_id",
 		ShutdownBin:              "/sbin/shutdown",
-		AppUID:                   os.Getuid(),
+		AppUID:                   unixrpc.ResolveUID(sockUser, os.Getuid()),
 		MaxRequestBytes:          envInt("UPDATED_MAX_REQUEST_BYTES", 32*1024),
 		MaxResponseBytes:         envInt("UPDATED_MAX_RESPONSE_BYTES", 2*1024*1024),
 		ListLimit:                envInt("UPDATED_LIST_LIMIT", 30),

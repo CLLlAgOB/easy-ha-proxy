@@ -97,7 +97,7 @@ func OptionsFromEnv() Options {
 	}
 	certsDir := envOr("HAPROXY_CERTS_DIR", DefaultHAProxyCertsDir)
 	return Options{
-		SocketPath:       envOr("HAPROXY_CERTD_SOCKET", DefaultSocketPath),
+		SocketPath:       envOr("HAPROXY_CERTD_SOCKET", envOr("CERTD_SOCKET_PATH", DefaultSocketPath)),
 		HAProxyCertsDir:  certsDir,
 		LERootDir:        envOr("HAPROXY_LE_ROOT_DIR", DefaultLERootDir),
 		CARootDir:        envOr("HAPROXY_CA_ROOT_DIR", DefaultCARootDir),

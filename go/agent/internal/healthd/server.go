@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 const maxControlBodyBytes = 8192
@@ -26,9 +28,45 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/status", s.handleStatus)
+	mux.HandleFunc("GET /api/v1/health/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/events", s.handleEvents)
+	mux.HandleFunc("GET /api/v1/health/events", s.handleEvents)
+	mux.HandleFunc("GET /api/v1/control/capabilities", s.handleCapabilities)
 	mux.HandleFunc("POST /api/v1/control", s.handleControl)
 	return mux
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	allActions := []string{"start", "stop", "restart", "reload"}
+	sysCaps := make(map[string][]string)
+	for _, u := range s.Collector.cfg.SystemdUnits {
+		var acts []string
+		for _, a := range allActions {
+			if ActionPermitted("systemd", u, a, s.SelfUnit) {
+				acts = append(acts, a)
+			}
+		}
+		if len(acts) > 0 {
+			sysCaps[u] = acts
+		}
+	}
+	dockCaps := make(map[string][]string)
+	for _, c := range s.Collector.cfg.DockerContainers {
+		var acts []string
+		for _, a := range allActions {
+			if ActionPermitted("docker", c, a, s.SelfUnit) {
+				acts = append(acts, a)
+			}
+		}
+		if len(acts) > 0 {
+			dockCaps[c] = acts
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"systemd": sysCaps,
+		"docker":  dockCaps,
+	})
 }
 
 // Serve binds and serves over socketPath until ctx is canceled.
@@ -41,6 +79,11 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	if err != nil {
 		return err
 	}
+	grp := strings.TrimSpace(os.Getenv("HEALTHD_SOCKET_GROUP"))
+	if grp == "" {
+		grp = "hadmin"
+	}
+	unixrpc.ChownSocket(socketPath, "", grp, 0o660)
 	defer func() {
 		_ = ln.Close()
 		_ = os.Remove(socketPath)
