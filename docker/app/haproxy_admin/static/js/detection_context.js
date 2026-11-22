@@ -118,6 +118,7 @@
     table("dc-existing", ["Rule", "Conditions"], (state.existing_behavior || []).map((rule) => {
       let text;
       if (rule.gap_hours) text = t("Another scanner finding after {gap_hours} hours, within {days} days");
+      else if (rule.addresses) text = t("At least {addresses} distinct offending IPv4 addresses in the same /24 subnet within {minutes} minutes");
       else if (rule.paths) text = t("At least {paths} distinct missing routes within {minutes} minutes");
       else if (rule.hits) text = t("At least {hits} scanner hits in total; {categories} categories in the last {hours} hours");
       else text = t("At least {categories} categories in the last {hours} hours");

@@ -40,6 +40,7 @@ from .constants import (
     EVENT_SCANNER_DECISIVE,
     EVENT_SCANNER_MULTI,
     EVENT_SCANNER_PATH,
+    EVENT_SUBNET_CAMPAIGN,
     EVENT_WIDE_ENUM,
     LOG,
     LOW_AND_SLOW_MIN_CATEGORIES,
@@ -615,6 +616,7 @@ class DetectionContext:
                         {"id": EVENT_WIDE_ENUM, "paths": WIDE_ENUM_MIN, "minutes": WIDE_ENUM_WINDOW // 60},
                         {"id": EVENT_MASS_ENUM, "paths": MASS_ENUM_MIN, "minutes": WIDE_ENUM_WINDOW // 60},
                         {"id": EVENT_RECURRING, "gap_hours": RECURRING_GAP // 3600, "days": RECURRING_WINDOW // 86400},
+                        {"id": EVENT_SUBNET_CAMPAIGN, "addresses": SUBNET_CAMPAIGN_MIN_IPS, "minutes": SUBNET_CAMPAIGN_WINDOW // 60},
                     ],
                     "warning_only": sorted(DETECTION_WARNING_RULES),
                     "stats": [{**{k: v for k, v in row.items() if k != "ips"}, "unique_ips": len(row["ips"]),
@@ -629,11 +631,14 @@ class DetectionContext:
             raise ValueError("expected an object")
         uri, method, status = data.get("url", "/"), data.get("method", "GET"), data.get("status", 404)
         agent = data.get("user_agent", "")
+        protocol = data.get("protocol", "HTTP/1.1")
         host = detection_host(data.get("host", ""))
         if not isinstance(uri, str) or len(uri) > 4096 or not uri.startswith("/") or uri.startswith("//"):
             raise ValueError("expected a request path of at most 4096 characters")
         if type(status) is not int or not 100 <= status <= 599 or not isinstance(method, str) or not re.fullmatch(r"[A-Z]{3,16}", method):
             raise ValueError("invalid HTTP method or status")
+        if not isinstance(protocol, str) or protocol not in ("HTTP/1.0", "HTTP/1.1", "HTTP/2.0"):
+            raise ValueError("invalid HTTP protocol")
         if not isinstance(agent, str) or len(agent) > 512:
             raise ValueError("User-Agent must be at most 512 characters")
         try:
@@ -643,7 +648,8 @@ class DetectionContext:
         verdict = exclusions.verdict(ip)
         request = ParsedRequest(client_ip=ip, status=status, frontend="preview", backend="preview/srv1", method=method,
                                 path=normalize_path(uri), host=host, query_flag=classify_query(uri),
-                                path_flag=classify_raw_path(uri), observation_flags=observation_flags(uri), user_agent=agent)
+                                path_flag=classify_raw_path(uri), observation_flags=observation_flags(uri),
+                                user_agent=agent, protocol=protocol)
         matches = self.inspect(request, now, trusted=verdict.excluded, record=False)
         categories: Dict[str, int] = {}
         for row in matches:

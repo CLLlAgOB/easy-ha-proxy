@@ -10,6 +10,7 @@ User=root
 Group={{ app_group | default('hadmin') }}
 
 Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
 EnvironmentFile=-{{ haproxy_admin_env_file }}
 Environment="GUARDD_SOCKET_PATH={{ guardd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-guardd.sock') }}"
 Environment="GUARDD_SOCKET_GROUP={{ guardd_socket_group | default(app_group | default('hadmin')) }}"
@@ -23,7 +24,11 @@ EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-guardd.py', rstrip=false) | hash('sha256') }}"
+{% set _guardd_hashes = [lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-guardd.py', rstrip=false) | hash('sha256')] -%}
+{% for _guardd_mod in (query('ansible.builtin.fileglob', role_path ~ '/files/guardd/*.py') | sort) -%}
+{%   set _ = _guardd_hashes.append(lookup('ansible.builtin.file', _guardd_mod, rstrip=false) | hash('sha256')) -%}
+{% endfor -%}
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_guardd_hashes | join(':')) | hash('sha256') }}"
 
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-guardd.py
 

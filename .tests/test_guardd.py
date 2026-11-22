@@ -2135,9 +2135,29 @@ class SigningInIsNotReconnaissance(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls._saved_signatures = (
+            dict(guardd._SHIPPED_SEGMENTS),
+            dict(guardd._SHIPPED_PATHS),
+            set(guardd.DECISIVE_CATEGORIES),
+            guardd.SIGNATURE_VERSION,
+            guardd.SIGNATURE_SOURCE,
+            {k: dict(v) for k, v in guardd._overrides.items()},
+        )
         guardd.load_signatures(
             str(ROOT / "ansible/roles/haproxy-admin/files/scanner-signatures.json")
         )
+
+    @classmethod
+    def tearDownClass(cls):
+        (
+            guardd._SHIPPED_SEGMENTS,
+            guardd._SHIPPED_PATHS,
+            guardd.DECISIVE_CATEGORIES,
+            guardd.SIGNATURE_VERSION,
+            guardd.SIGNATURE_SOURCE,
+            guardd._overrides,
+        ) = cls._saved_signatures
+        guardd.publish_signatures()
 
     def test_the_path_that_caused_this_is_not_a_probe(self):
         self.assertEqual(
@@ -2702,6 +2722,30 @@ class ProtocolAndMethodAnomalyTests(EnforcementTestCase):
         )
         matches_trace = self.engine.detection.inspect(trace_req, now + 3, record=False)
         self.assertIn("observe:unusual-method-probe", {m["id"] for m in matches_trace})
+
+    def test_preview_accepts_protocol_and_summary_lists_subnet_campaign(self):
+        now = 1_000_000
+        preview_h10 = self.engine.detection.preview(
+            {
+                "host": "app.example.com",
+                "url": "/",
+                "method": "GET",
+                "status": 200,
+                "protocol": "HTTP/1.0",
+                "user_agent": "Mozilla/5.0 Chrome/130.0.0.0 Safari/537.36",
+            },
+            self.engine.exclusions,
+            now,
+        )
+        self.assertIn("observe:proto-ua-mismatch", {m["id"] for m in preview_h10["matches"]})
+        with self.assertRaises(ValueError):
+            self.engine.detection.preview(
+                {"host": "app.example.com", "url": "/", "protocol": "HTTP/9.9"},
+                self.engine.exclusions,
+                now,
+            )
+        behavior_ids = {row["id"] for row in self.engine.detection.summary()["existing_behavior"]}
+        self.assertIn(guardd.EVENT_SUBNET_CAMPAIGN, behavior_ids)
 
 
 class QualitySignalBreakdownTests(EnforcementTestCase):

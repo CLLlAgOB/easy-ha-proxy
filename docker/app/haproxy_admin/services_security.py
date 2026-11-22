@@ -52,6 +52,8 @@ LOG = logging.getLogger("haproxy-admin")
 # Kept in step with DEFAULT_WEIGHTS in easy-ha-proxy-guardd.py.
 EVENT_TYPES: tuple[str, ...] = (
     "SCANNER_PATH",
+    "SCANNER_PATH_DECISIVE",
+    "QUERY_INJECTION",
     "SCANNER_MULTI_CATEGORY",
     "LOW_AND_SLOW_SCANNER",
     "NOT_FOUND_ENUMERATION",
@@ -64,6 +66,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "ERROR_RATE_EXCEEDED",
     "LEGACY_HAPROXY_BAN",
     "HARD_FLOOR_EPISODE",
+    "SUBNET_CAMPAIGN",
 )
 
 
@@ -232,8 +235,8 @@ def address(value: str, args: Dict[str, str]) -> Dict[str, Any]:
 # A sweep of thirty or more made-up paths is probing too; the six-path tier
 # is not on the list, because a client with a few stale links trips it.
 _HOSTILE_MARKERS = (
-    "SCANNER", "INVALID_HOST", "NOSNI", "LEGACY_HAPROXY_BAN",
-    "WIDE_ENUMERATION", "MASS_ENUMERATION",
+    "SCANNER", "QUERY_INJECTION", "SUBNET_CAMPAIGN", "INVALID_HOST", "NOSNI",
+    "LEGACY_HAPROXY_BAN", "WIDE_ENUMERATION", "MASS_ENUMERATION",
 )
 
 

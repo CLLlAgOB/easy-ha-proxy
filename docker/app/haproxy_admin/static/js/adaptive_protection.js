@@ -735,6 +735,14 @@
           ` · ${of(report.addresses_in_networks, report.banned_addresses)}`
         : "";
     }
+    const signals = byId("ap-quality-signals");
+    if (signals) {
+      const disputed = (report.by_signal || []).filter((row) => Number(row.disputed) > 0);
+      signals.textContent = disputed.length
+        ? `${uiText("Signals with disputed bans")}: ` +
+          disputed.map((row) => `${row.signal} (${of(row.disputed, row.bans)})`).join(", ")
+        : "";
+    }
     const waiting = byId("ap-quality-waiting");
     if (waiting) {
       waiting.textContent = "";

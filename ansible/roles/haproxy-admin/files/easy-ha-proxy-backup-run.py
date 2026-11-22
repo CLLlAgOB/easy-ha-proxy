@@ -18,6 +18,7 @@ SOCKET_PATH = os.environ.get(
     "BACKUPD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock"
 )
 TIMEOUT_SECONDS = int(os.environ.get("BACKUPD_SCHEDULED_TIMEOUT", str(8 * 3600)))
+MAX_RESPONSE_BYTES = 1024 * 1024
 
 
 def main() -> int:
@@ -31,10 +32,15 @@ def main() -> int:
             client.sendall(request)
             client.shutdown(socket.SHUT_WR)
             chunks = []
+            received = 0
             while True:
                 chunk = client.recv(65536)
                 if not chunk:
                     break
+                received += len(chunk)
+                if received > MAX_RESPONSE_BYTES:
+                    print("the backup daemon returned an oversized answer", file=sys.stderr)
+                    return 2
                 chunks.append(chunk)
     except OSError as exc:
         print(f"the backup daemon is unreachable: {exc}", file=sys.stderr)

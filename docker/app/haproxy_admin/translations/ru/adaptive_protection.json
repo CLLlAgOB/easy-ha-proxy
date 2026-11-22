@@ -209,6 +209,12 @@
     "Error rate exceeded": "Превышение частоты ошибок",
     "HAProxy rule": "Правило HAProxy",
     "Hard protection threshold": "Жёсткий порог защиты",
+    "Decisive scanner signature": "Решающая сигнатура сканера",
+    "Query injection": "Инъекция в параметрах запроса",
+    "Coordinated /24 subnet campaign": "Скоординированная атака из подсети /24",
+    "Browser User-Agent over HTTP/1.0": "Браузерный User-Agent поверх HTTP/1.0",
+    "Unusual HTTP method probe": "Нетипичный HTTP-метод",
+    "Signals with disputed bans": "Сигналы со снятыми оператором банами",
     "Unknown reason": "Причина неизвестна",
     "Invalid ban reference": "Некорректная ссылка на блокировку",
     "How to read risk scores": "Как читать оценку риска"

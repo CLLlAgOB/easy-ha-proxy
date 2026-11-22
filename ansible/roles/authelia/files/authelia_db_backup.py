@@ -57,8 +57,12 @@ def backup(source: Path, directory: Path, label: str, keep: int) -> Path | None:
     os.close(descriptor)
     try:
         with contextlib.closing(
-            sqlite3.connect(_sqlite_ro_uri(source), uri=True)
-        ) as origin, contextlib.closing(sqlite3.connect(partial)) as copy:
+            sqlite3.connect(_sqlite_ro_uri(source), uri=True, timeout=30.0)
+        ) as origin, contextlib.closing(
+            sqlite3.connect(partial, timeout=30.0)
+        ) as copy:
+            origin.execute("PRAGMA busy_timeout = 30000")
+            copy.execute("PRAGMA busy_timeout = 30000")
             origin.backup(copy, pages=256, sleep=0.05)
         with contextlib.closing(
             sqlite3.connect(_sqlite_ro_uri(partial), uri=True)

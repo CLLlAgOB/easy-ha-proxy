@@ -214,7 +214,10 @@
   const BAN_REASONS = {
     secrets: "Secret file probes", vcs: "Repository probes", wordpress: "WordPress probes",
     config: "Configuration probes", "rce-probe": "Command execution probes", "server-info": "Server information probes",
-    "known-exploit": "Known exploit probes", SCANNER_PATH: "Scanner signature",
+    "known-exploit": "Known exploit probes", subnet: "Coordinated /24 subnet campaign",
+    "proto-ua-mismatch": "Browser User-Agent over HTTP/1.0", "unusual-method-probe": "Unusual HTTP method probe",
+    SCANNER_PATH: "Scanner signature", SCANNER_PATH_DECISIVE: "Decisive scanner signature",
+    QUERY_INJECTION: "Query injection", SUBNET_CAMPAIGN: "Coordinated /24 subnet campaign",
     SCANNER_MULTI_CATEGORY: "Several scanner categories", LOW_AND_SLOW_SCANNER: "Persistent slow scanning",
     NOT_FOUND_ENUMERATION: "Missing path enumeration", WIDE_ENUMERATION: "Wide path enumeration",
     MASS_ENUMERATION: "Mass path enumeration", RECURRING_SCANNER: "Repeated scanning",
