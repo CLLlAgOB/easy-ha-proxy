@@ -5,6 +5,9 @@
 //! SLRU per-IP memory (`IpMemory`), IPv4 `/24` campaign correlation
 //! (`SubnetCorrelator`), and rotation-safe incremental log reading (`LogCursor`).
 
+pub mod api;
+pub mod enforcer;
+pub mod live;
 pub mod parser;
 pub mod runtime;
 pub mod scoring;
@@ -15,6 +18,17 @@ pub mod tracking;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+pub use api::{constant_time_eq, dispatch_http, DaemonState};
+#[cfg(unix)]
+pub use api::serve_unix_socket;
+pub use enforcer::{
+    is_adaptive_code, Enforcer, EnforcementQueue, QueueStatus, ADAPTIVE_BAN_CODE,
+    ADAPTIVE_PAGE_CODE, MANUAL_BAN_CODE,
+};
+pub use live::{
+    live_refusal, CompletedMinute, LiveBuffer, LiveMemoryStatus, LiveRecord, MinuteDigests,
+    RefusedCounts, DIGEST_BOUNDS_MS,
+};
 pub use parser::{extract_host, parse_access_line, parse_stamp, ParsedRequest};
 pub use runtime::{
     banned_now, list_tables, load_config, parse_table, read_table, runtime_command, GuardConfig,

@@ -220,6 +220,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: aarch64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -233,9 +234,20 @@ jobs:
         working-directory: rust/guardd
         run: cargo test
 
-      - name: Release build
+      - name: Release build (x86_64)
         working-directory: rust/guardd
         run: cargo build --release
+
+      - name: Cross-compile release build (aarch64 / NanoPi ARM64)
+        working-directory: rust/guardd
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          cargo build --release --target aarch64-unknown-linux-gnu
+          file target/aarch64-unknown-linux-gnu/release/guardd-core target/aarch64-unknown-linux-gnu/release/libguardd_core.so
 
       - name: Python-vs-Rust differential parity
         env:

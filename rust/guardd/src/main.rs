@@ -2,12 +2,17 @@
 //! of the Rust `guardd-core` hot path.
 
 use guardd_core::{
-    parse_access_line, score_events, IpMemory, RequestLogDb, ScoringPolicy, SecurityDatabase,
+    load_config, parse_access_line, score_events, DaemonState, Enforcer, EnforcementQueue,
+    IpMemory, LiveBuffer, MinuteDigests, RequestLogDb, ScoringPolicy, SecurityDatabase,
     SignatureEngine, SubnetCorrelator,
 };
+#[cfg(unix)]
+use guardd_core::serve_unix_socket;
 use std::env;
 use std::io::{self, BufRead, BufWriter, Write};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn load_signatures(path: Option<&str>) -> SignatureEngine {
@@ -211,12 +216,62 @@ fn cmd_seed_db(sec_path: &str, req_path: &str, sig_path: Option<&str>) -> ExitCo
     ExitCode::SUCCESS
 }
 
+#[cfg(unix)]
+fn cmd_serve(
+    config_path: &str,
+    db_path: &str,
+    socket_path: &str,
+    sig_path: Option<&str>,
+) -> ExitCode {
+    let cfg = load_config(config_path);
+    let sigs = load_signatures(sig_path);
+    let db = match SecurityDatabase::open(db_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("cannot open security database {db_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mode_override = db.get_state("mode_override", "");
+    let enf = Enforcer::new(&cfg, if mode_override.is_empty() { None } else { Some(&mode_override) });
+    let token = env::var("GUARDD_TOKEN").unwrap_or_default();
+    let state = Arc::new(Mutex::new(DaemonState {
+        live: LiveBuffer::new(cfg.live_buffer_records, cfg.live_buffer_seconds, 0),
+        memory: IpMemory::new(cfg.max_tracked_ips, cfg.max_paths_per_ip),
+        config: cfg,
+        signatures: sigs,
+        database: db,
+        enforcer: enf,
+        queue: EnforcementQueue::new(10_000),
+        subnets: SubnetCorrelator::default_config(),
+        digests: MinuteDigests::new(),
+        policy: ScoringPolicy::default(),
+        control_token: token,
+        lines_read: 0,
+        lines_parsed: 0,
+    }));
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Err(e) = serve_unix_socket(socket_path, state, stop) {
+        eprintln!("guardd-core serve failed: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(unix))]
+fn cmd_serve(_config_path: &str, _db_path: &str, _socket_path: &str, _sig_path: Option<&str>) -> ExitCode {
+    eprintln!("serve requires Unix AF_UNIX sockets");
+    ExitCode::FAILURE
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let sub = args.get(1).map(String::as_str).unwrap_or("bench");
     let mut sig_path: Option<String> = None;
     let mut sec_db: Option<String> = None;
     let mut req_db: Option<String> = None;
+    let mut cfg_path: Option<String> = None;
+    let mut sock_path: Option<String> = None;
     let mut lines: usize = 50_000;
 
     let mut i = 2;
@@ -229,7 +284,7 @@ fn main() -> ExitCode {
                     continue;
                 }
             }
-            "--security-db" => {
+            "--security-db" | "--database" => {
                 if let Some(v) = args.get(i + 1) {
                     sec_db = Some(v.clone());
                     i += 2;
@@ -239,6 +294,20 @@ fn main() -> ExitCode {
             "--requests-db" => {
                 if let Some(v) = args.get(i + 1) {
                     req_db = Some(v.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "--config" => {
+                if let Some(v) = args.get(i + 1) {
+                    cfg_path = Some(v.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "--socket" => {
+                if let Some(v) = args.get(i + 1) {
+                    sock_path = Some(v.clone());
                     i += 2;
                     continue;
                 }
@@ -260,6 +329,20 @@ fn main() -> ExitCode {
     match sub {
         "parse" => cmd_parse(sig_path.as_deref()),
         "bench" => cmd_bench(lines, sig_path.as_deref()),
+        "serve" => {
+            let cfg = cfg_path.unwrap_or_else(|| {
+                env::var("GUARDD_CONFIG").unwrap_or_else(|_| "/opt/haproxy-admin/guardd.json".to_string())
+            });
+            let db = sec_db.unwrap_or_else(|| {
+                env::var("GUARDD_DATABASE")
+                    .unwrap_or_else(|_| "/var/lib/easy-ha-proxy/security/security.db".to_string())
+            });
+            let sock = sock_path.unwrap_or_else(|| {
+                env::var("GUARDD_SOCKET_PATH")
+                    .unwrap_or_else(|_| "/run/easy-ha-proxy/easy-ha-proxy-guardd.sock".to_string())
+            });
+            cmd_serve(&cfg, &db, &sock, sig_path.as_deref())
+        }
         "seed-db" => match (sec_db.as_deref(), req_db.as_deref()) {
             (Some(s), Some(r)) => cmd_seed_db(s, r, sig_path.as_deref()),
             _ => {
@@ -268,7 +351,7 @@ fn main() -> ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: guardd-core <parse|bench|seed-db> [--signatures PATH] [--lines N]");
+            eprintln!("usage: guardd-core <parse|bench|serve|seed-db> [--signatures PATH] [--lines N]");
             ExitCode::from(2)
         }
     }
