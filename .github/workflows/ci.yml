@@ -353,6 +353,8 @@ jobs:
           cat dist/SHA256SUMS.panel
 
       - name: Build Go panel container image (smoke + size check)
+        env:
+          DOCKER_BUILDKIT: '1'
         run: |
           docker build -f go/panel/Dockerfile -t easy-ha-proxy-panel:ci-check .
           docker image inspect easy-ha-proxy-panel:ci-check --format 'Go panel image size: {{.Size}} bytes'

@@ -1,0 +1,11 @@
+**
+!go/panel/go.mod
+!go/panel/cmd/
+!go/panel/cmd/**
+!go/panel/internal/
+!go/panel/internal/**
+!docker/app/haproxy_admin/static/
+!docker/app/haproxy_admin/static/**
+!docker/app/haproxy_admin/translations/
+!docker/app/haproxy_admin/translations/**
+docker/app/haproxy_admin/translations/README.md
