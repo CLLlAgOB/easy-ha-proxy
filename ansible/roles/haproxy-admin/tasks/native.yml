@@ -1,0 +1,137 @@
+---
+# roles/haproxy-admin/tasks/native.yml
+# Opt-in installation of the precompiled Rust (guardd-core) and Go
+# (easy-ha-proxy-agent) host binaries for x86_64 (amd64) and aarch64 (arm64).
+# Runs only when native_daemons_enabled or any per-daemon native flag is true.
+
+- name: "native-daemons | Determine whether any native binary is requested"
+  ansible.builtin.set_fact:
+    _native_any_enabled: >-
+      {{
+        (native_daemons_enabled | default(false) | bool)
+        or (native_guardd_enabled | default(false) | bool)
+        or (native_guardd_ffi_enabled | default(false) | bool)
+        or (native_healthd_enabled | default(false) | bool)
+        or (native_metricsd_enabled | default(false) | bool)
+        or (native_alertd_enabled | default(false) | bool)
+        or (native_controld_enabled | default(false) | bool)
+        or (native_certd_enabled | default(false) | bool)
+        or (native_backupd_enabled | default(false) | bool)
+        or (native_updated_enabled | default(false) | bool)
+      }}
+
+- name: "native-daemons | Install and verify native binaries"
+  when: _native_any_enabled | bool
+  block:
+    - name: "native-daemons | Map host architecture to release arch"
+      ansible.builtin.set_fact:
+        _native_arch_map:
+          x86_64: amd64
+          aarch64: arm64
+          arm64: arm64
+        _native_arch: >-
+          {{
+            {
+              'x86_64': 'amd64',
+              'aarch64': 'arm64',
+              'arm64': 'arm64'
+            }[ansible_architecture] | default('')
+          }}
+
+    - name: "native-daemons | Require supported architecture (amd64 or arm64)"
+      ansible.builtin.assert:
+        that:
+          - _native_arch in ['amd64', 'arm64']
+        fail_msg: >-
+          Unsupported host architecture '{{ ansible_architecture }}' for native
+          easy-ha-proxy binaries (supported: x86_64, aarch64).
+
+    - name: "native-daemons | Require local bundle dir or verified HTTPS release URL"
+      ansible.builtin.assert:
+        that:
+          - (native_local_bundle_dir | default('') | length > 0)
+            or (
+              (native_release_base_url | default('') | regex_search('^https://')) is not none
+              and (native_release_checksums[_native_arch] | default('') | regex_search('^[0-9a-fA-F]{64}$')) is not none
+            )
+        fail_msg: >-
+          Set either native_local_bundle_dir or both an https:// native_release_base_url
+          and a 64-hex SHA-256 entry in native_release_checksums['{{ _native_arch }}'].
+
+    - name: "native-daemons | Ensure staging and native library directories exist"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /usr/local/lib/easy-ha-proxy
+        - /var/lib/easy-ha-proxy/native-staging
+
+    - name: "native-daemons | Copy local release bundle when configured"
+      ansible.builtin.copy:
+        src: "{{ native_local_bundle_dir }}/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
+        dest: "/var/lib/easy-ha-proxy/native-staging/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
+        owner: root
+        group: root
+        mode: "0600"
+      when: native_local_bundle_dir | default('') | length > 0
+
+    - name: "native-daemons | Download and SHA-256 verify release bundle over HTTPS"
+      ansible.builtin.get_url:
+        url: "{{ native_release_base_url | regex_replace('/+$', '') }}/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
+        dest: "/var/lib/easy-ha-proxy/native-staging/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
+        checksum: "sha256:{{ native_release_checksums[_native_arch] }}"
+        owner: root
+        group: root
+        mode: "0600"
+        timeout: 60
+      when: native_local_bundle_dir | default('') | length == 0
+
+    - name: "native-daemons | Unpack bundle into staging directory"
+      ansible.builtin.unarchive:
+        src: "/var/lib/easy-ha-proxy/native-staging/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
+        dest: /var/lib/easy-ha-proxy/native-staging
+        remote_src: true
+
+    - name: "native-daemons | Install easy-ha-proxy-agent binary"
+      ansible.builtin.copy:
+        src: /var/lib/easy-ha-proxy/native-staging/sbin/easy-ha-proxy-agent
+        dest: "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: "native-daemons | Install guardd-core binary"
+      ansible.builtin.copy:
+        src: /var/lib/easy-ha-proxy/native-staging/sbin/guardd-core
+        dest: "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: "native-daemons | Install libguardd_core.so FFI library"
+      ansible.builtin.copy:
+        src: /var/lib/easy-ha-proxy/native-staging/lib/libguardd_core.so
+        dest: "{{ native_guardd_lib | default('/usr/local/lib/easy-ha-proxy/libguardd_core.so') }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: "native-daemons | Smoke-check easy-ha-proxy-agent binary"
+      ansible.builtin.command:
+        argv:
+          - "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
+          - version
+      changed_when: false
+
+    - name: "native-daemons | Smoke-check guardd-core binary"
+      ansible.builtin.command:
+        argv:
+          - "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
+          - --help
+      changed_when: false

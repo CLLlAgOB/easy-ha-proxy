@@ -43,7 +43,11 @@ EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')
 {%   set _ = _updated_hashes.append(lookup('ansible.builtin.file', _updated_mod, rstrip=false) | hash('sha256')) -%}
 {% endfor -%}
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_updated_hashes | join(':')) | hash('sha256') }}"
+{% if native_updated_enabled | default(false) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} updated
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py
+{% endif %}
 Restart=always
 RestartSec=3
 TimeoutStopSec={{ (updated_job_timeout_seconds | default(7200) | int) + 30 }}

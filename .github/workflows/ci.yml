@@ -262,6 +262,24 @@ jobs:
           --lines 50000
           --signatures ansible/roles/haproxy-admin/files/scanner-signatures.json
 
+      - name: Package Rust artifacts (amd64 + arm64)
+        working-directory: rust/guardd
+        run: |
+          mkdir -p dist
+          cp target/release/guardd-core dist/guardd-core-linux-amd64
+          cp target/release/libguardd_core.so dist/libguardd_core-linux-amd64.so
+          cp target/aarch64-unknown-linux-gnu/release/guardd-core dist/guardd-core-linux-arm64
+          cp target/aarch64-unknown-linux-gnu/release/libguardd_core.so dist/libguardd_core-linux-arm64.so
+          (cd dist && sha256sum guardd-core-linux-* libguardd_core-linux-* > SHA256SUMS.rust)
+          cat dist/SHA256SUMS.rust
+
+      - name: Upload Rust artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-guardd-binaries
+          path: rust/guardd/dist/
+          retention-days: 14
+
   go-agent:
     name: Go host agent
     runs-on: ubuntu-24.04
@@ -292,6 +310,55 @@ jobs:
           file dist/easy-ha-proxy-agent-linux-amd64 dist/easy-ha-proxy-agent-linux-arm64
           ./dist/easy-ha-proxy-agent-linux-amd64 version
           ./dist/easy-ha-proxy-agent-linux-amd64 probe-host
+          (cd dist && sha256sum easy-ha-proxy-agent-linux-* > SHA256SUMS.go)
+          cat dist/SHA256SUMS.go
+
+      - name: Upload Go agent artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-agent-binaries
+          path: go/agent/dist/
+          retention-days: 14
+
+  native-release:
+    name: Native release bundles (amd64 + arm64)
+    needs: [rust-guardd, go-agent]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-guardd-binaries
+          path: release-staging/rust
+
+      - name: Download Go agent artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: go-agent-binaries
+          path: release-staging/go
+
+      - name: Assemble dual-arch release tarballs and SHA256SUMS
+        run: |
+          mkdir -p release-out
+          for arch in amd64 arm64; do
+            stage="release-staging/bundle-${arch}"
+            mkdir -p "${stage}/sbin" "${stage}/lib"
+            install -m 0755 "release-staging/rust/guardd-core-linux-${arch}" "${stage}/sbin/guardd-core"
+            install -m 0644 "release-staging/rust/libguardd_core-linux-${arch}.so" "${stage}/lib/libguardd_core.so"
+            install -m 0755 "release-staging/go/easy-ha-proxy-agent-linux-${arch}" "${stage}/sbin/easy-ha-proxy-agent"
+            tar -C "${stage}" -czf "release-out/easy-ha-proxy-native-linux-${arch}.tar.gz" sbin lib
+          done
+          (cd release-out && sha256sum easy-ha-proxy-native-linux-*.tar.gz > SHA256SUMS && sha256sum -c SHA256SUMS)
+          ls -lh release-out/
+          cat release-out/SHA256SUMS
+
+      - name: Upload combined native bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: easy-ha-proxy-native-bundles
+          path: release-out/
+          retention-days: 30
 
   ansible:
     name: Ansible syntax

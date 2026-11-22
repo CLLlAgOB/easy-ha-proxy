@@ -37,7 +37,11 @@ Environment="BACKUPD_DESTINATIONS_DIR={{ backupd_destinations_dir | default('/et
 {%   set _ = _backupd_hashes.append(lookup('ansible.builtin.file', _backupd_mod, rstrip=false) | hash('sha256')) -%}
 {% endfor -%}
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_backupd_hashes | join(':')) | hash('sha256') }}"
+{% if native_backupd_enabled | default(false) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} backupd
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backupd.py
+{% endif %}
 Restart=always
 RestartSec=3
 TimeoutStopSec={{ (backupd_job_timeout_seconds | default(21600) | int) + 30 }}

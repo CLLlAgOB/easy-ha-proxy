@@ -24,7 +24,11 @@ EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')
 Environment="ALERTD_GATEWAY_NAME={{ alertd_gateway_name | default(admin_domain | default(''), true) }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-alertd.py', rstrip=false) | hash('sha256') }}"
 
+{% if native_alertd_enabled | default(false) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} alertd
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-alertd.py
+{% endif %}
 
 Restart=always
 RestartSec=5

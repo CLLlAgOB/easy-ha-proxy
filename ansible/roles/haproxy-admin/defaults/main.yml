@@ -260,3 +260,26 @@ backup_schedule_enabled: true
 backup_schedule_oncalendar: "*-*-* 03:20:00"
 backup_schedule_jitter: 20m
 backup_schedule_timeout: 8h
+
+# --- Native Rust + Go host binaries (opt-in) ---
+# Disabled by default so existing Python daemons keep running unchanged until
+# the operator explicitly opts in via vars.yml. Granular per-daemon switches
+# allow rolling out or rolling back individual services without touching others.
+native_daemons_enabled: false
+native_guardd_enabled: "{{ native_daemons_enabled | bool }}"
+native_guardd_ffi_enabled: "{{ native_daemons_enabled | bool }}"
+native_healthd_enabled: "{{ native_daemons_enabled | bool }}"
+native_metricsd_enabled: "{{ native_daemons_enabled | bool }}"
+native_alertd_enabled: "{{ native_daemons_enabled | bool }}"
+native_controld_enabled: "{{ native_daemons_enabled | bool }}"
+native_certd_enabled: "{{ native_daemons_enabled | bool }}"
+native_backupd_enabled: "{{ native_daemons_enabled | bool }}"
+native_updated_enabled: "{{ native_daemons_enabled | bool }}"
+native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
+native_guardd_bin: /usr/local/sbin/guardd-core
+native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so
+# Either point to a pre-fetched directory containing easy-ha-proxy-native-linux-<arch>.tar.gz
+# or provide an HTTPS base URL together with mandatory SHA-256 checksums per architecture.
+native_local_bundle_dir: ""
+native_release_base_url: ""
+native_release_checksums: {}

@@ -153,6 +153,7 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_ADMIN}/tasks/certd.yml", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/dns-plugins.yml", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/daemons.yml", ("ha-adm-daemons",)),
+    (f"{_ADMIN}/tasks/native.yml", ("ha-adm-native",)),
     # Journal retention.
     (f"{_ADMIN}/templates/journal-vacuum.service.j2", ("ha-adm-journald",)),
     (f"{_ADMIN}/templates/journal-vacuum.timer.j2", ("ha-adm-journald",)),

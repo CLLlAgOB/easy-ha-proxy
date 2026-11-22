@@ -30,7 +30,14 @@ Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-pr
 {% endfor -%}
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_guardd_hashes | join(':')) | hash('sha256') }}"
 
+{% if native_guardd_ffi_enabled | default(false) | bool %}
+Environment="GUARDD_NATIVE_LIB={{ native_guardd_lib | default('/usr/local/lib/easy-ha-proxy/libguardd_core.so') }}"
+{% endif %}
+{% if native_guardd_enabled | default(false) | bool %}
+ExecStart={{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }} serve
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-guardd.py
+{% endif %}
 
 Restart=always
 RestartSec=5

@@ -33,7 +33,11 @@ EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')
 {% endfor -%}
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_certd_hashes | join(':')) | hash('sha256') }}"
 
+{% if native_certd_enabled | default(false) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} certd
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py
+{% endif %}
 
 Restart=always
 RestartSec=3

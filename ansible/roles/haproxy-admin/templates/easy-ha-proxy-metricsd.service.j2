@@ -26,7 +26,11 @@ EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')
 {% endfor -%}
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_metricsd_hashes | join(':')) | hash('sha256') }}"
 
+{% if native_metricsd_enabled | default(false) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} metricsd
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-metricsd.py
+{% endif %}
 
 Restart=always
 RestartSec=5

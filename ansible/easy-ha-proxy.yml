@@ -215,6 +215,10 @@
       tags: ha-adm-cfg
 
     - role: haproxy-admin
+      task_stage: native
+      tags: ha-adm-native
+
+    - role: haproxy-admin
       task_stage: healthd
       tags: ha-adm-healthd
 

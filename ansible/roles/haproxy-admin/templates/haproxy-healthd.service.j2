@@ -22,7 +22,11 @@ Environment="HEALTHD_SOCKET_GROUP={{ healthd_socket_group | default('hadmin') }}
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-healthd.py', rstrip=false) | hash('sha256') }}"
 
+{% if native_healthd_enabled | default(false) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} healthd
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-healthd.py
+{% endif %}
 
 Restart=always
 RestartSec=3
