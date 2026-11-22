@@ -7,7 +7,11 @@ Requires=docker.service
 Type=simple
 User=root
 Group={{ authelia_log_reader_group }}
+{% if native_authelia_bansd_enabled | default(native_daemons_enabled | default(false)) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} authelia-bansd
+{% else %}
 ExecStart=/usr/local/sbin/authelia-bansd.py
+{% endif %}
 Restart=always
 RestartSec=2
 

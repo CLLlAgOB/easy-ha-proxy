@@ -16,16 +16,18 @@ import (
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alertd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/authelia"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/backupd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/healthd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updated"
 )
 
-const version = "0.4.0-alpha"
+const version = "0.5.0-alpha"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -52,6 +54,28 @@ func main() {
 		runBackupd(args)
 	case "updated":
 		runUpdated(args)
+	case "authelia-bansd":
+		if err := authelia.RunBansd(authelia.BansdOptionsFromEnv()); err != nil {
+			log.Fatalf("authelia-bansd error: %v", err)
+		}
+	case "authelia-usersd":
+		if err := authelia.RunUsersd(authelia.UsersdOptionsFromEnv()); err != nil {
+			log.Fatalf("authelia-usersd error: %v", err)
+		}
+	case "authelia-configd":
+		if err := authelia.RunConfigd(authelia.ConfigdOptionsFromEnv()); err != nil {
+			log.Fatalf("authelia-configd error: %v", err)
+		}
+	case "unit-failed":
+		unit := ""
+		if len(args) == 1 {
+			unit = args[0]
+		}
+		os.Exit(tools.RunUnitFailed(context.Background(), unit, tools.UnitFailedOptions{Stderr: os.Stderr}))
+	case "backup-run":
+		os.Exit(tools.RunBackupScheduled(context.Background(), "", 0, os.Stdout, os.Stderr))
+	case "server-state":
+		os.Exit(runServerState(args))
 	case "probe-host":
 		s, _ := metricsd.ReadHostSample(time.Now().Unix(), nil)
 		enc := json.NewEncoder(os.Stdout)
@@ -64,7 +88,35 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|probe-host|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|probe-host|version> [flags]")
+}
+
+func runServerState(args []string) int {
+	fs := flag.NewFlagSet("server-state", flag.ContinueOnError)
+	statePath := fs.String("state", "", "path to HAProxy server-state file")
+	cfgPath := fs.String("config", "", "path to haproxy.cfg")
+	if err := fs.Parse(args); err != nil || *statePath == "" || *cfgPath == "" {
+		fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent server-state --state <path> --config <path>")
+		return 2
+	}
+	stateRaw, err := os.ReadFile(*statePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot normalize HAProxy state: %v\n", err)
+		return 1
+	}
+	var cfgText string
+	hasCfg := false
+	if cfgRaw, err := os.ReadFile(*cfgPath); err == nil {
+		cfgText = string(cfgRaw)
+		hasCfg = true
+	}
+	out, err := tools.NormalizeServerState(string(stateRaw), cfgText, hasCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot normalize HAProxy state: %v\n", err)
+		return 1
+	}
+	_, _ = os.Stdout.WriteString(out)
+	return 0
 }
 
 func runCertd(args []string) {

@@ -89,6 +89,19 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("native_guardd_ffi_enabled", guardd_tpl)
         self.assertIn("GUARDD_NATIVE_LIB=", guardd_tpl)
 
+        extra_toggles = (
+            (ROOT / "ansible/roles/authelia/templates/authelia-bansd.service.j2", "native_authelia_bansd_enabled", "authelia-bansd", "ExecStart=/usr/local/sbin/authelia-bansd.py"),
+            (ROOT / "ansible/roles/authelia/templates/authelia-usersd.service.j2", "native_authelia_usersd_enabled", "authelia-usersd", "ExecStart=/usr/local/sbin/authelia-usersd.py"),
+            (ROOT / "ansible/roles/authelia/templates/authelia-configd.service.j2", "native_authelia_configd_enabled", "authelia-configd", "ExecStart=/usr/local/sbin/authelia-configd.py"),
+            (TEMPLATES / "easy-ha-proxy-unit-failed@.service.j2", "native_tools_enabled", "unit-failed %i", "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-unit-failed.py %i"),
+            (TEMPLATES / "easy-ha-proxy-backup.service.j2", "native_tools_enabled", "backup-run", "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backup-run.py"),
+        )
+        for path, flag, subcmd, py_exec in extra_toggles:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(flag, text, path.name)
+            self.assertIn(subcmd, text, path.name)
+            self.assertIn(py_exec, text, path.name)
+
     def test_native_task_enforces_https_and_sha256_verification(self):
         tasks_text = (ROLE / "tasks/native.yml").read_text(encoding="utf-8")
         parsed = yaml.safe_load(tasks_text)
