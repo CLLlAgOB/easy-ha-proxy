@@ -583,3 +583,96 @@ jobs:
               .
           fi
           echo "Published ${channel_image} (web files ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"
+
+  # Multi-arch native Go web panel image (linux/amd64 + linux/arm64).
+  # Published independently of the Python web image so opt-in gateways using
+  # `haproxy_admin_use_go_panel: true` can pull clllagob/haproxy-admin-ui:go-alpha
+  # or :go-latest without modifying jobs.image.
+  go-panel-image:
+    name: Publish the Go web panel image
+    needs: [go-panel, javascript, secrets]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      REPOSITORY: clllagob/haproxy-admin-ui
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fingerprint the Go web panel
+        id: tree
+        run: |
+          tree="$(git ls-tree -r --full-tree HEAD -- go/panel docker/app/haproxy_admin/static docker/app/haproxy_admin/translations | sha256sum | cut -d' ' -f1)"
+          echo "tree=${tree}" >> "$GITHUB_OUTPUT"
+          echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "channel=go-latest" >> "$GITHUB_OUTPUT"
+            echo "key=go-source-${tree}" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=go-alpha" >> "$GITHUB_OUTPUT"
+            echo "key=go-alpha-${tree}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for registry credentials
+        id: credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set; the Go panel image was not published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+
+      - name: Publish Go panel image
+        if: steps.credentials.outputs.ready == 'true'
+        env:
+          DOCKER_BUILDKIT: '1'
+          TREE: ${{ steps.tree.outputs.tree }}
+          BUILT_AT: ${{ steps.tree.outputs.date }}
+          KEY: ${{ steps.tree.outputs.key }}
+          CHANNEL: ${{ steps.tree.outputs.channel }}
+        run: |
+          key_image="${REPOSITORY}:${KEY}"
+          channel_image="${REPOSITORY}:${CHANNEL}"
+          alpha_image="${REPOSITORY}:go-alpha-${TREE}"
+          if docker buildx imagetools inspect "${key_image}" >/dev/null 2>&1; then
+            echo "Already built: ${key_image}"
+            docker buildx imagetools create --tag "${channel_image}" "${key_image}"
+          elif [ "${CHANNEL}" = "go-latest" ] && docker buildx imagetools inspect "${alpha_image}" >/dev/null 2>&1; then
+            echo "Promoting ${alpha_image}"
+            docker buildx imagetools create --tag "${key_image}" --tag "${channel_image}" "${alpha_image}"
+          else
+            for platform in linux/amd64 linux/arm64; do
+              docker buildx build -f go/panel/Dockerfile --platform "${platform}" --load --tag easy-ha-proxy-panel:check . || exit 1
+              docker run --rm --platform "${platform}" easy-ha-proxy-panel:check version || exit 1
+            done
+            docker buildx build \
+              -f go/panel/Dockerfile \
+              --platform linux/amd64,linux/arm64 \
+              --label "org.opencontainers.image.version=${CHANNEL}" \
+              --label "io.easy-ha-proxy.go-panel-tree=${TREE}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --tag "${key_image}" \
+              --tag "${channel_image}" \
+              --push \
+              .
+          fi
+          echo "Published ${channel_image} (go-panel tree ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"

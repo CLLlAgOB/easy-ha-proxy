@@ -1,0 +1,123 @@
+{{ define "title" }}SSH protection{{ end }}
+{{ define "header_title" }}SSH protection{{ end }}
+{{ define "content" }}
+<div id="ssh-protection-app" class="os-security-page"
+     data-status-url="/system/ssh-security/api/status"
+     data-monitoring-url="/system/ssh-security/api/monitoring"
+     data-connection-url="/system/ssh-security/api/connection"
+     data-unblock-history-url="/system/ssh-security/api/unblock-history"
+     data-protection-url="/system/ssh-security/api/protection"
+     data-unban-url="/system/ssh-security/api/unban">
+  <section class="card">
+    <div class="card-header">
+      <h2>Fail2ban on this server</h2>
+      <div class="oss-actions">
+        <button class="btn btn-secondary" type="button" id="ssh-refresh">Refresh status</button>
+        <button class="btn btn-secondary" type="button" id="ssh-monitoring" hidden></button>
+      </div>
+    </div>
+    <p id="ssh-state" role="status" data-i18n-skip translate="no">Reading SSH protection status…</p>
+    <p id="ssh-owner" class="text-muted" hidden data-i18n-skip translate="no"></p>
+    <p id="ssh-message" role="status" aria-live="polite" data-i18n-skip translate="no"></p>
+    <p id="ssh-error" class="text-danger" role="status" hidden data-i18n-skip translate="no"></p>
+    <p id="ssh-firewall" role="status" hidden data-i18n-skip translate="no"></p>
+    <p id="ssh-policy-summary" class="text-muted" hidden data-i18n-skip translate="no"></p>
+    <details id="ssh-effective-trusted" hidden>
+      <summary>Effective trusted addresses</summary>
+      <p id="ssh-effective-trusted-value" class="text-muted" data-i18n-skip translate="no"></p>
+    </details>
+    <dl class="oss-current-grid" id="ssh-counters" hidden>
+      <div><dt>Current failed attempts</dt><dd id="ssh-currently-failed">—</dd></div>
+      <div><dt>Total failed attempts</dt><dd id="ssh-total-failed">—</dd></div>
+      <div><dt>Currently blocked IP addresses</dt><dd id="ssh-currently-banned">—</dd></div>
+      <div><dt>Total IP blocks</dt><dd id="ssh-total-banned">—</dd></div>
+    </dl>
+    <details id="ssh-job-details" hidden>
+      <summary>Last SSH protection operation</summary>
+      <p id="ssh-job" data-i18n-skip translate="no"></p>
+      <pre id="ssh-job-log" class="config-technical-output mono" hidden data-i18n-skip translate="no"></pre>
+    </details>
+  </section>
+  <details class="card" id="ssh-configuration" hidden>
+    <summary>Configure SSH blocking</summary>
+    <form id="ssh-configuration-form">
+      <div class="oss-policy-grid" id="ssh-thresholds" hidden>
+        <label for="ssh-maxretry">Failed attempts
+          <input type="number" id="ssh-maxretry" class="form-input" min="2" max="50" required disabled>
+        </label>
+        <label for="ssh-findtime">Detection window in minutes
+          <input type="number" id="ssh-findtime" class="form-input" min="1" max="1440" required disabled>
+        </label>
+        <label for="ssh-bantime">Block duration in minutes
+          <input type="number" id="ssh-bantime" class="form-input" min="1" max="10080" required disabled>
+        </label>
+      </div>
+      <label class="ssh-trusted" for="ssh-trusted">
+        <span>Trusted IP addresses and subnets</span>
+        <textarea class="form-input" id="ssh-trusted" rows="3" maxlength="2100" aria-describedby="ssh-trusted-help" data-i18n-skip translate="no"></textarea>
+      </label>
+      <p id="ssh-trusted-help" class="text-muted">Enter IPv4 or IPv6 addresses and CIDR subnets separated by spaces or new lines. Include the address you use to administer this server if it is stable.</p>
+      <p id="ssh-trusted-warning" class="text-warning" hidden data-i18n-skip translate="no"></p>
+      <div class="oss-actions">
+        <button class="btn" type="submit" id="ssh-configure" hidden></button>
+        <button class="btn btn-secondary" type="button" id="ssh-disable" hidden>Disable SSH blocking</button>
+      </div>
+    </form>
+  </details>
+  <section class="card" id="ssh-blocks" hidden>
+    <h2>SSH blocks</h2>
+    <label class="ssh-trusted" id="ssh-filter-label" for="ssh-filter">Find an IP in active blocks
+      <input class="form-input" type="search" id="ssh-filter" autocomplete="off" maxlength="64">
+    </label>
+    <p id="ssh-blocks-note" class="text-muted" data-i18n-skip translate="no"></p>
+    <div class="table-scroll oss-packages" id="ssh-blocks-table" hidden>
+      <table><thead><tr><th>IP address</th><th>Blocked since (server time)</th><th>Expires (server time)</th><th>Action</th></tr></thead><tbody id="ssh-banned"></tbody></table>
+    </div>
+  </section>
+  <details class="card" id="ssh-history" hidden>
+    <summary>Recent manual unblocks</summary>
+    <p id="ssh-history-note" class="text-muted" data-i18n-skip translate="no"></p>
+    <div class="table-scroll oss-packages" id="ssh-history-table" hidden>
+      <table><thead><tr><th>Time</th><th>IP address</th><th>Administrator</th></tr></thead><tbody id="ssh-history-events"></tbody></table>
+    </div>
+  </details>
+  <section class="card" id="ssh-openssh" hidden>
+    <h2>OpenSSH settings</h2>
+    <p class="text-muted">These values come from the global OpenSSH configuration. Rules for specific users or addresses may set different values.</p>
+    <dl class="oss-current-grid">
+      <div><dt>SSH listening addresses</dt><dd id="ssh-listeners" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Password authentication</dt><dd id="ssh-passwordauthentication" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Keyboard-interactive authentication</dt><dd id="ssh-kbdinteractiveauthentication" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>Root login</dt><dd id="ssh-permitrootlogin" data-i18n-skip translate="no">—</dd></div>
+      <div><dt>OpenSSH connection penalties</dt><dd id="ssh-persourcepenalties" data-i18n-skip translate="no">—</dd></div>
+    </dl>
+    <details id="ssh-connection-details" hidden>
+      <summary>Check OpenSSH settings for a connection</summary>
+      <p class="text-muted">Enter the connection details to evaluate matching OpenSSH rules.</p>
+      <form id="ssh-connection-form">
+        <div class="oss-policy-grid">
+          <label for="ssh-connection-user">SSH username
+            <input class="form-input" id="ssh-connection-user" name="user" maxlength="65" required autocomplete="off">
+          </label>
+          <label for="ssh-connection-ip">Client IP address
+            <input class="form-input" id="ssh-connection-ip" name="ip" maxlength="64" required autocomplete="off">
+          </label>
+          <label for="ssh-connection-hostname">Client hostname (optional)
+            <input class="form-input" id="ssh-connection-hostname" name="hostname" maxlength="253" autocomplete="off">
+          </label>
+          <label for="ssh-connection-local">Server IP address (optional)
+            <input class="form-input" id="ssh-connection-local" name="local_address" maxlength="64" autocomplete="off">
+          </label>
+          <label for="ssh-connection-port">Server SSH port (optional)
+            <input class="form-input" id="ssh-connection-port" name="port" type="number" min="1" max="65535">
+          </label>
+        </div>
+        <button type="submit" id="ssh-connection-check" class="btn btn-secondary">Check connection settings</button>
+      </form>
+      <p id="ssh-connection-message" role="status" data-i18n-skip translate="no"></p>
+      <dl id="ssh-connection-result" class="oss-current-grid" data-i18n-skip translate="no" hidden></dl>
+    </details>
+  </section>
+</div>
+{{ end }}
+{{ define "scripts" }}<script src="{{ staticURL "js/ssh_security.js" }}"></script>{{ end }}

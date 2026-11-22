@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +23,7 @@ import (
 	"easy-ha-proxy/panel/internal/security"
 )
 
-//go:embed templates/*.html
+//go:embed templates/base.html templates/generic.html templates/pages/*.html
 var templateFS embed.FS
 
 // NavItem represents one sidebar navigation link.
@@ -45,14 +47,16 @@ type ServerTimeContext struct {
 	Offset       string `json:"offset"`
 }
 
-// PageSpec defines metadata and scripts for one rendered admin page.
+// PageSpec defines metadata, template name, and scripts for one admin page.
 type PageSpec struct {
+	Template    string
 	PageID      string
 	Title       string
 	HeaderTitle string
 	Description string
 	APIEndpoint string
 	Scripts     []string
+	Extra       map[string]any
 }
 
 type pageData struct {
@@ -75,12 +79,27 @@ type pageData struct {
 	NavGroups          []NavGroup
 	Scripts            []string
 	PanelVersion       string
-	StaticURL          func(string) string
+
+	// Page-specific template fields matching Flask templates.
+	Ranges            []string
+	DefaultRange      string
+	CanSwitchMonitors bool
+	Windows           []int
+	Providers         []string
+	Transports        []string
+	MaxKeepDays       int
+	EventTypes        []string
+	Hours24           []int
+	OSIntervals       []int
+	MaxUploadGiB      string
+	BanJSON           string
 }
 
-// Renderer compiles embedded templates and caches static asset hashes.
+// Renderer compiles embedded templates (base + each page) and caches static
+// asset content hashes.
 type Renderer struct {
-	tmpl      *template.Template
+	pages     map[string]*template.Template
+	generic   *template.Template
 	staticDir string
 	serverTZ  string
 	catalog   *i18n.Catalog
@@ -89,24 +108,56 @@ type Renderer struct {
 	versions map[string]string
 }
 
-// NewRenderer builds a Renderer from the embedded HTML templates.
+// NewRenderer compiles base.html together with generic.html and every page
+// template under templates/pages/*.html.
 func NewRenderer(staticDir, serverTZ string, catalog *i18n.Catalog) (*Renderer, error) {
 	if serverTZ == "" {
 		serverTZ = "UTC"
 	}
 	r := &Renderer{
+		pages:     make(map[string]*template.Template),
 		staticDir: staticDir,
 		serverTZ:  serverTZ,
 		catalog:   catalog,
 		versions:  make(map[string]string),
 	}
-	tmpl, err := template.New("page.html").Funcs(template.FuncMap{
+
+	funcs := template.FuncMap{
 		"staticURL": r.StaticURL,
-	}).ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		return nil, err
+		"upper":     strings.ToUpper,
+		"fmtHour":   func(h int) string { return fmt.Sprintf("%02d:00", h) },
+		"windowLabel": func(sec int) string {
+			if sec < 60 {
+				return fmt.Sprintf("%d sec", sec)
+			}
+			return fmt.Sprintf("%d min", sec/60)
+		},
 	}
-	r.tmpl = tmpl
+
+	gen, err := template.New("base.html").Funcs(funcs).ParseFS(templateFS, "templates/base.html", "templates/generic.html")
+	if err != nil {
+		return nil, fmt.Errorf("parse generic template: %w", err)
+	}
+	r.generic = gen
+
+	entries, err := fs.ReadDir(templateFS, "templates/pages")
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".html") {
+				continue
+			}
+			t, err := template.New("base.html").Funcs(funcs).ParseFS(
+				templateFS,
+				"templates/base.html",
+				"templates/pages/"+entry.Name(),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("parse page template %s: %w", entry.Name(), err)
+			}
+			r.pages[entry.Name()] = t
+		}
+	}
+
 	return r, nil
 }
 
@@ -187,6 +238,11 @@ func (r *Renderer) Render(w http.ResponseWriter, req *http.Request, spec PageSpe
 	st := r.serverTimeContext()
 	stRaw, _ := json.Marshal(st)
 
+	hours24 := make([]int, 24)
+	for i := 0; i < 24; i++ {
+		hours24[i] = i
+	}
+
 	data := pageData{
 		Language:           lang,
 		CSRFToken:          csrf,
@@ -207,17 +263,72 @@ func (r *Renderer) Render(w http.ResponseWriter, req *http.Request, spec PageSpe
 		NavGroups:          defaultNavGroups,
 		Scripts:            spec.Scripts,
 		PanelVersion:       config.Version,
-		StaticURL:          r.StaticURL,
+		Ranges:             []string{"1h", "6h", "24h", "7d", "30d", "90d", "1y"},
+		DefaultRange:       "24h",
+		CanSwitchMonitors:  isSuper,
+		Windows:            []int{30, 60, 300, 900},
+		Providers:          []string{"cloudflare", "digitalocean", "route53", "rfc2136"},
+		Transports:         []string{"sftp", "scp"},
+		MaxKeepDays:        365,
+		EventTypes:         defaultEventTypes,
+		Hours24:            hours24,
+		OSIntervals:        []int{1, 2, 4, 6, 12, 24},
+		MaxUploadGiB:       "8.0",
+		BanJSON:            "{}",
+	}
+
+	if spec.Template == "audit.html" {
+		data.Ranges = []string{"1h", "24h", "7d", "30d", "90d", "all"}
+		data.DefaultRange = "7d"
+	}
+	if spec.Extra != nil {
+		if v, ok := spec.Extra["max_upload_gib"].(string); ok && v != "" {
+			data.MaxUploadGiB = v
+		}
+		if v, ok := spec.Extra["ban_json"].(string); ok && v != "" {
+			data.BanJSON = v
+		}
+	}
+
+	tmpl := r.generic
+	if spec.Template != "" {
+		if compiled, ok := r.pages[spec.Template]; ok {
+			tmpl = compiled
+		}
 	}
 
 	var buf bytes.Buffer
-	if err := r.tmpl.ExecuteTemplate(&buf, "page.html", data); err != nil {
+	if err := tmpl.ExecuteTemplate(&buf, "base.html", data); err != nil {
 		http.Error(w, "template rendering error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
+}
+
+// HasPageTemplate reports whether a dedicated DOM template is loaded for name.
+func (r *Renderer) HasPageTemplate(name string) bool {
+	_, ok := r.pages[name]
+	return ok
+}
+
+var defaultEventTypes = []string{
+	"SCANNER_PATH",
+	"SCANNER_PATH_DECISIVE",
+	"QUERY_INJECTION",
+	"SCANNER_MULTI_CATEGORY",
+	"LOW_AND_SLOW_SCANNER",
+	"NOT_FOUND_ENUMERATION",
+	"WIDE_ENUMERATION",
+	"MASS_ENUMERATION",
+	"RECURRING_SCANNER",
+	"INVALID_HOST_ACTIVITY",
+	"NOSNI_PROBING",
+	"RATE_EXCEEDED",
+	"ERROR_RATE_EXCEEDED",
+	"LEGACY_HAPROXY_BAN",
+	"HARD_FLOOR_EPISODE",
 }
 
 var defaultNavGroups = []NavGroup{

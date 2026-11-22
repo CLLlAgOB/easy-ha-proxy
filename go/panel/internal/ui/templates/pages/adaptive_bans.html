@@ -1,0 +1,41 @@
+{{ define "title" }}Adaptive bans{{ end }}
+{{ define "header_title" }}Adaptive bans{{ end }}
+{{ define "header_buttons_wrap" }}<div class="page-actions"><a class="btn" href="/security/adaptive">Protection overview</a></div>{{ end }}
+{{ define "content" }}
+<section class="card" id="ap-bans-card" aria-labelledby="ap-bans-title">
+  <div class="card-header">
+    <h2 id="ap-bans-title">Adaptive bans</h2>
+    <button class="btn-small" type="button" id="ab-refresh">Refresh bans</button>
+  </div>
+  <p class="mon-sub">Applied bans and their history. Open an address to inspect one recorded decision.</p>
+  <form id="ab-filters" class="ab-toolbar">
+    <label>Show<select id="ab-mode"><option value="active">Banned right now</option><option value="history">Ban history</option></select></label>
+    <label class="ab-search">IP or reason<input id="ab-query" type="search" maxlength="100" placeholder="IP or reason"></label>
+    <label>Ban period<select id="ab-period"><option value="0">All retained history</option><option value="86400">Last 24 hours</option><option value="604800">Last 7 days</option><option value="2592000">Last 30 days</option></select></label>
+    <button class="btn-small primary" type="submit">Filter</button>
+    <button class="btn-small" type="button" id="ab-reset">Reset filters</button>
+  </form>
+  <p class="mon-sub" id="ab-note" role="status" aria-live="polite">Loading bans…</p>
+  <div class="ap-page-table">
+    <table class="data-table ab-table">
+      <thead><tr>
+        <th aria-sort="none"><button type="button" data-ab-sort="ip">Address</button></th>
+        <th aria-sort="descending"><button type="button" data-ab-sort="ts">Banned at</button></th>
+        <th aria-sort="none"><button type="button" data-ab-sort="until">Scheduled end</button></th>
+        <th aria-sort="none"><button type="button" data-ab-sort="strike">Ban step</button></th>
+        <th aria-sort="none"><button type="button" data-ab-sort="score">Ban score</button></th>
+        <th>What it did</th>
+      </tr></thead>
+      <tbody id="ap-bans" data-i18n-skip translate="no"></tbody>
+    </table>
+  </div>
+  <div class="ab-toolbar ab-pagination">
+    <button class="btn-small" type="button" id="ab-prev" disabled>Previous</button>
+    <span id="ab-page" data-i18n-skip translate="no"></span>
+    <button class="btn-small" type="button" id="ab-next" disabled>Next</button>
+  </div>
+  <p class="mon-sub">History contains applied adaptive bans, including repeats. The scheduled end is not proof of when a ban was lifted.</p>
+</section>
+<script src="{{ staticURL "js/adaptive_core.js" }}"></script>
+<script src="{{ staticURL "js/adaptive_bans.js" }}"></script>
+{{ end }}

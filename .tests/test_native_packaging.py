@@ -125,6 +125,14 @@ class NativePackagingTests(unittest.TestCase):
         jobs = workflow["jobs"]
         self.assertIn("rust-guardd", jobs)
         self.assertIn("go-agent", jobs)
+        self.assertIn("go-panel", jobs)
+        self.assertIn("go-panel-image", jobs)
+        go_img = jobs["go-panel-image"]
+        self.assertEqual(set(go_img["needs"]), {"go-panel", "javascript", "secrets"})
+        publish_step = next(s for s in go_img["steps"] if s.get("name") == "Publish Go panel image")
+        self.assertIn("--platform linux/amd64,linux/arm64", publish_step["run"])
+        self.assertIn("-f go/panel/Dockerfile", publish_step["run"])
+        self.assertIn("go-agent", jobs)
         self.assertIn("native-release", jobs)
         self.assertEqual(set(jobs["native-release"]["needs"]), {"rust-guardd", "go-agent"})
 

@@ -1,3 +1,4 @@
+{{ define "base.html" -}}
 <!doctype html>
 <html lang="{{ .Language }}">
 <head>
@@ -5,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="csrf-token" content="{{ .CSRFToken }}">
   <meta name="color-scheme" content="light dark">
-  <title>{{ .Title }} — easy-ha-proxy</title>
+  <title>{{ block "title" . }}{{ .Title }}{{ end }}</title>
   <script src="{{ staticURL "js/theme.js" }}"></script>
   <link rel="stylesheet" href="{{ staticURL "css/styles.css" }}">
   <link rel="stylesheet" href="{{ staticURL "css/pages.css" }}">
@@ -64,11 +65,12 @@
         </button>
         <div>
           <p class="page-eyebrow notranslate" translate="no" data-i18n-skip>easy-ha-proxy</p>
-          <h1>{{ .HeaderTitle }}</h1>
+          <h1>{{ block "header_title" . }}{{ .HeaderTitle }}{{ end }}</h1>
           <p class="page-timezone" title="{{ .ServerTime.Zone }}"><span>Server time</span>: <span data-i18n-skip translate="no">{{ .ServerTime.Abbreviation }} ({{ .ServerTime.Offset }})</span></p>
         </div>
       </div>
       <div class="controls">
+        {{ block "header_lead" . }}{{ end }}
         {{- if .IsSuperadmin }}
         <a id="global-config-state" class="global-config-state" href="/haproxy/config" data-state-endpoint="/haproxy/config/state" aria-label="Open HAProxy configuration" hidden>
           <span class="global-config-state-dot" aria-hidden="true"></span><span id="global-config-state-label" role="status" aria-live="polite">Configuration status unavailable</span>
@@ -95,21 +97,15 @@
       </div>
     </header>
     <main class="container" id="main-content" tabindex="-1">
-      <section class="card" id="go-panel-root" data-api-endpoint="{{ .APIEndpoint }}" data-page-id="{{ .PageID }}">
-        <h2>{{ .HeaderTitle }}</h2>
-        <p class="muted">{{ .Description }}</p>
-        {{- if .APIEndpoint }}
-        <p class="muted"><span>API</span>: <code>{{ .APIEndpoint }}</code></p>
-        {{- end }}
-      </section>
+      {{ block "header_buttons_wrap" . }}{{ end }}
+      {{ block "content" . }}{{ end }}
     </main>
     <footer class="app-footer" id="app-footer">
       <span class="footer-product notranslate" translate="no" data-i18n-skip>easy-ha-proxy {{ .PanelVersion }} (Go)</span> ·
       <a href="https://db-ip.com" rel="noopener noreferrer">IP Geolocation by DB-IP</a>
     </footer>
   </div>
-  {{- range .Scripts }}
-  <script defer src="{{ staticURL . }}"></script>
-  {{- end }}
+  {{ block "scripts" . }}{{ end }}
 </body>
 </html>
+{{- end }}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -295,36 +296,42 @@ func (s *Server) handleConfigApply(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) registerHTMLPages(mux *http.ServeMux) {
+	maxUploadGiB := fmt.Sprintf("%.1f", float64(s.Cfg.MaxUploadBytes)/(1024*1024*1024))
+	if s.Cfg.MaxUploadBytes <= 0 {
+		maxUploadGiB = "8.0"
+	}
+
 	pages := map[string]ui.PageSpec{
-		"/":                           {PageID: "routes.index", Title: "Dashboard", HeaderTitle: "Dashboard", Description: "Live HAProxy bans, connections, whitelists, and backends.", APIEndpoint: "/api/tables", Scripts: []string{"js/dashboard.js"}},
-		"/monitoring":                 {PageID: "routes.monitoring_page", Title: "Monitoring", HeaderTitle: "Monitoring", Description: "Historical traffic, latency, and host telemetry.", APIEndpoint: "/api/monitoring/summary", Scripts: []string{"js/monitoring_core.js", "js/monitoring.js"}},
-		"/monitoring/live":            {PageID: "routes.live_activity_page", Title: "Live activity", HeaderTitle: "Live activity", Description: "Real-time traffic stream and ban decisions.", APIEndpoint: "/api/monitoring/live", Scripts: []string{"js/live_activity_core.js", "js/live_activity.js"}},
-		"/system/health":              {PageID: "routes.system_health_page", Title: "System health", HeaderTitle: "System health", Description: "Host systemd services and Docker container health.", APIEndpoint: "/api/health/status", Scripts: []string{"js/health.js"}},
-		"/system/alerts":              {PageID: "routes.alerts_page", Title: "Alerts", HeaderTitle: "Alerts", Description: "Active gateway alerts, rules, and notification channels.", APIEndpoint: "/api/alerts/state", Scripts: []string{"js/alerts.js"}},
-		"/system/audit":               {PageID: "routes.audit_page", Title: "Audit log", HeaderTitle: "Audit log", Description: "Administrative change history.", APIEndpoint: "/api/audit/events", Scripts: []string{"js/audit.js"}},
-		"/security/adaptive":          {PageID: "routes.adaptive_protection", Title: "Adaptive protection", HeaderTitle: "Adaptive protection", Description: "guardd mode, ban ladder, and reputation quality.", APIEndpoint: "/api/security/adaptive/health", Scripts: []string{"js/adaptive_core.js", "js/adaptive_protection.js"}},
-		"/security/adaptive/bans":     {PageID: "routes.adaptive_bans", Title: "Adaptive bans", HeaderTitle: "Adaptive bans", Description: "Active and historical adaptive bans.", APIEndpoint: "/api/security/adaptive/bans", Scripts: []string{"js/adaptive_bans.js"}},
-		"/security/detection-rules":   {PageID: "routes.detection_rules", Title: "Detection rules", HeaderTitle: "Detection rules", Description: "Scanner signatures, candidates, and trap hosts.", APIEndpoint: "/api/security/detection-rules", Scripts: []string{"js/detection_rules.js"}},
-		"/security/requests":          {PageID: "routes.request_log", Title: "Request log", HeaderTitle: "Request log", Description: "Bounded HTTP request log search.", APIEndpoint: "/api/security/requests", Scripts: []string{"js/request_log_core.js", "js/request_log.js"}},
-		"/haproxy/backends":           {PageID: "routes.haproxy_backends_page", Title: "HAProxy backends", HeaderTitle: "HAProxy backends", Description: "Runtime Ready / Drain / Maintenance and server weights.", APIEndpoint: "/api/haproxy/backends", Scripts: []string{"js/haproxy_backends.js"}},
+		"/":                           {Template: "index.html", PageID: "routes.index", Title: "Dashboard", HeaderTitle: "Dashboard"},
+		"/monitoring":                 {Template: "monitoring.html", PageID: "routes.monitoring_page", Title: "Monitoring", HeaderTitle: "Monitoring"},
+		"/monitoring/live":            {Template: "live_activity.html", PageID: "routes.live_activity_page", Title: "Live activity", HeaderTitle: "Live activity"},
+		"/system/health":              {Template: "health.html", PageID: "routes.system_health_page", Title: "Status", HeaderTitle: "Status"},
+		"/system/alerts":              {Template: "alerts.html", PageID: "routes.alerts_page", Title: "Alerts", HeaderTitle: "Alerts"},
+		"/system/audit":               {Template: "audit.html", PageID: "routes.audit_page", Title: "Change log", HeaderTitle: "Change log"},
+		"/security/adaptive":          {Template: "adaptive_protection.html", PageID: "routes.adaptive_protection_page", Title: "Adaptive protection", HeaderTitle: "Adaptive protection"},
+		"/security/adaptive/bans":     {Template: "adaptive_bans.html", PageID: "routes.adaptive_bans_page", Title: "Adaptive bans", HeaderTitle: "Adaptive bans"},
+		"/security/adaptive/ban":      {Template: "adaptive_ban_detail.html", PageID: "routes.adaptive_ban_detail_page", Title: "Ban details", HeaderTitle: "Ban details"},
+		"/security/detection-rules":   {Template: "detection_rules.html", PageID: "routes.detection_rules_page", Title: "Detection rules", HeaderTitle: "Detection rules"},
+		"/security/requests":          {Template: "request_log.html", PageID: "routes.request_log_page", Title: "Request log", HeaderTitle: "Request log"},
+		"/haproxy/backends":           {Template: "haproxy_backends.html", PageID: "routes.haproxy_backends_page", Title: "Backends", HeaderTitle: "Backends"},
 		"/haproxy/sites":              {PageID: "routes.haproxy_sites", Title: "Sites", HeaderTitle: "Sites", Description: "HTTP/HTTPS site definitions (websites.yml).", APIEndpoint: "/api/haproxy/config/files/websites", Scripts: []string{"js/haproxy_sites.js"}},
 		"/haproxy/tcp":                {PageID: "routes.haproxy_tcp", Title: "TCP forwards", HeaderTitle: "TCP forwards", Description: "TCP stream forwarding rules (tcp.yml).", APIEndpoint: "/api/haproxy/config/files/tcp", Scripts: []string{"js/haproxy_tcp.js"}},
 		"/haproxy/udp":                {PageID: "routes.haproxy_udp", Title: "UDP forwards", HeaderTitle: "UDP forwards", Description: "UDP forwarding rules (udp.yml).", APIEndpoint: "/api/haproxy/config/files/udp"},
 		"/haproxy/certs":              {PageID: "routes.haproxy_certs", Title: "Certificates", HeaderTitle: "Certificates", Description: "Let's Encrypt, Internal CA, and mTLS certificates.", APIEndpoint: "/api/haproxy/certs", Scripts: []string{"js/haproxy_certs.js"}},
-		"/haproxy/certs/dns-providers": {PageID: "routes.dns_providers_page", Title: "DNS providers", HeaderTitle: "DNS providers", Description: "DNS-01 credential profiles managed by certd.", APIEndpoint: "/api/haproxy/dns-providers", Scripts: []string{"js/dns_providers.js"}},
-		"/haproxy/certs/delivery":     {PageID: "routes.cert_delivery_page", Title: "Certificate delivery", HeaderTitle: "Certificate delivery", Description: "Automated SFTP/SCP delivery of renewed certificates.", APIEndpoint: "/api/haproxy/cert-delivery", Scripts: []string{"js/cert_delivery.js"}},
-		"/haproxy/geoip":              {PageID: "routes.haproxy_geoip_page", Title: "GeoIP", HeaderTitle: "GeoIP", Description: "Local DB-IP country database and filter schedule.", APIEndpoint: "/haproxy/geoip/status", Scripts: []string{"js/geoip.js"}},
+		"/haproxy/certs/dns-providers": {Template: "dns_providers.html", PageID: "routes.dns_providers_page", Title: "DNS providers", HeaderTitle: "DNS providers"},
+		"/haproxy/certs/delivery":     {Template: "cert_delivery.html", PageID: "routes.cert_delivery_page", Title: "Certificate delivery", HeaderTitle: "Certificate delivery"},
+		"/haproxy/geoip":              {Template: "haproxy_geoip.html", PageID: "routes.haproxy_geoip_page", Title: "GeoIP database", HeaderTitle: "GeoIP database"},
 		"/haproxy/config":             {PageID: "routes.haproxy_config_page", Title: "HAProxy configuration", HeaderTitle: "HAProxy configuration", Description: "Inspect, check, and transactionally apply HAProxy configuration.", APIEndpoint: "/haproxy/config/state", Scripts: []string{"js/haproxy_config.js"}},
-		"/haproxy/config/history":     {PageID: "routes.config_history_page", Title: "Configuration history", HeaderTitle: "Configuration history", Description: "Compare and restore confirmed HAProxy configuration versions.", APIEndpoint: "/api/haproxy/config/versions", Scripts: []string{"js/config_history.js"}},
-		"/haproxy/trash":              {PageID: "routes.trash_page", Title: "Trash", HeaderTitle: "Trash", Description: "Recently removed sites and certificates.", APIEndpoint: "/api/haproxy/trash", Scripts: []string{"js/trash.js"}},
+		"/haproxy/config/history":     {Template: "config_history.html", PageID: "routes.config_history_page", Title: "Configuration history", HeaderTitle: "Configuration history"},
+		"/haproxy/trash":              {Template: "trash.html", PageID: "routes.trash_page", Title: "Trash", HeaderTitle: "Trash"},
 		"/authelia/users":             {PageID: "routes.authelia_users", Title: "Authelia users", HeaderTitle: "Authelia users", Description: "User accounts and superadmin roles.", APIEndpoint: "/authelia/api/users", Scripts: []string{"js/authelia_users.js"}},
 		"/authelia/bans":              {PageID: "routes.authelia_bans", Title: "Authelia bans", HeaderTitle: "Authelia bans", Description: "Brute-force lockouts managed by authelia-bansd.", APIEndpoint: "/authelia/api/bans", Scripts: []string{"js/authelia_bans.js"}},
 		"/authelia/settings/":         {PageID: "authelia_settings.page", Title: "Authelia settings", HeaderTitle: "Authelia settings", Description: "Authentication policy and mail relay settings.", APIEndpoint: "/authelia/settings/notifications/latest", Scripts: []string{"js/authelia_settings.js"}},
-		"/system/backups/":            {PageID: "system_backups.page", Title: "System backups", HeaderTitle: "System backups", Description: "Encrypted full backups, off-host destinations, and schedules.", APIEndpoint: "/system/backups/api/status", Scripts: []string{"js/system_backups.js"}},
-		"/system/updates/":            {PageID: "system_updates.page", Title: "System updates", HeaderTitle: "System updates", Description: "easy-ha-proxy software updates and HAProxy upgrades.", APIEndpoint: "/system/updates/api/status", Scripts: []string{"js/updates_core.js", "js/system_updates.js"}},
-		"/system/os-security/":        {PageID: "os_security.page", Title: "OS security", HeaderTitle: "OS security", Description: "Distribution security updates and reboot policy.", APIEndpoint: "/system/os-security/api/status", Scripts: []string{"js/os_security.js"}},
-		"/system/ssh-security/":       {PageID: "ssh_security.page", Title: "SSH security", HeaderTitle: "SSH security", Description: "SSH intrusion protection and ban management.", APIEndpoint: "/system/ssh-security/api/status", Scripts: []string{"js/ssh_security.js"}},
-		"/system/schedule/":           {PageID: "schedule.page", Title: "Schedule", HeaderTitle: "Schedule", Description: "Unified maintenance, backup, and GeoIP schedule.", APIEndpoint: "/system/backups/api/schedule", Scripts: []string{"js/schedule_core.js", "js/system_schedule.js"}},
+		"/system/backups/":            {Template: "system_backups.html", PageID: "system_backups.page", Title: "Full backup and restore", HeaderTitle: "Full backup and restore", Extra: map[string]any{"max_upload_gib": maxUploadGiB}},
+		"/system/updates/":            {Template: "system_updates.html", PageID: "system_updates.page", Title: "Software updates", HeaderTitle: "Software updates"},
+		"/system/os-security/":        {Template: "os_security.html", PageID: "os_security.page", Title: "OS security", HeaderTitle: "OS security"},
+		"/system/ssh-security/":       {Template: "ssh_security.html", PageID: "ssh_security.page", Title: "SSH protection", HeaderTitle: "SSH protection"},
+		"/system/schedule/":           {Template: "system_schedule.html", PageID: "schedule.page", Title: "Task schedule", HeaderTitle: "Task schedule"},
 	}
 
 	for routePath, spec := range pages {

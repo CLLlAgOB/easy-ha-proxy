@@ -92,7 +92,10 @@ func New(cfg *config.Config, pool *daemons.Pool, rt *haproxy.Runtime, cat *i18n.
 		Runtime: rt,
 	}
 
-	uiRenderer, _ := ui.NewRenderer(cfg.StaticDir, cfg.ServerTimezone, cat)
+	uiRenderer, err := ui.NewRenderer(cfg.StaticDir, cfg.ServerTimezone, cat)
+	if err != nil {
+		panic("failed to initialize UI renderer: " + err.Error())
+	}
 
 	s := &Server{
 		Cfg:      cfg,

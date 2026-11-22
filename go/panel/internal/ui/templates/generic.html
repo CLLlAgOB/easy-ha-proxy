@@ -1,0 +1,15 @@
+{{ define "content" }}
+<section class="card" id="go-panel-root" data-api-endpoint="{{ .APIEndpoint }}" data-page-id="{{ .PageID }}">
+  <h2>{{ .HeaderTitle }}</h2>
+  <p class="muted">{{ .Description }}</p>
+  {{- if .APIEndpoint }}
+  <p class="muted"><span>API</span>: <code>{{ .APIEndpoint }}</code></p>
+  {{- end }}
+</section>
+{{ end }}
+
+{{ define "scripts" }}
+{{- range .Scripts }}
+<script defer src="{{ staticURL . }}"></script>
+{{- end }}
+{{ end }}
