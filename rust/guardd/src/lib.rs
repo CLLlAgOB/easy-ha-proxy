@@ -6,17 +6,29 @@
 //! (`SubnetCorrelator`), and rotation-safe incremental log reading (`LogCursor`).
 
 pub mod parser;
+pub mod runtime;
+pub mod scoring;
 pub mod signatures;
+pub mod storage;
 pub mod tracking;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 pub use parser::{extract_host, parse_access_line, parse_stamp, ParsedRequest};
+pub use runtime::{
+    banned_now, list_tables, load_config, parse_table, read_table, runtime_command, GuardConfig,
+    RuntimeError,
+};
+pub use scoring::{
+    enforceable, ip_family, score_events, state_for, ExclusionModel, ScoreContribution,
+    ScoreResult, ScoringPolicy, StoredEvent, Verdict,
+};
 pub use signatures::{
     classify_raw_path, is_asset, is_authentication_endpoint, is_proto_ua_mismatch,
     is_unusual_method_probe, normalize_path, user_agent_token, SignatureEngine,
 };
+pub use storage::{RequestLogDb, SecurityDatabase};
 pub use tracking::{
     format_subnet24, ipv4_subnet24_key, IpActivity, IpMemory, LogCursor, SubnetCorrelator,
     SubnetSummary,

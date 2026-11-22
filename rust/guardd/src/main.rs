@@ -2,7 +2,8 @@
 //! of the Rust `guardd-core` hot path.
 
 use guardd_core::{
-    parse_access_line, IpMemory, SignatureEngine, SubnetCorrelator,
+    parse_access_line, score_events, IpMemory, RequestLogDb, ScoringPolicy, SecurityDatabase,
+    SignatureEngine, SubnetCorrelator,
 };
 use std::env;
 use std::io::{self, BufRead, BufWriter, Write};
@@ -157,10 +158,65 @@ fn cmd_bench(lines_count: usize, sig_path: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn cmd_seed_db(sec_path: &str, req_path: &str, sig_path: Option<&str>) -> ExitCode {
+    let sigs = load_signatures(sig_path);
+    let sec = match SecurityDatabase::open(sec_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("security.db open error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let _ = sec.set_state("mode_override", "enforce");
+    let _ = sec.upsert_ip_state("198.51.100.77", 1_786_429_000, false, "");
+    let _ = sec.record_event(
+        1_786_429_000,
+        "198.51.100.77",
+        "SCANNER_PATH_DECISIVE",
+        "log",
+        "app.example.com",
+        "secrets",
+        "/.env",
+        false,
+    );
+    let evs = sec.events_for_ip("198.51.100.77", 0).unwrap_or_default();
+    let score = score_events(&evs, 1_786_429_000, &ScoringPolicy::default());
+
+    let mut rdb = match RequestLogDb::open(req_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("requests.db open error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let sample = "2026-08-11T07:26:51.104063+00:00 gw haproxy[10]: \
+        198.51.100.77:60374 [11/Aug/2026:07:26:51.096] fe_https~ be_app/s1 \
+        0/0/0/2/3 404 210 ----- 1/1/0/0/0 0/0 host=app.example.com ua=sqlmap/1.7 \
+        GET /.env HTTP/1.1";
+    if let Some(req) = parse_access_line(sample, &sigs) {
+        if let Err(e) = rdb.insert_batch(&[req]) {
+            eprintln!("requests.db insert error: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "score": score.score,
+            "state": score.state,
+            "recommended_action": score.recommended_action,
+            "events_counted": score.events_counted,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let sub = args.get(1).map(String::as_str).unwrap_or("bench");
     let mut sig_path: Option<String> = None;
+    let mut sec_db: Option<String> = None;
+    let mut req_db: Option<String> = None;
     let mut lines: usize = 50_000;
 
     let mut i = 2;
@@ -169,6 +225,20 @@ fn main() -> ExitCode {
             "--signatures" => {
                 if let Some(v) = args.get(i + 1) {
                     sig_path = Some(v.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "--security-db" => {
+                if let Some(v) = args.get(i + 1) {
+                    sec_db = Some(v.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "--requests-db" => {
+                if let Some(v) = args.get(i + 1) {
+                    req_db = Some(v.clone());
                     i += 2;
                     continue;
                 }
@@ -190,8 +260,15 @@ fn main() -> ExitCode {
     match sub {
         "parse" => cmd_parse(sig_path.as_deref()),
         "bench" => cmd_bench(lines, sig_path.as_deref()),
+        "seed-db" => match (sec_db.as_deref(), req_db.as_deref()) {
+            (Some(s), Some(r)) => cmd_seed_db(s, r, sig_path.as_deref()),
+            _ => {
+                eprintln!("usage: guardd-core seed-db --security-db PATH --requests-db PATH [--signatures PATH]");
+                ExitCode::from(2)
+            }
+        },
         _ => {
-            eprintln!("usage: guardd-core <parse|bench> [--signatures PATH] [--lines N]");
+            eprintln!("usage: guardd-core <parse|bench|seed-db> [--signatures PATH] [--lines N]");
             ExitCode::from(2)
         }
     }

@@ -33,6 +33,7 @@ if str(_HERE) not in sys.path:
 _SUBMODULE_NAMES: Tuple[str, ...] = (
     "constants",
     "parser",
+    "native",
     "runtime",
     "scoring",
     "watchers",

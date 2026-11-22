@@ -11,6 +11,7 @@ GUARDD_DIR = FILES / "guardd"
 SUBMODULES = (
     "constants",
     "parser",
+    "native",
     "runtime",
     "scoring",
     "watchers",

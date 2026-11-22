@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -262,6 +263,74 @@ class RustGuarddParityTests(unittest.TestCase):
         for idx, (raw, rust_parsed) in enumerate(zip(PARITY_LINES, decoded, strict=True)):
             with self.subTest(index=idx):
                 self.assertEqual(rust_parsed, _py_parsed_dict(py.parse_access_line(raw)))
+
+    def test_python_native_bridge_matches_pure_python(self) -> None:
+        rust_lib = _find_rust_lib()
+        if rust_lib is None:
+            self.skipTest("Rust libguardd_core.so not built")
+        py = _load_python_guardd()
+        prev = os.environ.get("GUARDD_NATIVE_LIB")
+        os.environ["GUARDD_NATIVE_LIB"] = str(rust_lib)
+        py.reset_native_bridge()
+        try:
+            native_rows = py.parse_access_lines_native(PARITY_LINES)
+            self.assertIsNotNone(native_rows)
+            assert native_rows is not None
+            self.assertEqual(len(native_rows), len(PARITY_LINES))
+            for idx, (raw, got) in enumerate(zip(PARITY_LINES, native_rows, strict=True)):
+                with self.subTest(index=idx):
+                    self.assertEqual(got, py.parse_access_line(raw))
+        finally:
+            if prev is None:
+                os.environ.pop("GUARDD_NATIVE_LIB", None)
+            else:
+                os.environ["GUARDD_NATIVE_LIB"] = prev
+            py.reset_native_bridge()
+
+    def test_rust_sqlite_databases_are_readable_and_scorable_by_python(self) -> None:
+        rust_bin = _find_rust_bin()
+        if rust_bin is None:
+            self.skipTest("Rust guardd-core binary not built")
+        py = _load_python_guardd()
+        with tempfile.TemporaryDirectory() as tmp:
+            sec_path = Path(tmp) / "security.db"
+            req_path = Path(tmp) / "requests.db"
+            proc = subprocess.run(
+                [
+                    str(rust_bin),
+                    "seed-db",
+                    "--security-db",
+                    str(sec_path),
+                    "--requests-db",
+                    str(req_path),
+                    "--signatures",
+                    str(SIGNATURES_PATH),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            rust_score = json.loads(proc.stdout.strip())
+
+            # Python SecurityDatabase must open the Rust-created DB cleanly and compute the exact same score.
+            py_sec = py.SecurityDatabase(str(sec_path))
+            self.assertEqual(py_sec.get_state("mode_override", "monitor"), "enforce")
+            py_events = py_sec.events_for("198.51.100.77", since=0)
+            self.assertEqual(len(py_events), 1)
+            py_score = py.score_events(py_events, 1_786_429_000, py.ScoringPolicy())
+            self.assertEqual(py_score["score"], rust_score["score"])
+            self.assertEqual(py_score["state"], rust_score["state"])
+            self.assertEqual(py_score["recommended_action"], rust_score["recommended_action"])
+            self.assertEqual(py_score["events_counted"], rust_score["events_counted"])
+
+            # Python RequestLog must open the Rust-created requests.db and find the logged row.
+            cfg = py.GuardConfig(request_log_enabled=True)
+            py_rlog = py.RequestLog(str(req_path), cfg)
+            result = py_rlog.search(client="198.51.100.77", since=0, until=2_000_000_000)
+            self.assertEqual(len(result["requests"]), 1)
+            self.assertEqual(result["requests"][0]["path"], "/.env")
+            self.assertEqual(result["requests"][0]["status"], 404)
+            self.assertEqual(result["requests"][0]["user_agent"], "sqlmap/1.7")
 
 
 if __name__ == "__main__":

@@ -112,6 +112,7 @@ from .constants import (
     signature_summary,
     validate_ban_durations,
 )
+from .native import NATIVE_BATCH_MIN_LINES, parse_access_lines_native
 from .parser import (
     L_TS,
     ParsedRequest,
@@ -120,6 +121,7 @@ from .parser import (
     parse_access_line,
     refusal_is_a_shield,
 )
+_DEFAULT_PARSE_ACCESS_LINE = parse_access_line
 from .runtime import (
     GuardConfig,
     RuntimeAnswerTooLarge,
@@ -1127,8 +1129,20 @@ class GuardEngine:
         self.lines_read += len(lines)
         parsed = 0
         live: List[tuple] = []
-        for line in lines:
-            request = parse_access_line(line)
+        native_parsed = (
+            parse_access_lines_native(lines)
+            if (
+                len(lines) >= NATIVE_BATCH_MIN_LINES
+                and parse_access_line is _DEFAULT_PARSE_ACCESS_LINE
+            )
+            else None
+        )
+        for idx, line in enumerate(lines):
+            request = (
+                native_parsed[idx]
+                if native_parsed is not None
+                else parse_access_line(line)
+            )
             if request is None:
                 continue
             parsed += 1

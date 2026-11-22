@@ -5,6 +5,7 @@ from __future__ import annotations
 SUBMODULES = (
     "constants",
     "parser",
+    "native",
     "runtime",
     "scoring",
     "watchers",
