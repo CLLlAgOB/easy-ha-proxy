@@ -12,7 +12,11 @@ ExecStartPre=/usr/sbin/ipset create {{ udp_ban_set | default('haproxy_ban') }} h
 # it stops renewing runs out. "create -exist" would fail on a set from before
 # (no timeouts); controld swaps that one for a new one itself.
 ExecStartPre=/bin/sh -c '/usr/sbin/ipset list -n {{ udp_auth_set | default('haproxy_ip_auth') }} >/dev/null 2>&1 || /usr/sbin/ipset create {{ udp_auth_set | default('haproxy_ip_auth') }} hash:ip family inet timeout 0 -exist'
+{% if native_tools_enabled | default(native_daemons_enabled | default(false)) | bool %}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} udp-forward
+{% else %}
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-udp-forward.py
+{% endif %}
 RemainAfterExit=yes
 
 [Install]

@@ -95,6 +95,8 @@ class NativePackagingTests(unittest.TestCase):
             (ROOT / "ansible/roles/authelia/templates/authelia-configd.service.j2", "native_authelia_configd_enabled", "authelia-configd", "ExecStart=/usr/local/sbin/authelia-configd.py"),
             (TEMPLATES / "easy-ha-proxy-unit-failed@.service.j2", "native_tools_enabled", "unit-failed %i", "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-unit-failed.py %i"),
             (TEMPLATES / "easy-ha-proxy-backup.service.j2", "native_tools_enabled", "backup-run", "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backup-run.py"),
+            (TEMPLATES / "iptables-haproxy-udp.service.j2", "native_tools_enabled", "udp-forward", "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-udp-forward.py"),
+            (ROOT / "ansible/roles/geoip_acl/templates/update-geoip.sh.j2", "native_tools_enabled", "update-geoip", 'exec "${PYTHON}" "${UPDATER}" "${args[@]}" "$@"'),
         )
         for path, flag, subcmd, py_exec in extra_toggles:
             text = path.read_text(encoding="utf-8")
