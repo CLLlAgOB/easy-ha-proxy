@@ -15,20 +15,30 @@ import (
 const (
 	DefaultSocketPath = "/run/easy-ha-proxy/easy-ha-proxy-alertd.sock"
 	DefaultTimeout    = 3 * time.Second
+	TokenHeader       = "X-Alertd-Token"
 )
 
-// Event represents one alert condition sent to easy-ha-proxy-alertd.
-type Event struct {
-	Rule     string         `json:"rule"`
-	Subject  string         `json:"subject"`
-	State    string         `json:"state,omitempty"`
-	Severity string         `json:"severity,omitempty"`
-	Summary  string         `json:"summary,omitempty"`
-	Details  map[string]any `json:"details,omitempty"`
+// Observation matches the POST /api/v1/alerts/notify contract of easy-ha-proxy-alertd.
+type Observation struct {
+	Rule         string `json:"rule"`
+	Subject      string `json:"subject,omitempty"`
+	Active       *bool  `json:"active,omitempty"`
+	Severity     string `json:"severity,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Detail       string `json:"detail,omitempty"`
+	TriggerDelay *int   `json:"trigger_delay,omitempty"`
+	Recipient    string `json:"recipient,omitempty"`
+	Retired      bool   `json:"retired,omitempty"`
 }
 
-// Client delivers alerts over the local alertd Unix socket.
-// When Token is empty, Report is a no-op so daemons never fail without alertd.
+// BoolPtr returns a pointer to v for level observations.
+func BoolPtr(v bool) *bool { return &v }
+
+// IntPtr returns a pointer to v for optional trigger_delay overrides.
+func IntPtr(v int) *int { return &v }
+
+// Client delivers observations over the local alertd Unix socket.
+// When Token is empty, Observe is a no-op so daemons never fail without alertd.
 type Client struct {
 	SocketPath string
 	Token      string
@@ -70,26 +80,26 @@ func (c *Client) Enabled() bool {
 	return c != nil && c.Token != ""
 }
 
-// Report sends one alert event to alertd; returns true only on HTTP 2xx.
-func (c *Client) Report(ctx context.Context, ev Event) bool {
+// Observe sends one observation to POST /api/v1/alerts/notify; returns true on HTTP 2xx.
+func (c *Client) Observe(ctx context.Context, obs Observation) bool {
 	if !c.Enabled() {
 		return false
 	}
-	body, err := json.Marshal(ev)
+	body, err := json.Marshal(obs)
 	if err != nil {
 		return false
 	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		"http://unix/api/v1/alerts/report",
+		"http://unix/api/v1/alerts/notify",
 		bytes.NewReader(body),
 	)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Alert-Token", c.Token)
+	req.Header.Set(TokenHeader, c.Token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

@@ -1,5 +1,5 @@
 // Command easy-ha-proxy-agent is the unified static multi-call host daemon
-// for easy-ha-proxy (Stage 3: healthd and metricsd).
+// for easy-ha-proxy (healthd, metricsd, alertd, controld).
 package main
 
 import (
@@ -13,12 +13,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alertd"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/healthd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
 )
 
-const version = "0.1.0-alpha"
+const version = "0.2.0-alpha"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -35,6 +37,10 @@ func main() {
 		runHealthd(args)
 	case "metricsd":
 		runMetricsd(args)
+	case "alertd":
+		runAlertd(args)
+	case "controld":
+		runControld(args)
 	case "probe-host":
 		s, _ := metricsd.ReadHostSample(time.Now().Unix(), nil)
 		enc := json.NewEncoder(os.Stdout)
@@ -47,7 +53,32 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|probe-host|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|probe-host|version> [flags]")
+}
+
+func runAlertd(args []string) {
+	opts := alertd.OptionsFromEnv()
+	fs := flag.NewFlagSet("alertd", flag.ExitOnError)
+	fs.StringVar(&opts.ConfigPath, "config", opts.ConfigPath, "path to alertd.json")
+	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
+	fs.StringVar(&opts.StatePath, "state", opts.StatePath, "path to persisted alert state JSON")
+	_ = fs.Parse(args)
+
+	if err := alertd.Run(opts); err != nil {
+		log.Fatalf("alertd error: %v", err)
+	}
+}
+
+func runControld(args []string) {
+	opts := controld.OptionsFromEnv()
+	fs := flag.NewFlagSet("controld", flag.ExitOnError)
+	fs.StringVar(&opts.ControlSocket, "socket", opts.ControlSocket, "AF_UNIX control socket path")
+	fs.StringVar(&opts.HAProxyCfgPath, "cfg", opts.HAProxyCfgPath, "path to haproxy.cfg")
+	_ = fs.Parse(args)
+
+	if err := controld.Run(opts); err != nil {
+		log.Fatalf("controld error: %v", err)
+	}
 }
 
 func signalContext() (context.Context, context.CancelFunc) {
