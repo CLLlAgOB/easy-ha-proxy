@@ -208,6 +208,7 @@ INSTALL_TAGS = ",".join(
         "geo",
         "ha-cfg",
         "docker",
+        "ha-adm-native",
         "aut-install",
         "ha-adm-install",
         "ha-adm-healthd",
@@ -234,6 +235,7 @@ UPDATE_TAGS = ",".join(
         "geo",
         "ha-cfg",
         "docker",
+        "ha-adm-native",
         "aut-install",
         "aut-update",
         "ha-adm-install",
@@ -255,6 +257,7 @@ UPDATE_TAGS = ",".join(
 UI_TAGS = ",".join(
     (
         "ha-cfg",
+        "ha-adm-native",
         "aut-daemons",
         "ha-adm-daemons",
         "ha-adm-healthd",
@@ -270,7 +273,7 @@ UI_TAGS = ",".join(
         "status",
     )
 )
-DAEMON_TAGS = "aut-daemons,ha-adm-daemons,status"
+DAEMON_TAGS = "ha-adm-native,aut-daemons,ha-adm-daemons,status"
 HOST_SERVICE_TAGS = ",".join(
     (
         "crt-install",
@@ -280,6 +283,7 @@ HOST_SERVICE_TAGS = ",".join(
         "apparmor",
         "geo",
         "ha-cfg",
+        "ha-adm-native",
         "ha-adm-install",
         "ha-adm-healthd",
         "ha-adm-backupd",

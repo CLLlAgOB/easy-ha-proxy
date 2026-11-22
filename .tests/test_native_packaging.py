@@ -85,6 +85,11 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("/usr/local/bin/easy-ha-proxy-panel", compose)
         self.assertIn("haproxy_admin_image", compose)
 
+        installer = (ROOT / "installer/easy_ha_proxy.py").read_text(encoding="utf-8")
+        for bundle in ("INSTALL_TAGS", "UPDATE_TAGS", "UI_TAGS", "DAEMON_TAGS", "HOST_SERVICE_TAGS"):
+            self.assertIn(bundle, installer)
+        self.assertGreaterEqual(installer.count("ha-adm-native"), 5)
+
     def test_all_eight_service_templates_support_opt_in_and_python_fallback(self):
         for tpl_name, flag, native_fragment, py_exec in SERVICE_TOGGLES:
             text = (TEMPLATES / tpl_name).read_text(encoding="utf-8")
