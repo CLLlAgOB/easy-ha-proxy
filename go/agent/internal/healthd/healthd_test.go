@@ -1,138 +1,179 @@
 package healthd
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-type fakeRunner struct {
-	calls [][]string
-}
-
-func (f *fakeRunner) Run(_ context.Context, argv ...string) (int, string, string) {
-	f.calls = append(f.calls, append([]string(nil), argv...))
-	if len(argv) >= 2 && argv[0] == "systemctl" && argv[1] == "show" {
-		return 0, "Id=haproxy.service\nLoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nDescription=HAProxy\n", ""
-	}
-	if len(argv) >= 2 && argv[0] == "docker" && argv[1] == "inspect" {
-		return 0, "running|healthy|example/haproxy-admin:alpha\n", ""
-	}
-	return 0, "", ""
-}
-
-func TestAllowedActionsPolicyParity(t *testing.T) {
-	if !ActionPermitted("systemd", "haproxy.service", "reload", DefaultHealthUnit) {
-		t.Fatal("haproxy must allow reload")
-	}
-	if ActionPermitted("systemd", "haproxy.service", "stop", DefaultHealthUnit) {
-		t.Fatal("haproxy must not allow stop")
-	}
-	if ActionPermitted("docker", "haproxy-admin", "stop", DefaultHealthUnit) {
-		t.Fatal("haproxy-admin container must allow restart only")
-	}
-	if len(AllowedActions("systemd", "easy-ha-proxy-backup.service", DefaultHealthUnit)) != 0 {
-		t.Fatal("scheduled backup service must allow no control actions")
-	}
-}
-
-func TestUnixSocketStatusAndControl(t *testing.T) {
-	cfg := Config{
-		SystemdUnits:       []string{"haproxy.service"},
-		DockerContainers:   []string{"haproxy-admin"},
-		EventsMax:          50,
-		CacheTTLSeconds:    0,
-		UnitsRescanSeconds: 300,
-	}
-	runner := &fakeRunner{}
-	col := NewCollector(cfg, DefaultHealthUnit, runner)
-	srv := &Server{
-		Collector:    col,
-		ControlToken: "unit-secret",
-		SelfUnit:     DefaultHealthUnit,
-		Runner:       runner,
-	}
-
-	sock := filepath.Join(t.TempDir(), "healthd.sock")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = srv.Serve(ctx, sock) }()
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", sock)
-			},
-		},
-		Timeout: 3 * time.Second,
-	}
-
-	var resp *http.Response
-	var err error
-	for i := 0; i < 40; i++ {
-		resp, err = client.Get("http://unix/api/v1/status")
-		if err == nil {
-			break
+func fakeRunner(t *testing.T) Runner {
+	t.Helper()
+	return func(_ time.Duration, argv ...string) (int, string, string) {
+		cmd := strings.Join(argv, " ")
+		switch {
+		case strings.HasPrefix(cmd, "systemctl list-unit-files"):
+			return 0, "authelia-bansd.service enabled enabled\nother.service enabled enabled\n", ""
+		case strings.HasPrefix(cmd, "systemctl show easy-ha-proxy-backup.service"):
+			return 0, "LoadState=loaded\nActiveState=inactive\nSubState=dead\nType=oneshot\nResult=success\nExecMainStatus=0\nInactiveExitTimestamp=Sun 2026-11-22 03:39:23 CET\n", ""
+		case strings.HasPrefix(cmd, "systemctl show"):
+			return 0, "LoadState=loaded\nActiveState=active\nSubState=running\nType=simple\n", ""
+		case cmd == "docker version":
+			return 0, "", ""
+		case strings.HasPrefix(cmd, "docker container inspect"):
+			return 0, "Status=running\nRunning=true\nHealth=healthy\nExitCode=0\n", ""
+		case strings.HasPrefix(cmd, "journalctl -u haproxy.service --no-pager -q -o short-iso --show-cursor"):
+			return 0, "2026-11-22 line one\n-- cursor: s=abc\n", ""
+		case strings.HasPrefix(cmd, "journalctl") && strings.Contains(cmd, "-o json"):
+			return 0, `{"MESSAGE":"hello","__REALTIME_TIMESTAMP":"1795341600000000","PRIORITY":"6","_SYSTEMD_UNIT":"authelia-bansd.service"}` + "\n", ""
+		case strings.HasPrefix(cmd, "systemctl restart"):
+			return 0, "", ""
 		}
-		time.Sleep(15 * time.Millisecond)
+		return 1, "", "unexpected " + cmd
 	}
-	if err != nil {
-		t.Fatalf("GET /api/v1/status failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var statusBody struct {
-		OK       bool     `json:"ok"`
-		Snapshot Snapshot `json:"snapshot"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&statusBody); err != nil {
-		t.Fatalf("decode status: %v", err)
-	}
-	if !statusBody.OK || len(statusBody.Snapshot.Systemd) != 1 || statusBody.Snapshot.Systemd[0].ActiveState != "active" {
-		t.Fatalf("unexpected snapshot: %+v", statusBody)
-	}
+}
 
-	// Unauthorized control request must be rejected with 401.
-	reqBad, _ := http.NewRequest(http.MethodPost, "http://unix/api/v1/control",
-		bytes.NewBufferString(`{"kind":"systemd","name":"haproxy.service","action":"reload"}`))
-	reqBad.Header.Set("X-Healthd-Token", "wrong")
-	rBad, err := client.Do(reqBad)
+func testConfig(t *testing.T) Config {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "healthd.json")
+	_ = os.WriteFile(p, []byte(`{"systemd":{"units":["haproxy.service","easy-ha-proxy-backup.service","haproxy-healthd.service"],"unit_globs":["authelia-*.service"]},
+		"docker":{"containers":["haproxy-admin"]},"cache_ttl_seconds":0,"logs":{"default_tail":5}}`), 0o644)
+	cfg, err := LoadConfig(p)
 	if err != nil {
-		t.Fatalf("POST bad failed: %v", err)
+		t.Fatal(err)
 	}
-	rBad.Body.Close()
-	if rBad.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", rBad.StatusCode)
-	}
+	return cfg
+}
 
-	// Authorized reload of haproxy.service must succeed.
-	reqOK, _ := http.NewRequest(http.MethodPost, "http://unix/api/v1/control",
-		bytes.NewBufferString(`{"kind":"systemd","name":"haproxy.service","action":"reload"}`))
-	reqOK.Header.Set("X-Healthd-Token", "unit-secret")
-	rOK, err := client.Do(reqOK)
-	if err != nil {
-		t.Fatalf("POST ok failed: %v", err)
+func TestConfigShapeAndLimits(t *testing.T) {
+	cfg := testConfig(t)
+	if len(cfg.SystemdUnits) != 3 || cfg.SystemdUnitGlobs[0] != "authelia-*.service" || cfg.DockerContainers[0] != "haproxy-admin" {
+		t.Fatalf("nested keys not read: %+v", cfg)
 	}
-	rOK.Body.Close()
-	if rOK.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rOK.StatusCode)
+	if cfg.LogsDefaultTail != 10 || cfg.CacheTTLSeconds != 15 || cfg.LogsMaxSinceSeconds != 86400 {
+		t.Fatalf("defaults/limits differ from Python: %+v", cfg)
 	}
-	foundReload := false
-	for _, call := range runner.calls {
-		if strings.Join(call, " ") == "systemctl reload haproxy.service" {
-			foundReload = true
+}
+
+func TestOneshotHealthAndSnapshot(t *testing.T) {
+	st := NewState(testConfig(t), DefaultHealthUnit, fakeRunner(t))
+	snap := st.Snapshot(true)
+	units := snap["systemd"].(map[string]any)["units"].(map[string]any)
+	backup := units["easy-ha-proxy-backup.service"].(map[string]any)
+	if backup["healthy"] != true || backup["display_state"] != "completed" || backup["display_sub_state"] != "success" {
+		t.Fatalf("oneshot health: %v", backup)
+	}
+	if _, ok := units["authelia-bansd.service"]; !ok {
+		t.Fatalf("glob not expanded: %v", units)
+	}
+	if snap["docker"].(map[string]any)["available"] != true {
+		t.Fatalf("docker: %v", snap["docker"])
+	}
+}
+
+func TestHTTPRoutes(t *testing.T) {
+	st := NewState(testConfig(t), DefaultHealthUnit, fakeRunner(t))
+	srv := httptest.NewServer(&Server{State: st, ControlToken: "tok"})
+	defer srv.Close()
+	get := func(p string) (int, map[string]any) {
+		resp, err := http.Get(srv.URL + p)
+		if err != nil {
+			t.Fatal(err)
 		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
 	}
-	if !foundReload {
-		t.Fatalf("expected systemctl reload call, got %+v", runner.calls)
+	if c, out := get("/api/v1/health/ping"); c != 200 || out["ok"] != true {
+		t.Fatalf("ping %d %v", c, out)
+	}
+	if c, out := get("/api/v1/health/logs/systemd?unit=haproxy.service"); c != 200 || out["cursor"] != "s=abc" || out["text"] != "2026-11-22 line one\n" {
+		t.Fatalf("logs %d %v", c, out)
+	}
+	if c, out := get("/api/v1/health/logs/systemd"); c != 400 || out["error"] != "unit is required" {
+		t.Fatalf("logs no unit %d %v", c, out)
+	}
+	c, out := get("/api/v1/health/recent-systemd")
+	items, _ := out["items"].([]any)
+	if c != 200 || len(items) != 1 || items[0].(map[string]any)["raw_message"] != "hello" {
+		t.Fatalf("recent %d %v", c, out)
+	}
+	if units := out["units"].([]any); len(units) != 2 {
+		t.Fatalf("haproxy and healthd must be excluded by default: %v", units)
+	}
+	if c, out := get("/api/v1/health/recent-systemd?unit=bogus.service"); c != 400 || out["error"] != "one or more units are not monitored" {
+		t.Fatalf("recent invalid %d %v", c, out)
+	}
+	if c, out := get("/api/v1/health/events?limit=5"); c != 200 || out["items"] == nil {
+		t.Fatalf("events %d %v", c, out)
+	}
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/control", strings.NewReader(`{"kind":"systemd","name":"easy-ha-proxy-backup.service","action":"start"}`))
+	req.Header.Set("X-Healthd-Token", "tok")
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 403 {
+		t.Fatalf("backup unit must not be startable: %d", resp.StatusCode)
+	}
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/api/v1/control", strings.NewReader(`{"kind":"systemd","name":"haproxy.service","action":"restart"}`))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 403 {
+		t.Fatalf("missing token must be forbidden: %d", resp.StatusCode)
+	}
+}
+
+func TestSiteStateMachineMailsOnceAndRecovers(t *testing.T) {
+	dir := t.TempDir()
+	siteAlertsStatePath = filepath.Join(dir, "site-alerts.json")
+	var sent []string
+	sa := &SiteAlerts{incidents: map[string]*incident{}, send: func(_, subject, _ string) bool {
+		sent = append(sent, subject)
+		return true
+	}}
+	site := map[string]any{"name": "app", "alert_after": "1m", "alert_mode": "down"}
+	down := &siteCondition{State: "down", Total: 1}
+	ok := &siteCondition{State: "ok", Total: 1, Up: 1}
+	sa.evaluate(nil, site, "app", down, 1000)
+	sa.evaluate(nil, site, "app", down, 1059)
+	if len(sent) != 0 {
+		t.Fatalf("alerted before alert_after: %v", sent)
+	}
+	sa.evaluate(nil, site, "app", down, 1061)
+	sa.evaluate(nil, site, "app", down, 1100)
+	if len(sent) != 1 || !strings.HasSuffix(sent[0], ": DOWN") {
+		t.Fatalf("expected one DOWN: %v", sent)
+	}
+	sa.evaluate(nil, site, "app", ok, 1200)
+	sa.evaluate(nil, site, "app", ok, 1261)
+	if len(sent) != 2 || !strings.HasSuffix(sent[1], ": RECOVERED") {
+		t.Fatalf("expected recovery: %v", sent)
+	}
+	if !sa.persist() {
+		t.Fatal("persist failed")
+	}
+	if got := loadIncidents(); len(got) != 0 {
+		t.Fatalf("closed incident must not be kept: %v", got)
+	}
+}
+
+func TestSiteCondition(t *testing.T) {
+	rows := []map[string]string{
+		{"pxname": "be_app", "svname": "s1", "status": "UP"},
+		{"pxname": "be_app", "svname": "s2", "status": "DOWN", "addr": "10.0.0.2:80"},
+		{"pxname": "be_app", "svname": "BACKEND", "status": "UP"},
+	}
+	c := siteConditionFor("app", rows)
+	if c == nil || c.State != "degraded" || c.Up != 1 || c.Total != 2 {
+		t.Fatalf("condition: %+v", c)
+	}
+	if siteConditionFor("other", rows) != nil {
+		t.Fatal("unknown backend must be nil")
+	}
+	if alertAfterSeconds("5m") != 300 || alertAfterSeconds(nil) != 300 || alertAfterSeconds(90) != 90 {
+		t.Fatal("alert_after parsing")
 	}
 }

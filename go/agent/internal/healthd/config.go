@@ -1,10 +1,13 @@
-// Package healthd implements the systemd/Docker health & control monitor
-// inside the unified easy-ha-proxy-agent binary.
+// Package healthd is a port of haproxy-healthd.py: the state of systemd units
+// and Docker containers, their logs, a state-change feed, a guarded control
+// API and the per-site availability alerts.
 package healthd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -14,107 +17,132 @@ const (
 	DefaultHealthUnit = "haproxy-healthd.service"
 )
 
-// Config mirrors haproxy-healthd.py's HealthdConfig.
+// Config is HealthdConfig: the same keys, defaults and limits as Python.
 type Config struct {
-	SystemdUnits           []string `json:"systemd_units"`
-	SystemdUnitGlobs       []string `json:"systemd_unit_globs"`
-	DockerContainers       []string `json:"docker_containers"`
-	PollIntervalSeconds    int      `json:"poll_interval_seconds"`
-	EventsMax              int      `json:"events_max"`
-	CacheTTLSeconds        int      `json:"cache_ttl_seconds"`
-	UnitsRescanSeconds     int      `json:"units_rescan_seconds"`
-	LogsDefaultTail        int      `json:"logs_default_tail"`
-	LogsMaxTail            int      `json:"logs_max_tail"`
-	LogsDefaultSinceSecond int      `json:"logs_default_since_seconds"`
-	LogsMaxSinceSeconds    int      `json:"logs_max_since_seconds"`
+	SystemdUnits            []string
+	SystemdUnitGlobs        []string
+	DockerContainers        []string
+	PollIntervalSeconds     int
+	EventsMax               int
+	CacheTTLSeconds         int
+	UnitsRescanSeconds      int
+	LogsDefaultTail         int
+	LogsMaxTail             int
+	LogsDefaultSinceSeconds int
+	LogsMaxSinceSeconds     int
 }
 
-// DefaultConfig returns safe defaults matching haproxy-healthd.py.
-func DefaultConfig() Config {
-	return Config{
-		SystemdUnits: []string{
-			"haproxy.service",
-			"haproxy-certd.service",
-			"haproxy-controld.service",
-			"haproxy-healthd.service",
-			"easy-ha-proxy-guardd.service",
-			"easy-ha-proxy-metricsd.service",
-			"easy-ha-proxy-alertd.service",
-			"easy-ha-proxy-backupd.service",
-			"easy-ha-proxy-updated.service",
-		},
-		SystemdUnitGlobs:       []string{"authelia-*.service"},
-		DockerContainers:       []string{"haproxy-admin", "authelia", "authelia-redis"},
-		PollIntervalSeconds:    15,
-		EventsMax:              200,
-		CacheTTLSeconds:        5,
-		UnitsRescanSeconds:     300,
-		LogsDefaultTail:        150,
-		LogsMaxTail:            2000,
-		LogsDefaultSinceSecond: 3600,
-		LogsMaxSinceSeconds:    7 * 86400,
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
 	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
-// LoadConfig reads healthd.json, falling back to safe defaults on error.
-func LoadConfig(path string) Config {
-	cfg := DefaultConfig()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return cfg
+// pyInt mirrors int(raw.get(key) or default): a missing, null, zero or empty
+// value takes the default.
+func pyInt(m map[string]any, key string, def int) int {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return def
 	}
-	var parsed Config
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return cfg
-	}
-	if len(parsed.SystemdUnits) > 0 {
-		cfg.SystemdUnits = cleanStrings(parsed.SystemdUnits)
-	}
-	if parsed.SystemdUnitGlobs != nil {
-		cfg.SystemdUnitGlobs = cleanStrings(parsed.SystemdUnitGlobs)
-	}
-	if parsed.DockerContainers != nil {
-		cfg.DockerContainers = cleanStrings(parsed.DockerContainers)
-	}
-	cfg.PollIntervalSeconds = clampInt(parsed.PollIntervalSeconds, cfg.PollIntervalSeconds, 5, 300)
-	cfg.EventsMax = clampInt(parsed.EventsMax, cfg.EventsMax, 20, 5000)
-	if parsed.CacheTTLSeconds >= 0 && parsed.CacheTTLSeconds <= 300 {
-		cfg.CacheTTLSeconds = parsed.CacheTTLSeconds
-	}
-	cfg.UnitsRescanSeconds = clampInt(parsed.UnitsRescanSeconds, cfg.UnitsRescanSeconds, 30, 3600)
-	cfg.LogsDefaultTail = clampInt(parsed.LogsDefaultTail, cfg.LogsDefaultTail, 10, 5000)
-	cfg.LogsMaxTail = clampInt(parsed.LogsMaxTail, cfg.LogsMaxTail, 50, 10000)
-	cfg.LogsDefaultSinceSecond = clampInt(parsed.LogsDefaultSinceSecond, cfg.LogsDefaultSinceSecond, 60, 30*86400)
-	cfg.LogsMaxSinceSeconds = clampInt(parsed.LogsMaxSinceSeconds, cfg.LogsMaxSinceSeconds, 300, 90*86400)
-	return cfg
-}
-
-func cleanStrings(items []string) []string {
-	out := make([]string, 0, len(items))
-	seen := make(map[string]struct{}, len(items))
-	for _, s := range items {
-		t := strings.TrimSpace(s)
+	switch t := v.(type) {
+	case float64:
+		if t == 0 {
+			return def
+		}
+		return int(t)
+	case string:
 		if t == "" {
-			continue
+			return def
 		}
-		if _, dup := seen[t]; dup {
-			continue
+		n, err := strconv.Atoi(strings.TrimSpace(t))
+		if err != nil {
+			return def
 		}
-		seen[t] = struct{}{}
-		out = append(out, t)
+		return n
+	case bool:
+		if !t {
+			return def
+		}
+		return 1
+	}
+	return def
+}
+
+func strList(m map[string]any, key string) []string {
+	raw, _ := m[key].([]any)
+	out := make([]string, 0, len(raw))
+	for _, x := range raw {
+		out = append(out, fmt.Sprint(x))
 	}
 	return out
 }
 
-func clampInt(val, fallback, minV, maxV int) int {
-	if val == 0 {
-		return fallback
+func sub(m map[string]any, key string) map[string]any {
+	if v, ok := m[key].(map[string]any); ok {
+		return v
 	}
-	if val < minV {
-		return minV
+	return map[string]any{}
+}
+
+// LoadConfig reads healthd.json the way _load_config does.
+func LoadConfig(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("config not found: %s", path)
 	}
-	if val > maxV {
-		return maxV
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Config{}, err
 	}
-	return val
+	systemd, docker, logs := sub(raw, "systemd"), sub(raw, "docker"), sub(raw, "logs")
+	cfg := Config{
+		SystemdUnits:     strList(systemd, "units"),
+		SystemdUnitGlobs: strList(systemd, "unit_globs"),
+		DockerContainers: strList(docker, "containers"),
+	}
+	cfg.PollIntervalSeconds = clamp(pyInt(raw, "poll_interval_seconds", 5), 1, 300)
+	cfg.EventsMax = clamp(pyInt(raw, "events_max", 200), 10, 2000)
+	cfg.CacheTTLSeconds = clamp(pyInt(raw, "cache_ttl_seconds", 15), 0, 3600)
+	cfg.UnitsRescanSeconds = clamp(pyInt(raw, "units_rescan_seconds", 60), 5, 3600)
+	cfg.LogsMaxTail = clamp(pyInt(logs, "max_tail", 2000), 50, 20000)
+	cfg.LogsDefaultTail = clamp(pyInt(logs, "default_tail", 200), 10, cfg.LogsMaxTail)
+	cfg.LogsMaxSinceSeconds = clamp(pyInt(logs, "max_since_seconds", 86400), 300, 7*24*3600)
+	cfg.LogsDefaultSinceSeconds = clamp(pyInt(logs, "default_since_seconds", 3600), 60, cfg.LogsMaxSinceSeconds)
+	return cfg, nil
+}
+
+func unitBase(unit string) string {
+	return strings.TrimSuffix(strings.TrimSpace(unit), ".service")
+}
+
+// AllowedActions is _control_allowed_actions.
+func AllowedActions(kind, name, selfUnit string) []string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	nm := strings.TrimSpace(name)
+	switch kind {
+	case "docker":
+		if nm == "haproxy-admin" || nm == "authelia" || nm == "authelia-redis" {
+			return []string{"restart"}
+		}
+		return []string{"start", "stop", "restart"}
+	case "systemd":
+		base := unitBase(nm)
+		switch {
+		case base == "haproxy":
+			return []string{"reload", "restart"}
+		case strings.HasPrefix(base, "authelia"):
+			return []string{"start", "stop", "restart"}
+		case base == unitBase(selfUnit):
+			return []string{"restart"}
+		case base == "easy-ha-proxy-backup":
+			return []string{}
+		}
+		return []string{"start", "stop", "restart"}
+	}
+	return []string{}
 }

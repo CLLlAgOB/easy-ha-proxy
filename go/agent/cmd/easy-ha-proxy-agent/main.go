@@ -320,17 +320,31 @@ func runHealthd(args []string) {
 	selfUnit := fs.String("unit", envOr("HEALTHD_UNIT", healthd.DefaultHealthUnit), "own systemd unit name")
 	_ = fs.Parse(args)
 
-	cfg := healthd.LoadConfig(*cfgPath)
-	col := healthd.NewCollector(cfg, *selfUnit, nil)
-	srv := &healthd.Server{
-		Collector:    col,
-		ControlToken: os.Getenv("HEALTHD_TOKEN"),
-		SelfUnit:     *selfUnit,
+	cfg, err := healthd.LoadConfig(*cfgPath)
+	if err != nil {
+		log.Fatalf("healthd: %v", err)
 	}
-
+	state := healthd.NewState(cfg, strings.TrimSpace(*selfUnit), nil)
+	state.ForceRefresh()
 	ctx, cancel := signalContext()
 	defer cancel()
-	log.Printf("easy-ha-proxy-agent healthd listening on %s", *sockPath)
+	if strings.TrimSpace(os.Getenv("HEALTHD_BACKGROUND_POLL")) == "1" {
+		go func() {
+			t := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					state.ForceRefresh()
+				}
+			}
+		}()
+	}
+	go healthd.NewSiteAlerts(alerts.FromEnv()).Run(ctx)
+	srv := &healthd.Server{State: state, ControlToken: strings.TrimSpace(os.Getenv("HEALTHD_TOKEN"))}
+	log.Printf("haproxy-healthd (Go) listening on %s config=%s ttl=%ds", *sockPath, *cfgPath, cfg.CacheTTLSeconds)
 	if err := srv.Serve(ctx, *sockPath); err != nil {
 		log.Fatalf("healthd error: %v", err)
 	}
