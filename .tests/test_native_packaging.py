@@ -69,6 +69,7 @@ class NativePackagingTests(unittest.TestCase):
     def test_defaults_keep_native_daemons_opt_in(self):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
         self.assertIs(defaults["native_daemons_enabled"], False)
+        self.assertIs(defaults["haproxy_admin_use_go_panel"], False)
         self.assertEqual(defaults["native_agent_bin"], "/usr/local/sbin/easy-ha-proxy-agent")
         self.assertEqual(defaults["native_guardd_bin"], "/usr/local/sbin/guardd-core")
         self.assertEqual(
@@ -77,6 +78,11 @@ class NativePackagingTests(unittest.TestCase):
         )
         for _tpl, flag, _native_cmd, _py_cmd in SERVICE_TOGGLES:
             self.assertIn(flag, defaults)
+
+        compose = (TEMPLATES / "docker-compose.yml.j2").read_text(encoding="utf-8")
+        self.assertIn("haproxy_admin_use_go_panel", compose)
+        self.assertIn("/usr/local/bin/easy-ha-proxy-panel", compose)
+        self.assertIn("haproxy_admin_image", compose)
 
     def test_all_eight_service_templates_support_opt_in_and_python_fallback(self):
         for tpl_name, flag, native_fragment, py_exec in SERVICE_TOGGLES:

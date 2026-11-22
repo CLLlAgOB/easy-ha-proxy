@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	Version              = "0.2.0-alpha"
+	Version              = "0.3.0-alpha"
 	DefaultListenAddr    = "0.0.0.0:5000"
 	DefaultSecretFile    = "/var/lib/haproxy-admin/secret_key"
 	DefaultMaxBodyBytes  = 32 * 1024 * 1024
@@ -33,8 +33,10 @@ type Config struct {
 	TranslationsDir  string
 	Timezone         string
 	ServerTimezone   string
-	AuditDatabase    string
-	HAProxySocket    string
+	AuditDatabase      string
+	ConfigDir          string
+	ConfigBackupDir    string
+	HAProxySocket      string
 	HAProxyCfg       string
 	HAProxyLog       string
 	WhitelistGlobal  string
@@ -88,6 +90,8 @@ func Load() (*Config, error) {
 		Timezone:            envOr("TZ", "UTC"),
 		ServerTimezone:      envOr("EHP_SERVER_TIMEZONE", envOr("TZ", "UTC")),
 		AuditDatabase:       envOr("AUDIT_DATABASE", "/var/lib/easy-ha-proxy/audit/audit.db"),
+		ConfigDir:           envOr("HAPROXY_ADMIN_CONFIG_DIR", "/opt/haproxy-admin/config"),
+		ConfigBackupDir:     envOr("HAPROXY_ADMIN_BACKUPS_DIR", "/opt/haproxy-admin/backups"),
 		HAProxySocket:       envOr("SOCKET_PATH", "/run/haproxy/admin.sock"),
 		HAProxyCfg:          envOr("HAPROXY_CFG", "/etc/haproxy/haproxy.cfg"),
 		HAProxyLog:          envOr("LOG_FILE", "/var/log/haproxy.log"),

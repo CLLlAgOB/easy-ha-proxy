@@ -3,7 +3,8 @@
 `easy-ha-proxy` ships an optional precompiled native runtime alongside the default Python daemons for both `linux/amd64` and `linux/arm64` (including NanoPi ARM64 gateways):
 
 - **`guardd-core` (Rust, ~2.1 MB)** + **`libguardd_core.so`**: zero-regex HAProxy access-log hot path (`~730k lines/s`, `~4.1 MB` RSS), SLRU IP memory, `/24` subnet correlation, SQLite persistence (`security.db`, `requests.db`), enforcer, and AF_UNIX HTTP API.
-- **`easy-ha-proxy-agent` (Go, `CGO_ENABLED=0`, ~6.7–7.1 MB)**: single static zero-dependency multi-call binary hosting all 7 orchestration/control daemons (`healthd`, `metricsd`, `alertd`, `controld`, `certd`, `backupd`, `updated`).
+- **`easy-ha-proxy-agent` (Go, `CGO_ENABLED=0`, ~7.5–7.9 MB)**: single static zero-dependency multi-call binary hosting all 10 host daemons (`healthd`, `metricsd`, `alertd`, `controld`, `certd`, `backupd`, `updated`, `authelia-bansd`, `authelia-usersd`, `authelia-configd`) and 6 oneshot/timer utilities (`unit-failed`, `backup-run`, `server-state`, `udp-forward`, `cert-deliver`, `update-geoip`).
+- **`easy-ha-proxy-panel` (Go, `CGO_ENABLED=0`, ~7.2 MB, `FROM scratch` container)**: optional native Go web administration panel replacing Python/Flask + Gunicorn with a ~12 MB scratch container and a built-in ~2 ms `healthcheck` subcommand (`haproxy_admin_use_go_panel: true` in `vars.yml`).
 
 ## Architecture & Release Bundles
 

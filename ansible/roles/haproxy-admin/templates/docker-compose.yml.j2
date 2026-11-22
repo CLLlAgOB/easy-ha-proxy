@@ -1,6 +1,6 @@
 services:
   haproxy-admin:
-    image: "{{ haproxy_admin_image }}"
+    image: "{{ haproxy_admin_go_image | default('clllagob/haproxy-admin-ui:go-alpha') if haproxy_admin_use_go_panel | default(false) | bool else haproxy_admin_image }}"
     container_name: "{{ haproxy_admin_container_name }}"
     restart: unless-stopped
     read_only: true
@@ -75,6 +75,12 @@ services:
     # same 200, same {"ok": true}. A wrong secret, a wrong identity and a
     # dead port were each confirmed to still fail it.
     healthcheck:
+{% if haproxy_admin_use_go_panel | default(false) | bool %}
+      test:
+        - CMD
+        - /usr/local/bin/easy-ha-proxy-panel
+        - healthcheck
+{% else %}
       test:
         - CMD
         - python
@@ -96,6 +102,7 @@ services:
           answer = b"".join(iter(lambda: connection.recv(4096), b""))
           assert answer.split(b"\r\n", 1)[0].split()[1] == b"200"
           assert b'"ok": true' in answer
+{% endif %}
       # Thirty seconds rather than ten. What remains per run is gunicorn
       # serving the request, and only asking less often reduces that. The
       # window before a wedged container is called unhealthy is unchanged:

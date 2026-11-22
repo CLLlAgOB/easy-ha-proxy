@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"easy-ha-proxy/panel/internal/audit"
+	"easy-ha-proxy/panel/internal/cfgstore"
 	"easy-ha-proxy/panel/internal/config"
 	"easy-ha-proxy/panel/internal/daemons"
 	"easy-ha-proxy/panel/internal/geoip"
@@ -25,6 +27,7 @@ import (
 	"easy-ha-proxy/panel/internal/i18n"
 	"easy-ha-proxy/panel/internal/prometheus"
 	"easy-ha-proxy/panel/internal/security"
+	"easy-ha-proxy/panel/internal/ui"
 )
 
 var (
@@ -51,6 +54,9 @@ type Server struct {
 	Pool     *daemons.Pool
 	Runtime  *haproxy.Runtime
 	GeoIP    *geoip.Reader
+	Audit    *audit.Store
+	CfgStore *cfgstore.Store
+	UI       *ui.Renderer
 	Catalog  *i18n.Catalog
 	Boundary *security.Boundary
 	Prom     *prometheus.Collector
@@ -86,11 +92,16 @@ func New(cfg *config.Config, pool *daemons.Pool, rt *haproxy.Runtime, cat *i18n.
 		Runtime: rt,
 	}
 
+	uiRenderer, _ := ui.NewRenderer(cfg.StaticDir, cfg.ServerTimezone, cat)
+
 	s := &Server{
 		Cfg:      cfg,
 		Pool:     pool,
 		Runtime:  rt,
 		GeoIP:    geoip.NewReader(cfg.GeoIPDBPath),
+		Audit:    audit.Open(cfg.AuditDatabase),
+		CfgStore: cfgstore.New(cfg.ConfigDir, cfg.ConfigBackupDir, cfg.HAProxyCfg),
+		UI:       uiRenderer,
 		Catalog:  cat,
 		Boundary: boundary,
 		Prom:     prom,
@@ -218,6 +229,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	s.registerBackupRoutes(mux)
 	s.registerUpdateAndSecurityRoutes(mux)
 	s.registerAutheliaRoutes(mux)
+
+	// Stage D3 route groups: audit log, YAML config store, and HTML UI pages.
+	s.registerStageD3Routes(mux)
 }
 
 func (s *Server) staticHandler() http.Handler {

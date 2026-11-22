@@ -157,6 +157,8 @@ haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
 
 # Container image and name.
 haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
+haproxy_admin_use_go_panel: false
+haproxy_admin_go_image: "clllagob/haproxy-admin-ui:go-alpha"
 haproxy_admin_container_name: "haproxy-admin"
 
 # UI port exposed on localhost.

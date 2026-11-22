@@ -352,13 +352,17 @@ jobs:
           (cd dist && sha256sum easy-ha-proxy-panel-linux-* > SHA256SUMS.panel)
           cat dist/SHA256SUMS.panel
 
-      - name: Build Go panel container image (smoke + size check)
+      - name: Build Go panel container image (smoke + live healthcheck + size)
         env:
           DOCKER_BUILDKIT: '1'
         run: |
           docker build -f go/panel/Dockerfile -t easy-ha-proxy-panel:ci-check .
           docker image inspect easy-ha-proxy-panel:ci-check --format 'Go panel image size: {{.Size}} bytes'
           docker run --rm easy-ha-proxy-panel:ci-check version
+          cid=$(docker run -d --rm -e HAPROXY_ADMIN_PROXY_SECRET=ci-test-secret -e HAPROXY_ADMIN_SECRET_KEY=ci-hmac-secret easy-ha-proxy-panel:ci-check serve)
+          trap 'docker stop "$cid" >/dev/null 2>&1 || true' EXIT
+          sleep 1
+          docker exec -e HAPROXY_ADMIN_PROXY_SECRET=ci-test-secret "$cid" /usr/local/bin/easy-ha-proxy-panel healthcheck
 
       - name: Upload Go panel artifacts
         uses: actions/upload-artifact@v4
