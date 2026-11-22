@@ -5,18 +5,24 @@
 #   docker build -f go/panel/Dockerfile -t easy-ha-proxy-panel:go .
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN apk add --no-cache tzdata ca-certificates
+RUN apk add --no-cache tzdata ca-certificates file
 
 WORKDIR /src/go/panel
 COPY go/panel/go.mod ./
 COPY go/panel/ ./
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+RUN set -euo pipefail; \
+    GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-amd64}" CGO_ENABLED=0 \
     go build -trimpath -ldflags="-s -w" \
-    -o /out/easy-ha-proxy-panel ./cmd/easy-ha-proxy-panel
+    -o /out/easy-ha-proxy-panel ./cmd/easy-ha-proxy-panel; \
+    arch="${TARGETARCH:-amd64}"; \
+    desc="$(file /out/easy-ha-proxy-panel)"; \
+    echo "Built panel binary for ${arch}: ${desc}"; \
+    if [ "${arch}" = "arm64" ]; then echo "${desc}" | grep -qi "aarch64\|arm64"; \
+    elif [ "${arch}" = "amd64" ]; then echo "${desc}" | grep -qi "x86-64\|amd64"; fi
 
 FROM scratch
 
