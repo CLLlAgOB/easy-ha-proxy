@@ -79,8 +79,9 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # "web application" update pulls it. Nothing on the host changes.
     ("Dockerfile", ()),
     ("docker/*", ()),
-    # Native Rust hot-path core (compiled in CI; raw sources do not deploy).
+    # Native Rust hot-path core and Go host agent (compiled in CI; raw sources do not deploy).
     ("rust/*", ()),
+    ("go/*", ()),
     # Install entry points and the menu helper run from the source directory
     # itself, and the refreshed source is already in place.
     ("install.sh", ()),
