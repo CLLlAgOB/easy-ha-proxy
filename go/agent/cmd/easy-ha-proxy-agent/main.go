@@ -243,6 +243,9 @@ func runServerState(args []string) int {
 
 func runCertd(args []string) {
 	opts := certd.OptionsFromEnv()
+	if len(args) == 1 && args[0] == "--renew" {
+		os.Exit(certd.RenewCertificates(opts))
+	}
 	fs := flag.NewFlagSet("certd", flag.ExitOnError)
 	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
 	fs.StringVar(&opts.HAProxyCertsDir, "certs-dir", opts.HAProxyCertsDir, "HAProxy PEM directory")
