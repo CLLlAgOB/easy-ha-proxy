@@ -254,7 +254,10 @@ func runCertd(args []string) {
 }
 
 func runBackupd(args []string) {
-	opts := backupd.OptionsFromEnv()
+	opts, err := backupd.OptionsFromEnv()
+	if err != nil {
+		log.Fatalf("Cannot start backup daemon: %v", err)
+	}
 	fs := flag.NewFlagSet("backupd", flag.ExitOnError)
 	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
 	fs.StringVar(&opts.SpoolRoot, "spool", opts.SpoolRoot, "backup spool root directory")
