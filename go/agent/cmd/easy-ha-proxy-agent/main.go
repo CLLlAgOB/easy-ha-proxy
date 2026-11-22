@@ -1,5 +1,5 @@
 // Command easy-ha-proxy-agent is the unified static multi-call host daemon
-// for easy-ha-proxy (healthd, metricsd, alertd, controld).
+// for easy-ha-proxy (healthd, metricsd, alertd, controld, certd, backupd, updated).
 package main
 
 import (
@@ -14,13 +14,16 @@ import (
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alertd"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/backupd"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/healthd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updated"
 )
 
-const version = "0.2.0-alpha"
+const version = "0.3.0-alpha"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -41,6 +44,12 @@ func main() {
 		runAlertd(args)
 	case "controld":
 		runControld(args)
+	case "certd":
+		runCertd(args)
+	case "backupd":
+		runBackupd(args)
+	case "updated":
+		runUpdated(args)
 	case "probe-host":
 		s, _ := metricsd.ReadHostSample(time.Now().Unix(), nil)
 		enc := json.NewEncoder(os.Stdout)
@@ -53,7 +62,43 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|probe-host|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|probe-host|version> [flags]")
+}
+
+func runCertd(args []string) {
+	opts := certd.OptionsFromEnv()
+	fs := flag.NewFlagSet("certd", flag.ExitOnError)
+	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
+	fs.StringVar(&opts.HAProxyCertsDir, "certs-dir", opts.HAProxyCertsDir, "HAProxy PEM directory")
+	_ = fs.Parse(args)
+
+	if err := certd.Run(opts); err != nil {
+		log.Fatalf("certd error: %v", err)
+	}
+}
+
+func runBackupd(args []string) {
+	opts := backupd.OptionsFromEnv()
+	fs := flag.NewFlagSet("backupd", flag.ExitOnError)
+	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
+	fs.StringVar(&opts.SpoolRoot, "spool", opts.SpoolRoot, "backup spool root directory")
+	_ = fs.Parse(args)
+
+	if err := backupd.Run(opts); err != nil {
+		log.Fatalf("backupd error: %v", err)
+	}
+}
+
+func runUpdated(args []string) {
+	opts := updated.OptionsFromEnv()
+	fs := flag.NewFlagSet("updated", flag.ExitOnError)
+	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
+	fs.StringVar(&opts.StateRoot, "state", opts.StateRoot, "update broker state root directory")
+	_ = fs.Parse(args)
+
+	if err := updated.Run(opts); err != nil {
+		log.Fatalf("updated error: %v", err)
+	}
 }
 
 func runAlertd(args []string) {
