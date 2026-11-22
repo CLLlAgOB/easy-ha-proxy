@@ -222,7 +222,7 @@ class RustGuarddParityTests(unittest.TestCase):
         rust_rows = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
         self.assertEqual(len(rust_rows), len(PARITY_LINES))
 
-        for idx, (raw, rust_row) in enumerate(zip(PARITY_LINES, rust_rows)):
+        for idx, (raw, rust_row) in enumerate(zip(PARITY_LINES, rust_rows, strict=True)):
             with self.subTest(index=idx, line=raw[:80]):
                 py_req = py.parse_access_line(raw)
                 self.assertEqual(rust_row["parsed"], _py_parsed_dict(py_req))
@@ -259,7 +259,7 @@ class RustGuarddParityTests(unittest.TestCase):
             lib.guardd_engine_free(handle)
 
         self.assertEqual(len(decoded), len(PARITY_LINES))
-        for idx, (raw, rust_parsed) in enumerate(zip(PARITY_LINES, decoded)):
+        for idx, (raw, rust_parsed) in enumerate(zip(PARITY_LINES, decoded, strict=True)):
             with self.subTest(index=idx):
                 self.assertEqual(rust_parsed, _py_parsed_dict(py.parse_access_line(raw)))
 
