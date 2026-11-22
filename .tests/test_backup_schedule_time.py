@@ -13,6 +13,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,7 +141,7 @@ class OnDemandTests(unittest.TestCase):
     """Pressing the button before arming the schedule must still work."""
 
     def setUp(self):
-        self.source = DAEMON.read_text(encoding="utf-8")
+        self.source = daemon_source("easy-ha-proxy-backupd.py")
         self.block = self.source.split("def run_scheduled_backup")[1]
 
     def test_the_timer_still_respects_the_off_switch(self):
@@ -167,7 +168,7 @@ class OnDemandTests(unittest.TestCase):
 
 class ReportingTests(unittest.TestCase):
     def test_the_schedule_reports_both_the_wish_and_what_systemd_will_do(self):
-        block = DAEMON.read_text(encoding="utf-8").split("def load_schedule")[1]
+        block = daemon_source("easy-ha-proxy-backupd.py").split("def load_schedule")[1]
         block = block.split("def ")[0]
         self.assertIn('"time"', block)
         self.assertIn('"next_run"', block)

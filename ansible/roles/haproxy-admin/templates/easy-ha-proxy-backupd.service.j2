@@ -8,6 +8,7 @@ Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
 Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
 Environment="BACKUPD_SOCKET_PATH={{ backupd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.sock') }}"
 Environment="BACKUPD_ROOT_DIR={{ backupd_root_dir | default('/var/lib/easy-ha-proxy/backup-web') }}"
 Environment="BACKUPD_SOURCE_DIR={{ backupd_source_dir | default('/opt/easy-ha-proxy/source') }}"
@@ -31,7 +32,11 @@ Environment="BACKUPD_SERVICE_NAME=easy-ha-proxy-backupd.service"
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
 Environment="BACKUPD_DESTINATIONS_DIR={{ backupd_destinations_dir | default('/etc/easy-ha-proxy/backup-destinations') }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-backupd.py', rstrip=false) | hash('sha256') }}"
+{% set _backupd_hashes = [lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-backupd.py', rstrip=false) | hash('sha256')] -%}
+{% for _backupd_mod in (query('ansible.builtin.fileglob', playbook_dir ~ '/roles/haproxy-admin/files/backupd/*.py') | sort) -%}
+{%   set _ = _backupd_hashes.append(lookup('ansible.builtin.file', _backupd_mod, rstrip=false) | hash('sha256')) -%}
+{% endfor -%}
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_backupd_hashes | join(':')) | hash('sha256') }}"
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backupd.py
 Restart=always
 RestartSec=3

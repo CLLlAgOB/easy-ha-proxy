@@ -23,6 +23,7 @@ import unittest
 from unittest import mock
 
 import yaml
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 CERTD_PATH = ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"
@@ -132,7 +133,7 @@ class TheWords(unittest.TestCase):
             spec.loader.exec_module(i18n)
         except ImportError:
             self.skipTest("the panel's dependencies are not installed here")
-        source = CERTD_PATH.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-certd.py")
         routes = (ROOT / "docker/app/haproxy_admin/routes_haproxy_config.py").read_text(encoding="utf-8")
         self.assertIn('" Sites that ask for its client certificates: "', routes)
         for verb in ("rotating it", "deleting it"):

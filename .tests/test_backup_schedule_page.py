@@ -15,6 +15,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,7 +78,7 @@ class RouteTests(unittest.TestCase):
     def test_every_action_the_daemon_offers_now_has_a_way_in(self):
         # The gap this test exists to keep closed: an action implemented in
         # the daemon that nothing can reach.
-        daemon = DAEMON.read_text(encoding="utf-8")
+        daemon = daemon_source("easy-ha-proxy-backupd.py")
         actions = set(
             re.findall(r'if action == "([a-z_]+)":', daemon)
         )

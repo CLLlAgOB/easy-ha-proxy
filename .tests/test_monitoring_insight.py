@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "docker" / "app" / "haproxy_admin"
@@ -114,7 +115,7 @@ class TotalsPerBackend(unittest.TestCase):
         self.assertEqual(payload["backends"][0]["response_ms_avg"], 100)
 
     def test_the_daemon_answers_for_it(self):
-        source = (FILES / "easy-ha-proxy-metricsd.py").read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-metricsd.py")
         handler = source.split('if path == "/api/v1/metrics/backends":')[1].split("return\n\n")[0]
         self.assertIn("resolve_window(query)", handler)
         self.assertIn("database.backend_totals(since=since, until=until)", handler)

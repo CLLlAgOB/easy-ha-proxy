@@ -26,6 +26,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,7 +234,7 @@ class TheArchiveCarriesTheSnapshotNotTheLiveFile(unittest.TestCase):
 
 class ThePageSaysWhetherItIsThere(unittest.TestCase):
     def test_the_daemon_passes_the_flag_on(self):
-        source = BACKUPD.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-backupd.py")
         keys = source.split("MANIFEST_KEYS = (")[1].split(")")[0]
         self.assertIn('"metrics_included"', keys)
 

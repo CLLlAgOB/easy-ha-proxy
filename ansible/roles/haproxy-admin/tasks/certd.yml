@@ -22,6 +22,16 @@
     mode: "0755"
   register: certd_script
 
+- name: "haproxy-certd | Install certd package"
+  ansible.builtin.copy:
+    src: certd/
+    dest: /usr/local/sbin/certd/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  register: certd_package
+
 - name: "haproxy-certd | Install systemd unit"
   ansible.builtin.template:
     src: haproxy-certd.service.j2
@@ -64,7 +74,7 @@
   ansible.builtin.systemd:
     name: haproxy-certd.service
     state: restarted
-  when: certd_script.changed or certd_unit.changed
+  when: certd_script.changed or certd_package.changed or certd_unit.changed
 
 - name: "haproxy-certd | Ensure service started"
   ansible.builtin.systemd:

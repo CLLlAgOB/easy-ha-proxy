@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
@@ -151,7 +152,7 @@ class TheWatch(unittest.TestCase):
         self.assertEqual(broker.os_security_watch(NOW), "")
 
     def test_the_schedule_looks_on_every_pass(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py").read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         loop = source[source.index("def auto_check_loop()"):source.index("def update_command(")]
         # Separate schedules run the full tick, the unified window its
         # check-only one; either answer reaches the watch.

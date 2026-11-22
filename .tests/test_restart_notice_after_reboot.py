@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 BROKER = ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
@@ -117,7 +118,7 @@ class AFindingFromBeforeTheBoot(unittest.TestCase):
         self.assertFalse(restart[0].kwargs["active"])
 
     def test_the_unified_loop_runs_checks_instead_of_nothing(self):
-        source = BROKER.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         self.assertIn("answer = os_security_check_tick() if unified else os_security_tick()", source)
 
 

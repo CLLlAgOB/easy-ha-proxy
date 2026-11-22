@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 import unittest
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,18 +20,14 @@ from haproxy_admin import routes_dns_providers as routes  # noqa: E402
 class ProviderTableTests(unittest.TestCase):
     def test_the_application_and_the_daemon_agree_on_the_providers(self):
         # The page can only offer what certd will accept.
-        certd = (
-            ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"
-        ).read_text(encoding="utf-8")
+        certd = daemon_source("haproxy-certd.py")
         block = certd.split("DNS_PROVIDERS: Dict[str, Dict[str, Any]] = {")[1]
         block = block.split("\n}")[0]
         declared = set(re.findall(r'^\s{4}"([a-z0-9]+)":', block, flags=re.MULTILINE))
         self.assertEqual(declared, set(routes.PROVIDERS))
 
     def test_the_profile_pattern_matches_the_daemon(self):
-        certd = (
-            ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"
-        ).read_text(encoding="utf-8")
+        certd = daemon_source("haproxy-certd.py")
         self.assertIn(r'DNS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")', certd)
         self.assertEqual(routes.PROFILE_RE.pattern, r"^[a-z0-9][a-z0-9-]{0,39}$")
 

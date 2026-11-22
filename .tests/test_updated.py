@@ -16,6 +16,7 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,10 +36,10 @@ BACKUPD_UNIT_PATH = (
     / "ansible/roles/haproxy-admin/templates/easy-ha-proxy-backupd.service.j2"
 )
 
-DAEMON_SOURCE = DAEMON_PATH.read_text(encoding="utf-8")
+DAEMON_SOURCE = daemon_source("easy-ha-proxy-updated.py")
 UNIT_SOURCE = UNIT_PATH.read_text(encoding="utf-8")
 TASK_SOURCE = TASK_PATH.read_text(encoding="utf-8")
-BACKUPD_SOURCE = BACKUPD_PATH.read_text(encoding="utf-8")
+BACKUPD_SOURCE = daemon_source("easy-ha-proxy-backupd.py")
 BACKUPD_UNIT_SOURCE = BACKUPD_UNIT_PATH.read_text(encoding="utf-8")
 
 

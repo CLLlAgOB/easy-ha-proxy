@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "installer"))
@@ -116,7 +117,7 @@ class TheWiring(unittest.TestCase):
         self.assertLess(restart.index("set_inheritable"), restart.index("os.execve("))
 
     def test_the_broker_and_the_cli_name_the_same_lock(self):
-        broker = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py").read_text(encoding="utf-8")
+        broker = daemon_source("easy-ha-proxy-updated.py")
         self.assertIn('"/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock"', broker)
         self.assertEqual(
             str(easy_ha_proxy.MAINTENANCE_LOCK_PATH),

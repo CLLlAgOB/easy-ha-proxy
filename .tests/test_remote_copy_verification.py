@@ -25,6 +25,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -167,7 +168,7 @@ class PruningTests(unittest.TestCase):
     """An unproven copy must never cost the last good one."""
 
     def test_nothing_is_pruned_when_verification_failed(self):
-        source = DAEMON.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-backupd.py")
         block = source.split('response["ok"] = False')[1][:400]
         self.assertIn("backup.failed", block)
         # The invariant the comment above it states.

@@ -26,6 +26,7 @@ from unittest import mock
 
 import update_plan
 from update_plan import CommandResult
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,7 +202,7 @@ class TheBroker(unittest.TestCase):
         self.broker.validate_requirements(self.plan_map(), ["all"])
 
     def test_the_refusal_is_part_of_validating_a_selection(self):
-        source = BROKER_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         body = source.split("def validate_selection(")[1].split("\ndef ")[0]
         self.assertIn("validate_requirements(available, components)", body)
 
@@ -224,7 +225,7 @@ class TheBroker(unittest.TestCase):
         self.assertEqual(self.broker.auto_check_hours(), self.broker.AUTO_CHECK_HOURS)
 
     def test_the_status_carries_the_settings_and_the_schedule_always_runs(self):
-        source = BROKER_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         self.assertIn('"settings": settings_payload()', source)
         serve = source.split("def serve() -> None:")[1].split("\ndef ")[0]
         self.assertIn("threading.Thread(target=auto_check_loop", serve)

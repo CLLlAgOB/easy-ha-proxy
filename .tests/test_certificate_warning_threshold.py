@@ -22,6 +22,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,7 +86,7 @@ class RealCertificates(unittest.TestCase):
         self.assertLessEqual(info["days_left"], info["warn_days"])
 
     def test_the_list_and_the_alert_use_the_same_threshold(self):
-        source = CERTD_PATH.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-certd.py")
         watch = source.split("class CertificateExpiryWatch")[1].split("\ndef ")[0]
         self.assertIn('days <= int(info["warn_days"])', watch)
         self.assertNotIn("<= CERT_WARN_DAYS", source)

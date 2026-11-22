@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,7 +96,7 @@ class NormalisationTests(unittest.TestCase):
 
 class CallSiteTests(unittest.TestCase):
     def setUp(self):
-        self.source = DAEMON.read_text(encoding="utf-8")
+        self.source = daemon_source("easy-ha-proxy-backupd.py")
 
     def test_the_stored_key_goes_through_normalisation(self):
         self.assertIn(

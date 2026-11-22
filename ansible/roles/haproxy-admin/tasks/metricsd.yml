@@ -11,6 +11,16 @@
     mode: "0755"
   register: metricsd_script
 
+- name: "easy-ha-proxy-metricsd | Install metricsd package"
+  ansible.builtin.copy:
+    src: metricsd/
+    dest: /usr/local/sbin/metricsd/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  register: metricsd_package
+
 # The daemon config sits beside healthd.json rather than inside config/, which
 # is recursively chowned to the app user after a backup restore.
 - name: "easy-ha-proxy-metricsd | Render config"
@@ -55,6 +65,7 @@
     state: restarted
   when: >-
     metricsd_script.changed
+    or metricsd_package.changed
     or metricsd_unit.changed
     or metricsd_cfg.changed
     or (hapadm_env_t.changed | default(false))

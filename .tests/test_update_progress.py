@@ -28,6 +28,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,7 +186,7 @@ class TheBroker(unittest.TestCase):
         self.assertIsNone(self.broker.public_job({"id": "a" * 32, "progress": {"phase": "evil"}})["progress"])
 
     def test_the_progress_is_published_with_the_log(self):
-        source = BROKER_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         self.assertEqual(source.count("publish_output(job_id, read_"), 2)
         self.assertIn('progress={"phase": "verifying"}', source)
         self.assertIn('progress={"phase": "rechecking"}', source)

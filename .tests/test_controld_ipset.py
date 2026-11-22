@@ -25,6 +25,7 @@ import textwrap
 import time
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -455,7 +456,7 @@ class ReloadAndCheckAreBounded(unittest.TestCase):
 
 class EveryCommandIsBounded(unittest.TestCase):
     def test_controld_runs_nothing_without_a_time_limit(self):
-        tree = ast.parse(DAEMON.read_text(encoding="utf-8"))
+        tree = ast.parse(daemon_source("haproxy-controld.py"))
         unbounded = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -473,7 +474,7 @@ class EveryCommandIsBounded(unittest.TestCase):
         self.assertEqual(unbounded, [])
 
     def test_ipset_is_never_run_once_per_address(self):
-        source = DAEMON.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-controld.py")
         self.assertNotIn('"ipset", "add"', source)
         self.assertNotIn('"ipset", "del"', source)
 

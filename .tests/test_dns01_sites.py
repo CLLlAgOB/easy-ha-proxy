@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import yaml
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -395,9 +396,7 @@ class RenewalDurabilityTests(unittest.TestCase):
     CREDENTIALS_DIR = "/etc/easy-ha-proxy/dns-providers"
 
     def test_the_daemon_the_unit_and_ansible_agree_on_the_path(self):
-        certd = (
-            ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"
-        ).read_text(encoding="utf-8")
+        certd = daemon_source("haproxy-certd.py")
         unit = (
             ROOT
             / "ansible/roles/haproxy-admin/templates/haproxy-certd.service.j2"

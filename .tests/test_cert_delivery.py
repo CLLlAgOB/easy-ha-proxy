@@ -40,6 +40,7 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -415,7 +416,7 @@ class FindingTheCertificateOnDemand(unittest.TestCase):
     """The part a hook never has to do, because certbot tells it."""
 
     def setUp(self):
-        self.source = CERTD.read_text(encoding="utf-8")
+        self.source = daemon_source("haproxy-certd.py")
         self.block = self.source.split("def _resolve_lineage")[1].split(
             "def handle_deliveries_list")[0]
 
@@ -486,7 +487,7 @@ class FindingTheCertificateOnDemand(unittest.TestCase):
 
 class TheDaemonKeepsTheSecrets(unittest.TestCase):
     def setUp(self):
-        self.source = CERTD.read_text(encoding="utf-8")
+        self.source = daemon_source("haproxy-certd.py")
 
     def test_the_listing_never_returns_key_material(self):
         block = self.source.split("def _delivery_public")[1].split("\ndef ")[0]

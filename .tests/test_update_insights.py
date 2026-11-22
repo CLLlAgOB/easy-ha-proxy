@@ -29,6 +29,7 @@ from unittest import mock
 
 import update_plan
 from update_plan import CommandResult
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,7 +216,7 @@ class TheBroker(unittest.TestCase):
         self.assertIsNone(self.broker.availability_report(self.plan(("all", "current"), ("os", "unknown"))))
 
     def test_every_check_and_the_recheck_after_an_installation_report(self):
-        source = BROKER_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         self.assertIn("report_availability(plan)", source.split("def run_check(")[1].split("\ndef ")[0])
         self.assertIn("report_availability(refreshed)", source)
 
@@ -269,7 +270,7 @@ class TheBroker(unittest.TestCase):
         self.assertTrue(self.broker.load_job(job["id"])["scheduled"])
 
     def test_each_component_is_timed(self):
-        source = BROKER_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         self.assertIn('"component_seconds": component_seconds', source)
         self.assertIn("component_started_at=utc_now()", source)
         public = self.broker.public_job({"id": "a" * 32, "component_started_at": "2026-10-26T10:00:00+00:00"})

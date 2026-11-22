@@ -28,6 +28,16 @@
     mode: "0755"
   register: updated_script
 
+- name: "easy-ha-proxy-updated | Install updated package"
+  ansible.builtin.copy:
+    src: updated/
+    dest: /usr/local/sbin/updated/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  register: updated_package
+
 - name: "easy-ha-proxy-updated | Install systemd unit"
   ansible.builtin.template:
     src: easy-ha-proxy-updated.service.j2
@@ -57,7 +67,7 @@
     mode: "0600"
   when:
     - updated_active.stat.exists
-    - updated_script.changed or updated_unit.changed
+    - updated_script.changed or updated_unit.changed or updated_package.changed
 
 - name: "easy-ha-proxy-updated | Enable service"
   ansible.builtin.systemd:
@@ -70,7 +80,7 @@
     state: restarted
   when:
     - not updated_active.stat.exists
-    - updated_script.changed or updated_unit.changed
+    - updated_script.changed or updated_unit.changed or updated_package.changed
 
 - name: "easy-ha-proxy-updated | Ensure service is started"
   ansible.builtin.systemd:

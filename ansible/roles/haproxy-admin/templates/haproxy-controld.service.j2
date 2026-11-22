@@ -19,7 +19,12 @@ Environment="HAPROXY_ADMIN_ALLOWLIST_PATH={{ admin_ips_file | default('/etc/hapr
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-controld.py', rstrip=false) | hash('sha256') }}"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+{% set _controld_hashes = [lookup('ansible.builtin.file', role_path ~ '/files/haproxy-controld.py', rstrip=false) | hash('sha256')] -%}
+{% for _controld_mod in (query('ansible.builtin.fileglob', role_path ~ '/files/controld/*.py') | sort) -%}
+{%   set _ = _controld_hashes.append(lookup('ansible.builtin.file', _controld_mod, rstrip=false) | hash('sha256')) -%}
+{% endfor -%}
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_controld_hashes | join(':')) | hash('sha256') }}"
 ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-controld.py
 Restart=always
 RestartSec=3

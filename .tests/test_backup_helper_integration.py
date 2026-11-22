@@ -20,6 +20,7 @@ from easy_ha_proxy import (
     offline_restore_image_preflight,
     offline_restore_required_images,
 )
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,7 @@ INSTALLER = INSTALLER_PATH.read_text(encoding="utf-8")
 HELPER = HELPER_PATH.read_text(encoding="utf-8")
 BACKUPD_TASK = BACKUPD_TASK_PATH.read_text(encoding="utf-8")
 BACKUPD_UNIT = BACKUPD_UNIT_PATH.read_text(encoding="utf-8")
-BACKUPD_DAEMON = BACKUPD_DAEMON_PATH.read_text(encoding="utf-8")
+BACKUPD_DAEMON = daemon_source("easy-ha-proxy-backupd.py")
 PLAYBOOK = PLAYBOOK_PATH.read_text(encoding="utf-8")
 INSTALL_LOCAL = INSTALL_LOCAL_PATH.read_text(encoding="utf-8")
 

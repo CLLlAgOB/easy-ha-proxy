@@ -21,6 +21,7 @@ import unittest
 from unittest import mock
 
 from jinja2 import Environment, FileSystemLoader
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,7 +63,7 @@ class TheBrokerSummary(unittest.TestCase):
         self.assertEqual(self.broker.REQUEST_FIELDS["summary"], frozenset({"action"}))
         with mock.patch.object(self.broker, "load_latest_plan", return_value=plan("os")):
             self.assertEqual(self.broker.dispatch({"action": "summary"})["level"], "os")
-        source = BROKER_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         self.assertIn('"summary": summary_payload(plan)', source)
 
 

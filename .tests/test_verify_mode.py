@@ -21,6 +21,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,7 +132,7 @@ class BehaviourTests(unittest.TestCase):
 
 class PlumbingTests(unittest.TestCase):
     def setUp(self):
-        self.daemon = DAEMON.read_text(encoding="utf-8")
+        self.daemon = daemon_source("easy-ha-proxy-backupd.py")
         self.routes = (
             ROOT / "docker" / "app" / "haproxy_admin" / "routes_backup.py"
         ).read_text(encoding="utf-8")

@@ -19,6 +19,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -130,7 +131,7 @@ class RunningBounded(unittest.TestCase):
 
 class EveryCommandIsBounded(unittest.TestCase):
     def test_certd_runs_nothing_around_the_bounded_runner(self):
-        tree = ast.parse(DAEMON.read_text(encoding="utf-8"))
+        tree = ast.parse(daemon_source("haproxy-certd.py"))
         direct = []
         for node in ast.walk(tree):
             if (

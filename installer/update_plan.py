@@ -1009,12 +1009,47 @@ def _probe_services(
     )
 
 
+_DAEMON_PACKAGES: dict[str, str] = {
+    "haproxy-certd": "certd",
+    "haproxy-controld": "controld",
+    "easy-ha-proxy-backupd": "backupd",
+    "easy-ha-proxy-updated": "updated",
+    "easy-ha-proxy-metricsd": "metricsd",
+    "easy-ha-proxy-guardd": "guardd",
+}
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _daemon_digest(path: Path, artifact_id: str) -> str:
+    base_digest = _sha256(path)
+    package_name = _DAEMON_PACKAGES.get(artifact_id)
+    if not package_name:
+        return base_digest
+    package_dir = path.parent / package_name
+    if not package_dir.is_dir():
+        return base_digest
+    module_files = sorted(
+        candidate
+        for candidate in package_dir.glob("*.py")
+        if candidate.is_file() and not candidate.is_symlink()
+    )
+    if not module_files:
+        return base_digest
+    combined = hashlib.sha256()
+    combined.update(base_digest.encode("ascii"))
+    for module_file in module_files:
+        combined.update(b":")
+        combined.update(module_file.name.encode("utf-8"))
+        combined.update(b"=")
+        combined.update(_sha256(module_file).encode("ascii"))
+    return combined.hexdigest()
 
 
 def _probe_daemons(
@@ -1039,8 +1074,10 @@ def _probe_daemons(
             artifacts.append(item)
             continue
         try:
-            source_digest = _sha256(source_path)
-            installed_digest = _sha256(installed) if installed.is_file() else None
+            source_digest = _daemon_digest(source_path, artifact_id)
+            installed_digest = (
+                _daemon_digest(installed, artifact_id) if installed.is_file() else None
+            )
         except OSError as exc:
             item.update({"state": "unknown", "reason": "read-failed", "error": str(exc)})
             unknown = True

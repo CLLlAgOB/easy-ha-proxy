@@ -138,18 +138,25 @@ class _GuarddFacade(types.ModuleType):
 
 
 def _bootstrap() -> Tuple[types.ModuleType, ...]:
+    ns = globals()
     this_mod = sys.modules.get(__name__)
-    isolated = None if __name__ == "__main__" else f"_guardd_pkg_{id(this_mod)}"
+    if this_mod is None:
+        import gc
+
+        for obj in gc.get_referrers(ns):
+            if isinstance(obj, types.ModuleType) and obj.__dict__ is ns:
+                this_mod = obj
+                break
+    isolated = None if __name__ == "__main__" else f"_guardd_pkg_{id(ns)}"
     submodules = _load_submodules(isolated)
+    for sub in submodules:
+        for key, val in sub.__dict__.items():
+            if key in _SKIP_EXPORT or key in _LIVE_GLOBALS:
+                continue
+            ns[key] = val
+    ns["_guardd_submodules"] = submodules
+    ns["_guardd_constants"] = submodules[0]
     if this_mod is not None:
-        ns = this_mod.__dict__
-        for sub in submodules:
-            for key, val in sub.__dict__.items():
-                if key in _SKIP_EXPORT or key in _LIVE_GLOBALS:
-                    continue
-                ns[key] = val
-        ns["_guardd_submodules"] = submodules
-        ns["_guardd_constants"] = submodules[0]
         this_mod.__class__ = _GuarddFacade
     return submodules
 

@@ -25,6 +25,7 @@ from unittest import mock
 
 from jinja2 import Environment, FileSystemLoader
 import yaml
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -321,7 +322,7 @@ class CertbotIsToldToSkipIt(unittest.TestCase):
         self.assertEqual(CERTD.handle_renewal_pauses({"domains": ["../etc"]})[0], 400)
 
     def test_the_route_exists(self):
-        source = CERTD_PATH.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-certd.py")
         self.assertIn('elif path == "/api/v1/certs/renewal-pauses":', source)
 
 

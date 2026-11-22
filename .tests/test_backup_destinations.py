@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -362,9 +363,7 @@ class UploadTests(DestinationTestCase):
 
 
 class ProtocolTests(unittest.TestCase):
-    SOURCE = (
-        ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
-    ).read_text(encoding="utf-8")
+    SOURCE = daemon_source("easy-ha-proxy-backupd.py")
 
     def test_every_new_action_is_declared_and_dispatched(self):
         for action in (
@@ -524,9 +523,7 @@ class S3SigningTests(DestinationTestCase):
         self.assertEqual(captured["target"], "/gateway-backups/gw1/archive.tar.gz.enc")
 
     def test_an_s3_upload_needs_no_second_transfer_to_be_verified(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-backupd.py")
         block = source.split("def s3_upload")[1].split("def s3_prune")[0]
         self.assertIn('"verified_by": "signed-put"', block)
         # The service checks the body against the hash in the signature, which
@@ -717,15 +714,11 @@ class OwnershipGuardTests(unittest.TestCase):
     def test_the_file_is_already_restrictive_before_the_chown(self):
         # This is why skipping it is safe: the descriptor is opened 0600, so a
         # chown that does not happen leaves the file stricter, never looser.
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-backupd.py")
         block = source.split("def atomic_json(")[1].split("def ")[0]
         self.assertLess(block.index("0o600"), block.index("_set_owner"))
 
     def test_the_owner_check_still_demands_root_when_running_as_root(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-backupd.py")
         block = source.split("def safe_json_file(")[1].split("def ")[0]
         self.assertIn("if expected_uid == 0 and os.geteuid() != 0:", block)

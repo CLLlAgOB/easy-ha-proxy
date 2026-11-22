@@ -37,6 +37,16 @@
     mode: "0755"
   register: backupd_script
 
+- name: "easy-ha-proxy-backupd | Install backupd package"
+  ansible.builtin.copy:
+    src: backupd/
+    dest: /usr/local/sbin/backupd/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  register: backupd_package
+
 - name: "easy-ha-proxy-backupd | Install systemd unit"
   ansible.builtin.template:
     src: easy-ha-proxy-backupd.service.j2
@@ -66,7 +76,7 @@
     mode: "0600"
   when:
     - backupd_restore_active.stat.exists
-    - backupd_script.changed or backupd_unit.changed
+    - backupd_script.changed or backupd_unit.changed or backupd_package.changed
 
 - name: "easy-ha-proxy-backupd | Enable service"
   ansible.builtin.systemd:
@@ -79,7 +89,7 @@
     state: restarted
   when:
     - not backupd_restore_active.stat.exists
-    - backupd_script.changed or backupd_unit.changed
+    - backupd_script.changed or backupd_unit.changed or backupd_package.changed
 
 - name: "easy-ha-proxy-backupd | Ensure service is started"
   ansible.builtin.systemd:

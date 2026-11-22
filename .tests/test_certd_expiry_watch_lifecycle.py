@@ -16,6 +16,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 CERTD_PATH = ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"
@@ -50,7 +51,7 @@ class ReadingTheList(unittest.TestCase):
 
 class TheWatch(unittest.TestCase):
     def test_one_is_started_by_the_daemon_and_stopped_with_it(self):
-        source = CERTD_PATH.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-certd.py")
         self.assertEqual(source.count("CertificateExpiryWatch()"), 1)
         main = source.split("\ndef main() -> None:")[1]
         self.assertIn("expiry_watch = CertificateExpiryWatch()", main)

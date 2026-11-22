@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -208,9 +209,7 @@ class Password(Destinations):
 
 class ThePage(unittest.TestCase):
     def test_the_daemon_and_the_routes_know_the_new_fields_and_action(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py").read_text(
-            encoding="utf-8"
-        )
+        source = daemon_source("easy-ha-proxy-backupd.py")
         self.assertIn('"auth", "password",', source)
         self.assertIn('if action == "destination_retrust":', source)
         routes = (APP / "routes_backup.py").read_text(encoding="utf-8")

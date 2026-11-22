@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "docker" / "app" / "haproxy_admin"
@@ -475,7 +476,7 @@ class ThePartsAreSentOnlyWhenShown(unittest.TestCase):
         self.assertEqual(light["series"]["containers"], [10.0, 10.0, 10.0])
 
     def test_the_daemon_reads_the_flag(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-metricsd.py").read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-metricsd.py")
         self.assertIn('wanted = (query.get("components", ["1"])[0] or "1").strip().lower()', source)
         self.assertIn('components=wanted not in ("0", "false", "no")', source)
 

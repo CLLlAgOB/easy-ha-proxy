@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1079,9 +1080,7 @@ class PressureCleanupTests(CollectorTestCase):
         self.assertEqual(self.rows(), [])
 
     def test_the_daemon_never_issues_a_full_vacuum(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-metricsd.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-metricsd.py")
         # Look at SQL the daemon could actually execute -- quoted text -- and
         # ignore prose that merely mentions the word.
         # `auto_vacuum` has no word boundary before "vacuum", so match the bare

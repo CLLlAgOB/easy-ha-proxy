@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 import unittest
 import urllib.error
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "installer"))
@@ -97,7 +98,7 @@ class TheReleases(unittest.TestCase):
 
 class ThePlan(unittest.TestCase):
     def test_it_sits_outside_what_an_installation_is_held_to(self):
-        broker = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py").read_text(encoding="utf-8")
+        broker = daemon_source("easy-ha-proxy-updated.py")
         digest = broker.split("def plan_digest")[1].split("\ndef ")[0]
         self.assertNotIn("upstream", digest)
         self.assertIn('"components": payload.get("components")', digest)

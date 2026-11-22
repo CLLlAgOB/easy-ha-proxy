@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "ansible/roles/haproxy-admin/files/haproxy-udp-forward.py"
@@ -331,7 +332,7 @@ class Checking(unittest.TestCase):
         self.assertFalse(controld.UdpFailover.probe(None, "ping", None))
 
     def test_the_loop_is_started_and_the_tools_are_installed(self):
-        source = (ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py").read_text(encoding="utf-8")
+        source = daemon_source("haproxy-controld.py")
         self.assertIn('threading.Thread(target=udp_failover_loop, daemon=True, name="udp-failover-loop").start()', source)
         self.assertIn('"failover": UDP_FAILOVER.public_state()', source)
         tasks = (ROOT / "ansible/roles/haproxy-admin/tasks/iptables-udp.yml").read_text(encoding="utf-8")

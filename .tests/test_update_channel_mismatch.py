@@ -28,6 +28,7 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,7 +170,7 @@ class APlanFromAnotherChannelIsRefused(unittest.TestCase):
         lock.assert_not_called()
 
     def test_the_worker_checks_again_and_rechecks_on_the_plans_branch(self):
-        source = DAEMON_PATH.read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-updated.py")
         worker = source.split("def apply_worker(")[1].split("\ndef ")[0]
         self.assertIn("validate_selection(plan, components)", worker)
         recheck = worker.split("fresh = execute_checker(")[1].split(")\n")[0]

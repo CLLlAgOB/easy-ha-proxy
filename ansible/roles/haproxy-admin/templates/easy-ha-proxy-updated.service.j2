@@ -8,6 +8,7 @@ Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
 Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
 Environment="UPDATED_SOCKET_PATH={{ updated_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-updated.sock') }}"
 Environment="UPDATED_STATE_ROOT={{ updated_state_root | default('/var/lib/easy-ha-proxy/update-web') }}"
 Environment="UPDATED_SOURCE_DIR={{ updated_source_dir | default('/opt/easy-ha-proxy/source') }}"
@@ -37,7 +38,11 @@ Environment="UPDATED_SERVICE_NAME=easy-ha-proxy-updated.service"
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-updated.py', rstrip=false) | hash('sha256') }}"
+{% set _updated_hashes = [lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-updated.py', rstrip=false) | hash('sha256')] -%}
+{% for _updated_mod in (query('ansible.builtin.fileglob', playbook_dir ~ '/roles/haproxy-admin/files/updated/*.py') | sort) -%}
+{%   set _ = _updated_hashes.append(lookup('ansible.builtin.file', _updated_mod, rstrip=false) | hash('sha256')) -%}
+{% endfor -%}
+Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_updated_hashes | join(':')) | hash('sha256') }}"
 ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py
 Restart=always
 RestartSec=3

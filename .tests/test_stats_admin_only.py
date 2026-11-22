@@ -15,6 +15,7 @@ import re
 import sys
 import time
 import unittest
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".tests"))
@@ -105,7 +106,7 @@ class ThePanelsOwnTraffic(StoreTestCase):
     def test_monitoring_and_the_panel_leave_it_out(self):
         defaults = (ROOT / "ansible/roles/haproxy-admin/defaults/main.yml").read_text(encoding="utf-8")
         self.assertIn("be_stats", defaults.split("ui_exclude_backends_exact:")[1].split("\n")[1])
-        metricsd = (ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-metricsd.py").read_text(encoding="utf-8")
+        metricsd = daemon_source("easy-ha-proxy-metricsd.py")
         self.assertIn('"be_stats"', metricsd.split("DEFAULT_EXCLUDE_EXACT = (")[1].split(")")[0])
 
 

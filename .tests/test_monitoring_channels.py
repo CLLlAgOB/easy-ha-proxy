@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -280,10 +281,7 @@ class TheChosenPeriod(unittest.TestCase):
         )
 
     def test_the_daemon_prefers_the_pair_over_the_preset(self):
-        source = (
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
-            / "easy-ha-proxy-metricsd.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-metricsd.py")
         block = source.split("def resolve_window")[1].split(chr(10) + "def ")[0]
         self.assertIn('return "custom"', block)
         self.assertIn("MAX_RANGE_SECONDS", block)
@@ -364,10 +362,7 @@ class AnOlderCollectorSaysSo(unittest.TestCase):
     def test_the_daemon_names_the_window_it_used(self):
         # The whole check rests on this: without a label in the answer the
         # page cannot tell a honoured window from an ignored one.
-        source = (
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
-            / "easy-ha-proxy-metricsd.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-metricsd.py")
         block = source.split("def resolve_window")[1].split(chr(10) + "def ")[0]
         self.assertIn('return "custom"', block)
 
@@ -394,10 +389,7 @@ class SavingTheNames(unittest.TestCase):
 
 class TheDaemonSideIsWired(unittest.TestCase):
     def setUp(self):
-        self.source = (
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
-            / "easy-ha-proxy-metricsd.py"
-        ).read_text(encoding="utf-8")
+        self.source = daemon_source("easy-ha-proxy-metricsd.py")
 
     def test_the_query_is_not_scoped_to_one_site(self):
         # A link carries every site pointed at it, and the whole question is

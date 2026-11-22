@@ -39,6 +39,7 @@ import unittest
 from unittest import mock
 
 import yaml
+from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "docker" / "app"))
@@ -872,7 +873,7 @@ class CertdKeepsWhatItDeletes(CertdFixture):
     def test_the_trash_is_never_inside_the_crt_directory(self):
         # One file there that is not a certificate stops HAProxy from starting.
         default = Path("/var/lib/easy-ha-proxy/cert-trash")
-        source = CERTD_PATH.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-certd.py")
         self.assertIn(f'"HAPROXY_CERTD_TRASH_DIR", "{default}"', source)
 
     def test_tampered_dotdot_or_root_target_is_refused(self):

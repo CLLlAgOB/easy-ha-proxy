@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,9 +163,7 @@ class ReadingTests(HistoryTestCase):
 
 class IntegrationPointTests(unittest.TestCase):
     def test_the_version_is_recorded_where_the_change_is_confirmed(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("haproxy-controld.py")
         confirmed = source.index('state["state"] = "confirmed"')
         recorded = source.index("record_config_version(state)", confirmed)
         # The rollback path drops the same field, so look only after the
@@ -176,9 +175,7 @@ class IntegrationPointTests(unittest.TestCase):
         self.assertLess(recorded, dropped)
 
     def test_the_socket_exposes_reading_but_no_way_to_forge_a_version(self):
-        source = (
-            ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py"
-        ).read_text(encoding="utf-8")
+        source = daemon_source("haproxy-controld.py")
         self.assertIn('cmd == "config-versions"', source)
         self.assertIn('cmd.startswith("config-version ")', source)
         # History is written by confirming a change, never by a command.

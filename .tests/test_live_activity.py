@@ -36,7 +36,7 @@ GUARDD_PATH = ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
 CONTROLD_PATH = ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py"
 UNIT = ROOT / "ansible/roles/haproxy-admin/templates/easy-ha-proxy-guardd.service.j2"
 sys.path.insert(0, str(ROOT / "docker" / "app"))
-from _guardd_source import guardd_source  # noqa: E402
+from _guardd_source import daemon_source, guardd_source  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("guardd_live", GUARDD_PATH)
 guardd = importlib.util.module_from_spec(SPEC)
@@ -266,7 +266,7 @@ class TheGatewayComesFirst(unittest.TestCase):
         self.assertIn("CPUWeight=50", unit)
 
     def test_the_log_is_no_longer_reread_per_refresh(self):
-        source = CONTROLD_PATH.read_text(encoding="utf-8")
+        source = daemon_source("haproxy-controld.py")
         self.assertNotIn("logs-live", source)
 
 

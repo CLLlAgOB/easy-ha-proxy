@@ -511,6 +511,11 @@ class EveryWriterOfTheCertificateDirectoryChecksTheHold(unittest.TestCase):
     """
 
     def read(self, relative):
+        from _guardd_source import PACKAGE_MODULES, daemon_source
+
+        name = Path(relative).name
+        if name in PACKAGE_MODULES:
+            return daemon_source(name)
         return (ROOT / relative).read_text(encoding="utf-8")
 
     def test_the_renewal_hook_checks_it(self):

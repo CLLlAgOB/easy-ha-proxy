@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _guardd_source import guardd_source  # noqa: E402
+from _guardd_source import daemon_source, guardd_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = ROOT / "ansible/roles/haproxy-admin/files"
@@ -306,7 +306,7 @@ class Collected(unittest.TestCase):
             self.assertEqual(self.database._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
 
     def test_the_rollup_waits_for_late_minutes(self):
-        source = (FILES / "easy-ha-proxy-metricsd.py").read_text(encoding="utf-8")
+        source = daemon_source("easy-ha-proxy-metricsd.py")
         maintenance = source.split("def run_maintenance(")[1].split("\n    def ")[0]
         self.assertIn("lagged = now - LATENCY_ROLLUP_LAG_SECONDS", maintenance)
         self.assertGreaterEqual(metricsd.LATENCY_ROLLUP_LAG_SECONDS, 60 + 30 + metricsd.DIGEST_PULL_SECONDS)

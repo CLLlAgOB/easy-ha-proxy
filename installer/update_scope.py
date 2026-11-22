@@ -107,6 +107,7 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_ADMIN}/tasks/guardd.yml", ("ha-adm-guardd",)),
     # Metrics.
     (f"{_ADMIN}/files/easy-ha-proxy-metricsd.py", ("ha-adm-metricsd",)),
+    (f"{_ADMIN}/files/metricsd/*", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/templates/metricsd.json.j2", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-metricsd.service.j2", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/tasks/metricsd.yml", ("ha-adm-metricsd",)),
@@ -123,10 +124,12 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_ADMIN}/tasks/healthd.yml", ("ha-adm-healthd",)),
     # Control.
     (f"{_ADMIN}/files/haproxy-controld.py", ("ha-adm-controld",)),
+    (f"{_ADMIN}/files/controld/*", ("ha-adm-controld",)),
     (f"{_ADMIN}/templates/haproxy-controld.service.j2", ("ha-adm-controld",)),
     (f"{_ADMIN}/tasks/controld.yml", ("ha-adm-controld",)),
     # Backups.
     (f"{_ADMIN}/files/easy-ha-proxy-backupd.py", ("ha-adm-backupd",)),
+    (f"{_ADMIN}/files/backupd/*", ("ha-adm-backupd",)),
     (f"{_ADMIN}/files/easy-ha-proxy-backup-run.py", ("ha-adm-backupd",)),
     (f"{_ADMIN}/files/easy-ha-proxy-unit-failed.py", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-backup.service.j2", ("ha-adm-backupd",)),
@@ -136,10 +139,12 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_ADMIN}/tasks/backupd.yml", ("ha-adm-backupd",)),
     # The update broker.
     (f"{_ADMIN}/files/easy-ha-proxy-updated.py", ("ha-adm-updated",)),
+    (f"{_ADMIN}/files/updated/*", ("ha-adm-updated",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-updated.service.j2", ("ha-adm-updated",)),
     (f"{_ADMIN}/tasks/updated.yml", ("ha-adm-updated",)),
     # Certificates: certd is only deployed by the install and daemons stages.
     (f"{_ADMIN}/files/haproxy-certd.py", ("ha-adm-daemons",)),
+    (f"{_ADMIN}/files/certd/*", ("ha-adm-daemons",)),
     (f"{_ADMIN}/files/easy-ha-proxy-cert-deliver.py", ("ha-adm-daemons",)),
     (f"{_ADMIN}/templates/haproxy-certd.service.j2", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/certd.yml", ("ha-adm-daemons",)),
