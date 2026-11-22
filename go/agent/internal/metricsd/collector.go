@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 )
 
@@ -43,6 +44,8 @@ type DeltaSample struct {
 type Collector struct {
 	cfg    Config
 	client *haproxy.Client
+	Store  *Store
+	Alerts *alerts.Client
 
 	mu          sync.Mutex
 	prev        map[haproxy.ObjectKey]Counters
@@ -54,17 +57,28 @@ type Collector struct {
 	pollsTotal  uint64
 	pollErrors  uint64
 	lastPollTS  int64
+	lastAlertM  int64
 	maxSamples  int
 }
 
-// NewCollector creates a Collector with sensible bounded memory defaults.
+// NewCollector creates a Collector with sensible bounded memory defaults and in-memory rollup store.
 func NewCollector(cfg Config, client *haproxy.Client) *Collector {
+	return NewCollectorWithStore(cfg, client, nil, nil)
+}
+
+// NewCollectorWithStore creates a Collector wired to a durable Store and optional alertd client.
+func NewCollectorWithStore(cfg Config, client *haproxy.Client, store *Store, alertClient *alerts.Client) *Collector {
 	if client == nil {
 		client = haproxy.NewClient(cfg.HAProxySocket)
+	}
+	if store == nil {
+		store, _ = NewStore("", cfg)
 	}
 	return &Collector{
 		cfg:    cfg,
 		client: client,
+		Store:  store,
+		Alerts: alertClient,
 		prev:   make(map[haproxy.ObjectKey]Counters),
 		sites:  make(map[string]string),
 		monitors: map[string]bool{
@@ -101,6 +115,9 @@ func (c *Collector) PollOnce(ctx context.Context, now int64) error {
 		c.recentHost = append(c.recentHost, hs)
 		if len(c.recentHost) > 1440 {
 			c.recentHost = c.recentHost[len(c.recentHost)-1440:]
+		}
+		if c.Store != nil {
+			c.Store.RecordHost(hs)
 		}
 	}
 
@@ -150,7 +167,20 @@ func (c *Collector) PollOnce(ctx context.Context, now int64) error {
 		if len(c.recent) > c.maxSamples {
 			c.recent = c.recent[len(c.recent)-c.maxSamples:]
 		}
+		if c.Store != nil {
+			c.Store.RecordTraffic(sample)
+		}
 	}
+	prevMinute := ((now / 60) - 1) * 60
+	shouldEvalAlerts := prevMinute > 0 && prevMinute > c.lastAlertM
+	if shouldEvalAlerts {
+		c.lastAlertM = prevMinute
+	}
+	c.mu.Unlock()
+	if shouldEvalAlerts {
+		c.EvaluateTrafficAlerts(ctx, prevMinute)
+	}
+	c.mu.Lock()
 	return nil
 }
 

@@ -19,21 +19,93 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 )
 
 // Controller executes HAProxy control-plane operations with guarded serialization.
 type Controller struct {
-	Opts      Options
-	applyMu   sync.Mutex
-	logScanCh chan struct{}
+	Opts        Options
+	Ipset       IpsetRunner
+	HAProxy     *haproxy.Client
+	Alerts      *alerts.Client
+	UDPFailover *UDPFailoverManager
+	CheckRunner func(ctx context.Context, checks []ControlPlaneCheck) (bool, []CheckResult)
+	applyMu     sync.Mutex
+	logScanCh   chan struct{}
 }
 
 // NewController constructs a Controller using opts.
 func NewController(opts Options) *Controller {
-	return &Controller{
+	c := &Controller{
 		Opts:      opts,
+		Ipset:     &ExecIpsetRunner{Bin: opts.IpsetBin},
+		HAProxy:   haproxy.NewClient(opts.HAProxyAdminSocket),
+		Alerts:    alerts.FromEnv(),
 		logScanCh: make(chan struct{}, 2),
 	}
+	c.UDPFailover = NewUDPFailoverManager(opts.UDPFailoverState, c.UDPApply, c.Alerts)
+	return c
+}
+
+// UDPApply restarts iptables-haproxy-udp.service synchronously.
+func (c *Controller) UDPApply(ctx context.Context) error {
+	cmdCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cmdCtx, c.Opts.SystemctlBin, "restart", "iptables-haproxy-udp.service").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("UDP forwarding apply failed: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (c *Controller) runHAProxyCheckFile(ctx context.Context, path string) (int, string, string, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, c.Opts.HAProxyBin, "-c", "-f", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return 124, "", "haproxy -c did not finish within 30 seconds and was stopped", nil
+	}
+	rc := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			rc = exitErr.ExitCode()
+		} else {
+			return 0, "", "", err
+		}
+	}
+	return rc, stdout.String(), stderr.String(), nil
+}
+
+func (c *Controller) runSystemctlReload(ctx context.Context) (bool, string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, c.Opts.SystemctlBin, "reload", "haproxy")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return false, "the reload did not finish within 30 seconds and was stopped"
+	}
+	if err == nil {
+		msg := strings.TrimSpace(stdout.String())
+		if msg == "" {
+			msg = "reloaded"
+		}
+		return true, msg
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		msg = err.Error()
+	}
+	return false, msg
 }
 
 // RebootScheduled returns true when either reboot marker exists on disk.

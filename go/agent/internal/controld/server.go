@@ -93,9 +93,100 @@ func (s *Server) HandleCommand(ctx context.Context, cmd string) string {
 		}
 		return fmt.Sprintf("ERROR %s\n", msg)
 
+	case cmd == "sync-bans":
+		if err := s.Controller.SyncBansOnce(ctx); err != nil {
+			return fmt.Sprintf("ERROR sync-bans: %v\n", err)
+		}
+		_ = s.Controller.SyncAuthOnce(ctx)
+		return "OK sync-bans done\n"
+
+	case cmd == "logs-attackers":
+		list, err := s.Controller.LogsAttackers(ctx)
+		if err != nil {
+			return fmt.Sprintf("ERROR logs-attackers: %v\n", err)
+		}
+		raw, _ := json.Marshal(list)
+		return fmt.Sprintf("OK %s\n", base64.StdEncoding.EncodeToString(raw))
+
+	case cmd == "udp-apply" || cmd == "udp-apply-json":
+		if err := s.Controller.UDPApply(ctx); err != nil {
+			if cmd == "udp-apply-json" {
+				return encodeControlJSON(false, map[string]any{"ok": false, "error": err.Error()})
+			}
+			return fmt.Sprintf("ERROR udp-apply: %v\n", err)
+		}
+		if cmd == "udp-apply-json" {
+			return encodeControlJSON(true, s.Controller.UDPStatus())
+		}
+		return "OK udp-apply done\n"
+
 	case cmd == "udp-status":
 		st := s.Controller.UDPStatus()
+		if s.Controller.UDPFailover != nil {
+			if fo := s.Controller.UDPFailover.PublicState(); len(fo) > 0 {
+				st["failover"] = fo
+			}
+		}
 		return encodeControlJSON(true, st)
+
+	case strings.HasPrefix(cmd, "apply-config "):
+		parts := strings.SplitN(cmd, " ", 3)
+		if len(parts) != 3 {
+			return encodeControlJSON(false, map[string]any{"ok": false, "failure": "apply-config requires config and checks payloads"})
+		}
+		res := s.Controller.ApplyConfigGuarded(ctx, parts[1], parts[2])
+		ok, _ := res["ok"].(bool)
+		return encodeControlJSON(ok, res)
+
+	case strings.HasPrefix(cmd, "begin-config-transaction "):
+		parts := strings.SplitN(cmd, " ", 5)
+		if len(parts) != 5 {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": "begin-config-transaction requires config, checks, sources, and timeout payloads"})
+		}
+		res, err := s.Controller.BeginConfigTransaction(ctx, parts[1], parts[2], parts[3], parts[4])
+		if err != nil {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": err.Error()})
+		}
+		pending, _ := res["pending"].(bool)
+		return encodeControlJSON(pending, res)
+
+	case cmd == "config-transaction-status" || strings.HasPrefix(cmd, "config-transaction-status "):
+		parts := strings.Fields(cmd)
+		if len(parts) > 2 {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": "config-transaction-status accepts one optional id"})
+		}
+		txID := ""
+		if len(parts) == 2 {
+			txID = parts[1]
+		}
+		res, err := s.Controller.ConfigTransactionStatus(ctx, txID)
+		if err != nil {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": err.Error()})
+		}
+		return encodeControlJSON(true, res)
+
+	case strings.HasPrefix(cmd, "confirm-config-transaction "):
+		parts := strings.Fields(cmd)
+		if len(parts) != 3 {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": "confirm-config-transaction requires id and candidate hash"})
+		}
+		res, err := s.Controller.ConfirmConfigTransaction(ctx, parts[1], parts[2])
+		if err != nil {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": err.Error()})
+		}
+		ok, _ := res["ok"].(bool)
+		return encodeControlJSON(ok, res)
+
+	case strings.HasPrefix(cmd, "rollback-config-transaction "):
+		parts := strings.Fields(cmd)
+		if len(parts) != 2 {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": "rollback-config-transaction requires an id"})
+		}
+		res, err := s.Controller.RollbackConfigTransaction(ctx, parts[1])
+		if err != nil {
+			return encodeControlJSON(false, map[string]any{"ok": false, "state": "error", "pending": false, "failure": err.Error()})
+		}
+		return encodeControlJSON(res["state"] == "rolled_back", res)
 
 	case strings.HasPrefix(cmd, "udp-port-check"):
 		parts := strings.Fields(cmd)
@@ -274,7 +365,13 @@ func Run(opts Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	srv := NewServer(NewController(opts))
+	ctrl := NewController(opts)
+	if err := ctrl.RecoverTransaction(ctx); err != nil {
+		log.Printf("controld: transaction recovery warning: %v", err)
+	}
+	go ctrl.RunBansLoop(ctx)
+
+	srv := NewServer(ctrl)
 	log.Printf("haproxy-controld (Go) listening on %s cfg=%s", opts.ControlSocket, opts.HAProxyCfgPath)
 	return srv.Serve(ctx, ln)
 }
