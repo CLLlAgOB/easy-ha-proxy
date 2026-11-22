@@ -269,7 +269,10 @@ func runBackupd(args []string) {
 }
 
 func runUpdated(args []string) {
-	opts := updated.OptionsFromEnv()
+	opts, err := updated.OptionsFromEnv()
+	if err != nil {
+		log.Fatalf("Cannot start update broker: %v", err)
+	}
 	fs := flag.NewFlagSet("updated", flag.ExitOnError)
 	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
 	fs.StringVar(&opts.StateRoot, "state", opts.StateRoot, "update broker state root directory")

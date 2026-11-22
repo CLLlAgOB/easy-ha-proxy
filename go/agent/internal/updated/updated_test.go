@@ -1,128 +1,134 @@
 package updated
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
+	"time"
 )
 
-func TestParseProgressScopedToLatestComponent(t *testing.T) {
-	logText := strings.Join([]string{
-		"=== Applying component: daemons ===",
-		"EHP-PROGRESS phase=playbook",
-		"EHP-PROGRESS 9/10 Old daemon task",
-		"=== Applying component: os ===",
-		"EHP-PROGRESS phase=prepare",
-		"EHP-PROGRESS 2/5 Install security upgrades",
-	}, "\n")
-	p := ParseProgress(logText)
-	if p.Phase != "prepare" || p.Done != 2 || p.Total != 5 || p.Task != "Install security upgrades" {
-		t.Fatalf("unexpected progress: %+v", p)
+func newTestDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	root := t.TempDir()
+	opts := Options{
+		SocketPath: filepath.Join(root, "run", "u.sock"), StateRoot: filepath.Join(root, "state"),
+		SourceDir: filepath.Join(root, "src"), ConfigDir: filepath.Join(root, "etc"), PythonPath: "/nonexistent",
+		CLIPath: "/bin/true", ActiveMarker: filepath.Join(root, "run", "active"),
+		RestartRequestMarker: filepath.Join(root, "run", "restart"), RebootMarker: filepath.Join(root, "run", "reboot.json"),
+		AssistantRebootMarker: filepath.Join(root, "run", "assistant"), MaintenanceLockPath: filepath.Join(root, "run", "op.lock"),
+		HAProxyTransactionMarker: filepath.Join(root, "run", "tx"), HAProxyTransactionState: filepath.Join(root, "run", "tx.json"),
+		BackupdRestoreMarker: filepath.Join(root, "run", "restore"), BootIDPath: filepath.Join(root, "boot_id"),
+		RebootRequiredPath: filepath.Join(root, "reboot-required"), ProcStatPath: filepath.Join(root, "stat"),
+		HAProxyUpdateState: filepath.Join(root, "hp", "last-update.json"), HAProxyMigrationState: filepath.Join(root, "hp", "last-migration.json"),
+		MaxRequestBytes: 32768, MaxResponseBytes: 2 << 20, MaxCaptureBytes: 256 * 1024, MaxStateBytes: 1 << 20,
+		JobTimeoutSeconds: 60, CheckTimeoutSeconds: 60, PlanTTLSeconds: 900, ListLimit: 30, AutoCheckHours: 24,
+		MaxConnections: 4, RebootDelaySeconds: 60, AppUID: os.Getuid(), AppPrimaryGID: -1, AppGroupGID: -1,
+	}
+	for _, dir := range []string{opts.JobsDir(), filepath.Dir(opts.SocketPath), opts.ConfigDir, filepath.Join(opts.SourceDir, "installer")} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(opts.BootIDPath, []byte("58eacc1c-f8a0-4c2f-86f4-45f4aaaaaaaa\n"), 0o644)
+	d := NewDaemon(opts)
+	d.Alerts = nil
+	d.rootUID = os.Geteuid()
+	d.transient = func() bool { return false }
+	return d
+}
+
+func TestDispatchValidation(t *testing.T) {
+	d := newTestDaemon(t)
+	cases := []struct {
+		req  map[string]any
+		want string
+	}{
+		{map[string]any{"action": "nope"}, "unknown update broker action"},
+		{map[string]any{"action": "summary", "z": 1, "a": 1}, "unexpected request fields: a, z"},
+		{map[string]any{"action": "set_settings", "auto_check_hours": 5.0}, "auto_check_hours must be one of 0, 6, 12, 24, 72, 168"},
+		{map[string]any{"action": "set_auto_install", "enabled": true, "start": 4.0, "end": 4.0}, "the window must not start and end at the same hour"},
+		{map[string]any{"action": "start_apply", "confirmation": "no"}, "type UPDATE to confirm component updates"},
+		{map[string]any{"action": "reboot", "confirmation": "REBOOT", "expected_boot_id": "x", "actor": "a"}, "a valid expected boot id is required"},
+		{map[string]any{"action": "reboot", "confirmation": "REBOOT", "expected_boot_id": "00000000-0000-0000-0000-000000000000", "actor": "a"},
+			"the server boot changed; reload the page and try again"},
+		{map[string]any{"action": "set_channels"}, "select a channel to persist"},
+	}
+	for _, c := range cases {
+		_, err := d.Dispatch(context.Background(), c.req)
+		if err == nil || err.Error() != c.want {
+			t.Errorf("%v: got %v, want %q", c.req["action"], err, c.want)
+		}
+	}
+	out, err := d.Dispatch(context.Background(), map[string]any{"action": "set_settings", "auto_check_hours": 6.0})
+	if err != nil || out["settings"].(map[string]any)["auto_check_hours"] != int64(6) {
+		t.Fatalf("set_settings: %v %v", out, err)
 	}
 }
 
-func TestUpdatedBrokerSettingsRebootAndSSHValidation(t *testing.T) {
-	dir := t.TempDir()
-	fakeShutdown := filepath.Join(dir, "fake-shutdown.sh")
-	_ = os.WriteFile(fakeShutdown, []byte("#!/bin/sh\nexit 0\n"), 0o755)
-	bootFile := filepath.Join(dir, "boot_id")
-	bootUUID := "11111111-2222-3333-4444-555555555555"
-	_ = os.WriteFile(bootFile, []byte(bootUUID+"\n"), 0o644)
-	srcDir := filepath.Join(dir, "source")
-	_ = os.MkdirAll(srcDir, 0o755)
-	_ = os.WriteFile(filepath.Join(srcDir, "VERSION"), []byte("2.5.0-alpha\n"), 0o644)
+func TestSelectedComponentsOrderAndCollapse(t *testing.T) {
+	got, err := selectedComponents([]any{"os", "admin-container", "all", "daemons"})
+	if err != nil || strings.Join(got, ",") != "all,os" {
+		t.Fatalf("all collapses source and containers: %v %v", got, err)
+	}
+	got, _ = selectedComponents([]any{"haproxy", "services", "changes", "authelia-container"})
+	if strings.Join(got, ",") != "changes,authelia-container,haproxy" {
+		t.Fatalf("changes replaces services: %v", got)
+	}
+	if _, err := selectedComponents([]any{"all", "all"}); err == nil || err.Error() != "duplicate update component" {
+		t.Fatalf("duplicate: %v", err)
+	}
+}
 
-	opts := Options{
-		SocketPath:               filepath.Join(dir, "updated.sock"),
-		StateRoot:                filepath.Join(dir, "state"),
-		SourceDir:                srcDir,
-		RebootMarker:             filepath.Join(dir, "reboot.json"),
-		SSHProtectionMonitorPath: filepath.Join(dir, "state", "ssh-monitor.json"),
-		BootIDPath:               bootFile,
-		ShutdownBin:              fakeShutdown,
-		AppUID:                   os.Getuid(),
-		MaxRequestBytes:          32 * 1024,
-		MaxResponseBytes:         1024 * 1024,
-		ListLimit:                30,
-		AutoCheckHours:           24,
-		MaxConnections:           8,
+func TestProgressAndLog(t *testing.T) {
+	text := "EHP-PROGRESS phase=source\n=== Applying component: daemons ===\nEHP-PROGRESS 3/9 Copy\x07 files\n"
+	p := parseProgress(text)
+	if p["phase"] != "playbook" || p["done"] != 3 || p["total"] != 9 || p["task"] != "Copy files" {
+		t.Fatalf("progress: %v", p)
 	}
+	if parseProgress("=== Applying component: x ===\nnothing") != nil {
+		t.Fatal("progress before the heading must not count")
+	}
+	d := newTestDaemon(t)
+	d.Opts.MaxCaptureBytes = 30
+	got := d.sanitizeLog(strings.Repeat("é", 40))
+	if !strings.HasPrefix(got, "[output truncated]\n") || len(got) > 30 {
+		t.Fatalf("truncation: %q (%d)", got, len(got))
+	}
+}
 
-	svc, err := NewService(opts)
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
+func TestMaintenanceWindow(t *testing.T) {
+	loc := time.FixedZone("X", 3600)
+	value := map[string]any{"enabled": true, "start": int64(23), "end": int64(2), "updated_at": 1.0}
+	at := time.Date(2026, 11, 23, 1, 30, 0, 0, loc)
+	w := mwCurrent(value, at)
+	if w == nil || w["key"] != "2026-11-22" {
+		t.Fatalf("window spanning midnight: %v", w)
 	}
+	if mwCurrent(value, time.Date(2026, 11, 23, 2, 0, 0, 0, loc)) != nil {
+		t.Fatal("window end is exclusive")
+	}
+	if !inInstallWindow(at, 23, 2) || installNight(at, 23, 2) != "2026-11-22" {
+		t.Fatal("install window helpers")
+	}
+	if _, err := mwPolicy(map[string]any{"auto_install_unified": true, "auto_install_start": 1.0, "auto_install_end": 1.0}); err == nil {
+		t.Fatal("invalid unified policy accepted")
+	}
+}
 
-	srv := unixrpc.NewServer(opts.AppUID, opts.MaxRequestBytes, opts.MaxResponseBytes, opts.MaxConnections, svc.Dispatch)
-	ln, err := net.Listen("unix", opts.SocketPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+func TestAvailabilityReport(t *testing.T) {
+	plan := map[string]any{"components": []any{
+		map[string]any{"id": "os", "state": "available", "actionable": true, "details": map[string]any{"package_count": 4.0}},
+		map[string]any{"id": "haproxy", "state": "available", "actionable": true, "installed": "2.8.5", "available": "2.8.6"},
+	}}
+	active, summary, detail, ok := availabilityReport(plan)
+	if !ok || !active || summary != "Software updates are available: operating-system packages (4), HAProxy 2.8.5 → 2.8.6" ||
+		detail != "Install them from Software updates in HAProxy Admin." {
+		t.Fatalf("report: %v %q %q", active, summary, detail)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = srv.Serve(ctx, ln) }()
-
-	call := func(payload map[string]any) map[string]any {
-		t.Helper()
-		conn, err := net.Dial("unix", opts.SocketPath)
-		if err != nil {
-			t.Fatalf("dial: %v", err)
-		}
-		defer conn.Close()
-		b, _ := json.Marshal(payload)
-		_, _ = conn.Write(append(b, '\n'))
-		line, err := bufio.NewReader(conn).ReadString('\n')
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		var out map[string]any
-		_ = json.Unmarshal([]byte(line), &out)
-		return out
-	}
-
-	// Summary reports protocol_version=2 and VERSION.
-	sum := call(map[string]any{"action": "summary"})
-	if sum["ok"] != true || sum["version"] != "2.5.0-alpha" || int(sum["protocol_version"].(float64)) != 2 {
-		t.Fatalf("unexpected summary: %+v", sum)
-	}
-
-	// set_settings rejects invalid interval and accepts 12.
-	if res := call(map[string]any{"action": "set_settings", "auto_check_hours": 5}); res["ok"] != false {
-		t.Fatalf("expected invalid auto_check_hours rejection: %+v", res)
-	}
-	if res := call(map[string]any{"action": "set_settings", "auto_check_hours": 12}); res["ok"] != true {
-		t.Fatalf("expected auto_check_hours=12 accepted: %+v", res)
-	}
-
-	// Reboot requires confirmation=REBOOT and matching boot_id; then cancel_reboot clears marker.
-	if res := call(map[string]any{"action": "reboot", "confirmation": "NO"}); res["ok"] != false {
-		t.Fatalf("expected invalid confirmation rejected: %+v", res)
-	}
-	if res := call(map[string]any{"action": "reboot", "confirmation": "REBOOT", "expected_boot_id": bootUUID, "actor": "admin"}); res["ok"] != true {
-		t.Fatalf("expected reboot scheduled: %+v", res)
-	}
-	if _, err := os.Stat(opts.RebootMarker); err != nil {
-		t.Fatalf("expected reboot marker written: %v", err)
-	}
-	if res := call(map[string]any{"action": "cancel_reboot"}); res["ok"] != true {
-		t.Fatalf("cancel_reboot failed: %+v", res)
-	}
-	if _, err := os.Stat(opts.RebootMarker); !os.IsNotExist(err) {
-		t.Fatalf("expected reboot marker removed after cancel")
-	}
-
-	// ssh_protection_unban rejects zone-ID IPv6 and accepts valid IPv4.
-	if res := call(map[string]any{"action": "ssh_protection_unban", "ip": "fe80::1%eth0"}); res["ok"] != false {
-		t.Fatalf("expected zone-ID IP rejected: %+v", res)
-	}
-	if res := call(map[string]any{"action": "ssh_protection_unban", "ip": "203.0.113.42"}); res["ok"] != true {
-		t.Fatalf("expected valid IP accepted: %+v", res)
+	_, _, _, ok = availabilityReport(map[string]any{"components": []any{map[string]any{"id": "os", "state": "unknown"}}})
+	if ok {
+		t.Fatal("unknown must say nothing")
 	}
 }
