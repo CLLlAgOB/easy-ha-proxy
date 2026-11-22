@@ -16,13 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // Service implements the update broker JSON-line RPC protocol.
 type Service struct {
-	mu   sync.Mutex
-	Opts Options
+	mu     sync.Mutex
+	Opts   Options
+	Alerts *alerts.Client
 }
 
 // NewService initializes state directories and recovers any interrupted jobs.
@@ -32,7 +34,7 @@ func NewService(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{Opts: opts}
+	s := &Service{Opts: opts, Alerts: alerts.FromEnv()}
 	s.RecoverStaleJobs()
 	return s, nil
 }
@@ -176,6 +178,10 @@ func (s *Service) Dispatch(ctx context.Context, req map[string]any) (map[string]
 		return s.statusResponse(req), nil
 	case "summary":
 		return s.summaryResponse(), nil
+	case "start_check":
+		return s.StartCheck(ctx, req)
+	case "start_apply":
+		return s.StartApply(ctx, req)
 	case "set_settings":
 		return s.setSettings(req)
 	case "set_auto_reboot":

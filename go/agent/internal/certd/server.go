@@ -33,6 +33,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/certs/upload", s.handleUpload)
 	mux.HandleFunc("/api/v1/certs/delete-haproxy", s.handleDeleteHAProxy)
 	mux.HandleFunc("/api/v1/certs/standby", s.handleStandby)
+	mux.HandleFunc("/api/v1/certs/standby/store", s.handleStandbyStore)
+	mux.HandleFunc("/api/v1/certs/standby/activate", s.handleStandbyActivate)
+	mux.HandleFunc("/api/v1/certs/standby/delete", s.handleStandbyDelete)
+	mux.HandleFunc("/api/v1/certs/issue", s.handleIssue)
+	mux.HandleFunc("/api/v1/certs/ca/internal/ensure", s.handleCAEnsure)
+	mux.HandleFunc("/api/v1/certs/ca/internal/issue", s.handleCAIssue)
+	mux.HandleFunc("/api/v1/certs/ca/internal/rotate", s.handleCARotate)
+	mux.HandleFunc("/api/v1/certs/ca/internal/delete", s.handleCADelete)
+	mux.HandleFunc("/api/v1/certs/ca/export", s.handleCAExport)
+	mux.HandleFunc("/api/v1/certs/ca/revoked", s.handleCARevoked)
 	mux.HandleFunc("/api/v1/certs/dns-providers", s.handleDNSList)
 	mux.HandleFunc("/api/v1/certs/dns-providers/save", s.handleDNSSave)
 	mux.HandleFunc("/api/v1/certs/dns-providers/delete", s.handleDNSDelete)
@@ -196,6 +206,154 @@ func (s *Server) handleStandby(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "standby": certs})
+}
+
+func (s *Server) handleStandbyStore(w http.ResponseWriter, r *http.Request) {
+	body, err := readJSONMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	name, _ := body["name"].(string)
+	info, err := s.Manager.StandbyStore(name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cert": info})
+}
+
+func (s *Server) handleStandbyActivate(w http.ResponseWriter, r *http.Request) {
+	body, err := readJSONMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	name, _ := body["name"].(string)
+	info, err := s.Manager.StandbyActivate(name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cert": info})
+}
+
+func (s *Server) handleStandbyDelete(w http.ResponseWriter, r *http.Request) {
+	body, err := readJSONMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	name, _ := body["name"].(string)
+	if err := s.Manager.StandbyDelete(name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": name})
+}
+
+func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
+	body, err := readJSONMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	var req IssueRequest
+	raw, _ := json.Marshal(body)
+	_ = json.Unmarshal(raw, &req)
+	res, err := s.Manager.IssueWithCertbot(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleCAEnsure(w http.ResponseWriter, r *http.Request) {
+	body, _ := readJSONMap(r)
+	cn, _ := body["common_name"].(string)
+	days := 0
+	if n, ok := body["valid_days"].(float64); ok {
+		days = int(n)
+	}
+	info, created, err := s.Manager.EnsureInternalCA(cn, days)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": created, "ca": info})
+}
+
+func (s *Server) handleCAIssue(w http.ResponseWriter, r *http.Request) {
+	body, _ := readJSONMap(r)
+	cn, _ := body["common_name"].(string)
+	kind, _ := body["kind"].(string)
+	days := 0
+	if n, ok := body["valid_days"].(float64); ok {
+		days = int(n)
+	}
+	install, _ := body["install"].(bool)
+	var sans []string
+	if rawS, ok := body["sans"].([]any); ok {
+		for _, v := range rawS {
+			if str, ok := v.(string); ok {
+				sans = append(sans, str)
+			}
+		}
+	}
+	info, pemBundle, err := s.Manager.IssueInternalCert(cn, sans, kind, days, install)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cert": info, "pem": pemBundle})
+}
+
+func (s *Server) handleCARotate(w http.ResponseWriter, r *http.Request) {
+	body, _ := readJSONMap(r)
+	cn, _ := body["common_name"].(string)
+	days := 0
+	if n, ok := body["valid_days"].(float64); ok {
+		days = int(n)
+	}
+	info, err := s.Manager.RotateInternalCA(cn, days)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ca": info})
+}
+
+func (s *Server) handleCADelete(w http.ResponseWriter, _ *http.Request) {
+	if err := s.Manager.DeleteInternalCA(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": true})
+}
+
+func (s *Server) handleCAExport(w http.ResponseWriter, _ *http.Request) {
+	certPEM, crlPEM, err := s.Manager.ExportInternalCA()
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ca_pem": certPEM, "crl_pem": crlPEM})
+}
+
+func (s *Server) handleCARevoked(w http.ResponseWriter, r *http.Request) {
+	body, _ := readJSONMap(r)
+	if serial, ok := body["serial"].(string); ok && strings.TrimSpace(serial) != "" {
+		reason, _ := body["reason"].(string)
+		list, err := s.Manager.RevokeInternalCert(serial, reason)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revoked": list})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revoked": s.Manager.ListRevoked()})
 }
 
 func (s *Server) handleDNSList(w http.ResponseWriter, _ *http.Request) {

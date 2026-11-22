@@ -28,7 +28,7 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updated"
 )
 
-const version = "0.6.0-alpha"
+const version = "0.7.0-alpha"
 
 func main() {
 	if len(os.Args) < 2 {

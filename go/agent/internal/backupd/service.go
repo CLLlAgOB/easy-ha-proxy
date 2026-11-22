@@ -14,13 +14,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // Service implements the backupd request dispatcher, storage, destinations, schedule, and job tracking.
 type Service struct {
-	mu   sync.Mutex
-	Opts Options
+	mu          sync.Mutex
+	Opts        Options
+	Alerts      *alerts.Client
+	OpenSSLBin  string
+	BackupRoots []string
 }
 
 // NewService prepares the spool directory layout, recovers stale jobs, and returns Service.
@@ -30,7 +34,7 @@ func NewService(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{Opts: opts}
+	s := &Service{Opts: opts, Alerts: alerts.FromEnv(), OpenSSLBin: "openssl"}
 	s.RecoverStaleJobs()
 	return s, nil
 }
@@ -83,7 +87,7 @@ func (s *Service) rebootScheduled() bool {
 }
 
 // Dispatch validates strict action & field whitelists and routes the request.
-func (s *Service) Dispatch(_ context.Context, req map[string]any) (map[string]any, error) {
+func (s *Service) Dispatch(ctx context.Context, req map[string]any) (map[string]any, error) {
 	action, _ := req["action"].(string)
 	allowed, ok := RequestFields[action]
 	if !ok {
@@ -103,6 +107,14 @@ func (s *Service) Dispatch(_ context.Context, req map[string]any) (map[string]an
 	switch action {
 	case "status":
 		return s.statusResponse(req), nil
+	case "stage_backup":
+		return s.StageBackup(req)
+	case "start_backup":
+		return s.StartBackup(ctx, req)
+	case "start_inspect":
+		return s.StartInspect(ctx, req)
+	case "run_scheduled":
+		return s.RunScheduled(ctx)
 	case "destinations":
 		return s.listDestinations(), nil
 	case "destination_save":
@@ -119,7 +131,7 @@ func (s *Service) Dispatch(_ context.Context, req map[string]any) (map[string]an
 		if s.rebootScheduled() {
 			return nil, unixrpc.NewError("conflict", "a server reboot is scheduled")
 		}
-		return nil, unixrpc.NewError("invalid", fmt.Sprintf("action %q requires backup worker execution", action))
+		return nil, unixrpc.NewError("invalid", fmt.Sprintf("action %q is not yet enabled", action))
 	}
 }
 
