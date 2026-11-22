@@ -28,3 +28,7 @@ enable_geoip: false
 # update is always available from the web UI.
 geoip_update_on_calendar: "weekly"
 geoip_update_randomized_delay: "2h"
+
+native_daemons_enabled: true
+native_tools_enabled: "{{ native_daemons_enabled | bool }}"
+native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent

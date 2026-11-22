@@ -433,3 +433,23 @@ status_check_docker_log_lines: 80
 #   docker compose logs --tail N <container>
 # Can be overridden in group_vars/host_vars if needed.
 status_check_docker_logs_compose_dir: "/opt/authelia"
+
+# Keep native Rust + Go template defaults in sync with haproxy-admin so
+# status-check artifact digests match the rendered systemd units and wrappers.
+native_daemons_enabled: true
+native_guardd_enabled: "{{ native_daemons_enabled | bool }}"
+native_guardd_ffi_enabled: "{{ native_daemons_enabled | bool }}"
+native_healthd_enabled: "{{ native_daemons_enabled | bool }}"
+native_metricsd_enabled: "{{ native_daemons_enabled | bool }}"
+native_alertd_enabled: "{{ native_daemons_enabled | bool }}"
+native_controld_enabled: "{{ native_daemons_enabled | bool }}"
+native_certd_enabled: "{{ native_daemons_enabled | bool }}"
+native_backupd_enabled: "{{ native_daemons_enabled | bool }}"
+native_updated_enabled: "{{ native_daemons_enabled | bool }}"
+native_authelia_bansd_enabled: "{{ native_daemons_enabled | bool }}"
+native_authelia_usersd_enabled: "{{ native_daemons_enabled | bool }}"
+native_authelia_configd_enabled: "{{ native_daemons_enabled | bool }}"
+native_tools_enabled: "{{ native_daemons_enabled | bool }}"
+native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
+native_guardd_bin: /usr/local/sbin/guardd-core
+native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so
