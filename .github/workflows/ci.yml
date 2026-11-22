@@ -210,6 +210,46 @@ jobs:
           npm install --no-save --no-package-lock --ignore-scripts eslint@9.39.1 @eslint/js@9.39.1 globals@16.4.0
           npx --no-install eslint docker/app/haproxy_admin/static/js .tests/js
 
+  rust-guardd:
+    name: Rust guardd-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/guardd
+
+      - name: Clippy
+        working-directory: rust/guardd
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rust unit tests
+        working-directory: rust/guardd
+        run: cargo test
+
+      - name: Release build
+        working-directory: rust/guardd
+        run: cargo build --release
+
+      - name: Python-vs-Rust differential parity
+        env:
+          PYTHONPATH: .tests:installer
+          GUARDD_RUST_BIN: rust/guardd/target/release/guardd-core
+          GUARDD_RUST_LIB: rust/guardd/target/release/libguardd_core.so
+        run: python3 -m unittest -v test_rust_guardd_parity
+
+      - name: Hot-path benchmark
+        run: >-
+          rust/guardd/target/release/guardd-core bench
+          --lines 50000
+          --signatures ansible/roles/haproxy-admin/files/scanner-signatures.json
+
   ansible:
     name: Ansible syntax
     runs-on: ubuntu-24.04
