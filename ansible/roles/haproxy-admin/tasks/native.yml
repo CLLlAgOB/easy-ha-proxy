@@ -166,4 +166,8 @@
         argv:
           - "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
           - --help
+      register: _guardd_core_smoke
       changed_when: false
+      failed_when: >-
+        _guardd_core_smoke.rc != 0
+        and ('usage: guardd-core' not in ((_guardd_core_smoke.stdout | default('')) ~ (_guardd_core_smoke.stderr | default(''))))

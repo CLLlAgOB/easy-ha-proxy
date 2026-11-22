@@ -350,6 +350,14 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "-h" | "--help" | "help" => {
+            println!("usage: guardd-core <parse|bench|serve|seed-db> [--signatures PATH] [--lines N]");
+            ExitCode::SUCCESS
+        }
+        "-V" | "--version" | "version" => {
+            println!("guardd-core {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         _ => {
             eprintln!("usage: guardd-core <parse|bench|serve|seed-db> [--signatures PATH] [--lines N]");
             ExitCode::from(2)
