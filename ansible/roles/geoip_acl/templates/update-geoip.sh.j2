@@ -47,7 +47,9 @@ if (( FORCE_DOWNLOAD )); then
 fi
 
 {% if native_tools_enabled | default(native_daemons_enabled | default(false)) | bool %}
-exec {{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') | quote }} update-geoip "${args[@]}" "$@"
-{% else %}
-exec "${PYTHON}" "${UPDATER}" "${args[@]}" "$@"
+NATIVE_BIN={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') | quote }}
+if [[ -x "${NATIVE_BIN}" ]]; then
+  exec "${NATIVE_BIN}" update-geoip "${args[@]}" "$@"
+fi
 {% endif %}
+exec "${PYTHON}" "${UPDATER}" "${args[@]}" "$@"

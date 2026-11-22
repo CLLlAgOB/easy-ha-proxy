@@ -157,7 +157,7 @@ haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
 
 # Container image and name.
 haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
-haproxy_admin_use_go_panel: false
+haproxy_admin_use_go_panel: true
 haproxy_admin_go_image: "clllagob/haproxy-admin-ui:go-alpha"
 haproxy_admin_container_name: "haproxy-admin"
 
@@ -263,11 +263,11 @@ backup_schedule_oncalendar: "*-*-* 03:20:00"
 backup_schedule_jitter: 20m
 backup_schedule_timeout: 8h
 
-# --- Native Rust + Go host binaries (opt-in) ---
-# Disabled by default so existing Python daemons keep running unchanged until
-# the operator explicitly opts in via vars.yml. Granular per-daemon switches
-# allow rolling out or rolling back individual services without touching others.
-native_daemons_enabled: false
+# --- Native Rust + Go host binaries (default enabled on alpha) ---
+# Enabled by default so gateways run the compiled Rust guardd-core and static
+# Go easy-ha-proxy-agent without Python daemons. Set native_daemons_enabled: false
+# (or any per-daemon flag to false) in vars.yml for instant rollback to Python.
+native_daemons_enabled: true
 native_guardd_enabled: "{{ native_daemons_enabled | bool }}"
 native_guardd_ffi_enabled: "{{ native_daemons_enabled | bool }}"
 native_healthd_enabled: "{{ native_daemons_enabled | bool }}"
@@ -284,8 +284,10 @@ native_tools_enabled: "{{ native_daemons_enabled | bool }}"
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
 native_guardd_bin: /usr/local/sbin/guardd-core
 native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so
-# Either point to a pre-fetched directory containing easy-ha-proxy-native-linux-<arch>.tar.gz
-# or provide an HTTPS base URL together with mandatory SHA-256 checksums per architecture.
+# Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
+# Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url
+# together with mandatory SHA-256 checksums per architecture.
+native_release_image: "clllagob/haproxy-admin-ui:native-alpha"
 native_local_bundle_dir: ""
 native_release_base_url: ""
 native_release_checksums: {}

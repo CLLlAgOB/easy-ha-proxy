@@ -676,3 +676,92 @@ jobs:
               .
           fi
           echo "Published ${channel_image} (go-panel tree ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"
+
+  # Multi-arch scratch OCI image carrying the precompiled Rust (guardd-core)
+  # and Go (easy-ha-proxy-agent) host binaries for linux/amd64 and linux/arm64,
+  # so Ansible's ha-adm-native stage can pull and SHA-256 verify them with zero
+  # extra configuration.
+  native-release-image:
+    name: Publish native host binaries OCI image
+    needs: [rust-guardd, go-agent, native-release, secrets]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      REPOSITORY: clllagob/haproxy-admin-ui
+    steps:
+      - name: Check for registry credentials
+        id: credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set; native OCI image was not published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download Rust artifacts
+        if: steps.credentials.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-guardd-binaries
+          path: native-oci/rust
+
+      - name: Download Go agent artifacts
+        if: steps.credentials.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: go-agent-binaries
+          path: native-oci/go
+
+      - uses: docker/login-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.credentials.outputs.ready == 'true'
+
+      - name: Stage and publish multi-arch native binaries OCI image
+        if: steps.credentials.outputs.ready == 'true'
+        run: |
+          mkdir -p native-oci/ctx/amd64/sbin native-oci/ctx/amd64/lib \
+                   native-oci/ctx/arm64/sbin native-oci/ctx/arm64/lib
+          for arch in amd64 arm64; do
+            install -m 0755 "native-oci/rust/guardd-core-linux-${arch}" "native-oci/ctx/${arch}/sbin/guardd-core"
+            install -m 0644 "native-oci/rust/libguardd_core-linux-${arch}.so" "native-oci/ctx/${arch}/lib/libguardd_core.so"
+            install -m 0755 "native-oci/go/easy-ha-proxy-agent-linux-${arch}" "native-oci/ctx/${arch}/sbin/easy-ha-proxy-agent"
+            (cd "native-oci/ctx/${arch}" && sha256sum sbin/easy-ha-proxy-agent sbin/guardd-core lib/libguardd_core.so > SHA256SUMS)
+          done
+          cat > native-oci/ctx/Dockerfile <<'EOF'
+          FROM scratch
+          ARG TARGETARCH
+          COPY ${TARGETARCH}/sbin/ /sbin/
+          COPY ${TARGETARCH}/lib/ /lib/
+          COPY ${TARGETARCH}/SHA256SUMS /SHA256SUMS
+          ENTRYPOINT ["/sbin/easy-ha-proxy-agent"]
+          CMD ["version"]
+          EOF
+          channel="native-alpha"
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            channel="native-latest"
+          fi
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --label "org.opencontainers.image.version=${channel}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "${REPOSITORY}:${channel}" \
+            --tag "${REPOSITORY}:${channel}-${GITHUB_SHA::12}" \
+            --push \
+            native-oci/ctx
+          echo "Published ${REPOSITORY}:${channel} (amd64 + arm64)" >> "$GITHUB_STEP_SUMMARY"

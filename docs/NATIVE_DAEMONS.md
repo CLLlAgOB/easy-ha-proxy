@@ -22,46 +22,14 @@ sbin/guardd-core
 lib/libguardd_core.so
 ```
 
-## Enabling Native Daemons (Opt-In)
+## Default Runtime & Delivery (Alpha)
 
-All native switches default to `false` in `ansible/roles/haproxy-admin/defaults/main.yml`, so existing gateways continue running Python daemons unchanged until you opt in.
+On `alpha`, both `native_daemons_enabled: true` and `haproxy_admin_use_go_panel: true` are enabled by default in `ansible/roles/haproxy-admin/defaults/main.yml`:
 
-### Option A: Install from a verified HTTPS release mirror
+- Host binaries are pulled automatically from the multi-arch scratch OCI bundle `clllagob/haproxy-admin-ui:native-alpha` (`linux/amd64` + `linux/arm64`) and verified with `sha256sum -c SHA256SUMS` before installation into `/usr/local/sbin/`.
+- The web admin container runs `clllagob/haproxy-admin-ui:go-alpha` (`FROM scratch`) with the native `easy-ha-proxy-panel healthcheck` subcommand.
+- Operators can still override delivery with `native_local_bundle_dir` or an HTTPS `native_release_base_url` + `native_release_checksums`.
 
-Add to your `vars.yml`:
+## Instant Rollback to Python
 
-```yaml
-native_daemons_enabled: true
-native_release_base_url: "https://example.invalid/easy-ha-proxy/native"
-native_release_checksums:
-  amd64: "<64-hex sha256 of easy-ha-proxy-native-linux-amd64.tar.gz>"
-  arm64: "<64-hex sha256 of easy-ha-proxy-native-linux-arm64.tar.gz>"
-```
-
-### Option B: Install from a pre-fetched local bundle directory
-
-```yaml
-native_daemons_enabled: true
-native_local_bundle_dir: "/opt/easy-ha-proxy/native-bundles"
-```
-
-### Option C: Gradual per-daemon rollout (or Rust FFI acceleration only)
-
-Keep `native_daemons_enabled: false` and enable individual services selectively:
-
-```yaml
-native_guardd_ffi_enabled: true   # accelerate Python guardd via libguardd_core.so
-native_healthd_enabled: true
-native_metricsd_enabled: true
-native_alertd_enabled: true
-```
-
-Apply with:
-
-```bash
-ansible-playbook -i inventory ansible/easy-ha-proxy.yml --tags ha-adm-daemons
-```
-
-## Instant Rollback
-
-Set `native_daemons_enabled: false` (or flip any individual `native_<daemon>_enabled: false`) in `vars.yml` and re-run `--tags ha-adm-daemons`. The original Python scripts remain installed in `/usr/local/sbin/`, so systemd units switch back immediately.
+Set `native_daemons_enabled: false` and/or `haproxy_admin_use_go_panel: false` (or flip any individual `native_<daemon>_enabled: false`) in `vars.yml` and re-run Ansible. The original Python scripts remain installed in `/usr/local/sbin/`, so systemd units and the Docker container switch back immediately.

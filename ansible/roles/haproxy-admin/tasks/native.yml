@@ -1,8 +1,11 @@
 ---
 # roles/haproxy-admin/tasks/native.yml
-# Opt-in installation of the precompiled Rust (guardd-core) and Go
+# Installation of the precompiled Rust (guardd-core) and Go
 # (easy-ha-proxy-agent) host binaries for x86_64 (amd64) and aarch64 (arm64).
-# Runs only when native_daemons_enabled or any per-daemon native flag is true.
+# Delivery priority:
+#   1. native_local_bundle_dir (air-gapped local tarball)
+#   2. native_release_base_url + native_release_checksums (HTTPS + mandatory SHA-256)
+#   3. native_release_image (multi-arch scratch OCI image pulled via Docker + SHA256SUMS check)
 
 - name: "native-daemons | Determine whether any native binary is requested"
   ansible.builtin.set_fact:
@@ -18,6 +21,10 @@
         or (native_certd_enabled | default(false) | bool)
         or (native_backupd_enabled | default(false) | bool)
         or (native_updated_enabled | default(false) | bool)
+        or (native_authelia_bansd_enabled | default(false) | bool)
+        or (native_authelia_usersd_enabled | default(false) | bool)
+        or (native_authelia_configd_enabled | default(false) | bool)
+        or (native_tools_enabled | default(false) | bool)
       }}
 
 - name: "native-daemons | Install and verify native binaries"
@@ -25,10 +32,6 @@
   block:
     - name: "native-daemons | Map host architecture to release arch"
       ansible.builtin.set_fact:
-        _native_arch_map:
-          x86_64: amd64
-          aarch64: arm64
-          arm64: arm64
         _native_arch: >-
           {{
             {
@@ -46,17 +49,27 @@
           Unsupported host architecture '{{ ansible_architecture }}' for native
           easy-ha-proxy binaries (supported: x86_64, aarch64).
 
-    - name: "native-daemons | Require local bundle dir or verified HTTPS release URL"
+    - name: "native-daemons | Select delivery mode"
+      ansible.builtin.set_fact:
+        _native_mode: >-
+          {%- if native_local_bundle_dir | default('') | length > 0 -%}local
+          {%- elif native_release_base_url | default('') | length > 0 -%}https
+          {%- elif native_release_image | default('') | length > 0 -%}oci
+          {%- else -%}none
+          {%- endif -%}
+
+    - name: "native-daemons | Validate configured delivery source"
       ansible.builtin.assert:
         that:
-          - (native_local_bundle_dir | default('') | length > 0)
-            or (
+          - _native_mode in ['local', 'https', 'oci']
+          - _native_mode != 'https' or (
               (native_release_base_url | default('') | regex_search('^https://')) is not none
               and (native_release_checksums[_native_arch] | default('') | regex_search('^[0-9a-fA-F]{64}$')) is not none
             )
         fail_msg: >-
-          Set either native_local_bundle_dir or both an https:// native_release_base_url
-          and a 64-hex SHA-256 entry in native_release_checksums['{{ _native_arch }}'].
+          Configure native_release_image, native_local_bundle_dir, or both an
+          https:// native_release_base_url and a 64-hex SHA-256 entry in
+          native_release_checksums['{{ _native_arch }}'].
 
     - name: "native-daemons | Ensure staging and native library directories exist"
       ansible.builtin.file:
@@ -76,7 +89,7 @@
         owner: root
         group: root
         mode: "0600"
-      when: native_local_bundle_dir | default('') | length > 0
+      when: _native_mode == 'local'
 
     - name: "native-daemons | Download and SHA-256 verify release bundle over HTTPS"
       ansible.builtin.get_url:
@@ -87,13 +100,32 @@
         group: root
         mode: "0600"
         timeout: 60
-      when: native_local_bundle_dir | default('') | length == 0
+      when: _native_mode == 'https'
 
-    - name: "native-daemons | Unpack bundle into staging directory"
+    - name: "native-daemons | Unpack tarball bundle into staging directory"
       ansible.builtin.unarchive:
         src: "/var/lib/easy-ha-proxy/native-staging/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
         dest: /var/lib/easy-ha-proxy/native-staging
         remote_src: true
+      when: _native_mode in ['local', 'https']
+
+    - name: "native-daemons | Pull and verify native binary bundle from OCI image"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        img={{ native_release_image | quote }}
+        stage="/var/lib/easy-ha-proxy/native-staging"
+        rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
+        docker pull "${img}"
+        cid="$(docker create "${img}")"
+        trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
+        docker cp "${cid}:/sbin" "${stage}/sbin"
+        docker cp "${cid}:/lib" "${stage}/lib"
+        docker cp "${cid}:/SHA256SUMS" "${stage}/SHA256SUMS"
+        (cd "${stage}" && sha256sum -c SHA256SUMS)
+      args:
+        executable: /bin/bash
+      when: _native_mode == 'oci'
+      changed_when: true
 
     - name: "native-daemons | Install easy-ha-proxy-agent binary"
       ansible.builtin.copy:

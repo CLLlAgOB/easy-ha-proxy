@@ -66,10 +66,11 @@ SERVICE_TOGGLES: tuple[tuple[str, str, str, str], ...] = (
 
 
 class NativePackagingTests(unittest.TestCase):
-    def test_defaults_keep_native_daemons_opt_in(self):
+    def test_defaults_enable_native_stack_with_python_rollback(self):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
-        self.assertIs(defaults["native_daemons_enabled"], False)
-        self.assertIs(defaults["haproxy_admin_use_go_panel"], False)
+        self.assertIs(defaults["native_daemons_enabled"], True)
+        self.assertIs(defaults["haproxy_admin_use_go_panel"], True)
+        self.assertEqual(defaults["native_release_image"], "clllagob/haproxy-admin-ui:native-alpha")
         self.assertEqual(defaults["native_agent_bin"], "/usr/local/sbin/easy-ha-proxy-agent")
         self.assertEqual(defaults["native_guardd_bin"], "/usr/local/sbin/guardd-core")
         self.assertEqual(
@@ -118,6 +119,8 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("aarch64", tasks_text)
         self.assertIn("^https://", tasks_text)
         self.assertIn("checksum: \"sha256:", tasks_text)
+        self.assertIn("sha256sum -c SHA256SUMS", tasks_text)
+        self.assertIn("native_release_image", tasks_text)
         self.assertIn("easy-ha-proxy-native-linux-", tasks_text)
 
     def test_ci_assembles_dual_arch_native_release_bundles_with_sha256(self):
@@ -127,6 +130,7 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("go-agent", jobs)
         self.assertIn("go-panel", jobs)
         self.assertIn("go-panel-image", jobs)
+        self.assertIn("native-release-image", jobs)
         go_img = jobs["go-panel-image"]
         self.assertEqual(set(go_img["needs"]), {"go-panel", "javascript", "secrets"})
         publish_step = next(s for s in go_img["steps"] if s.get("name") == "Publish Go panel image")

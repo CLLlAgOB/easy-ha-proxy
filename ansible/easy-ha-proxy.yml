@@ -176,6 +176,10 @@
         - docker
 
     - role: haproxy-admin
+      task_stage: native
+      tags: ha-adm-native
+
+    - role: haproxy-admin
       task_stage: getuseruid
       tags:
         - ha-adm-install
@@ -213,10 +217,6 @@
     - role: haproxy-admin
       task_stage: config
       tags: ha-adm-cfg
-
-    - role: haproxy-admin
-      task_stage: native
-      tags: ha-adm-native
 
     - role: haproxy-admin
       task_stage: healthd
