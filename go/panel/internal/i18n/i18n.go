@@ -149,8 +149,15 @@ func (c *Catalog) withFallback() *Catalog {
 }
 
 func buildJSAsset(msgs map[string]string) jsAsset {
-	// json.Marshal sorts map keys deterministically and keeps UTF-8 intact.
-	payload, _ := json.Marshal(msgs)
+	// json.dumps(ensure_ascii=False, separators=(",", ":"), sort_keys=True):
+	// map keys sorted, UTF-8 kept, and no HTML escaping of <, > and &, which
+	// json.Marshal adds and Python does not -- the body, and so its ETag, must
+	// be the same bytes.
+	var enc bytes.Buffer
+	encoder := json.NewEncoder(&enc)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(msgs)
+	payload := bytes.TrimSuffix(enc.Bytes(), []byte("\n"))
 	body := append([]byte("window.HAPROXY_ADMIN_I18N=window.HAPROXY_ADMIN_I18N||{};window.HAPROXY_ADMIN_I18N.messages="), payload...)
 	body = append(body, ';')
 
@@ -258,11 +265,8 @@ func (c *Catalog) ServeMessagesJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 
-	if inm := strings.TrimSpace(r.Header.Get("If-None-Match")); inm == etag || inm == asset.ETag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
+	// Flask never answers this route conditionally: the URL carries the
+	// content hash, so a browser does not revalidate it anyway.
 	acceptsGzip := strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip")
 	data := asset.Body
 	if acceptsGzip {

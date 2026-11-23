@@ -435,7 +435,7 @@ func (a *App) registerBackups() {
 		if err != nil {
 			return err
 		}
-		mtime := float64(info.ModTime().UnixNano()) / 1e9
+		mtime := pyStatMtime(info.ModTime())
 		h := c.W.Header()
 		h.Set("Content-Disposition", contentDisposition(filename))
 		h.Set("Cache-Control", "no-cache, max-age=0")

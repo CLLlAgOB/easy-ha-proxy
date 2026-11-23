@@ -227,6 +227,7 @@ func (a *App) registerAll() {
 	a.registerPrometheus()
 	a.registerUpdatesOps()
 	a.registerBackups()
+	a.registerStaticLanguage()
 	trashRestorers["udp"] = RestoreUDPForward
 }
 

@@ -262,8 +262,9 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 	req.Header.Set("If-None-Match", etag)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotModified {
-		t.Fatalf("expected 304 for matching ETag, got %d", rec.Code)
+	// Flask answers this hashed, immutable URL in full even on a matching ETag.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a matching ETag (Flask is not conditional here), got %d", rec.Code)
 	}
 
 	// 7. /metrics moved to internal/app; the Flask harness covers it.
