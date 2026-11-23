@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"easy-ha-proxy/panel/internal/app"
 	"easy-ha-proxy/panel/internal/audit"
 	"easy-ha-proxy/panel/internal/cfgstore"
 	"easy-ha-proxy/panel/internal/config"
@@ -60,6 +61,7 @@ type Server struct {
 	Catalog  *i18n.Catalog
 	Boundary *security.Boundary
 	Prom     *prometheus.Collector
+	App      *app.App
 	handler  http.Handler
 }
 
@@ -113,9 +115,18 @@ func New(cfg *config.Config, pool *daemons.Pool, rt *haproxy.Runtime, cat *i18n.
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
+	// The Flask port answers every endpoint it implements; the remaining
+	// ones still go to the older handlers registered on mux.
+	templatesDir := os.Getenv("HAPROXY_ADMIN_TEMPLATES_DIR")
+	if templatesDir == "" {
+		templatesDir = "/app/templates"
+	}
+	s.App = app.New(cfg, cat, pool, templatesDir)
+	s.App.Fallback = mux
+
 	// Middleware order (outermost -> innermost):
-	// GzipJSONMiddleware -> BodyLimit -> Boundary (Proxy Secret + RBAC + CSRF + Security Headers) -> Mux.
-	var h http.Handler = mux
+	// GzipJSONMiddleware -> BodyLimit -> Boundary (Proxy Secret + RBAC + CSRF + Security Headers) -> App -> Mux.
+	var h http.Handler = s.App
 	h = boundary.Wrap(h)
 	h = s.bodyLimitMiddleware(h)
 	h = security.GzipJSONMiddleware(h)

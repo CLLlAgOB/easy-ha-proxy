@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"easy-ha-proxy/panel/internal/app"
 	"easy-ha-proxy/panel/internal/config"
 	"easy-ha-proxy/panel/internal/security"
 	"easy-ha-proxy/panel/internal/server"
@@ -49,6 +50,7 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
+	app.EnsureWhitelistFile()
 	srv := server.New(cfg, nil, nil, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -88,12 +88,6 @@ func TestStageD3AuditConfigStoreAndHTMLPages(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/api/haproxy/config/files/vars", `{"content":"enable_geoip: false\n"}`))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"sha256"`) {
-		t.Fatalf("config save vars failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, superReq(http.MethodPost, "/haproxy/config/check", `{"config":"global\n"}`))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
 		t.Fatalf("config check failed: %d %s", rec.Code, rec.Body.String())

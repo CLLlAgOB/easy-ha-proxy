@@ -31,8 +31,10 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 COPY --from=builder /out/easy-ha-proxy-panel /usr/local/bin/easy-ha-proxy-panel
 COPY docker/app/haproxy_admin/static /app/static
 COPY docker/app/haproxy_admin/translations /app/translations
+COPY docker/app/haproxy_admin/templates /app/templates
 
 ENV HAPROXY_ADMIN_STATIC_DIR=/app/static \
+    HAPROXY_ADMIN_TEMPLATES_DIR=/app/templates \
     HAPROXY_ADMIN_TRANSLATIONS_DIR=/app/translations \
     HAPROXY_ADMIN_LISTEN_ADDR=0.0.0.0:5000
 

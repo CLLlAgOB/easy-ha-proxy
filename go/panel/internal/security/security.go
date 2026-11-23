@@ -4,6 +4,9 @@
 package security
 
 import (
+	"fmt"
+	"html"
+
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -12,9 +15,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"easy-ha-proxy/panel/internal/pyyaml"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -23,21 +26,21 @@ import (
 )
 
 const (
-	ProxySecretHeader          = "X-Easy-HA-Proxy-Secret"
-	PortalHostHeader           = "X-Easy-HA-Proxy-Portal-Host"
-	StaticCacheSeconds         = 31536000
-	ControlPlaneHealthPath     = "/api/control-plane-health"
-	AccessPortalHealthPath     = "/api/access-portal-health"
-	ControlPlaneHealthUser     = "easy-ha-proxy-healthcheck"
-	ControlPlaneHealthGroup    = "healthcheck"
-	MetricsScrapePath          = "/metrics"
-	MetricsScrapeUser          = "easy-ha-proxy-metrics"
-	MetricsScrapeGroup         = "metrics"
-	SessionCookieName          = "easy_ha_proxy_session"
-	CSRFHeaderPrimary          = "X-CSRFToken"
-	CSRFHeaderAlternate        = "X-CSRF-Token"
-	CSRFFormField              = "csrf_token"
-	CompressMinBytes           = 512
+	ProxySecretHeader       = "X-Easy-HA-Proxy-Secret"
+	PortalHostHeader        = "X-Easy-HA-Proxy-Portal-Host"
+	StaticCacheSeconds      = 31536000
+	ControlPlaneHealthPath  = "/api/control-plane-health"
+	AccessPortalHealthPath  = "/api/access-portal-health"
+	ControlPlaneHealthUser  = "easy-ha-proxy-healthcheck"
+	ControlPlaneHealthGroup = "healthcheck"
+	MetricsScrapePath       = "/metrics"
+	MetricsScrapeUser       = "easy-ha-proxy-metrics"
+	MetricsScrapeGroup      = "metrics"
+	SessionCookieName       = "easy_ha_proxy_session"
+	CSRFHeaderPrimary       = "X-CSRFToken"
+	CSRFHeaderAlternate     = "X-CSRF-Token"
+	CSRFFormField           = "csrf_token"
+	CompressMinBytes        = 512
 )
 
 var superadminPrefixes = []string{
@@ -164,15 +167,29 @@ func (b *Boundary) tr(r *http.Request, msg string) string {
 func (b *Boundary) writeError(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	translated := b.tr(r, msg)
 	if CallerParsesJSON(r) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		// jsonify, re-dumped by localize_json_response: sorted, ASCII.
+		m := pyyaml.NewMap()
+		m.Set("error", translated)
+		m.Set("ok", false)
+		text, _ := pyyaml.JSONDumps(m, true, false)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":    false,
-			"error": translated,
-		})
+		_, _ = w.Write([]byte(text))
 		return
 	}
-	http.Error(w, translated, status)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(WerkzeugErrorPage(status, translated)))
+}
+
+// WerkzeugErrorPage is the HTML body werkzeug's abort(status, description) renders.
+func WerkzeugErrorPage(status int, description string) string {
+	name := http.StatusText(status)
+	if status == http.StatusRequestEntityTooLarge {
+		name = "Request Entity Too Large"
+	}
+	return fmt.Sprintf("<!doctype html>\n<html lang=en>\n<title>%d %s</title>\n<h1>%s</h1>\n<p>%s</p>\n",
+		status, name, name, html.EscapeString(description))
 }
 
 // Wrap applies CSP nonce generation, security headers, same-origin redirect

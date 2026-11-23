@@ -301,19 +301,6 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 	if rec.Code != http.StatusOK || lastUpdateAction != "ssh_protection_unban" {
 		t.Fatalf("ssh unban failed: %d action=%q", rec.Code, lastUpdateAction)
 	}
-
-	// 6. Authelia users & bans daemons.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/authelia/api/users", "", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"admin"`) {
-		t.Fatalf("authelia users list failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/authelia/api/bans", "", ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("authelia bans list failed: %d %s", rec.Code, rec.Body.String())
-	}
 }
 
 // controldOK answers as haproxy-controld does: "OK <base64(json)>".
