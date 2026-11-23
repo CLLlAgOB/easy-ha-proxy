@@ -99,21 +99,7 @@ func usage() {
 }
 
 func runUDPForward(args []string) int {
-	opts := tools.UDPForwardOptionsFromEnv()
-	fs := flag.NewFlagSet("udp-forward", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", false, "print planned iptables rules")
-	checkOnly := fs.Bool("check", false, "validate udp.yml only")
-	healthTargets := fs.Bool("health-targets", false, "print failover probe targets as JSON")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	out, err := tools.ApplyUDPForwards(context.Background(), opts, *dryRun, *checkOnly, *healthTargets)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[easy-ha-proxy-udp] ERROR: %v\n", err)
-		return 1
-	}
-	_, _ = os.Stdout.WriteString(out)
-	return 0
+	return tools.RunUDPForward(args, os.Stdout, os.Stderr)
 }
 
 func runCertDeliver(args []string) int {

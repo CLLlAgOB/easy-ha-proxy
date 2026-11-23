@@ -47,10 +47,11 @@ func TestUDPForwardGeneratorValidationAndFailover(t *testing.T) {
 		t.Fatalf("ApplyUDPForwards dry-run: %v", err)
 	}
 	for _, want := range []string{
-		"-A HP_UDP_RAW -p udp --dport 51820:51821 -m set --match-set haproxy_ban src -j DROP",
-		"-A HP_UDP_RAW -p udp --dport 51820:51821 -m set ! --match-set haproxy_ip_auth src -j DROP",
-		"-A HP_UDP_PRE -p udp --dport 51820:51821 -j DNAT --to-destination 10.0.0.20:51820-51821",
-		"-A HP_UDP_POST -p udp -d 10.0.0.20 --dport 51820:51821 -j MASQUERADE",
+		"-t raw -A HP_UDP_RAW -p udp --dport 51820:51821 -m set --match-set haproxy_ban src -j DROP",
+		"-t raw -A HP_UDP_RAW -p udp --dport 51820:51821 -m set ! --match-set haproxy_ip_auth src -j DROP",
+		"-t nat -A HP_UDP_PRE -p udp --dport 51820 -j DNAT --to-destination 10.0.0.20:51820",
+		"-t nat -A HP_UDP_PRE -p udp --dport 51821 -j DNAT --to-destination 10.0.0.20:51821",
+		"-t nat -A HP_UDP_POST -p udp -d 10.0.0.20 --dport 51821 -j MASQUERADE",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("missing expected rule %q in:\n%s", want, script)
