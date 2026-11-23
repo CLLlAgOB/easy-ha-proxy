@@ -11,7 +11,7 @@ ARG TARGETARCH
 RUN apk add --no-cache tzdata ca-certificates file
 
 WORKDIR /src/go/panel
-COPY go/panel/go.mod ./
+COPY go/panel/go.mod go/panel/go.sum ./
 COPY go/panel/ ./
 
 RUN set -euo pipefail; \
