@@ -212,6 +212,8 @@ func (a *App) registerAll() {
 	a.registerBackendPresetRoutes()
 	a.registerConfigHistoryRoutes()
 	a.registerCertRoutes()
+	a.registerAutheliaACL()
+	a.registerAutheliaSettings()
 	trashRestorers["udp"] = RestoreUDPForward
 }
 

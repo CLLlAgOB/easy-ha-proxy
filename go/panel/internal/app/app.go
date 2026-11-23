@@ -159,6 +159,7 @@ type Ctx struct {
 	Lang     string
 
 	flashLoaded  bool
+	session      map[string]any
 	flashes      []flashMessage
 	flashDirty   bool
 	flashUsed    []flashMessage
@@ -214,22 +215,23 @@ func Abort(code int, description string) error {
 	return abortSignal{code: code, description: description}
 }
 
-// ---- flash messages ----
+// ---- the session (Flask's signed cookie session: flashes and form nonces) ----
 
-const flashCookie = "easy_ha_proxy_flash"
+const sessionCookie = "easy_ha_proxy_flask_session"
 
 func (c *Ctx) sign(payload string) string {
 	mac := hmac.New(sha256.New, c.App.secret)
-	mac.Write([]byte("flash|" + payload))
+	mac.Write([]byte("session|" + payload))
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }
 
-func (c *Ctx) loadFlashes() {
+func (c *Ctx) loadSession() {
 	if c.flashLoaded {
 		return
 	}
 	c.flashLoaded = true
-	ck, err := c.R.Cookie(flashCookie)
+	c.session = map[string]any{}
+	ck, err := c.R.Cookie(sessionCookie)
 	if err != nil {
 		return
 	}
@@ -241,18 +243,44 @@ func (c *Ctx) loadFlashes() {
 	if err != nil {
 		return
 	}
-	var items [][2]string
-	if json.Unmarshal(raw, &items) != nil {
+	var data map[string]any
+	if json.Unmarshal(raw, &data) != nil {
 		return
 	}
-	for _, it := range items {
-		c.flashes = append(c.flashes, flashMessage{Category: it[0], Message: it[1]})
+	c.session = data
+	if items, ok := data["_flashes"].([]any); ok {
+		for _, it := range items {
+			pair, ok := it.([]any)
+			if ok && len(pair) == 2 {
+				cat, _ := pair[0].(string)
+				msg, _ := pair[1].(string)
+				c.flashes = append(c.flashes, flashMessage{Category: cat, Message: msg})
+			}
+		}
 	}
+}
+
+// SessionGet is session.get(key) (string values).
+func (c *Ctx) SessionGet(key string) string {
+	c.loadSession()
+	s, _ := c.session[key].(string)
+	return s
+}
+
+// SessionSetDefault is session.setdefault(key, value).
+func (c *Ctx) SessionSetDefault(key, value string) string {
+	c.loadSession()
+	if s, ok := c.session[key].(string); ok {
+		return s
+	}
+	c.session[key] = value
+	c.flashDirty = true
+	return value
 }
 
 // Flash is flask.flash(message, category).
 func (c *Ctx) Flash(message, category string) {
-	c.loadFlashes()
+	c.loadSession()
 	if category == "" {
 		category = "message"
 	}
@@ -266,7 +294,7 @@ func (c *Ctx) popFlashes() []flashMessage {
 	if c.flashUsedSet {
 		return c.flashUsed
 	}
-	c.loadFlashes()
+	c.loadSession()
 	c.flashUsed = c.flashes
 	c.flashUsedSet = true
 	if len(c.flashes) > 0 {
@@ -280,15 +308,24 @@ func (c *Ctx) commitCookies() {
 	if !c.flashDirty {
 		return
 	}
-	cookie := &http.Cookie{Name: flashCookie, Path: "/", HttpOnly: true, Secure: c.App.Cfg.SessionSecure, SameSite: http.SameSiteStrictMode}
-	if len(c.flashes) == 0 {
-		cookie.MaxAge = -1
-	} else {
+	data := map[string]any{}
+	for k, v := range c.session {
+		if k != "_flashes" {
+			data[k] = v
+		}
+	}
+	if len(c.flashes) > 0 {
 		items := make([][2]string, len(c.flashes))
 		for i, f := range c.flashes {
 			items[i] = [2]string{f.Category, f.Message}
 		}
-		raw, _ := json.Marshal(items)
+		data["_flashes"] = items
+	}
+	cookie := &http.Cookie{Name: sessionCookie, Path: "/", HttpOnly: true, Secure: c.App.Cfg.SessionSecure, SameSite: http.SameSiteStrictMode}
+	if len(data) == 0 {
+		cookie.MaxAge = -1
+	} else {
+		raw, _ := json.Marshal(data)
 		payload := base64.RawURLEncoding.EncodeToString(raw)
 		cookie.Value = payload + "." + c.sign(payload)
 	}
