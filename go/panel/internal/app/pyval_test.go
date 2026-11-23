@@ -51,3 +51,29 @@ func TestShlexSplit(t *testing.T) {
 		}
 	}
 }
+
+// Expected values come from CPython 3.12 ipaddress.ip_address(x).is_global.
+func TestPyIsGlobal(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"8.8.8.8", true}, {"10.0.0.1", false}, {"100.64.1.1", false}, {"100.128.0.1", true}, {"192.0.0.9", true},
+		{"192.0.0.10", true}, {"192.0.0.11", false}, {"192.0.0.170", false}, {"192.0.0.172", false},
+		{"198.18.5.5", false}, {"224.0.0.1", true}, {"255.255.255.255", false}, {"0.1.2.3", false},
+		{"169.254.1.1", false}, {"172.31.0.1", false}, {"172.32.0.1", true}, {"203.0.113.5", false},
+		{"240.0.0.1", false}, {"::1", false}, {"::", false}, {"2001:db8::1", false}, {"2001:4860::8888", true},
+		{"2001:1::1", true}, {"2001:1::3", false}, {"2001:3::5", true}, {"2001:20::1", true}, {"2002::1", false},
+		{"fc00::1", false}, {"fe80::1", false}, {"ff02::1", true}, {"::ffff:8.8.8.8", true},
+		{"::ffff:10.0.0.1", false}, {"64:ff9b:1::1", false}, {"64:ff9b::1", true}, {"3fff::1", false},
+		{"100::1", false}, {"100:0:0:1::1", true},
+	} {
+		a, ok := pyIPAddress(tc.in)
+		if !ok {
+			t.Fatalf("pyIPAddress(%q) failed", tc.in)
+		}
+		if got := pyIsGlobal(a); got != tc.want {
+			t.Errorf("pyIsGlobal(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}

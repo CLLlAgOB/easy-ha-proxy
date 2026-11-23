@@ -157,9 +157,8 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 	}))
 
 	// Fake HAProxy admin socket + config file with display-name comment.
-	var lastHAProxyCmd string
 	haproxySock := startFakeHAProxyAdmin(t, func(cmd string) string {
-		lastHAProxyCmd = cmd
+		_ = cmd
 		if cmd == "show stat" {
 			return "# pxname,svname,scur,status,weight,check_status,addr\n" +
 				"be_app_example_com,srv1,5,UP,100,L7OK,10.0.0.10:8080\n" +
@@ -235,24 +234,7 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 
 	// 2. Health API moved to internal/app; the Flask harness covers it.
 
-	// 3. HAProxy runtime backends listing (excludes authelia_backend!) + set weight.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, adminReq(http.MethodGet, "/api/haproxy/backends", ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("backends list failed: %d %s", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "authelia_backend") {
-		t.Fatalf("protected backend authelia_backend leaked into operable list")
-	}
-	if !strings.Contains(rec.Body.String(), "App Example") {
-		t.Fatalf("expected display-name 'App Example', got %s", rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, adminReq(http.MethodPost, "/api/haproxy/backends/weight", `{"backend":"be_app_example_com","server":"srv1","weight":50}`))
-	if rec.Code != http.StatusOK || lastHAProxyCmd != "set server be_app_example_com/srv1 weight 50" {
-		t.Fatalf("set weight failed: %d cmd=%q body=%s", rec.Code, lastHAProxyCmd, rec.Body.String())
-	}
+	// 3. HAProxy runtime backends moved to internal/app; the Flask harness covers them.
 
 	// 4. Alerts API moved to internal/app; the Flask harness covers it.
 

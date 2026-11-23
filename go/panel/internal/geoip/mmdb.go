@@ -36,18 +36,45 @@ func NewReader(path string) *Reader {
 // CountryCode returns the two-letter ISO country code for ipStr, or "" if
 // unavailable or not found.
 func (r *Reader) CountryCode(ipStr string) string {
-	addr, err := netip.ParseAddr(ipStr)
-	if err != nil {
+	val, ok := r.lookup(ipStr)
+	if !ok {
 		return ""
 	}
+	return extractCountryCode(val)
+}
+
+// CountryISO is record["country"]["iso_code"] as the database holds it --
+// what the Python panel's get_country_code reads, with no fallback to
+// registered_country. ok is false when there is no database or no record.
+func (r *Reader) CountryISO(ipStr string) (any, bool) {
+	val, ok := r.lookup(ipStr)
+	if !ok {
+		return nil, false
+	}
+	m, isMap := val.(map[string]any)
+	if !isMap {
+		return nil, true
+	}
+	c, isMap := m["country"].(map[string]any)
+	if !isMap {
+		return nil, true
+	}
+	return c["iso_code"], true
+}
+
+func (r *Reader) lookup(ipStr string) (any, bool) {
+	addr, err := netip.ParseAddr(ipStr)
+	if err != nil {
+		return nil, false
+	}
 	if err := r.ensureLoaded(); err != nil {
-		return ""
+		return nil, false
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if len(r.data) == 0 || r.nodeCount == 0 {
-		return ""
+		return nil, false
 	}
 
 	var ipBytes []byte
@@ -58,14 +85,14 @@ func (r *Reader) CountryCode(ipStr string) string {
 			// Walk IPv4-mapped prefix (96 zero bits) from root.
 			node, ok := r.walkZeros(96)
 			if !ok {
-				return ""
+				return nil, false
 			}
 			startNode = node
 		}
 		ipBytes = a4[:]
 	} else {
 		if r.ipVersion != 6 {
-			return ""
+			return nil, false
 		}
 		a16 := addr.As16()
 		ipBytes = a16[:]
@@ -86,21 +113,21 @@ func (r *Reader) CountryCode(ipStr string) string {
 	}
 
 	if node == r.nodeCount {
-		return ""
+		return nil, false
 	}
 	if node < r.nodeCount {
-		return ""
+		return nil, false
 	}
 	offset := uint64(node-r.nodeCount) - 16
 	dataOffset := r.dataStart + offset
 	if dataOffset >= uint64(len(r.data)) {
-		return ""
+		return nil, false
 	}
 	val, _, err := r.decodeValue(dataOffset, 0)
 	if err != nil {
-		return ""
+		return nil, false
 	}
-	return extractCountryCode(val)
+	return val, true
 }
 
 func (r *Reader) walkZeros(bits int) (uint32, bool) {

@@ -220,6 +220,7 @@ func (a *App) registerAll() {
 	a.registerHealth()
 	a.registerAlerts()
 	a.registerMonitoring()
+	a.registerRuntimeTables()
 	trashRestorers["udp"] = RestoreUDPForward
 }
 

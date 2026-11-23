@@ -67,7 +67,6 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(downloadsDir, "bk001.tar.gz.enc"), []byte("ENCRYPTED-ARCHIVE"), 0o600)
 
 	// Fake HAProxy socket.
-	var clearedKey string
 	haproxySock := startFakeHAProxyAdmin(t, func(cmd string) string {
 		switch {
 		case cmd == "show table abuse_ban":
@@ -75,7 +74,7 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 		case cmd == "show table":
 			return "# table: abuse_ban, type: ip\n# table: ip_auth, type: ip\n"
 		case strings.HasPrefix(cmd, "clear table abuse_ban key "):
-			clearedKey = strings.TrimPrefix(cmd, "clear table abuse_ban key ")
+			_ = strings.TrimPrefix(cmd, "clear table abuse_ban key ")
 			return ""
 		case cmd == "show stat":
 			return "# pxname,svname,scur,smax,rate,status,weight,check_status,addr\nfe_https,FRONTEND,12,20,3,OPEN,,,\nbe_site,BACKEND,4,10,1,UP,,,\nbe_site,s1,4,10,1,UP,100,L7OK,10.0.0.5:80\n"
@@ -196,40 +195,9 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 		return req
 	}
 
-	// 1. Dashboard: whitelists, add whitelist, tables, unban, connections, country-batch.
+	// 1. Dashboard runtime routes moved to internal/app; the Flask harness covers them.
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/api/whitelists", "", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "203.0.113.10") {
-		t.Fatalf("whitelists failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/api/whitelist", `{"ip":"198.51.100.42"}`, ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("whitelist add failed: %d %s", rec.Code, rec.Body.String())
-	}
-	rawGeo, _ := os.ReadFile(geoWL)
-	if !strings.Contains(string(rawGeo), "198.51.100.42") {
-		t.Fatalf("expected IP written to geo whitelist, got %q", string(rawGeo))
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/api/tables?view=bans", "", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "192.0.2.55") {
-		t.Fatalf("tables failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/api/unban", `{"ip":"192.0.2.55"}`, ""))
-	if rec.Code != http.StatusOK || clearedKey != "192.0.2.55" {
-		t.Fatalf("unban failed: %d cleared=%q", rec.Code, clearedKey)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/api/country-batch", `{"ips":["8.8.8.8","not-an-ip"]}`, ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("country-batch failed: %d %s", rec.Code, rec.Body.String())
-	}
+	_ = rec
 
 	// 2. Certs (DNS providers, cert delivery) moved to internal/app; the Flask harness covers them.
 
