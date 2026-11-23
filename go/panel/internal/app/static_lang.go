@@ -95,6 +95,15 @@ func (a *App) registerStaticLanguage() {
 	a.Handle("static", static)
 	a.Handle("routes.static", static)
 
+	a.Handle("i18n_messages", func(c *Ctx) error {
+		if c.App.Catalog == nil {
+			return Abort(404, "")
+		}
+		c.written = true
+		c.App.Catalog.ServeMessagesJS(c.W, c.R)
+		return nil
+	})
+
 	a.Handle("set_language", func(c *Ctx) error {
 		language := ""
 		if c.App.Catalog != nil {

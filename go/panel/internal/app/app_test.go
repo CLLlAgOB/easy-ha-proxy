@@ -15,7 +15,7 @@ import (
 func testApp(t *testing.T) *App {
 	t.Helper()
 	cfg := &config.Config{SecretKey: "test-secret"}
-	return New(cfg, nil, nil, "../../../../docker/app/haproxy_admin/templates")
+	return New(cfg, nil, "../../../../docker/app/haproxy_admin/templates")
 }
 
 // TestURLForVectors builds every endpoint's URL the way Flask did

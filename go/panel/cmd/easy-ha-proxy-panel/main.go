@@ -52,7 +52,7 @@ func runServe() error {
 	}
 	app.EnsureWhitelistFile()
 	app.StartTrashPurger()
-	srv := server.New(cfg, nil, nil, nil)
+	srv := server.New(cfg, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -16,7 +16,6 @@ import (
 	"sync"
 
 	"easy-ha-proxy/panel/internal/config"
-	"easy-ha-proxy/panel/internal/daemons"
 	"easy-ha-proxy/panel/internal/i18n"
 	"easy-ha-proxy/panel/internal/jinja"
 	"easy-ha-proxy/panel/internal/pyyaml"
@@ -28,12 +27,10 @@ type HandlerFunc func(c *Ctx) error
 
 // App is the ported Flask application.
 type App struct {
-	Cfg      *config.Config
-	Catalog  *i18n.Catalog
-	Pool     *daemons.Pool
-	Router   *Router
-	Env      *jinja.Environment
-	Fallback http.Handler
+	Cfg     *config.Config
+	Catalog *i18n.Catalog
+	Router  *Router
+	Env     *jinja.Environment
 
 	handlers map[string]HandlerFunc
 	secret   []byte
@@ -43,11 +40,10 @@ type App struct {
 }
 
 // New builds the application; templatesDir holds the Flask templates.
-func New(cfg *config.Config, cat *i18n.Catalog, pool *daemons.Pool, templatesDir string) *App {
+func New(cfg *config.Config, cat *i18n.Catalog, templatesDir string) *App {
 	a := &App{
 		Cfg:            cfg,
 		Catalog:        cat,
-		Pool:           pool,
 		Router:         NewRouter(flaskRules),
 		handlers:       map[string]HandlerFunc{},
 		secret:         []byte(cfg.SecretKey),
@@ -87,7 +83,7 @@ func (a *App) Endpoints() []string {
 	return out
 }
 
-// ServeHTTP dispatches to ported endpoints and hands the rest to Fallback.
+// ServeHTTP dispatches to the endpoints; anything else is a 404/405 as in Flask.
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m := a.Router.Match(r.Method, r.URL.Path)
 	if m.Rule != nil {
@@ -107,12 +103,6 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.serve(c, h)
 			return
 		}
-	}
-	// A Flask endpoint that has no Go handler yet is still served by the
-	// older handlers; anything else is a 404/405 as in Flask.
-	if a.Fallback != nil && (m.Rule != nil || len(m.Allowed) > 0 && a.fallbackAllowed(r)) {
-		a.Fallback.ServeHTTP(w, r)
-		return
 	}
 	c := a.newCtx(w, r, m)
 	if len(m.Allowed) > 0 {
@@ -461,25 +451,6 @@ func (c *Ctx) abortPage(code int, description string) {
 	body := fmt.Sprintf("<!doctype html>\n<html lang=en>\n<title>%d %s</title>\n<h1>%s</h1>\n<p>%s</p>\n",
 		code, name, name, string(jinja.Escape(description)))
 	_ = c.HTML(code, body)
-}
-
-// fallbackAllowed reports whether an older handler serves this method for
-// a path whose Flask rule takes other methods.
-func (a *App) fallbackAllowed(r *http.Request) bool {
-	m := a.Router.Match("GET", r.URL.Path)
-	if m.Rule == nil {
-		for _, meth := range []string{"POST", "PUT", "DELETE"} {
-			if mm := a.Router.Match(meth, r.URL.Path); mm.Rule != nil {
-				m = mm
-				break
-			}
-		}
-	}
-	if m.Rule == nil {
-		return false
-	}
-	_, ported := a.handlers[m.Rule.endpoint]
-	return !ported
 }
 
 // EnsureWhitelistFile is utils.ensure_whitelist_file, run at start-up.
