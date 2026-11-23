@@ -1,730 +1,1748 @@
 package metricsd
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
+
+	_ "modernc.org/sqlite"
 )
+
+var schemaStatements = []string{
+	"CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+	`
+    CREATE TABLE IF NOT EXISTS objects (
+        id         INTEGER PRIMARY KEY,
+        kind       TEXT    NOT NULL,
+        proxy      TEXT    NOT NULL,
+        server     TEXT    NOT NULL,
+        first_seen INTEGER NOT NULL,
+        last_seen  INTEGER NOT NULL,
+        UNIQUE (kind, proxy, server)
+    )
+    `,
+	`
+    CREATE TABLE IF NOT EXISTS counter_baseline (
+        object_id  INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+        metric     TEXT    NOT NULL,
+        value      INTEGER NOT NULL,
+        updated_ts INTEGER NOT NULL,
+        PRIMARY KEY (object_id, metric)
+    ) WITHOUT ROWID
+    `,
+	`
+    CREATE TABLE IF NOT EXISTS server_state_events (
+        id             INTEGER PRIMARY KEY,
+        ts             INTEGER NOT NULL,
+        object_id      INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+        previous_state TEXT    NOT NULL,
+        state          TEXT    NOT NULL
+    )
+    `,
+	"CREATE INDEX IF NOT EXISTS idx_state_events_ts ON server_state_events (ts)",
+	`
+    CREATE INDEX IF NOT EXISTS idx_state_events_object
+        ON server_state_events (object_id, ts)
+    `,
+	`
+    CREATE TABLE IF NOT EXISTS collector_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    `,
+	`
+    CREATE TABLE IF NOT EXISTS storage_samples (
+        ts          INTEGER PRIMARY KEY,
+        total_bytes INTEGER NOT NULL
+    ) WITHOUT ROWID
+    `,
+}
 
 const (
-	GiB = uint64(1024 * 1024 * 1024)
+	channelLabelsKey = "channel_labels"
+	channelHiddenKey = "channel_hidden"
+	monitorsKey      = "monitors"
 )
 
-// ChartSeries lists all supported chart names for GET /api/v1/metrics/series.
-var ChartSeries = map[string]struct{}{
-	"requests":    {},
-	"errors":      {},
-	"latency":     {},
-	"bandwidth":   {},
-	"connections": {},
-	"cpu":         {},
-	"memory":      {},
-	"load":        {},
-	"network":     {},
-	"temperature": {},
-}
+var gatheredMonitors = []string{"machine", "components", "disk", "network", "temperature", "percentiles", "refusals"}
+var digestMonitors = []string{"percentiles", "refusals"}
+var hostMonitors = []string{"machine", "disk", "network", "temperature"}
+var shownMonitors = []string{"requests", "traffic", "responses", "latency", "connections", "uplinks", "availability"}
 
-// TrafficBucket aggregates traffic deltas for one (bucketTS, kind, proxy, server).
-type TrafficBucket struct {
-	TS         int64  `json:"ts"`
-	Kind       string `json:"kind"`
-	Proxy      string `json:"proxy"`
-	Server     string `json:"server"`
-	Status     string `json:"status"`
-	Requests   uint64 `json:"requests"`
-	BytesIn    uint64 `json:"bytes_in"`
-	BytesOut   uint64 `json:"bytes_out"`
-	Resp2xx    uint64 `json:"resp_2xx"`
-	Resp3xx    uint64 `json:"resp_3xx"`
-	Resp4xx    uint64 `json:"resp_4xx"`
-	Resp5xx    uint64 `json:"resp_5xx"`
-	ScurMax    uint64 `json:"scur_max"`
-	RtimeSum   uint64 `json:"rtime_sum"`
-	RtimeCount uint64 `json:"rtime_count"`
-}
-
-// StateChange records one status transition for a backend or server.
-type StateChange struct {
-	TS     int64  `json:"ts"`
-	Kind   string `json:"kind"`
-	Proxy  string `json:"proxy"`
-	Server string `json:"server"`
-	Status string `json:"status"`
-}
-
-// StorageStatus summarizes disk budget, retention pressure, and whether writes are paused.
-type StorageStatus struct {
-	Path               string `json:"path"`
-	DatabaseBytes      uint64 `json:"database_bytes"`
-	MaxDatabaseBytes   uint64 `json:"max_database_bytes"`
-	ReservedFreeBytes  uint64 `json:"reserved_free_bytes"`
-	AvailableFreeBytes uint64 `json:"available_free_bytes"`
-	TotalFSBytes       uint64 `json:"total_fs_bytes"`
-	Pressure           bool   `json:"pressure"`
-	Paused             bool   `json:"paused"`
-	EffectiveMinDays   int    `json:"effective_one_minute_days"`
-	EffectiveHourDays  int    `json:"effective_one_hour_days"`
-	CheckedAt          int64  `json:"checked_at"`
-}
-
-type bucketKey struct {
-	ts     int64
-	kind   string
-	proxy  string
-	server string
-}
-
-type metricsSnapshot struct {
-	MinuteTraffic []TrafficBucket   `json:"minute_traffic"`
-	HourTraffic   []TrafficBucket   `json:"hour_traffic"`
-	MinuteHost    []HostSample      `json:"minute_host"`
-	HourHost      []HostSample      `json:"hour_host"`
-	States        []StateChange     `json:"states"`
-	Labels        map[string]string `json:"channel_labels"`
-	Hidden        []string          `json:"channel_hidden"`
-	Monitors      map[string]bool   `json:"monitors"`
-}
-
-// Store persists minute & hour rollups, state transitions, and UI metadata without CGO.
-type Store struct {
-	mu                 sync.Mutex
-	path               string
-	cfg                Config
-	minuteTraffic      map[bucketKey]*TrafficBucket
-	hourTraffic        map[bucketKey]*TrafficBucket
-	minuteHost         map[int64]HostSample
-	hourHost           map[int64]HostSample
-	lastStatus         map[string]string
-	states             []StateChange
-	labels             map[string]string
-	hidden             []string
-	monitors           map[string]bool
-	storage            StorageStatus
-	maxDBBytesOverride uint64
-	reserveOverride    uint64
-	statFSFn           func(string) (fsStats, error)
-}
-
-// NewStore opens or initializes a durable metrics store at path (empty = in-memory).
-func NewStore(path string, cfg Config) (*Store, error) {
-	s := &Store{
-		path:          path,
-		cfg:           cfg,
-		minuteTraffic: make(map[bucketKey]*TrafficBucket),
-		hourTraffic:   make(map[bucketKey]*TrafficBucket),
-		minuteHost:    make(map[int64]HostSample),
-		hourHost:      make(map[int64]HostSample),
-		lastStatus:    make(map[string]string),
-		labels:        make(map[string]string),
-		hidden:        []string{},
-		monitors: map[string]bool{
-			"traffic":  true,
-			"machine":  true,
-			"backends": true,
-		},
-		statFSFn: statFS,
-	}
-	s.storage.Path = path
-	s.storage.EffectiveMinDays = cfg.RetentionOneMinuteDays
-	s.storage.EffectiveHourDays = cfg.RetentionOneHourDays
-
-	if path != "" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return nil, err
-		}
-		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-			var snap metricsSnapshot
-			if json.Unmarshal(raw, &snap) == nil {
-				for _, b := range snap.MinuteTraffic {
-					cp := b
-					s.minuteTraffic[bucketKey{b.TS, b.Kind, b.Proxy, b.Server}] = &cp
-				}
-				for _, b := range snap.HourTraffic {
-					cp := b
-					s.hourTraffic[bucketKey{b.TS, b.Kind, b.Proxy, b.Server}] = &cp
-				}
-				for _, h := range snap.MinuteHost {
-					s.minuteHost[h.TS] = h
-				}
-				for _, h := range snap.HourHost {
-					s.hourHost[h.TS] = h
-				}
-				s.states = snap.States
-				if snap.Labels != nil {
-					s.labels = snap.Labels
-				}
-				if snap.Hidden != nil {
-					s.hidden = snap.Hidden
-				}
-				for k, v := range snap.Monitors {
-					s.monitors[k] = v
-				}
-			}
-		}
-	}
-	return s, nil
-}
-
-// RecordTraffic merges one DeltaSample into both its 1-minute and 1-hour rollup buckets.
-func (s *Store) RecordTraffic(sample DeltaSample) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.storage.Paused {
-		return
-	}
-	minTS := (sample.TS / 60) * 60
-	hrTS := (sample.TS / 3600) * 3600
-	mergeBucket(s.minuteTraffic, minTS, sample)
-	mergeBucket(s.hourTraffic, hrTS, sample)
-
-	if sample.Kind == "backend" || sample.Kind == "server" {
-		key := sample.Kind + ":" + sample.Proxy + ":" + sample.Server
-		if prev, ok := s.lastStatus[key]; !ok || prev != sample.Status {
-			s.lastStatus[key] = sample.Status
-			s.states = append(s.states, StateChange{
-				TS:     sample.TS,
-				Kind:   sample.Kind,
-				Proxy:  sample.Proxy,
-				Server: sample.Server,
-				Status: sample.Status,
-			})
-			if len(s.states) > 20000 {
-				s.states = s.states[len(s.states)-20000:]
-			}
-		}
-	}
-}
-
-func mergeBucket(m map[bucketKey]*TrafficBucket, bucketTS int64, sample DeltaSample) {
-	k := bucketKey{ts: bucketTS, kind: sample.Kind, proxy: sample.Proxy, server: sample.Server}
-	b, ok := m[k]
-	if !ok {
-		b = &TrafficBucket{
-			TS:     bucketTS,
-			Kind:   sample.Kind,
-			Proxy:  sample.Proxy,
-			Server: sample.Server,
-		}
-		m[k] = b
-	}
-	b.Status = sample.Status
-	b.Requests += sample.Requests
-	b.BytesIn += sample.BytesIn
-	b.BytesOut += sample.BytesOut
-	b.Resp2xx += sample.Resp2xx
-	b.Resp3xx += sample.Resp3xx
-	b.Resp4xx += sample.Resp4xx
-	b.Resp5xx += sample.Resp5xx
-	if sample.Scur > b.ScurMax {
-		b.ScurMax = sample.Scur
-	}
-	if sample.RtimeMS > 0 {
-		b.RtimeSum += sample.RtimeMS
-		b.RtimeCount++
-	}
-}
-
-// RecordHost stores one host sample into its 1-minute and 1-hour slots.
-func (s *Store) RecordHost(hs HostSample) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.storage.Paused {
-		return
-	}
-	minTS := (hs.TS / 60) * 60
-	hrTS := (hs.TS / 3600) * 3600
-	mh := hs
-	mh.TS = minTS
-	s.minuteHost[minTS] = mh
-	hh := hs
-	hh.TS = hrTS
-	s.hourHost[hrTS] = hh
-}
-
-// EvaluateStorage checks filesystem free space, enforces auto-sized cap/reserve,
-// reduces retention under pressure, and pauses writes if free space falls below reserve.
-func (s *Store) EvaluateStorage(now int64) StorageStatus {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	dir := "."
-	if s.path != "" {
-		dir = filepath.Dir(s.path)
-	}
-	fs, err := s.statFSFn(dir)
-	var dbSize uint64
-	if s.path != "" {
-		if fi, err := os.Stat(s.path); err == nil {
-			dbSize = uint64(fi.Size())
-		}
-	}
-
-	maxDB := s.maxDBBytesOverride
-	if maxDB == 0 && err == nil && fs.TotalBytes > 0 {
-		tenPct := fs.TotalBytes / 10
-		maxDB = min(5*GiB, tenPct)
-		if maxDB < 64*1024*1024 {
-			maxDB = 64 * 1024 * 1024
-		}
-	}
-	reserve := s.reserveOverride
-	if reserve == 0 && err == nil && fs.TotalBytes > 0 {
-		tenPct := fs.TotalBytes / 10
-		reserve = max(2*GiB, min(tenPct, 10*GiB))
-	}
-
-	lowFree := err == nil && reserve > 0 && fs.AvailBytes < reserve
-	overCap := maxDB > 0 && dbSize > maxDB
-	pressure := lowFree || overCap
-	minDays := s.cfg.RetentionOneMinuteDays
-	hrDays := s.cfg.RetentionOneHourDays
-	if pressure {
-		if minDays > 3 {
-			minDays = 3
-		}
-		if hrDays > 90 {
-			hrDays = 90
-		}
-		s.pruneLocked(now, minDays, min(s.cfg.RetentionOneMinuteServerHrs, 12), hrDays)
-	}
-	paused := lowFree
-
-	s.storage = StorageStatus{
-		Path:               s.path,
-		DatabaseBytes:      dbSize,
-		MaxDatabaseBytes:   maxDB,
-		ReservedFreeBytes:  reserve,
-		AvailableFreeBytes: fs.AvailBytes,
-		TotalFSBytes:       fs.TotalBytes,
-		Pressure:           pressure,
-		Paused:             paused,
-		EffectiveMinDays:   minDays,
-		EffectiveHourDays:  hrDays,
-		CheckedAt:          now,
-	}
-	return s.storage
-}
-
-// StorageReport returns the latest evaluated StorageStatus.
-func (s *Store) StorageReport(now int64) StorageStatus {
-	s.mu.Lock()
-	checked := s.storage.CheckedAt
-	s.mu.Unlock()
-	if checked == 0 {
-		return s.EvaluateStorage(now)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.storage
-}
-
-// Prune enforces configured retention windows and flushes the snapshot to disk.
-func (s *Store) Prune(now int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pruneLocked(now, s.cfg.RetentionOneMinuteDays, s.cfg.RetentionOneMinuteServerHrs, s.cfg.RetentionOneHourDays)
-	s.flushLocked()
-}
-
-func (s *Store) pruneLocked(now int64, minDays, srvHours, hrDays int) {
-	minCut := now - int64(max(1, minDays))*86400
-	srvCut := now - int64(max(1, srvHours))*3600
-	hrCut := now - int64(max(1, hrDays))*86400
-
-	for k := range s.minuteTraffic {
-		cut := minCut
-		if k.kind == "server" {
-			cut = srvCut
-		}
-		if k.ts < cut {
-			delete(s.minuteTraffic, k)
-		}
-	}
-	for k := range s.hourTraffic {
-		if k.ts < hrCut {
-			delete(s.hourTraffic, k)
-		}
-	}
-	for ts := range s.minuteHost {
-		if ts < minCut {
-			delete(s.minuteHost, ts)
-		}
-	}
-	for ts := range s.hourHost {
-		if ts < hrCut {
-			delete(s.hourHost, ts)
-		}
-	}
-	keptStates := s.states[:0]
-	for _, st := range s.states {
-		if st.TS >= minCut {
-			keptStates = append(keptStates, st)
-		}
-	}
-	s.states = keptStates
-}
-
-// Flush writes an atomic JSON snapshot to disk.
-func (s *Store) Flush() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.flushLocked()
-}
-
-func (s *Store) flushLocked() {
-	if s.path == "" {
-		return
-	}
-	snap := metricsSnapshot{
-		MinuteTraffic: make([]TrafficBucket, 0, len(s.minuteTraffic)),
-		HourTraffic:   make([]TrafficBucket, 0, len(s.hourTraffic)),
-		MinuteHost:    make([]HostSample, 0, len(s.minuteHost)),
-		HourHost:      make([]HostSample, 0, len(s.hourHost)),
-		States:        s.states,
-		Labels:        s.labels,
-		Hidden:        s.hidden,
-		Monitors:      s.monitors,
-	}
-	for _, b := range s.minuteTraffic {
-		snap.MinuteTraffic = append(snap.MinuteTraffic, *b)
-	}
-	for _, b := range s.hourTraffic {
-		snap.HourTraffic = append(snap.HourTraffic, *b)
-	}
-	for _, h := range s.minuteHost {
-		snap.MinuteHost = append(snap.MinuteHost, h)
-	}
-	for _, h := range s.hourHost {
-		snap.HourHost = append(snap.HourHost, h)
-	}
-	raw, err := json.Marshal(snap)
-	if err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".metrics-store.*.tmp")
-	if err != nil {
-		return
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return
-	}
-	_ = tmp.Chmod(0o640)
-	_ = tmp.Sync()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return
-	}
-	_ = os.Rename(tmpName, s.path)
-}
-
-// ChannelLabels returns copies of the persisted operator channel labels and hidden list.
-func (s *Store) ChannelLabels() (map[string]string, []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	labels := make(map[string]string, len(s.labels))
-	for k, v := range s.labels {
-		labels[k] = v
-	}
-	hidden := append([]string(nil), s.hidden...)
-	return labels, hidden
-}
-
-// SetChannelLabels updates channel labels and (when hidden != nil) the hidden host list.
-func (s *Store) SetChannelLabels(labels map[string]string, hidden []string) (map[string]string, []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.labels = labels
-	if hidden != nil {
-		s.hidden = hidden
-	}
-	s.flushLocked()
-	cpL := make(map[string]string, len(s.labels))
-	for k, v := range s.labels {
-		cpL[k] = v
-	}
-	return cpL, append([]string(nil), s.hidden...)
-}
-
-// Series returns chart time-series points over [since, until] (choosing 1m or 1h resolution).
-func (s *Store) Series(chart, site string, since, until int64) map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	useHourly := until-since > 48*3600
-	step := 60
-	if useHourly {
-		step = 3600
-	}
-
-	if chart == "cpu" || chart == "memory" || chart == "load" || chart == "network" || chart == "temperature" {
-		src := s.minuteHost
-		if useHourly {
-			src = s.hourHost
-		}
-		var list []HostSample
-		for ts, hs := range src {
-			if ts >= since && ts <= until {
-				list = append(list, hs)
-			}
-		}
-		sort.Slice(list, func(i, j int) bool { return list[i].TS < list[j].TS })
-		points := make([]map[string]any, 0, len(list))
-		for _, hs := range list {
-			pt := map[string]any{"ts": hs.TS}
-			switch chart {
-			case "cpu":
-				pt["cpu_percent"] = hs.CPUPercent
-			case "memory":
-				pt["mem_percent"] = hs.MemPercent
-				pt["mem_used_bytes"] = hs.MemUsedBytes
-			case "load":
-				pt["load1"] = hs.Load1
-				pt["load5"] = hs.Load5
-				pt["load15"] = hs.Load15
-			case "network":
-				pt["net_rx_bytes"] = hs.NetRxBytes
-				pt["net_tx_bytes"] = hs.NetTxBytes
-			case "temperature":
-				pt["temp_celsius"] = hs.TempCelsius
-			}
-			points = append(points, pt)
-		}
-		return map[string]any{"chart": chart, "resolution": step, "points": points}
-	}
-
-	src := s.minuteTraffic
-	if useHourly {
-		src = s.hourTraffic
-	}
-	byTS := make(map[int64]*TrafficBucket)
-	for _, b := range src {
-		if b.TS < since || b.TS > until {
-			continue
-		}
-		if site != "" {
-			if b.Kind != "backend" || b.Proxy != site {
-				continue
-			}
-		} else if b.Kind != "frontend" {
-			continue
-		}
-		agg, ok := byTS[b.TS]
-		if !ok {
-			agg = &TrafficBucket{TS: b.TS}
-			byTS[b.TS] = agg
-		}
-		agg.Requests += b.Requests
-		agg.BytesIn += b.BytesIn
-		agg.BytesOut += b.BytesOut
-		agg.Resp2xx += b.Resp2xx
-		agg.Resp3xx += b.Resp3xx
-		agg.Resp4xx += b.Resp4xx
-		agg.Resp5xx += b.Resp5xx
-		agg.ScurMax += b.ScurMax
-		agg.RtimeSum += b.RtimeSum
-		agg.RtimeCount += b.RtimeCount
-	}
-	keys := make([]int64, 0, len(byTS))
-	for ts := range byTS {
-		keys = append(keys, ts)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	points := make([]map[string]any, 0, len(keys))
-	for _, ts := range keys {
-		b := byTS[ts]
-		pt := map[string]any{"ts": ts}
-		switch chart {
-		case "requests":
-			pt["requests"] = b.Requests
-		case "errors":
-			pt["resp_4xx"] = b.Resp4xx
-			pt["resp_5xx"] = b.Resp5xx
-		case "latency":
-			var avg float64
-			if b.RtimeCount > 0 {
-				avg = float64(b.RtimeSum) / float64(b.RtimeCount)
-			}
-			pt["rtime_ms"] = avg
-		case "bandwidth":
-			pt["bytes_in"] = b.BytesIn
-			pt["bytes_out"] = b.BytesOut
-		case "connections":
-			pt["scur"] = b.ScurMax
-		}
-		points = append(points, pt)
-	}
-	return map[string]any{"chart": chart, "site": site, "resolution": step, "points": points}
-}
-
-// ServerTotals aggregates per-server totals over [since, until].
-func (s *Store) ServerTotals(since, until int64) map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	src := s.minuteTraffic
-	if until-since > 48*3600 {
-		src = s.hourTraffic
-	}
-	byKey := make(map[string]*TrafficBucket)
-	for _, b := range src {
-		if b.Kind != "server" || b.TS < since || b.TS > until {
-			continue
-		}
-		k := b.Proxy + "/" + b.Server
-		agg, ok := byKey[k]
-		if !ok {
-			agg = &TrafficBucket{Kind: "server", Proxy: b.Proxy, Server: b.Server}
-			byKey[k] = agg
-		}
-		agg.Status = b.Status
-		agg.Requests += b.Requests
-		agg.BytesIn += b.BytesIn
-		agg.BytesOut += b.BytesOut
-		agg.Resp2xx += b.Resp2xx
-		agg.Resp3xx += b.Resp3xx
-		agg.Resp4xx += b.Resp4xx
-		agg.Resp5xx += b.Resp5xx
-	}
-	list := make([]TrafficBucket, 0, len(byKey))
-	for _, v := range byKey {
-		list = append(list, *v)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Requests > list[j].Requests })
-	return map[string]any{"servers": list}
-}
-
-// BackendTotals aggregates per-backend totals over [since, until].
-func (s *Store) BackendTotals(since, until int64) map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	src := s.minuteTraffic
-	if until-since > 48*3600 {
-		src = s.hourTraffic
-	}
-	byKey := make(map[string]*TrafficBucket)
-	for _, b := range src {
-		if b.Kind != "backend" || b.TS < since || b.TS > until {
-			continue
-		}
-		agg, ok := byKey[b.Proxy]
-		if !ok {
-			agg = &TrafficBucket{Kind: "backend", Proxy: b.Proxy}
-			byKey[b.Proxy] = agg
-		}
-		agg.Status = b.Status
-		agg.Requests += b.Requests
-		agg.BytesIn += b.BytesIn
-		agg.BytesOut += b.BytesOut
-		agg.Resp2xx += b.Resp2xx
-		agg.Resp3xx += b.Resp3xx
-		agg.Resp4xx += b.Resp4xx
-		agg.Resp5xx += b.Resp5xx
-		agg.RtimeSum += b.RtimeSum
-		agg.RtimeCount += b.RtimeCount
-	}
-	list := make([]TrafficBucket, 0, len(byKey))
-	for _, v := range byKey {
-		list = append(list, *v)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Requests > list[j].Requests })
-	return map[string]any{"backends": list}
-}
-
-// StateTimeline returns backend/server status changes over [since, until].
-func (s *Store) StateTimeline(site string, since, until int64) map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]StateChange, 0)
-	for _, st := range s.states {
-		if st.TS < since || st.TS > until {
-			continue
-		}
-		if site != "" && st.Proxy != site {
-			continue
-		}
-		out = append(out, st)
-	}
-	return map[string]any{"events": out}
-}
-
-// LatestBackendMinuteBuckets returns the latest completed minute bucket per backend at minuteTS.
-func (s *Store) LatestBackendMinuteBuckets(minuteTS int64) []TrafficBucket {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]TrafficBucket, 0)
-	for k, b := range s.minuteTraffic {
-		if k.ts == minuteTS && k.kind == "backend" {
-			out = append(out, *b)
-		}
+func monitorDefaults() map[string]bool {
+	out := map[string]bool{}
+	for _, n := range append(append([]string{}, gatheredMonitors...), shownMonitors...) {
+		out[n] = true
 	}
 	return out
 }
 
-// Stats returns row counts and file size for /api/v1/metrics/health.
-func (s *Store) Stats() map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var size int64
-	if s.path != "" {
-		if fi, err := os.Stat(s.path); err == nil {
-			size = fi.Size()
+// monitorsFrom is monitors_from.
+func monitorsFrom(raw any) map[string]bool {
+	m := monitorDefaults()
+	if obj, ok := raw.(map[string]any); ok {
+		for name, v := range obj {
+			if _, known := m[name]; known {
+				if b, ok := v.(bool); ok {
+					m[name] = b
+				}
+			}
 		}
 	}
-	return map[string]any{
-		"minute_traffic_rows": len(s.minuteTraffic),
-		"hour_traffic_rows":   len(s.hourTraffic),
-		"minute_host_rows":    len(s.minuteHost),
-		"hour_host_rows":      len(s.hourHost),
-		"state_events":        len(s.states),
-		"database_bytes":      size,
+	return m
+}
+
+func metricTableSQL(name string) string {
+	cols := make([]string, len(metricColumns))
+	for i, c := range metricColumns {
+		cols[i] = c + " INTEGER NOT NULL DEFAULT 0"
+	}
+	return fmt.Sprintf(`
+    CREATE TABLE IF NOT EXISTS %s (
+        bucket_ts INTEGER NOT NULL,
+        object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+        %s,
+        PRIMARY KEY (bucket_ts, object_id)
+    ) WITHOUT ROWID
+    `, name, strings.Join(cols, ",\n        "))
+}
+
+// Bucket is one object's samples for the minute being collected.
+type Bucket struct {
+	Counters, GaugeSums, GaugeMaxima map[string]int64
+	Samples                          int64
+}
+
+func newBucket() *Bucket {
+	return &Bucket{Counters: map[string]int64{}, GaugeSums: map[string]int64{}, GaugeMaxima: map[string]int64{}}
+}
+
+func (b *Bucket) addCounter(name string, delta int64) {
+	if delta != 0 {
+		b.Counters[name] += delta
 	}
 }
 
-// CleanChannelLabels validates POST /api/v1/metrics/channel-labels matching metricsd/api.py.
-func CleanChannelLabels(labels map[string]any, hiddenRaw any) (map[string]string, []string, string) {
-	if len(labels) > 64 {
-		return nil, nil, "at most 64 labels"
+func (b *Bucket) addGauge(name string, value int64) {
+	b.GaugeSums[name] += value
+	if cur, ok := b.GaugeMaxima[name]; !ok || value > cur {
+		b.GaugeMaxima[name] = value
 	}
-	cleaned := make(map[string]string, len(labels))
-	for host, rawVal := range labels {
-		key := strings.TrimSpace(host)
-		if key == "" || len(key) > 255 {
-			return nil, nil, "a host name is missing or too long"
+}
+
+// floorDiv is Python's // for ints.
+func floorDiv(a, b int64) int64 {
+	q := a / b
+	if (a%b != 0) && ((a < 0) != (b < 0)) {
+		q--
+	}
+	return q
+}
+
+func (b *Bucket) row() map[string]int64 {
+	samples := b.Samples
+	if samples < 1 {
+		samples = 1
+	}
+	avg := func(n string) int64 { return floorDiv(b.GaugeSums[n], samples) }
+	c, mx := b.Counters, b.GaugeMaxima
+	return map[string]int64{
+		"samples": b.Samples, "requests": c["requests"], "sessions": c["sessions"], "bytes_in": c["bytes_in"],
+		"bytes_out": c["bytes_out"], "resp_2xx": c["resp_2xx"], "resp_3xx": c["resp_3xx"], "resp_4xx": c["resp_4xx"],
+		"resp_5xx": c["resp_5xx"], "resp_other": c["resp_other"], "check_failures": c["check_failures"],
+		"conn_cur_avg": avg("conn_cur"), "conn_cur_max": mx["conn_cur"], "queue_avg": avg("queue"),
+		"queue_max": mx["queue"], "queue_ms_avg": avg("queue_ms"), "connect_ms_avg": avg("connect_ms"),
+		"response_ms_avg": avg("response_ms"), "response_ms_max": mx["response_ms"], "total_ms_avg": avg("total_ms"),
+		"cpu_avg": avg("cpu"), "cpu_max": mx["cpu"], "haproxy_busy_avg": avg("haproxy_busy"),
+		"haproxy_busy_max": mx["haproxy_busy"], "memory_avg": avg("memory"), "memory_max": mx["memory"],
+		"memory_total": mx["memory_total"], "disk_used_avg": avg("disk_used"), "disk_total": mx["disk_total"],
+		"disk_read": c["disk_read"], "disk_write": c["disk_write"], "net_rx": c["net_rx"], "net_tx": c["net_tx"],
+		"temp_avg": avg("temp"), "temp_max": mx["temp"], "refused_geo": c["refused_geo"],
+		"refused_banned": c["refused_banned"], "refused_rate": c["refused_rate"], "refused_other": c["refused_other"],
+	}
+}
+
+// histogramPercentile is histogram_percentile; ok false for None.
+func histogramPercentile(counts []int64, share float64) (int64, bool) {
+	var total int64
+	for _, c := range counts {
+		total += c
+	}
+	if total <= 0 {
+		return 0, false
+	}
+	rank := share * float64(total)
+	var seen int64
+	for i, count := range counts {
+		if count <= 0 {
+			continue
 		}
-		text, _ := rawVal.(string)
-		text = strings.TrimSpace(text)
-		if len(text) > 60 {
-			text = text[:60]
+		if float64(seen+count) >= rank {
+			var lower int64
+			if i > 0 {
+				lower = digestBoundsMS[i-1]
+			}
+			if i >= len(digestBoundsMS) {
+				return lower, true
+			}
+			upper := digestBoundsMS[i]
+			return pyRoundInt(float64(lower) + float64(upper-lower)*(rank-float64(seen))/float64(count)), true
 		}
-		if text != "" {
-			cleaned[key] = text
+		seen += count
+	}
+	return digestBoundsMS[len(digestBoundsMS)-1], true
+}
+
+// unixGetJSON is unix_get_json: GET a JSON object over a Unix socket.
+func unixGetJSON(socketPath, path string, timeout time.Duration) (map[string]any, error) {
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.Write([]byte("GET " + path + " HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n")); err != nil {
+		return nil, err
+	}
+	raw := []byte{}
+	buf := make([]byte, 65536)
+	for len(raw) < 16*1024*1024 {
+		n, err := conn.Read(buf)
+		raw = append(raw, buf[:n]...)
+		if err != nil {
+			break
 		}
 	}
-	if hiddenRaw == nil {
-		return cleaned, nil, ""
+	head, body, _ := strings.Cut(string(raw), "\r\n\r\n")
+	parts := strings.SplitN(head, " ", 3)
+	if len(parts) < 2 || parts[1] != "200" {
+		h := head
+		if len(h) > 80 {
+			h = h[:80]
+		}
+		return nil, fmt.Errorf("%s: %q", path, h)
 	}
-	list, ok := hiddenRaw.([]any)
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	m, ok := v.(map[string]any)
 	if !ok {
-		return nil, nil, "hidden must be a list"
+		return nil, fmt.Errorf("%s: not an object", path)
 	}
-	if len(list) > 64 {
-		return nil, nil, "at most 64 hidden channels"
+	return m, nil
+}
+
+// readDiskSpace is read_disk_space: (used, total) KiB.
+func readDiskSpace(path string) (int64, int64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0, false
 	}
-	seen := make(map[string]struct{}, len(list))
-	for _, it := range list {
-		h, _ := it.(string)
-		h = strings.TrimSpace(h)
-		if h != "" && len(h) <= 255 {
-			seen[h] = struct{}{}
+	total := int64(st.Blocks) * int64(st.Frsize)
+	if total <= 0 {
+		return 0, 0, false
+	}
+	used := (int64(st.Blocks) - int64(st.Bfree)) * int64(st.Frsize)
+	return used / memoryUnit, total / memoryUnit, true
+}
+
+type pair struct{ a, b int64 }
+
+func readDiskCounters(diskstats, blockRoot string) map[string]pair {
+	ents, err := os.ReadDir(blockRoot)
+	if err != nil {
+		return nil
+	}
+	disks := map[string]bool{}
+	for _, e := range ents {
+		if _, err := os.Stat(filepath.Join(blockRoot, e.Name(), "device")); err == nil {
+			disks[e.Name()] = true
 		}
 	}
-	hidden := make([]string, 0, len(seen))
-	for h := range seen {
-		hidden = append(hidden, h)
+	raw, err := os.ReadFile(diskstats)
+	if err != nil {
+		return nil
 	}
-	sort.Strings(hidden)
-	return cleaned, hidden, ""
+	out := map[string]pair{}
+	for _, line := range splitLines(string(raw)) {
+		f := strings.Fields(line)
+		if len(f) < 10 || !disks[f[2]] {
+			continue
+		}
+		r, err1 := strconv.ParseInt(f[5], 10, 64)
+		w, err2 := strconv.ParseInt(f[9], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		out[f[2]] = pair{r * diskstatsSector, w * diskstatsSector}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func readIntFile(path string) (int64, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	return n, err == nil
+}
+
+func readNetworkCounters(netRoot string) map[string]pair {
+	ents, err := os.ReadDir(netRoot)
+	if err != nil {
+		return nil
+	}
+	out := map[string]pair{}
+	for _, e := range ents {
+		base := filepath.Join(netRoot, e.Name())
+		if _, err := os.Stat(filepath.Join(base, "device")); err != nil {
+			continue
+		}
+		rx, ok1 := readIntFile(filepath.Join(base, "statistics", "rx_bytes"))
+		tx, ok2 := readIntFile(filepath.Join(base, "statistics", "tx_bytes"))
+		if !ok1 || !ok2 {
+			continue
+		}
+		out[e.Name()] = pair{rx, tx}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func readTemperature(root string) (int64, bool) {
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return 0, false
+	}
+	var warmest int64
+	found := false
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), "thermal_zone") {
+			continue
+		}
+		milli, ok := readIntFile(filepath.Join(root, e.Name(), "temp"))
+		if !ok || !(temperatureLowMilli < milli && milli < temperatureHighMilli) {
+			continue
+		}
+		v := floorDiv(milli, 100)
+		if !found || v > warmest {
+			warmest, found = v, true
+		}
+	}
+	return warmest, found
+}
+
+type span struct {
+	State      string `json:"state"`
+	Start, End int64
+}
+
+func (s span) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`{"state":%q,"start":%d,"end":%d}`, s.State, s.Start, s.End)), nil
+}
+
+func closeSpan(spans *[]span, start, end int64, state string) {
+	if end <= start {
+		return
+	}
+	if n := len(*spans); n > 0 && (*spans)[n-1].State == state {
+		(*spans)[n-1].End = end
+		return
+	}
+	*spans = append(*spans, span{state, start, end})
+}
+
+func compressSpans(spans []span, since, until int64, slices int) []span {
+	length := until - since
+	if length < 1 {
+		length = 1
+	}
+	result := []span{}
+	index := 0
+	for number := 0; number < slices; number++ {
+		start := since + length*int64(number)/int64(slices)
+		end := since + length*int64(number+1)/int64(slices)
+		if end <= start {
+			continue
+		}
+		for index < len(spans) && spans[index].End <= start {
+			index++
+		}
+		seconds := map[string]int64{}
+		order := []string{}
+		worst := map[string]int64{}
+		worstOrder := []string{}
+		for probe := index; probe < len(spans) && spans[probe].Start < end; probe++ {
+			s := spans[probe]
+			overlap := minI(end, s.End) - maxI(start, s.Start)
+			if overlap <= 0 {
+				continue
+			}
+			group := "OTHER"
+			if s.State == "UP" || s.State == absentSpan {
+				group = s.State
+			}
+			if _, ok := seconds[group]; !ok {
+				order = append(order, group)
+			}
+			seconds[group] += overlap
+			if group == "OTHER" {
+				if _, ok := worst[s.State]; !ok {
+					worstOrder = append(worstOrder, s.State)
+				}
+				worst[s.State] += overlap
+			}
+		}
+		cursor := start
+		for _, g := range order {
+			name := g
+			if g == "OTHER" {
+				best := ""
+				var bestV int64 = -1
+				for _, w := range worstOrder {
+					if worst[w] > bestV {
+						best, bestV = w, worst[w]
+					}
+				}
+				name = best
+			}
+			closeSpan(&result, cursor, cursor+seconds[g], name)
+			cursor += seconds[g]
+		}
+	}
+	return result
+}
+
+func minI(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxI(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ---------------------------------------------------------------------------
+// MetricsDatabase
+// ---------------------------------------------------------------------------
+
+// Database is MetricsDatabase: one connection guarded by a lock.
+type Database struct {
+	Path string
+	mu   sync.Mutex
+	db   *sql.DB
+}
+
+// OpenDatabase is MetricsDatabase(path).
+func OpenDatabase(path string) (*Database, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o777); err != nil {
+		return nil, err
+	}
+	_, statErr := os.Stat(path)
+	fresh := os.IsNotExist(statErr)
+	db, err := sql.Open("sqlite", path+"?_txlock=deferred")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	d := &Database{Path: path, db: db}
+	pragmas := []string{}
+	if fresh {
+		pragmas = append(pragmas, "PRAGMA auto_vacuum=INCREMENTAL")
+	}
+	pragmas = append(pragmas, "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL", "PRAGMA foreign_keys=ON",
+		"PRAGMA busy_timeout=5000")
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if err := d.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// tx runs f in one transaction under the lock (Python's "with lock, conn").
+func (d *Database) tx(f func(*sql.Tx) error) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	t, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := f(t); err != nil {
+		_ = t.Rollback()
+		return err
+	}
+	return t.Commit()
+}
+
+func (d *Database) migrate() error {
+	return d.tx(func(t *sql.Tx) error {
+		for _, s := range schemaStatements {
+			if _, err := t.Exec(s); err != nil {
+				return err
+			}
+		}
+		for _, name := range []string{"metric_1m", "metric_1h"} {
+			if _, err := t.Exec(metricTableSQL(name)); err != nil {
+				return err
+			}
+		}
+		for _, table := range []string{"latency_1m", "latency_1h"} {
+			cols := make([]string, len(histogramColumns))
+			for i, c := range histogramColumns {
+				cols[i] = c + " INTEGER NOT NULL DEFAULT 0"
+			}
+			q := "CREATE TABLE IF NOT EXISTS " + table + " (bucket_ts INTEGER NOT NULL, " +
+				"object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE, " +
+				strings.Join(cols, ",\n") + ", PRIMARY KEY (bucket_ts, object_id)) WITHOUT ROWID"
+			if _, err := t.Exec(q); err != nil {
+				return err
+			}
+		}
+		for _, table := range []string{"metric_1m", "metric_1h"} {
+			existing, err := tableColumns(t, table)
+			if err != nil {
+				return err
+			}
+			for _, c := range metricColumns {
+				if existing[c] {
+					continue
+				}
+				if _, err := t.Exec("ALTER TABLE " + table + " ADD COLUMN " + c + " INTEGER NOT NULL DEFAULT 0"); err != nil {
+					return err
+				}
+				log.Printf("Added metrics column %s.%s", table, c)
+			}
+		}
+		existing, err := tableColumns(t, "objects")
+		if err != nil {
+			return err
+		}
+		if !existing["address"] {
+			if _, err := t.Exec("ALTER TABLE objects ADD COLUMN address TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
+			log.Printf("Added objects.address")
+		}
+		for _, q := range []string{"CREATE INDEX IF NOT EXISTS idx_metric_1m_object ON metric_1m (object_id, bucket_ts)",
+			"CREATE INDEX IF NOT EXISTS idx_metric_1h_object ON metric_1h (object_id, bucket_ts)"} {
+			if _, err := t.Exec(q); err != nil {
+				return err
+			}
+		}
+		var version sql.NullInt64
+		err = t.QueryRow("SELECT version FROM schema_version").Scan(&version)
+		if err == sql.ErrNoRows {
+			_, err = t.Exec("INSERT INTO schema_version (version) VALUES (?)", schemaVersion)
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		current := version.Int64
+		if current > schemaVersion {
+			return fmt.Errorf("metrics database schema v%d is newer than the supported v%d", current, schemaVersion)
+		}
+		for current < schemaVersion {
+			current++
+			log.Printf("Migrated metrics database to schema v%d", current)
+		}
+		_, err = t.Exec("UPDATE schema_version SET version = ?", current)
+		return err
+	})
+}
+
+func tableColumns(t *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := t.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	cols, _ := rows.Columns()
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		for i, c := range cols {
+			if c == "name" {
+				out[fmt.Sprint(textOf(vals[i]))] = true
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+func textOf(v any) string {
+	switch x := v.(type) {
+	case []byte:
+		return string(x)
+	case string:
+		return x
+	case nil:
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+// Close closes the connection.
+func (d *Database) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_ = d.db.Close()
+}
+
+// queryAll runs a query under the lock and returns rows as []any slices.
+func (d *Database) queryAll(q string, args ...any) ([][]any, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return queryRows(d.db, q, args...)
+}
+
+type querier interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+func queryRows(db querier, q string, args ...any) ([][]any, error) {
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	out := [][]any{}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				vals[i] = string(b)
+			}
+		}
+		out = append(out, vals)
+	}
+	return out, rows.Err()
+}
+
+func i64(v any) int64 { n, _ := asInt(v); return n }
+
+// ObjectID is object_id.
+func (d *Database) ObjectID(kind, proxy, server string, now int64) (int64, error) {
+	var id int64
+	err := d.tx(func(t *sql.Tx) error {
+		if _, err := t.Exec("INSERT INTO objects (kind, proxy, server, first_seen, last_seen) VALUES (?, ?, ?, ?, ?) "+
+			"ON CONFLICT (kind, proxy, server) DO UPDATE SET last_seen = ?", kind, proxy, server, now, now, now); err != nil {
+			return err
+		}
+		return t.QueryRow("SELECT id FROM objects WHERE kind = ? AND proxy = ? AND server = ?", kind, proxy, server).Scan(&id)
+	})
+	return id, err
+}
+
+// ObjectExists is object_exists.
+func (d *Database) ObjectExists(kind, proxy, server string) bool {
+	rows, err := d.queryAll("SELECT 1 FROM objects WHERE kind = ? AND proxy = ? AND server = ?", kind, proxy, server)
+	return err == nil && len(rows) > 0
+}
+
+func (d *Database) loadServerAddresses() map[int64]string {
+	rows, _ := d.queryAll("SELECT id, address FROM objects WHERE kind = 'server' AND address != ''")
+	out := map[int64]string{}
+	for _, r := range rows {
+		out[i64(r[0])] = textOf(r[1])
+	}
+	return out
+}
+
+func (d *Database) setObjectAddress(id int64, address string) error {
+	return d.tx(func(t *sql.Tx) error {
+		_, err := t.Exec("UPDATE objects SET address = ? WHERE id = ?", address, id)
+		return err
+	})
+}
+
+func (d *Database) renameCandidate(proxy, address string, present map[string]bool) (int64, string, bool) {
+	rows, _ := d.queryAll("SELECT id, server FROM objects WHERE kind = 'server' AND proxy = ? AND address = ?", proxy, address)
+	type c struct {
+		id     int64
+		server string
+	}
+	cands := []c{}
+	for _, r := range rows {
+		if s := textOf(r[1]); !present[s] {
+			cands = append(cands, c{i64(r[0]), s})
+		}
+	}
+	if len(cands) == 1 {
+		return cands[0].id, cands[0].server, true
+	}
+	return 0, "", false
+}
+
+func (d *Database) renameServer(id int64, server string) error {
+	return d.tx(func(t *sql.Tx) error {
+		_, err := t.Exec("UPDATE objects SET server = ? WHERE id = ?", server, id)
+		return err
+	})
+}
+
+type baselineKey struct {
+	id     int64
+	metric string
+}
+
+type baselineVal struct{ value, updated int64 }
+
+func (d *Database) loadBaselines() map[baselineKey]baselineVal {
+	rows, _ := d.queryAll("SELECT object_id, metric, value, updated_ts FROM counter_baseline")
+	out := map[baselineKey]baselineVal{}
+	for _, r := range rows {
+		out[baselineKey{i64(r[0]), textOf(r[1])}] = baselineVal{i64(r[2]), i64(r[3])}
+	}
+	return out
+}
+
+func storeBaselinesTx(t *sql.Tx, b map[baselineKey]baselineVal) error {
+	if len(b) == 0 {
+		return nil
+	}
+	stmt, err := t.Prepare("INSERT INTO counter_baseline (object_id, metric, value, updated_ts) VALUES (?, ?, ?, ?) " +
+		"ON CONFLICT (object_id, metric) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for k, v := range b {
+		if _, err := stmt.Exec(k.id, k.metric, v.value, v.updated); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Database) storeBaselines(b map[baselineKey]baselineVal) error {
+	return d.tx(func(t *sql.Tx) error { return storeBaselinesTx(t, b) })
+}
+
+func sortedIDs[V any](m map[int64]V) []int64 {
+	ids := make([]int64, 0, len(m))
+	for k := range m {
+		ids = append(ids, k)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// writeBuckets is write_buckets.
+func (d *Database) writeBuckets(bucketTS int64, rows map[int64]map[string]int64, merge bool, baselines map[baselineKey]baselineVal) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	cols := append([]string{"bucket_ts", "object_id"}, metricColumns...)
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(cols)), ", ")
+	var q string
+	if merge {
+		updates := []string{"samples = metric_1m.samples + excluded.samples"}
+		for _, c := range rollupSum {
+			updates = append(updates, c+" = metric_1m."+c+" + excluded."+c)
+		}
+		for _, c := range rollupMax {
+			updates = append(updates, c+" = MAX(metric_1m."+c+", excluded."+c+")")
+		}
+		for _, c := range rollupWavg {
+			updates = append(updates, c+" = CAST(COALESCE((metric_1m."+c+" * metric_1m.samples + excluded."+c+
+				" * excluded.samples) / NULLIF(metric_1m.samples + excluded.samples, 0), 0) AS INTEGER)")
+		}
+		q = "INSERT INTO metric_1m (" + strings.Join(cols, ", ") + ") VALUES (" + marks + ") " +
+			"ON CONFLICT (bucket_ts, object_id) DO UPDATE SET " + strings.Join(updates, ", ")
+	} else {
+		q = "INSERT OR REPLACE INTO metric_1m (" + strings.Join(cols, ", ") + ") VALUES (" + marks + ")"
+	}
+	return d.tx(func(t *sql.Tx) error {
+		stmt, err := t.Prepare(q)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, id := range sortedIDs(rows) {
+			row := rows[id]
+			args := []any{bucketTS, id}
+			for _, c := range metricColumns {
+				args = append(args, row[c])
+			}
+			if _, err := stmt.Exec(args...); err != nil {
+				return err
+			}
+		}
+		if baselines != nil {
+			return storeBaselinesTx(t, baselines)
+		}
+		return nil
+	})
+}
+
+func (d *Database) recordStateChange(id int64, previous, state string, now int64) error {
+	return d.tx(func(t *sql.Tx) error {
+		_, err := t.Exec("INSERT INTO server_state_events (ts, object_id, previous_state, state) VALUES (?, ?, ?, ?)",
+			now, id, previous, state)
+		return err
+	})
+}
+
+func (d *Database) lastObserved(id int64) (int64, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	one := func(q string) any {
+		rows, err := queryRows(d.db, q, id)
+		if err != nil || len(rows) == 0 {
+			return nil
+		}
+		return rows[0][0]
+	}
+	minute := one("SELECT MAX(bucket_ts) FROM metric_1m WHERE object_id = ?")
+	var hour any
+	if minute == nil {
+		hour = one("SELECT MAX(bucket_ts) FROM metric_1h WHERE object_id = ?")
+	}
+	event := one("SELECT MAX(ts) FROM server_state_events WHERE object_id = ?")
+	cands := []int64{}
+	if event != nil {
+		cands = append(cands, i64(event))
+	}
+	if minute != nil {
+		cands = append(cands, i64(minute)+bucketSeconds)
+	} else if hour != nil {
+		cands = append(cands, i64(hour))
+	}
+	if len(cands) == 0 {
+		return 0, false
+	}
+	best := cands[0]
+	for _, c := range cands {
+		if c > best {
+			best = c
+		}
+	}
+	return best, true
+}
+
+func (d *Database) loadLastStates() map[int64]string {
+	rows, _ := d.queryAll("SELECT object_id, state FROM server_state_events WHERE id IN (SELECT MAX(id) FROM server_state_events GROUP BY object_id)")
+	out := map[int64]string{}
+	for _, r := range rows {
+		out[i64(r[0])] = textOf(r[1])
+	}
+	return out
+}
+
+func (d *Database) getState(key, def string) string {
+	rows, _ := d.queryAll("SELECT value FROM collector_state WHERE key = ?", key)
+	if len(rows) == 0 {
+		return def
+	}
+	return textOf(rows[0][0])
+}
+
+func (d *Database) setState(key, value string) error {
+	return d.tx(func(t *sql.Tx) error {
+		_, err := t.Exec("INSERT INTO collector_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, value)
+		return err
+	})
+}
+
+func (d *Database) rollupHours(before int64) (int64, error) {
+	watermark := toInt(d.getState("rollup_watermark", "0"))
+	if before <= watermark {
+		return 0, nil
+	}
+	sums := make([]string, len(rollupSum))
+	for i, c := range rollupSum {
+		sums[i] = "SUM(" + c + ")"
+	}
+	projection := []string{fmt.Sprintf("bucket_ts - (bucket_ts %% %d) AS hour_ts", hourSeconds), "object_id", "SUM(samples)", strings.Join(sums, ", ")}
+	target := append([]string{"bucket_ts", "object_id", "samples"}, rollupSum...)
+	for _, c := range rollupWavg {
+		projection = append(projection, "CAST(COALESCE(SUM("+c+" * samples) / NULLIF(SUM(samples), 0), 0) AS INTEGER)")
+		target = append(target, c)
+	}
+	for _, c := range rollupMax {
+		projection = append(projection, "MAX("+c+")")
+		target = append(target, c)
+	}
+	var written int64
+	err := d.tx(func(t *sql.Tx) error {
+		res, err := t.Exec("INSERT OR REPLACE INTO metric_1h ("+strings.Join(target, ", ")+") SELECT "+strings.Join(projection, ", ")+
+			" FROM metric_1m WHERE bucket_ts >= ? AND bucket_ts < ? GROUP BY hour_ts, object_id", watermark, before)
+		if err != nil {
+			return err
+		}
+		written, _ = res.RowsAffected()
+		_, err = t.Exec("INSERT INTO collector_state (key, value) VALUES ('rollup_watermark', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", strconv.FormatInt(before, 10))
+		return err
+	})
+	if written < 0 {
+		written = 0
+	}
+	return written, err
+}
+
+func (d *Database) writeLatency(bucketTS int64, rows map[int64][]int64) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(histogramColumns)), ", ")
+	return d.tx(func(t *sql.Tx) error {
+		stmt, err := t.Prepare("INSERT OR REPLACE INTO latency_1m (bucket_ts, object_id, " + strings.Join(histogramColumns, ", ") + ") VALUES (?, ?, " + marks + ")")
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, id := range sortedIDs(rows) {
+			args := []any{bucketTS, id}
+			for _, c := range rows[id] {
+				args = append(args, c)
+			}
+			if _, err := stmt.Exec(args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (d *Database) rollupLatencyHours(before int64) (int64, error) {
+	watermark := toInt(d.getState("latency_rollup_watermark", "0"))
+	if before <= watermark {
+		return 0, nil
+	}
+	sums := make([]string, len(histogramColumns))
+	for i, c := range histogramColumns {
+		sums[i] = "SUM(" + c + ")"
+	}
+	var written int64
+	err := d.tx(func(t *sql.Tx) error {
+		res, err := t.Exec(fmt.Sprintf("INSERT OR REPLACE INTO latency_1h (bucket_ts, object_id, %s) SELECT bucket_ts - (bucket_ts %% %d) AS hour_ts, object_id, %s FROM latency_1m WHERE bucket_ts >= ? AND bucket_ts < ? GROUP BY hour_ts, object_id",
+			strings.Join(histogramColumns, ", "), hourSeconds, strings.Join(sums, ", ")), watermark, before)
+		if err != nil {
+			return err
+		}
+		written, _ = res.RowsAffected()
+		_, err = t.Exec("INSERT INTO collector_state (key, value) VALUES ('latency_rollup_watermark', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", strconv.FormatInt(before, 10))
+		return err
+	})
+	return written, err
+}
+
+func (d *Database) applyRetention(minuteCutoff, minuteServerCutoff, hourCutoff int64) (map[string]any, error) {
+	out := map[string]any{}
+	err := d.tx(func(t *sql.Tx) error {
+		exec := func(q string, args ...any) (int64, error) {
+			res, err := t.Exec(q, args...)
+			if err != nil {
+				return 0, err
+			}
+			n, _ := res.RowsAffected()
+			return n, nil
+		}
+		m1, err := exec("DELETE FROM metric_1m WHERE bucket_ts < ?", minuteCutoff)
+		if err != nil {
+			return err
+		}
+		m2, err := exec("DELETE FROM latency_1m WHERE bucket_ts < ?", minuteCutoff)
+		if err != nil {
+			return err
+		}
+		if _, err := exec("DELETE FROM latency_1h WHERE bucket_ts < ?", hourCutoff); err != nil {
+			return err
+		}
+		sm, err := exec("DELETE FROM metric_1m WHERE bucket_ts < ? AND object_id IN (SELECT id FROM objects WHERE kind = 'server')", minuteServerCutoff)
+		if err != nil {
+			return err
+		}
+		h, err := exec("DELETE FROM metric_1h WHERE bucket_ts < ?", hourCutoff)
+		if err != nil {
+			return err
+		}
+		ev, err := exec("DELETE FROM server_state_events WHERE ts < ?", hourCutoff)
+		if err != nil {
+			return err
+		}
+		out["minutes"], out["server_minutes"], out["hours"], out["events"] = m1+m2, sm, h, ev
+		return nil
+	})
+	return out, err
+}
+
+func (d *Database) incrementalVacuum(pages int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, _ = d.db.Exec(fmt.Sprintf("PRAGMA incremental_vacuum(%d)", pages))
+}
+
+func (d *Database) checkpoint(truncate bool) bool {
+	mode := "PASSIVE"
+	if truncate {
+		mode = "TRUNCATE"
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rows, err := d.db.Query("PRAGMA wal_checkpoint(" + mode + ")")
+	if err != nil {
+		return false
+	}
+	rows.Close()
+	return true
+}
+
+func scope(site, alias string) (string, []any) {
+	if site == "" {
+		return alias + ".kind = 'frontend'", nil
+	}
+	return alias + ".kind = 'backend' AND " + alias + ".proxy = ?", []any{site}
+}
+
+func (d *Database) sites() []any {
+	rows, _ := d.queryAll("SELECT proxy, first_seen, last_seen FROM objects WHERE kind = 'backend' ORDER BY proxy")
+	out := []any{}
+	for _, r := range rows {
+		out = append(out, omap("proxy", textOf(r[0]), "first_seen", i64(r[1]), "last_seen", i64(r[2])))
+	}
+	return out
+}
+
+func nullable(v any) any {
+	if v == nil {
+		return nil
+	}
+	return i64(v)
+}
+
+// series is MetricsDatabase.series.
+func (d *Database) series(chart, site string, since, until int64, components bool) (*OMap, error) {
+	columns := chartSeries[chart]
+	table, step := chooseResolution(maxI(1, until-since))
+	if chart == "latency" {
+		return d.latencySeries(site, table, step, since, until)
+	}
+	if chart == "percentiles" {
+		return d.percentileSeries(site, table, step, since, until)
+	}
+	var predicate string
+	var params []any
+	switch {
+	case chart == "refusals":
+		predicate = "o.kind = '" + edgeKind + "'"
+	case hostCharts[chart]:
+		predicate = "o.kind = 'host'"
+	default:
+		predicate, params = scope(site, "o")
+	}
+	proj := make([]string, len(columns))
+	for i, c := range columns {
+		proj[i] = aggregateSQL(c)
+	}
+	q := fmt.Sprintf("SELECT (m.bucket_ts / %d) * %d AS slot, %s FROM %s m JOIN objects o ON o.id = m.object_id WHERE %s AND m.bucket_ts >= ? AND m.bucket_ts < ? GROUP BY slot ORDER BY slot",
+		step, step, strings.Join(proj, ", "), table, predicate)
+	rows, err := d.queryAll(q, append(params, since, until)...)
+	if err != nil {
+		return nil, err
+	}
+	points := []any{}
+	for _, r := range rows {
+		points = append(points, i64(r[0]))
+	}
+	series := NewOMap()
+	for i, c := range columns {
+		vals := []any{}
+		for _, r := range rows {
+			if hostCharts[chart] || chart == "refusals" {
+				vals = append(vals, fromStorage(chart, r[i+1]))
+			} else {
+				vals = append(vals, i64(r[i+1]))
+			}
+		}
+		series.Set(c, clip(vals))
+	}
+	payload := omap("chart", chart, "resolution_seconds", step, "source", table, "points", clip(points), "series", series)
+	if _, ok := componentColumns[chart]; ok {
+		host := make([]int64, len(rows))
+		for i, r := range rows {
+			host[i] = i64(r[1])
+		}
+		if components {
+			err = d.addComponents(payload, chart, table, step, since, until, host)
+		} else {
+			err = d.addComponentGroups(payload, chart, table, step, since, until, host)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return payload, nil
+}
+
+func clip(v []any) []any {
+	if len(v) > maxChartPoints {
+		return v[:maxChartPoints]
+	}
+	return v
+}
+
+func convertComponent(chart string, v int64) any {
+	if chart == "memory" {
+		return v * memoryUnit
+	}
+	return pyRound1(float64(v) / cpuScale)
+}
+
+func (d *Database) addComponentGroups(payload *OMap, chart, table string, step, since, until int64, host []int64) error {
+	stored := int64(bucketSeconds)
+	if table != "metric_1m" {
+		stored = hourSeconds
+	}
+	if step != stored {
+		if err := d.addComponents(payload, chart, table, step, since, until, host); err != nil {
+			return err
+		}
+		payload.Delete("components")
+		return nil
+	}
+	average := componentColumns[chart][0]
+	value := "CASE WHEN m.samples > 0 THEN COALESCE(m." + average + ", 0) ELSE 0 END"
+	d.mu.Lock()
+	objRows, err := queryRows(d.db, "SELECT id, proxy FROM objects WHERE kind = 'component'")
+	if err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	haproxy := []any{}
+	for _, r := range objRows {
+		if componentName(textOf(r[1])) == "haproxy" {
+			haproxy = append(haproxy, i64(r[0]))
+		}
+	}
+	if len(haproxy) == 0 {
+		haproxy = []any{int64(-1)}
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(haproxy)), ", ")
+	args := append([]any{componentContainer, componentService}, haproxy...)
+	args = append(args, since, until)
+	rows, err := queryRows(d.db, "SELECT m.bucket_ts, SUM(CASE WHEN o.server = ? THEN "+value+" ELSE 0 END), SUM(CASE WHEN o.server = ? AND o.id NOT IN ("+marks+") THEN "+value+" ELSE 0 END), SUM("+value+") FROM "+table+" m JOIN objects o ON o.id = m.object_id WHERE o.kind = 'component' AND m.bucket_ts >= ? AND m.bucket_ts < ? GROUP BY m.bucket_ts", args...)
+	d.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	points := payload.Value("points").([]any)
+	size := len(points)
+	position := map[int64]int{}
+	for i, p := range points {
+		position[p.(int64)] = i
+	}
+	containers, helpers, claimed := make([]int64, size), make([]int64, size), make([]int64, size)
+	for _, r := range rows {
+		idx, ok := position[i64(r[0])]
+		if !ok {
+			continue
+		}
+		containers[idx], helpers[idx], claimed[idx] = i64(r[1]), i64(r[2]), i64(r[3])
+	}
+	d.finishGroups(payload, chart, helpers, containers, claimed, host, size)
+	return nil
+}
+
+func (d *Database) finishGroups(payload *OMap, chart string, helpers, containers, claimed, host []int64, size int) {
+	series := payload.Value("series").(*OMap)
+	conv := func(list []int64) []any {
+		out := make([]any, len(list))
+		for i, v := range list {
+			out[i] = convertComponent(chart, v)
+		}
+		return out
+	}
+	series.Set("helpers", conv(helpers))
+	series.Set("containers", conv(containers))
+	other := []any{}
+	for i := 0; i < size && i < len(host); i++ {
+		other = append(other, fromStorage(chart, maxI(0, host[i]-claimed[i])))
+	}
+	series.Set("other", other)
+}
+
+func (d *Database) latencySeries(site, table string, step, since, until int64) (*OMap, error) {
+	predicate, params := "o.kind = 'backend'", []any{}
+	if site != "" {
+		predicate, params = "o.kind = 'backend' AND o.proxy = ?", []any{site}
+	}
+	q := fmt.Sprintf("SELECT (m.bucket_ts / %d) * %d AS slot, CAST(ROUND(SUM(m.response_ms_avg * m.requests) * 1.0 / NULLIF(SUM(m.requests), 0)) AS INTEGER), MAX(CASE WHEN m.requests > 0 THEN m.response_ms_max END) FROM %s m JOIN objects o ON o.id = m.object_id WHERE %s AND m.bucket_ts >= ? AND m.bucket_ts < ? GROUP BY slot ORDER BY slot",
+		step, step, table, predicate)
+	rows, err := d.queryAll(q, append(params, since, until)...)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) > maxChartPoints {
+		rows = rows[:maxChartPoints]
+	}
+	pts, avg, mx := []any{}, []any{}, []any{}
+	for _, r := range rows {
+		pts = append(pts, i64(r[0]))
+		avg = append(avg, nullable(r[1]))
+		mx = append(mx, nullable(r[2]))
+	}
+	return omap("chart", "latency", "resolution_seconds", step, "source", table, "points", pts,
+		"series", omap("response_ms_avg", avg, "response_ms_max", mx)), nil
+}
+
+func (d *Database) percentileSeries(site, table string, step, since, until int64) (*OMap, error) {
+	source := "latency_1h"
+	if table == "metric_1m" {
+		source = "latency_1m"
+	}
+	predicate, params := "o.kind = 'backend'", []any{}
+	if site != "" {
+		predicate, params = "o.kind = 'backend' AND o.proxy = ?", []any{site}
+	}
+	sums := make([]string, len(histogramColumns))
+	for i, c := range histogramColumns {
+		sums[i] = "SUM(m." + c + ")"
+	}
+	q := fmt.Sprintf("SELECT (m.bucket_ts / %d) * %d AS slot, %s FROM %s m JOIN objects o ON o.id = m.object_id WHERE %s AND m.bucket_ts >= ? AND m.bucket_ts < ? GROUP BY slot ORDER BY slot",
+		step, step, strings.Join(sums, ", "), source, predicate)
+	rows, err := d.queryAll(q, append(params, since, until)...)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) > maxChartPoints {
+		rows = rows[:maxChartPoints]
+	}
+	series := NewOMap()
+	lists := map[string][]any{}
+	pts := []any{}
+	for _, r := range rows {
+		pts = append(pts, i64(r[0]))
+		counts := make([]int64, len(r)-1)
+		for i, v := range r[1:] {
+			counts[i] = i64(v)
+		}
+		for _, p := range percentiles {
+			if v, ok := histogramPercentile(counts, p.share); ok {
+				lists[p.name] = append(lists[p.name], v)
+			} else {
+				lists[p.name] = append(lists[p.name], nil)
+			}
+		}
+	}
+	for _, p := range percentiles {
+		if lists[p.name] == nil {
+			lists[p.name] = []any{}
+		}
+		series.Set(p.name, lists[p.name])
+	}
+	return omap("chart", "percentiles", "resolution_seconds", step, "source", source, "points", pts, "series", series), nil
+}
+
+func (d *Database) addComponents(payload *OMap, chart, table string, step, since, until int64, host []int64) error {
+	average, peak := componentColumns[chart][0], componentColumns[chart][1]
+	points := payload.Value("points").([]any)
+	position := map[int64]int{}
+	for i, p := range points {
+		position[p.(int64)] = i
+	}
+	stored := int64(bucketSeconds)
+	if table != "metric_1m" {
+		stored = hourSeconds
+	}
+	var selected, grouping string
+	if step == stored {
+		selected = "m.bucket_ts, o.proxy, o.server, CASE WHEN m.samples > 0 THEN COALESCE(m." + average + ", 0) ELSE 0 END, COALESCE(m." + peak + ", 0)"
+	} else {
+		selected = fmt.Sprintf("(m.bucket_ts / %d) * %d AS slot, o.proxy, o.server, %s, %s", step, step, aggregateSQL(average), aggregateSQL(peak))
+		grouping = " GROUP BY slot, o.id"
+	}
+	rows, err := d.queryAll("SELECT "+selected+" FROM "+table+" m JOIN objects o ON o.id = m.object_id WHERE o.kind = 'component' AND m.bucket_ts >= ? AND m.bucket_ts < ?"+grouping, since, until)
+	if err != nil {
+		return err
+	}
+	size := len(points)
+	type entry struct {
+		name, group string
+		raw         []int64
+		highest     int64
+	}
+	found := map[[2]string]*entry{}
+	order := [][2]string{}
+	names := map[string]string{}
+	for _, r := range rows {
+		idx, ok := position[i64(r[0])]
+		if !ok {
+			continue
+		}
+		proxy := textOf(r[1])
+		name, ok := names[proxy]
+		if !ok {
+			name = componentName(proxy)
+			names[proxy] = name
+		}
+		key := [2]string{textOf(r[2]), name}
+		e, ok := found[key]
+		if !ok {
+			e = &entry{name: name, group: key[0], raw: make([]int64, size)}
+			found[key] = e
+			order = append(order, key)
+		}
+		e.raw[idx] += i64(r[3])
+		if h := i64(r[4]); h > e.highest {
+			e.highest = h
+		}
+	}
+	helpers, containers, claimed := make([]int64, size), make([]int64, size), make([]int64, size)
+	type comp struct {
+		om   *OMap
+		mean float64
+		name string
+	}
+	comps := []comp{}
+	for _, key := range order {
+		e := found[key]
+		var sum, mx int64
+		for i, v := range e.raw {
+			claimed[i] += v
+			if e.group == componentContainer {
+				containers[i] += v
+			} else if e.group == componentService && e.name != "haproxy" {
+				helpers[i] += v
+			}
+			sum += v
+			if v > mx {
+				mx = v
+			}
+		}
+		values := make([]any, size)
+		for i, v := range e.raw {
+			values[i] = convertComponent(chart, v)
+		}
+		mean := fromStorage(chart, floorDiv(sum, maxI(1, int64(size))))
+		pk := fromStorage(chart, maxI(e.highest, mx))
+		om := omap("name", e.name, "group", e.group, "values", values, "mean", mean, "peak", pk)
+		comps = append(comps, comp{om, toFloat(mean), e.name})
+	}
+	sort.SliceStable(comps, func(i, j int) bool {
+		if comps[i].mean != comps[j].mean {
+			return comps[i].mean > comps[j].mean
+		}
+		return comps[i].name < comps[j].name
+	})
+	d.finishGroups(payload, chart, helpers, containers, claimed, host, size)
+	list := make([]any, len(comps))
+	for i, c := range comps {
+		list[i] = c.om
+	}
+	payload.Set("components", list)
+	return nil
+}
+
+func toFloat(v any) float64 {
+	switch x := v.(type) {
+	case int64:
+		return float64(x)
+	case float64:
+		return x
+	}
+	return 0
+}
+
+func (d *Database) hostLoad(since, until int64) (*OMap, error) {
+	table, _ := chooseResolution(maxI(1, until-since))
+	columns := []string{"cpu_avg", "cpu_max", "haproxy_busy_avg", "haproxy_busy_max", "memory_avg", "memory_max", "memory_total"}
+	proj := make([]string, len(columns))
+	for i, c := range columns {
+		proj[i] = aggregateSQL(c)
+	}
+	rows, err := d.queryAll("SELECT COUNT(*) AS observed, "+strings.Join(proj, ", ")+" FROM "+table+" m JOIN objects o ON o.id = m.object_id WHERE o.kind = 'host' AND m.bucket_ts >= ? AND m.bucket_ts < ?", since, until)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 || i64(rows[0][0]) == 0 {
+		return omap("observed", false), nil
+	}
+	out := omap("observed", true)
+	for i, c := range columns {
+		chart := "cpu"
+		if strings.HasPrefix(c, "memory") {
+			chart = "memory"
+		}
+		out.Set(c, fromStorage(chart, rows[0][i+1]))
+	}
+	return out, nil
+}
+
+func (d *Database) totals(site string, since, until int64) (*OMap, error) {
+	table, _ := chooseResolution(maxI(1, until-since))
+	predicate, params := scope(site, "o")
+	proj := make([]string, len(summaryColumns))
+	for i, c := range summaryColumns {
+		proj[i] = aggregateSQL(c)
+	}
+	rows, err := d.queryAll("SELECT "+strings.Join(proj, ", ")+" FROM "+table+" m JOIN objects o ON o.id = m.object_id WHERE "+predicate+" AND m.bucket_ts >= ? AND m.bucket_ts < ?", append(params, since, until)...)
+	if err != nil {
+		return nil, err
+	}
+	out := NewOMap()
+	for i, c := range summaryColumns {
+		var v int64
+		if len(rows) > 0 {
+			v = i64(rows[0][i])
+		}
+		out.Set(c, v)
+	}
+	return out, nil
+}
+
+func (d *Database) serverTotals(since, until int64) (*OMap, error) {
+	table, _ := chooseResolution(maxI(1, until-since))
+	columns := []string{"bytes_in", "bytes_out", "sessions"}
+	proj := make([]string, len(columns))
+	for i, c := range columns {
+		proj[i] = aggregateSQL(c)
+	}
+	rows, err := d.queryAll("SELECT o.proxy, o.server, "+strings.Join(proj, ", ")+" FROM "+table+" m JOIN objects o ON o.id = m.object_id WHERE o.kind = 'server' AND m.bucket_ts >= ? AND m.bucket_ts < ? GROUP BY o.proxy, o.server ORDER BY o.proxy, o.server", since, until)
+	if err != nil {
+		return nil, err
+	}
+	servers := []any{}
+	for _, r := range rows {
+		e := omap("proxy", textOf(r[0]), "server", textOf(r[1]))
+		for i, c := range columns {
+			e.Set(c, i64(r[i+2]))
+		}
+		servers = append(servers, e)
+	}
+	return omap("servers", servers), nil
+}
+
+var backendTotalColumns = []string{"requests", "resp_2xx", "resp_3xx", "resp_4xx", "resp_5xx", "resp_other", "bytes_in",
+	"bytes_out", "sessions", "check_failures"}
+
+func (d *Database) backendTotals(since, until int64) (*OMap, error) {
+	table, _ := chooseResolution(maxI(1, until-since))
+	proj := make([]string, len(backendTotalColumns))
+	for i, c := range backendTotalColumns {
+		proj[i] = aggregateSQL(c)
+	}
+	rows, err := d.queryAll("SELECT o.proxy, "+strings.Join(proj, ", ")+", CAST(ROUND(SUM(m.response_ms_avg * m.requests) * 1.0 / NULLIF(SUM(m.requests), 0)) AS INTEGER), MAX(CASE WHEN m.requests > 0 THEN m.response_ms_max END) FROM "+table+" m JOIN objects o ON o.id = m.object_id WHERE o.kind = 'backend' AND m.bucket_ts >= ? AND m.bucket_ts < ? GROUP BY o.proxy ORDER BY o.proxy", since, until)
+	if err != nil {
+		return nil, err
+	}
+	backends := []any{}
+	n := len(backendTotalColumns)
+	for _, r := range rows {
+		e := omap("proxy", textOf(r[0]))
+		for i, c := range backendTotalColumns {
+			e.Set(c, i64(r[i+1]))
+		}
+		e.Set("response_ms_avg", nullable(r[n+1]))
+		e.Set("response_ms_max", nullable(r[n+2]))
+		backends = append(backends, e)
+	}
+	return omap("backends", backends, "source", table), nil
+}
+
+func (d *Database) latestGauges(site string, until int64) (*OMap, error) {
+	predicate, params := scope(site, "o")
+	inner, innerParams := scope(site, "o2")
+	args := append(append(params, innerParams...), until)
+	rows, err := d.queryAll("SELECT "+aggregateSQL("conn_cur_avg")+", "+aggregateSQL("conn_cur_max")+" FROM metric_1m m JOIN objects o ON o.id = m.object_id WHERE "+predicate+" AND m.bucket_ts = (  SELECT MAX(m2.bucket_ts) FROM metric_1m m2   JOIN objects o2 ON o2.id = m2.object_id   WHERE "+inner+" AND m2.bucket_ts <= ?)", args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return omap("conn_cur_avg", int64(0), "conn_cur_max", int64(0)), nil
+	}
+	return omap("conn_cur_avg", i64(rows[0][0]), "conn_cur_max", i64(rows[0][1])), nil
+}
+
+func (d *Database) backendHealth() (*OMap, error) {
+	rows, err := d.queryAll("SELECT o.kind, o.proxy, o.server, e.state, e.ts FROM server_state_events e JOIN objects o ON o.id = e.object_id WHERE e.id IN (SELECT MAX(id) FROM server_state_events GROUP BY object_id) AND e.state != ? ORDER BY o.proxy, o.server", removedState)
+	if err != nil {
+		return nil, err
+	}
+	backends, servers := []any{}, []any{}
+	var bUp, sUp int64
+	for _, r := range rows {
+		e := omap("proxy", textOf(r[1]), "server", textOf(r[2]), "state", textOf(r[3]), "since", i64(r[4]))
+		if textOf(r[0]) == "backend" {
+			backends = append(backends, e)
+			if textOf(r[3]) == "UP" {
+				bUp++
+			}
+		} else {
+			servers = append(servers, e)
+			if textOf(r[3]) == "UP" {
+				sUp++
+			}
+		}
+	}
+	return omap("backends", backends, "servers", servers, "backends_up", bUp, "backends_total", int64(len(backends)),
+		"servers_up", sUp, "servers_total", int64(len(servers))), nil
+}
+
+func stateScope(site, alias string) (string, []any) {
+	if site == "" {
+		return alias + ".kind IN ('backend', 'server')", nil
+	}
+	return alias + ".kind IN ('backend', 'server') AND " + alias + ".proxy = ?", []any{site}
+}
+
+type stateChange struct {
+	ts    int64
+	state string
+}
+
+func (d *Database) stateTimeline(site string, since, until int64) (*OMap, error) {
+	predicate, params := stateScope(site, "o")
+	d.mu.Lock()
+	objects, err := queryRows(d.db, "SELECT o.id, o.kind, o.proxy, o.server FROM objects o WHERE "+predicate+" ORDER BY o.proxy, o.kind DESC, o.server", params...)
+	if err != nil {
+		d.mu.Unlock()
+		return nil, err
+	}
+	if len(objects) == 0 {
+		d.mu.Unlock()
+		return omap("objects", []any{}, "truncated", false), nil
+	}
+	ids := []any{}
+	for _, r := range objects {
+		ids = append(ids, i64(r[0]))
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(ids)), ", ")
+	initialRows, err := queryRows(d.db, "SELECT object_id, state FROM server_state_events WHERE id IN (  SELECT MAX(id) FROM server_state_events   WHERE ts <= ? AND object_id IN ("+marks+")   GROUP BY object_id)", append([]any{since}, ids...)...)
+	if err != nil {
+		d.mu.Unlock()
+		return nil, err
+	}
+	events, err := queryRows(d.db, "SELECT object_id, ts, state FROM server_state_events WHERE object_id IN ("+marks+") AND ts > ? AND ts <= ? ORDER BY object_id, id", append(ids, since, until)...)
+	d.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	initial := map[int64]string{}
+	for _, r := range initialRows {
+		initial[i64(r[0])] = textOf(r[1])
+	}
+	byObject := map[int64][]stateChange{}
+	for _, r := range events {
+		id := i64(r[0])
+		byObject[id] = append(byObject[id], stateChange{i64(r[1]), textOf(r[2])})
+	}
+	window := maxI(1, until-since)
+	compressed := false
+	result := []any{}
+	drawn := func(s string) string {
+		if s == removedState {
+			return absentSpan
+		}
+		return s
+	}
+	for _, r := range objects {
+		id := i64(r[0])
+		changes := byObject[id]
+		state, hasState := initial[id]
+		if !hasState && len(changes) == 0 {
+			continue
+		}
+		allRemoved := true
+		for _, c := range changes {
+			if c.state != removedState {
+				allRemoved = false
+			}
+		}
+		if (!hasState || state == removedState) && allRemoved {
+			continue
+		}
+		spans := []span{}
+		var cursor int64
+		var current string
+		if !hasState {
+			cursor = maxI(since, changes[0].ts)
+			closeSpan(&spans, since, cursor, absentSpan)
+			current = changes[0].state
+		} else {
+			cursor, current = since, state
+		}
+		var removedAt int64
+		hasRemoved := false
+		for _, c := range changes {
+			closeSpan(&spans, cursor, c.ts, drawn(current))
+			cursor = maxI(cursor, c.ts)
+			current = c.state
+			if c.state == removedState {
+				removedAt, hasRemoved = c.ts, true
+			} else {
+				hasRemoved = false
+			}
+		}
+		closeSpan(&spans, cursor, until, drawn(current))
+		var absent, downtime int64
+		for _, s := range spans {
+			if s.State == absentSpan {
+				absent += s.End - s.Start
+			} else if s.State != "UP" {
+				downtime += s.End - s.Start
+			}
+		}
+		present := maxI(1, window-absent)
+		if len(spans) > maxTimelineSpans {
+			spans = compressSpans(spans, since, until, maxTimelineSpans)
+			compressed = true
+		}
+		transitions := int64(0)
+		for _, c := range changes {
+			if c.state != removedState {
+				transitions++
+			}
+		}
+		avail := float64(present-downtime) / float64(present)
+		if avail < 0 {
+			avail = 0
+		}
+		spanList := make([]any, len(spans))
+		for i, s := range spans {
+			spanList[i] = s
+		}
+		e := omap("kind", textOf(r[1]), "proxy", textOf(r[2]), "server", textOf(r[3]), "current_state", current,
+			"transitions", transitions, "downtime_seconds", downtime, "availability", pyRoundN(avail, 5), "spans", spanList)
+		if current == removedState && hasRemoved {
+			e.Set("removed_at", removedAt)
+		}
+		result = append(result, e)
+	}
+	return omap("objects", result, "truncated", false, "compressed", compressed), nil
+}
+
+func (d *Database) recordStorageSample(ts, total int64) error {
+	slot := ts - ts%storageSampleInterval
+	return d.tx(func(t *sql.Tx) error {
+		if _, err := t.Exec("INSERT INTO storage_samples (ts, total_bytes) VALUES (?, ?) ON CONFLICT (ts) DO UPDATE SET total_bytes = excluded.total_bytes", slot, total); err != nil {
+			return err
+		}
+		_, err := t.Exec("DELETE FROM storage_samples WHERE ts < ?", ts-storageSampleRetention)
+		return err
+	})
+}
+
+func (d *Database) storageGrowth(now, current int64) *OMap {
+	since := func(seconds int64) any {
+		rows, err := d.queryAll("SELECT total_bytes FROM storage_samples WHERE ts <= ? ORDER BY ts DESC LIMIT 1", now-seconds)
+		if err != nil || len(rows) == 0 {
+			return nil
+		}
+		return current - i64(rows[0][0])
+	}
+	day, week := since(86400), since(7*86400)
+	trend := "unknown"
+	if week != nil {
+		w := week.(int64)
+		limit := maxI(stableGrowthFloor, int64(float64(current)*stableGrowthFraction))
+		aw := w
+		if aw < 0 {
+			aw = -aw
+		}
+		switch {
+		case aw <= limit:
+			trend = "stable"
+		case w > 0:
+			trend = "growing"
+		default:
+			trend = "shrinking"
+		}
+	}
+	return omap("last_24h_bytes", day, "last_7d_bytes", week, "trend", trend)
+}
+
+func (d *Database) stats() (*OMap, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	one := func(q string) []any {
+		rows, err := queryRows(d.db, q)
+		if err != nil || len(rows) == 0 {
+			return nil
+		}
+		return rows[0]
+	}
+	version := one("SELECT version FROM schema_version")
+	objects := one("SELECT COUNT(*) AS value FROM objects")
+	minutes := one("SELECT COUNT(*) AS value, MIN(bucket_ts) AS oldest, MAX(bucket_ts) AS newest FROM metric_1m")
+	hours := one("SELECT COUNT(*) AS value, MIN(bucket_ts) AS oldest, MAX(bucket_ts) AS newest FROM metric_1h")
+	events := one("SELECT COUNT(*) AS value FROM server_state_events")
+	freelist := one("PRAGMA freelist_count")
+	var v, fl int64
+	if version != nil {
+		v = i64(version[0])
+	}
+	if freelist != nil {
+		fl = i64(freelist[0])
+	}
+	return omap("schema_version", v, "objects", i64(objects[0]),
+		"metric_1m", omap("rows", i64(minutes[0]), "oldest_bucket_ts", nullable(minutes[1]), "newest_bucket_ts", nullable(minutes[2])),
+		"metric_1h", omap("rows", i64(hours[0]), "oldest_bucket_ts", nullable(hours[1]), "newest_bucket_ts", nullable(hours[2])),
+		"state_events", i64(events[0]), "freelist_pages", fl), nil
+}
+
+func fileSize(p string) int64 {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+func (d *Database) storage() *OMap {
+	db, wal, shm := fileSize(d.Path), fileSize(d.Path+"-wal"), fileSize(d.Path+"-shm")
+	fs := omap("total_bytes", int64(0), "free_bytes", int64(0))
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(filepath.Dir(d.Path), &st); err == nil {
+		fs = omap("total_bytes", int64(st.Blocks)*int64(st.Frsize), "free_bytes", int64(st.Bavail)*int64(st.Frsize))
+	}
+	return omap("database_bytes", db, "wal_bytes", wal, "shm_bytes", shm, "total_bytes", db+wal+shm, "filesystem", fs)
 }

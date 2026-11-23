@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -21,7 +20,6 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/backupd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/healthd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
@@ -83,11 +81,6 @@ func main() {
 		os.Exit(runCertDeliver(args))
 	case "update-geoip":
 		os.Exit(runUpdateGeoIP(args))
-	case "probe-host":
-		s, _ := metricsd.ReadHostSample(time.Now().Unix(), nil)
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(s)
 	default:
 		usage()
 		os.Exit(2)
@@ -95,7 +88,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|probe-host|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|version> [flags]")
 }
 
 func runUDPForward(args []string) int {
@@ -345,60 +338,8 @@ func runHealthd(args []string) {
 	}
 }
 
-func runMetricsd(args []string) {
-	fs := flag.NewFlagSet("metricsd", flag.ExitOnError)
-	cfgPath := fs.String("config", envOr("METRICSD_CONFIG", metricsd.DefaultConfigPath), "path to metricsd.json")
-	sockPath := fs.String("socket", envOr("METRICSD_SOCKET_PATH", metricsd.DefaultSocketPath), "AF_UNIX socket path")
-	dbPath := envOr("METRICSD_DATABASE", "/var/lib/easy-ha-proxy/metrics/metrics.db")
-	storePath := fs.String("store", envOr("METRICSD_STORE", filepath.Join(filepath.Dir(dbPath), "metrics-store.json")), "path to persisted metrics store")
-	_ = fs.Parse(args)
-
-	cfg := metricsd.LoadConfig(*cfgPath)
-	ctx, cancel := signalContext()
-	defer cancel()
-
-	if !cfg.Enabled {
-		log.Printf("easy-ha-proxy-agent metricsd disabled in %s; idling", *cfgPath)
-		<-ctx.Done()
-		return
-	}
-
-	store, err := metricsd.NewStore(*storePath, cfg)
-	if err != nil {
-		log.Fatalf("metricsd store error: %v", err)
-	}
-	col := metricsd.NewCollectorWithStore(cfg, haproxy.NewClient(cfg.HAProxySocket), store, alerts.FromEnv())
-	srv := &metricsd.Server{Collector: col}
-
-	go func() {
-		pollTicker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
-		defer pollTicker.Stop()
-		maintInterval := time.Duration(cfg.MaintenanceIntervalSeconds) * time.Second
-		if maintInterval <= 0 {
-			maintInterval = 5 * time.Minute
-		}
-		maintTicker := time.NewTicker(maintInterval)
-		defer maintTicker.Stop()
-
-		now := time.Now().Unix()
-		col.EvaluateStorageAlerts(ctx, now)
-		_ = col.PollOnce(ctx, now)
-		for {
-			select {
-			case <-ctx.Done():
-				store.Flush()
-				return
-			case t := <-pollTicker.C:
-				_ = col.PollOnce(ctx, t.Unix())
-			case t := <-maintTicker.C:
-				col.EvaluateStorageAlerts(ctx, t.Unix())
-				store.Prune(t.Unix())
-			}
-		}
-	}()
-
-	log.Printf("easy-ha-proxy-agent metricsd listening on %s store=%s", *sockPath, *storePath)
-	if err := srv.Serve(ctx, *sockPath); err != nil {
+func runMetricsd(_ []string) {
+	if err := metricsd.Main(); err != nil {
 		log.Fatalf("metricsd error: %v", err)
 	}
 }
