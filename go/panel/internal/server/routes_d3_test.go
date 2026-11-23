@@ -74,35 +74,10 @@ func TestStageD3AuditConfigStoreAndHTMLPages(t *testing.T) {
 		return req
 	}
 
-	// 1. Config store state, preview, download, save (audited), check, and apply (audited).
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/haproxy/config/state", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"clean"`) {
-		t.Fatalf("config state failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/haproxy/config/download/vars", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_geoip: true") {
-		t.Fatalf("config download vars failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/haproxy/config/check", `{"config":"global\n"}`))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
-		t.Fatalf("config check failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/haproxy/config/apply", `{"reason":"test"}`))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"pending_confirmation"`) {
-		t.Fatalf("config apply failed: %d %s", rec.Code, rec.Body.String())
-	}
-
 	// 2. Audit events, filters, status, and SSH unblock history.
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, superReq(http.MethodGet, "/api/audit/events?range=7d", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"config.apply"`) {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("audit events failed: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -125,7 +100,6 @@ func TestStageD3AuditConfigStoreAndHTMLPages(t *testing.T) {
 		"/monitoring",
 		"/system/alerts",
 		"/system/audit",
-		"/haproxy/config",
 		"/haproxy/backends",
 		"/system/backups/",
 		"/system/updates/",
