@@ -231,19 +231,7 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 		t.Fatalf("country-batch failed: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. Certs: DNS provider validation + save, cert delivery with available lineages, CA download.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/api/haproxy/dns-providers/save", `{"name":"cf-main","provider":"cloudflare","credentials":{"api_token":"tok123"}}`, ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("dns-provider save failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/api/haproxy/cert-delivery", "", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "example.com") {
-		t.Fatalf("cert-delivery list failed: %d %s", rec.Code, rec.Body.String())
-	}
-
+	// 2. Certs (DNS providers, cert delivery) moved to internal/app; the Flask harness covers them.
 
 	// 3. Config history, transactions, and GeoIP via controld.
 	rec = httptest.NewRecorder()
