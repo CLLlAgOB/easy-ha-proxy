@@ -205,6 +205,9 @@ func (a *App) registerAll() {
 	a.registerTCPRoutes()
 	a.registerSiteRoutes()
 	a.registerConfigRoutes()
+	a.registerSitesPage()
+	a.registerSiteEdit()
+	a.registerTCPPages()
 	trashRestorers["udp"] = RestoreUDPForward
 }
 
