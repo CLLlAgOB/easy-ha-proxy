@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -30,7 +31,11 @@ type Daemon struct {
 	Opts   Options
 	Alerts *alerts.Client
 
-	stateMu  sync.Mutex // STATE_LOCK
+	stateMu sync.Mutex // STATE_LOCK
+
+	jobCacheMu sync.Mutex
+	jobCache   map[string]jobCacheEntry
+
 	opMu     sync.Mutex // OPERATION_THREAD_LOCK
 	uploadMu sync.Mutex // DESTINATION_UPLOAD_LOCKS_GUARD
 	uploads  map[string]*uploadLock
@@ -397,12 +402,13 @@ func (d *Daemon) safeJSONFile(path string) (map[string]any, error) {
 	if cur.Dev != info.Dev || cur.Ino != info.Ino {
 		return nil, bErr("invalid", "state file changed while opening: %s", name)
 	}
-	raw := make([]byte, d.Opts.MaxStateBytes+1)
-	n, _ := readFull(f, raw)
-	if n > d.Opts.MaxStateBytes {
+	// Sized by what is read, not by the cap: listing the jobs reads every job
+	// file, and a 1 MiB buffer each time kept the collector busy.
+	raw, _ := io.ReadAll(io.LimitReader(f, int64(d.Opts.MaxStateBytes)+1))
+	if len(raw) > d.Opts.MaxStateBytes {
 		return nil, bErr("invalid", "state file is too large: %s", name)
 	}
-	v, err := decodeJSON(raw[:n])
+	v, err := decodeJSON(raw)
 	if err != nil {
 		return nil, bErr("invalid", "%v", err)
 	}
@@ -531,12 +537,54 @@ func sortByCreatedDesc(items []map[string]any) {
 	})
 }
 
+// jobCacheEntry is a job file as listJobs last read it, and the lstat it
+// was read under. Every write replaces the file by rename, so a changed file
+// is a different inode, size or mtime and is read again.
+type jobCacheEntry struct {
+	sig statInfo
+	job map[string]any
+}
+
+func deepCopyValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return deepCopyMap(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = deepCopyValue(item)
+		}
+		return out
+	}
+	return v
+}
+
+func deepCopyMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = deepCopyValue(v)
+	}
+	return out
+}
+
 func (d *Daemon) listJobs() []map[string]any {
 	matches, _ := filepath.Glob(filepath.Join(d.Opts.JobsDir(), "*.json"))
 	jobs := []map[string]any{}
+	d.jobCacheMu.Lock()
+	defer d.jobCacheMu.Unlock()
+	if d.jobCache == nil {
+		d.jobCache = map[string]jobCacheEntry{}
+	}
+	seen := map[string]bool{}
 	for _, path := range matches {
 		jobID := strings.TrimSuffix(filepath.Base(path), ".json")
 		if !identifierRe.MatchString(jobID) {
+			continue
+		}
+		sig, statErr := lstatInfo(path)
+		if kept, ok := d.jobCache[jobID]; ok && statErr == nil && kept.sig == sig {
+			seen[jobID] = true
+			jobs = append(jobs, kept.job)
 			continue
 		}
 		job, err := d.loadJob(jobID, false)
@@ -544,11 +592,24 @@ func (d *Daemon) listJobs() []map[string]any {
 			log.Printf("Ignoring unsafe job state %s", filepath.Base(path))
 			continue
 		}
+		if statErr == nil {
+			seen[jobID] = true
+			d.jobCache[jobID] = jobCacheEntry{sig: sig, job: job}
+		}
 		jobs = append(jobs, job)
+	}
+	for jobID := range d.jobCache {
+		if !seen[jobID] {
+			delete(d.jobCache, jobID)
+		}
 	}
 	sortByCreatedDesc(jobs)
 	if len(jobs) > d.Opts.ListLimit {
 		jobs = jobs[:d.Opts.ListLimit]
+	}
+	// The cache keeps its own maps: callers get copies they may change.
+	for i, job := range jobs {
+		jobs[i] = deepCopyMap(job)
 	}
 	return jobs
 }

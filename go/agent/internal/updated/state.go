@@ -3,6 +3,7 @@ package updated
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -24,7 +25,11 @@ type Daemon struct {
 	Alerts *alerts.Client
 
 	stateMu sync.Mutex // STATE_LOCK
-	opMu    sync.Mutex // OPERATION_THREAD_LOCK
+
+	jobCacheMu sync.Mutex
+	jobCache   map[string]jobCacheEntry
+
+	opMu sync.Mutex // OPERATION_THREAD_LOCK
 
 	shutdown chan struct{}
 	stop     chan struct{}
@@ -332,16 +337,14 @@ func (d *Daemon) safeJSONFile(path string) (map[string]any, error) {
 	if opened.Dev != info.Dev || opened.Ino != info.Ino {
 		return nil, uErr("invalid", "state file changed while opening: %s", name)
 	}
-	raw := make([]byte, d.Opts.MaxStateBytes+1)
-	n := 0
-	for n < len(raw) {
-		m, rerr := f.Read(raw[n:])
-		n += m
-		if rerr != nil || m == 0 {
-			break
-		}
+	// os.read(fd, MAX_STATE_BYTES + 1): what the file holds, never more than
+	// the cap. Sized by what is read, not by the cap: listing the jobs reads
+	// every job file, and a 1 MiB buffer each time kept the collector busy.
+	raw, err := io.ReadAll(io.LimitReader(f, int64(d.Opts.MaxStateBytes)+1))
+	if err != nil {
+		return nil, err
 	}
-	v, err := pyx.Decode(raw[:n])
+	v, err := pyx.Decode(raw)
 	if err != nil {
 		return nil, uErr("invalid", "%v", err)
 	}
@@ -520,12 +523,32 @@ func (d *Daemon) updateJob(jobID string, updates map[string]any) (map[string]any
 	return publicJob(state, true), nil
 }
 
+// jobCacheEntry is a job file as listJobs last read it, and the lstat it
+// was read under. Every write replaces the file by rename, so a changed file
+// is a different inode, size or mtime and is read again.
+type jobCacheEntry struct {
+	sig pyx.StatInfo
+	job map[string]any
+}
+
 func (d *Daemon) listJobs() []map[string]any {
 	matches, _ := filepath.Glob(filepath.Join(d.Opts.JobsDir(), "*.json"))
 	jobs := []map[string]any{}
+	d.jobCacheMu.Lock()
+	defer d.jobCacheMu.Unlock()
+	if d.jobCache == nil {
+		d.jobCache = map[string]jobCacheEntry{}
+	}
+	seen := map[string]bool{}
 	for _, path := range matches {
 		stem := strings.TrimSuffix(filepath.Base(path), ".json")
 		if !identifierRe.MatchString(stem) {
+			continue
+		}
+		sig, statErr := pyx.Lstat(path)
+		if kept, ok := d.jobCache[stem]; ok && statErr == nil && kept.sig == sig {
+			seen[stem] = true
+			jobs = append(jobs, kept.job)
 			continue
 		}
 		job, err := d.loadJob(stem, false)
@@ -533,7 +556,16 @@ func (d *Daemon) listJobs() []map[string]any {
 			log.Printf("Ignoring unsafe update job state %s", filepath.Base(path))
 			continue
 		}
+		if statErr == nil {
+			seen[stem] = true
+			d.jobCache[stem] = jobCacheEntry{sig: sig, job: job}
+		}
 		jobs = append(jobs, job)
+	}
+	for stem := range d.jobCache {
+		if !seen[stem] {
+			delete(d.jobCache, stem)
+		}
 	}
 	sort.SliceStable(jobs, func(i, j int) bool {
 		return pyx.StrOr(jobs[i]["created_at"]) > pyx.StrOr(jobs[j]["created_at"])
@@ -541,7 +573,33 @@ func (d *Daemon) listJobs() []map[string]any {
 	if len(jobs) > d.Opts.ListLimit {
 		jobs = jobs[:d.Opts.ListLimit]
 	}
+	// The cache keeps its own maps: callers get copies they may change.
+	for i, job := range jobs {
+		jobs[i] = deepCopyMap(job)
+	}
 	return jobs
+}
+
+func deepCopyValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return deepCopyMap(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = deepCopyValue(item)
+		}
+		return out
+	}
+	return v
+}
+
+func deepCopyMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = deepCopyValue(v)
+	}
+	return out
 }
 
 func activeStatus(s any) bool { return s == "queued" || s == "running" }

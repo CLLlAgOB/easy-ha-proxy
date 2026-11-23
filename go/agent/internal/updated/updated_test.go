@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func newTestDaemon(t *testing.T) *Daemon {
+func newTestDaemon(t testing.TB) *Daemon {
 	t.Helper()
 	root := t.TempDir()
 	opts := Options{
@@ -130,5 +130,38 @@ func TestAvailabilityReport(t *testing.T) {
 	_, _, _, ok = availabilityReport(map[string]any{"components": []any{map[string]any{"id": "os", "state": "unknown"}}})
 	if ok {
 		t.Fatal("unknown must say nothing")
+	}
+}
+
+// listJobs keeps parsed job files between calls; a write must show at once,
+// and a caller changing what it got must not change what the next one gets.
+func TestListJobsCache(t *testing.T) {
+	d := newTestDaemon(t)
+	job, err := d.newJob("check", map[string]any{"components": []any{"host"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := job["id"].(string)
+	first := d.listJobs()
+	if len(first) != 1 || first[0]["status"] != "queued" {
+		t.Fatalf("first listing: %v", first)
+	}
+	first[0]["status"] = "tampered"
+	first[0]["components"].([]any)[0] = "tampered"
+	again := d.listJobs()
+	if again[0]["status"] != "queued" || again[0]["components"].([]any)[0] != "host" {
+		t.Fatalf("cache changed by a caller: %v", again[0])
+	}
+	if _, err := d.updateJob(id, map[string]any{"status": "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.listJobs(); got[0]["status"] != "running" {
+		t.Fatalf("a written job was not read again: %v", got[0])
+	}
+	if err := os.Remove(filepath.Join(d.Opts.JobsDir(), id+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.listJobs(); len(got) != 0 || len(d.jobCache) != 0 {
+		t.Fatalf("a removed job is still listed: %v %v", got, d.jobCache)
 	}
 }
