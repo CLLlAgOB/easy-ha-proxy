@@ -1299,6 +1299,27 @@ def _normalized_tagged_image(image: str) -> str | None:
     return f"{repository}:{tag}"
 
 
+PANEL_FLAVOURS = ("go-",)
+
+
+def _panel_flavour(reference: str | None) -> str:
+    """The tag prefix of the panel flavour a normalised reference runs."""
+    if not reference:
+        return ""
+    tag = reference.rsplit(":", 1)[1]
+    for flavour in PANEL_FLAVOURS:
+        if tag.startswith(flavour) and tag[len(flavour):] in VALID_IMAGE_CHANNELS:
+            return flavour
+    return ""
+
+
+def _flavoured(reference: str | None, flavour: str) -> str | None:
+    if not reference or not flavour or _panel_flavour(reference) == flavour:
+        return reference
+    repository, tag = reference.rsplit(":", 1)
+    return f"{repository}:{flavour}{tag}"
+
+
 def _probe_image(image: str, runner: Runner) -> dict[str, Any]:
     if (
         not image
@@ -1901,8 +1922,13 @@ def _probe_admin_compose(
             },
         )
     base_image = configured_image or current_image
-    target_image = _tagged_image(base_image, target_channel)
     normalized_current = _normalized_tagged_image(current_image)
+    # The Go panel is published under "go-<channel>" in the same repository
+    # and chosen by the deployment, not by the channel. Keep the flavour the
+    # gateway runs, or every check would offer a "channel change" that the
+    # next deployment undoes, and the applied digest would never match.
+    flavour = _panel_flavour(normalized_current)
+    target_image = _tagged_image(base_image, flavour + target_channel)
     if not target_image or not normalized_current:
         return _component(
             "admin-container",
@@ -2000,7 +2026,7 @@ def _probe_admin_compose(
     _check_running(image_detail, current_image, running_images, runner)
 
     configured_reference = (
-        _normalized_tagged_image(configured_image)
+        _flavoured(_normalized_tagged_image(configured_image), flavour)
         if configured_image
         else target_image
     )

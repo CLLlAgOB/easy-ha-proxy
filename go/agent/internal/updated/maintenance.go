@@ -245,7 +245,38 @@ func (d *Daemon) recordAutoInstall(outcome string, values map[string]any) {
 	if err := d.atomicJSON(d.Opts.AutoInstallPath(), record); err != nil {
 		log.Printf("Could not record the automatic installation")
 	}
-	log.Printf("Automatic installation: %s %v", outcome, values)
+	log.Printf("Automatic installation: %s %s", outcome, pyValuesRepr(values))
+}
+
+// pyValuesRepr is `values or ""` for the keyword arguments Python logs, in
+// the order its call sites pass them.
+func pyValuesRepr(values map[string]any) string {
+	if len(values) == 0 {
+		return ""
+	}
+	quote := func(s string) string { return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", `\'`) + "'" }
+	parts := []string{}
+	for _, k := range []string{"components", "job_id", "error"} {
+		v, ok := values[k]
+		if !ok {
+			continue
+		}
+		var text string
+		switch x := v.(type) {
+		case []string:
+			items := make([]string, len(x))
+			for i, s := range x {
+				items[i] = quote(s)
+			}
+			text = "[" + strings.Join(items, ", ") + "]"
+		case string:
+			text = quote(x)
+		default:
+			text = fmt.Sprint(x)
+		}
+		parts = append(parts, quote(k)+": "+text)
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 func (d *Daemon) autoInstallOnce() (string, error) {
