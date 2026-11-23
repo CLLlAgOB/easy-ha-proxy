@@ -202,6 +202,7 @@ func requestHeaderOrder(r *http.Request) [][2]string {
 func (a *App) registerAll() {
 	a.registerPages()
 	a.registerUDPRoutes()
+	a.registerTCPRoutes()
 	trashRestorers["udp"] = RestoreUDPForward
 }
 
