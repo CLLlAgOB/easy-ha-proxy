@@ -464,3 +464,31 @@ func Main() error {
 	}
 	return err
 }
+
+// ProbeHost is the probe-host subcommand: one reading of what the collector
+// would read from this machine, for checking a build on a host.
+func ProbeHost() *OMap {
+	out := NewOMap()
+	if m := readHostMemory(); m != nil {
+		out.Set("memory_used_kib", m.a)
+		out.Set("memory_total_kib", m.b)
+	} else {
+		out.Set("memory_used_kib", nil)
+		out.Set("memory_total_kib", nil)
+	}
+	if used, total, ok := readDiskSpace(diskPath); ok {
+		out.Set("disk_used_kib", used)
+		out.Set("disk_total_kib", total)
+	} else {
+		out.Set("disk_used_kib", nil)
+		out.Set("disk_total_kib", nil)
+	}
+	if t, ok := readTemperature(thermalRoot); ok {
+		out.Set("temperature_tenths", t)
+	} else {
+		out.Set("temperature_tenths", nil)
+	}
+	out.Set("disks", int64(len(readDiskCounters(diskstatsPath, sysBlockRoot))))
+	out.Set("network_cards", int64(len(readNetworkCounters(sysNetRoot))))
+	return out
+}
