@@ -82,3 +82,31 @@ func guarddManualBan(ip string) (*Map, error) {
 }
 
 func intParam(key string, n int64) QueryValue { return QueryValue{key, fmt.Sprint(n)} }
+
+// guarddGetAny is _get_json for callers that hand the answer on as it is.
+func guarddGetAny(path string, params []QueryValue, timeout time.Duration) (any, error) {
+	return guarddTransport().Get(path, HTTPOptions{Params: params, Timeout: timeout})
+}
+
+// guarddChangeAny is _change for callers that hand the answer on as it is.
+func guarddChangeAny(path string, body any, timeout time.Duration) (any, error) {
+	return guarddTransport().Post(path, body, HTTPOptions{Timeout: timeout, WithToken: true, RejectedStatus: 400})
+}
+
+// guarddPostObject is a token-carrying POST whose body comes back whatever the status.
+func guarddPostObject(path string, body any, timeout time.Duration) (*Map, error) {
+	return asObject(guarddTransport().Post(path, body, HTTPOptions{Timeout: timeout, WithToken: true, NoCheckStatus: true, RequireObject: true}))
+}
+
+// guarddSetMode switches between observing and enforcing.
+func guarddSetMode(mode string) (any, error) {
+	return guarddTransport().Post("/api/v1/guard/mode", newMap("mode", mode), HTTPOptions{Timeout: 30 * time.Second, WithToken: true})
+}
+
+func guarddAdaptiveBans(params []QueryValue, detail bool) (*Map, error) {
+	path := "/api/v1/guard/adaptive/bans"
+	if detail {
+		path = "/api/v1/guard/adaptive/ban"
+	}
+	return asObject(guarddTransport().Get(path, HTTPOptions{Params: params, Timeout: 5 * time.Second, NoCheckStatus: true, RequireObject: true}))
+}
