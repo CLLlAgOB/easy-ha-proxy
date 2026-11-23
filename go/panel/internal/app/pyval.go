@@ -149,3 +149,56 @@ func copyMap(m *Map) *Map {
 }
 
 func jinjaEqual(a, b any) bool { return jinja.Equal(a, b) }
+
+// pyDecodeReplace is bytes.decode("utf-8", errors="replace"): every maximal
+// invalid subpart becomes one U+FFFD, as CPython does (strings.ToValidUTF8
+// folds a whole run into one).
+func pyDecodeReplace(b []byte) string {
+	var sb strings.Builder
+	sb.Grow(len(b))
+	for i := 0; i < len(b); {
+		c := b[i]
+		if c < 0x80 {
+			sb.WriteByte(c)
+			i++
+			continue
+		}
+		n, lo, hi := 0, byte(0x80), byte(0xBF)
+		switch {
+		case c >= 0xC2 && c <= 0xDF:
+			n = 2
+		case c == 0xE0:
+			n, lo = 3, 0xA0
+		case c >= 0xE1 && c <= 0xEC, c == 0xEE, c == 0xEF:
+			n = 3
+		case c == 0xED:
+			n, hi = 3, 0x9F
+		case c == 0xF0:
+			n, lo = 4, 0x90
+		case c >= 0xF1 && c <= 0xF3:
+			n = 4
+		case c == 0xF4:
+			n, hi = 4, 0x8F
+		}
+		if n == 0 {
+			sb.WriteString("\uFFFD")
+			i++
+			continue
+		}
+		k := 1
+		for ; k < n && i+k < len(b); k++ {
+			x := b[i+k]
+			if k == 1 && (x < lo || x > hi) || k > 1 && (x < 0x80 || x > 0xBF) {
+				break
+			}
+		}
+		if k < n {
+			sb.WriteString("\uFFFD")
+			i += k
+			continue
+		}
+		sb.Write(b[i : i+n])
+		i += n
+	}
+	return sb.String()
+}
