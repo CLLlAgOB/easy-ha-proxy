@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"easy-ha-proxy/panel/internal/pyyaml"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -58,18 +60,56 @@ func (c *Ctx) trustedClientIP() string {
 	return ""
 }
 
-// contentDisposition is werkzeug's attachment header for a download name.
-func contentDisposition(name string) string {
-	safe := true
-	for _, r := range name {
-		if r > 127 || strings.ContainsRune(" \"\\;,", r) {
-			safe = false
+const werkzeugTokenChars = "!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~"
+
+// quoteHeaderValue is werkzeug.http.quote_header_value.
+func quoteHeaderValue(v string) string {
+	if v == "" {
+		return `""`
+	}
+	token := true
+	for _, r := range v {
+		if !strings.ContainsRune(werkzeugTokenChars, r) {
+			token = false
+			break
 		}
 	}
-	if safe {
-		return "attachment; filename=" + name
+	if token {
+		return v
 	}
-	return fmt.Sprintf("attachment; filename=\"%s\"", strings.ReplaceAll(name, "\"", "\\\""))
+	v = strings.ReplaceAll(v, `\`, `\\`)
+	return `"` + strings.ReplaceAll(v, `"`, `\"`) + `"`
+}
+
+// contentDisposition is the header werkzeug's send_file sets for
+// as_attachment=True and a download name: an NFKD ASCII fallback plus an
+// RFC 5987 filename* when the name is not ASCII.
+func contentDisposition(name string) string {
+	ascii := true
+	for i := 0; i < len(name); i++ {
+		if name[i] > 127 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return "attachment; filename=" + quoteHeaderValue(name)
+	}
+	var simple strings.Builder
+	for _, r := range norm.NFKD.String(name) {
+		if r < 128 {
+			simple.WriteRune(r)
+		}
+	}
+	var quoted strings.Builder
+	for _, b := range []byte(name) {
+		if b < 128 && (b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.IndexByte("_.-~!#$&+^`|", b) >= 0) {
+			quoted.WriteByte(b)
+		} else {
+			fmt.Fprintf(&quoted, "%%%02X", b)
+		}
+	}
+	return "attachment; filename=" + quoteHeaderValue(simple.String()) + "; filename*=UTF-8''" + quoted.String()
 }
 
 func (c *Ctx) sendBytes(data []byte, mimetype, downloadName string) error {

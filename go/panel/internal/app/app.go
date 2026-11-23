@@ -426,6 +426,7 @@ var statusDescriptions = map[int]string{
 	405: "The method is not allowed for the requested URL.",
 	409: "A conflict happened while processing the request. The resource might have been modified while the request was being processed.",
 	413: "The data value transmitted exceeds the capacity limit.",
+	415: "The server does not support the media type transmitted in the request.",
 	500: "The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.",
 	502: "The proxy server received an invalid response from an upstream server.",
 	503: "The server is temporarily unable to service your request due to maintenance downtime or capacity problems. Please try again later.",
