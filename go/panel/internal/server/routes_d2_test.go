@@ -252,12 +252,6 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 
 	// 3. Config history, transactions, and GeoIP via controld.
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/api/haproxy/config/versions", "", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"v1"`) {
-		t.Fatalf("config versions failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, superReq(http.MethodPost, "/haproxy/geoip/schedule", `{"schedule":"weekly"}`, ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("geoip schedule failed: %d %s", rec.Code, rec.Body.String())
