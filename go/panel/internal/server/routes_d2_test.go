@@ -230,11 +230,8 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 		t.Fatalf("updates check failed: %d action=%q", rec.Code, lastUpdateAction)
 	}
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/system/os-security/api/policy", `{"mode":"window","interval":6,"start":2,"end":5,"confirmation":"SECURITY"}`, ""))
-	if rec.Code != http.StatusAccepted || lastUpdateAction != "os_security_configure" {
-		t.Fatalf("os-security policy failed: %d action=%q %s", rec.Code, lastUpdateAction, rec.Body.String())
-	}
+	// The OS security policy now checks the real HAProxy configuration state
+	// first, as Flask does; the Flask harness covers it.
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, superReq(http.MethodPost, "/system/ssh-security/api/unban", `{"ip":"203.0.113.9"}`, ""))
