@@ -1486,7 +1486,9 @@ func replaceYAMLSource(kind, path, content string) (bool, string) {
 	if len(content) > 2*1024*1024 {
 		return false, "YAML file exceeds the 2 MB size limit"
 	}
-	if msg := validateYAMLContent(kind, path, content); msg != "" {
+	if msg, rootErr := validateYAMLContent(kind, path, content); rootErr {
+		return false, msg
+	} else if msg != "" {
 		return false, "YAML validation error: " + msg
 	}
 	backupDir := filepath.Join(BaseDir, "backups")
@@ -1510,31 +1512,33 @@ func replaceYAMLSource(kind, path, content string) (bool, string) {
 	return true, fmt.Sprintf("File %s updated successfully", filepath.Base(path))
 }
 
-func validateYAMLContent(kind, path, content string) string {
+// validateYAMLContent returns the validation message, and true when the
+// message is the bare "root must be a mapping" answer (not wrapped).
+func validateYAMLContent(kind, path, content string) (string, bool) {
 	v, err := pyyaml.Load([]byte(content))
 	if err != nil {
-		return pyYAMLErrorText(err)
+		return pyYAMLErrorText(err), false
 	}
 	if !truthy(v) {
 		v = pyyaml.NewMap()
 	}
 	data, ok := asMap(v)
 	if !ok {
-		return ""
+		return "The YAML root must be a mapping", true
 	}
 	if err := ValidateConfigData(kind, data); err != nil {
-		return err.Error()
+		return err.Error(), false
 	}
 	if kind == "vars" && fileExists(path) {
 		existing, err := loadYAML(path)
 		if err != nil {
-			return pyYAMLErrorText(err)
+			return pyYAMLErrorText(err), false
 		}
 		if err := ValidateProtectedVarsUnchanged(existing, data); err != nil {
-			return err.Error()
+			return err.Error(), false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // pyYAMLErrorText is str(yaml.YAMLError) as closely as the Go parser allows.
