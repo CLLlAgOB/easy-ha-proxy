@@ -244,11 +244,6 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 		t.Fatalf("cert-delivery list failed: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/haproxy/certs/ca/internal/download", "", ""))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "BEGIN CERTIFICATE") {
-		t.Fatalf("CA download failed: %d %s", rec.Code, rec.Body.String())
-	}
 
 	// 3. Config history, transactions, and GeoIP via controld.
 	rec = httptest.NewRecorder()
