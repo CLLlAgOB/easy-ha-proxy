@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -34,6 +35,7 @@ type BansdOptions struct {
 	CommandTimeout  time.Duration
 	MaxRequestBytes int
 	MaxWorkers      int
+	SocketGroup     string
 }
 
 // BansdOptionsFromEnv reads options matching authelia-bansd.py.
@@ -65,6 +67,7 @@ func BansdOptionsFromEnv() BansdOptions {
 		CommandTimeout:  time.Duration(envInt("AUTHELIA_BANS_COMMAND_TIMEOUT", 5, 1, 60)) * time.Second,
 		MaxRequestBytes: envInt("AUTHELIA_BANS_MAX_REQUEST_BYTES", 65536, 1024, 1048576),
 		MaxWorkers:      envInt("AUTHELIA_BANS_MAX_WORKERS", 4, 1, 16),
+		SocketGroup:     envDefault("AUTHELIA_BANS_SOCKET_GROUP", "haproxy-admin"),
 	}
 }
 
@@ -119,7 +122,10 @@ func (s *BansdServer) runScript(ctx context.Context, args ...string) (int, strin
 
 // HandleRequest dispatches ping, list, revoke-user, and revoke-ip.
 func (s *BansdServer) HandleRequest(ctx context.Context, req map[string]any) map[string]any {
-	action, _ := req["action"].(string)
+	action := "None"
+	if v, ok := req["action"]; ok {
+		action = pyStr(jsonToPy(v))
+	}
 	if action == "ping" {
 		return map[string]any{"ok": true, "pong": true}
 	}
@@ -157,7 +163,7 @@ func (s *BansdServer) HandleRequest(ctx context.Context, req map[string]any) map
 		return map[string]any{"ok": true, "users": outU, "ips": outI}
 
 	case "revoke-user":
-		user := strings.TrimSpace(asStr(req["username"]))
+		user := pyStrip(pyStrOr(jsonToPy(req["username"])))
 		if user == "" {
 			return map[string]any{"ok": false, "error": "username is required"}
 		}
@@ -178,11 +184,11 @@ func (s *BansdServer) HandleRequest(ctx context.Context, req map[string]any) map
 		return map[string]any{"ok": true, "message": out}
 
 	case "revoke-ip":
-		ip := strings.TrimSpace(asStr(req["ip"]))
+		ip := pyStrip(pyStrOr(jsonToPy(req["ip"])))
 		if ip == "" {
 			return map[string]any{"ok": false, "error": "ip is required"}
 		}
-		if !validIPOrCIDR(ip) {
+		if !validIPNetwork(ip) {
 			return map[string]any{"ok": false, "error": "invalid IP/CIDR"}
 		}
 		rc, out, errOut := s.runScript(ctx, "revoke-ip", ip)
@@ -201,16 +207,6 @@ func (s *BansdServer) HandleRequest(ctx context.Context, req map[string]any) map
 	default:
 		return map[string]any{"ok": false, "error": fmt.Sprintf("unknown action %s", action)}
 	}
-}
-
-func validIPOrCIDR(s string) bool {
-	if _, err := netip.ParseAddr(s); err == nil {
-		return true
-	}
-	if _, err := netip.ParsePrefix(s); err == nil {
-		return true
-	}
-	return false
 }
 
 // Serve accepts connections on ln until ctx is canceled.
@@ -247,7 +243,7 @@ func RunBansd(opts BansdOptions) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(opts.SocketPath, 0o660)
+	setBansSocketPerms(opts.SocketPath, opts.SocketGroup)
 	defer os.Remove(opts.SocketPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -294,4 +290,63 @@ func writeLineJSON(conn net.Conn, payload map[string]any) {
 func asStr(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// setBansSocketPerms is set_socket_perms: root:<group>, mode 0660.
+func setBansSocketPerms(path, group string) {
+	gid := os.Getgid()
+	if g, err := user.LookupGroup(group); err == nil {
+		if n, err := strconv.Atoi(g.Gid); err == nil {
+			gid = n
+		}
+	} else {
+		log.Printf("group %s not found, leaving socket group as root", group)
+	}
+	_ = os.Chown(path, 0, gid)
+	_ = os.Chmod(path, 0o660)
+}
+
+// jsonToPy turns encoding/json values into the shapes pyStr understands.
+func jsonToPy(v any) any {
+	if f, ok := v.(float64); ok && f == float64(int64(f)) && !strings.ContainsAny(fmt.Sprint(f), "e") {
+		return int64(f)
+	}
+	return v
+}
+
+// validIPNetwork is ipaddress.ip_network(text, strict=False) succeeding.
+func validIPNetwork(text string) bool {
+	if strings.Count(text, "/") > 1 {
+		return false
+	}
+	addrText, mask, hasMask := strings.Cut(text, "/")
+	addr, err := netip.ParseAddr(addrText)
+	if err != nil || addr.Zone() != "" && hasMask {
+		return false
+	}
+	if !hasMask {
+		return addr.Zone() == "" || addr.Is6()
+	}
+	if n, err := strconv.Atoi(mask); err == nil && strings.Trim(mask, "0123456789") == "" && mask != "" {
+		return n >= 0 && n <= addr.BitLen()
+	}
+	if !addr.Is4() {
+		return false
+	}
+	m, err := netip.ParseAddr(mask)
+	if err != nil || !m.Is4() {
+		return false
+	}
+	b := m.As4()
+	v := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+	for n := 0; n <= 32; n++ {
+		full := uint32(0)
+		if n > 0 {
+			full = ^uint32(0) << (32 - n)
+		}
+		if v == full || v == ^full {
+			return true
+		}
+	}
+	return false
 }

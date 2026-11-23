@@ -1,517 +1,688 @@
 package authelia
 
+// The Go port of authelia-usersd.py: one JSON line per request on a Unix
+// socket, served one at a time; users_database.yml read without following
+// links and written back through internal/pyyaml (sort_keys=True), with a
+// hard-link backup rotation; argon2id hashed locally with argon2-cffi's
+// parameters so the password never reaches a process's argv.
+
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/crypto/argon2"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
 )
 
-var (
-	usersNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,63}$`)
-	groupNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
-)
-
-// UsersdOptions configures authelia-usersd from AUTHELIA_USERS_* environment variables.
+// UsersdOptions holds what authelia-usersd.py reads from the environment.
 type UsersdOptions struct {
-	SocketPath        string
-	UsersFile         string
-	AutheliaContainer string
-	DockerBin         string
-	MaxRequestBytes   int
+	SocketPath string
+	UsersFile  string
 }
 
-// UsersdOptionsFromEnv reads options matching authelia-usersd.py.
+// UsersdOptionsFromEnv reads the environment as authelia-usersd.py does.
 func UsersdOptionsFromEnv() UsersdOptions {
-	envOr := func(k, fb string) string {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			return v
-		}
-		return fb
-	}
 	return UsersdOptions{
-		SocketPath:        envOr("AUTHELIA_USERS_SOCKET", "/run/easy-ha-proxy/authelia-usersd.sock"),
-		UsersFile:         envOr("AUTHELIA_USERS_FILE", "/opt/authelia/users_database.yml"),
-		AutheliaContainer: envOr("AUTHELIA_CONTAINER_NAME", "authelia"),
-		DockerBin:         envOr("DOCKER_BIN", "/usr/bin/docker"),
-		MaxRequestBytes:   65536,
+		SocketPath: envDefault("AUTHELIA_USERS_SOCKET", "/run/easy-ha-proxy/authelia-usersd.sock"),
+		UsersFile:  envDefault("AUTHELIA_USERS_FILE", "/opt/authelia/users_database.yml"),
 	}
 }
 
-// UserRecord holds one Authelia file-provider user entry.
-type UserRecord struct {
-	DisplayName string   `json:"displayname"`
-	Email       string   `json:"email"`
-	Password    string   `json:"-"`
-	Groups      []string `json:"groups"`
-	Disabled    bool     `json:"disabled"`
+const (
+	usersMaxRequest = 1024 * 1024
+	usersMaxFile    = 10 * 1024 * 1024
+)
+
+var usernameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$`)
+
+// Usersd is the daemon state.
+type Usersd struct {
+	Opts UsersdOptions
+	// HashPassword can be replaced in tests; it defaults to argon2id.
+	HashPassword func(plain string) (string, error)
 }
 
-// UsersdServer manages Authelia's users_database.yml with last-superadmin protection.
-type UsersdServer struct {
-	mu       sync.Mutex
-	Opts     UsersdOptions
-	HashFunc func(ctx context.Context, plain string) (string, error)
+// NewUsersd builds the daemon.
+func NewUsersd(opts UsersdOptions) *Usersd {
+	return &Usersd{Opts: opts, HashPassword: hashArgon2id}
 }
 
-// NewUsersdServer constructs a UsersdServer.
-func NewUsersdServer(opts UsersdOptions) *UsersdServer {
-	if opts.MaxRequestBytes <= 0 {
-		opts.MaxRequestBytes = 65536
+func valueErr(format string, args ...any) error { return newErr("ValueError", format, args...) }
+
+// hashArgon2id is PasswordHasher(time_cost=3, memory_cost=65536,
+// parallelism=4, hash_len=32, salt_len=16).hash(plain).
+func hashArgon2id(plain string) (string, error) {
+	if n := utf8.RuneCountInString(plain); n < 8 || n > 1024 {
+		return "", valueErr("The password must be 8 to 1024 characters long")
 	}
-	return &UsersdServer{Opts: opts}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	key := argon2.IDKey([]byte(plain), salt, 3, 65536, 4, 32)
+	enc := base64.RawStdEncoding
+	return fmt.Sprintf("$argon2id$v=19$m=65536,t=3,p=4$%s$%s", enc.EncodeToString(salt), enc.EncodeToString(key)), nil
 }
 
-func (s *UsersdServer) hashPassword(ctx context.Context, plain string) (string, error) {
-	if s.HashFunc != nil {
-		return s.HashFunc(ctx, plain)
+func (u *Usersd) backupUsersFile() {
+	path := u.Opts.UsersFile
+	if _, err := os.Stat(path); err != nil {
+		return
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(
-		cmdCtx, s.Opts.DockerBin, "exec", "-i", s.Opts.AutheliaContainer,
-		"authelia", "crypto", "hash", "generate", "argon2", "--password", plain,
-	)
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(errBuf.String()))
+	now := time.Now()
+	backup := path + ".bak-" + now.Format("20060102-150405") + fmt.Sprintf("-%06d", now.Nanosecond()/1000)
+	if err := os.Link(path, backup); err != nil {
+		log.Printf("Backup failed (%s): %s", backup, osErr(err))
+	} else {
+		log.Printf("Backup created: %s", backup)
 	}
-	for _, line := range strings.Split(out.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Digest:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Digest:")), nil
-		}
-		if strings.HasPrefix(line, "$argon2") {
-			return line, nil
-		}
+	dir, prefix := filepath.Dir(path), filepath.Base(path)+".bak-"
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("Backup rotation list failed: %s", osErr(err))
+		return
 	}
-	return "", errors.New("authelia did not output an argon2 digest")
-}
-
-// ParseUsersYAML parses Authelia's users_database.yml without external YAML dependencies.
-func ParseUsersYAML(content string) map[string]*UserRecord {
-	users := make(map[string]*UserRecord)
-	inUsers := false
-	var curName string
-	var cur *UserRecord
-	inGroups := false
-
-	for _, rawLine := range strings.Split(content, "\n") {
-		line := strings.TrimRight(rawLine, "\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if indent == 0 {
-			inUsers = trimmed == "users:"
-			curName = ""
-			cur = nil
-			inGroups = false
-			continue
-		}
-		if !inUsers {
-			continue
-		}
-		if indent == 2 && strings.HasSuffix(trimmed, ":") {
-			curName = unquoteYAML(strings.TrimSuffix(trimmed, ":"))
-			cur = &UserRecord{Groups: []string{}}
-			users[curName] = cur
-			inGroups = false
-			continue
-		}
-		if cur == nil {
-			continue
-		}
-		if inGroups && strings.HasPrefix(trimmed, "- ") {
-			g := unquoteYAML(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))
-			if g != "" {
-				cur.Groups = append(cur.Groups, g)
+	type cand struct {
+		p string
+		t int64
+	}
+	cands := []cand{}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), prefix) {
+			p := filepath.Join(dir, e.Name())
+			var t int64
+			if fi, err := os.Stat(p); err == nil {
+				t = fi.ModTime().UnixNano()
 			}
-			continue
-		}
-		inGroups = false
-		key, val, found := strings.Cut(trimmed, ":")
-		if !found {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
-		switch key {
-		case "displayname":
-			cur.DisplayName = unquoteYAML(val)
-		case "email":
-			cur.Email = unquoteYAML(val)
-		case "password":
-			cur.Password = unquoteYAML(val)
-		case "disabled":
-			cur.Disabled = strings.EqualFold(val, "true")
-		case "groups":
-			if val == "" {
-				inGroups = true
-			} else if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") {
-				inner := strings.TrimSpace(val[1 : len(val)-1])
-				if inner != "" {
-					for _, part := range strings.Split(inner, ",") {
-						g := unquoteYAML(strings.TrimSpace(part))
-						if g != "" {
-							cur.Groups = append(cur.Groups, g)
-						}
-					}
-				}
-			}
+			cands = append(cands, cand{p, t})
 		}
 	}
-	return users
-}
-
-// RenderUsersYAML writes a canonical Authelia users_database.yml file.
-func RenderUsersYAML(users map[string]*UserRecord) string {
-	names := make([]string, 0, len(users))
-	for k := range users {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	var b strings.Builder
-	b.WriteString("users:\n")
-	for _, name := range names {
-		u := users[name]
-		fmt.Fprintf(&b, "  %s:\n", quoteYAML(name))
-		fmt.Fprintf(&b, "    displayname: %s\n", quoteYAML(u.DisplayName))
-		fmt.Fprintf(&b, "    email: %s\n", quoteYAML(u.Email))
-		fmt.Fprintf(&b, "    password: %s\n", quoteYAML(u.Password))
-		if u.Disabled {
-			b.WriteString("    disabled: true\n")
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].t > cands[j].t })
+	for i := 14; i < len(cands); i++ {
+		if err := os.Remove(cands[i].p); err != nil {
+			log.Printf("Failed to remove old backup %s: %s", cands[i].p, osErr(err))
 		} else {
-			b.WriteString("    disabled: false\n")
+			log.Printf("Old backup removed: %s", cands[i].p)
 		}
-		if len(u.Groups) == 0 {
-			b.WriteString("    groups: []\n")
-		} else {
-			b.WriteString("    groups:\n")
-			for _, g := range u.Groups {
-				fmt.Fprintf(&b, "      - %s\n", quoteYAML(g))
+	}
+}
+
+func (u *Usersd) loadUsersData() (*pyyaml.Map, *pyyaml.Map, error) {
+	path := u.Opts.UsersFile
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if err == syscall.ENOENT {
+			return nil, nil, newErr("FileNotFoundError", "users file not found: %s", path)
+		}
+		return nil, nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, nil, valueErr("users file is not a regular file: %s", path)
+	}
+	raw := make([]byte, 0, fi.Size()+1)
+	buf := make([]byte, 65536)
+	for len(raw) <= usersMaxFile {
+		n, err := f.Read(buf)
+		raw = append(raw, buf[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	if len(raw) > usersMaxFile {
+		return nil, nil, valueErr("users file exceeds allowed size: %s", path)
+	}
+	if err := utf8Error(raw); err != nil {
+		return nil, nil, err
+	}
+	v, err := pyyaml.Load(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !truthy(v) {
+		v = pyyaml.NewMap()
+	}
+	data, ok := v.(*pyyaml.Map)
+	if !ok {
+		return nil, nil, valueErr("unexpected YAML structure (root is not a dict)")
+	}
+	if users, ok := data.Value("users").(*pyyaml.Map); ok {
+		return data, users, nil
+	}
+	return data, data, nil
+}
+
+func (u *Usersd) saveUsersData(root *pyyaml.Map) error {
+	path := u.Opts.UsersFile
+	var prev *syscall.Stat_t
+	var st syscall.Stat_t
+	if err := syscall.Lstat(path, &st); err == nil {
+		if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+			return valueErr("users file is not a regular file: %s", path)
+		}
+		prev = &st
+	} else if err != syscall.ENOENT {
+		log.Printf("Failed to stat %s before save: %v", path, err)
+	}
+	u.backupUsersFile()
+	uid, gid := -1, -1
+	if prev != nil {
+		uid, gid = int(prev.Uid), int(prev.Gid)
+	} else if acct, err := user.Lookup("authelia"); err == nil {
+		uid, _ = strconv.Atoi(acct.Uid)
+		gid, _ = strconv.Atoi(acct.Gid)
+	}
+	text, err := pyyaml.Dump(root, pyyaml.Options{AllowUnicode: true, SortKeys: true})
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".users_database.*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.Remove(name)
+		}
+	}()
+	if _, err := tmp.WriteString(text); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if uid != -1 {
+		if err := tmp.Chown(uid, gid); err != nil {
+			log.Printf("Failed to set owner/group on temp users file: %v", err)
+		}
+	}
+	if err := tmp.Chmod(0o640); err != nil {
+		log.Printf("Failed to set mode on temp users file: %v", err)
+	}
+	tmp.Close()
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	keep = true
+	log.Printf("Users file updated: %s", path)
+	return nil
+}
+
+func userGroups(raw any) []any {
+	switch g := raw.(type) {
+	case []any:
+		out := make([]any, len(g))
+		for i, x := range g {
+			out[i] = pyStr(x)
+		}
+		return out
+	case nil:
+		return []any{}
+	}
+	if !truthy(raw) {
+		return []any{}
+	}
+	return []any{pyStr(raw)}
+}
+
+func orEmpty(v any) any {
+	if !truthy(v) {
+		return ""
+	}
+	return v
+}
+
+func safeUserView(username string, raw *pyyaml.Map) map[string]any {
+	return map[string]any{"username": username, "displayname": orEmpty(getDefault(raw, "displayname", "")),
+		"email": orEmpty(getDefault(raw, "email", "")), "groups": userGroups(raw.Value("groups")),
+		"disabled": truthy(getDefault(raw, "disabled", false))}
+}
+
+func validatedUsername(req *pyyaml.Map) (string, error) {
+	username := pyStrip(pyStrOr(req.Value("username")))
+	if !usernameRE.MatchString(username) {
+		return "", valueErr("username must contain only letters, digits, '.', '_', '@' or '-' (max 64)")
+	}
+	return username, nil
+}
+
+func validatedFields(req *pyyaml.Map) (*pyyaml.Map, error) {
+	raw := req.Value("fields")
+	if !truthy(raw) {
+		raw = pyyaml.NewMap()
+	}
+	fields, ok := raw.(*pyyaml.Map)
+	if !ok {
+		return nil, valueErr("fields must be an object")
+	}
+	out := pyyaml.NewMap()
+	for _, key := range []string{"displayname", "email"} {
+		v, present := fields.Get(key)
+		if !present {
+			continue
+		}
+		rawValue := pyStrOr(v)
+		for _, r := range rawValue {
+			if r < 32 || r == 127 {
+				return nil, valueErr("%s is invalid", key)
 			}
 		}
+		value := pyStrip(rawValue)
+		maximum := 320
+		if key == "email" {
+			maximum = 254
+		}
+		if value == "" || utf8.RuneCountInString(value) > maximum {
+			return nil, valueErr("%s is invalid", key)
+		}
+		if key == "email" && !emailRE.MatchString(value) {
+			return nil, valueErr("email is invalid")
+		}
+		out.Set(key, value)
 	}
-	return b.String()
+	if v, present := fields.Get("groups"); present {
+		groups, ok := v.([]any)
+		if !ok || len(groups) > 50 {
+			return nil, valueErr("groups must be a list with no more than 50 entries")
+		}
+		clean := []any{}
+		for _, g := range groups {
+			s := pyStrip(pyStr(g))
+			if usernameRE.MatchString(s) {
+				clean = append(clean, s)
+			}
+		}
+		if len(clean) != len(groups) {
+			return nil, valueErr("group name is invalid")
+		}
+		out.Set("groups", clean)
+	}
+	if v, present := fields.Get("disabled"); present {
+		out.Set("disabled", truthy(v))
+	}
+	return out, nil
 }
 
-func unquoteYAML(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
-		return strings.ReplaceAll(s[1:len(s)-1], "''", "'")
+func passwordFromRequest(req *pyyaml.Map) (string, error) {
+	v := req.Value("password_plain")
+	if v == nil {
+		return "", nil
 	}
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		inner := s[1 : len(s)-1]
-		inner = strings.ReplaceAll(inner, `\"`, `"`)
-		inner = strings.ReplaceAll(inner, `\\`, `\`)
-		return inner
+	s, ok := v.(string)
+	if !ok {
+		return "", valueErr("password_plain must be a string")
 	}
-	return s
+	return s, nil
 }
 
-func quoteYAML(s string) string {
-	escaped := strings.ReplaceAll(s, "'", "''")
-	return "'" + escaped + "'"
-}
-
-func isEnabledSuperadmin(u *UserRecord) bool {
-	if u == nil || u.Disabled {
+func isEnabledSuperadmin(raw any) bool {
+	u, ok := raw.(*pyyaml.Map)
+	if !ok || truthy(getDefault(u, "disabled", false)) {
 		return false
 	}
-	for _, g := range u.Groups {
-		if g == "superadmins" || g == "admins" {
+	groups := u.Value("groups")
+	if !truthy(groups) {
+		groups = []any{}
+	}
+	list, ok := groups.([]any)
+	if !ok {
+		list = []any{groups}
+	}
+	for _, g := range list {
+		if pyStrip(pyStr(g)) == "superadmin" {
 			return true
 		}
 	}
 	return false
 }
 
-func removesLastSuperadmin(users map[string]*UserRecord, target string, replacement *UserRecord) bool {
-	count := 0
-	for name, u := range users {
-		eff := u
-		if name == target {
-			eff = replacement
-		}
-		if isEnabledSuperadmin(eff) {
-			count++
-		}
+func removesLastEnabledSuperadmin(users *pyyaml.Map, username string, replacement *pyyaml.Map) bool {
+	if !isEnabledSuperadmin(users.Value(username)) {
+		return false
 	}
-	return count == 0 && isEnabledSuperadmin(users[target])
+	if replacement != nil && isEnabledSuperadmin(replacement) {
+		return false
+	}
+	other := false
+	users.Each(func(k, v any) {
+		if pyStr(k) != username && isEnabledSuperadmin(v) {
+			other = true
+		}
+	})
+	return !other
 }
 
-func safeUserView(username string, u *UserRecord) map[string]any {
-	groups := append([]string(nil), u.Groups...)
-	if groups == nil {
-		groups = []string{}
-	}
-	return map[string]any{
-		"username":     username,
-		"displayname":  u.DisplayName,
-		"email":        u.Email,
-		"groups":       groups,
-		"disabled":     u.Disabled,
-		"has_password": u.Password != "",
-	}
-}
-
-func (s *UsersdServer) loadLocked() (map[string]*UserRecord, error) {
-	raw, err := os.ReadFile(s.Opts.UsersFile)
+func (u *Usersd) handleList() (map[string]any, error) {
+	_, users, err := u.loadUsersData()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]*UserRecord{}, nil
-		}
 		return nil, err
 	}
-	return ParseUsersYAML(string(raw)), nil
-}
-
-func (s *UsersdServer) saveLocked(users map[string]*UserRecord) error {
-	if err := os.MkdirAll(filepath.Dir(s.Opts.UsersFile), 0o750); err != nil {
-		return err
-	}
-	return writeFileAtomic(s.Opts.UsersFile, []byte(RenderUsersYAML(users)), 0o600)
-}
-
-func parseGroups(raw any) ([]string, error) {
-	list, ok := raw.([]any)
-	if !ok {
-		return nil, errors.New("groups must be a list")
-	}
-	out := make([]string, 0, len(list))
-	seen := map[string]struct{}{}
-	for _, it := range list {
-		g := strings.TrimSpace(asStr(it))
-		if !groupNameRe.MatchString(g) {
-			return nil, fmt.Errorf("invalid group name: %q", g)
+	names := []string{}
+	byName := map[string]any{}
+	users.Each(func(k, v any) {
+		names = append(names, pyStr(k))
+		byName[pyStr(k)] = v
+	})
+	sort.Slice(names, func(i, j int) bool { return lessRunes(names[i], names[j]) })
+	out := []any{}
+	for _, n := range names {
+		val := byName[n]
+		if !truthy(val) {
+			val = pyyaml.NewMap()
 		}
-		if _, dup := seen[g]; !dup {
-			seen[g] = struct{}{}
-			out = append(out, g)
+		m, ok := val.(*pyyaml.Map)
+		if !ok {
+			continue
 		}
+		out = append(out, safeUserView(n, m))
 	}
-	return out, nil
+	return map[string]any{"ok": true, "users": out}, nil
 }
 
-// HandleRequest dispatches list, get, create, update, and delete actions.
-func (s *UsersdServer) HandleRequest(ctx context.Context, req map[string]any) map[string]any {
-	action := strings.TrimSpace(asStr(req["action"]))
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func lessRunes(a, b string) bool {
+	ra, rb := []rune(a), []rune(b)
+	for i := 0; i < len(ra) && i < len(rb); i++ {
+		if ra[i] != rb[i] {
+			return ra[i] < rb[i]
+		}
+	}
+	return len(ra) < len(rb)
+}
 
-	users, err := s.loadLocked()
+func (u *Usersd) handleGet(req *pyyaml.Map) (map[string]any, error) {
+	username, err := validatedUsername(req)
 	if err != nil {
-		return map[string]any{"ok": false, "error": err.Error()}
+		return nil, err
 	}
+	_, users, err := u.loadUsersData()
+	if err != nil {
+		return nil, err
+	}
+	m, ok := users.Value(username).(*pyyaml.Map)
+	if !ok {
+		return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' not found", username)}, nil
+	}
+	return map[string]any{"ok": true, "user": safeUserView(username, m)}, nil
+}
 
-	switch action {
+func (u *Usersd) handleUpdate(req *pyyaml.Map) (map[string]any, error) {
+	username, err := validatedUsername(req)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := validatedFields(req)
+	if err != nil {
+		return nil, err
+	}
+	password, err := passwordFromRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	root, users, err := u.loadUsersData()
+	if err != nil {
+		return nil, err
+	}
+	usr, ok := users.Value(username).(*pyyaml.Map)
+	if !ok {
+		return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' not found", username)}, nil
+	}
+	prospective := pyyaml.DeepCopy(usr).(*pyyaml.Map)
+	fields.Each(func(k, v any) { prospective.Set(k, v) })
+	if removesLastEnabledSuperadmin(users, username, prospective) {
+		return map[string]any{"ok": false, "error": "the last enabled superadmin cannot be disabled or demoted"}, nil
+	}
+	if _, present := usr.Get("groups"); !present {
+		usr.Set("groups", []any{})
+	}
+	for _, key := range []string{"displayname", "email", "disabled", "groups"} {
+		if v, present := fields.Get(key); present {
+			usr.Set(key, v)
+		}
+	}
+	if password != "" {
+		hash, err := u.HashPassword(password)
+		if err != nil {
+			log.Printf("hash password failed: %v", err)
+			return map[string]any{"ok": false, "error": "Could not hash the password: " + errText(err)}, nil
+		}
+		usr.Set("password", hash)
+	}
+	users.Set(username, usr)
+	if err := u.saveUsersData(root); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "user": safeUserView(username, usr)}, nil
+}
+
+func (u *Usersd) handleCreate(req *pyyaml.Map) (map[string]any, error) {
+	username, err := validatedUsername(req)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := validatedFields(req)
+	if err != nil {
+		return nil, err
+	}
+	password, err := passwordFromRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if password == "" {
+		return map[string]any{"ok": false, "error": "password_plain is required for create"}, nil
+	}
+	root, users, err := u.loadUsersData()
+	if err != nil {
+		return nil, err
+	}
+	if _, exists := users.Get(username); exists {
+		return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' already exists", username)}, nil
+	}
+	hash, err := u.HashPassword(password)
+	if err != nil {
+		log.Printf("hash password failed: %v", err)
+		return map[string]any{"ok": false, "error": "Could not hash the password: " + errText(err)}, nil
+	}
+	groups, _ := fields.Value("groups").([]any)
+	if groups == nil {
+		groups = []any{}
+	}
+	usr := pyyaml.NewMap()
+	usr.Set("password", hash)
+	usr.Set("displayname", orEmpty(getDefault(fields, "displayname", "")))
+	usr.Set("email", orEmpty(getDefault(fields, "email", "")))
+	usr.Set("groups", append([]any{}, groups...))
+	usr.Set("disabled", truthy(getDefault(fields, "disabled", false)))
+	users.Set(username, usr)
+	if err := u.saveUsersData(root); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "user": safeUserView(username, usr)}, nil
+}
+
+func (u *Usersd) handleDelete(req *pyyaml.Map) (map[string]any, error) {
+	username, err := validatedUsername(req)
+	if err != nil {
+		return nil, err
+	}
+	root, users, err := u.loadUsersData()
+	if err != nil {
+		return nil, err
+	}
+	deleted, exists := users.Get(username)
+	if !exists {
+		return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' not found", username)}, nil
+	}
+	if removesLastEnabledSuperadmin(users, username, nil) {
+		return map[string]any{"ok": false, "error": "the last enabled superadmin cannot be deleted"}, nil
+	}
+	users.Delete(username)
+	if err := u.saveUsersData(root); err != nil {
+		return nil, err
+	}
+	dm, ok := deleted.(*pyyaml.Map)
+	if !truthy(deleted) {
+		dm = pyyaml.NewMap()
+	} else if !ok {
+		// Python saved the file, then failed building the reply.
+		return nil, fmt.Errorf("'%s' object has no attribute 'get'", pyTypeName(deleted))
+	}
+	return map[string]any{"ok": true, "message": fmt.Sprintf("user '%s' deleted", username), "user": safeUserView(username, dm)}, nil
+}
+
+// HandleRequest is handle_request: ValueError becomes an error reply,
+// anything else an "internal error" from the server loop.
+func (u *Usersd) HandleRequest(reqAny any) (map[string]any, error) {
+	req, ok := reqAny.(*pyyaml.Map)
+	if !ok {
+		return map[string]any{"ok": false, "error": "request must be a JSON object"}, nil
+	}
+	actionRaw := req.Value("action")
+	if !truthy(actionRaw) {
+		actionRaw = ""
+	}
+	actionStr, ok := actionRaw.(string)
+	if !ok {
+		return nil, fmt.Errorf("'%s' object has no attribute 'strip'", pyTypeName(actionRaw))
+	}
+	var resp map[string]any
+	var err error
+	switch action := pyStrip(actionStr); action {
 	case "list":
-		names := make([]string, 0, len(users))
-		for k := range users {
-			names = append(names, k)
-		}
-		sort.Strings(names)
-		out := make([]map[string]any, 0, len(names))
-		for _, n := range names {
-			out = append(out, safeUserView(n, users[n]))
-		}
-		return map[string]any{"ok": true, "users": out}
-
+		resp, err = u.handleList()
 	case "get":
-		username := strings.TrimSpace(asStr(req["username"]))
-		if !usersNameRe.MatchString(username) {
-			return map[string]any{"ok": false, "error": "invalid username"}
-		}
-		u, ok := users[username]
-		if !ok {
-			return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' not found", username)}
-		}
-		return map[string]any{"ok": true, "user": safeUserView(username, u)}
-
-	case "create":
-		username := strings.TrimSpace(asStr(req["username"]))
-		if !usersNameRe.MatchString(username) {
-			return map[string]any{"ok": false, "error": "invalid username"}
-		}
-		if _, exists := users[username]; exists {
-			return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' already exists", username)}
-		}
-		plain := asStr(req["password_plain"])
-		if plain == "" {
-			return map[string]any{"ok": false, "error": "password_plain is required for create"}
-		}
-		hash, err := s.hashPassword(ctx, plain)
-		if err != nil {
-			return map[string]any{"ok": false, "error": fmt.Sprintf("Could not hash the password: %v", err)}
-		}
-		u := &UserRecord{
-			DisplayName: strings.TrimSpace(asStr(req["displayname"])),
-			Email:       strings.TrimSpace(asStr(req["email"])),
-			Password:    hash,
-			Groups:      []string{},
-		}
-		if b, ok := req["disabled"].(bool); ok {
-			u.Disabled = b
-		}
-		if rawG, has := req["groups"]; has && rawG != nil {
-			g, err := parseGroups(rawG)
-			if err != nil {
-				return map[string]any{"ok": false, "error": err.Error()}
-			}
-			u.Groups = g
-		}
-		users[username] = u
-		if err := s.saveLocked(users); err != nil {
-			return map[string]any{"ok": false, "error": err.Error()}
-		}
-		return map[string]any{"ok": true, "user": safeUserView(username, u)}
-
+		resp, err = u.handleGet(req)
 	case "update":
-		username := strings.TrimSpace(asStr(req["username"]))
-		if !usersNameRe.MatchString(username) {
-			return map[string]any{"ok": false, "error": "invalid username"}
-		}
-		cur, ok := users[username]
-		if !ok {
-			return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' not found", username)}
-		}
-		next := &UserRecord{
-			DisplayName: cur.DisplayName,
-			Email:       cur.Email,
-			Password:    cur.Password,
-			Groups:      append([]string(nil), cur.Groups...),
-			Disabled:    cur.Disabled,
-		}
-		if v, has := req["displayname"]; has {
-			next.DisplayName = strings.TrimSpace(asStr(v))
-		}
-		if v, has := req["email"]; has {
-			next.Email = strings.TrimSpace(asStr(v))
-		}
-		if b, ok := req["disabled"].(bool); ok {
-			next.Disabled = b
-		}
-		if rawG, has := req["groups"]; has && rawG != nil {
-			g, err := parseGroups(rawG)
-			if err != nil {
-				return map[string]any{"ok": false, "error": err.Error()}
-			}
-			next.Groups = g
-		}
-		if removesLastSuperadmin(users, username, next) {
-			return map[string]any{"ok": false, "error": "the last enabled superadmin cannot be disabled or demoted"}
-		}
-		if plain := asStr(req["password_plain"]); plain != "" {
-			hash, err := s.hashPassword(ctx, plain)
-			if err != nil {
-				return map[string]any{"ok": false, "error": fmt.Sprintf("Could not hash the password: %v", err)}
-			}
-			next.Password = hash
-		}
-		users[username] = next
-		if err := s.saveLocked(users); err != nil {
-			return map[string]any{"ok": false, "error": err.Error()}
-		}
-		return map[string]any{"ok": true, "user": safeUserView(username, next)}
-
+		resp, err = u.handleUpdate(req)
+	case "create":
+		resp, err = u.handleCreate(req)
 	case "delete":
-		username := strings.TrimSpace(asStr(req["username"]))
-		if !usersNameRe.MatchString(username) {
-			return map[string]any{"ok": false, "error": "invalid username"}
-		}
-		cur, ok := users[username]
-		if !ok {
-			return map[string]any{"ok": false, "error": fmt.Sprintf("user '%s' not found", username)}
-		}
-		if removesLastSuperadmin(users, username, nil) {
-			return map[string]any{"ok": false, "error": "the last enabled superadmin cannot be deleted"}
-		}
-		delete(users, username)
-		if err := s.saveLocked(users); err != nil {
-			return map[string]any{"ok": false, "error": err.Error()}
-		}
-		return map[string]any{"ok": true, "message": fmt.Sprintf("user '%s' deleted", username), "user": safeUserView(username, cur)}
-
+		resp, err = u.handleDelete(req)
 	default:
-		return map[string]any{"ok": false, "error": fmt.Sprintf("unknown action: %s", action)}
+		return map[string]any{"ok": false, "error": "unknown action: " + action}, nil
 	}
+	if err != nil && errKind(err) == "ValueError" {
+		return map[string]any{"ok": false, "error": errText(err)}, nil
+	}
+	return resp, err
 }
 
-// Serve accepts connections on ln until ctx is canceled.
-func (s *UsersdServer) Serve(ctx context.Context, ln net.Listener) error {
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
+func (u *Usersd) serveConn(conn net.Conn) {
+	defer conn.Close()
+	var resp map[string]any
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resp = map[string]any{"ok": false, "error": fmt.Sprintf("internal error: %v", r)}
 			}
-			return err
+		}()
+		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+		data := []byte{}
+		buf := make([]byte, 4096)
+		for !bytes.Contains(data, []byte("\n")) {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				data = append(data, buf[:n]...)
+				if len(data) > usersMaxRequest {
+					resp = map[string]any{"ok": false, "error": "internal error: request is too large"}
+					return
+				}
+			}
+			if err != nil {
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
+					resp = map[string]any{"ok": false, "error": "internal error: timed out"}
+					return
+				}
+				break
+			}
 		}
-		serveJSONLineConn(ctx, conn, s.Opts.MaxRequestBytes, s.HandleRequest)
+		if len(data) == 0 {
+			return
+		}
+		line := data
+		if i := bytes.IndexByte(line, '\n'); i >= 0 {
+			line = line[:i]
+		}
+		text := pyStrip(strings.ToValidUTF8(string(line), "�"))
+		if text == "" {
+			return
+		}
+		req, err := pyyaml.JSONLoads([]byte(text))
+		if err != nil {
+			resp = map[string]any{"ok": false, "error": "invalid json: " + jsonErrText(err)}
+			return
+		}
+		_ = conn.SetDeadline(time.Time{})
+		r, err := u.HandleRequest(req)
+		if err != nil {
+			log.Printf("request handling failed: %v", err)
+			resp = map[string]any{"ok": false, "error": "internal error: " + errText(err)}
+			return
+		}
+		resp = r
+	}()
+	if resp == nil {
+		return
 	}
+	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	_, _ = conn.Write(replyJSON(resp))
 }
 
-// RunUsersd starts authelia-usersd until SIGTERM/SIGINT.
+// RunUsersd is main(): serve the socket one request at a time.
 func RunUsersd(opts UsersdOptions) error {
-	if err := os.MkdirAll(filepath.Dir(opts.SocketPath), 0o750); err != nil {
-		return err
+	u := NewUsersd(opts)
+	if _, err := os.Stat(opts.SocketPath); err == nil {
+		_ = os.Remove(opts.SocketPath)
 	}
-	_ = os.Remove(opts.SocketPath)
 	ln, err := net.Listen("unix", opts.SocketPath)
 	if err != nil {
 		return err
 	}
 	_ = os.Chmod(opts.SocketPath, 0o660)
-	defer os.Remove(opts.SocketPath)
-
+	log.Printf("authelia-usersd listening on %s", opts.SocketPath)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	log.Printf("authelia-usersd (Go) listening on %s", opts.SocketPath)
-	return NewUsersdServer(opts).Serve(ctx, ln)
-}
-
-func writeFileAtomic(target string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(target)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(target)+".*.tmp")
-	if err != nil {
-		return err
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+	defer func() {
+		if _, err := os.Stat(opts.SocketPath); err == nil {
+			_ = os.Remove(opts.SocketPath)
+		}
+	}()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return nil
+		}
+		u.serveConn(conn)
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
-	}
-	_ = tmp.Chmod(mode)
-	_ = tmp.Sync()
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		cleanup()
-		return err
-	}
-	return nil
 }

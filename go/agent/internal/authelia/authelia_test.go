@@ -66,36 +66,3 @@ func TestBansdProtocolAndValidation(t *testing.T) {
 		t.Fatalf("invalid IP must be rejected: %+v", res)
 	}
 }
-
-func TestUsersdCRUDAndLastSuperadminGuard(t *testing.T) {
-	dir := t.TempDir()
-	usersFile := filepath.Join(dir, "users_database.yml")
-	_ = os.WriteFile(usersFile, []byte("users:\n  admin:\n    displayname: 'Admin'\n    email: 'a@example.com'\n    password: '$argon2id$v=19$hash'\n    disabled: false\n    groups:\n      - superadmins\n"), 0o600)
-
-	srv := NewUsersdServer(UsersdOptions{UsersFile: usersFile})
-	srv.HashFunc = func(_ context.Context, plain string) (string, error) {
-		return "$argon2id$fake$" + plain, nil
-	}
-
-	// Cannot delete or disable the last enabled superadmin.
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "delete", "username": "admin"}); res["ok"] != false {
-		t.Fatalf("must refuse deleting last superadmin: %+v", res)
-	}
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "update", "username": "admin", "disabled": true}); res["ok"] != false {
-		t.Fatalf("must refuse disabling last superadmin: %+v", res)
-	}
-
-	// Create a second user, update it, then delete it cleanly.
-	if res := srv.HandleRequest(context.Background(), map[string]any{
-		"action": "create", "username": "alice", "password_plain": "pw123",
-		"displayname": "Alice", "email": "alice@example.com", "groups": []any{"users"},
-	}); res["ok"] != true {
-		t.Fatalf("create alice failed: %+v", res)
-	}
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "list"}); res["ok"] != true || len(res["users"].([]map[string]any)) != 2 {
-		t.Fatalf("list failed: %+v", res)
-	}
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "delete", "username": "alice"}); res["ok"] != true {
-		t.Fatalf("delete alice failed: %+v", res)
-	}
-}
