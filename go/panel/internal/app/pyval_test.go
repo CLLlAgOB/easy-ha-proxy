@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // Expected values come from CPython 3.12 bytes.decode("utf-8", "replace").
 func TestPyDecodeReplace(t *testing.T) {
@@ -74,6 +77,23 @@ func TestPyIsGlobal(t *testing.T) {
 		}
 		if got := pyIsGlobal(a); got != tc.want {
 			t.Errorf("pyIsGlobal(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Expected values come from CPython 3.12 format(x, "g").
+func TestPyFormatG(t *testing.T) {
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{
+		{0.0, "0"}, {math.Copysign(0, -1), "-0"}, {1.0, "1"}, {1.5, "1.5"}, {100.0, "100"}, {123456.0, "123456"},
+		{1234567.0, "1.23457e+06"}, {0.0001, "0.0001"}, {1.234e-05, "1.234e-05"}, {1e+16, "1e+16"},
+		{2.5e-07, "2.5e-07"}, {999999.5, "1e+06"}, {9999995.0, "1e+07"}, {-42.0, "-42"}, {3.14159265, "3.14159"},
+		{1700000000.0, "1.7e+09"}, {0.1 + 0.2, "0.3"}, {1e+100, "1e+100"}, {12.345678, "12.3457"},
+	} {
+		if got := pyFormatG(tc.in); got != tc.want {
+			t.Errorf("pyFormatG(%v) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

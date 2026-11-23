@@ -223,6 +223,8 @@ func (a *App) registerAll() {
 	a.registerRuntimeTables()
 	a.registerLive()
 	a.registerSecurity()
+	a.registerGeoIPAudit()
+	a.registerPrometheus()
 	trashRestorers["udp"] = RestoreUDPForward
 }
 

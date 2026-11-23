@@ -266,42 +266,7 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 		t.Fatalf("expected 304 for matching ETag, got %d", rec.Code)
 	}
 
-	// 7. Prometheus /metrics dual-gate (401 without bearer, 200 with bearer).
-	promReq := func(bearer string) *http.Request {
-		r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-		r.Header.Set(security.ProxySecretHeader, cfg.ProxySecret)
-		r.Header.Set("Remote-User", security.MetricsScrapeUser)
-		r.Header.Set("Remote-Groups", security.MetricsScrapeGroup)
-		if bearer != "" {
-			r.Header.Set("Authorization", "Bearer "+bearer)
-		}
-		return r
-	}
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, promReq("wrong-token"))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for wrong bearer token, got %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, promReq(cfg.MetricsExportToken))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for valid /metrics scrape, got %d", rec.Code)
-	}
-	body := rec.Body.String()
-	for _, want := range []string{
-		"easy_ha_proxy_build_info 1",
-		`easy_ha_proxy_backend_servers_up{backend="be_app_example_com"} 1`,
-		`easy_ha_proxy_monitoring_storage_state{state="NORMAL"} 1`,
-		"easy_ha_proxy_guard_bans_active 3",
-		"easy_ha_proxy_guard_enforcing 1",
-		"easy_ha_proxy_alerts_firing 1",
-		`easy_ha_proxy_source_up{source="haproxy"} 1`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("missing metric %q in /metrics output:\n%s", want, body)
-		}
-	}
+	// 7. /metrics moved to internal/app; the Flask harness covers it.
 
 	// 8. Secret key atomic file creation & reuse test.
 	secretPath := filepath.Join(t.TempDir(), "secret_key")

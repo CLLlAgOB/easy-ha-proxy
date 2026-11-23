@@ -201,12 +201,7 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 
 	// 2. Certs (DNS providers, cert delivery) moved to internal/app; the Flask harness covers them.
 
-	// 3. Config history, transactions, and GeoIP via controld.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/haproxy/geoip/schedule", `{"schedule":"weekly"}`, ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("geoip schedule failed: %d %s", rec.Code, rec.Body.String())
-	}
+	// 3. GeoIP moved to internal/app; the Flask harness covers it.
 
 	// 4. Backups: start backup (202), streaming upload (201), safe download (200), restore validation.
 	rec = httptest.NewRecorder()
