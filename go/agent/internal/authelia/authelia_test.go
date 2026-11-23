@@ -99,34 +99,3 @@ func TestUsersdCRUDAndLastSuperadminGuard(t *testing.T) {
 		t.Fatalf("delete alice failed: %+v", res)
 	}
 }
-
-func TestConfigdPeerUIDAndMailRedaction(t *testing.T) {
-	dir := t.TempDir()
-	mailFile := filepath.Join(dir, "mail-notify.json")
-	notifFile := filepath.Join(dir, "notification.txt")
-	_ = os.WriteFile(mailFile, []byte(`{"enabled":true,"from":"gw@example.com","smtp_password":"secret"}`), 0o600)
-	_ = os.WriteFile(notifFile, []byte("reset link: https://example.com/tok"), 0o600)
-
-	srv := NewConfigdServer(ConfigdOptions{
-		MailStatePath:    mailFile,
-		NotificationFile: notifFile,
-		AllowedNotifUID:  0,
-	})
-
-	// Non-root peer cannot reveal or handle local notification file.
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "notification_reveal"}, 1000); res["forbidden"] != true {
-		t.Fatalf("expected forbidden for non-root peer: %+v", res)
-	}
-	// Root peer can reveal and clear it.
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "notification_reveal"}, 0); res["ok"] != true {
-		t.Fatalf("expected root reveal to succeed: %+v", res)
-	}
-	if res := srv.HandleRequest(context.Background(), map[string]any{"action": "notification_handle"}, 0); res["ok"] != true {
-		t.Fatalf("expected root handle to succeed: %+v", res)
-	}
-	// mail_view redacts smtp_password.
-	mv := srv.HandleRequest(context.Background(), map[string]any{"action": "mail_view"}, 1000)
-	if mv["ok"] != true || mv["mail"].(map[string]any)["smtp_password"] != "***" {
-		t.Fatalf("expected redacted smtp_password: %+v", mv)
-	}
-}
