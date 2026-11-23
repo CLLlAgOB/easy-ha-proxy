@@ -443,7 +443,12 @@ func (c *Ctx) abortPage(code int, description string) {
 		name = "Request Entity Too Large"
 	}
 	if security.CallerParsesJSON(c.R) {
-		reason := description
+		// error_reason(exc.description, exc.name): a bare abort(404) or an
+		// unhandled error still carries werkzeug's default description.
+		reason := strings.Join(strings.Fields(description), " ")
+		if reason == "" {
+			reason = strings.Join(strings.Fields(statusDescriptions[code]), " ")
+		}
 		if reason == "" {
 			reason = name
 		}

@@ -66,9 +66,7 @@ func startFakeHAProxyAdmin(t *testing.T, onCmd func(cmd string) string) string {
 
 func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 	// Fake healthd over AF_UNIX.
-	var lastHealthToken string
 	healthSock := startUnixHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastHealthToken = r.Header.Get("X-Healthd-Token")
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v1/health/status":
@@ -231,28 +229,11 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 	req.Header.Set("Remote-Groups", security.ControlPlaneHealthGroup)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok": true`) {
 		t.Fatalf("control-plane-health failed: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. Health status + health control (glob capability match + disallowed action).
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, adminReq(http.MethodGet, "/api/health/status", ""))
-	if rec.Code != http.StatusOK || lastHealthToken != "health-tok" {
-		t.Fatalf("health status failed: %d token=%q", rec.Code, lastHealthToken)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, adminReq(http.MethodPost, "/api/health/control", `{"kind":"systemd","name":"easy-ha-proxy-guardd.service","action":"restart"}`))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"text":"reloaded"`) {
-		t.Fatalf("health control glob match failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, adminReq(http.MethodPost, "/api/health/control", `{"kind":"systemd","name":"haproxy.service","action":"stop"}`))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for disallowed action stop, got %d", rec.Code)
-	}
+	// 2. Health API moved to internal/app; the Flask harness covers it.
 
 	// 3. HAProxy runtime backends listing (excludes authelia_backend!) + set weight.
 	rec = httptest.NewRecorder()
@@ -273,12 +254,7 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 		t.Fatalf("set weight failed: %d cmd=%q body=%s", rec.Code, lastHAProxyCmd, rec.Body.String())
 	}
 
-	// 4. Alerts quieten forwards X-Alertd-Token and operator username.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, adminReq(http.MethodPost, "/api/alerts/quieten", `{"rule":"host.disk","subject":"/","mode":"ack"}`))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("alerts quieten failed: %d %s", rec.Code, rec.Body.String())
-	}
+	// 4. Alerts API moved to internal/app; the Flask harness covers it.
 
 	// 5. Monitoring series validates chart and localizes Russian error.
 	req = adminReq(http.MethodGet, "/api/monitoring/series?chart=bogus", "")
