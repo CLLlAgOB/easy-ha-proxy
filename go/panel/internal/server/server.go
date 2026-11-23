@@ -75,14 +75,19 @@ func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ListenAndServe starts the HTTP server with hardened timeouts and graceful shutdown.
+// ListenAndServe starts the HTTP server with graceful shutdown.
+//
+// No whole-request read or write deadline, as under gunicorn's threaded
+// workers (whose --timeout 870 is a worker heartbeat, not a request limit):
+// a restore upload of up to 8 GiB, a backup download, or the Authelia mail
+// update that waits up to 840 s on its daemon all outlast one. The headers
+// must still arrive promptly, and the views that stream to visitors (the
+// access-portal download) set their own deadlines.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              s.Cfg.ListenAddr,
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
