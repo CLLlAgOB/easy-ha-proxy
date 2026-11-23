@@ -8,9 +8,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,46 +157,46 @@ func buildMinimalIPv4MMDB() []byte {
 	out = append(out, tree...)
 	out = append(out, sep...)
 	out = append(out, dataSec...)
-	out = append(out, mmdbMarker...)
+	out = append(out, geoipMMDBMarker...)
 	out = append(out, meta...)
 	return out
 }
 
-func TestPureGoMMDBReaderAndAtomicGeoIPRelease(t *testing.T) {
-	mmdb := buildMinimalIPv4MMDB()
-	byCountry, epoch, err := ExtractCountryNetworks(mmdb)
+func TestGeoIPReaderCollapseAndSelection(t *testing.T) {
+	r, err := parseMMDB(buildMinimalIPv4MMDB())
 	if err != nil {
-		t.Fatalf("ExtractCountryNetworks: %v", err)
+		t.Fatal(err)
 	}
-	if epoch != 1700000000 || len(byCountry["DE"]) != 1 || byCountry["DE"][0] != "0.0.0.0/1" {
-		t.Fatalf("unexpected MMDB extraction: epoch=%d byCountry=%+v", epoch, byCountry)
+	if r.buildEpoch != 1700000000 {
+		t.Fatalf("epoch %d", r.buildEpoch)
 	}
-
-	dir := t.TempDir()
-	selPath := filepath.Join(dir, "selection.json")
-	sel, err := SaveGeoIPSelection(selPath, []string{"de", "us"}, true)
-	if err != nil {
-		t.Fatalf("SaveGeoIPSelection: %v", err)
+	seen := []string{}
+	_ = r.each(func(n mmdbNetwork, rec any) error {
+		seen = append(seen, cidr{n.v6, n.addr, n.prefix}.String()+"="+fmt.Sprint(rec.(map[string]any)["country"].(map[string]any)["iso_code"]))
+		return nil
+	})
+	if strings.Join(seen, ",") != "0.0.0.0/1=DE" {
+		t.Fatalf("walk: %v", seen)
 	}
-	loaded, err := LoadGeoIPSelection(selPath)
-	if err != nil || len(loaded.Countries) != 2 || loaded.Countries[0] != "DE" || !loaded.AccessFilterEnabled {
-		t.Fatalf("LoadGeoIPSelection: %+v err=%v", loaded, err)
+	mk := func(s string) cidr {
+		p := netip.MustParsePrefix(s)
+		b := p.Addr().AsSlice()
+		return cidr{p.Addr().Is6(), new(big.Int).SetBytes(b), p.Bits()}
 	}
-
-	relID, err := PublishGeoIPRelease(dir, "2026-11", mmdb, sel)
-	if err != nil || !strings.HasPrefix(relID, "2026-11-") {
-		t.Fatalf("PublishGeoIPRelease: relID=%q err=%v", relID, err)
+	got := []string{}
+	for _, c := range collapse([]cidr{mk("10.0.1.0/24"), mk("10.0.0.0/24"), mk("10.0.0.0/25"), mk("10.0.2.0/23")}) {
+		got = append(got, c.String())
 	}
-	allowed, err := os.ReadFile(filepath.Join(dir, "current", GeoIPAllowedName))
-	if err != nil || strings.TrimSpace(string(allowed)) != "0.0.0.0/1" {
-		t.Fatalf("unexpected current/allowed.geo: %q err=%v", string(allowed), err)
+	if strings.Join(got, ",") != "10.0.0.0/22" {
+		t.Fatalf("collapse: %v", got)
 	}
-	stateBytes, err := os.ReadFile(filepath.Join(dir, "current", GeoIPStateName))
-	if err != nil {
-		t.Fatalf("read state.json: %v", err)
+	if c, err := normalizeCountries([]string{"de, us", "DE"}); err != nil || strings.Join(c, ",") != "DE,US" {
+		t.Fatalf("%v %v", c, err)
 	}
-	var st map[string]any
-	if json.Unmarshal(stateBytes, &st) != nil || st["allowed_networks"].(float64) != 1 {
-		t.Fatalf("unexpected state.json: %s", string(stateBytes))
+	if string(selectionJSON([]string{"DE"}, true)) != "{\n  \"access_filter_enabled\": true,\n  \"countries\": [\n    \"DE\"\n  ],\n  \"version\": 1\n}\n" {
+		t.Fatal("selection json")
+	}
+	if strings.Join(monthCandidates(time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC), 3), ",") != "2026-01,2025-12,2025-11" {
+		t.Fatal("months")
 	}
 }

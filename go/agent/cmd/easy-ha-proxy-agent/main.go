@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -134,66 +133,8 @@ func runCertDeliver(args []string) int {
 	return 0
 }
 
-type multiStringFlag []string
-
-func (m *multiStringFlag) String() string { return fmt.Sprintf("%v", []string(*m)) }
-func (m *multiStringFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
-}
-
 func runUpdateGeoIP(args []string) int {
-	fs := flag.NewFlagSet("update-geoip", flag.ContinueOnError)
-	dir := fs.String("directory", "/etc/haproxy/geoip", "GeoIP directory")
-	baseURL := fs.String("base-url", "https://download.db-ip.com/free", "DB-IP base URL")
-	selFile := fs.String("selection-file", "", "selection.json path")
-	cfgSel := fs.Bool("configure-selection", false, "update selection.json and exit")
-	accessFilter := fs.Bool("access-filter-enabled", false, "enable country access filter")
-	_ = fs.Bool("force-download", false, "force download")
-	_ = fs.Bool("skip-reload", false, "skip HAProxy reload")
-	_ = fs.String("vars-file", "", "vars.yml path")
-	_ = fs.String("config-transaction-state", "", "transaction state path")
-	_ = fs.String("config-transaction-id", "", "transaction id")
-	_ = fs.String("haproxy", "/usr/sbin/haproxy", "haproxy binary")
-	_ = fs.String("haproxy-config", "/etc/haproxy/haproxy.cfg", "haproxy config path")
-	_ = fs.String("systemctl", "/usr/bin/systemctl", "systemctl binary")
-	var countries multiStringFlag
-	fs.Var(&countries, "country", "ISO-3166-1 alpha-2 country code (repeatable)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	selPath := *selFile
-	if selPath == "" {
-		selPath = filepath.Join(*dir, "selection.json")
-	}
-	if *cfgSel {
-		sel, err := tools.SaveGeoIPSelection(selPath, countries, *accessFilter)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[easy-ha-proxy-geoip] ERROR: %v\n", err)
-			return 1
-		}
-		fmt.Printf("[easy-ha-proxy-geoip] Saved selection: %v (filter=%v)\n", sel.Countries, sel.AccessFilterEnabled)
-		return 0
-	}
-	sel, err := tools.LoadGeoIPSelection(selPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[easy-ha-proxy-geoip] ERROR: %v\n", err)
-		return 1
-	}
-	period := time.Now().UTC().Format("2006-01")
-	url := fmt.Sprintf("%s/dbip-country-lite-%s.mmdb.gz", *baseURL, period)
-	raw, err := tools.DownloadDBIPGzip(context.Background(), url)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[easy-ha-proxy-geoip] ERROR: %v\n", err)
-		return 1
-	}
-	relID, err := tools.PublishGeoIPRelease(*dir, period, raw, sel)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[easy-ha-proxy-geoip] ERROR: %v\n", err)
-		return 1
-	}
-	fmt.Printf("[easy-ha-proxy-geoip] Activated GeoIP release %s\n", relID)
-	return 0
+	return tools.RunUpdateGeoIP(args, os.Stdout)
 }
 
 func runServerState(args []string) int {

@@ -12,6 +12,8 @@ import (
 type Options struct {
 	AllowUnicode bool
 	SortKeys     bool
+	// Width is the width argument (0: PyYAML's 80).
+	Width int
 }
 
 const bestWidth = 80
@@ -29,13 +31,17 @@ type emitter struct {
 	rootContext  bool
 	mappingCtx   bool
 	simpleKeyCtx bool
+	bestWidth    int
 }
 
 const noIndent = -1
 
 // Dump is yaml.safe_dump(value, default_flow_style=False, ...).
 func Dump(value any, opts Options) (string, error) {
-	e := &emitter{opts: opts, whitespace: true, indention: true, indent: noIndent}
+	e := &emitter{opts: opts, whitespace: true, indention: true, indent: noIndent, bestWidth: bestWidth}
+	if opts.Width > 4 {
+		e.bestWidth = opts.Width
+	}
 	e.rootContext = true
 	if err := e.node(value, false, false); err != nil {
 		return "", err
@@ -447,7 +453,7 @@ func (e *emitter) writePlain(text string, split, root bool) {
 		switch {
 		case spaces:
 			if ch != ' ' {
-				if start+1 == end && e.column > bestWidth && split {
+				if start+1 == end && e.column > e.bestWidth && split {
 					e.writeIndent()
 					e.whitespace, e.indention = false, false
 				} else {
@@ -496,7 +502,7 @@ func (e *emitter) writeSingleQuoted(text string, split bool) {
 		switch {
 		case spaces:
 			if ch == -1 || ch != ' ' {
-				if start+1 == end && e.column > bestWidth && split && start != 0 && end != len(rs) {
+				if start+1 == end && e.column > e.bestWidth && split && start != 0 && end != len(rs) {
 					e.writeIndent()
 				} else {
 					e.write(string(rs[start:end]))
@@ -570,7 +576,7 @@ func (e *emitter) writeDoubleQuoted(text string, split bool) {
 				start = end + 1
 			}
 		}
-		if end > 0 && end < len(rs)-1 && (ch == ' ' || start >= end) && e.column+(end-start) > bestWidth && split {
+		if end > 0 && end < len(rs)-1 && (ch == ' ' || start >= end) && e.column+(end-start) > e.bestWidth && split {
 			data := ""
 			if start < end {
 				data = string(rs[start:end])
