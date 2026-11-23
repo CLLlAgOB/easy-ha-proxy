@@ -261,7 +261,10 @@ func TestServerEndToEndAPIsAndPrometheus(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: i18n.LanguageCookie, Value: "ru"})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "неизвестный график") {
+	// Flask answers in ASCII-escaped JSON (json.dumps' default), so the text is decoded.
+	var seriesErr struct{ Error string }
+	_ = json.Unmarshal(rec.Body.Bytes(), &seriesErr)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(seriesErr.Error, "неизвестный график") {
 		t.Fatalf("expected localized RU 400 error, got %d %s", rec.Code, rec.Body.String())
 	}
 
