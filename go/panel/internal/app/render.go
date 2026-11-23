@@ -273,6 +273,14 @@ func (c *Ctx) RenderString(name string, vars map[string]any) (string, error) {
 		}
 		return c.T(jinja.Str(args[0])), nil
 	})
+	ctx["backend_presets_list"] = jinja.Func(func([]any, *jinja.Map) (any, error) {
+		presets, err := loadPresets()
+		out := make([]any, len(presets))
+		for i, p := range presets {
+			out[i] = p
+		}
+		return out, err
+	})
 	ctx["current_language"] = c.Lang
 	ctx["supported_languages"] = langs
 	ctx["i18n_config"] = i18nCfg

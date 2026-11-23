@@ -201,6 +201,8 @@ func requestHeaderOrder(r *http.Request) [][2]string {
 
 func (a *App) registerAll() {
 	a.registerPages()
+	a.registerUDPRoutes()
+	trashRestorers["udp"] = RestoreUDPForward
 }
 
 // newMap builds an ordered dict from key, value pairs.
