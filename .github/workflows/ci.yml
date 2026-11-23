@@ -604,7 +604,7 @@ jobs:
       - name: Fingerprint the Go web panel
         id: tree
         run: |
-          tree="$(git ls-tree -r --full-tree HEAD -- go/panel docker/app/haproxy_admin/static docker/app/haproxy_admin/translations | sha256sum | cut -d' ' -f1)"
+          tree="$(git ls-tree -r --full-tree HEAD -- go/panel docker/app/haproxy_admin/static docker/app/haproxy_admin/translations docker/app/haproxy_admin/templates | sha256sum | cut -d' ' -f1)"
           echo "tree=${tree}" >> "$GITHUB_OUTPUT"
           echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
