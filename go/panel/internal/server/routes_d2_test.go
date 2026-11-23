@@ -203,25 +203,7 @@ func TestStageD2DashboardCertsConfigBackupsUpdatesAuthelia(t *testing.T) {
 
 	// 3. GeoIP moved to internal/app; the Flask harness covers it.
 
-	// 4. Backups: start backup (202), streaming upload (201), safe download (200), restore validation.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodPost, "/system/backups/api/jobs/backup", `{"passphrase":"very-strong-pass","include_ssh":false,"quiesce":true}`, ""))
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("backup start expected 202, got %d %s", rec.Code, rec.Body.String())
-	}
-
-	uploadReq := superReq(http.MethodPost, "/system/backups/api/uploads", "ARCHIVE-BYTES-PAYLOAD", "application/octet-stream")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, uploadReq)
-	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"upload_id"`) {
-		t.Fatalf("backup upload failed: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, superReq(http.MethodGet, "/system/backups/download/bk001", "", ""))
-	if rec.Code != http.StatusOK || rec.Body.String() != "ENCRYPTED-ARCHIVE" {
-		t.Fatalf("backup download failed: %d %q", rec.Code, rec.Body.String())
-	}
+	// 4. Backups moved to internal/app; the Flask harness covers them.
 
 	// 5. Updates, OS Security, SSH Security via updated.
 	rec = httptest.NewRecorder()
