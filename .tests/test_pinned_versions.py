@@ -106,17 +106,28 @@ class Versions(unittest.TestCase):
         self.assertIn("| `authelia_version` (authelia/authelia) |", pinned.report(list(rows.values())))
 
 
+def dependabot_entries(config):
+    """Each (ecosystem, directory) with its entry; `directories` lists several."""
+    entries = {}
+    for item in config["updates"]:
+        for directory in item.get("directories") or [item["directory"]]:
+            entries[(item["package-ecosystem"], directory)] = item
+    return entries
+
+
 class TheConfiguration(unittest.TestCase):
     def test_dependabot_targets_alpha_everywhere(self):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
-        ecosystems = {(item["package-ecosystem"], item["directory"]) for item in config["updates"]}
+        ecosystems = set(dependabot_entries(config))
         self.assertEqual(ecosystems, {("pip", "/docker/app"), ("pip", "/installer"),
-                                      ("docker", "/"), ("github-actions", "/")})
+                                      ("docker", "/"), ("github-actions", "/"),
+                                      ("gomod", "/go/agent"), ("gomod", "/go/panel"),
+                                      ("cargo", "/rust/guardd")})
         self.assertTrue(all(item["target-branch"] == "alpha" for item in config["updates"]))
 
     def test_dependabot_offers_only_what_can_be_taken(self):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
-        entries = {(item["package-ecosystem"], item["directory"]): item for item in config["updates"]}
+        entries = dependabot_entries(config)
         minor = {"version-update:semver-major", "version-update:semver-minor"}
 
         # The installer's ranges move only when a release falls outside them,
