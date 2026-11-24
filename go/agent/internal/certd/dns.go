@@ -578,7 +578,8 @@ func (d *Daemon) runCertbotForLineage(lineage, domain string, altNames []string,
 		"cmd": strings.Join(cmd, " ")}, nil
 }
 
-// RenewCertificates is renew_certificates, for `certd --renew`.
+// RenewCertificates is renew_certificates, for `certd --renew`. It logs as
+// logging.basicConfig(format="%(levelname)s: %(message)s") does.
 func RenewCertificates(opts Options) int {
 	d := &Daemon{Opts: opts}
 	failed := false
@@ -616,13 +617,13 @@ func RenewCertificates(opts Options) int {
 			}
 			if res.rc != 0 {
 				failed = true
-				log.Printf("Certbot renewal failed for %s (rc=%d): %s", name, res.rc, pyx.TruncRunes(strings.TrimSpace(string(res.stderr)), 400))
+				fmt.Fprintf(os.Stderr, "ERROR: Certbot renewal failed for %s (rc=%d): %s\n", name, res.rc, pyx.TruncRunes(strings.TrimSpace(string(res.stderr)), 400))
 			}
 			return nil
 		}()
 		if err != nil {
 			failed = true
-			log.Printf("Cannot renew %s: %v", name, err)
+			fmt.Fprintf(os.Stderr, "ERROR: Cannot renew %s: %v\n", name, err)
 		}
 	}
 	if failed {

@@ -108,8 +108,11 @@ class DumpedTransportTests(unittest.TestCase):
     HEADER = "be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state srv_uweight srv_iweight srv_time_since_last_change srv_check_status srv_check_result srv_check_health srv_check_state srv_agent_state bk_f_forced_id srv_f_forced_id srv_fqdn srv_port srvrecord srv_use_ssl srv_check_port srv_check_addr srv_agent_addr srv_agent_port"
     ROW = "36 target 1 main 127.0.0.1 2 1 17 100 10 15 3 4 6 0 0 0 - 1025 - 0 0 - - 0"
 
-    def dump(self, reply, online=True, config=None, previous="previous-state\n", mode=0o644):
-        from jinja2 import Template
+    def dump(self, reply, online=True, config=None, previous="previous-state\n", mode=0o644, native=None):
+        # native: None names the Python normalizer, as before; True renders a
+        # stand-in native agent and names no normalizer; False renders the
+        # native tools off and names no normalizer either.
+        from jinja2 import Environment
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state = root / "state"
@@ -122,7 +125,19 @@ class DumpedTransportTests(unittest.TestCase):
             helper.write_text('#!/bin/sh\ncat "$STATE_REPLY"\n')
             helper.chmod(0o700)
             script = root / "dump.sh"
-            script.write_text(Template(DUMPER.read_text()).render(haproxy_socket=str(root / "socket"), haproxy_server_state_file=str(state)))
+            environment = Environment()
+            environment.filters["bool"] = lambda value: str(value).strip().lower() in {"1", "true", "yes", "on"}
+            context = {"haproxy_socket": str(root / "socket"), "haproxy_server_state_file": str(state)}
+            arguments = [str(NORMALIZER)]
+            calls_path = root / "agent-calls"
+            if native is not None:
+                agent = root / "agent"
+                agent.write_text(f'#!/bin/sh\necho "$@" >> "{calls_path}"\nshift\n'
+                                 f'exec "{sys.executable}" "{NORMALIZER}" "$@"\n')
+                agent.chmod(0o700)
+                context.update(native_agent_bin=str(agent), native_tools_enabled=native)
+                arguments = []
+            script.write_text(environment.from_string(DUMPER.read_text()).render(**context))
             config_path = root / "haproxy.cfg"
             if config is not None:
                 config_path.write_text(config)
@@ -130,7 +145,8 @@ class DumpedTransportTests(unittest.TestCase):
                 if online:
                     server.bind(str(root / "socket"))
                 env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"], STATE_REPLY=str(payload))
-                result = subprocess.run(["sh", str(script), str(config_path), str(NORMALIZER)], env=env, capture_output=True, text=True, timeout=5)
+                result = subprocess.run(["sh", str(script), str(config_path), *arguments], env=env, capture_output=True, text=True, timeout=5)
+            self.agent_calls = calls_path.read_text() if calls_path.exists() else None
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(state.stat().st_mode & 0o777, mode)
             self.assertEqual((state.stat().st_uid, state.stat().st_gid), owner)
@@ -146,6 +162,25 @@ class DumpedTransportTests(unittest.TestCase):
             self.assertEqual(lines[2].split(), fields[:20])
             self.assertEqual(lines[1].split()[1:], self.HEADER.split()[:20])
             self.assertEqual(lines[2].split()[6:9], ["1", "17", "100"])
+
+    def test_the_native_agent_normalizes_when_no_normalizer_is_named(self):
+        reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
+        expected = self.dump(reply)
+        self.assertEqual(self.dump(reply, native=True), expected)
+        calls = self.agent_calls.split()
+        self.assertEqual(calls[:2], ["server-state", "--config"])
+        self.assertEqual(calls[3], "--state")
+
+    def test_turned_off_native_tools_keep_the_python_normalizer(self):
+        from jinja2 import Environment
+        environment = Environment()
+        environment.filters["bool"] = lambda value: str(value).strip().lower() in {"1", "true", "yes", "on"}
+        template = environment.from_string(DUMPER.read_text())
+        for context, agent in (({}, "/usr/local/sbin/easy-ha-proxy-agent"),
+                               ({"native_daemons_enabled": False}, ""),
+                               ({"native_tools_enabled": "False"}, "")):
+            lines = [line for line in template.render(**context).splitlines() if line.startswith("AGENT=")]
+            self.assertEqual(lines, [f'AGENT="{agent}"'], context)
 
     def test_older_twenty_field_format_is_kept(self):
         row = " ".join(self.ROW.split()[:20])

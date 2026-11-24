@@ -99,38 +99,7 @@ func runUDPForward(args []string) int {
 }
 
 func runCertDeliver(args []string) int {
-	opts := tools.CertDeliverOptionsFromEnv()
-	fs := flag.NewFlagSet("cert-deliver", flag.ContinueOnError)
-	lineage := fs.String("lineage", os.Getenv("RENEWED_LINEAGE"), "path to certbot lineage directory")
-	targetName := fs.String("target", "", "deliver only to this named target")
-	domainsStr := fs.String("domains", os.Getenv("RENEWED_DOMAINS"), "space-separated renewed domains")
-	if err := fs.Parse(args); err != nil || *lineage == "" {
-		fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent cert-deliver --lineage <dir> [--target <name>] [--domains '...']")
-		return 2
-	}
-	targets, err := tools.LoadDeliveryTargets(opts.DestinationsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cert-deliver: %v\n", err)
-		return 1
-	}
-	domains := strings.Fields(*domainsStr)
-	failed := 0
-	for _, t := range targets {
-		if *targetName != "" && t.Name != *targetName {
-			continue
-		}
-		if *targetName == "" && (!t.Enabled || (len(domains) > 0 && !tools.TargetWantsDomains(t, domains))) {
-			continue
-		}
-		if err := tools.DeliverTarget(context.Background(), opts, *lineage, t); err != nil {
-			fmt.Fprintf(os.Stderr, "cert-deliver [%s]: %v\n", t.Name, err)
-			failed++
-		}
-	}
-	if failed > 0 {
-		return 1
-	}
-	return 0
+	return tools.RunCertDeliver(args, tools.CertDeliverOptionsFromEnv(), os.Stdout, os.Stderr)
 }
 
 func runUpdateGeoIP(args []string) int {

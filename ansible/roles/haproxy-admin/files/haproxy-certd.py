@@ -149,4 +149,12 @@ def _bootstrap() -> Tuple[types.ModuleType, ...]:
 _SUBMODULES = _bootstrap()
 
 if __name__ == "__main__":
+    # certbot's renewal timer runs this with --renew (certbot-renew.service.conf).
+    # Without the branch it started a second daemon on certd's socket and the
+    # timer's run never ended.
+    if sys.argv[1:] == ["--renew"]:
+        import logging
+
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+        raise SystemExit(_SUBMODULES[-1].renew_certificates())
     raise SystemExit(_SUBMODULES[-1].main())

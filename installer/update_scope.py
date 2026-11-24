@@ -153,6 +153,7 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_ADMIN}/files/certd/*", ("ha-adm-daemons",)),
     (f"{_ADMIN}/files/easy-ha-proxy-cert-deliver.py", ("ha-adm-daemons",)),
     (f"{_ADMIN}/templates/haproxy-certd.service.j2", ("ha-adm-daemons",)),
+    (f"{_ADMIN}/templates/certbot-renew.service.conf.j2", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/certd.yml", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/dns-plugins.yml", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/daemons.yml", ("ha-adm-daemons",)),

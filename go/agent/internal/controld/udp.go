@@ -174,6 +174,20 @@ func (f *udpFailover) startupState() (map[string]string, bool) {
 	return out, true
 }
 
+// healthTargetsCommand asks the UDP generator which forwards have a backup.
+// The agent's own udp-forward is that generator (the Python one prints the
+// same targets); HP_UDP_GENERATOR names a Python generator to run instead.
+func (f *udpFailover) healthTargetsCommand() []string {
+	if gen := f.d.Opts.UDPGenerator; gen != "" {
+		return []string{"/usr/bin/python3", gen, "--config", f.d.Opts.UDPConfig, "--health-targets"}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "/usr/local/sbin/easy-ha-proxy-agent"
+	}
+	return []string{exe, "udp-forward", "--config", f.d.Opts.UDPConfig, "--health-targets"}
+}
+
 func (f *udpFailover) loadTargets() []map[string]any {
 	fi, err := os.Stat(f.d.Opts.UDPConfig)
 	if err != nil {
@@ -188,7 +202,7 @@ func (f *udpFailover) loadTargets() []map[string]any {
 	if key == f.configKey {
 		return f.targets
 	}
-	res, err := runCmd([]string{"/usr/bin/python3", f.d.Opts.UDPGenerator, "--config", f.d.Opts.UDPConfig, "--health-targets"}, nil, 30*time.Second)
+	res, err := runCmd(f.healthTargetsCommand(), nil, 30*time.Second)
 	var targets []map[string]any
 	if err == nil {
 		out := strings.TrimSpace(res.stdout)

@@ -646,17 +646,50 @@ sys.exit(1 if os.environ.get("PROBE_FAIL_LINEAGE") == lineage else 0)
 
 
 class RenewalServiceContractTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "certd runs on POSIX hosts")
+    def test_the_script_renews_and_exits_instead_of_starting_a_second_daemon(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "letsencrypt" / "renewal").mkdir(parents=True)
+            (root / "letsencrypt" / "renewal" / "a.example.com.conf").write_text(
+                "[renewalparams]\nauthenticator = standalone\n")
+            calls = root / "calls"
+            certbot = root / "certbot"
+            certbot.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+            certbot.chmod(0o755)
+            socket_path = root / "certd.sock"
+            env = dict(os.environ, CERTBOT_BIN=str(certbot), LETSENCRYPT_ROOT_DIR=str(root / "letsencrypt"),
+                       HAPROXY_DNS_CREDENTIALS_DIR=str(root / "dns"), HAPROXY_CERTD_SOCKET=str(socket_path),
+                       PYTHONDONTWRITEBYTECODE="1")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"), "--renew"],
+                env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(socket_path.exists())
+            self.assertNotIn("listening", result.stderr)
+            self.assertIn("renew --non-interactive --quiet --cert-name a.example.com", calls.read_text())
+
     def test_the_managed_snap_timer_override_renders_default_and_custom_paths(self):
         from jinja2 import Environment, StrictUndefined
         import yaml
 
         template = ROOT / "ansible/roles/haproxy-admin/templates/certbot-renew.service.conf.j2"
-        for context, root, credentials in (
-            ({}, "/etc/letsencrypt", "/etc/easy-ha-proxy/dns-providers"),
-            ({"letsencrypt_root_dir": "/srv/acme", "dns_credentials_dir": "/srv/dns"}, "/srv/acme", "/srv/dns"),
+        environment = Environment(undefined=StrictUndefined)
+        environment.filters["bool"] = lambda value: str(value).strip().lower() in {"1", "true", "yes", "on"}
+        for context, root, credentials, runner in (
+            ({}, "/etc/letsencrypt", "/etc/easy-ha-proxy/dns-providers",
+             "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py --renew"),
+            ({"letsencrypt_root_dir": "/srv/acme", "dns_credentials_dir": "/srv/dns"}, "/srv/acme", "/srv/dns",
+             "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py --renew"),
+            # The native certd's own renewal mode, never a second daemon.
+            ({"native_certd_enabled": True}, "/etc/letsencrypt", "/etc/easy-ha-proxy/dns-providers",
+             "ExecStart=/usr/local/sbin/easy-ha-proxy-agent certd --renew"),
         ):
-            rendered = Environment(undefined=StrictUndefined).from_string(template.read_text()).render(**context)
-            self.assertIn("ExecStart=\nExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py --renew", rendered)
+            rendered = environment.from_string(template.read_text()).render(**context)
+            lines = [line for line in rendered.splitlines() if line.startswith("ExecStart=")]
+            self.assertEqual(lines, ["ExecStart=", runner])
             self.assertIn(f'Environment="LETSENCRYPT_ROOT_DIR={root}"', rendered)
             self.assertIn(f'Environment="HAPROXY_DNS_CREDENTIALS_DIR={credentials}"', rendered)
             self.assertIn("TimeoutStartSec=infinity", rendered)

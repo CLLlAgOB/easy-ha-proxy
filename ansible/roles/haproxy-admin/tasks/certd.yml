@@ -91,6 +91,20 @@
     owner: root
     group: root
     mode: "0755"
+  when: not (native_tools_enabled | default(native_daemons_enabled | default(false)) | bool)
+
+# The agent's port of the same worker, under the name both callers use.
+- name: Install the certificate delivery worker (native agent)
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      # Managed by easy-ha-proxy: certbot's 906 deploy hook and certd run this.
+      exec {{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} cert-deliver "$@"
+    dest: /usr/local/sbin/easy-ha-proxy-cert-deliver
+    owner: root
+    group: root
+    mode: "0755"
+  when: native_tools_enabled | default(native_daemons_enabled | default(false)) | bool
 
 - name: Ensure certificate delivery targets directory exists
   ansible.builtin.file:

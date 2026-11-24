@@ -163,7 +163,7 @@ func OptionsFromEnv() Options {
 		UDPForwardState:                   env("HAPROXY_UDP_FORWARD_STATE", "/run/easy-ha-proxy/udp-forward-state.json"),
 		UDPFailoverState:                  env("HP_UDP_FAILOVER", "/run/easy-ha-proxy/udp-failover.json"),
 		UDPConfig:                         env("HP_UDP_CONFIG", "/opt/haproxy-admin/config/udp.yml"),
-		UDPGenerator:                      env("HP_UDP_GENERATOR", "/usr/local/sbin/haproxy-udp-forward.py"),
+		UDPGenerator:                      env("HP_UDP_GENERATOR", ""),
 		UDPHealthInterval:                 health,
 		MaxArchiveBytes:                   int64(envI("HAPADM_MAX_ARCHIVE_BYTES", 64*1024*1024)),
 		MaxArchiveFiles:                   int64(envI("HAPADM_MAX_ARCHIVE_FILES", 4096)),

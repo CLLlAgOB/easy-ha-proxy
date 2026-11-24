@@ -74,11 +74,10 @@ func TestCertDeliverWildcardCoverageAndArtefacts(t *testing.T) {
 	if NameCovered("a.b.example.com", []string{"*.example.com"}) {
 		t.Fatal("single-label wildcard must NOT match two labels")
 	}
-	if TargetWantsDomains(CertDeliveryTarget{Domains: []string{"example.com"}}, []string{"notexample.com"}) {
+	if certWantsDomain(map[string]any{"domains": []any{"example.com"}}, []string{"notexample.com"}) {
 		t.Fatal("substring domain must NOT match")
 	}
 
-	// Generate a test lineage with ECDSA cert + key.
 	lineage := t.TempDir()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
@@ -93,21 +92,29 @@ func TestCertDeliverWildcardCoverageAndArtefacts(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(lineage, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
 	_ = os.WriteFile(filepath.Join(lineage, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)
 
-	missing, err := UncoveredNames(CertDeliveryTarget{Domains: []string{"app.example.com", "api.svc.example.com"}}, lineage)
-	if err != nil || len(missing) != 0 {
-		t.Fatalf("expected full coverage, got missing=%v err=%v", missing, err)
+	opts := CertDeliverOptionsFromEnv()
+	opts.DestinationsDir = t.TempDir()
+	workdir := t.TempDir()
+	pairs, err := opts.buildArtefacts(lineage, map[string]any{"format": "pem-pair", "remote_path": "/etc/ssl/app/"}, workdir)
+	if err != nil || len(pairs) != 2 || pairs[0].RemotePath != "/etc/ssl/app/fullchain.pem" {
+		t.Fatalf("pem-pair: %+v err=%v", pairs, err)
 	}
-	missing, err = UncoveredNames(CertDeliveryTarget{Domains: []string{"other.org"}}, lineage)
-	if err != nil || len(missing) != 1 {
-		t.Fatalf("expected 1 uncovered domain, got missing=%v err=%v", missing, err)
+	if st, _ := os.Stat(pairs[0].LocalPath); st.Mode().Perm() != 0o644 {
+		t.Fatalf("pem-pair chain mode %v", st.Mode().Perm())
 	}
 
-	workdir := t.TempDir()
-	pairs, err := BuildCertArtefacts(context.Background(), lineage, CertDeliveryTarget{
-		Format: "pem-combined", RemotePath: "/etc/ssl/app.pem",
-	}, workdir, "")
-	if err != nil || len(pairs) != 1 || pairs[0].RemotePath != "/etc/ssl/app.pem" {
-		t.Fatalf("BuildCertArtefacts pem-combined: %+v err=%v", pairs, err)
+	// The deploy hook passes --lineage "" when certbot sets nothing: not an error.
+	var out, errBuf strings.Builder
+	if rc := RunCertDeliver([]string{"--lineage", "", "--domains", ""}, opts, &out, &errBuf); rc != 0 ||
+		errBuf.String() != "cert-deliver: INFO no lineage given; nothing to deliver\n" {
+		t.Fatalf("empty lineage: rc=%d %q", rc, errBuf.String())
+	}
+	// A record without "enabled" is enabled, as record.get("enabled", True).
+	_ = os.WriteFile(filepath.Join(opts.DestinationsDir, "rdg.json"), []byte(`{"domains":["app.example.com"]}`), 0o600)
+	errBuf.Reset()
+	if rc := RunCertDeliver([]string{"--lineage", lineage, "--domains", "app.example.com"}, opts, &out, &errBuf); rc != 1 ||
+		!strings.Contains(errBuf.String(), "delivery to rdg failed: host is not set") {
+		t.Fatalf("missing host: rc=%d %q", rc, errBuf.String())
 	}
 }
 
