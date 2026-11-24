@@ -1964,59 +1964,6 @@ impl Engine {
         }
     }
 
-    fn visit_enforcement_checks(
-        &mut self,
-        now: i64,
-        mut check: impl FnMut(&mut Self, &str) -> EResult<()>,
-    ) -> EResult<()> {
-        self.enforcement_checked = 0;
-        let pending = self
-            .sink
-            .queue
-            .batch(ENFORCEMENT_BATCH - ENFORCEMENT_SWEEP_RESERVE);
-        let mut seen = HashSet::new();
-        for (ip, generation) in &pending {
-            seen.insert(ip.clone());
-            self.enforcement_checked += 1;
-            check(self, ip)?;
-            self.sink.queue.acknowledge(ip, *generation);
-        }
-        let allowance = (ENFORCEMENT_BATCH - pending.len()) as i64;
-        if self.enforcement_scan_before == 0 {
-            self.enforcement_scan_before = now;
-        }
-        let after = self.enforcement_scan_after.clone();
-        let mut addresses = self.db.enforcement_addresses(
-            (after.0, &after.1),
-            self.enforcement_scan_before,
-            allowance,
-        )?;
-        if addresses.is_empty() && self.enforcement_scan_after != (0, String::new()) {
-            self.enforcement_scan_after = (0, String::new());
-            self.enforcement_scan_before = now;
-            addresses = self.db.enforcement_addresses((0, ""), now, allowance)?;
-        }
-        for (first_seen, ip) in &addresses {
-            if !seen.contains(ip) {
-                self.enforcement_checked += 1;
-                check(self, ip)?;
-            }
-            self.enforcement_scan_after = (*first_seen, ip.clone());
-        }
-        if (addresses.len() as i64) < allowance {
-            self.enforcement_scan_after = (0, String::new());
-            self.enforcement_scan_before = 0;
-        }
-        self.db.set_state(
-            ENFORCEMENT_CURSOR_KEY,
-            &crate::secdb::python_json(&json!({
-                "after": [self.enforcement_scan_after.0, self.enforcement_scan_after.1],
-                "before": self.enforcement_scan_before,
-            })),
-        )?;
-        Ok(())
-    }
-
     pub fn ban_blockers(&self, rep: &Reputation, now: i64, policy: Option<&str>) -> Vec<String> {
         let policy = policy.unwrap_or(self.sink.ban_policy);
         let mut blockers = Vec::new();
@@ -2108,54 +2055,6 @@ impl Engine {
         })
     }
 
-    fn settle_pending_decisions(&mut self, now: i64) -> Result<(), String> {
-        let pending = self.db.pending_decisions(now - DECISION_PENDING_GRACE)?;
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let standing = match self.enforcer.active_bans() {
-            Ok(s) => s,
-            Err(e) => {
-                log_warn(&format!(
-                    "Could not read the ban table to settle decisions: {e}"
-                ));
-                return Ok(());
-            }
-        };
-        let scheduled = self.db.scheduled_bans()?;
-        for d in pending {
-            let ip = d["ip"].as_str().unwrap_or("").to_string();
-            let id = d["id"].as_i64().unwrap_or(0);
-            let until = d["until"].as_i64().unwrap_or(0);
-            let ts = d["ts"].as_i64().unwrap_or(0);
-            let code = standing.get(&ip).copied();
-            let adaptive = code.is_some_and(|c| c == ADAPTIVE_BAN_CODE || c == ADAPTIVE_PAGE_CODE);
-            if adaptive && !scheduled.contains_key(&ip) && until > now {
-                self.db.commit_ban(
-                    id,
-                    &ip,
-                    until,
-                    code.unwrap_or(ADAPTIVE_BAN_CODE),
-                    ts,
-                    &format!("score={} seconds={} [settled]", d["score"], until - ts),
-                )?;
-                log_warn(&format!("Recorded the ban on {ip} applied before a crash"));
-                continue;
-            }
-            if adaptive && !scheduled.contains_key(&ip) {
-                if let Err(e) = self.enforcer.lift(&ip) {
-                    if e.ban_table_unsure() {
-                        log_warn(&e.to_string());
-                        continue;
-                    }
-                    return Err(e.to_string());
-                }
-            }
-            self.db.settle_decision(id, "abandoned")?;
-        }
-        Ok(())
-    }
-
     pub fn ban_duration(&self, ip: &str, now: i64) -> Result<i64, String> {
         let ladder = &self.ban_durations;
         let index = self.strike_level(ip, now)?.min(ladder.len() as i64 - 1) as usize;
@@ -2182,150 +2081,6 @@ impl Engine {
                 .join(", ")
         ));
         Ok(checked)
-    }
-
-    pub fn apply_enforcement(&mut self, now: Option<i64>) -> EResult<Value> {
-        let now = now.unwrap_or_else(utc_now);
-        self.enforcement_checked = 0;
-        let mut applied: Vec<String> = Vec::new();
-        let mut lifted: Vec<String> = Vec::new();
-        self.settle_pending_decisions(now)?;
-        let mut scheduled = self.db.scheduled_bans()?;
-        let mut codes = self.db.scheduled_ban_codes()?;
-        let enforcing = self.enforcer.allowed();
-        for (ip, until) in scheduled.clone() {
-            let served = until <= now;
-            if enforcing && !served {
-                continue;
-            }
-            let taken_off = match self.enforcer.lift(&ip) {
-                Ok(t) => t,
-                Err(e) if e.ban_table_unsure() => {
-                    log_warn(&format!("{e}; trying again next cycle"));
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-            if taken_off {
-                lifted.push(ip.clone());
-                self.sink.emit(
-                    &ip,
-                    EVENT_BAN_LIFTED,
-                    now,
-                    "guardd",
-                    "",
-                    "",
-                    if enforcing {
-                        "expired"
-                    } else {
-                        "enforcement disabled"
-                    },
-                    false,
-                    Some(format!("{ip}|{EVENT_BAN_LIFTED}|{until}")),
-                )?;
-                let code = codes
-                    .get(&ip)
-                    .copied()
-                    .filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE)
-                    .unwrap_or(ADAPTIVE_BAN_CODE);
-                self.db.record_decision(
-                    &ip,
-                    now,
-                    "lifted",
-                    if served { "expiry" } else { "mode" },
-                    "applied",
-                    Decision {
-                        code,
-                        until,
-                        policy: self.sink.ban_policy,
-                        ..Default::default()
-                    },
-                )?;
-            }
-            if served {
-                self.db.clear_ban(&ip)?;
-            }
-        }
-        if !enforcing {
-            let mut extra: Vec<String> = self.enforcer.adaptive_bans()?.into_keys().collect();
-            extra.sort();
-            for ip in extra {
-                if scheduled.contains_key(&ip) {
-                    continue;
-                }
-                match self.enforcer.lift(&ip) {
-                    Ok(true) => lifted.push(ip),
-                    Ok(false) => {}
-                    Err(e) if e.ban_table_unsure() => {
-                        log_warn(&format!("{e}; trying again next cycle"))
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            self.apply_promotions();
-            return Ok(json!({"applied": applied, "lifted": lifted, "enforcing": false}));
-        }
-        let mut standing = self.enforcer.active_bans()?;
-        for (ip, until) in &scheduled {
-            if *until <= now || standing.contains_key(ip) {
-                continue;
-            }
-            let code = codes
-                .get(ip)
-                .copied()
-                .filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE)
-                .unwrap_or(ADAPTIVE_BAN_CODE);
-            if self.enforcer.ban(ip, code)? {
-                log_info(&format!("Re-asserted the ban on {ip}, gone from the table"));
-            }
-        }
-        let policy = self.scoring_policy();
-        self.visit_enforcement_checks(now, |engine, ip| {
-            let row = engine.reputation(ip, now, Some(&policy), Some(&scheduled))?;
-            engine.apply_row_decision(
-                &row,
-                now,
-                &mut scheduled,
-                &mut codes,
-                &mut standing,
-                &mut applied,
-            )?;
-            Ok(())
-        })?;
-        if !applied.is_empty() {
-            self.check_burst(applied.len(), now);
-        }
-        self.apply_promotions();
-        Ok(json!({"applied": applied, "lifted": lifted, "enforcing": true}))
-    }
-
-    pub fn apply_urgent_enforcement(&mut self, now: Option<i64>) -> EResult<Value> {
-        let now = now.unwrap_or_else(utc_now);
-        if !self.enforcer.allowed() || !self.sink.queue.has_urgent() {
-            return Ok(json!({"applied": [], "enforcing": self.enforcer.allowed()}));
-        }
-        let mut scheduled = self.db.scheduled_bans()?;
-        let mut codes = self.db.scheduled_ban_codes()?;
-        let mut standing = self.enforcer.active_bans()?;
-        let policy = self.scoring_policy();
-        let mut applied = Vec::new();
-        for (ip, generation) in self.sink.queue.urgent_batch(ENFORCEMENT_BATCH) {
-            let row = self.reputation(&ip, now, Some(&policy), Some(&scheduled))?;
-            self.apply_row_decision(
-                &row,
-                now,
-                &mut scheduled,
-                &mut codes,
-                &mut standing,
-                &mut applied,
-            )?;
-            self.sink.queue.acknowledge(&ip, generation);
-        }
-        if !applied.is_empty() {
-            self.fast_enforcements += applied.len() as u64;
-            self.check_burst(applied.len(), now);
-        }
-        Ok(json!({"applied": applied, "enforcing": true}))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2485,23 +2240,6 @@ impl Engine {
         Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn apply_row_decision(
-        &mut self,
-        row: &Reputation,
-        now: i64,
-        scheduled: &mut BTreeMap<String, i64>,
-        codes: &mut BTreeMap<String, i64>,
-        standing: &mut HashMap<String, i64>,
-        applied: &mut Vec<String>,
-    ) -> EResult<bool> {
-        let Some(prep) = self.prepare_row_decision(row, now, scheduled, codes, standing)? else {
-            return Ok(false);
-        };
-        let banned = self.enforcer.ban(&prep.ip, prep.code)?;
-        self.finish_row_decision(prep, banned, scheduled, codes, standing, applied)
-    }
-
     fn check_burst(&mut self, banned: usize, now: i64) {
         for _ in 0..banned {
             self.burst_bans.push_back(now);
@@ -2569,196 +2307,6 @@ impl Engine {
                 String::new(),
             );
         }
-    }
-
-    pub fn place_manual_ban(&mut self, ip: &str, now: Option<i64>) -> EResult<Value> {
-        let now = now.unwrap_or_else(utc_now);
-        let checked = ip.trim().to_string();
-        if !enforceable(&checked) {
-            return Err(EngineError::Value(
-                "only an IPv4 address can be banned".into(),
-            ));
-        }
-        let mut remembered = true;
-        let previous = self
-            .db
-            .manual_bans()
-            .ok()
-            .and_then(|m| m.get(&checked).copied());
-        if let Err(e) =
-            self.db
-                .write_manual_ban(&checked, now, now + MANUAL_BAN_DEFAULT_SECONDS, now, 0)
-        {
-            remembered = false;
-            log_warn(&format!(
-                "Could not remember the manual ban on {checked}: {e}"
-            ));
-        }
-        let put_back = |db: &SecurityDatabase| {
-            if !remembered {
-                return;
-            }
-            match previous {
-                Some(p) => {
-                    let _ = db.write_manual_ban(
-                        &checked,
-                        p.placed_at,
-                        p.expires_at,
-                        p.seen_at,
-                        p.reasserted,
-                    );
-                }
-                None => {
-                    let _ = db.forget_manual_ban(&checked);
-                }
-            }
-        };
-        let placed = match self.enforcer.restore(&checked, MANUAL_BAN_CODE) {
-            Ok(p) => p,
-            Err(e) => {
-                put_back(&self.db);
-                return Err(EngineError::Refused(e.to_string()));
-            }
-        };
-        if !placed {
-            put_back(&self.db);
-            return Err(EngineError::Refused(format!(
-                "HAProxy refused the ban on {checked}"
-            )));
-        }
-        let mut until = now + MANUAL_BAN_DEFAULT_SECONDS;
-        if let Ok(rows) = read_table(
-            &self.config.haproxy_socket,
-            "tbl_ban",
-            &format!("key {checked}"),
-        ) {
-            if let Some(fields) = rows.get(&checked) {
-                let exp = field_int(fields, "exp");
-                if exp > 0 {
-                    until = now + exp / 1000;
-                }
-            }
-        }
-        let outcome = self
-            .db
-            .write_manual_ban(&checked, now, until, now, 0)
-            .and_then(|_| {
-                self.db.record_decision(
-                    &checked,
-                    now,
-                    "applied",
-                    "operator",
-                    "applied",
-                    Decision {
-                        code: MANUAL_BAN_CODE,
-                        until,
-                        policy: self.sink.ban_policy,
-                        ..Default::default()
-                    },
-                )
-            });
-        if let Err(e) = outcome {
-            remembered = false;
-            log_warn(&format!(
-                "Banned {checked} by hand, but could not remember it: {e}"
-            ));
-        }
-        log_warn(&format!("Ban placed by hand on {checked} until {until}"));
-        Ok(
-            json!({"ok": true, "ip": checked, "code": MANUAL_BAN_CODE, "until": until, "remembered": remembered}),
-        )
-    }
-
-    pub fn forget_ban(&mut self, ip: &str, now: Option<i64>) -> EResult<Value> {
-        let now = now.unwrap_or_else(utc_now);
-        let checked = ip.trim().to_string();
-        if checked.is_empty() {
-            return Err(EngineError::Value("an address is required".into()));
-        }
-        if checked.parse::<std::net::IpAddr>().is_err() {
-            return Err(EngineError::Value("invalid IP address".into()));
-        }
-        let held = self
-            .db
-            .scheduled_bans()?
-            .get(&checked)
-            .copied()
-            .unwrap_or(0);
-        self.db.clear_ban(&checked)?;
-        let manual = self.db.forget_manual_ban(&checked)?;
-        let mut refused = String::new();
-        let mut lifted = false;
-        let mut released = false;
-        match self.enforcer.lift(&checked) {
-            Ok(l) => {
-                lifted = l;
-                match self.enforcer.release(&checked) {
-                    Ok(r) => released = r,
-                    Err(e) if e.ban_table_unsure() => {
-                        refused = e.to_string();
-                        log_warn(&refused);
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Err(e) if e.ban_table_unsure() => {
-                refused = e.to_string();
-                log_warn(&refused);
-            }
-            Err(e) => return Err(e.into()),
-        }
-        if held != 0 || lifted {
-            self.sink.emit(
-                &checked,
-                EVENT_BAN_LIFTED,
-                now,
-                "operator",
-                "",
-                "",
-                "cleared by hand",
-                false,
-                Some(format!("{checked}|{EVENT_BAN_LIFTED}|{now}")),
-            )?;
-            log_warn(&format!(
-                "Ban on {checked} cleared by hand; the schedule is dropped"
-            ));
-        }
-        let legacy = self.settle_legacy_observed(&checked);
-        if held != 0 || lifted || manual || legacy != 0 {
-            let code = if held != 0 || lifted {
-                ADAPTIVE_BAN_CODE
-            } else if manual {
-                MANUAL_BAN_CODE
-            } else {
-                legacy
-            };
-            self.db.record_decision(
-                &checked,
-                now,
-                "lifted",
-                "operator",
-                if refused.is_empty() {
-                    "applied"
-                } else {
-                    "failed"
-                },
-                Decision {
-                    code,
-                    until: held,
-                    policy: self.sink.ban_policy,
-                    ..Default::default()
-                },
-            )?;
-        }
-        self.apply_promotions();
-        Ok(json!({
-            "ok": true,
-            "refused": refused,
-            "ip": checked,
-            "was_scheduled": held != 0,
-            "lifted": lifted || released,
-            "cleared": refused.is_empty(),
-        }))
     }
 
     pub fn quality(&mut self, days: i64, now: Option<i64>) -> Result<Value, String> {
@@ -2895,104 +2443,11 @@ impl Engine {
         })
     }
 
-    pub fn set_first_step_page(&mut self, enabled: &Value) -> EResult<Value> {
-        let Some(enabled) = enabled.as_bool() else {
-            return Err(EngineError::Value("enabled must be true or false".into()));
-        };
-        let mut changed = 0;
-        self.db
-            .set_state(FIRST_STEP_PAGE_KEY, if enabled { "1" } else { "0" })?;
-        self.first_step_page = enabled;
-        if !enabled {
-            let standing = self.enforcer.active_bans()?;
-            for (ip, code) in self.db.scheduled_ban_codes()? {
-                if code != ADAPTIVE_PAGE_CODE {
-                    continue;
-                }
-                if standing.get(&ip) == Some(&ADAPTIVE_PAGE_CODE)
-                    && !self.enforcer.ban(&ip, ADAPTIVE_BAN_CODE)?
-                {
-                    continue;
-                }
-                self.db.set_ban_code(&ip, ADAPTIVE_BAN_CODE)?;
-                changed += 1;
-            }
-        }
-        log_warn(&format!(
-            "First-step page switched {}{}",
-            if enabled { "on" } else { "off" },
-            if changed > 0 {
-                format!("; {changed} first steps now cut off")
-            } else {
-                String::new()
-            }
-        ));
-        let mut state = self.first_step_state();
-        state["changed"] = json!(changed);
-        Ok(state)
-    }
-
-    pub fn sync_shield(&mut self, now: i64) -> Value {
-        let sigs = self.sig();
-        match shield_entries(
-            &self.enforcer.mode,
-            self.shield_enabled,
-            &self.detection.config.modes,
-            &self.detection.config.exceptions,
-            now,
-            &sigs,
-        ) {
-            Ok(wanted) => self.shield.sync(&wanted, now),
-            Err(e) => {
-                self.shield.status["active"] = json!(false);
-                self.shield.status["error"] = json!(e.chars().take(300).collect::<String>());
-                self.shield.status.clone()
-            }
-        }
-    }
-
     pub fn shield_state(&self) -> Value {
         let mut v = self.shield.status.clone();
         v["enabled"] = json!(self.shield_enabled);
         v["mode"] = json!(self.enforcer.mode);
         v
-    }
-
-    pub fn set_shield(&mut self, enabled: &Value, now: Option<i64>) -> EResult<Value> {
-        let Some(enabled) = enabled.as_bool() else {
-            return Err(EngineError::Value("enabled must be true or false".into()));
-        };
-        self.db
-            .set_state(SHIELD_ENABLED_KEY, if enabled { "1" } else { "0" })?;
-        self.shield_enabled = enabled;
-        log_warn(&format!(
-            "Path shield switched {}",
-            if enabled { "on" } else { "off" }
-        ));
-        self.sync_shield(now.unwrap_or_else(utc_now));
-        Ok(self.shield_state())
-    }
-
-    pub fn set_mode(&mut self, mode: &str, now: Option<i64>) -> EResult<Value> {
-        let mode = mode.trim().to_lowercase();
-        if !SUPPORTED_MODES.contains(&mode.as_str()) {
-            return Err(EngineError::Value(format!(
-                "mode must be one of {}",
-                SUPPORTED_MODES.join(", ")
-            )));
-        }
-        let now = now.unwrap_or_else(utc_now);
-        let previous = self.enforcer.mode.clone();
-        self.db.set_state("mode_override", &mode)?;
-        self.enforcer.mode = mode.clone();
-        log_warn(&format!(
-            "Adaptive protection mode changed: {previous} -> {mode}"
-        ));
-        let mut result = self.apply_enforcement(Some(now))?;
-        self.sync_shield(now);
-        result["mode"] = json!(mode);
-        result["previous"] = json!(previous);
-        Ok(result)
     }
 
     pub fn parse_ban_detail(detail: &str) -> (Option<i64>, Vec<String>) {
@@ -3131,60 +2586,6 @@ impl Engine {
             },
             "addresses": rows.iter().map(|r| r.to_json(false)).collect::<Vec<_>>(),
         }))
-    }
-
-    pub fn run_maintenance(&mut self) -> Result<Value, String> {
-        let now = utc_now();
-        let cutoff = now - self.config.event_retention_days * 86400;
-        let ban_cutoff = cutoff.min(now - self.longest_strike_retention());
-        let mut deleted = self.db.apply_retention(cutoff, ban_cutoff)?;
-        deleted.insert(
-            "rate_warnings".into(),
-            self.db.prune_rate_warnings(
-                now - RATE_WARNINGS_KEEP_DAYS * 86400,
-                RATE_WARNINGS_KEEP_ROWS,
-            )?,
-        );
-        deleted.insert(
-            "ban_decisions".into(),
-            self.db
-                .prune_decisions(ban_cutoff, DECISIONS_KEEP_ROWS, now)?,
-        );
-        if deleted.values().any(|v| *v != 0) {
-            self.db.incremental_vacuum(256);
-        }
-        let pruned = self.memory.prune(now - 6 * 3600);
-        self.sink.subnets.prune(now);
-        self.candidates.prune(now - CANDIDATE_TTL);
-        self.unknown_hosts.prune(now - UNKNOWN_HOSTS_TTL);
-        self.detection.persist(now, true, &self.db)?;
-        let _ = self
-            .db
-            .set_state(CANDIDATES_KEY, &self.candidates.snapshot(2000).to_string());
-        let _ = self.db.set_state(
-            UNKNOWN_HOSTS_KEY,
-            &self.unknown_hosts.snapshot().to_string(),
-        );
-        let ordered = [
-            "events",
-            "cooldowns",
-            "addresses",
-            "rate_warnings",
-            "ban_decisions",
-        ];
-        let text = format!(
-            "{{{}}}",
-            ordered
-                .iter()
-                .map(|k| format!("\"{k}\": {}", deleted.get(*k).copied().unwrap_or(0)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        log_info(&format!(
-            "Maintenance: deleted={text} pruned_ips={pruned} tracked={}",
-            self.memory.len()
-        ));
-        Ok(json!({"deleted": deleted, "pruned_ips": pruned}))
     }
 
     pub fn health(&self) -> Result<Value, String> {
@@ -3663,6 +3064,57 @@ impl Shared {
         ));
         self.sync_shield_locked(&decisions, now.unwrap_or_else(utc_now));
         Ok(self.engine().shield_state())
+    }
+
+    /// The operator's first-step-page switch. Turning it off re-bans every
+    /// address that is shown the page with the hard ban code: HAProxy I/O,
+    /// so it runs on a detached enforcer under the decisions lock, like the
+    /// other ban changes, and never holds the engine while it waits.
+    pub fn set_first_step_page(&self, enabled: &Value) -> EResult<Value> {
+        let Some(enabled) = enabled.as_bool() else {
+            return Err(EngineError::Value("enabled must be true or false".into()));
+        };
+        let _decisions = lock(&self.decisions);
+        let mut enforcer = {
+            let mut e = self.engine();
+            e.db.set_state(FIRST_STEP_PAGE_KEY, if enabled { "1" } else { "0" })?;
+            e.first_step_page = enabled;
+            e.enforcer.clone()
+        };
+        let before = enforcer.clone();
+        let mut changed = 0;
+        let result: EResult<()> = (|| {
+            if !enabled {
+                let standing = enforcer.active_bans()?;
+                for (ip, code) in self.db.scheduled_ban_codes()? {
+                    if code != ADAPTIVE_PAGE_CODE {
+                        continue;
+                    }
+                    if standing.get(&ip) == Some(&ADAPTIVE_PAGE_CODE)
+                        && !enforcer.ban(&ip, ADAPTIVE_BAN_CODE)?
+                    {
+                        continue;
+                    }
+                    self.db.set_ban_code(&ip, ADAPTIVE_BAN_CODE)?;
+                    changed += 1;
+                }
+            }
+            Ok(())
+        })();
+        self.merge_enforcer_deltas(&before, &enforcer);
+        result?;
+        log_warn(&format!(
+            "First-step page switched {}{}",
+            if enabled { "on" } else { "off" },
+            if changed > 0 {
+                format!("; {changed} first steps now cut off")
+            } else {
+                String::new()
+            }
+        ));
+        let mut state = self.engine().first_step_state();
+        state["changed"] = json!(changed);
+        Ok(state)
     }
 
     fn settle_pending_decisions_locked(
@@ -4454,32 +3906,86 @@ pub fn run(shared: Arc<Shared>) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn failed_check_stays_queued_and_invalid_unban_is_rejected() {
+    fn test_shared() -> Shared {
         let db = Arc::new(SecurityDatabase::open(":memory:").unwrap());
-        let mut engine = Engine::new(
+        let sigs = Arc::new(RwLock::new(Arc::new(SignatureEngine::builtin())));
+        let requests = Arc::new(RwLock::new(None));
+        let engine = Engine::new(
             GuardConfig::default(),
-            db,
-            Arc::new(RwLock::new(Arc::new(SignatureEngine::builtin()))),
+            db.clone(),
+            sigs.clone(),
             None,
-            Arc::new(RwLock::new(None)),
+            requests.clone(),
         );
+        Shared {
+            engine: Mutex::new(engine),
+            decisions: Mutex::new(()),
+            alerts: None,
+            stop: Arc::new(AtomicBool::new(false)),
+            lag_bytes: Arc::new(AtomicU64::new(0)),
+            db,
+            live: None,
+            requests,
+            sigs,
+            shipped: Mutex::new(Arc::new(SignatureEngine::builtin())),
+            overrides: Mutex::new(json!({})),
+            config: GuardConfig::default(),
+            token: String::new(),
+            request_log_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn invalid_unban_is_rejected_before_touching_haproxy() {
+        let shared = test_shared();
         assert!(matches!(
-            engine.forget_ban("not an address", Some(1)),
+            shared.forget_ban("not an address", Some(1)),
             Err(EngineError::Value(_))
         ));
-        engine.sink.queue.mark("192.0.2.1", false);
-        engine.sink.queue.mark("192.0.2.2", false);
-        let result = engine.visit_enforcement_checks(1, |_, ip| {
+        assert!(matches!(
+            shared.forget_ban("", Some(1)),
+            Err(EngineError::Value(_))
+        ));
+    }
+
+    // Shared::apply_enforcement_locked acknowledges a queued address only
+    // after its check succeeded: a failed check returns first, and the
+    // address must still be in the next batch.
+    #[test]
+    fn failed_check_stays_queued() {
+        let shared = test_shared();
+        let mut e = shared.engine();
+        e.sink.queue.mark("192.0.2.1", false);
+        e.sink.queue.mark("192.0.2.2", false);
+        let pending = e.sink.queue.batch(10);
+        assert_eq!(pending.len(), 2);
+        for (ip, generation) in &pending {
             if ip == "192.0.2.2" {
-                Err(EngineError::Other("decision unavailable".into()))
-            } else {
-                Ok(())
+                break; // the check failed: no acknowledgement
             }
-        });
-        assert!(result.is_err());
-        let retry = engine.sink.queue.batch(10);
+            e.sink.queue.acknowledge(ip, *generation);
+        }
+        let retry = e.sink.queue.batch(10);
         assert_eq!(retry.len(), 1);
         assert_eq!(retry[0].0, "192.0.2.2");
+    }
+
+    // Moved from Engine to Shared: the switch is validated, stored and
+    // applied to the engine without holding the engine lock afterwards.
+    #[test]
+    fn first_step_page_switch_goes_through_shared() {
+        let shared = test_shared();
+        assert!(matches!(
+            shared.set_first_step_page(&json!("yes")),
+            Err(EngineError::Value(_))
+        ));
+        shared.engine().first_step_page = false;
+        let state = shared.set_first_step_page(&json!(true)).unwrap();
+        assert_eq!(state["enabled"], json!(true));
+        assert_eq!(state["changed"], json!(0));
+        assert!(shared.engine().first_step_page);
+        assert_eq!(shared.db.get_state(FIRST_STEP_PAGE_KEY, ""), "1");
+        // The decisions lock is free again for the next ban change.
+        assert!(shared.decisions.try_lock().is_ok());
     }
 }

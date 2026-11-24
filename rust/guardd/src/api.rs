@@ -851,7 +851,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            match s.engine().set_first_step_page(&enabled) {
+            match s.set_first_step_page(&enabled) {
                 Ok(state) => (200, json!({"ok": true, "first_step_page": state})),
                 Err(x) => engine_error(x),
             }
