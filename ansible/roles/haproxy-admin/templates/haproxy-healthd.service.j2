@@ -30,7 +30,10 @@ ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-healthd.py
 
 Restart=always
 RestartSec=3
-RuntimeDirectory=easy-ha-proxy
+# ProtectSystem=strict leaves /run read-only except these: the socket
+# directory and the journalctl --cursor-file directory of the "follow"
+# log mode (HEALTHD_CURSOR_DIR in both daemons).
+RuntimeDirectory=easy-ha-proxy haproxy-healthd-cursors
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 StateDirectory=easy-ha-proxy

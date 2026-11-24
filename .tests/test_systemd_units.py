@@ -80,5 +80,59 @@ class CertbotSandboxTests(unittest.TestCase):
         self.assertEqual(protect_home(certd), "tmpfs")
 
 
+def unit_setting(unit: Path, name: str) -> list[str]:
+    """Every value of a setting, split on whitespace (systemd list syntax)."""
+    text = unit.read_text(encoding="utf-8")
+    values: list[str] = []
+    for match in re.finditer(rf"^{name}\s*=\s*(.*)$", text, re.MULTILINE):
+        values.extend(match.group(1).split())
+    return values
+
+
+class HealthdRunDirectoryTests(unittest.TestCase):
+    """ProtectSystem=strict mounts /run read-only except the unit's own
+    RuntimeDirectory= entries. healthd keeps the journalctl --cursor-file
+    state of its "follow" log mode in /run/haproxy-healthd-cursors, outside
+    its socket directory; with only easy-ha-proxy listed, journalctl could
+    not save the cursor and the mode answered errors."""
+
+    UNIT = UNIT_DIR / "haproxy-healthd.service.j2"
+
+    @staticmethod
+    def cursor_defaults() -> dict[str, str]:
+        python = (DAEMON_DIR / "haproxy-healthd.py").read_text(encoding="utf-8")
+        go = (ROOT / "go/agent/internal/healthd/state.go").read_text(encoding="utf-8")
+        found = {
+            "python": re.search(r'"HEALTHD_CURSOR_DIR",\s*"([^"]+)"', python),
+            "go": re.search(r'envOr\("HEALTHD_CURSOR_DIR",\s*"([^"]+)"\)', go),
+        }
+        out = {}
+        for daemon, match in found.items():
+            if match is None:
+                raise AssertionError(f"cursor directory default not found in the {daemon} healthd")
+            out[daemon] = match.group(1)
+        return out
+
+    def test_the_unit_is_strict(self) -> None:
+        # Without strict the directories below need not be listed, and this
+        # test would protect nothing.
+        self.assertEqual(unit_setting(self.UNIT, "ProtectSystem"), ["strict"])
+
+    def test_cursor_directory_is_a_runtime_directory(self) -> None:
+        runtime = {f"/run/{name}" for name in unit_setting(self.UNIT, "RuntimeDirectory")}
+        # A leading "-" only makes a missing path non-fatal.
+        writable = {p.lstrip("-") for p in unit_setting(self.UNIT, "ReadWritePaths")}
+        for daemon, path in self.cursor_defaults().items():
+            with self.subTest(daemon=daemon):
+                self.assertTrue(
+                    path in runtime or path in writable,
+                    f"{daemon} healthd writes cursors to {path}, which "
+                    f"ProtectSystem=strict leaves read-only (RuntimeDirectory: {sorted(runtime)})",
+                )
+
+    def test_socket_directory_is_still_listed(self) -> None:
+        self.assertIn("easy-ha-proxy", unit_setting(self.UNIT, "RuntimeDirectory"))
+
+
 if __name__ == "__main__":
     unittest.main()
