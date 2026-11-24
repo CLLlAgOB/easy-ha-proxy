@@ -741,6 +741,9 @@ jobs:
               --label "io.easy-ha-proxy.go-panel-tree=${TREE}" \
               --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
               --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --build-arg "EHP_BUILD_REVISION=${GITHUB_SHA}" \
+              --build-arg "EHP_BUILD_DATE=${BUILT_AT}" \
+              --build-arg "EHP_SOURCE_TREE=${TREE}" \
               --tag "${key_image}" \
               --tag "${channel_image}" \
               --push \

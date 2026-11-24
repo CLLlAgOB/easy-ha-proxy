@@ -33,6 +33,16 @@ COPY docker/app/haproxy_admin/static /app/static
 COPY docker/app/haproxy_admin/translations /app/translations
 COPY docker/app/haproxy_admin/templates /app/templates
 
+# Which build this is, for the panel's footer and its comparison with the
+# host: CI passes the commit, its date and the Go panel's source tree (the
+# same fingerprint the image is keyed by and the host reports as go_web_tree).
+ARG EHP_BUILD_REVISION=""
+ARG EHP_BUILD_DATE=""
+ARG EHP_SOURCE_TREE=""
+ENV EHP_BUILD_REVISION=${EHP_BUILD_REVISION} \
+    EHP_BUILD_DATE=${EHP_BUILD_DATE} \
+    EHP_SOURCE_TREE=${EHP_SOURCE_TREE}
+
 ENV HAPROXY_ADMIN_STATIC_DIR=/app/static \
     HAPROXY_ADMIN_TEMPLATES_DIR=/app/templates \
     HAPROXY_ADMIN_TRANSLATIONS_DIR=/app/translations \

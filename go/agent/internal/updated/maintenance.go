@@ -1258,12 +1258,17 @@ func (d *Daemon) readHostBuild() map[string]any {
 	if !aware {
 		committed = committed.In(time.Local)
 	}
-	listing, _ := d.sourceGit(append([]string{"ls-tree", "-r", "--full-tree", "HEAD", "--"}, webTreeInputs...)...)
-	webTree := ""
-	if listing != "" {
+	tree := func(inputs []string) string {
+		listing, _ := d.sourceGit(append([]string{"ls-tree", "-r", "--full-tree", "HEAD", "--"}, inputs...)...)
+		if listing == "" {
+			return ""
+		}
 		sum := sha256.Sum256([]byte(listing))
-		webTree = hex.EncodeToString(sum[:])
+		return hex.EncodeToString(sum[:])
 	}
+	webTree := tree(webTreeInputs)
+	// The Flask image is keyed by web_tree; the Go panel image by this one.
+	goWebTree := tree(goWebTreeInputs)
 	version := ""
 	if raw, err := os.ReadFile(filepath.Join(d.Opts.SourceDir, "VERSION")); err == nil {
 		if text := strings.TrimSpace(string(raw)); sourceVersionRe.MatchString(text) {
@@ -1271,7 +1276,7 @@ func (d *Daemon) readHostBuild() map[string]any {
 		}
 	}
 	return map[string]any{"revision": head[0], "committed_at": committed.UTC().Format("2006-01-02T15:04:05") + "+00:00",
-		"web_tree": webTree, "version": version}
+		"web_tree": webTree, "go_web_tree": goWebTree, "version": version}
 }
 
 func (d *Daemon) hostBuild() map[string]any {
