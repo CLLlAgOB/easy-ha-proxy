@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
@@ -59,9 +60,16 @@ func (s StorageStatus) asDict() *OMap {
 
 // StorageGuard keeps monitoring inside its budget.
 type StorageGuard struct {
-	cfg            Config
-	db             *Database
-	alerts         alertSink
+	cfg    Config
+	db     *Database
+	alerts alertSink
+	storageState
+	// The collector alone mutates storageState. HTTP readers see the last
+	// completed enforcement pass without waiting for database maintenance.
+	published atomic.Pointer[storageState]
+}
+
+type storageState struct {
 	state          string
 	writesPaused   bool
 	pressureLevel  int
@@ -73,7 +81,14 @@ type StorageGuard struct {
 }
 
 func newStorageGuard(cfg Config, db *Database, sink alertSink) *StorageGuard {
-	return &StorageGuard{cfg: cfg, db: db, alerts: sink, state: stateNormal}
+	g := &StorageGuard{cfg: cfg, db: db, alerts: sink, storageState: storageState{state: stateNormal}}
+	g.publish()
+	return g
+}
+
+func (g *StorageGuard) publish() {
+	state := g.storageState
+	g.published.Store(&state)
 }
 
 func (g *StorageGuard) resolveLimits(fsTotal int64) (int64, int64) {
@@ -230,6 +245,7 @@ func (g *StorageGuard) enforce(now int64) (StorageStatus, []string) {
 		g.lastLogged = status.State
 	}
 	g.state = status.State
+	g.publish()
 	g.reportToAlerts(status)
 	_ = g.db.recordStorageSample(now, status.TotalBytes)
 	return status, actions
@@ -265,18 +281,19 @@ func (g *StorageGuard) reportToAlerts(s StorageStatus) {
 }
 
 func (g *StorageGuard) report(now int64) *OMap {
+	state := g.published.Load()
 	s := g.measure()
 	p := s.asDict()
-	p.Set("writes_paused", g.writesPaused)
-	p.Set("pressure_level", int64(g.pressureLevel))
-	p.Set("effective_retention", g.retentionForLevel(g.pressureLevel))
+	p.Set("writes_paused", state.writesPaused)
+	p.Set("pressure_level", int64(state.pressureLevel))
+	p.Set("effective_retention", g.retentionForLevel(state.pressureLevel))
 	p.Set("configured_retention", g.retentionForLevel(0))
 	p.Set("wal_soft_limit_bytes", g.cfg.WALSoftLimitBytes)
 	p.Set("auto_reduce_retention", g.cfg.AutoReduceRetention)
-	p.Set("last_cleanup_ts", g.lastCleanup)
-	p.Set("last_checkpoint_ts", g.lastCheckpoint)
-	p.Set("last_pause_ts", g.lastPause)
-	p.Set("last_resume_ts", g.lastResume)
+	p.Set("last_cleanup_ts", state.lastCleanup)
+	p.Set("last_checkpoint_ts", state.lastCheckpoint)
+	p.Set("last_pause_ts", state.lastPause)
+	p.Set("last_resume_ts", state.lastResume)
 	p.Set("growth", g.db.storageGrowth(now, s.TotalBytes))
 	return p
 }
@@ -391,6 +408,7 @@ type Collector struct {
 	db               *Database
 	storage          *StorageGuard
 	stop             chan struct{}
+	stopOnce         sync.Once
 	done             chan struct{}
 	running          bool
 	mu               sync.Mutex
@@ -470,6 +488,8 @@ func monitorsJSON(m map[string]bool) string {
 
 // setMonitors is set_monitors.
 func (c *Collector) setMonitors(changes map[string]bool) (map[string]bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	merged := map[string]any{}
 	for k, v := range c.monitors {
 		merged[k] = v
@@ -481,8 +501,6 @@ func (c *Collector) setMonitors(changes map[string]bool) (map[string]bool, error
 	if err := c.db.setState(monitorsKey, monitorsJSON(m)); err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.monitors = m
 	if !m["components"] || !m["machine"] {
 		c.componentPrev = map[string]compPrev{}
@@ -510,20 +528,17 @@ func (c *Collector) Start() {
 
 // Stop ends the loop and flushes the minute in progress.
 func (c *Collector) Stop() {
-	select {
-	case <-c.stop:
-	default:
-		close(c.stop)
-	}
-	select {
-	case <-c.done:
-	case <-time.After(10 * time.Second):
-	}
+	c.stopOnce.Do(func() { close(c.stop) })
+	<-c.done
 }
 
 func (c *Collector) run() {
 	defer close(c.done)
-	defer func() { c.running = false }()
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.running = false
+	}()
 	interval := time.Duration(c.cfg.PollIntervalSeconds) * time.Second
 	nextMaintenance := time.Now().Add(time.Duration(c.cfg.MaintenanceIntervalSeconds) * time.Second)
 	for {
@@ -535,10 +550,13 @@ func (c *Collector) run() {
 		}
 		started := time.Now()
 		if _, err := c.poll(); err != nil {
+			c.mu.Lock()
 			c.consecutiveFails++
 			c.lastError = err.Error()
-			if c.consecutiveFails == 1 || c.consecutiveFails == 10 || c.consecutiveFails%60 == 0 {
-				log.Printf("Poll failed (%d in a row): %v", c.consecutiveFails, err)
+			failures := c.consecutiveFails
+			c.mu.Unlock()
+			if failures == 1 || failures == 10 || failures%60 == 0 {
+				log.Printf("Poll failed (%d in a row): %v", failures, err)
 			}
 		}
 		if time.Since(c.lastDigestPull) >= digestPullSeconds*time.Second {
@@ -625,7 +643,7 @@ func (c *Collector) poll() (int, error) {
 			return err
 		}
 		if c.anyHostMonitor() {
-			c.observeHost(now)
+			return c.observeHost(now)
 		}
 		return nil
 	}()
@@ -633,6 +651,8 @@ func (c *Collector) poll() (int, error) {
 		return 0, err
 	}
 	c.reportAuthelia(rows)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.pollsTotal++
 	c.lastPollTS = now
 	c.consecutiveFails = 0
@@ -739,7 +759,7 @@ func (c *Collector) reportTraffic(rows map[int64]map[string]int64) {
 	}
 }
 
-func (c *Collector) observeHost(now int64) {
+func (c *Collector) observeHost(now int64) error {
 	machine := c.monitors["machine"]
 	var cpu, busy *int64
 	var memory *pair
@@ -766,9 +786,12 @@ func (c *Collector) observeHost(now int64) {
 		}
 	}
 	if cpu == nil && busy == nil && memory == nil && disk == nil && diskIO == nil && network == nil && temp == nil {
-		return
+		return nil
 	}
-	b := c.machineBucket(hostKind, "", "", now)
+	b, err := c.machineBucket(hostKind, "", "", now)
+	if err != nil {
+		return err
+	}
 	b.Samples++
 	if cpu != nil {
 		b.addGauge("cpu", *cpu)
@@ -796,9 +819,9 @@ func (c *Collector) observeHost(now int64) {
 		b.addGauge("temp", *temp)
 	}
 	if !machine || !c.monitors["components"] {
-		return
+		return nil
 	}
-	c.observeComponents(now)
+	return c.observeComponents(now)
 }
 
 func (c *Collector) counterDelta(name string, current map[string]pair) *pair {
@@ -828,14 +851,14 @@ func (c *Collector) sensors() *OMap {
 	return omap("temperature", ok)
 }
 
-func (c *Collector) machineBucket(kind, proxy, server string, now int64) *Bucket {
+func (c *Collector) machineBucket(kind, proxy, server string, now int64) (*Bucket, error) {
 	key := objectKey{kind, proxy, server}
 	id, ok := c.objectIDs[key]
 	if !ok {
 		var err error
 		id, err = c.db.ObjectID(kind, proxy, server, now)
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
 		c.objectIDs[key] = id
 	}
@@ -844,7 +867,7 @@ func (c *Collector) machineBucket(kind, proxy, server string, now int64) *Bucket
 		b = newBucket()
 		c.buckets[id] = b
 	}
-	return b
+	return b, nil
 }
 
 func readHostMemory() *pair {
@@ -985,6 +1008,10 @@ func readCgroup(path string) (*int64, *int64) {
 			for _, line := range strings.Split(string(raw), "\n") {
 				if strings.HasPrefix(line, "inactive_file ") {
 					f := strings.Fields(line)
+					if len(f) < 2 {
+						valid = false
+						break
+					}
 					n, err := strconv.ParseInt(f[1], 10, 64)
 					if err != nil {
 						valid = false
@@ -1004,7 +1031,7 @@ func readCgroup(path string) (*int64, *int64) {
 	return usage, memory
 }
 
-func (c *Collector) observeComponents(now int64) {
+func (c *Collector) observeComponents(now int64) error {
 	moment := time.Now()
 	processors := runtime.NumCPU()
 	if processors < 1 {
@@ -1060,7 +1087,10 @@ func (c *Collector) observeComponents(now int64) {
 	}
 	for _, key := range order {
 		r := readings[key]
-		b := c.machineBucket(componentKind, key[0], key[1], now)
+		b, err := c.machineBucket(componentKind, key[0], key[1], now)
+		if err != nil {
+			return err
+		}
 		b.Samples++
 		if r.cpu != nil {
 			b.addGauge("cpu", minI(100*cpuScale, *r.cpu))
@@ -1074,6 +1104,7 @@ func (c *Collector) observeComponents(now int64) {
 			delete(c.componentPrev, p)
 		}
 	}
+	return nil
 }
 
 func (c *Collector) readHostCPU() *int64 {
@@ -1331,10 +1362,18 @@ func (c *Collector) flushLocked(bucketTS int64) (int, error) {
 	return len(rows), nil
 }
 
+// Monitor maps are replaced, never mutated, once they are published.
+func (c *Collector) monitorSnapshot() (map[string]bool, any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.monitors, c.digestsAvailable
+}
+
 func (c *Collector) pullDigests(now int64) (int, error) {
+	monitors, _ := c.monitorSnapshot()
 	anyOn := false
 	for _, n := range digestMonitors {
-		if c.monitors[n] {
+		if monitors[n] {
 			anyOn = true
 		}
 	}
@@ -1343,11 +1382,12 @@ func (c *Collector) pullDigests(now int64) (int, error) {
 	}
 	since := toInt(c.db.getState(digestCursorKey, "0"))
 	payload, err := unixGetJSON(c.guarddSocket, fmt.Sprintf("/api/v1/guard/digest?since=%d", since), 10*time.Second)
+	c.mu.Lock()
+	c.digestsAvailable = err == nil
+	c.mu.Unlock()
 	if err != nil {
-		c.digestsAvailable = false
 		return 0, err
 	}
-	c.digestsAvailable = true
 	bounds, _ := payload["bounds_ms"].([]any)
 	if len(bounds) != len(digestBoundsMS) {
 		log.Printf("guardd's histogram differs from ours; digests skipped")
@@ -1375,7 +1415,7 @@ func (c *Collector) pullDigests(now int64) (int, error) {
 			continue
 		}
 		newest = maxI(newest, ts)
-		if c.monitors["percentiles"] {
+		if monitors["percentiles"] {
 			rows := map[int64][]int64{}
 			backends, _ := minute["backends"].(map[string]any)
 			proxies := make([]string, 0, len(backends))
@@ -1408,7 +1448,7 @@ func (c *Collector) pullDigests(now int64) (int, error) {
 			}
 			written += len(rows)
 		}
-		if c.monitors["refusals"] {
+		if monitors["refusals"] {
 			refused, _ := minute["refused"].(map[string]any)
 			row := map[string]int64{}
 			for _, col := range metricColumns {
@@ -1506,6 +1546,9 @@ func (c *Collector) runMaintenance() (*OMap, error) {
 }
 
 func (c *Collector) health() *OMap {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	storage := c.storage.published.Load()
 	now := utcNow()
 	stale := maxI(60, c.cfg.PollIntervalSeconds*6)
 	var age any
@@ -1518,7 +1561,7 @@ func (c *Collector) health() *OMap {
 	return omap("running", c.running, "degraded", degraded, "poll_interval_seconds", c.cfg.PollIntervalSeconds,
 		"last_poll_ts", c.lastPollTS, "last_poll_age_seconds", age, "last_flush_ts", c.lastFlushTS,
 		"polls_total", c.pollsTotal, "buckets_written", c.bucketsWritten, "buckets_dropped", c.bucketsDropped,
-		"writes_paused", c.storage.writesPaused, "storage_state", c.storage.state,
+		"writes_paused", storage.writesPaused, "storage_state", storage.state,
 		"consecutive_failures", c.consecutiveFails, "last_error", c.lastError)
 }
 

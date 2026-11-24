@@ -1,8 +1,10 @@
 package metricsd
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
@@ -62,5 +64,59 @@ func TestHelpers(t *testing.T) {
 	}
 	if componentName("easy-ha-proxy-updated-job-abc123") != "easy-ha-proxy-updated" {
 		t.Fatal("component name")
+	}
+}
+
+func TestConcurrentMonitorUpdates(t *testing.T) {
+	db, err := OpenDatabase(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := NewCollector(Config{}, db, nil)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, key := range []string{"disk", "network"} {
+		wg.Go(func() {
+			<-start
+			for range 8 {
+				if _, err := c.setMonitors(map[string]bool{key: false}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	if c.monitors["disk"] || c.monitors["network"] || db.getState(monitorsKey, "") != monitorsJSON(c.monitors) {
+		t.Fatal("monitor changes were lost")
+	}
+}
+
+func TestUnavailableMetricStorage(t *testing.T) {
+	db, err := OpenDatabase(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := db.stats(); err == nil {
+		t.Fatal("expected database read to fail")
+	}
+	c := NewCollector(Config{}, db, nil)
+	if _, err := c.machineBucket(hostKind, "", "", 1); err == nil {
+		t.Fatal("expected object creation to fail")
+	}
+}
+
+func TestIncompleteCgroupMemoryStat(t *testing.T) {
+	dir := t.TempDir()
+	for name, data := range map[string]string{"memory.current": "1024", "memory.stat": "inactive_file "} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, memory := readCgroup(dir); memory != nil {
+		t.Fatalf("unexpected incomplete reading: %d", *memory)
 	}
 }

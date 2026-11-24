@@ -1,6 +1,9 @@
 package healthd
 
 import (
+	"context"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
+
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -137,22 +140,22 @@ func TestSiteStateMachineMailsOnceAndRecovers(t *testing.T) {
 	site := map[string]any{"name": "app", "alert_after": "1m", "alert_mode": "down"}
 	down := &siteCondition{State: "down", Total: 1}
 	ok := &siteCondition{State: "ok", Total: 1, Up: 1}
-	sa.evaluate(nil, site, "app", down, 1000)
-	sa.evaluate(nil, site, "app", down, 1059)
+	sa.evaluate(context.Background(), site, "app", down, 1000)
+	sa.evaluate(context.Background(), site, "app", down, 1059)
 	if len(sent) != 0 {
 		t.Fatalf("alerted before alert_after: %v", sent)
 	}
-	sa.evaluate(nil, site, "app", down, 1061)
-	sa.evaluate(nil, site, "app", down, 1100)
+	sa.evaluate(context.Background(), site, "app", down, 1061)
+	sa.evaluate(context.Background(), site, "app", down, 1100)
 	if len(sent) != 1 || !strings.HasSuffix(sent[0], ": DOWN") {
 		t.Fatalf("expected one DOWN: %v", sent)
 	}
-	sa.evaluate(nil, site, "app", ok, 1200)
-	sa.evaluate(nil, site, "app", ok, 1261)
+	sa.evaluate(context.Background(), site, "app", ok, 1200)
+	sa.evaluate(context.Background(), site, "app", ok, 1261)
 	if len(sent) != 2 || !strings.HasSuffix(sent[1], ": RECOVERED") {
 		t.Fatalf("expected recovery: %v", sent)
 	}
-	if !sa.persist() {
+	if err := sa.persist(); err != nil {
 		t.Fatal("persist failed")
 	}
 	if got := loadIncidents(); len(got) != 0 {
@@ -161,7 +164,7 @@ func TestSiteStateMachineMailsOnceAndRecovers(t *testing.T) {
 }
 
 func TestSiteCondition(t *testing.T) {
-	rows := []map[string]string{
+	rows := []haproxy.StatRow{
 		{"pxname": "be_app", "svname": "s1", "status": "UP"},
 		{"pxname": "be_app", "svname": "s2", "status": "DOWN", "addr": "10.0.0.2:80"},
 		{"pxname": "be_app", "svname": "BACKEND", "status": "UP"},

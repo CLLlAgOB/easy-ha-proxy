@@ -74,6 +74,7 @@ WEB_TREE_LABEL = "io.easy-ha-proxy.source-tree"
 WEB_TREE_INPUTS = ("Dockerfile", ".dockerignore", "docker/app")
 GO_WEB_TREE_LABEL = "io.easy-ha-proxy.go-panel-tree"
 GO_WEB_TREE_INPUTS = (
+    "VERSION",
     "go/panel",
     "docker/app/haproxy_admin/static",
     "docker/app/haproxy_admin/translations",

@@ -270,8 +270,23 @@ func normalizePrivateKey(material string) []byte {
 
 // writePrivate replaces a root-only file.
 func writePrivate(path string, content []byte) error {
-	_ = os.Remove(path)
-	return privateFile(path, content)
+	file, err := os.CreateTemp(filepath.Dir(path), ".credential-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
 func (d *Daemon) ensureDestinationsDir() error {
@@ -1237,7 +1252,10 @@ func (d *Daemon) s3Request(record map[string]any, method, key string, query map[
 	if body == nil {
 		req.ContentLength = 0
 	}
-	resp, err := (&http.Client{Transport: transport}).Do(req)
+	resp, err := (&http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}).Do(req)
 	if err != nil {
 		var be *Error
 		if errors.As(err, &be) {

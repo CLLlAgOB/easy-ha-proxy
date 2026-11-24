@@ -176,6 +176,19 @@
         - docker
 
     - role: haproxy-admin
+      task_stage: daemons_env
+      tags:
+        - ha-adm-install
+        - ha-adm-daemons
+        - ha-adm-healthd
+        - ha-adm-controld
+        - ha-adm-backupd
+        - ha-adm-updated
+        - ha-adm-alertd
+        - ha-adm-metricsd
+        - ha-adm-guardd
+
+    - role: haproxy-admin
       task_stage: native
       tags: ha-adm-native
 

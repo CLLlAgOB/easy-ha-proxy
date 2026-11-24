@@ -20,8 +20,14 @@ pub fn haproxy_config_path() -> String {
 }
 
 fn read_cfg(path: &str) -> Option<String> {
-    let p = if path.is_empty() { haproxy_config_path() } else { path.to_string() };
-    fs::read(&p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    let p = if path.is_empty() {
+        haproxy_config_path()
+    } else {
+        path.to_string()
+    };
+    fs::read(&p)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
@@ -55,7 +61,10 @@ fn threshold_thresholds_from(text: &str) -> HashMap<String, i64> {
 /// Every name the gateway serves, from its own valid_host ACL.
 pub fn read_site_names(path: &str) -> HashSet<String> {
     static R: OnceLock<Regex> = OnceLock::new();
-    let rx = re(&R, r"(?m)^\s*acl\s+valid_host\s+hdr\(host\)\s+-i\s+(?P<names>.+?)\s*$");
+    let rx = re(
+        &R,
+        r"(?m)^\s*acl\s+valid_host\s+hdr\(host\)\s+-i\s+(?P<names>.+?)\s*$",
+    );
     let Some(text) = read_cfg(path) else {
         return HashSet::new();
     };
@@ -97,8 +106,13 @@ pub fn normalize_host(host: &str) -> String {
     }
 }
 
-pub fn validate_trap_hosts(hosts: &Value, site_names: &HashSet<String>) -> Result<Vec<String>, String> {
-    let list = hosts.as_array().ok_or_else(|| "expected a list of names".to_string())?;
+pub fn validate_trap_hosts(
+    hosts: &Value,
+    site_names: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let list = hosts
+        .as_array()
+        .ok_or_else(|| "expected a list of names".to_string())?;
     if list.len() > MAX_TRAP_HOSTS {
         return Err(format!("at most {MAX_TRAP_HOSTS} trap names"));
     }
@@ -140,7 +154,13 @@ pub fn decision_summary(reason: &Value) -> Value {
         });
         summary.insert(
             "categories".into(),
-            Value::from(ranked.iter().take(4).map(|(k, _)| (*k).clone()).collect::<Vec<_>>()),
+            Value::from(
+                ranked
+                    .iter()
+                    .take(4)
+                    .map(|(k, _)| (*k).clone())
+                    .collect::<Vec<_>>(),
+            ),
         );
     } else if let Some(evidence) = reason.get("evidence").and_then(Value::as_array) {
         let mut seen: Vec<String> = Vec::new();
@@ -186,7 +206,11 @@ pub fn decision_summary(reason: &Value) -> Value {
 }
 
 /// The per-site counters holding an address when HAProxy's own ban was first seen.
-pub fn legacy_ban_readings(ip: &str, tables: &Tables, thresholds: &HashMap<String, i64>) -> Vec<Value> {
+pub fn legacy_ban_readings(
+    ip: &str,
+    tables: &Tables,
+    thresholds: &HashMap<String, i64>,
+) -> Vec<Value> {
     let mut names: Vec<&String> = tables.keys().collect();
     names.sort();
     let mut readings: Vec<(bool, i64, String, Value)> = Vec::new();
@@ -286,11 +310,19 @@ impl IpNetwork {
     pub fn contains(&self, ip: &IpAddr) -> bool {
         match (self.addr, ip) {
             (IpAddr::V4(n), IpAddr::V4(a)) => {
-                let mask = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
+                let mask = if self.prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - self.prefix)
+                };
                 (u32::from(n) & mask) == (u32::from(*a) & mask)
             }
             (IpAddr::V6(n), IpAddr::V6(a)) => {
-                let mask = if self.prefix == 0 { 0 } else { u128::MAX << (128 - self.prefix) };
+                let mask = if self.prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - self.prefix)
+                };
                 (u128::from(n) & mask) == (u128::from(*a) & mask)
             }
             _ => false,
@@ -321,12 +353,18 @@ pub fn site_ceilings_from(text: &str) -> HashMap<String, SiteCeiling> {
     static RATE: OnceLock<Regex> = OnceLock::new();
     static IPS: OnceLock<Regex> = OnceLock::new();
     static WARN: OnceLock<Regex> = OnceLock::new();
-    let host_re = re(&HOST, r"(?m)^\s*acl\s+host_(?P<id>[A-Za-z0-9_]+)\s+hdr\(host\)\s+-i\s+(?P<names>.+?)\s*$");
+    let host_re = re(
+        &HOST,
+        r"(?m)^\s*acl\s+host_(?P<id>[A-Za-z0-9_]+)\s+hdr\(host\)\s+-i\s+(?P<names>.+?)\s*$",
+    );
     let rate_re = re(
         &RATE,
         r"(?m)^backend\s+tbl_rate_(?P<id>[A-Za-z0-9_]+)\s*\n\s*stick-table\b[^\n]*?\bhttp_req_rate\((?P<window>[^)]+)\)",
     );
-    let ips_re = re(&IPS, r"(?m)^\s*acl\s+site_ips_(?P<id>[A-Za-z0-9_]+)\s+src\s+(?P<addresses>.+?)\s*$");
+    let ips_re = re(
+        &IPS,
+        r"(?m)^\s*acl\s+site_ips_(?P<id>[A-Za-z0-9_]+)\s+src\s+(?P<addresses>.+?)\s*$",
+    );
     let warn_re = re(
         &WARN,
         r"(?m)^\s*#\s*guardd-rate-warning\s+site=(?P<id>[A-Za-z0-9_]+)\s+gt\s+(?P<limit>\d+)\s+per\s+(?P<window>\S+)\s*$",
@@ -338,11 +376,17 @@ pub fn site_ceilings_from(text: &str) -> HashMap<String, SiteCeiling> {
     }
     let mut warning_only: HashMap<String, (i64, i64)> = HashMap::new();
     for c in warn_re.captures_iter(text) {
-        warning_only.insert(c["id"].to_string(), (safe_int_str(&c["limit"]), haproxy_seconds(&c["window"])));
+        warning_only.insert(
+            c["id"].to_string(),
+            (safe_int_str(&c["limit"]), haproxy_seconds(&c["window"])),
+        );
     }
     let mut allowed: HashMap<String, Vec<IpNetwork>> = HashMap::new();
     for c in ips_re.captures_iter(text) {
-        let nets: Vec<IpNetwork> = c["addresses"].split_whitespace().filter_map(IpNetwork::parse).collect();
+        let nets: Vec<IpNetwork> = c["addresses"]
+            .split_whitespace()
+            .filter_map(IpNetwork::parse)
+            .collect();
         allowed.entry(c["id"].to_string()).or_insert(nets);
     }
     let mut names: Vec<(String, Vec<String>)> = Vec::new();
@@ -351,7 +395,13 @@ pub fn site_ceilings_from(text: &str) -> HashMap<String, SiteCeiling> {
         if names.iter().any(|(n, _)| n == &id) {
             continue;
         }
-        names.push((id, c["names"].split_whitespace().map(|s| s.to_lowercase()).collect()));
+        names.push((
+            id,
+            c["names"]
+                .split_whitespace()
+                .map(|s| s.to_lowercase())
+                .collect(),
+        ));
     }
     let mut sites = HashMap::new();
     for (site_id, hostnames) in names {
@@ -393,7 +443,10 @@ pub fn read_hard_floor(path: &str) -> BTreeMap<String, BTreeMap<String, i64>> {
         &R,
         r"(?m)^\s*#\s*guardd-hard-floor\s+table=(?P<table>[A-Za-z0-9_.-]+)(?P<limits>(?:\s+(?:http_req_rate|conn_rate|conn_cur)=\d+)+)\s*$",
     );
-    let lx = re(&L, r"(?P<counter>http_req_rate|conn_rate|conn_cur)=(?P<limit>\d+)");
+    let lx = re(
+        &L,
+        r"(?P<counter>http_req_rate|conn_rate|conn_cur)=(?P<limit>\d+)",
+    );
     let Some(text) = read_cfg(path) else {
         return BTreeMap::new();
     };
@@ -417,7 +470,10 @@ pub const BAN_POLICY_U02: &str = "u02";
 /// The policy the generated configuration says HAProxy runs.
 pub fn read_ban_policy(path: &str) -> &'static str {
     static R: OnceLock<Regex> = OnceLock::new();
-    let rx = re(&R, r"(?m)^\s*#\s*guardd-ban-policy\s+(?P<policy>legacy|u02)\s*$");
+    let rx = re(
+        &R,
+        r"(?m)^\s*#\s*guardd-ban-policy\s+(?P<policy>legacy|u02)\s*$",
+    );
     let Some(text) = read_cfg(path) else {
         return BAN_POLICY_LEGACY;
     };

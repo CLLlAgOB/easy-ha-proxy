@@ -13,8 +13,11 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -201,6 +204,15 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 			CSPNonce: nonce,
 		}
 
+		// Form parsing by handlers updates this request copy. net/http only
+		// cleans the original request when the connection finishes.
+		r = r.WithContext(WithIdentity(r.Context(), id))
+		defer func() {
+			if r.MultipartForm != nil {
+				_ = r.MultipartForm.RemoveAll()
+			}
+		}()
+
 		// Wrap ResponseWriter so headers and redirects are normalized before
 		// the status line is sent.
 		sw := &securityResponseWriter{
@@ -227,7 +239,7 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 			(r.URL.Path == ControlPlaneHealthPath || r.URL.Path == AccessPortalHealthPath) &&
 			username == ControlPlaneHealthUser &&
 			isExactSingleGroup(groups, ControlPlaneHealthGroup) {
-			next.ServeHTTP(sw, r.WithContext(WithIdentity(r.Context(), id)))
+			next.ServeHTTP(sw, r)
 			return
 		}
 
@@ -236,7 +248,7 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 			r.URL.Path == MetricsScrapePath &&
 			username == MetricsScrapeUser &&
 			isExactSingleGroup(groups, MetricsScrapeGroup) {
-			next.ServeHTTP(sw, r.WithContext(WithIdentity(r.Context(), id)))
+			next.ServeHTTP(sw, r)
 			return
 		}
 
@@ -258,7 +270,7 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 				return
 			}
 			id.AccessPortal = true
-			next.ServeHTTP(sw, r.WithContext(WithIdentity(r.Context(), id)))
+			next.ServeHTTP(sw, r)
 			return
 		}
 
@@ -296,13 +308,23 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 		id.CSRFToken = b.CSRFTokenForSession(sid)
 
 		if isMutatingMethod(r.Method) {
-			if !validCookie || !b.verifyCSRF(r, id.CSRFToken) {
+			if !validCookie {
+				b.writeError(sw, r, http.StatusBadRequest, "CSRF validation failed")
+				return
+			}
+			ok, err := b.verifyCSRF(r, id.CSRFToken)
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) || errors.Is(err, multipart.ErrMessageTooLarge) {
+				b.writeError(sw, r, http.StatusRequestEntityTooLarge, "Request Entity Too Large")
+				return
+			}
+			if !ok {
 				b.writeError(sw, r, http.StatusBadRequest, "CSRF validation failed")
 				return
 			}
 		}
 
-		next.ServeHTTP(sw, r.WithContext(WithIdentity(r.Context(), id)))
+		next.ServeHTTP(sw, r)
 	})
 }
 
@@ -361,28 +383,32 @@ func (b *Boundary) MakeSessionCookie(sessionID string) *http.Cookie {
 	}
 }
 
-func (b *Boundary) verifyCSRF(r *http.Request, expected string) bool {
+func (b *Boundary) verifyCSRF(r *http.Request, expected string) (bool, error) {
 	if expected == "" {
-		return false
+		return false, nil
 	}
-	candidates := []string{
-		strings.TrimSpace(r.Header.Get(CSRFHeaderPrimary)),
-		strings.TrimSpace(r.Header.Get(CSRFHeaderAlternate)),
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	var err error
+	switch mediaType {
+	case "multipart/form-data":
+		err = r.ParseMultipartForm(2 << 20)
+	case "application/x-www-form-urlencoded":
+		err = r.ParseForm()
 	}
-	for _, tok := range candidates {
-		if tok != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(tok)) == 1 {
-			return true
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range []string{
+		r.Header.Get(CSRFHeaderPrimary),
+		r.Header.Get(CSRFHeaderAlternate),
+		r.PostForm.Get(CSRFFormField),
+	} {
+		token := strings.TrimSpace(candidate)
+		if token != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(token)) == 1 {
+			return true, nil
 		}
 	}
-	// Check form field for standard HTML form POSTs without disturbing JSON bodies.
-	ct := strings.ToLower(r.Header.Get("Content-Type"))
-	if strings.HasPrefix(ct, "application/x-www-form-urlencoded") || strings.HasPrefix(ct, "multipart/form-data") {
-		tok := strings.TrimSpace(r.FormValue(CSRFFormField))
-		if tok != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(tok)) == 1 {
-			return true
-		}
-	}
-	return false
+	return false, nil
 }
 
 func isMutatingMethod(method string) bool {

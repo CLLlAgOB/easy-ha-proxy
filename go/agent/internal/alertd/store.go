@@ -129,10 +129,20 @@ const eventColumns = "id, ts, rule, subject, transition, severity, summary, deta
 // the engine can answer the request that caused it with a 500, as the Python
 // daemon does when sqlite3 raises, instead of reporting success.
 type Store struct {
+	*storeDatabase
+	err error
+}
+
+type storeDatabase struct {
 	mu   sync.Mutex
 	db   *sql.DB
 	path string
-	err  error
+}
+
+// operation shares the connection and its lock but tracks errors for a
+// single engine operation, including any I/O between database calls.
+func (s *Store) operation() *Store {
+	return &Store{storeDatabase: s.storeDatabase}
 }
 
 // NewStore opens or creates the alert database at path; "" keeps it in
@@ -173,7 +183,7 @@ func NewStore(path string, legacyJSON ...string) (*Store, error) {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 	}
-	s := &Store{db: db, path: path}
+	s := &Store{storeDatabase: &storeDatabase{db: db, path: path}}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err

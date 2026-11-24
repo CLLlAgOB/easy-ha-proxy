@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // Server exposes the easy-ha-proxy-alertd AF_UNIX HTTP API.
@@ -269,6 +272,7 @@ func Run(opts DaemonOptions) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = store.Close() }()
 	engine := NewEngine(opts, cfg, store, nil)
 	srv := &Server{Engine: engine, Token: opts.Token}
 
@@ -280,37 +284,43 @@ func Run(opts DaemonOptions) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(opts.SocketPath, 0o660)
+	defer func() { _ = ln.Close() }()
+	if opts.SocketGroup != "" {
+		group, err := user.LookupGroup(opts.SocketGroup)
+		if err != nil {
+			return err
+		}
+		gid, err := strconv.Atoi(group.Gid)
+		if err != nil {
+			return err
+		}
+		if err := os.Chown(opts.SocketPath, -1, gid); err != nil {
+			return err
+		}
+	}
+	if err := os.Chmod(opts.SocketPath, 0o660); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	go engine.RunLoop(ctx)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		engine.RunLoop(ctx)
+	}()
+	defer func() {
+		stop()
+		<-loopDone
+	}()
 
 	httpSrv := &http.Server{
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      60 * time.Second,
 	}
 	log.Printf("easy-ha-proxy-alertd (Go) listening on %s rules=%d enabled=%v", opts.SocketPath, len(Rules), cfg.Enabled)
 
-	errCh := make(chan error, 1)
-	go func() {
-		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-
-	select {
-	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
-		_ = os.Remove(opts.SocketPath)
-		return nil
-	case err := <-errCh:
-		_ = os.Remove(opts.SocketPath)
-		return err
-	}
+	return unixrpc.ServeHTTP(ctx, httpSrv, ln, 45*time.Second)
 }

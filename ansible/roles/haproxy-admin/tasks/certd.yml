@@ -74,7 +74,7 @@
   ansible.builtin.systemd:
     name: haproxy-certd.service
     state: restarted
-  when: certd_script.changed or certd_package.changed or certd_unit.changed
+  when: certd_script.changed or certd_package.changed or certd_unit.changed or (daemons_env_t.changed | default(false))
 
 - name: "haproxy-certd | Ensure service started"
   ansible.builtin.systemd:

@@ -73,7 +73,8 @@ pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// ISO year and week of a local date (`%G-W%V`).
 pub fn iso_week(t: &LocalTime) -> String {
-    let days = crate::context::days_from_civil(i64::from(t.year), i64::from(t.month), i64::from(t.day));
+    let days =
+        crate::context::days_from_civil(i64::from(t.year), i64::from(t.month), i64::from(t.day));
     // Thursday of this ISO week decides its year.
     let thursday = days - i64::from(t.weekday) + 3;
     let (ty, _, _) = civil_from_days(thursday);

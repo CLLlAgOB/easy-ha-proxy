@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -809,6 +810,9 @@ func (c *ttlCache) get(key string) map[string]any {
 	}
 	if time.Since(e.at) > c.ttl {
 		delete(c.entries, key)
+		if i := slices.Index(c.order, key); i >= 0 {
+			c.order = slices.Delete(c.order, i, i+1)
+		}
 		return nil
 	}
 	out := map[string]any{}

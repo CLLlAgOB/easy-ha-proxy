@@ -16,12 +16,13 @@ use crate::constants::{
 };
 use crate::parser::ParsedRequest;
 use crate::scoring::{ExclusionModel, ScoringPolicy};
+use crate::secdb::SecurityDatabase;
 use crate::signatures::{
     classify_raw_path, is_asset, is_proto_ua_mismatch, is_unusual_method_probe, normalize_path,
     SignatureEngine,
 };
-use crate::secdb::SecurityDatabase;
 use crate::tracking::{hash32, LogCursor};
+use hashlink::LinkedHashMap;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -38,18 +39,48 @@ pub const DETECTION_TTL: i64 = 24 * 3600;
 pub const LOGIN_CORRELATIONS_KEY: &str = "detection_login_correlations_v1";
 
 pub const DETECTION_NEW_RULES: [(&str, &str); 7] = [
-    ("observe:sql-injection", "SQL query structure in a parameter; observation by default"),
-    ("observe:script-injection", "Script or event-handler markup in a parameter; observation by default"),
-    ("observe:encoded-sensitive-path", "A sensitive path appears after a second decode; observation by default"),
-    ("observe:service-api-probe", "Container, cloud metadata or diagnostic API route; observation by default"),
-    ("observe:proto-ua-mismatch", "Modern browser User-Agent over HTTP/1.0; observation by default"),
-    ("observe:unusual-method-probe", "Unusual or WebDAV HTTP method outside the host profile; observation by default"),
-    ("behavior:slow-enumeration", "24 distinct missing paths, 90% failures, three half-hour windows within six hours"),
+    (
+        "observe:sql-injection",
+        "SQL query structure in a parameter; observation by default",
+    ),
+    (
+        "observe:script-injection",
+        "Script or event-handler markup in a parameter; observation by default",
+    ),
+    (
+        "observe:encoded-sensitive-path",
+        "A sensitive path appears after a second decode; observation by default",
+    ),
+    (
+        "observe:service-api-probe",
+        "Container, cloud metadata or diagnostic API route; observation by default",
+    ),
+    (
+        "observe:proto-ua-mismatch",
+        "Modern browser User-Agent over HTTP/1.0; observation by default",
+    ),
+    (
+        "observe:unusual-method-probe",
+        "Unusual or WebDAV HTTP method outside the host profile; observation by default",
+    ),
+    (
+        "behavior:slow-enumeration",
+        "24 distinct missing paths, 90% failures, three half-hour windows within six hours",
+    ),
 ];
 pub const DETECTION_WARNING_RULES: [(&str, &str); 3] = [
-    ("auth:credential-spray", "Ten different usernames from one IP within fifteen minutes; warning only"),
-    ("auth:distributed-login", "Ten different IPs target one username within fifteen minutes; warning only"),
-    ("auth:failed-login-burst", "Twenty failed first-factor logins from one IP within fifteen minutes; warning only"),
+    (
+        "auth:credential-spray",
+        "Ten different usernames from one IP within fifteen minutes; warning only",
+    ),
+    (
+        "auth:distributed-login",
+        "Ten different IPs target one username within fifteen minutes; warning only",
+    ),
+    (
+        "auth:failed-login-burst",
+        "Twenty failed first-factor logins from one IP within fifteen minutes; warning only",
+    ),
 ];
 
 pub fn detection_profiles() -> Value {
@@ -216,7 +247,9 @@ fn detection_scope(row: &Map<String, Value>) -> Result<Scope, String> {
     let value = match row.get("value").and_then(Value::as_str) {
         Some(v)
             if (1..=200).contains(&v.chars().count())
-                && !v.chars().any(|c| "?#%\\ ".contains(c) || (c as u32) < 32 || c as u32 == 127) =>
+                && !v
+                    .chars()
+                    .any(|c| "?#%\\ ".contains(c) || (c as u32) < 32 || c as u32 == 127) =>
         {
             v.to_string()
         }
@@ -246,7 +279,11 @@ fn detection_scope(row: &Map<String, Value>) -> Result<Scope, String> {
         hosts: host_set.into_iter().collect(),
         methods: method_set.into_iter().collect(),
         matcher,
-        value: if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() },
+        value: if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
+        },
         statuses: status_set.into_iter().collect(),
     })
 }
@@ -362,11 +399,16 @@ pub fn builtin_detection_ids(sigs: &SignatureEngine) -> BTreeSet<String> {
     ids
 }
 
-pub fn validate_detection_config(data: &Value, sigs: &SignatureEngine) -> Result<DetectionSettings, String> {
+pub fn validate_detection_config(
+    data: &Value,
+    sigs: &SignatureEngine,
+) -> Result<DetectionSettings, String> {
     let Some(obj) = data.as_object() else {
         return Err("expected detection configuration version 1".into());
     };
-    let version_ok = obj.get("version").is_some_and(|v| (v.is_i64() || v.is_u64()) && v.as_i64() == Some(1));
+    let version_ok = obj
+        .get("version")
+        .is_some_and(|v| (v.is_i64() || v.is_u64()) && v.as_i64() == Some(1));
     if !version_ok {
         return Err("expected detection configuration version 1".into());
     }
@@ -379,7 +421,10 @@ pub fn validate_detection_config(data: &Value, sigs: &SignatureEngine) -> Result
     let Some(rules) = rules.as_array().filter(|r| r.len() <= DETECTION_MAX_RULES) else {
         return Err("too many contextual rules".into());
     };
-    let Some(exceptions) = exceptions.as_array().filter(|r| r.len() <= DETECTION_MAX_EXCEPTIONS) else {
+    let Some(exceptions) = exceptions
+        .as_array()
+        .filter(|r| r.len() <= DETECTION_MAX_EXCEPTIONS)
+    else {
         return Err("too many exceptions".into());
     };
     let Some(modes) = modes.as_object().filter(|m| m.len() <= DETECTION_MAX_RULES) else {
@@ -412,23 +457,27 @@ pub fn validate_detection_config(data: &Value, sigs: &SignatureEngine) -> Result
             Some(Value::String(m)) if m == "observe" || m == "enforce" => m.clone(),
             _ => return Err("mode must be observe or enforce".into()),
         };
-        checked.push(CustomRule { id, scope: detection_scope(row)?, category, mode });
+        checked.push(CustomRule {
+            id,
+            scope: detection_scope(row)?,
+            category,
+            mode,
+        });
     }
     let mut known = builtin_detection_ids(sigs);
     known.extend(ids.iter().cloned());
-    let supported_id = |value: &Value| -> bool {
-        match value.as_str() {
-            Some(s) => {
-                known.contains(s)
+    let supported_id =
+        |value: &Value| -> bool {
+            match value.as_str() {
+                Some(s) => known.contains(s)
                     || rx(
                         &SUPPORTED,
                         r"^(?:path|query|ua|raw|observe|behavior|auth):[A-Za-z0-9_. /+:-]{1,100}$",
                     )
-                    .is_match(s)
+                    .is_match(s),
+                None => false,
             }
-            None => false,
-        }
-    };
+        };
     let mut mode_map = BTreeMap::new();
     for (k, v) in modes {
         let ok_mode = matches!(v.as_str(), Some("observe") | Some("enforce"));
@@ -640,15 +689,28 @@ impl DetectionContext {
         }
     }
 
-    pub fn replace(&mut self, data: &Value, database: &SecurityDatabase, sigs: &SignatureEngine) -> Result<(), String> {
+    pub fn replace(
+        &mut self,
+        data: &Value,
+        database: &SecurityDatabase,
+        sigs: &SignatureEngine,
+    ) -> Result<(), String> {
         let mut checked = validate_detection_config(data, sigs)?;
         if checked.revision != self.config.revision {
             return Err("settings changed; reload before saving".into());
         }
         checked.revision += 1;
-        let reset_slow = checked.mode("behavior:slow-enumeration").unwrap_or("observe") == "enforce"
-            && self.config.mode("behavior:slow-enumeration").unwrap_or("observe") != "enforce";
-        let mut states: Vec<(String, String)> = vec![(DETECTION_CONFIG_KEY.into(), checked.to_json().to_string())];
+        let reset_slow = checked
+            .mode("behavior:slow-enumeration")
+            .unwrap_or("observe")
+            == "enforce"
+            && self
+                .config
+                .mode("behavior:slow-enumeration")
+                .unwrap_or("observe")
+                != "enforce";
+        let mut states: Vec<(String, String)> =
+            vec![(DETECTION_CONFIG_KEY.into(), checked.to_json().to_string())];
         if reset_slow {
             states.push((DETECTION_SLOW_KEY.into(), "[]".into()));
         }
@@ -662,18 +724,34 @@ impl DetectionContext {
 
     /// The configured action for a rule on this request: an exception first,
     /// then the mode, then `default`.
-    pub fn action(&self, rule: &str, request: &ParsedRequest, now: i64, default: &str) -> (String, String) {
+    pub fn action(
+        &self,
+        rule: &str,
+        request: &ParsedRequest,
+        now: i64,
+        default: &str,
+    ) -> (String, String) {
         let host = request.host.to_lowercase();
         let host = host.trim_end_matches('.').to_string();
-        if let Some(list) = self.config.exceptions_by_scope.get(&(rule.to_string(), host)) {
+        if let Some(list) = self
+            .config
+            .exceptions_by_scope
+            .get(&(rule.to_string(), host))
+        {
             for &i in list {
                 let exc = &self.config.exceptions[i];
-                if exc.rule == rule && (exc.expires == 0 || exc.expires > now) && exc.scope.matches(request) {
+                if exc.rule == rule
+                    && (exc.expires == 0 || exc.expires > now)
+                    && exc.scope.matches(request)
+                {
                     return ("excepted".into(), exc.id.clone());
                 }
             }
         }
-        (self.config.mode(rule).unwrap_or(default).to_string(), String::new())
+        (
+            self.config.mode(rule).unwrap_or(default).to_string(),
+            String::new(),
+        )
     }
 
     pub fn inspect(
@@ -686,12 +764,23 @@ impl DetectionContext {
         sigs: &SignatureEngine,
     ) -> Vec<DetectionMatch> {
         let mut found: Vec<(String, String, &'static str, &'static str)> = Vec::new();
-        let decisive_event = |c: &str| if sigs.category_is_decisive(c) { EVENT_SCANNER_DECISIVE } else { EVENT_SCANNER_PATH };
+        let decisive_event = |c: &str| {
+            if sigs.category_is_decisive(c) {
+                EVENT_SCANNER_DECISIVE
+            } else {
+                EVENT_SCANNER_PATH
+            }
+        };
         let category = sigs.classify_path(&request.path).to_string();
         if !category.is_empty()
             && (sigs.category_is_decisive(&category) || !is_served(request.status) || catch_all)
         {
-            found.push((format!("path:{category}"), category.clone(), "enforce", decisive_event(&category)));
+            found.push((
+                format!("path:{category}"),
+                category.clone(),
+                "enforce",
+                decisive_event(&category),
+            ));
         }
         if !request.query_flag.is_empty() {
             found.push((
@@ -702,11 +791,21 @@ impl DetectionContext {
             ));
         }
         if !request.path_flag.is_empty() {
-            found.push(("raw:path-traversal".into(), request.path_flag.clone(), "enforce", EVENT_SCANNER_DECISIVE));
+            found.push((
+                "raw:path-traversal".into(),
+                request.path_flag.clone(),
+                "enforce",
+                EVENT_SCANNER_DECISIVE,
+            ));
         }
         let (agent, agent_category) = sigs.classify_user_agent(&request.user_agent);
         if !agent.is_empty() {
-            found.push((format!("ua:{agent}"), agent_category.to_string(), "enforce", decisive_event(agent_category)));
+            found.push((
+                format!("ua:{agent}"),
+                agent_category.to_string(),
+                "enforce",
+                decisive_event(agent_category),
+            ));
         }
         for name in &request.observation_flags {
             if is_new_rule(name) {
@@ -715,24 +814,56 @@ impl DetectionContext {
                     "observe:encoded-sensitive-path" => EVENT_SCANNER_DECISIVE,
                     _ => EVENT_QUERY_INJECTION,
                 };
-                let short = name.split_once(':').map(|(_, b)| b).unwrap_or("").to_string();
+                let short = name
+                    .split_once(':')
+                    .map(|(_, b)| b)
+                    .unwrap_or("")
+                    .to_string();
                 found.push((name.clone(), short, "observe", event));
             }
         }
         if is_proto_ua_mismatch(&request.protocol, &request.user_agent) {
-            found.push(("observe:proto-ua-mismatch".into(), "proto-ua-mismatch".into(), "observe", EVENT_SCANNER_PATH));
+            found.push((
+                "observe:proto-ua-mismatch".into(),
+                "proto-ua-mismatch".into(),
+                "observe",
+                EVENT_SCANNER_PATH,
+            ));
         }
-        let host_key = request.host.to_lowercase().trim_end_matches('.').to_string();
-        let profile = self.config.profiles.get(&host_key).map(String::as_str).unwrap_or("web");
+        let host_key = request
+            .host
+            .to_lowercase()
+            .trim_end_matches('.')
+            .to_string();
+        let profile = self
+            .config
+            .profiles
+            .get(&host_key)
+            .map(String::as_str)
+            .unwrap_or("web");
         if is_unusual_method_probe(&request.method, profile) {
-            found.push(("observe:unusual-method-probe".into(), "unusual-method-probe".into(), "observe", EVENT_SCANNER_PATH));
+            found.push((
+                "observe:unusual-method-probe".into(),
+                "unusual-method-probe".into(),
+                "observe",
+                EVENT_SCANNER_PATH,
+            ));
         }
         if let Some(indexes) = self.config.rules_by_host.get(&host_key) {
             for &i in indexes {
                 let rule = &self.config.rules[i];
                 if rule.scope.matches(request) {
-                    let mode: &'static str = if rule.mode == "enforce" { "enforce" } else { "observe" };
-                    found.push((rule.id.clone(), rule.category.clone(), mode, decisive_event(&rule.category)));
+                    let mode: &'static str = if rule.mode == "enforce" {
+                        "enforce"
+                    } else {
+                        "observe"
+                    };
+                    found.push((
+                        rule.id.clone(),
+                        rule.category.clone(),
+                        mode,
+                        decisive_event(&rule.category),
+                    ));
                 }
             }
         }
@@ -746,7 +877,11 @@ impl DetectionContext {
             } else {
                 mode
             };
-            let points = if action == "enforce" { default_weight(event) } else { 0 };
+            let points = if action == "enforce" {
+                default_weight(event)
+            } else {
+                0
+            };
             if record {
                 self.note(&rule, request, now, &action);
             }
@@ -814,7 +949,12 @@ impl DetectionContext {
     }
 
     pub fn observe_slow(&mut self, request: &ParsedRequest, now: i64, handled: bool) -> String {
-        if handled || request.host.is_empty() || is_asset(&request.path) || request.path.is_empty() || request.path == "/" {
+        if handled
+            || request.host.is_empty()
+            || is_asset(&request.path)
+            || request.path.is_empty()
+            || request.path == "/"
+        {
             return String::new();
         }
         let host: String = request.host.chars().take(253).collect();
@@ -823,7 +963,10 @@ impl DetectionContext {
         let pos = self.slow.iter().position(|(k, _)| *k == key);
         let mut entry = match pos {
             Some(p) => self.slow.remove(p).1,
-            None => SlowEntry { last: now, buckets: BTreeMap::new() },
+            None => SlowEntry {
+                last: now,
+                buckets: BTreeMap::new(),
+            },
         };
         entry.last = entry.last.max(now);
         let newest = entry.last.div_euclid(1800);
@@ -847,8 +990,16 @@ impl DetectionContext {
         }
         let missing: i64 = entry.buckets.values().map(|b| b.missing).sum();
         let total: i64 = entry.buckets.values().map(|b| b.total).sum();
-        let distinct: HashSet<u32> = entry.buckets.values().flat_map(|b| b.paths.iter().copied()).collect();
-        let windows = entry.buckets.values().filter(|b| !b.paths.is_empty()).count();
+        let distinct: HashSet<u32> = entry
+            .buckets
+            .values()
+            .flat_map(|b| b.paths.iter().copied())
+            .collect();
+        let windows = entry
+            .buckets
+            .values()
+            .filter(|b| !b.paths.is_empty())
+            .count();
         self.slow.push((key, entry));
         while self.slow.len() > DETECTION_MAX_TRACKED {
             self.slow.remove(0);
@@ -866,13 +1017,22 @@ impl DetectionContext {
         action
     }
 
-    pub fn persist(&mut self, now: i64, force: bool, database: &SecurityDatabase) {
+    pub fn persist(
+        &mut self,
+        now: i64,
+        force: bool,
+        database: &SecurityDatabase,
+    ) -> Result<(), String> {
         if !force && now - self.last_saved < 60 {
-            return;
+            return Ok(());
         }
         self.stats.retain(|(_, v)| v.last >= now - DETECTION_TTL);
         self.slow.retain(|(_, v)| v.last >= now - 6 * 3600);
-        let stats: Vec<Value> = self.stats.iter().map(|(name, v)| stat_json(name, v, true)).collect();
+        let stats: Vec<Value> = self
+            .stats
+            .iter()
+            .map(|(name, v)| stat_json(name, v, true))
+            .collect();
         let slow: Vec<Value> = self
             .slow
             .iter()
@@ -889,16 +1049,26 @@ impl DetectionContext {
                 json!([[ip, host], v.last, buckets])
             })
             .collect();
-        let _ = database.set_states(&[
-            (DETECTION_STATS_KEY.to_string(), Value::from(stats).to_string()),
-            (DETECTION_SLOW_KEY.to_string(), Value::from(slow).to_string()),
-        ]);
+        database.set_states(&[
+            (
+                DETECTION_STATS_KEY.to_string(),
+                Value::from(stats).to_string(),
+            ),
+            (
+                DETECTION_SLOW_KEY.to_string(),
+                Value::from(slow).to_string(),
+            ),
+        ])?;
         self.last_saved = now;
+        Ok(())
     }
 
     pub fn summary(&self, sigs: &SignatureEngine) -> Value {
         let mut new_rules = Map::new();
-        for (k, v) in DETECTION_NEW_RULES.iter().chain(DETECTION_WARNING_RULES.iter()) {
+        for (k, v) in DETECTION_NEW_RULES
+            .iter()
+            .chain(DETECTION_WARNING_RULES.iter())
+        {
             new_rules.insert((*k).into(), json!(v));
         }
         let mut warning: Vec<&str> = DETECTION_WARNING_RULES.iter().map(|(k, _)| *k).collect();
@@ -958,10 +1128,15 @@ impl DetectionContext {
         let method = obj.get("method").cloned().unwrap_or_else(|| json!("GET"));
         let status = obj.get("status").cloned().unwrap_or_else(|| json!(404));
         let agent = obj.get("user_agent").cloned().unwrap_or_else(|| json!(""));
-        let protocol = obj.get("protocol").cloned().unwrap_or_else(|| json!("HTTP/1.1"));
+        let protocol = obj
+            .get("protocol")
+            .cloned()
+            .unwrap_or_else(|| json!("HTTP/1.1"));
         let host = detection_host(obj.get("host").and_then(Value::as_str).unwrap_or(""))?;
         let uri = match uri.as_str() {
-            Some(u) if u.chars().count() <= 4096 && u.starts_with('/') && !u.starts_with("//") => u.to_string(),
+            Some(u) if u.chars().count() <= 4096 && u.starts_with('/') && !u.starts_with("//") => {
+                u.to_string()
+            }
             _ => return Err("expected a request path of at most 4096 characters".into()),
         };
         static METHOD: OnceLock<Regex> = OnceLock::new();
@@ -986,7 +1161,9 @@ impl DetectionContext {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .unwrap_or("203.0.113.254");
-        let ip: std::net::IpAddr = raw_ip.parse().map_err(|_| "invalid client IP".to_string())?;
+        let ip: std::net::IpAddr = raw_ip
+            .parse()
+            .map_err(|_| "invalid client IP".to_string())?;
         let ip = ip.to_string();
         let verdict = exclusions.verdict(&ip);
         let request = ParsedRequest {
@@ -1000,7 +1177,11 @@ impl DetectionContext {
             bad_request: false,
             query_flag: sigs.classify_query(&uri).to_string(),
             path_flag: classify_raw_path(&uri).to_string(),
-            observation_flags: sigs.observation_flags(&uri).into_iter().map(String::from).collect(),
+            observation_flags: sigs
+                .observation_flags(&uri)
+                .into_iter()
+                .map(String::from)
+                .collect(),
             ts: 0,
             request_id: String::new(),
             bytes_out: 0,
@@ -1060,7 +1241,11 @@ fn stat_json(name: &str, v: &StatRow, with_ips: bool) -> Value {
     row
 }
 
-fn restore_stat(row: &Value, known: &BTreeSet<String>, now: i64) -> Result<Option<(String, StatRow)>, ()> {
+fn restore_stat(
+    row: &Value,
+    known: &BTreeSet<String>,
+    now: i64,
+) -> Result<Option<(String, StatRow)>, ()> {
     let obj = row.as_object().ok_or(())?;
     let name = obj.get("id").and_then(Value::as_str).ok_or(())?.to_string();
     let first = obj.get("first").and_then(Value::as_i64).ok_or(())?;
@@ -1069,7 +1254,10 @@ fn restore_stat(row: &Value, known: &BTreeSet<String>, now: i64) -> Result<Optio
         return Ok(None);
     }
     let mut counts = [0i64; 5];
-    for (i, k) in ["hits", "trusted", "excepted", "observe", "enforce"].iter().enumerate() {
+    for (i, k) in ["hits", "trusted", "excepted", "observe", "enforce"]
+        .iter()
+        .enumerate()
+    {
         let n = obj.get(*k).and_then(Value::as_i64).ok_or(())?;
         if !(0..=1_000_000_000_000).contains(&n) {
             return Err(());
@@ -1077,7 +1265,13 @@ fn restore_stat(row: &Value, known: &BTreeSet<String>, now: i64) -> Result<Optio
         counts[i] = n;
     }
     let mut ips = BTreeSet::new();
-    for v in obj.get("ips").and_then(Value::as_array).ok_or(())?.iter().take(64) {
+    for v in obj
+        .get("ips")
+        .and_then(Value::as_array)
+        .ok_or(())?
+        .iter()
+        .take(64)
+    {
         let n = v.as_i64().ok_or(())?;
         if !(0..(1i64 << 32)).contains(&n) {
             return Err(());
@@ -1085,7 +1279,13 @@ fn restore_stat(row: &Value, known: &BTreeSet<String>, now: i64) -> Result<Optio
         ips.insert(n as u32);
     }
     let mut hosts = Vec::new();
-    for (k, v) in obj.get("hosts").and_then(Value::as_object).ok_or(())?.iter().take(8) {
+    for (k, v) in obj
+        .get("hosts")
+        .and_then(Value::as_object)
+        .ok_or(())?
+        .iter()
+        .take(8)
+    {
         let n = v.as_i64().ok_or(())?;
         if n < 0 {
             return Err(());
@@ -1127,7 +1327,11 @@ fn restore_slow(row: &Value, now: i64) -> Result<Option<(SlowKey, SlowEntry)>, (
         let missing = b[1].as_i64().ok_or(())?;
         let total = b[2].as_i64().ok_or(())?;
         let good = b[3].as_i64().ok_or(())?;
-        if [missing, total, good].iter().any(|n| !(0..=1_000_000_000_000).contains(n)) || missing + good > total {
+        if [missing, total, good]
+            .iter()
+            .any(|n| !(0..=1_000_000_000_000).contains(n))
+            || missing + good > total
+        {
             return Err(());
         }
         let paths: Vec<u32> = b[4]
@@ -1137,10 +1341,24 @@ fn restore_slow(row: &Value, now: i64) -> Result<Option<(SlowKey, SlowEntry)>, (
             .take(32)
             .map(|v| v.as_u64().map(|n| n as u32).ok_or(()))
             .collect::<Result<_, _>>()?;
-        restored.insert(slot, SlowBucket { missing, total, good, paths });
+        restored.insert(
+            slot,
+            SlowBucket {
+                missing,
+                total,
+                good,
+                paths,
+            },
+        );
     }
     if !restored.is_empty() && (now - 6 * 3600..=now + 60).contains(&last) {
-        Ok(Some(((ip.to_string(), host), SlowEntry { last, buckets: restored })))
+        Ok(Some((
+            (ip.to_string(), host),
+            SlowEntry {
+                last,
+                buckets: restored,
+            },
+        )))
     } else {
         Ok(None)
     }
@@ -1165,32 +1383,55 @@ pub struct LoginCorrelations {
 
 impl LoginCorrelations {
     pub fn new(path: &str, database: &SecurityDatabase, now: i64) -> Self {
-        let saved: Value = serde_json::from_str(&database.get_state(LOGIN_CORRELATIONS_KEY, "{}")).unwrap_or(Value::Null);
+        let saved: Value = serde_json::from_str(&database.get_state(LOGIN_CORRELATIONS_KEY, "{}"))
+            .unwrap_or(Value::Null);
         let saved = if saved.is_object() { saved } else { json!({}) };
         let cursor = cursor_from_state(path, saved.get("cursor"));
-        let mut lc = Self { entries: Vec::new(), cursor, enabled: !path.is_empty(), dropped: 0, last_saved: 0 };
+        let mut lc = Self {
+            entries: Vec::new(),
+            cursor,
+            enabled: !path.is_empty(),
+            dropped: 0,
+            last_saved: 0,
+        };
         if let Some(rows) = saved.get("entries").and_then(Value::as_array) {
             for row in rows.iter().take(256) {
-                let Some(pair) = row.as_array().filter(|a| a.len() == 2) else { break };
+                let Some(pair) = row.as_array().filter(|a| a.len() == 2) else {
+                    break;
+                };
                 let Some(key) = pair[0].as_str() else { break };
-                let Some(buckets) = pair[1].as_array() else { break };
+                let Some(buckets) = pair[1].as_array() else {
+                    break;
+                };
                 let mut clean = BTreeMap::new();
                 let mut bad = false;
                 for b in buckets.iter().take(3) {
-                    let Some(b) = b.as_array().filter(|a| a.len() == 3) else { bad = true; break };
-                    let (Some(slot), Some(count), Some(peers)) = (b[0].as_i64(), b[1].as_i64(), b[2].as_array()) else {
+                    let Some(b) = b.as_array().filter(|a| a.len() == 3) else {
+                        bad = true;
+                        break;
+                    };
+                    let (Some(slot), Some(count), Some(peers)) =
+                        (b[0].as_i64(), b[1].as_i64(), b[2].as_array())
+                    else {
                         bad = true;
                         break;
                     };
                     if now / 300 - 2 <= slot && slot <= now / 300 {
-                        let peers: Vec<u32> = peers.iter().take(32).filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                        let peers: Vec<u32> = peers
+                            .iter()
+                            .take(32)
+                            .filter_map(|v| v.as_u64().map(|n| n as u32))
+                            .collect();
                         clean.insert(slot, (count, peers));
                     }
                 }
                 if bad {
                     break;
                 }
-                if !clean.is_empty() && key.chars().count() <= 80 && (key.starts_with("ip:") || key.starts_with("user:")) {
+                if !clean.is_empty()
+                    && key.chars().count() <= 80
+                    && (key.starts_with("ip:") || key.starts_with("user:"))
+                {
                     lc.entries.push((key.to_string(), clean));
                 }
             }
@@ -1198,7 +1439,13 @@ impl LoginCorrelations {
         lc
     }
 
-    pub fn observe(&mut self, line: &str, now: i64, exclusions: &ExclusionModel, context: &mut DetectionContext) {
+    pub fn observe(
+        &mut self,
+        line: &str,
+        now: i64,
+        exclusions: &ExclusionModel,
+        context: &mut DetectionContext,
+    ) {
         if line.len() > 16384 {
             self.dropped += 1;
             return;
@@ -1215,11 +1462,16 @@ impl LoginCorrelations {
         }
         static MSG: OnceLock<Regex> = OnceLock::new();
         let msg = obj.get("msg").map(value_text).unwrap_or_default();
-        let Some(m) = rx(&MSG, r"^Unsuccessful 1FA authentication attempt by user '([^']{0,256})'").captures(&msg) else {
+        let Some(m) = rx(
+            &MSG,
+            r"^Unsuccessful 1FA authentication attempt by user '([^']{0,256})'",
+        )
+        .captures(&msg) else {
             return;
         };
         let parsed = (|| -> Option<(String, i64, String)> {
-            let ip: std::net::IpAddr = obj.get("remote_ip").and_then(Value::as_str)?.parse().ok()?;
+            let ip: std::net::IpAddr =
+                obj.get("remote_ip").and_then(Value::as_str)?.parse().ok()?;
             let stamp = parse_iso_time(obj.get("time").map(value_text)?.as_str())?;
             let username: String = obj
                 .get("username")
@@ -1239,10 +1491,19 @@ impl LoginCorrelations {
             return;
         }
         let stamp = stamp.min(now);
-        let mut keys: Vec<(String, Option<u32>)> =
-            vec![(format!("ip:{ip}"), if username.is_empty() { None } else { Some(address_key(&username)) })];
+        let mut keys: Vec<(String, Option<u32>)> = vec![(
+            format!("ip:{ip}"),
+            if username.is_empty() {
+                None
+            } else {
+                Some(address_key(&username))
+            },
+        )];
         if !username.is_empty() {
-            keys.push((format!("user:{}", sha256_hex(username.as_bytes())), Some(address_key(&ip))));
+            keys.push((
+                format!("user:{}", sha256_hex(username.as_bytes())),
+                Some(address_key(&ip)),
+            ));
         }
         let slot = stamp / 300;
         for (key, peer) in keys {
@@ -1259,7 +1520,8 @@ impl LoginCorrelations {
                     bucket.1.push(p);
                 }
             }
-            let distinct: HashSet<u32> = buckets.values().flat_map(|b| b.1.iter().copied()).collect();
+            let distinct: HashSet<u32> =
+                buckets.values().flat_map(|b| b.1.iter().copied()).collect();
             let count: i64 = buckets.values().map(|b| b.0).sum();
             self.entries.push((key.clone(), buckets));
             while self.entries.len() > 256 {
@@ -1290,24 +1552,32 @@ impl LoginCorrelations {
         }
     }
 
-    pub fn poll(&mut self, now: i64, exclusions: &ExclusionModel, context: &mut DetectionContext, database: &SecurityDatabase) {
+    pub fn poll(
+        &mut self,
+        now: i64,
+        exclusions: &ExclusionModel,
+        context: &mut DetectionContext,
+        database: &SecurityDatabase,
+    ) -> Result<(), String> {
         if !self.enabled {
-            return;
+            return Ok(());
         }
         for line in self.cursor.read(256 * 1024) {
             self.observe(&line, now, exclusions, context);
         }
         if now - self.last_saved >= 60 {
-            self.persist(now, database);
+            self.persist(now, database)?;
         }
+        Ok(())
     }
 
-    pub fn persist(&mut self, now: i64, database: &SecurityDatabase) {
+    pub fn persist(&mut self, now: i64, database: &SecurityDatabase) -> Result<(), String> {
         if !self.enabled {
-            return;
+            return Ok(());
         }
-        self.entries
-            .retain(|(_, b)| !b.is_empty() && b.keys().max().copied().unwrap_or(i64::MIN) >= now / 300 - 2);
+        self.entries.retain(|(_, b)| {
+            !b.is_empty() && b.keys().max().copied().unwrap_or(i64::MIN) >= now / 300 - 2
+        });
         let rows: Vec<Value> = self
             .entries
             .iter()
@@ -1316,11 +1586,12 @@ impl LoginCorrelations {
                 json!([k, buckets])
             })
             .collect();
-        let _ = database.set_state(
+        database.set_state(
             LOGIN_CORRELATIONS_KEY,
             &json!({"cursor": cursor_state(&self.cursor), "entries": rows}).to_string(),
-        );
+        )?;
         self.last_saved = now;
+        Ok(())
     }
 
     pub fn health(&self) -> Value {
@@ -1362,7 +1633,8 @@ fn auth_request(ip: &str) -> ParsedRequest {
 }
 
 pub fn cursor_from_state(path: &str, state: Option<&Value>) -> LogCursor {
-    let get = |k: &str| crate::constants::safe_int_value(state.and_then(|s| s.get(k))).max(0) as u64;
+    let get =
+        |k: &str| crate::constants::safe_int_value(state.and_then(|s| s.get(k))).max(0) as u64;
     LogCursor::new(path, get("inode"), get("offset"), get("rotations"))
 }
 
@@ -1440,17 +1712,27 @@ struct Candidate {
 /// Paths refused to many addresses that no signature matches.
 #[derive(Debug, Default)]
 pub struct PathCandidates {
-    paths: Vec<((String, String), Candidate)>,
-    served: Vec<(u64, i64)>,
+    paths: LinkedHashMap<(String, String), Candidate>,
+    served: LinkedHashMap<u64, i64>,
 }
 
 fn key_digest(host: &str, path: &str) -> u64 {
-    (u64::from(crate::constants::crc32(host.as_bytes())) << 32) | u64::from(crate::constants::crc32(path.as_bytes()))
+    (u64::from(crate::constants::crc32(host.as_bytes())) << 32)
+        | u64::from(crate::constants::crc32(path.as_bytes()))
 }
 
 impl PathCandidates {
     #[allow(clippy::too_many_arguments)]
-    pub fn note(&mut self, path: &str, ip: &str, host: &str, status: u16, served: bool, client: bool, ts: i64) {
+    pub fn note(
+        &mut self,
+        path: &str,
+        ip: &str,
+        host: &str,
+        status: u16,
+        served: bool,
+        client: bool,
+        ts: i64,
+    ) {
         if path.chars().count() > CANDIDATE_MAX_PATH_LENGTH {
             return;
         }
@@ -1458,24 +1740,18 @@ impl PathCandidates {
         let key = (host.clone(), path.to_string());
         let digest = key_digest(&host, path);
         if served {
-            if let Some(p) = self.served.iter().position(|(d, _)| *d == digest) {
-                self.served.remove(p);
+            self.served.insert(digest, ts);
+            if self.served.len() > CANDIDATE_MAX_SERVED {
+                self.served.pop_front();
             }
-            self.served.push((digest, ts));
-            while self.served.len() > CANDIDATE_MAX_SERVED {
-                self.served.remove(0);
-            }
-            if let Some(p) = self.paths.iter().position(|(k, _)| *k == key) {
-                self.paths.remove(p);
-            }
+            self.paths.remove(&key);
             return;
         }
-        if !ENUMERATION_STATUSES.contains(&status) || self.served.iter().any(|(d, _)| *d == digest) {
+        if !ENUMERATION_STATUSES.contains(&status) || self.served.contains_key(&digest) {
             return;
         }
-        let pos = self.paths.iter().position(|(k, _)| *k == key);
-        let mut entry = match pos {
-            Some(p) => self.paths.remove(p).1,
+        let mut entry = match self.paths.remove(&key) {
+            Some(entry) => entry,
             None => Candidate {
                 first: ts,
                 last: ts,
@@ -1507,20 +1783,25 @@ impl PathCandidates {
                 }
             }
         }
-        self.paths.push((key, entry));
+        self.paths.insert(key, entry);
         while self.paths.len() > CANDIDATE_MAX_PATHS {
-            self.paths.remove(0);
+            self.paths.pop_front();
         }
     }
 
     pub fn prune(&mut self, before: i64) -> usize {
         let n = self.paths.len();
-        self.paths.retain(|(_, e)| e.last >= before);
-        self.served.retain(|(_, s)| *s >= before);
+        self.paths.retain(|_, e| e.last >= before);
+        self.served.retain(|_, s| *s >= before);
         n - self.paths.len()
     }
 
-    pub fn suggestions(&self, dismissed: &HashSet<String>, limit: usize, sigs: &SignatureEngine) -> Vec<Value> {
+    pub fn suggestions(
+        &self,
+        dismissed: &HashSet<String>,
+        limit: usize,
+        sigs: &SignatureEngine,
+    ) -> Vec<Value> {
         let mut rows: Vec<(bool, i64, i64, Value)> = Vec::new();
         for ((host, path), e) in &self.paths {
             if e.ips.len() < CANDIDATE_MIN_ADDRESSES || dismissed.contains(path) {
@@ -1560,7 +1841,7 @@ impl PathCandidates {
     }
 
     pub fn snapshot(&self, limit: usize) -> Value {
-        let mut ranked: Vec<&((String, String), Candidate)> = self.paths.iter().collect();
+        let mut ranked: Vec<_> = self.paths.iter().collect();
         ranked.sort_by_key(|x| std::cmp::Reverse(x.1.ips.len()));
         let rows: Vec<Value> = ranked
             .into_iter()
@@ -1584,23 +1865,56 @@ impl PathCandidates {
     pub fn restore(&mut self, rows: &Value) {
         let Some(rows) = rows.as_array() else { return };
         for row in rows.iter().take(CANDIDATE_MAX_PATHS) {
-            let Some(r) = row.as_array().filter(|a| a.len() == 7) else { continue };
-            let Some(hosts) = r[6].as_object().filter(|h| h.len() == 1) else { continue };
+            let Some(r) = row.as_array().filter(|a| a.len() == 7) else {
+                continue;
+            };
+            let Some(hosts) = r[6].as_object().filter(|h| h.len() == 1) else {
+                continue;
+            };
             let host = hosts.keys().next().cloned().unwrap_or_default();
             let path = value_text(&r[0]);
             if path.chars().count() > CANDIDATE_MAX_PATH_LENGTH {
                 continue;
             }
-            let (Some(first), Some(last)) = (r[1].as_i64(), r[2].as_i64()) else { continue };
-            let ips: Option<BTreeSet<u32>> = r[3].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect());
-            let clients: Option<BTreeSet<u32>> = r[4].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect());
-            let (Some(ips), Some(clients)) = (ips, clients) else { continue };
+            let (Some(first), Some(last)) = (r[1].as_i64(), r[2].as_i64()) else {
+                continue;
+            };
+            let ips: Option<BTreeSet<u32>> = r[3].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u32))
+                    .collect()
+            });
+            let clients: Option<BTreeSet<u32>> = r[4].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u32))
+                    .collect()
+            });
+            let (Some(ips), Some(clients)) = (ips, clients) else {
+                continue;
+            };
             let status: Vec<(String, i64)> = r[5]
                 .as_object()
-                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0))).collect())
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0)))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let hosts_v: Vec<(String, i64)> = hosts.iter().map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0))).collect();
-            self.paths.push(((host, path), Candidate { first, last, ips, clients, status, hosts: hosts_v }));
+            let hosts_v: Vec<(String, i64)> = hosts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0)))
+                .collect();
+            self.paths.insert(
+                (host, path),
+                Candidate {
+                    first,
+                    last,
+                    ips,
+                    clients,
+                    status,
+                    hosts: hosts_v,
+                },
+            );
         }
     }
 
@@ -1629,15 +1943,20 @@ struct UnknownHost {
 /// Names asked for that serve no site, and who asked.
 #[derive(Debug, Default)]
 pub struct UnknownHosts {
-    hosts: Vec<(String, UnknownHost)>,
+    hosts: LinkedHashMap<String, UnknownHost>,
 }
 
 impl UnknownHosts {
     pub fn note(&mut self, host: &str, ip: &str, client: bool, ts: i64) {
-        let pos = self.hosts.iter().position(|(h, _)| h == host);
-        let mut entry = match pos {
-            Some(p) => self.hosts.remove(p).1,
-            None => UnknownHost { first: ts, last: ts, requests: 0, ips: BTreeSet::new(), clients: BTreeSet::new() },
+        let mut entry = match self.hosts.remove(host) {
+            Some(entry) => entry,
+            None => UnknownHost {
+                first: ts,
+                last: ts,
+                requests: 0,
+                ips: BTreeSet::new(),
+                clients: BTreeSet::new(),
+            },
         };
         entry.last = ts;
         entry.requests += 1;
@@ -1648,14 +1967,14 @@ impl UnknownHosts {
         if client && entry.clients.len() < CANDIDATE_MAX_ADDRESSES {
             entry.clients.insert(key);
         }
-        self.hosts.push((host.to_string(), entry));
+        self.hosts.insert(host.to_string(), entry);
         while self.hosts.len() > UNKNOWN_HOSTS_MAX {
-            self.hosts.remove(0);
+            self.hosts.pop_front();
         }
     }
 
     pub fn prune(&mut self, before: i64) {
-        self.hosts.retain(|(_, e)| e.last >= before);
+        self.hosts.retain(|_, e| e.last >= before);
     }
 
     pub fn listing(&self, limit: usize) -> Vec<Value> {
@@ -1693,18 +2012,38 @@ impl UnknownHosts {
     pub fn restore(&mut self, rows: &Value) {
         let Some(rows) = rows.as_array() else { return };
         for row in rows.iter().take(UNKNOWN_HOSTS_MAX) {
-            let Some(r) = row.as_array().filter(|a| a.len() == 6) else { continue };
-            let (Some(first), Some(last), Some(requests)) = (r[1].as_i64(), r[2].as_i64(), r[3].as_i64()) else {
+            let Some(r) = row.as_array().filter(|a| a.len() == 6) else {
                 continue;
             };
-            let ips: Option<BTreeSet<u32>> = r[4].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect());
-            let clients: Option<BTreeSet<u32>> = r[5].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect());
-            let (Some(ips), Some(clients)) = (ips, clients) else { continue };
+            let (Some(first), Some(last), Some(requests)) =
+                (r[1].as_i64(), r[2].as_i64(), r[3].as_i64())
+            else {
+                continue;
+            };
+            let ips: Option<BTreeSet<u32>> = r[4].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u32))
+                    .collect()
+            });
+            let clients: Option<BTreeSet<u32>> = r[5].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u32))
+                    .collect()
+            });
+            let (Some(ips), Some(clients)) = (ips, clients) else {
+                continue;
+            };
             let host = value_text(&r[0]);
-            if let Some(p) = self.hosts.iter().position(|(h, _)| *h == host) {
-                self.hosts.remove(p);
-            }
-            self.hosts.push((host, UnknownHost { first, last, requests, ips, clients }));
+            self.hosts.insert(
+                host,
+                UnknownHost {
+                    first,
+                    last,
+                    requests,
+                    ips,
+                    clients,
+                },
+            );
         }
     }
 }
@@ -1714,10 +2053,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn candidates_refresh_order_and_drop_previously_served_paths() {
+        let mut names = UnknownHosts::default();
+        names.note("one.test", "192.0.2.1", false, 1);
+        names.note("two.test", "192.0.2.2", false, 2);
+        names.note("one.test", "192.0.2.3", true, 3);
+        let saved = names.snapshot();
+        assert_eq!(saved[0][0], "two.test");
+        assert_eq!(saved[1][3], 2);
+        let mut restored = UnknownHosts::default();
+        restored.restore(&saved);
+        assert_eq!(restored.snapshot(), saved);
+
+        let mut paths = PathCandidates::default();
+        paths.note("/sample", "192.0.2.1", "one.test", 404, false, false, 1);
+        assert_eq!(paths.len(), 1);
+        paths.note("/sample", "192.0.2.1", "one.test", 200, true, false, 2);
+        paths.note("/sample", "192.0.2.2", "one.test", 404, false, false, 3);
+        assert!(paths.is_empty());
+        paths.prune(3);
+        paths.note("/sample", "192.0.2.2", "one.test", 404, false, false, 4);
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
     fn iso_time_parses_authelia_stamps() {
         assert_eq!(parse_iso_time("2026-11-22T10:00:00Z"), Some(1_795_341_600));
-        assert_eq!(parse_iso_time("2026-11-22T11:00:00+01:00"), Some(1_795_341_600));
-        assert_eq!(parse_iso_time("2026-11-22T10:00:00.123456Z"), Some(1_795_341_600));
+        assert_eq!(
+            parse_iso_time("2026-11-22T11:00:00+01:00"),
+            Some(1_795_341_600)
+        );
+        assert_eq!(
+            parse_iso_time("2026-11-22T10:00:00.123456Z"),
+            Some(1_795_341_600)
+        );
         assert_eq!(parse_iso_time("nonsense"), None);
     }
 

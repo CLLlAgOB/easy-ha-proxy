@@ -38,3 +38,19 @@ func TestForceRefreshReleasesLockAfterPanic(t *testing.T) {
 		t.Fatal("ForceRefresh still blocked on the collection lock after a panic")
 	}
 }
+
+func TestExpiredCacheKeyCanBeReinserted(t *testing.T) {
+	c := newTTLCache(60, 2, 256)
+	put := func(key string) { c.put(key, map[string]any{"unit": key}) }
+	put("a")
+	c.entries["a"] = ttlEntry{at: time.Now().Add(-2 * time.Minute)}
+	if c.get("a") != nil {
+		t.Fatal("expired entry still present")
+	}
+	put("b")
+	put("a")
+	put("c")
+	if c.get("a") == nil || c.get("b") != nil || len(c.order) != 2 {
+		t.Fatalf("wrong cache eviction order: %v", c.order)
+	}
+}

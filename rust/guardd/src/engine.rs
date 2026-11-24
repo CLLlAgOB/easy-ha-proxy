@@ -7,38 +7,45 @@
 
 use crate::alerts::AlertClient;
 use crate::constants::*;
-use crate::context::{cursor_from_state, cursor_state, CatchAllPages, DetectionContext, LoginCorrelations, PathCandidates, UnknownHosts};
+use crate::context::{
+    cursor_from_state, cursor_state, CatchAllPages, DetectionContext, LoginCorrelations,
+    PathCandidates, UnknownHosts,
+};
 use crate::enforcer::{EnforcementQueue, Enforcer};
 use crate::haconfig::{
-    decision_summary, first_counter, legacy_ban_readings, normalize_host, read_site_names, read_thresholds,
-    validate_trap_hosts, Tables, BAN_POLICY_LEGACY, BAN_POLICY_U02,
+    decision_summary, first_counter, legacy_ban_readings, normalize_host, read_site_names,
+    read_thresholds, validate_trap_hosts, Tables, BAN_POLICY_LEGACY, BAN_POLICY_U02,
 };
 use crate::live::MinuteDigests;
 use crate::livebuf::{
-    line_epoch, live_budget_ceiling, host_memory_available, process_rss_bytes, service_memory_limit, LiveBuffer,
-    LiveRecord, ENFORCEMENT_BATCH, ENFORCEMENT_CURSOR_KEY, ENFORCEMENT_QUEUE_LIMIT, ENFORCEMENT_RECOVERY_EVENTS,
-    ENFORCEMENT_SWEEP_RESERVE, FAST_REACTION_TICK_SECONDS, LIVE_BUDGET_MAX_MIB, LIVE_BUDGET_MAX_SECONDS,
-    LIVE_BUDGET_MIN_MIB, LIVE_BUDGET_STATE_KEY, LIVE_BUDGET_STEP_MIB, LIVE_FAST_TICK_SECONDS, LIVE_REFILL_BYTES,
+    host_memory_available, line_epoch, live_budget_ceiling, process_rss_bytes,
+    service_memory_limit, LiveBuffer, LiveRecord, ENFORCEMENT_BATCH, ENFORCEMENT_CURSOR_KEY,
+    ENFORCEMENT_QUEUE_LIMIT, ENFORCEMENT_RECOVERY_EVENTS, ENFORCEMENT_SWEEP_RESERVE,
+    FAST_REACTION_TICK_SECONDS, LIVE_BUDGET_MAX_MIB, LIVE_BUDGET_MAX_SECONDS, LIVE_BUDGET_MIN_MIB,
+    LIVE_BUDGET_STATE_KEY, LIVE_BUDGET_STEP_MIB, LIVE_FAST_TICK_SECONDS, LIVE_REFILL_BYTES,
     LIVE_REFILL_CHUNK_BYTES, LIVE_REFILL_FULL, MIB,
 };
 use crate::parser::{parse_access_line, ParsedRequest};
 use crate::reqlog::RequestLog;
-use crate::runtime::{list_tables, parse_table, read_table, runtime_command, GuardConfig, RuntimeError};
+use crate::runtime::{
+    list_tables, parse_table, read_table, runtime_command, GuardConfig, RuntimeError,
+};
 use crate::scoring::{enforceable, score_events, ExclusionModel, ScoreContribution, ScoringPolicy};
 use crate::secdb::{Decision, NewEvent, SecurityDatabase};
 use crate::shield::{shield_entries, PathShield, SHIELD_ENABLED_KEY};
 use crate::signatures::{is_asset, SignatureEngine};
 use crate::tracking::{IpActivity, IpMemory, LogCursor, SubnetCorrelator};
 use crate::watchers::{
-    BanPolicyWatch, HardFloorWatch, TrustedRates, BAN_POLICY_STATE_KEY, BAN_SNAPSHOTS_KEPT, LEGACY_LIFTS_PER_CYCLE,
-    RATE_WARNINGS_KEEP_DAYS, RATE_WARNINGS_KEEP_ROWS, TRUST_AFTER_SIGN_IN_SECONDS,
+    BanPolicyWatch, HardFloorWatch, TrustedRates, BAN_POLICY_STATE_KEY, BAN_SNAPSHOTS_KEPT,
+    LEGACY_LIFTS_PER_CYCLE, RATE_WARNINGS_KEEP_DAYS, RATE_WARNINGS_KEEP_ROWS,
+    TRUST_AFTER_SIGN_IN_SECONDS,
 };
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -60,7 +67,11 @@ pub enum EngineError {
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Value(m) | Self::Lookup(m) | Self::Conflict(m) | Self::Refused(m) | Self::Other(m) => {
+            Self::Value(m)
+            | Self::Lookup(m)
+            | Self::Conflict(m)
+            | Self::Refused(m)
+            | Self::Other(m) => {
                 write!(f, "{m}")
             }
         }
@@ -91,7 +102,14 @@ fn log_info(msg: &str) {
 
 fn json_list_strings(raw: &str) -> Vec<String> {
     match serde_json::from_str::<Value>(raw) {
-        Ok(Value::Array(a)) => a.iter().map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).collect(),
+        Ok(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -125,7 +143,8 @@ impl Sink {
         if handled && !refusal_does_not_excuse(event_type) {
             return;
         }
-        let urgent = self.scoring_policy().weight(event_type) >= WOULD_BAN_SCORE || event_type == EVENT_SUBNET_CAMPAIGN;
+        let urgent = self.scoring_policy().weight(event_type) >= WOULD_BAN_SCORE
+            || event_type == EVENT_SUBNET_CAMPAIGN;
         self.queue.mark(ip, urgent);
     }
 
@@ -214,7 +233,11 @@ fn round2(x: f64) -> f64 {
 
 impl Reputation {
     pub fn to_json(&self, with_contributions: bool) -> Value {
-        let cats: Map<String, Value> = self.categories.iter().map(|(k, v)| (k.clone(), json!(round2(*v)))).collect();
+        let cats: Map<String, Value> = self
+            .categories
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(round2(*v))))
+            .collect();
         let mut v = json!({
             "ip": self.ip,
             "score": self.score,
@@ -319,6 +342,7 @@ pub struct Engine {
     enforcement_checked: usize,
     pub fast_enforcements: u64,
     pub running: Arc<AtomicBool>,
+    pub lag_bytes: Arc<AtomicU64>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -335,7 +359,11 @@ impl Engine {
     ) -> Self {
         let now = utc_now();
         let override_mode = db.get_state("mode_override", "");
-        let mode = if SUPPORTED_MODES.contains(&override_mode.as_str()) { override_mode } else { config.mode.clone() };
+        let mode = if SUPPORTED_MODES.contains(&override_mode.as_str()) {
+            override_mode
+        } else {
+            config.mode.clone()
+        };
         let mut enforcer = Enforcer::new(&config, None);
         enforcer.mode = mode;
         let ban_durations = load_ban_durations(&db);
@@ -347,25 +375,45 @@ impl Engine {
         if let Ok(v) = serde_json::from_str::<Value>(&db.get_state(UNKNOWN_HOSTS_KEY, "[]")) {
             unknown_hosts.restore(&v);
         }
-        let trap_hosts: BTreeSet<String> = json_list_strings(&db.get_state(TRAP_HOSTS_KEY, "[]")).into_iter().collect();
+        let trap_hosts: BTreeSet<String> = json_list_strings(&db.get_state(TRAP_HOSTS_KEY, "[]"))
+            .into_iter()
+            .collect();
         let mut candidates = PathCandidates::default();
         if let Ok(v) = serde_json::from_str::<Value>(&db.get_state(CANDIDATES_KEY, "[]")) {
             candidates.restore(&v);
         }
-        let cursor_state: Value = serde_json::from_str(&db.get_state("log_cursor", "{}")).unwrap_or(json!({}));
+        let cursor_state: Value =
+            serde_json::from_str(&db.get_state("log_cursor", "{}")).unwrap_or(json!({}));
         let cursor = cursor_from_state(&config.log_file, Some(&cursor_state));
         let live = if config.live_buffer_records > 0 {
-            Some(Arc::new(Mutex::new(LiveBuffer::new(config.live_buffer_records, config.live_buffer_seconds))))
+            Some(Arc::new(Mutex::new(LiveBuffer::new(
+                config.live_buffer_records,
+                config.live_buffer_seconds,
+            ))))
         } else {
             None
         };
-        let known_bans: BTreeSet<String> = json_list_strings(&db.get_state(KNOWN_BANS_STATE_KEY, "[]")).into_iter().collect();
+        let known_bans: BTreeSet<String> =
+            json_list_strings(&db.get_state(KNOWN_BANS_STATE_KEY, "[]"))
+                .into_iter()
+                .collect();
         let legacy_observed = load_legacy_observed(&db);
         let (scan_after, scan_before) = {
-            let scan: Value = serde_json::from_str(&db.get_state(ENFORCEMENT_CURSOR_KEY, "{}")).unwrap_or(json!({}));
+            let scan: Value = serde_json::from_str(&db.get_state(ENFORCEMENT_CURSOR_KEY, "{}"))
+                .unwrap_or(json!({}));
             let after = scan.get("after").and_then(Value::as_array);
-            let a0 = after.and_then(|a| a.first()).and_then(Value::as_i64).unwrap_or(0);
-            let a1 = after.and_then(|a| a.get(1)).map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
+            let a0 = after
+                .and_then(|a| a.first())
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let a1 = after
+                .and_then(|a| a.get(1))
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_default();
             let before = scan.get("before").and_then(Value::as_i64).unwrap_or(0);
             ((a0, a1), before)
         };
@@ -410,7 +458,10 @@ impl Engine {
             candidates,
             unknown_hosts,
             trap_hosts,
-            site_names: SiteNames { names: HashSet::new(), checked: None },
+            site_names: SiteNames {
+                names: HashSet::new(),
+                checked: None,
+            },
             cursor,
             live,
             live_budget: json!({"budget_mib": 0, "revision": 0, "changed_at": 0}),
@@ -431,6 +482,7 @@ impl Engine {
             enforcement_checked: 0,
             fast_enforcements: 0,
             running: Arc::new(AtomicBool::new(false)),
+            lag_bytes: Arc::new(AtomicU64::new(0)),
         };
         engine.live_budget = engine.load_live_budget();
         engine.apply_live_budget_at_start();
@@ -484,7 +536,12 @@ impl Engine {
         n
     }
 
-    fn read_back(&self, start: u64, end: u64, horizon: f64) -> std::io::Result<(Vec<LiveRecord>, bool, u64)> {
+    fn read_back(
+        &self,
+        start: u64,
+        end: u64,
+        horizon: f64,
+    ) -> std::io::Result<(Vec<LiveRecord>, bool, u64)> {
         let mut f = File::open(&self.config.log_file)?;
         f.seek(SeekFrom::Start(start))?;
         let mut data = vec![0u8; (end - start) as usize];
@@ -493,7 +550,9 @@ impl Engine {
         let mut boundary = start;
         let mut slice: &[u8] = &data;
         if start > 0 {
-            let cut = memchr::memchr(b'\n', slice).map(|p| p + 1).unwrap_or(slice.len());
+            let cut = memchr::memchr(b'\n', slice)
+                .map(|p| p + 1)
+                .unwrap_or(slice.len());
             slice = &slice[cut..];
             boundary = start + cut as u64;
         }
@@ -506,7 +565,9 @@ impl Engine {
             }
             let bounded = &raw[..raw.len().min(crate::signatures::MAX_LOG_LINE_BYTES)];
             let line = String::from_utf8_lossy(bounded);
-            let Some(ts) = line_epoch(&line) else { continue };
+            let Some(ts) = line_epoch(&line) else {
+                continue;
+            };
             if ts < horizon {
                 reached_back = true;
                 continue;
@@ -557,7 +618,8 @@ impl Engine {
     // -- the live buffer's memory -------------------------------------------------
 
     fn load_live_budget(&self) -> Value {
-        let stored: Value = serde_json::from_str(&self.db.get_state(LIVE_BUDGET_STATE_KEY, "")).unwrap_or(json!({}));
+        let stored: Value = serde_json::from_str(&self.db.get_state(LIVE_BUDGET_STATE_KEY, ""))
+            .unwrap_or(json!({}));
         let mut budget = clamp_int(stored.get("budget_mib"), 0, 0, LIVE_BUDGET_MAX_MIB);
         let revision = clamp_int(stored.get("revision"), 0, 0, 1 << 31);
         let changed_at = clamp_int(stored.get("changed_at"), 0, 0, 1 << 33);
@@ -576,13 +638,18 @@ impl Engine {
         let (ceiling, _) = live_budget_ceiling(0, false);
         let applied = LIVE_BUDGET_MIN_MIB.max(wanted.min(ceiling));
         if applied < wanted {
-            log_warn(&format!("Live buffer: {wanted} MiB chosen, {applied} MiB fit the service's memory limit"));
+            log_warn(&format!(
+                "Live buffer: {wanted} MiB chosen, {applied} MiB fit the service's memory limit"
+            ));
         }
         lock(live).set_budget(applied * MIB);
     }
 
     pub fn live_memory(&self) -> EResult<Value> {
-        let live = self.live.as_ref().ok_or_else(|| EngineError::Lookup("the live buffer is off".into()))?;
+        let live = self
+            .live
+            .as_ref()
+            .ok_or_else(|| EngineError::Lookup("the live buffer is off".into()))?;
         let b = lock(live);
         let status = b.status();
         let (ceiling, reason) = live_budget_ceiling(b.bytes(), true);
@@ -610,17 +677,38 @@ impl Engine {
         }))
     }
 
-    pub fn set_live_memory(&mut self, budget_mib: Option<&Value>, revision: Option<&Value>) -> EResult<Value> {
-        let live = self.live.clone().ok_or_else(|| EngineError::Lookup("the live buffer is off".into()))?;
+    pub fn set_live_memory(
+        &mut self,
+        budget_mib: Option<&Value>,
+        revision: Option<&Value>,
+    ) -> EResult<Value> {
+        let live = self
+            .live
+            .clone()
+            .ok_or_else(|| EngineError::Lookup("the live buffer is off".into()))?;
         let wanted = match budget_mib {
             Some(Value::Number(n)) if n.is_i64() || n.is_u64() => n.as_i64().unwrap_or(-1),
-            Some(Value::String(s)) => s.trim().parse::<i64>().map_err(|_| EngineError::Value("budget_mib and revision must be whole numbers".into()))?,
-            _ => return Err(EngineError::Value("budget_mib must be a whole number of MiB".into())),
+            Some(Value::String(s)) => s.trim().parse::<i64>().map_err(|_| {
+                EngineError::Value("budget_mib and revision must be whole numbers".into())
+            })?,
+            _ => {
+                return Err(EngineError::Value(
+                    "budget_mib must be a whole number of MiB".into(),
+                ))
+            }
         };
         let seen = match revision {
-            Some(Value::Number(n)) => n.as_i64().ok_or_else(|| EngineError::Value("budget_mib and revision must be whole numbers".into()))?,
-            Some(Value::String(s)) => s.trim().parse::<i64>().map_err(|_| EngineError::Value("budget_mib and revision must be whole numbers".into()))?,
-            _ => return Err(EngineError::Value("budget_mib and revision must be whole numbers".into())),
+            Some(Value::Number(n)) => n.as_i64().ok_or_else(|| {
+                EngineError::Value("budget_mib and revision must be whole numbers".into())
+            })?,
+            Some(Value::String(s)) => s.trim().parse::<i64>().map_err(|_| {
+                EngineError::Value("budget_mib and revision must be whole numbers".into())
+            })?,
+            _ => {
+                return Err(EngineError::Value(
+                    "budget_mib and revision must be whole numbers".into(),
+                ))
+            }
         };
         if wanted != 0 && !(LIVE_BUDGET_MIN_MIB..=LIVE_BUDGET_MAX_MIB).contains(&wanted) {
             return Err(EngineError::Value(format!(
@@ -628,24 +716,34 @@ impl Engine {
             )));
         }
         if seen != self.live_budget["revision"].as_i64().unwrap_or(0) {
-            return Err(EngineError::Conflict("changed by someone else in the meantime".into()));
+            return Err(EngineError::Conflict(
+                "changed by someone else in the meantime".into(),
+            ));
         }
         let dropped = {
             let mut b = lock(&live);
             if wanted != 0 {
                 let (ceiling, reason) = live_budget_ceiling(b.bytes(), true);
                 if wanted > ceiling && wanted > b.max_bytes / MIB {
-                    return Err(EngineError::Value(format!("at most {ceiling} MiB can be given now ({reason})")));
+                    return Err(EngineError::Value(format!(
+                        "at most {ceiling} MiB can be given now ({reason})"
+                    )));
                 }
             }
-            let state = json!({"budget_mib": wanted, "revision": seen + 1, "changed_at": utc_now()});
-            self.db.set_state(LIVE_BUDGET_STATE_KEY, &crate::secdb::python_json(&state))?;
+            let state =
+                json!({"budget_mib": wanted, "revision": seen + 1, "changed_at": utc_now()});
+            self.db
+                .set_state(LIVE_BUDGET_STATE_KEY, &crate::secdb::python_json(&state))?;
             self.live_budget = state;
             b.set_budget(wanted * MIB)
         };
         log_warn(&format!(
             "Live buffer: {} from the web interface; {dropped} older requests dropped",
-            if wanted != 0 { format!("{wanted} MiB") } else { "back to its configured profile".into() }
+            if wanted != 0 {
+                format!("{wanted} MiB")
+            } else {
+                "back to its configured profile".into()
+            }
         ));
         let mut out = self.live_memory()?;
         out["dropped"] = json!(dropped);
@@ -654,28 +752,42 @@ impl Engine {
 
     // -- collection -----------------------------------------------------------------
 
-    pub fn poll(&mut self) -> Result<Value, String> {
+    fn poll(
+        &mut self,
+        tables: Result<(Tables, BTreeSet<String>), String>,
+    ) -> Result<Value, String> {
         let now = utc_now();
         self.sink.exclusions.reload_files(false);
         self.refresh_ban_policy(now)?;
-        let tables = self.read_tables()?;
+        let (tables, unreadable) = tables?;
+        self.unreadable_tables = unreadable;
         let mut from_tables = self.ingest_tables(&tables, now)?;
         from_tables += self.ingest_hard_floor(now)?;
-        let budget = (64 * 1024).max(self.config.log_read_bytes_per_cycle.saturating_sub(self.cycle_bytes));
+        let budget = (64 * 1024).max(
+            self.config
+                .log_read_bytes_per_cycle
+                .saturating_sub(self.cycle_bytes),
+        );
         let from_log = self.ingest_log(now, Some(budget))?;
         self.flush_rate_warnings(now, from_log == 0);
-        let enforcement = self.apply_enforcement(Some(now)).map_err(|e| e.to_string())?;
-        self.polls_total += 1;
-        self.last_poll_ts = Some(now);
-        self.consecutive_failures = 0;
-        self.last_error = None;
-        self.db.set_state("log_cursor", &crate::secdb::python_json(&cursor_state(&self.cursor)))?;
+        let enforcement = self
+            .apply_enforcement(Some(now))
+            .map_err(|e| e.to_string())?;
+        self.db.set_state(
+            "log_cursor",
+            &crate::secdb::python_json(&cursor_state(&self.cursor)),
+        )?;
         self.sync_shield(now);
         self.weekly_summary_tick(Some(now));
         let sigs = self.sig();
         let _ = &sigs;
-        self.login_correlations.poll(now, &self.sink.exclusions, &mut self.detection, &self.db);
-        self.detection.persist(now, false, &self.db);
+        self.login_correlations
+            .poll(now, &self.sink.exclusions, &mut self.detection, &self.db)?;
+        self.detection.persist(now, false, &self.db)?;
+        self.polls_total += 1;
+        self.last_poll_ts = Some(now);
+        self.consecutive_failures = 0;
+        self.last_error = None;
         Ok(json!({
             "table_events": from_tables,
             "log_lines": from_log,
@@ -684,9 +796,8 @@ impl Engine {
         }))
     }
 
-    pub fn read_tables(&mut self) -> Result<Tables, String> {
-        let socket = self.config.haproxy_socket.clone();
-        let available = list_tables(&socket).map_err(|e| e.to_string())?;
+    fn read_tables(socket: &str, stop: &AtomicBool) -> Result<(Tables, BTreeSet<String>), String> {
+        let available = list_tables(socket).map_err(|e| e.to_string())?;
         let wanted: Vec<String> = available
             .into_iter()
             .filter(|n| {
@@ -698,7 +809,10 @@ impl Engine {
         let mut result: Tables = HashMap::new();
         let mut unreadable = BTreeSet::new();
         for name in wanted {
-            match read_table(&socket, &name, "") {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match read_table(socket, &name, "") {
                 Ok(rows) => {
                     result.insert(name, rows);
                 }
@@ -709,8 +823,7 @@ impl Engine {
                 Err(e) => return Err(e.to_string()),
             }
         }
-        self.unreadable_tables = unreadable;
-        Ok(result)
+        Ok((result, unreadable))
     }
 
     fn save_legacy_observed(&mut self) -> Result<(), String> {
@@ -721,10 +834,19 @@ impl Engine {
         for (ip, code) in &self.legacy_observed {
             m.insert(ip.clone(), json!(code));
         }
-        self.db.set_state(LEGACY_OBSERVED_STATE_KEY, &crate::secdb::python_json(&Value::Object(m)))
+        self.db.set_state(
+            LEGACY_OBSERVED_STATE_KEY,
+            &crate::secdb::python_json(&Value::Object(m)),
+        )
     }
 
-    fn observe_legacy_bans(&mut self, bans: &HashMap<String, HashMap<String, String>>, newly: &BTreeSet<String>, tables: &Tables, now: i64) -> Result<usize, String> {
+    fn observe_legacy_bans(
+        &mut self,
+        bans: &HashMap<String, HashMap<String, String>>,
+        newly: &BTreeSet<String>,
+        tables: &Tables,
+        now: i64,
+    ) -> Result<usize, String> {
         let mut written = 0;
         let mut changed = false;
         let mut thresholds: Option<HashMap<String, i64>> = None;
@@ -770,7 +892,18 @@ impl Engine {
                 continue;
             }
             self.legacy_observed.retain(|(i, _)| *i != ip);
-            self.db.record_decision(&ip, now, "ended", "haproxy", "observed", Decision { code, policy: self.sink.ban_policy, ..Default::default() })?;
+            self.db.record_decision(
+                &ip,
+                now,
+                "ended",
+                "haproxy",
+                "observed",
+                Decision {
+                    code,
+                    policy: self.sink.ban_policy,
+                    ..Default::default()
+                },
+            )?;
             written += 1;
             changed = true;
         }
@@ -781,7 +914,12 @@ impl Engine {
     }
 
     fn settle_legacy_observed(&mut self, ip: &str) -> i64 {
-        let code = self.legacy_observed.iter().find(|(i, _)| i == ip).map(|(_, c)| *c).unwrap_or(0);
+        let code = self
+            .legacy_observed
+            .iter()
+            .find(|(i, _)| i == ip)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
         if code != 0 {
             self.legacy_observed.retain(|(i, _)| i != ip);
             let _ = self.save_legacy_observed();
@@ -794,8 +932,11 @@ impl Engine {
             let empty = HashMap::new();
             let auth_rows = tables.get("tbl_ip_auth").unwrap_or(&empty);
             self.sink.exclusions.refresh_authenticated(auth_rows);
-            let mut authenticated: Vec<String> =
-                auth_rows.iter().filter(|(_, f)| field_int(f, "gpc0") > 0).map(|(ip, _)| ip.clone()).collect();
+            let mut authenticated: Vec<String> = auth_rows
+                .iter()
+                .filter(|(_, f)| field_int(f, "gpc0") > 0)
+                .map(|(ip, _)| ip.clone())
+                .collect();
             authenticated.sort();
             if !authenticated.is_empty() {
                 self.db.record_authenticated(&authenticated, now)?;
@@ -806,10 +947,16 @@ impl Engine {
         }
         let empty = HashMap::new();
         let bans = tables.get("tbl_ban").unwrap_or(&empty);
-        let active: BTreeSet<String> = bans.iter().filter(|(_, f)| field_int(f, "gpc0") > 0).map(|(ip, _)| ip.clone()).collect();
+        let active: BTreeSet<String> = bans
+            .iter()
+            .filter(|(_, f)| field_int(f, "gpc0") > 0)
+            .map(|(ip, _)| ip.clone())
+            .collect();
         let newly: BTreeSet<String> = active.difference(&self.known_bans).cloned().collect();
         if let Err(e) = self.observe_legacy_bans(bans, &newly, tables, now) {
-            log_warn(&format!("Could not write HAProxy's own bans into the decision history: {e}"));
+            log_warn(&format!(
+                "Could not write HAProxy's own bans into the decision history: {e}"
+            ));
         }
         let mut events = Vec::new();
         for ip in &newly {
@@ -832,7 +979,10 @@ impl Engine {
         }
         if active != self.known_bans {
             let list: Vec<&String> = active.iter().take(KNOWN_BANS_MAX).collect();
-            self.db.set_state(KNOWN_BANS_STATE_KEY, &crate::secdb::python_json(&json!(list)))?;
+            self.db.set_state(
+                KNOWN_BANS_STATE_KEY,
+                &crate::secdb::python_json(&json!(list)),
+            )?;
         }
         self.known_bans = active.clone();
         let written = self.db.record_events(&events)?;
@@ -849,12 +999,18 @@ impl Engine {
             self.reconcile_legacy_bans(bans, now)?;
         }
         if let Err(e) = self.keep_manual_bans(bans, now) {
-            log_warn(&format!("Could not check the manual bans against HAProxy: {e}"));
+            log_warn(&format!(
+                "Could not check the manual bans against HAProxy: {e}"
+            ));
         }
         Ok(written + self.ingest_rate_tables(tables, now)?)
     }
 
-    pub fn keep_manual_bans(&mut self, bans: &HashMap<String, HashMap<String, String>>, now: i64) -> Result<u64, String> {
+    pub fn keep_manual_bans(
+        &mut self,
+        bans: &HashMap<String, HashMap<String, String>>,
+        now: i64,
+    ) -> Result<u64, String> {
         let known = self.db.manual_bans()?;
         let mut ips: Vec<&String> = bans.keys().collect();
         ips.sort();
@@ -864,9 +1020,19 @@ impl Engine {
                 let remaining = (field_int(fields, "exp") / 1000).max(0);
                 self.db.note_manual_ban(ip, now, now + remaining)?;
                 if !known.contains_key(ip) {
-                    self.db.record_decision(ip, now, "applied", "operator", "applied", Decision {
-                        code: MANUAL_BAN_CODE, until: now + remaining, policy: self.sink.ban_policy, ..Default::default()
-                    })?;
+                    self.db.record_decision(
+                        ip,
+                        now,
+                        "applied",
+                        "operator",
+                        "applied",
+                        Decision {
+                            code: MANUAL_BAN_CODE,
+                            until: now + remaining,
+                            policy: self.sink.ban_policy,
+                            ..Default::default()
+                        },
+                    )?;
                 }
             }
         }
@@ -880,7 +1046,9 @@ impl Engine {
             let code = field_int(entry, "gpt0");
             if record.expires_at <= now {
                 if record.reasserted != 0 && held && code == MANUAL_BAN_CODE {
-                    self.enforcer.lift_code(&ip, MANUAL_BAN_CODE).map_err(|e| e.to_string())?;
+                    self.enforcer
+                        .lift_code(&ip, MANUAL_BAN_CODE)
+                        .map_err(|e| e.to_string())?;
                 }
                 self.db.forget_manual_ban(&ip)?;
                 continue;
@@ -893,13 +1061,29 @@ impl Engine {
                 continue;
             }
             if s > record.seen_at {
-                if self.enforcer.restore(&ip, MANUAL_BAN_CODE).map_err(|e| e.to_string())? {
+                if self
+                    .enforcer
+                    .restore(&ip, MANUAL_BAN_CODE)
+                    .map_err(|e| e.to_string())?
+                {
                     self.db.mark_manual_reasserted(&ip)?;
                     restored += 1;
-                    log_warn(&format!("Restored the manual ban on {ip}, lost when HAProxy restarted"));
-                    self.db.record_decision(&ip, now, "restored", "restart", "applied", Decision {
-                        code: MANUAL_BAN_CODE, until: record.expires_at, policy: self.sink.ban_policy, ..Default::default()
-                    })?;
+                    log_warn(&format!(
+                        "Restored the manual ban on {ip}, lost when HAProxy restarted"
+                    ));
+                    self.db.record_decision(
+                        &ip,
+                        now,
+                        "restored",
+                        "restart",
+                        "applied",
+                        Decision {
+                            code: MANUAL_BAN_CODE,
+                            until: record.expires_at,
+                            policy: self.sink.ban_policy,
+                            ..Default::default()
+                        },
+                    )?;
                 }
             } else {
                 self.db.forget_manual_ban(&ip)?;
@@ -936,7 +1120,11 @@ impl Engine {
         self.sink.ban_policy = policy;
         self.sink.exclusions.geo_trusted = policy != BAN_POLICY_U02;
         let state = self.ban_policy_state();
-        let previous = state.get("policy").and_then(Value::as_str).unwrap_or(BAN_POLICY_LEGACY).to_string();
+        let previous = state
+            .get("policy")
+            .and_then(Value::as_str)
+            .unwrap_or(BAN_POLICY_LEGACY)
+            .to_string();
         if previous == policy {
             return Ok(policy);
         }
@@ -945,23 +1133,35 @@ impl Engine {
             match self.snapshot_bans(now) {
                 Ok(path) => record["snapshot"] = json!(path),
                 Err(e) => {
-                    log_warn(&format!("Ban policy {policy} seen, but the ban table snapshot failed: {e}"));
+                    log_warn(&format!(
+                        "Ban policy {policy} seen, but the ban table snapshot failed: {e}"
+                    ));
                     return Ok(policy);
                 }
             }
         }
-        self.db.set_state(BAN_POLICY_STATE_KEY, &crate::secdb::python_json(&record))?;
+        self.db
+            .set_state(BAN_POLICY_STATE_KEY, &crate::secdb::python_json(&record))?;
         log_warn(&format!("Ban policy is now {policy} (was {previous})"));
         Ok(policy)
     }
 
     pub fn switch_recorded(&self) -> bool {
-        self.ban_policy_state().get("policy").and_then(Value::as_str) == Some(BAN_POLICY_U02)
+        self.ban_policy_state()
+            .get("policy")
+            .and_then(Value::as_str)
+            == Some(BAN_POLICY_U02)
     }
 
     fn snapshot_bans(&self, now: i64) -> Result<String, String> {
-        let rows = read_table(&self.config.haproxy_socket, "tbl_ban", "").map_err(|e| e.to_string())?;
-        let dir = self.db.path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let rows =
+            read_table(&self.config.haproxy_socket, "tbl_ban", "").map_err(|e| e.to_string())?;
+        let dir = self
+            .db
+            .path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
         let target = dir.join(format!("ban-policy-u02-{now}.json"));
         let temporary = target.with_extension("tmp");
         let mut entries = Map::new();
@@ -977,11 +1177,13 @@ impl Engine {
             entries.insert(k.clone(), Value::Object(f));
         }
         let payload = json!({"entries": entries, "ts": now});
-        std::fs::write(&temporary, crate::secdb::python_json(&payload)).map_err(|e| e.to_string())?;
+        std::fs::write(&temporary, crate::secdb::python_json(&payload))
+            .map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
         }
         std::fs::rename(&temporary, &target).map_err(|e| e.to_string())?;
         if let Ok(read) = std::fs::read_dir(&dir) {
@@ -989,7 +1191,9 @@ impl Engine {
                 .filter_map(Result::ok)
                 .map(|e| e.path())
                 .filter(|p| {
-                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ban-policy-u02-") && n.ends_with(".json"))
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("ban-policy-u02-") && n.ends_with(".json"))
                 })
                 .collect();
             old.sort();
@@ -1002,10 +1206,16 @@ impl Engine {
         Ok(target.display().to_string())
     }
 
-    fn reconcile_legacy_bans(&mut self, bans: &HashMap<String, HashMap<String, String>>, now: i64) -> Result<usize, String> {
+    fn reconcile_legacy_bans(
+        &mut self,
+        bans: &HashMap<String, HashMap<String, String>>,
+        now: i64,
+    ) -> Result<usize, String> {
         let mut legacy: Vec<&String> = bans
             .iter()
-            .filter(|(_, f)| field_int(f, "gpc0") > 0 && crate::watchers::is_legacy_code(field_int(f, "gpt0")))
+            .filter(|(_, f)| {
+                field_int(f, "gpc0") > 0 && crate::watchers::is_legacy_code(field_int(f, "gpt0"))
+            })
             .map(|(ip, _)| ip)
             .collect();
         legacy.sort();
@@ -1029,15 +1239,36 @@ impl Engine {
             } else {
                 self.legacy_bans.remove(&key);
             }
-            self.sink.emit(ip, EVENT_LEGACY_BAN_LIFTED, now, "guardd", "", "",
-                &format!("code={code} policy={BAN_POLICY_U02}"), false,
-                Some(format!("{ip}|{EVENT_LEGACY_BAN_LIFTED}|{now}")))?;
-            self.db.record_decision(ip, now, "lifted", "policy", "applied", Decision { code, policy: BAN_POLICY_U02, ..Default::default() })?;
+            self.sink.emit(
+                ip,
+                EVENT_LEGACY_BAN_LIFTED,
+                now,
+                "guardd",
+                "",
+                "",
+                &format!("code={code} policy={BAN_POLICY_U02}"),
+                false,
+                Some(format!("{ip}|{EVENT_LEGACY_BAN_LIFTED}|{now}")),
+            )?;
+            self.db.record_decision(
+                ip,
+                now,
+                "lifted",
+                "policy",
+                "applied",
+                Decision {
+                    code,
+                    policy: BAN_POLICY_U02,
+                    ..Default::default()
+                },
+            )?;
             self.settle_legacy_observed(ip);
         }
         if lifted > 0 {
             self.legacy_lifted += lifted as u64;
-            log_warn(&format!("Lifted {lifted} bans HAProxy wrote under the old rules"));
+            log_warn(&format!(
+                "Lifted {lifted} bans HAProxy wrote under the old rules"
+            ));
         }
         self.apply_promotions();
         Ok(lifted)
@@ -1050,7 +1281,10 @@ impl Engine {
         }
         let mut over: BTreeMap<(String, String, String), (i64, i64)> = BTreeMap::new();
         for (table, counter, limit) in queries {
-            let payload = match runtime_command(&self.config.haproxy_socket, &format!("show table {table} data.{counter} gt {limit}")) {
+            let payload = match runtime_command(
+                &self.config.haproxy_socket,
+                &format!("show table {table} data.{counter} gt {limit}"),
+            ) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
@@ -1064,13 +1298,31 @@ impl Engine {
         let mut written = 0;
         for ((ip, table, counter), (value, limit)) in self.hard_floor.update(&over) {
             let verdict = self.sink.exclusions.verdict(&ip);
-            let event_type = if verdict.excluded { EVENT_HARD_FLOOR_TRUSTED } else { EVENT_HARD_FLOOR };
+            let event_type = if verdict.excluded {
+                EVENT_HARD_FLOOR_TRUSTED
+            } else {
+                EVENT_HARD_FLOOR
+            };
             let mut detail = format!("{counter}={value} limit={limit} table={table}");
             if verdict.excluded {
-                let src = if verdict.source.is_empty() { verdict.reason.clone() } else { verdict.source.clone() };
+                let src = if verdict.source.is_empty() {
+                    verdict.reason.clone()
+                } else {
+                    verdict.source.clone()
+                };
                 detail.push_str(&format!(" trusted={src}"));
             }
-            if self.sink.emit(&ip, event_type, now, "stick-table", "flood", "", &detail, false, None)? {
+            if self.sink.emit(
+                &ip,
+                event_type,
+                now,
+                "stick-table",
+                "flood",
+                "",
+                &detail,
+                false,
+                None,
+            )? {
                 written += 1;
             }
         }
@@ -1093,8 +1345,14 @@ impl Engine {
             } else {
                 continue;
             };
-            let site = if name.matches('_').count() >= 2 { name.splitn(3, '_').last().unwrap_or("").to_string() } else { String::new() };
-            let Some(&limit) = thresholds.get(name) else { continue };
+            let site = if name.matches('_').count() >= 2 {
+                name.splitn(3, '_').last().unwrap_or("").to_string()
+            } else {
+                String::new()
+            };
+            let Some(&limit) = thresholds.get(name) else {
+                continue;
+            };
             let mut ips: Vec<&String> = tables[name].keys().collect();
             ips.sort();
             for ip in ips {
@@ -1102,7 +1360,17 @@ impl Engine {
                 if value <= limit || self.sink.exclusions.verdict(ip).excluded {
                     continue;
                 }
-                if self.sink.emit(ip, event_type, now, "stick-table", "", &site, &format!("{prefix}={value} limit={limit}"), false, Some(format!("{ip}|{event_type}|{name}")))? {
+                if self.sink.emit(
+                    ip,
+                    event_type,
+                    now,
+                    "stick-table",
+                    "",
+                    &site,
+                    &format!("{prefix}={value} limit={limit}"),
+                    false,
+                    Some(format!("{ip}|{event_type}|{name}")),
+                )? {
                     written += 1;
                 }
             }
@@ -1118,7 +1386,10 @@ impl Engine {
             Ok(n) => n,
             Err(e) => {
                 self.trusted_rates.dropped += finished.len() as u64;
-                log_warn(&format!("Could not record {} rate warnings: {e}", finished.len()));
+                log_warn(&format!(
+                    "Could not record {} rate warnings: {e}",
+                    finished.len()
+                ));
                 0
             }
         }
@@ -1126,18 +1397,28 @@ impl Engine {
 
     pub fn ingest_log(&mut self, now: i64, max_bytes: Option<usize>) -> Result<usize, String> {
         let before = self.cursor.offset;
-        let lines = self.cursor.read(max_bytes.unwrap_or(self.config.log_read_bytes_per_cycle));
+        let lines = self
+            .cursor
+            .read(max_bytes.unwrap_or(self.config.log_read_bytes_per_cycle));
+        self.lag_bytes
+            .store(self.cursor.lag_bytes, Ordering::Relaxed);
         self.cycle_bytes += self.cursor.offset.saturating_sub(before) as usize;
         if lines.is_empty() {
             return Ok(0);
         }
         self.lines_read += lines.len() as u64;
         let sigs = self.sig();
-        let requests = self.requests.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let requests = self
+            .requests
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let mut parsed = 0u64;
         let mut live_batch = Vec::new();
         for line in &lines {
-            let Some(request) = parse_access_line(line, &sigs) else { continue };
+            let Some(request) = parse_access_line(line, &sigs) else {
+                continue;
+            };
             parsed += 1;
             let ts = line_epoch(line);
             let ended = ts.unwrap_or(now as f64);
@@ -1167,20 +1448,35 @@ impl Engine {
     }
 
     /// Fold one request into the address's memory and emit any findings.
-    pub fn observe_request(&mut self, request: &ParsedRequest, now: i64, stamp: Option<f64>, sigs: &SignatureEngine) -> Result<(), String> {
+    pub fn observe_request(
+        &mut self,
+        request: &ParsedRequest,
+        now: i64,
+        stamp: Option<f64>,
+        sigs: &SignatureEngine,
+    ) -> Result<(), String> {
         let ip = request.client_ip.clone();
         let verdict = self.sink.exclusions.verdict(&ip);
         let trust = if verdict.reason == "authenticated" {
             "signed-in".to_string()
         } else if verdict.reason == "whitelisted" {
-            if verdict.source.is_empty() { "whitelist".to_string() } else { verdict.source.clone() }
+            if verdict.source.is_empty() {
+                "whitelist".to_string()
+            } else {
+                verdict.source.clone()
+            }
         } else {
             String::new()
         };
         self.trusted_rates.observe(request, &trust, now, stamp);
         let catch_known = self.catch_all.known(&request.host, request.bytes_out);
-        let matches = self.detection.inspect(request, now, verdict.excluded, true, catch_known, sigs);
-        let actions: HashMap<String, String> = matches.iter().map(|m| (m.id.clone(), m.action.clone())).collect();
+        let matches =
+            self.detection
+                .inspect(request, now, verdict.excluded, true, catch_known, sigs);
+        let actions: HashMap<String, String> = matches
+            .iter()
+            .map(|m| (m.id.clone(), m.action.clone()))
+            .collect();
         if verdict.excluded {
             self.excluded_observations += 1;
             return Ok(());
@@ -1190,7 +1486,13 @@ impl Engine {
         result
     }
 
-    fn permitted(&self, actions: &HashMap<String, String>, rule: &str, request: &ParsedRequest, now: i64) -> bool {
+    fn permitted(
+        &self,
+        actions: &HashMap<String, String>,
+        rule: &str,
+        request: &ParsedRequest,
+        now: i64,
+    ) -> bool {
         match actions.get(rule) {
             Some(a) => a == "enforce",
             None => self.detection.action(rule, request, now, "enforce").0 == "enforce",
@@ -1208,16 +1510,43 @@ impl Engine {
         actions: &HashMap<String, String>,
     ) -> Result<(), String> {
         let ip = request.client_ip.as_str();
-        let permit_query = !request.query_flag.is_empty() && self.permitted(actions, &format!("query:{}", request.query_flag), request, now);
-        let permit_path_flag = !request.path_flag.is_empty() && self.permitted(actions, "raw:path-traversal", request, now);
+        let permit_query = !request.query_flag.is_empty()
+            && self.permitted(
+                actions,
+                &format!("query:{}", request.query_flag),
+                request,
+                now,
+            );
+        let permit_path_flag = !request.path_flag.is_empty()
+            && self.permitted(actions, "raw:path-traversal", request, now);
         let (agent, agent_category) = sigs.classify_user_agent(&request.user_agent);
-        let permit_agent = !agent.is_empty() && self.permitted(actions, &format!("ua:{agent}"), request, now);
+        let permit_agent =
+            !agent.is_empty() && self.permitted(actions, &format!("ua:{agent}"), request, now);
         let max_paths = self.config.max_paths_per_ip;
-        let sites = self.site_names.get().clone();
-        let Self { memory, sink, detection, catch_all, candidates, unknown_hosts, trap_hosts, db, .. } = self;
+        let Self {
+            memory,
+            sink,
+            detection,
+            catch_all,
+            candidates,
+            unknown_hosts,
+            site_names,
+            trap_hosts,
+            db,
+            ..
+        } = self;
         let activity = memory.touch(ip, now);
         activity.requests += 1;
-        check_unknown_host(sink, unknown_hosts, trap_hosts, &sites, ip, activity, now, request)?;
+        check_unknown_host(
+            sink,
+            unknown_hosts,
+            trap_hosts,
+            site_names.get(),
+            ip,
+            activity,
+            now,
+            request,
+        )?;
         if request.bad_request {
             activity.bad_requests += 1;
             note_invalid_host(sink, ip, activity, now, request, max_paths)?;
@@ -1231,14 +1560,29 @@ impl Engine {
             Some(s) => (now as f64).min(s) as i64,
             None => now,
         };
-        let slow_action = if observed_at >= now - 6 * 3600 { detection.observe_slow(request, observed_at, handled) } else { String::new() };
+        let slow_action = if observed_at >= now - 6 * 3600 {
+            detection.observe_slow(request, observed_at, handled)
+        } else {
+            String::new()
+        };
         if slow_action == "enforce" {
-            sink.emit(ip, EVENT_SCANNER_PATH, now, "haproxy-log", "slow-enumeration", &request.host, &request.path, false,
-                Some(format!("{ip}|behavior:slow-enumeration|{}", request.host)))?;
+            sink.emit(
+                ip,
+                EVENT_SCANNER_PATH,
+                now,
+                "haproxy-log",
+                "slow-enumeration",
+                &request.host,
+                &request.path,
+                false,
+                Some(format!("{ip}|behavior:slow-enumeration|{}", request.host)),
+            )?;
         }
         let mut emitted_context: HashSet<(String, String)> = HashSet::new();
         for m in matches {
-            if (m.id.starts_with("custom:") || m.id.starts_with("observe:")) && m.action == "enforce" {
+            if (m.id.starts_with("custom:") || m.id.starts_with("observe:"))
+                && m.action == "enforce"
+            {
                 let finding = (m.event_type.clone(), m.category.clone());
                 if emitted_context.contains(&finding) {
                     continue;
@@ -1246,9 +1590,26 @@ impl Engine {
                 emitted_context.insert(finding);
                 activity.scanner_hits += 1;
                 activity.scanner_hits_denied += u64::from(handled);
-                let detail: String = format!("{} {}", m.id, request.path).chars().take(300).collect();
-                sink.emit(ip, &m.event_type, now, "haproxy-log", &m.category, &request.host, &detail, handled,
-                    Some(format!("{ip}|{}|{}|{}", m.event_type, m.category, i64::from(handled))))?;
+                let detail: String = format!("{} {}", m.id, request.path)
+                    .chars()
+                    .take(300)
+                    .collect();
+                sink.emit(
+                    ip,
+                    &m.event_type,
+                    now,
+                    "haproxy-log",
+                    &m.category,
+                    &request.host,
+                    &detail,
+                    handled,
+                    Some(format!(
+                        "{ip}|{}|{}|{}",
+                        m.event_type,
+                        m.category,
+                        i64::from(handled)
+                    )),
+                )?;
                 activity.note_category(&m.category, now, 16);
                 check_multi_category(sink, ip, activity, now)?;
                 if m.id.starts_with("custom:") {
@@ -1276,16 +1637,41 @@ impl Engine {
                 activity.scanner_hits_denied += 1;
             }
             activity.note_category(&request.query_flag, now, 16);
-            sink.emit(ip, EVENT_QUERY_INJECTION, now, "haproxy-log", &request.query_flag, &request.host, &request.path, handled,
-                Some(format!("{ip}|{EVENT_QUERY_INJECTION}|{}", request.query_flag)))?;
+            sink.emit(
+                ip,
+                EVENT_QUERY_INJECTION,
+                now,
+                "haproxy-log",
+                &request.query_flag,
+                &request.host,
+                &request.path,
+                handled,
+                Some(format!(
+                    "{ip}|{EVENT_QUERY_INJECTION}|{}",
+                    request.query_flag
+                )),
+            )?;
             check_multi_category(sink, ip, activity, now)?;
         }
         if permit_path_flag {
             activity.scanner_hits += 1;
             activity.scanner_hits_denied += u64::from(handled);
             activity.note_category(&request.path_flag, now, 16);
-            sink.emit(ip, EVENT_SCANNER_DECISIVE, now, "haproxy-log", &request.path_flag, &request.host, &request.path, handled,
-                Some(format!("{ip}|path|{}|{}", request.path_flag, i64::from(handled))))?;
+            sink.emit(
+                ip,
+                EVENT_SCANNER_DECISIVE,
+                now,
+                "haproxy-log",
+                &request.path_flag,
+                &request.host,
+                &request.path,
+                handled,
+                Some(format!(
+                    "{ip}|path|{}|{}",
+                    request.path_flag,
+                    i64::from(handled)
+                )),
+            )?;
         }
         if permit_agent {
             activity.scanner_hits += 1;
@@ -1293,21 +1679,47 @@ impl Engine {
                 activity.scanner_hits_denied += 1;
             }
             activity.note_category(agent_category, now, 16);
-            let event = if sigs.category_is_decisive(agent_category) { EVENT_SCANNER_DECISIVE } else { EVENT_SCANNER_PATH };
-            sink.emit(ip, event, now, "haproxy-log", agent_category, &request.host, &format!("user agent {agent}"), handled,
-                Some(format!("{ip}|ua|{agent}|{}", i64::from(handled))))?;
+            let event = if sigs.category_is_decisive(agent_category) {
+                EVENT_SCANNER_DECISIVE
+            } else {
+                EVENT_SCANNER_PATH
+            };
+            sink.emit(
+                ip,
+                event,
+                now,
+                "haproxy-log",
+                agent_category,
+                &request.host,
+                &format!("user agent {agent}"),
+                handled,
+                Some(format!("{ip}|ua|{agent}|{}", i64::from(handled))),
+            )?;
             check_multi_category(sink, ip, activity, now)?;
         }
         let mut category = sigs.classify_path(&request.path).to_string();
-        if category.is_empty() && !request.path.is_empty() && request.path != "/" && !is_asset(&request.path) {
-            let served = is_served(request.status) && !catch_all.known(&request.host, request.bytes_out);
+        if category.is_empty()
+            && !request.path.is_empty()
+            && request.path != "/"
+            && !is_asset(&request.path)
+        {
+            let served =
+                is_served(request.status) && !catch_all.known(&request.host, request.bytes_out);
             let good = activity.requests as i64
                 - activity.errors as i64
                 - activity.not_found as i64
                 - activity.gateway_denied as i64
                 - activity.bad_requests as i64;
             let looks_like_client = activity.requests >= 20 && good * 2 >= activity.requests as i64;
-            candidates.note(&request.path, ip, &request.host, request.status, served, looks_like_client, now);
+            candidates.note(
+                &request.path,
+                ip,
+                &request.host,
+                request.status,
+                served,
+                looks_like_client,
+                now,
+            );
         }
         if !category.is_empty()
             && is_served(request.status)
@@ -1329,27 +1741,78 @@ impl Engine {
                 activity.scanner_hits_denied += 1;
             }
             activity.note_category(&category, now, 16);
-            let event = if sigs.category_is_decisive(&category) { EVENT_SCANNER_DECISIVE } else { EVENT_SCANNER_PATH };
-            sink.emit(ip, event, now, "haproxy-log", &category, &request.host, &request.path, handled,
-                Some(format!("{ip}|{event}|{category}|{}", i64::from(handled))))?;
+            let event = if sigs.category_is_decisive(&category) {
+                EVENT_SCANNER_DECISIVE
+            } else {
+                EVENT_SCANNER_PATH
+            };
+            sink.emit(
+                ip,
+                event,
+                now,
+                "haproxy-log",
+                &category,
+                &request.host,
+                &request.path,
+                handled,
+                Some(format!("{ip}|{event}|{category}|{}", i64::from(handled))),
+            )?;
             check_multi_category(sink, ip, activity, now)?;
             check_low_and_slow(sink, ip, activity, now)?;
             check_recurring(sink, db, ip, activity, now)?;
-        } else if category.is_empty() && ENUMERATION_STATUSES.contains(&request.status) && !is_asset(&request.path) {
+        } else if category.is_empty()
+            && ENUMERATION_STATUSES.contains(&request.status)
+            && !is_asset(&request.path)
+        {
             if request.status == 404 && activity.note_missing(&request.path, now, max_paths) {
                 let distinct = activity.distinct_missing(now - NOT_FOUND_WINDOW);
                 if distinct >= NOT_FOUND_MIN_DISTINCT {
-                    sink.emit(ip, EVENT_NOT_FOUND_ENUM, now, "haproxy-log", "", "", &format!("distinct={distinct}"), false, None)?;
+                    sink.emit(
+                        ip,
+                        EVENT_NOT_FOUND_ENUM,
+                        now,
+                        "haproxy-log",
+                        "",
+                        "",
+                        &format!("distinct={distinct}"),
+                        false,
+                        None,
+                    )?;
                 }
             }
-            if activity.note_refused(&request.path, now, max_paths.max(2 * WIDE_ENUM_MIN as usize), WIDE_ENUM_WINDOW) {
+            if activity.note_refused(
+                &request.path,
+                now,
+                max_paths.max(2 * WIDE_ENUM_MIN as usize),
+                WIDE_ENUM_WINDOW,
+            ) {
                 let count = activity.burst_misses;
                 if count >= WIDE_ENUM_MIN {
                     let handled = request.denied_by_gateway() && !activity.reached_backend;
                     let detail = format!("distinct={count} within {WIDE_ENUM_WINDOW}s");
-                    sink.emit(ip, EVENT_WIDE_ENUM, now, "haproxy-log", "", "", &detail, handled, None)?;
+                    sink.emit(
+                        ip,
+                        EVENT_WIDE_ENUM,
+                        now,
+                        "haproxy-log",
+                        "",
+                        "",
+                        &detail,
+                        handled,
+                        None,
+                    )?;
                     if count >= MASS_ENUM_MIN {
-                        sink.emit(ip, EVENT_MASS_ENUM, now, "haproxy-log", "", "", &detail, handled, None)?;
+                        sink.emit(
+                            ip,
+                            EVENT_MASS_ENUM,
+                            now,
+                            "haproxy-log",
+                            "",
+                            "",
+                            &detail,
+                            handled,
+                            None,
+                        )?;
                     }
                 }
             }
@@ -1367,15 +1830,29 @@ impl Engine {
     pub fn set_trap_hosts(&mut self, hosts: &Value) -> EResult<Vec<String>> {
         let sites = self.site_names();
         let checked = validate_trap_hosts(hosts, &sites).map_err(EngineError::Value)?;
-        self.db.set_state(TRAP_HOSTS_KEY, &crate::secdb::python_json(&json!(checked)))?;
+        self.db
+            .set_state(TRAP_HOSTS_KEY, &crate::secdb::python_json(&json!(checked)))?;
         self.trap_hosts = checked.iter().cloned().collect();
-        log_info(&format!("trap names set: {}", if checked.is_empty() { "none".into() } else { checked.join(", ") }));
+        log_info(&format!(
+            "trap names set: {}",
+            if checked.is_empty() {
+                "none".into()
+            } else {
+                checked.join(", ")
+            }
+        ));
         Ok(checked)
     }
 
     // -- reputation -----------------------------------------------------------------
 
-    pub fn reputation(&self, ip: &str, now: i64, policy: Option<&ScoringPolicy>, scheduled: Option<&BTreeMap<String, i64>>) -> Result<Reputation, String> {
+    pub fn reputation(
+        &self,
+        ip: &str,
+        now: i64,
+        policy: Option<&ScoringPolicy>,
+        scheduled: Option<&BTreeMap<String, i64>>,
+    ) -> Result<Reputation, String> {
         let owned_policy;
         let policy = match policy {
             Some(p) => p,
@@ -1396,7 +1873,10 @@ impl Engine {
         let result = score_events(&events, now, policy);
         let verdict = self.sink.exclusions.verdict(ip);
         let facts = self.db.ip_facts(ip);
-        let authenticated_at = facts.get("authenticated_at").and_then(Value::as_i64).unwrap_or(0);
+        let authenticated_at = facts
+            .get("authenticated_at")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let mut rep = Reputation {
             ip: ip.to_string(),
             score: result.score,
@@ -1428,7 +1908,12 @@ impl Engine {
         Ok(rep)
     }
 
-    pub fn reputation_table(&self, now: i64, limit: i64, policy: Option<&ScoringPolicy>) -> Result<Vec<Reputation>, String> {
+    pub fn reputation_table(
+        &self,
+        now: i64,
+        limit: i64,
+        policy: Option<&ScoringPolicy>,
+    ) -> Result<Vec<Reputation>, String> {
         let owned;
         let policy = match policy {
             Some(p) => p,
@@ -1439,7 +1924,10 @@ impl Engine {
         };
         let scheduled = self.db.scheduled_bans()?;
         let mut rows = Vec::new();
-        for ip in self.db.active_addresses(now - policy.window_seconds, limit)? {
+        for ip in self
+            .db
+            .active_addresses(now - policy.window_seconds, limit)?
+        {
             rows.push(self.reputation(&ip, now, Some(policy), Some(&scheduled))?);
         }
         rows.sort_by_key(|r| std::cmp::Reverse(r.score));
@@ -1459,16 +1947,21 @@ impl Engine {
         }
     }
 
-    fn enforcement_rows(&mut self, now: i64, scheduled: &BTreeMap<String, i64>) -> Result<Vec<Reputation>, String> {
+    fn visit_enforcement_checks(
+        &mut self,
+        now: i64,
+        mut check: impl FnMut(&mut Self, &str) -> EResult<()>,
+    ) -> EResult<()> {
         self.enforcement_checked = 0;
-        let policy = self.scoring_policy();
-        let pending = self.sink.queue.batch(ENFORCEMENT_BATCH - ENFORCEMENT_SWEEP_RESERVE);
+        let pending = self
+            .sink
+            .queue
+            .batch(ENFORCEMENT_BATCH - ENFORCEMENT_SWEEP_RESERVE);
         let mut seen = HashSet::new();
-        let mut out = Vec::new();
         for (ip, generation) in &pending {
             seen.insert(ip.clone());
             self.enforcement_checked += 1;
-            out.push(self.reputation(ip, now, Some(&policy), Some(scheduled))?);
+            check(self, ip)?;
             self.sink.queue.acknowledge(ip, *generation);
         }
         let allowance = (ENFORCEMENT_BATCH - pending.len()) as i64;
@@ -1476,7 +1969,11 @@ impl Engine {
             self.enforcement_scan_before = now;
         }
         let after = self.enforcement_scan_after.clone();
-        let mut addresses = self.db.enforcement_addresses((after.0, &after.1), self.enforcement_scan_before, allowance)?;
+        let mut addresses = self.db.enforcement_addresses(
+            (after.0, &after.1),
+            self.enforcement_scan_before,
+            allowance,
+        )?;
         if addresses.is_empty() && self.enforcement_scan_after != (0, String::new()) {
             self.enforcement_scan_after = (0, String::new());
             self.enforcement_scan_before = now;
@@ -1485,7 +1982,7 @@ impl Engine {
         for (first_seen, ip) in &addresses {
             if !seen.contains(ip) {
                 self.enforcement_checked += 1;
-                out.push(self.reputation(ip, now, Some(&policy), Some(scheduled))?);
+                check(self, ip)?;
             }
             self.enforcement_scan_after = (*first_seen, ip.clone());
         }
@@ -1500,7 +1997,7 @@ impl Engine {
                 "before": self.enforcement_scan_before,
             })),
         )?;
-        Ok(out)
+        Ok(())
     }
 
     pub fn ban_blockers(&self, rep: &Reputation, now: i64, policy: Option<&str>) -> Vec<String> {
@@ -1529,12 +2026,19 @@ impl Engine {
     }
 
     pub fn longest_strike_retention(&self) -> i64 {
-        (1..=self.ban_durations.len() as i64).map(|l| self.strike_retention(l)).max().unwrap_or(0)
+        (1..=self.ban_durations.len() as i64)
+            .map(|l| self.strike_retention(l))
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn strike_level(&self, ip: &str, now: i64) -> Result<i64, String> {
-        let stamps: Vec<i64> =
-            self.db.ban_timestamps(ip, 100)?.into_iter().filter(|ts| *ts >= self.ban_durations_changed_at).collect();
+        let stamps: Vec<i64> = self
+            .db
+            .ban_timestamps(ip, 100)?
+            .into_iter()
+            .filter(|ts| *ts >= self.ban_durations_changed_at)
+            .collect();
         if stamps.is_empty() {
             return Ok(0);
         }
@@ -1555,11 +2059,22 @@ impl Engine {
     }
 
     pub fn decision_reason(&self, rep: &Reputation) -> Value {
-        let mut counted: Vec<&ScoreContribution> = rep.contributions.iter().filter(|c| c.points > 0.0).collect();
+        let mut counted: Vec<&ScoreContribution> = rep
+            .contributions
+            .iter()
+            .filter(|c| c.points > 0.0)
+            .collect();
         counted.sort_by(|a, b| {
-            b.points.partial_cmp(&a.points).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.ts.cmp(&a.ts))
+            b.points
+                .partial_cmp(&a.points)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.ts.cmp(&a.ts))
         });
-        let cats: Map<String, Value> = rep.categories.iter().map(|(k, v)| (k.clone(), json!(round2(*v)))).collect();
+        let cats: Map<String, Value> = rep
+            .categories
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(round2(*v))))
+            .collect();
         json!({
             "score": rep.score,
             "state": rep.state,
@@ -1584,7 +2099,9 @@ impl Engine {
         let standing = match self.enforcer.active_bans() {
             Ok(s) => s,
             Err(e) => {
-                log_warn(&format!("Could not read the ban table to settle decisions: {e}"));
+                log_warn(&format!(
+                    "Could not read the ban table to settle decisions: {e}"
+                ));
                 return Ok(());
             }
         };
@@ -1597,8 +2114,14 @@ impl Engine {
             let code = standing.get(&ip).copied();
             let adaptive = code.is_some_and(|c| c == ADAPTIVE_BAN_CODE || c == ADAPTIVE_PAGE_CODE);
             if adaptive && !scheduled.contains_key(&ip) && until > now {
-                self.db.commit_ban(id, &ip, until, code.unwrap_or(ADAPTIVE_BAN_CODE), ts,
-                    &format!("score={} seconds={} [settled]", d["score"], until - ts))?;
+                self.db.commit_ban(
+                    id,
+                    &ip,
+                    until,
+                    code.unwrap_or(ADAPTIVE_BAN_CODE),
+                    ts,
+                    &format!("score={} seconds={} [settled]", d["score"], until - ts),
+                )?;
                 log_warn(&format!("Recorded the ban on {ip} applied before a crash"));
                 continue;
             }
@@ -1625,13 +2148,21 @@ impl Engine {
     pub fn set_ban_durations(&mut self, data: &Value) -> EResult<Vec<i64>> {
         let checked = validate_ban_durations(data).map_err(EngineError::Value)?;
         let now = utc_now();
-        self.db.set_state(BAN_DURATIONS_KEY, &crate::secdb::python_json(&json!(checked)))?;
-        self.db.set_state(BAN_DURATIONS_CHANGED_KEY, &now.to_string())?;
+        self.db.set_state(
+            BAN_DURATIONS_KEY,
+            &crate::secdb::python_json(&json!(checked)),
+        )?;
+        self.db
+            .set_state(BAN_DURATIONS_CHANGED_KEY, &now.to_string())?;
         self.ban_durations = checked.clone();
         self.ban_durations_changed_at = now;
         log_warn(&format!(
             "Adaptive ban durations changed to {}",
-            checked.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+            checked
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         Ok(checked)
     }
@@ -1660,13 +2191,39 @@ impl Engine {
             };
             if taken_off {
                 lifted.push(ip.clone());
-                self.sink.emit(&ip, EVENT_BAN_LIFTED, now, "guardd", "", "",
-                    if enforcing { "expired" } else { "enforcement disabled" }, false,
-                    Some(format!("{ip}|{EVENT_BAN_LIFTED}|{until}")))?;
-                let code = codes.get(&ip).copied().filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE).unwrap_or(ADAPTIVE_BAN_CODE);
-                self.db.record_decision(&ip, now, "lifted", if served { "expiry" } else { "mode" }, "applied", Decision {
-                    code, until, policy: self.sink.ban_policy, ..Default::default()
-                })?;
+                self.sink.emit(
+                    &ip,
+                    EVENT_BAN_LIFTED,
+                    now,
+                    "guardd",
+                    "",
+                    "",
+                    if enforcing {
+                        "expired"
+                    } else {
+                        "enforcement disabled"
+                    },
+                    false,
+                    Some(format!("{ip}|{EVENT_BAN_LIFTED}|{until}")),
+                )?;
+                let code = codes
+                    .get(&ip)
+                    .copied()
+                    .filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE)
+                    .unwrap_or(ADAPTIVE_BAN_CODE);
+                self.db.record_decision(
+                    &ip,
+                    now,
+                    "lifted",
+                    if served { "expiry" } else { "mode" },
+                    "applied",
+                    Decision {
+                        code,
+                        until,
+                        policy: self.sink.ban_policy,
+                        ..Default::default()
+                    },
+                )?;
             }
             if served {
                 self.db.clear_ban(&ip)?;
@@ -1682,7 +2239,9 @@ impl Engine {
                 match self.enforcer.lift(&ip) {
                     Ok(true) => lifted.push(ip),
                     Ok(false) => {}
-                    Err(e) if e.ban_table_unsure() => log_warn(&format!("{e}; trying again next cycle")),
+                    Err(e) if e.ban_table_unsure() => {
+                        log_warn(&format!("{e}; trying again next cycle"))
+                    }
                     Err(e) => return Err(e.into()),
                 }
             }
@@ -1694,15 +2253,28 @@ impl Engine {
             if *until <= now || standing.contains_key(ip) {
                 continue;
             }
-            let code = codes.get(ip).copied().filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE).unwrap_or(ADAPTIVE_BAN_CODE);
+            let code = codes
+                .get(ip)
+                .copied()
+                .filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE)
+                .unwrap_or(ADAPTIVE_BAN_CODE);
             if self.enforcer.ban(ip, code)? {
                 log_info(&format!("Re-asserted the ban on {ip}, gone from the table"));
             }
         }
-        let rows = self.enforcement_rows(now, &scheduled)?;
-        for row in rows {
-            self.apply_row_decision(&row, now, &mut scheduled, &mut codes, &mut standing, &mut applied)?;
-        }
+        let policy = self.scoring_policy();
+        self.visit_enforcement_checks(now, |engine, ip| {
+            let row = engine.reputation(ip, now, Some(&policy), Some(&scheduled))?;
+            engine.apply_row_decision(
+                &row,
+                now,
+                &mut scheduled,
+                &mut codes,
+                &mut standing,
+                &mut applied,
+            )?;
+            Ok(())
+        })?;
         if !applied.is_empty() {
             self.check_burst(applied.len(), now);
         }
@@ -1722,7 +2294,14 @@ impl Engine {
         let mut applied = Vec::new();
         for (ip, generation) in self.sink.queue.urgent_batch(ENFORCEMENT_BATCH) {
             let row = self.reputation(&ip, now, Some(&policy), Some(&scheduled))?;
-            self.apply_row_decision(&row, now, &mut scheduled, &mut codes, &mut standing, &mut applied)?;
+            self.apply_row_decision(
+                &row,
+                now,
+                &mut scheduled,
+                &mut codes,
+                &mut standing,
+                &mut applied,
+            )?;
             self.sink.queue.acknowledge(&ip, generation);
         }
         if !applied.is_empty() {
@@ -1750,7 +2329,8 @@ impl Engine {
         if scheduled.get(ip).copied().unwrap_or(0) > now {
             let escalate = codes.get(ip) == Some(&ADAPTIVE_PAGE_CODE)
                 && standing.get(ip) == Some(&ADAPTIVE_PAGE_CODE)
-                && self.db.signature_paths_since(ip, self.db.last_ban_ts(ip)) >= PAGE_ESCALATION_PATHS;
+                && self.db.signature_paths_since(ip, self.db.last_ban_ts(ip))
+                    >= PAGE_ESCALATION_PATHS;
             if !escalate {
                 return Ok(false);
             }
@@ -1777,19 +2357,30 @@ impl Engine {
         }
         let duration = self.ban_duration(ip, now)?;
         let level = self.strike_level(ip, now)?;
-        let code = if self.first_step_page && level == 0 && !after_page { ADAPTIVE_PAGE_CODE } else { ADAPTIVE_BAN_CODE };
+        let code = if self.first_step_page && level == 0 && !after_page {
+            ADAPTIVE_PAGE_CODE
+        } else {
+            ADAPTIVE_BAN_CODE
+        };
         let mut reason = self.decision_reason(row);
         if after_page {
             reason["after_page"] = json!(true);
         }
-        let decision = self.db.record_decision(ip, now, "applied", "adaptive", "pending", Decision {
-            code,
-            until: now + duration,
-            strike: level + 1,
-            score: row.score,
-            policy: self.sink.ban_policy,
-            reason: Some(reason),
-        })?;
+        let decision = self.db.record_decision(
+            ip,
+            now,
+            "applied",
+            "adaptive",
+            "pending",
+            Decision {
+                code,
+                until: now + duration,
+                strike: level + 1,
+                score: row.score,
+                policy: self.sink.ban_policy,
+                reason: Some(reason),
+            },
+        )?;
         if !self.enforcer.ban(ip, code)? {
             self.db.settle_decision(decision, "failed")?;
             self.sink.queue.mark(ip, true);
@@ -1797,9 +2388,23 @@ impl Engine {
         }
         let mut cats: Vec<&String> = row.categories.keys().collect();
         cats.sort();
-        let categories = cats.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-        self.db.commit_ban(decision, ip, now + duration, code, now,
-            &format!("score={} seconds={duration} [{categories}]{}", row.score, if after_page { " after the page" } else { "" }))?;
+        let categories = cats
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.db.commit_ban(
+            decision,
+            ip,
+            now + duration,
+            code,
+            now,
+            &format!(
+                "score={} seconds={duration} [{categories}]{}",
+                row.score,
+                if after_page { " after the page" } else { "" }
+            ),
+        )?;
         scheduled.insert(ip.to_string(), now + duration);
         codes.insert(ip.to_string(), code);
         standing.insert(ip.to_string(), code);
@@ -1808,7 +2413,13 @@ impl Engine {
         log_warn(&format!(
             "Adaptive ban applied to {ip} for {duration}s (score {}){}",
             row.score,
-            if code == ADAPTIVE_PAGE_CODE { " -- a page first" } else if after_page { " -- went on after the page" } else { "" }
+            if code == ADAPTIVE_PAGE_CODE {
+                " -- a page first"
+            } else if after_page {
+                " -- went on after the page"
+            } else {
+                ""
+            }
         ));
         if let Some(alerts) = &self.alerts {
             alerts.observe(
@@ -1819,7 +2430,11 @@ impl Engine {
                 &format!(
                     "score {} over {}; the ban lifts automatically when it expires",
                     row.score,
-                    if categories.is_empty() { "no category".to_string() } else { categories.clone() }
+                    if categories.is_empty() {
+                        "no category".to_string()
+                    } else {
+                        categories.clone()
+                    }
                 ),
             );
         }
@@ -1830,14 +2445,21 @@ impl Engine {
         for _ in 0..banned {
             self.burst_bans.push_back(now);
         }
-        while self.burst_bans.front().is_some_and(|t| *t <= now - BURST_WINDOW_SECONDS) {
+        while self
+            .burst_bans
+            .front()
+            .is_some_and(|t| *t <= now - BURST_WINDOW_SECONDS)
+        {
             self.burst_bans.pop_front();
         }
         let count = self.burst_bans.len();
         if count < BURST_MIN_BANS {
             return;
         }
-        if self.burst_reported.is_some_and(|r| now - r < BURST_REPORT_GAP_SECONDS) {
+        if self
+            .burst_reported
+            .is_some_and(|r| now - r < BURST_REPORT_GAP_SECONDS)
+        {
             return;
         }
         self.burst_reported = Some(now);
@@ -1860,7 +2482,13 @@ impl Engine {
         self.failing_reported = failing;
         let Some(alerts) = &self.alerts else { return };
         if failing {
-            let err: String = self.last_error.clone().unwrap_or_else(|| "unknown error".into()).chars().take(200).collect();
+            let err: String = self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "unknown error".into())
+                .chars()
+                .take(200)
+                .collect();
             alerts.observe(
                 ENGINE_FAILING_RULE,
                 "guardd",
@@ -1869,7 +2497,11 @@ impl Engine {
                 "Until it works again nothing is scored or banned and no ban decision is recorded; bans already in HAProxy stay. The service journal of easy-ha-proxy-guardd has the details; a full disk is the usual cause.",
             );
         } else {
-            alerts.clear(ENGINE_FAILING_RULE, "guardd", "Adaptive protection works again");
+            alerts.clear(
+                ENGINE_FAILING_RULE,
+                "guardd",
+                "Adaptive protection works again",
+            );
         }
     }
 
@@ -1877,13 +2509,24 @@ impl Engine {
         let now = now.unwrap_or_else(utc_now);
         let checked = ip.trim().to_string();
         if !enforceable(&checked) {
-            return Err(EngineError::Value("only an IPv4 address can be banned".into()));
+            return Err(EngineError::Value(
+                "only an IPv4 address can be banned".into(),
+            ));
         }
         let mut remembered = true;
-        let previous = self.db.manual_bans().ok().and_then(|m| m.get(&checked).copied());
-        if let Err(e) = self.db.write_manual_ban(&checked, now, now + MANUAL_BAN_DEFAULT_SECONDS, now, 0) {
+        let previous = self
+            .db
+            .manual_bans()
+            .ok()
+            .and_then(|m| m.get(&checked).copied());
+        if let Err(e) =
+            self.db
+                .write_manual_ban(&checked, now, now + MANUAL_BAN_DEFAULT_SECONDS, now, 0)
+        {
             remembered = false;
-            log_warn(&format!("Could not remember the manual ban on {checked}: {e}"));
+            log_warn(&format!(
+                "Could not remember the manual ban on {checked}: {e}"
+            ));
         }
         let put_back = |db: &SecurityDatabase| {
             if !remembered {
@@ -1891,7 +2534,13 @@ impl Engine {
             }
             match previous {
                 Some(p) => {
-                    let _ = db.write_manual_ban(&checked, p.placed_at, p.expires_at, p.seen_at, p.reasserted);
+                    let _ = db.write_manual_ban(
+                        &checked,
+                        p.placed_at,
+                        p.expires_at,
+                        p.seen_at,
+                        p.reasserted,
+                    );
                 }
                 None => {
                     let _ = db.forget_manual_ban(&checked);
@@ -1907,10 +2556,16 @@ impl Engine {
         };
         if !placed {
             put_back(&self.db);
-            return Err(EngineError::Refused(format!("HAProxy refused the ban on {checked}")));
+            return Err(EngineError::Refused(format!(
+                "HAProxy refused the ban on {checked}"
+            )));
         }
         let mut until = now + MANUAL_BAN_DEFAULT_SECONDS;
-        if let Ok(rows) = read_table(&self.config.haproxy_socket, "tbl_ban", &format!("key {checked}")) {
+        if let Ok(rows) = read_table(
+            &self.config.haproxy_socket,
+            "tbl_ban",
+            &format!("key {checked}"),
+        ) {
             if let Some(fields) = rows.get(&checked) {
                 let exp = field_int(fields, "exp");
                 if exp > 0 {
@@ -1918,17 +2573,34 @@ impl Engine {
                 }
             }
         }
-        let outcome = self.db.write_manual_ban(&checked, now, until, now, 0).and_then(|_| {
-            self.db.record_decision(&checked, now, "applied", "operator", "applied", Decision {
-                code: MANUAL_BAN_CODE, until, policy: self.sink.ban_policy, ..Default::default()
-            })
-        });
+        let outcome = self
+            .db
+            .write_manual_ban(&checked, now, until, now, 0)
+            .and_then(|_| {
+                self.db.record_decision(
+                    &checked,
+                    now,
+                    "applied",
+                    "operator",
+                    "applied",
+                    Decision {
+                        code: MANUAL_BAN_CODE,
+                        until,
+                        policy: self.sink.ban_policy,
+                        ..Default::default()
+                    },
+                )
+            });
         if let Err(e) = outcome {
             remembered = false;
-            log_warn(&format!("Banned {checked} by hand, but could not remember it: {e}"));
+            log_warn(&format!(
+                "Banned {checked} by hand, but could not remember it: {e}"
+            ));
         }
         log_warn(&format!("Ban placed by hand on {checked} until {until}"));
-        Ok(json!({"ok": true, "ip": checked, "code": MANUAL_BAN_CODE, "until": until, "remembered": remembered}))
+        Ok(
+            json!({"ok": true, "ip": checked, "code": MANUAL_BAN_CODE, "until": until, "remembered": remembered}),
+        )
     }
 
     pub fn forget_ban(&mut self, ip: &str, now: Option<i64>) -> EResult<Value> {
@@ -1937,7 +2609,15 @@ impl Engine {
         if checked.is_empty() {
             return Err(EngineError::Value("an address is required".into()));
         }
-        let held = self.db.scheduled_bans()?.get(&checked).copied().unwrap_or(0);
+        if checked.parse::<std::net::IpAddr>().is_err() {
+            return Err(EngineError::Value("invalid IP address".into()));
+        }
+        let held = self
+            .db
+            .scheduled_bans()?
+            .get(&checked)
+            .copied()
+            .unwrap_or(0);
         self.db.clear_ban(&checked)?;
         let manual = self.db.forget_manual_ban(&checked)?;
         let mut refused = String::new();
@@ -1962,16 +2642,47 @@ impl Engine {
             Err(e) => return Err(e.into()),
         }
         if held != 0 || lifted {
-            self.sink.emit(&checked, EVENT_BAN_LIFTED, now, "operator", "", "", "cleared by hand", false,
-                Some(format!("{checked}|{EVENT_BAN_LIFTED}|{now}")))?;
-            log_warn(&format!("Ban on {checked} cleared by hand; the schedule is dropped"));
+            self.sink.emit(
+                &checked,
+                EVENT_BAN_LIFTED,
+                now,
+                "operator",
+                "",
+                "",
+                "cleared by hand",
+                false,
+                Some(format!("{checked}|{EVENT_BAN_LIFTED}|{now}")),
+            )?;
+            log_warn(&format!(
+                "Ban on {checked} cleared by hand; the schedule is dropped"
+            ));
         }
         let legacy = self.settle_legacy_observed(&checked);
         if held != 0 || lifted || manual || legacy != 0 {
-            let code = if held != 0 || lifted { ADAPTIVE_BAN_CODE } else if manual { MANUAL_BAN_CODE } else { legacy };
-            self.db.record_decision(&checked, now, "lifted", "operator", if refused.is_empty() { "applied" } else { "failed" }, Decision {
-                code, until: held, policy: self.sink.ban_policy, ..Default::default()
-            })?;
+            let code = if held != 0 || lifted {
+                ADAPTIVE_BAN_CODE
+            } else if manual {
+                MANUAL_BAN_CODE
+            } else {
+                legacy
+            };
+            self.db.record_decision(
+                &checked,
+                now,
+                "lifted",
+                "operator",
+                if refused.is_empty() {
+                    "applied"
+                } else {
+                    "failed"
+                },
+                Decision {
+                    code,
+                    until: held,
+                    policy: self.sink.ban_policy,
+                    ..Default::default()
+                },
+            )?;
         }
         self.apply_promotions();
         Ok(json!({
@@ -1997,7 +2708,8 @@ impl Engine {
         report["mode"] = json!(self.enforcer.mode);
         let dismissed: HashSet<String> = dismissed_candidates(&self.db).into_iter().collect();
         let sigs = self.sig();
-        report["signature_candidates"] = json!(self.candidates.suggestions(&dismissed, 100, &sigs).len());
+        report["signature_candidates"] =
+            json!(self.candidates.suggestions(&dismissed, 100, &sigs).len());
         let names = self
             .unknown_hosts
             .listing(50)
@@ -2025,24 +2737,47 @@ impl Engine {
         let bans = report["bans"].as_i64().unwrap_or(0);
         let days = report["days"].as_i64().unwrap_or(7);
         let summary = if bans != 0 {
-            format!("Adaptive protection banned {} addresses in {days} days", report["banned_addresses"])
+            format!(
+                "Adaptive protection banned {} addresses in {days} days",
+                report["banned_addresses"]
+            )
         } else {
             format!("Adaptive protection banned nobody in {days} days")
         };
         let per_day = &report["bans_per_day"];
         let mut lines = vec![
             format!("Mode: {}.", report["mode"].as_str().unwrap_or("")),
-            if per_day.is_null() { format!("Bans: {bans}.") } else { format!("Bans: {bans} ({per_day} a day).") },
-            format!("Decided within {QUALITY_AT_ONCE_SECONDS} s of the first finding: {} of {bans}.", report["decided_at_once"]),
-            format!("Came back after a ban ended: {} of {}.", report["came_back_after_a_ban"], report["first_bans_ended"]),
-            format!("Bans lifted by an operator: {}.", report["lifted_by_operator"]),
-            format!("Probers that were never banned: {}.", report["probers_never_banned"]),
+            if per_day.is_null() {
+                format!("Bans: {bans}.")
+            } else {
+                format!("Bans: {bans} ({per_day} a day).")
+            },
+            format!(
+                "Decided within {QUALITY_AT_ONCE_SECONDS} s of the first finding: {} of {bans}.",
+                report["decided_at_once"]
+            ),
+            format!(
+                "Came back after a ban ended: {} of {}.",
+                report["came_back_after_a_ban"], report["first_bans_ended"]
+            ),
+            format!(
+                "Bans lifted by an operator: {}.",
+                report["lifted_by_operator"]
+            ),
+            format!(
+                "Probers that were never banned: {}.",
+                report["probers_never_banned"]
+            ),
         ];
         if let Some(nets) = report["networks"].as_array().filter(|n| !n.is_empty()) {
             lines.push(format!(
                 "Networks with several banned addresses: {}.",
                 nets.iter()
-                    .map(|r| format!("{} ({})", r["network"].as_str().unwrap_or(""), r["addresses"]))
+                    .map(|r| format!(
+                        "{} ({})",
+                        r["network"].as_str().unwrap_or(""),
+                        r["addresses"]
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -2057,7 +2792,10 @@ impl Engine {
             waiting.push(format!("{tc} host names that look like traps"));
         }
         if !waiting.is_empty() {
-            lines.push(format!("Waiting for your decision on the Detection rules page: {}.", waiting.join(" and ")));
+            lines.push(format!(
+                "Waiting for your decision on the Detection rules page: {}.",
+                waiting.join(" and ")
+            ));
         }
         (summary, lines.join("\n"))
     }
@@ -2075,7 +2813,9 @@ impl Engine {
         if self.db.get_state(WEEKLY_SUMMARY_KEY, "") == week || self.enforcer.mode == MODE_OFF {
             return false;
         }
-        let Ok(report) = self.quality(7, Some(now)) else { return false };
+        let Ok(report) = self.quality(7, Some(now)) else {
+            return false;
+        };
         let (summary, detail) = self.weekly_summary_text(&report);
         if let Some(alerts) = &self.alerts {
             alerts.observe(WEEKLY_SUMMARY_RULE, &week, None, &summary, &detail);
@@ -2096,7 +2836,8 @@ impl Engine {
             return Err(EngineError::Value("enabled must be true or false".into()));
         };
         let mut changed = 0;
-        self.db.set_state(FIRST_STEP_PAGE_KEY, if enabled { "1" } else { "0" })?;
+        self.db
+            .set_state(FIRST_STEP_PAGE_KEY, if enabled { "1" } else { "0" })?;
         self.first_step_page = enabled;
         if !enabled {
             let standing = self.enforcer.active_bans()?;
@@ -2104,7 +2845,9 @@ impl Engine {
                 if code != ADAPTIVE_PAGE_CODE {
                     continue;
                 }
-                if standing.get(&ip) == Some(&ADAPTIVE_PAGE_CODE) && !self.enforcer.ban(&ip, ADAPTIVE_BAN_CODE)? {
+                if standing.get(&ip) == Some(&ADAPTIVE_PAGE_CODE)
+                    && !self.enforcer.ban(&ip, ADAPTIVE_BAN_CODE)?
+                {
                     continue;
                 }
                 self.db.set_ban_code(&ip, ADAPTIVE_BAN_CODE)?;
@@ -2114,7 +2857,11 @@ impl Engine {
         log_warn(&format!(
             "First-step page switched {}{}",
             if enabled { "on" } else { "off" },
-            if changed > 0 { format!("; {changed} first steps now cut off") } else { String::new() }
+            if changed > 0 {
+                format!("; {changed} first steps now cut off")
+            } else {
+                String::new()
+            }
         ));
         let mut state = self.first_step_state();
         state["changed"] = json!(changed);
@@ -2123,7 +2870,14 @@ impl Engine {
 
     pub fn sync_shield(&mut self, now: i64) -> Value {
         let sigs = self.sig();
-        match shield_entries(&self.enforcer.mode, self.shield_enabled, &self.detection.config.modes, &self.detection.config.exceptions, now, &sigs) {
+        match shield_entries(
+            &self.enforcer.mode,
+            self.shield_enabled,
+            &self.detection.config.modes,
+            &self.detection.config.exceptions,
+            now,
+            &sigs,
+        ) {
             Ok(wanted) => self.shield.sync(&wanted, now),
             Err(e) => {
                 self.shield.status["active"] = json!(false);
@@ -2144,9 +2898,13 @@ impl Engine {
         let Some(enabled) = enabled.as_bool() else {
             return Err(EngineError::Value("enabled must be true or false".into()));
         };
-        self.db.set_state(SHIELD_ENABLED_KEY, if enabled { "1" } else { "0" })?;
+        self.db
+            .set_state(SHIELD_ENABLED_KEY, if enabled { "1" } else { "0" })?;
         self.shield_enabled = enabled;
-        log_warn(&format!("Path shield switched {}", if enabled { "on" } else { "off" }));
+        log_warn(&format!(
+            "Path shield switched {}",
+            if enabled { "on" } else { "off" }
+        ));
         self.sync_shield(now.unwrap_or_else(utc_now));
         Ok(self.shield_state())
     }
@@ -2154,13 +2912,18 @@ impl Engine {
     pub fn set_mode(&mut self, mode: &str, now: Option<i64>) -> EResult<Value> {
         let mode = mode.trim().to_lowercase();
         if !SUPPORTED_MODES.contains(&mode.as_str()) {
-            return Err(EngineError::Value(format!("mode must be one of {}", SUPPORTED_MODES.join(", "))));
+            return Err(EngineError::Value(format!(
+                "mode must be one of {}",
+                SUPPORTED_MODES.join(", ")
+            )));
         }
         let now = now.unwrap_or_else(utc_now);
         let previous = self.enforcer.mode.clone();
         self.db.set_state("mode_override", &mode)?;
         self.enforcer.mode = mode.clone();
-        log_warn(&format!("Adaptive protection mode changed: {previous} -> {mode}"));
+        log_warn(&format!(
+            "Adaptive protection mode changed: {previous} -> {mode}"
+        ));
         let mut result = self.apply_enforcement(Some(now))?;
         self.sync_shield(now);
         result["mode"] = json!(mode);
@@ -2181,7 +2944,13 @@ impl Engine {
         let cats = CATS
             .get_or_init(|| Regex::new(r"\[([^\]]*)\]").expect("regex"))
             .captures(detail)
-            .map(|c| c[1].split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
+            .map(|c| {
+                c[1].split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         (score, cats)
     }
@@ -2196,15 +2965,24 @@ impl Engine {
                 continue;
             }
             let decision = self.db.adaptive_ban_detail(0, ip, 0, *until)?;
-            let last_ban = decision.as_ref().and_then(|d| d["ts"].as_i64()).unwrap_or_else(|| self.db.last_ban_ts(ip));
+            let last_ban = decision
+                .as_ref()
+                .and_then(|d| d["ts"].as_i64())
+                .unwrap_or_else(|| self.db.last_ban_ts(ip));
             let (rec_score, rec_cats) = Self::parse_ban_detail(&self.db.last_ban_detail(ip));
-            let reason = decision.as_ref().map(|d| d["reason"].clone()).unwrap_or_else(|| json!({}));
+            let reason = decision
+                .as_ref()
+                .map(|d| d["reason"].clone())
+                .unwrap_or_else(|| json!({}));
             let standing = self.reputation(ip, now, None, Some(&scheduled))?;
             let score = match &decision {
                 Some(d) => d["score"].clone(),
                 None => json!(rec_score.unwrap_or(standing.score)),
             };
-            let summary_cats = decision_summary(&reason).get("categories").cloned().filter(|c| c.as_array().is_some_and(|a| !a.is_empty()));
+            let summary_cats = decision_summary(&reason)
+                .get("categories")
+                .cloned()
+                .filter(|c| c.as_array().is_some_and(|a| !a.is_empty()));
             let categories = summary_cats.unwrap_or_else(|| {
                 if !rec_cats.is_empty() {
                     json!(rec_cats)
@@ -2234,7 +3012,13 @@ impl Engine {
         Ok(rows.into_iter().map(|r| r.1).collect())
     }
 
-    pub fn shadow_review(&self, now: Option<i64>, limit: i64, policy: Option<&ScoringPolicy>, signatures: Value) -> Result<Value, String> {
+    pub fn shadow_review(
+        &self,
+        now: Option<i64>,
+        limit: i64,
+        policy: Option<&ScoringPolicy>,
+        signatures: Value,
+    ) -> Result<Value, String> {
         let now = now.unwrap_or_else(utc_now);
         let owned;
         let policy = match policy {
@@ -2249,7 +3033,11 @@ impl Engine {
         for r in &rows {
             *by_state.entry(r.state).or_insert(0) += 1;
         }
-        let weights: Map<String, Value> = policy.weights.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let weights: Map<String, Value> = policy
+            .weights
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
         Ok(json!({
             "mode": self.enforcer.mode,
             "configured_mode": self.config.mode,
@@ -2286,8 +3074,18 @@ impl Engine {
         let cutoff = now - self.config.event_retention_days * 86400;
         let ban_cutoff = cutoff.min(now - self.longest_strike_retention());
         let mut deleted = self.db.apply_retention(cutoff, ban_cutoff)?;
-        deleted.insert("rate_warnings".into(), self.db.prune_rate_warnings(now - RATE_WARNINGS_KEEP_DAYS * 86400, RATE_WARNINGS_KEEP_ROWS)?);
-        deleted.insert("ban_decisions".into(), self.db.prune_decisions(ban_cutoff, DECISIONS_KEEP_ROWS, now)?);
+        deleted.insert(
+            "rate_warnings".into(),
+            self.db.prune_rate_warnings(
+                now - RATE_WARNINGS_KEEP_DAYS * 86400,
+                RATE_WARNINGS_KEEP_ROWS,
+            )?,
+        );
+        deleted.insert(
+            "ban_decisions".into(),
+            self.db
+                .prune_decisions(ban_cutoff, DECISIONS_KEEP_ROWS, now)?,
+        );
         if deleted.values().any(|v| *v != 0) {
             self.db.incremental_vacuum(256);
         }
@@ -2295,15 +3093,33 @@ impl Engine {
         self.sink.subnets.prune(now);
         self.candidates.prune(now - CANDIDATE_TTL);
         self.unknown_hosts.prune(now - UNKNOWN_HOSTS_TTL);
-        self.detection.persist(now, true, &self.db);
-        let _ = self.db.set_state(CANDIDATES_KEY, &self.candidates.snapshot(2000).to_string());
-        let _ = self.db.set_state(UNKNOWN_HOSTS_KEY, &self.unknown_hosts.snapshot().to_string());
-        let ordered = ["events", "cooldowns", "addresses", "rate_warnings", "ban_decisions"];
+        self.detection.persist(now, true, &self.db)?;
+        let _ = self
+            .db
+            .set_state(CANDIDATES_KEY, &self.candidates.snapshot(2000).to_string());
+        let _ = self.db.set_state(
+            UNKNOWN_HOSTS_KEY,
+            &self.unknown_hosts.snapshot().to_string(),
+        );
+        let ordered = [
+            "events",
+            "cooldowns",
+            "addresses",
+            "rate_warnings",
+            "ban_decisions",
+        ];
         let text = format!(
             "{{{}}}",
-            ordered.iter().map(|k| format!("\"{k}\": {}", deleted.get(*k).copied().unwrap_or(0))).collect::<Vec<_>>().join(", ")
+            ordered
+                .iter()
+                .map(|k| format!("\"{k}\": {}", deleted.get(*k).copied().unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
-        log_info(&format!("Maintenance: deleted={text} pruned_ips={pruned} tracked={}", self.memory.len()));
+        log_info(&format!(
+            "Maintenance: deleted={text} pruned_ips={pruned} tracked={}",
+            self.memory.len()
+        ));
         Ok(json!({"deleted": deleted, "pruned_ips": pruned}))
     }
 
@@ -2391,9 +3207,16 @@ impl Engine {
         let finished = self.trusted_rates.take_finished();
         let _ = self.db.record_rate_warnings(&finished);
         let now = utc_now();
-        self.detection.persist(now, true, &self.db);
-        self.login_correlations.persist(now, &self.db);
-        let _ = self.db.set_state("log_cursor", &crate::secdb::python_json(&cursor_state(&self.cursor)));
+        if let Err(e) = self.detection.persist(now, true, &self.db) {
+            log_warn(&format!("Could not save detection context: {e}"));
+        }
+        if let Err(e) = self.login_correlations.persist(now, &self.db) {
+            log_warn(&format!("Could not save login correlations: {e}"));
+        }
+        let _ = self.db.set_state(
+            "log_cursor",
+            &crate::secdb::python_json(&cursor_state(&self.cursor)),
+        );
     }
 }
 
@@ -2404,7 +3227,17 @@ fn check_multi_category(sink: &mut Sink, ip: &str, a: &IpActivity, now: i64) -> 
     if n < MULTI_CATEGORY_MIN {
         return Ok(());
     }
-    sink.emit(ip, EVENT_SCANNER_MULTI, now, "haproxy-log", "", "", &format!("categories={n}"), a.scanning_was_all_refused(), None)?;
+    sink.emit(
+        ip,
+        EVENT_SCANNER_MULTI,
+        now,
+        "haproxy-log",
+        "",
+        "",
+        &format!("categories={n}"),
+        a.scanning_was_all_refused(),
+        None,
+    )?;
     Ok(())
 }
 
@@ -2413,11 +3246,27 @@ fn check_low_and_slow(sink: &mut Sink, ip: &str, a: &IpActivity, now: i64) -> Re
     if a.scanner_hits < LOW_AND_SLOW_MIN_HITS || n < LOW_AND_SLOW_MIN_CATEGORIES {
         return Ok(());
     }
-    sink.emit(ip, EVENT_LOW_AND_SLOW, now, "haproxy-log", "", "", &format!("hits={} categories={n}", a.scanner_hits), a.scanning_was_all_refused(), None)?;
+    sink.emit(
+        ip,
+        EVENT_LOW_AND_SLOW,
+        now,
+        "haproxy-log",
+        "",
+        "",
+        &format!("hits={} categories={n}", a.scanner_hits),
+        a.scanning_was_all_refused(),
+        None,
+    )?;
     Ok(())
 }
 
-fn check_recurring(sink: &mut Sink, db: &SecurityDatabase, ip: &str, a: &mut IpActivity, now: i64) -> Result<(), String> {
+fn check_recurring(
+    sink: &mut Sink,
+    db: &SecurityDatabase,
+    ip: &str,
+    a: &mut IpActivity,
+    now: i64,
+) -> Result<(), String> {
     if now - a.recurring_checked < RECURRING_RECHECK {
         return Ok(());
     }
@@ -2427,7 +3276,17 @@ fn check_recurring(sink: &mut Sink, db: &SecurityDatabase, ip: &str, a: &mut IpA
         return Ok(());
     }
     let hours = (now - earlier) / 3600;
-    sink.emit(ip, EVENT_RECURRING, now, "haproxy-log", "", "", &format!("back after {hours}h"), a.scanning_was_all_refused(), None)?;
+    sink.emit(
+        ip,
+        EVENT_RECURRING,
+        now,
+        "haproxy-log",
+        "",
+        "",
+        &format!("back after {hours}h"),
+        a.scanning_was_all_refused(),
+        None,
+    )?;
     Ok(())
 }
 
@@ -2446,22 +3305,58 @@ fn check_unknown_host(
     if host.is_empty() || sites.is_empty() || sites.contains(&host) {
         return Ok(());
     }
-    let good = a.requests as i64 - a.errors as i64 - a.not_found as i64 - a.gateway_denied as i64 - a.bad_requests as i64;
+    let good = a.requests as i64
+        - a.errors as i64
+        - a.not_found as i64
+        - a.gateway_denied as i64
+        - a.bad_requests as i64;
     let client = a.requests >= 20 && good * 2 >= a.requests as i64;
     unknown_hosts.note(&host, ip, client, now);
     if trap_hosts.contains(&host) && !client {
-        sink.emit(ip, EVENT_SCANNER_DECISIVE, now, "haproxy-log", "trap", "", &format!("trap name {host}"), false, Some(format!("{ip}|trap|{host}")))?;
+        sink.emit(
+            ip,
+            EVENT_SCANNER_DECISIVE,
+            now,
+            "haproxy-log",
+            "trap",
+            "",
+            &format!("trap name {host}"),
+            false,
+            Some(format!("{ip}|trap|{host}")),
+        )?;
     }
     Ok(())
 }
 
-fn note_invalid_host(sink: &mut Sink, ip: &str, a: &mut IpActivity, now: i64, request: &ParsedRequest, max_paths: usize) -> Result<(), String> {
-    let distinct = a.note_invalid_host(&format!("{}|{}", request.host, request.path), now, max_paths, INVALID_HOST_WINDOW);
+fn note_invalid_host(
+    sink: &mut Sink,
+    ip: &str,
+    a: &mut IpActivity,
+    now: i64,
+    request: &ParsedRequest,
+    max_paths: usize,
+) -> Result<(), String> {
+    let distinct = a.note_invalid_host(
+        &format!("{}|{}", request.host, request.path),
+        now,
+        max_paths,
+        INVALID_HOST_WINDOW,
+    );
     let Some(d) = distinct.filter(|d| *d >= INVALID_HOST_MIN) else {
         return Ok(());
     };
     let handled = request.denied_by_gateway() && !a.reached_backend;
-    sink.emit(ip, EVENT_INVALID_HOST, now, "haproxy-log", "", "", &format!("distinct={d}"), handled, None)?;
+    sink.emit(
+        ip,
+        EVENT_INVALID_HOST,
+        now,
+        "haproxy-log",
+        "",
+        "",
+        &format!("distinct={d}"),
+        handled,
+        None,
+    )?;
     Ok(())
 }
 
@@ -2472,10 +3367,15 @@ pub fn load_ban_durations(db: &SecurityDatabase) -> Vec<i64> {
     if raw.is_empty() {
         return BAN_DURATIONS.to_vec();
     }
-    match serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string()).and_then(|v| validate_ban_durations(&v)) {
+    match serde_json::from_str::<Value>(&raw)
+        .map_err(|e| e.to_string())
+        .and_then(|v| validate_ban_durations(&v))
+    {
         Ok(steps) => steps,
         Err(e) => {
-            log_warn(&format!("stored ban durations are unusable ({e}); using defaults"));
+            log_warn(&format!(
+                "stored ban durations are unusable ({e}); using defaults"
+            ));
             BAN_DURATIONS.to_vec()
         }
     }
@@ -2497,7 +3397,12 @@ pub fn dismissed_candidates(db: &SecurityDatabase) -> Vec<String> {
 }
 
 /// Hide a suggestion for good, or bring a hidden one back.
-pub fn dismiss_candidate(db: &SecurityDatabase, path: &str, restore: bool, host: &str) -> EResult<Value> {
+pub fn dismiss_candidate(
+    db: &SecurityDatabase,
+    path: &str,
+    restore: bool,
+    host: &str,
+) -> EResult<Value> {
     let text = path.trim();
     if !text.starts_with('/') || text.chars().count() > CANDIDATE_MAX_PATH_LENGTH {
         return Err(EngineError::Value("expected a path".into()));
@@ -2508,14 +3413,20 @@ pub fn dismiss_candidate(db: &SecurityDatabase, path: &str, restore: bool, host:
         let h = detection_host(host).map_err(EngineError::Value)?;
         serde_json::to_string(&json!([h, text])).unwrap_or_default()
     };
-    let mut dismissed: Vec<String> = dismissed_candidates(db).into_iter().filter(|i| *i != key).collect();
+    let mut dismissed: Vec<String> = dismissed_candidates(db)
+        .into_iter()
+        .filter(|i| *i != key)
+        .collect();
     if !restore {
         dismissed.push(key);
     }
     if dismissed.len() > CANDIDATES_MAX_DISMISSED {
         dismissed = dismissed[dismissed.len() - CANDIDATES_MAX_DISMISSED..].to_vec();
     }
-    db.set_state(CANDIDATES_DISMISSED_KEY, &crate::secdb::python_json(&json!(dismissed)))?;
+    db.set_state(
+        CANDIDATES_DISMISSED_KEY,
+        &crate::secdb::python_json(&json!(dismissed)),
+    )?;
     Ok(json!({"dismissed": dismissed}))
 }
 
@@ -2538,6 +3449,7 @@ fn stat_inode_size(path: &str) -> Option<(u64, u64)> {
 pub struct Shared {
     pub engine: Mutex<Engine>,
     pub stop: Arc<AtomicBool>,
+    pub lag_bytes: Arc<AtomicU64>,
     pub db: Arc<SecurityDatabase>,
     pub live: Option<Arc<Mutex<LiveBuffer>>>,
     pub requests: Arc<RwLock<Option<Arc<RequestLog>>>>,
@@ -2572,13 +3484,20 @@ pub fn run(shared: Arc<Shared>) {
         let mut e = shared.engine();
         let refilled = e.refill_live(utc_now_f());
         if refilled > 0 {
-            log_info(&format!("Live activity: {refilled} requests from before the start read back"));
+            log_info(&format!(
+                "Live activity: {refilled} requests from before the start read back"
+            ));
         }
-        (e.config.poll_interval_seconds.max(1) as f64, e.config.maintenance_interval_seconds as f64, e.config.log_read_bytes_per_cycle, e.running.clone())
+        (
+            e.config.poll_interval_seconds.max(1) as f64,
+            e.config.maintenance_interval_seconds as f64,
+            e.config.log_read_bytes_per_cycle,
+            e.running.clone(),
+        )
     };
     running.store(true, Ordering::SeqCst);
     // The rest of the read-back, a piece at a time, with the engine free in between.
-    {
+    let refill = {
         let bg = shared.clone();
         std::thread::spawn(move || {
             let mut added = 0usize;
@@ -2600,14 +3519,18 @@ pub fn run(shared: Arc<Shared>) {
             if added > 0 {
                 log_info("Live activity: older requests read back from the log");
             }
-        });
-    }
+        })
+    };
     let mut next_maintenance = Instant::now() + Duration::from_secs_f64(maintenance_every);
     while !shared.stop.load(Ordering::SeqCst) {
         let started = Instant::now();
+        let tables = Engine::read_tables(&shared.config.haproxy_socket, &shared.stop);
+        if shared.stop.load(Ordering::SeqCst) {
+            break;
+        }
         {
             let mut e = shared.engine();
-            match e.poll() {
+            match e.poll(tables) {
                 Ok(_) => {}
                 Err(err) => {
                     e.consecutive_failures += 1;
@@ -2632,7 +3555,9 @@ pub fn run(shared: Arc<Shared>) {
             if shared.stop.load(Ordering::SeqCst) {
                 break;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs_f64();
             if remaining <= 0.25 {
                 break;
             }
@@ -2656,5 +3581,40 @@ pub fn run(shared: Arc<Shared>) {
         }
         shared.engine().cycle_bytes = 0;
     }
+    let _ = refill.join();
     running.store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_check_stays_queued_and_invalid_unban_is_rejected() {
+        let db = Arc::new(SecurityDatabase::open(":memory:").unwrap());
+        let mut engine = Engine::new(
+            GuardConfig::default(),
+            db,
+            Arc::new(RwLock::new(Arc::new(SignatureEngine::builtin()))),
+            None,
+            Arc::new(RwLock::new(None)),
+        );
+        assert!(matches!(
+            engine.forget_ban("not an address", Some(1)),
+            Err(EngineError::Value(_))
+        ));
+        engine.sink.queue.mark("192.0.2.1", false);
+        engine.sink.queue.mark("192.0.2.2", false);
+        let result = engine.visit_enforcement_checks(1, |_, ip| {
+            if ip == "192.0.2.2" {
+                Err(EngineError::Other("decision unavailable".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        let retry = engine.sink.queue.batch(10);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].0, "192.0.2.2");
+    }
 }

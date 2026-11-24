@@ -291,70 +291,89 @@ func historyDiff(left, right string) (*Map, error) {
 	return p, nil
 }
 
+func stageHistorySource(path string, data []byte, mode os.FileMode) (string, error) {
+	file, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
+	if err != nil {
+		return "", err
+	}
+	name := file.Name()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := errors.Join(file.Chmod(mode), file.Sync(), file.Close()); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
 func writeSources(sources map[string]string) error {
-	paths := map[string]string{}
+	type staged struct{ target, next, previous string }
+	var files []staged
+	defer func() {
+		for _, file := range files {
+			_ = os.Remove(file.next)
+			if file.previous != "" {
+				_ = os.Remove(file.previous)
+			}
+		}
+	}()
 	for _, np := range currentConfigSourcePaths() {
-		paths[np.name] = np.path
-	}
-	type staged struct{ tmp, target string }
-	var st []staged
-	for _, n := range configSourceOrder {
-		target := paths[n]
-		tmp := filepath.Join(filepath.Dir(target), "."+filepath.Base(target)+".restore")
-		if err := os.WriteFile(tmp, []byte(sources[n]), 0o666); err != nil {
-			for _, s := range st {
-				os.Remove(s.tmp)
+		mode := os.FileMode(0o600)
+		files = append(files, staged{target: np.path})
+		file := &files[len(files)-1]
+		info, err := os.Lstat(np.path)
+		if err == nil {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("expected a regular managed source: %s", np.name)
 			}
+			mode = info.Mode().Perm()
+			original, err := os.ReadFile(np.path)
+			if err != nil {
+				return err
+			}
+			file.previous, err = stageHistorySource(np.path, original, mode)
+			if err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
 			return err
 		}
-		if info, err := os.Stat(target); err == nil {
-			_ = os.Chmod(tmp, info.Mode().Perm())
-		}
-		st = append(st, staged{tmp, target})
-	}
-	previous := map[string][]byte{}
-	for _, s := range st {
-		if raw, err := os.ReadFile(s.target); err == nil {
-			previous[s.target] = raw
+		file.next, err = stageHistorySource(np.path, []byte(sources[np.name]), mode)
+		if err != nil {
+			return err
 		}
 	}
-	var moved []string
-	for _, s := range st {
-		if err := os.Rename(s.tmp, s.target); err != nil {
-			for _, t := range moved {
-				raw, had := previous[t]
-				if !had {
-					os.Remove(t)
-					continue
+	for i, file := range files {
+		if err := os.Rename(file.next, file.target); err != nil {
+			for j := i - 1; j >= 0; j-- {
+				replaced := &files[j]
+				if replaced.previous == "" {
+					err = errors.Join(err, os.Remove(replaced.target))
+				} else if restoreErr := os.Rename(replaced.previous, replaced.target); restoreErr != nil {
+					err = errors.Join(err, fmt.Errorf("restore %s from %s: %w", replaced.target, replaced.previous, restoreErr))
+					replaced.previous = "" // Keep the recovery copy on disk.
 				}
-				back := filepath.Join(filepath.Dir(t), "."+filepath.Base(t)+".restore-back")
-				_ = os.WriteFile(back, raw, 0o666)
-				_ = os.Rename(back, t)
-			}
-			for _, s2 := range st {
-				os.Remove(s2.tmp)
 			}
 			return err
 		}
-		moved = append(moved, s.target)
 	}
 	return nil
 }
 
 func setAside(sources map[string]string) (string, error) {
-	folder := filepath.Join(BaseDir, "backups", "before-restore-"+time.Now().Format("20060102150405"))
-	if err := os.MkdirAll(folder, 0o777); err != nil {
+	root := filepath.Join(BaseDir, "backups")
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(folder, 0o700); err != nil {
+	folder, err := os.MkdirTemp(root, "before-restore-"+time.Now().Format("20060102150405")+"-")
+	if err != nil {
 		return "", err
 	}
-	for name, text := range sources {
-		p := filepath.Join(folder, name)
-		if err := os.WriteFile(p, []byte(text), 0o666); err != nil {
-			return "", err
-		}
-		if err := os.Chmod(p, 0o600); err != nil {
+	for name, data := range sources {
+		if err := os.WriteFile(filepath.Join(folder, name), []byte(data), 0o600); err != nil {
 			return "", err
 		}
 	}
@@ -394,9 +413,9 @@ func historyRestore(op *Op, id, clientIP string) (*Map, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	original, err := currentSources()
 	if err != nil {
-		release()
 		return nil, err
 	}
 	unapplied := true
@@ -406,16 +425,13 @@ func historyRestore(op *Op, id, clientIP string) (*Map, error) {
 	aside := ""
 	if unapplied {
 		if aside, err = setAside(original); err != nil {
-			release()
 			return nil, &RestoreError{"The unapplied changes could not be set aside, so nothing was restored: " + pyOSError(err), "set_aside_failed"}
 		}
 	}
 	if err := writeSources(sources); err != nil {
-		release()
 		return nil, &RestoreError{"The version could not be written, so nothing was restored: " + pyOSError(err), "restore_write_failed"}
 	}
 	result, err := applyRestored(op, original, clientIP)
-	release()
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +462,11 @@ func applyRestored(op *Op, original map[string]string, clientIP string) (*Map, e
 		if !truthy(pre.Value("ok")) {
 			return nil, &RestoreError{pyStr(orValue(pre.Value("error"), "the restored configuration was refused")), pyStr(orValue(pre.Value("error_code"), "restore_refused"))}
 		}
-		return BeginCfgConfirmation(op, cfg, 0, false, "")
+		started, err := BeginCfgConfirmation(op, cfg, 0, false, "")
+		if err == nil && !truthy(started.Value("ok")) {
+			err = &RestoreError{pyStr(orValue(started.Value("error"), "the restored configuration was refused")), pyStr(orValue(started.Value("error_code"), "restore_refused"))}
+		}
+		return started, err
 	}()
 	if err != nil {
 		if werr := writeSources(original); werr != nil {

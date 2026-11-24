@@ -478,7 +478,9 @@ fn parse_access_tail(remainder: &str) -> Option<(usize, &str, &str, &str)> {
     if before_proto.is_empty() {
         return None;
     }
-    let uri_start = rfind_ws(before_proto.as_bytes()).map(|i| i + 1).unwrap_or(0);
+    let uri_start = rfind_ws(before_proto.as_bytes())
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let uri = &before_proto[uri_start..];
     if uri.is_empty() {
         return None;
@@ -489,9 +491,7 @@ fn parse_access_tail(remainder: &str) -> Option<(usize, &str, &str, &str)> {
     if before_uri.is_empty() {
         return None;
     }
-    let method_start = rfind_ws(before_uri.as_bytes())
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let method_start = rfind_ws(before_uri.as_bytes()).map(|i| i + 1).unwrap_or(0);
     let method = &before_uri[method_start..];
     if !(3..=10).contains(&method.len()) || !method.bytes().all(|b| b.is_ascii_uppercase()) {
         return None;
@@ -525,9 +525,10 @@ fn authenticated_username(prefix: &str) -> String {
     if raw.is_empty() || raw == "-" {
         return String::new();
     }
-    if !raw.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'~' | b'%' | b'+' | b'-')
-    }) {
+    if !raw
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'~' | b'%' | b'+' | b'-'))
+    {
         return String::new();
     }
     let Some(decoded) = unquote_strict(raw) else {

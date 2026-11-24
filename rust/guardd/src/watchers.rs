@@ -175,7 +175,11 @@ impl TrustedRates {
         if !force && self.signature == Some(signature) {
             return false;
         }
-        let sites = if signature.is_some() { read_site_ceilings(&path) } else { HashMap::new() };
+        let sites = if signature.is_some() {
+            read_site_ceilings(&path)
+        } else {
+            HashMap::new()
+        };
         let mut hosts = HashMap::new();
         let mut ids: Vec<&String> = sites.keys().collect();
         ids.sort();
@@ -235,7 +239,9 @@ impl TrustedRates {
         let mut trust = trust.to_string();
         if trust.is_empty() {
             match &site.allow {
-                Some(nets) if in_networks(&request.client_ip, nets) => trust = "site-allow-list".into(),
+                Some(nets) if in_networks(&request.client_ip, nets) => {
+                    trust = "site-allow-list".into()
+                }
                 _ => return,
             }
         }
@@ -252,7 +258,13 @@ impl TrustedRates {
         if !self.counters.contains_key(&key) {
             self.counters.insert(
                 key.clone(),
-                TrustedCounter { start: ts, curr: 0, prev: 0, episode: None, order },
+                TrustedCounter {
+                    start: ts,
+                    curr: 0,
+                    prev: 0,
+                    episode: None,
+                    order,
+                },
             );
             if self.counters.len() > self.max_keys {
                 if let Some(oldest) = self
@@ -311,7 +323,12 @@ impl TrustedRates {
         };
         ep.requests += 1;
         ep.ended = ep.ended.max(ts);
-        match live_refusal(request.status, &request.backend, &request.term, &request.ban_reason) {
+        match live_refusal(
+            request.status,
+            &request.backend,
+            &request.term,
+            &request.ban_reason,
+        ) {
             "rate-limited" => ep.rate_limited += 1,
             "banned" => ep.banned += 1,
             _ => {}
@@ -323,7 +340,11 @@ impl TrustedRates {
 
     pub fn tick(&mut self, now: i64, idle: bool) {
         self.maybe_reload();
-        let reference = if idle { self.clock.max(now) } else { self.clock };
+        let reference = if idle {
+            self.clock.max(now)
+        } else {
+            self.clock
+        };
         let mut finished = Vec::new();
         let mut remove = Vec::new();
         for (key, counter) in self.counters.iter_mut() {
@@ -370,7 +391,11 @@ impl TrustedRates {
     }
 
     pub fn open_episodes(&self) -> Vec<Value> {
-        let mut rows: Vec<&Episode> = self.counters.values().filter_map(|c| c.episode.as_ref()).collect();
+        let mut rows: Vec<&Episode> = self
+            .counters
+            .values()
+            .filter_map(|c| c.episode.as_ref())
+            .collect();
         rows.sort_by_key(|e| std::cmp::Reverse(e.started));
         rows.into_iter().map(|e| e.to_json(Some(true))).collect()
     }
@@ -424,14 +449,23 @@ pub struct HardFloorWatch {
 
 impl HardFloorWatch {
     pub fn ceilings(&mut self) -> &BTreeMap<String, BTreeMap<String, i64>> {
-        let fresh = matches!(self.checked, Some(t) if t.elapsed().as_secs_f64() < RATE_CEILINGS_RECHECK);
+        let fresh =
+            matches!(self.checked, Some(t) if t.elapsed().as_secs_f64() < RATE_CEILINGS_RECHECK);
         if !fresh {
             self.checked = Some(Instant::now());
-            let path = if self.config_path.is_empty() { haproxy_config_path() } else { self.config_path.clone() };
+            let path = if self.config_path.is_empty() {
+                haproxy_config_path()
+            } else {
+                self.config_path.clone()
+            };
             let key = file_signature(&path);
             if self.key != Some(key) {
                 self.key = Some(key);
-                self.ceilings = if key.is_some() { read_hard_floor(&path) } else { BTreeMap::new() };
+                self.ceilings = if key.is_some() {
+                    read_hard_floor(&path)
+                } else {
+                    BTreeMap::new()
+                };
             }
         }
         &self.ceilings
@@ -448,10 +482,7 @@ impl HardFloorWatch {
     }
 
     /// Take one read's offenders; return those now over for long enough.
-    pub fn update(
-        &mut self,
-        over: &BTreeMap<FloorKey, (i64, i64)>,
-    ) -> Vec<(FloorKey, (i64, i64))> {
+    pub fn update(&mut self, over: &BTreeMap<FloorKey, (i64, i64)>) -> Vec<(FloorKey, (i64, i64))> {
         let mut streak = BTreeMap::new();
         let mut sustained = Vec::new();
         for (key, val) in over {
@@ -487,17 +518,29 @@ pub struct BanPolicyWatch {
 
 impl Default for BanPolicyWatch {
     fn default() -> Self {
-        Self { config_path: String::new(), key: None, policy: BAN_POLICY_LEGACY }
+        Self {
+            config_path: String::new(),
+            key: None,
+            policy: BAN_POLICY_LEGACY,
+        }
     }
 }
 
 impl BanPolicyWatch {
     pub fn current(&mut self) -> &'static str {
-        let path = if self.config_path.is_empty() { haproxy_config_path() } else { self.config_path.clone() };
+        let path = if self.config_path.is_empty() {
+            haproxy_config_path()
+        } else {
+            self.config_path.clone()
+        };
         let key = file_signature(&path);
         if self.key != Some(key) {
             self.key = Some(key);
-            self.policy = if key.is_some() { read_ban_policy(&path) } else { BAN_POLICY_LEGACY };
+            self.policy = if key.is_some() {
+                read_ban_policy(&path)
+            } else {
+                BAN_POLICY_LEGACY
+            };
         }
         self.policy
     }
@@ -509,7 +552,13 @@ mod tests {
 
     #[test]
     fn counter_matches_haproxy_period_arithmetic() {
-        let mut c = TrustedCounter { start: 100, curr: 0, prev: 0, episode: None, order: 0 };
+        let mut c = TrustedCounter {
+            start: 100,
+            curr: 0,
+            prev: 0,
+            episode: None,
+            order: 0,
+        };
         assert_eq!(c.add(100, 10), 1);
         assert_eq!(c.add(105, 10), 2);
         // Next period: prev=2 weighted by (10-elapsed)/10.
@@ -522,7 +571,14 @@ mod tests {
     fn hard_floor_needs_two_reads() {
         let mut w = HardFloorWatch::default();
         let mut over = BTreeMap::new();
-        over.insert(("1.2.3.4".to_string(), "t".to_string(), "conn_cur".to_string()), (900, 500));
+        over.insert(
+            (
+                "1.2.3.4".to_string(),
+                "t".to_string(),
+                "conn_cur".to_string(),
+            ),
+            (900, 500),
+        );
         assert!(w.update(&over).is_empty());
         assert_eq!(w.update(&over).len(), 1);
         assert!(w.update(&BTreeMap::new()).is_empty());

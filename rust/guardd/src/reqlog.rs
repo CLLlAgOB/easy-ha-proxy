@@ -26,7 +26,9 @@ pub const REQUEST_INDEXED_ROWS: i64 = 5000;
 pub const REQUEST_SUMMARY_SECONDS: f64 = 3.0;
 pub const REQUEST_SUMMARY_TOP: usize = 10;
 const SUMMARY_BARS: i64 = 72;
-const SUMMARY_STEPS: [i64; 12] = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
+const SUMMARY_STEPS: [i64; 12] = [
+    60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400,
+];
 const MAX_PATH_LENGTH: usize = 200;
 const MAX_HOST_LENGTH: usize = 128;
 const MAX_USER_AGENT_LENGTH: usize = 128;
@@ -73,13 +75,31 @@ const ADDED_COLUMNS: [(&str, &str); 6] = [
 ];
 
 const COLUMNS: [&str; 20] = [
-    "id", "ts", "request_id", "client", "status", "frontend", "backend", "server", "method", "host", "path",
-    "bytes_out", "duration_ms", "bad_request", "response_ms", "times", "term", "ban_reason", "agent_id",
+    "id",
+    "ts",
+    "request_id",
+    "client",
+    "status",
+    "frontend",
+    "backend",
+    "server",
+    "method",
+    "host",
+    "path",
+    "bytes_out",
+    "duration_ms",
+    "bad_request",
+    "response_ms",
+    "times",
+    "term",
+    "ban_reason",
+    "agent_id",
     "authenticated_user",
 ];
 
 pub fn request_log_path() -> String {
-    std::env::var("GUARDD_REQUEST_LOG").unwrap_or_else(|_| "/var/lib/easy-ha-proxy/requests/requests.db".into())
+    std::env::var("GUARDD_REQUEST_LOG")
+        .unwrap_or_else(|_| "/var/lib/easy-ha-proxy/requests/requests.db".into())
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -95,7 +115,9 @@ pub fn parse_statuses(text: &str) -> Vec<(i64, i64)> {
     let mut ranges: Vec<(i64, i64)> = Vec::new();
     let lowered = text.trim().to_lowercase();
     for token in split_re.split(&lowered).take(8) {
-        let Some(c) = token_re.captures(token) else { continue };
+        let Some(c) = token_re.captures(token) else {
+            continue;
+        };
         let range = if &c[2] == "xx" {
             let low: i64 = c[1].parse::<i64>().unwrap_or(0) * 100;
             (low, low + 100)
@@ -155,14 +177,20 @@ impl RequestQuery {
             client: truncate(client, 200),
             statuses: parse_statuses(status),
             host: truncate(host, 200),
-            hide_admin: hide_admin && request_id.is_empty() && !LIVE_ADMIN_BACKENDS.contains(&backend.as_str()),
+            hide_admin: hide_admin
+                && request_id.is_empty()
+                && !LIVE_ADMIN_BACKENDS.contains(&backend.as_str()),
             backend,
             request_id,
             method: truncate(&method.to_uppercase(), 10),
             path: truncate(path, MAX_PATH_LENGTH),
             refused,
             slower_ms: slower.clamp(0, 86_400_000),
-            agent: if agent.is_empty() { String::new() } else { logged_agent(&agent) },
+            agent: if agent.is_empty() {
+                String::new()
+            } else {
+                logged_agent(&agent)
+            },
         }
     }
 
@@ -212,8 +240,15 @@ impl RequestQuery {
             }
         }
         if self.hide_admin {
-            clauses.push(format!("backend NOT IN ({})", vec!["?"; LIVE_ADMIN_BACKENDS.len()].join(",")));
-            params.extend(LIVE_ADMIN_BACKENDS.iter().map(|b| SqlValue::Text((*b).into())));
+            clauses.push(format!(
+                "backend NOT IN ({})",
+                vec!["?"; LIVE_ADMIN_BACKENDS.len()].join(",")
+            ));
+            params.extend(
+                LIVE_ADMIN_BACKENDS
+                    .iter()
+                    .map(|b| SqlValue::Text((*b).into())),
+            );
         }
         if !self.path.is_empty() {
             clauses.push("path LIKE ? ESCAPE ?".to_string());
@@ -238,7 +273,9 @@ impl RequestQuery {
             params.push(SqlValue::Integer(self.slower_ms));
         }
         if !self.agent.is_empty() {
-            clauses.push("agent_id IN (SELECT id FROM agents WHERE agent LIKE ? ESCAPE ?)".to_string());
+            clauses.push(
+                "agent_id IN (SELECT id FROM agents WHERE agent LIKE ? ESCAPE ?)".to_string(),
+            );
             params.push(SqlValue::Text(format!("%{}%", like_literal(&self.agent))));
             params.push(SqlValue::Text("\\".into()));
         }
@@ -275,7 +312,12 @@ impl RequestQuery {
             return false;
         }
         let status = i64::from(r.status);
-        if !self.statuses.is_empty() && !self.statuses.iter().any(|(l, h)| *l <= status && status < *h) {
+        if !self.statuses.is_empty()
+            && !self
+                .statuses
+                .iter()
+                .any(|(l, h)| *l <= status && status < *h)
+        {
             return false;
         }
         if self.refused && r.refusal.is_empty() {
@@ -345,7 +387,15 @@ impl RequestSummary {
 
     pub fn add(&mut self, bar: i64, status: u16, refused: bool, count: i64) {
         let bar = bar.clamp(0, self.bars - 1) as usize;
-        let kind = if refused { 3 } else if status >= 500 { 2 } else if status >= 400 { 1 } else { 0 };
+        let kind = if refused {
+            3
+        } else if status >= 500 {
+            2
+        } else if status >= 400 {
+            1
+        } else {
+            0
+        };
         self.histogram[bar][kind] += count;
         *self.statuses.entry(i64::from(status)).or_insert(0) += count;
         self.counted += count;
@@ -356,10 +406,17 @@ impl RequestSummary {
     }
 
     pub fn add_path(&mut self, host: &str, path: &str, count: i64) {
-        *self.paths.entry((host.to_string(), path.to_string())).or_insert(0) += count;
+        *self
+            .paths
+            .entry((host.to_string(), path.to_string()))
+            .or_insert(0) += count;
     }
 
-    fn most<K: Clone, F: Fn(&K) -> String>(counter: &HashMap<K, i64>, top: usize, text: F) -> Vec<(K, i64)> {
+    fn most<K: Clone, F: Fn(&K) -> String>(
+        counter: &HashMap<K, i64>,
+        top: usize,
+        text: F,
+    ) -> Vec<(K, i64)> {
         let mut items: Vec<(K, i64)> = counter.iter().map(|(k, v)| (k.clone(), *v)).collect();
         items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| text(&a.0).cmp(&text(&b.0))));
         items.truncate(top);
@@ -443,10 +500,13 @@ impl RequestLog {
         let fresh = !p.exists();
         let mut conn = Connection::open(&p).map_err(e)?;
         if fresh {
-            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;").map_err(e)?;
+            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")
+                .map_err(e)?;
         }
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")
-            .map_err(e)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+        )
+        .map_err(e)?;
         for stmt in SCHEMA {
             conn.execute(stmt, []).map_err(e)?;
         }
@@ -455,8 +515,11 @@ impl RequestLog {
             .optional()
             .map_err(e)?;
         if found.is_none() {
-            conn.execute("INSERT INTO schema_version (version) VALUES (?1)", params![REQUEST_LOG_SCHEMA_VERSION])
-                .map_err(e)?;
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                params![REQUEST_LOG_SCHEMA_VERSION],
+            )
+            .map_err(e)?;
         }
         let version = found.unwrap_or(REQUEST_LOG_SCHEMA_VERSION);
         // One transaction for the new columns, the move to UTC and the new
@@ -470,15 +533,22 @@ impl RequestLog {
         };
         for (name, kind) in ADDED_COLUMNS {
             if !present.iter().any(|c| c == name) {
-                tx.execute(&format!("ALTER TABLE requests ADD COLUMN {name} {kind}"), []).map_err(e)?;
+                tx.execute(
+                    &format!("ALTER TABLE requests ADD COLUMN {name} {kind}"),
+                    [],
+                )
+                .map_err(e)?;
             }
         }
         if version < 2 {
             local_stamps_to_utc(&tx)?;
         }
         if version < REQUEST_LOG_SCHEMA_VERSION {
-            tx.execute("UPDATE schema_version SET version = ?1", params![REQUEST_LOG_SCHEMA_VERSION])
-                .map_err(e)?;
+            tx.execute(
+                "UPDATE schema_version SET version = ?1",
+                params![REQUEST_LOG_SCHEMA_VERSION],
+            )
+            .map_err(e)?;
         }
         tx.commit().map_err(e)?;
         Ok(Self {
@@ -526,14 +596,22 @@ impl RequestLog {
             status: i64::from(record.status),
             frontend: truncate(&record.frontend, 64),
             backend: truncate(backend, 64),
-            server: if server.is_empty() || server == "<NOSRV>" { String::new() } else { truncate(server, 64) },
+            server: if server.is_empty() || server == "<NOSRV>" {
+                String::new()
+            } else {
+                truncate(server, 64)
+            },
             method: truncate(&record.method, 10),
             host: truncate(&record.host, MAX_HOST_LENGTH),
             path: truncate(&record.path, MAX_PATH_LENGTH),
             bytes_out: record.bytes_out as i64,
             duration_ms: record.duration_ms,
             bad_request: i64::from(record.bad_request),
-            response_ms: if record.response_ms >= 0 { record.response_ms } else { -1 },
+            response_ms: if record.response_ms >= 0 {
+                record.response_ms
+            } else {
+                -1
+            },
             times: truncate(&record.times, 40),
             term: truncate(&record.term, 8),
             ban_reason: truncate(&record.ban_reason, 160),
@@ -569,10 +647,18 @@ impl RequestLog {
     }
 
     fn size(&self) -> u64 {
-        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         ["", "-wal", "-shm"]
             .iter()
-            .map(|s| fs::metadata(self.path.with_file_name(format!("{name}{s}"))).map(|m| m.len()).unwrap_or(0))
+            .map(|s| {
+                fs::metadata(self.path.with_file_name(format!("{name}{s}")))
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            })
             .sum()
     }
 
@@ -600,9 +686,10 @@ impl RequestLog {
         }
         {
             let conn = self.conn();
-            if let Ok(gone) =
-                conn.execute("DELETE FROM agents WHERE last_ts < (SELECT ts FROM requests ORDER BY id LIMIT 1)", [])
-            {
+            if let Ok(gone) = conn.execute(
+                "DELETE FROM agents WHERE last_ts < (SELECT ts FROM requests ORDER BY id LIMIT 1)",
+                [],
+            ) {
                 if gone > 0 {
                     state.agents.clear();
                 }
@@ -614,7 +701,10 @@ impl RequestLog {
             if !state.paused {
                 state.paused = true;
                 state.pause_reason = "the filesystem is below its free-space reserve".into();
-                eprintln!("Request log paused: {}. HAProxy traffic is not affected.", state.pause_reason);
+                eprintln!(
+                    "Request log paused: {}. HAProxy traffic is not affected.",
+                    state.pause_reason
+                );
             }
         } else if state.paused && free as f64 > reserve as f64 * 1.2 {
             state.paused = false;
@@ -623,8 +713,11 @@ impl RequestLog {
     }
 
     fn reader(&self) -> Result<Connection, String> {
-        let conn = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .map_err(e)?;
+        let conn = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(e)?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(e)?;
         conn.execute_batch("PRAGMA query_only=1;").map_err(e)?;
         Ok(conn)
@@ -650,14 +743,21 @@ impl RequestLog {
     }
 
     /// The newest matching requests, a page at a time.
-    pub fn search(&self, query: &RequestQuery, before: i64, count: bool, limit: i64, seconds: f64) -> Result<Value, String> {
+    pub fn search(
+        &self,
+        query: &RequestQuery,
+        before: i64,
+        count: bool,
+        limit: i64,
+        seconds: f64,
+    ) -> Result<Value, String> {
         let (clauses, parameters) = query.clauses();
         let (since, until) = (query.since as i64, query.until as i64);
         let limit = limit.clamp(1, 500);
         let before = before.clamp(0, 1i64 << 62);
         let deadline = Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
         let _slot = self.acquire()?;
-        let conn = self.reader()?;
+        let mut conn = self.reader()?;
         let index = if !query.request_id.is_empty() {
             "ix_requests_rid"
         } else if !query.client.is_empty() && few(&conn, &clauses, &parameters)? {
@@ -666,12 +766,26 @@ impl RequestLog {
             ""
         };
         let mut found = if index.is_empty() {
-            search_scan(&conn, &clauses, &parameters, since, until, before, limit, count, deadline)?
+            search_scan(
+                &mut conn,
+                &clauses,
+                &parameters,
+                since,
+                until,
+                before,
+                limit,
+                count,
+                deadline,
+            )?
         } else {
             search_indexed(&conn, index, &clauses, &parameters, before, limit, count)?
         };
         let stopped_at = found.stopped_at;
-        let searched_to = if stopped_at != 0 { ts_at(&conn, stopped_at) } else { 0 };
+        let searched_to = if stopped_at != 0 {
+            ts_at(&conn, stopped_at)
+        } else {
+            0
+        };
         let rows = present(&conn, &found.rows)?;
         let mut out = json!({
             "requests": rows,
@@ -696,7 +810,13 @@ impl RequestLog {
         let (low, high) = id_bounds(&conn, query.since as i64, query.until as i64)?;
         let oldest = if high >= low { ts_at(&conn, low) } else { 0 };
         let now = crate::constants::utc_now_f();
-        let start = if query.since != 0.0 { query.since } else if oldest != 0 { oldest as f64 } else { now };
+        let start = if query.since != 0.0 {
+            query.since
+        } else if oldest != 0 {
+            oldest as f64
+        } else {
+            now
+        };
         let end = if query.until != 0.0 { query.until } else { now };
         let (first, step, bars) = summary_layout(start, end);
         let mut summary = RequestSummary::new(first, step, bars);
@@ -708,14 +828,24 @@ impl RequestLog {
             let mut values = vec![SqlValue::Integer(floor), SqlValue::Integer(position)];
             values.extend(parameters.iter().cloned());
             {
-                let mut args = vec![SqlValue::Integer(summary.first), SqlValue::Integer(summary.step)];
+                let mut args = vec![
+                    SqlValue::Integer(summary.first),
+                    SqlValue::Integer(summary.step),
+                ];
                 args.extend(values.iter().cloned());
                 let mut stmt = conn
-                    .prepare(&format!("SELECT (ts - ?) / ?, status, {refused}, COUNT(*) {part} GROUP BY 1, 2, 3"))
+                    .prepare(&format!(
+                        "SELECT (ts - ?) / ?, status, {refused}, COUNT(*) {part} GROUP BY 1, 2, 3"
+                    ))
                     .map_err(e)?;
                 let rows = stmt
                     .query_map(params_from_iter(args.iter()), |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
                     })
                     .map_err(e)?;
                 for row in rows {
@@ -724,9 +854,13 @@ impl RequestLog {
                 }
             }
             {
-                let mut stmt = conn.prepare(&format!("SELECT client, COUNT(*) {part} GROUP BY client")).map_err(e)?;
+                let mut stmt = conn
+                    .prepare(&format!("SELECT client, COUNT(*) {part} GROUP BY client"))
+                    .map_err(e)?;
                 let rows = stmt
-                    .query_map(params_from_iter(values.iter()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                    .query_map(params_from_iter(values.iter()), |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                    })
                     .map_err(e)?;
                 for row in rows {
                     let (client, count) = row.map_err(e)?;
@@ -734,10 +868,18 @@ impl RequestLog {
                 }
             }
             {
-                let mut stmt = conn.prepare(&format!("SELECT host, path, COUNT(*) {part} GROUP BY host, path")).map_err(e)?;
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT host, path, COUNT(*) {part} GROUP BY host, path"
+                    ))
+                    .map_err(e)?;
                 let rows = stmt
                     .query_map(params_from_iter(values.iter()), |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
                     })
                     .map_err(e)?;
                 for row in rows {
@@ -753,7 +895,11 @@ impl RequestLog {
         let mut result = summary.read();
         let complete = position < low;
         result["complete"] = json!(complete);
-        result["reached_to"] = json!(if complete { 0 } else { ts_at(&conn, position + 1) });
+        result["reached_to"] = json!(if complete {
+            0
+        } else {
+            ts_at(&conn, position + 1)
+        });
         Ok(result)
     }
 
@@ -761,7 +907,10 @@ impl RequestLog {
         let (newest, oldest) = match self.reader() {
             Ok(conn) => {
                 let q = |sql: &str| -> Option<(i64, i64)> {
-                    conn.query_row(sql, [], |r| Ok((r.get(0)?, r.get(1)?))).optional().ok().flatten()
+                    conn.query_row(sql, [], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()
+                        .ok()
+                        .flatten()
                 };
                 (
                     q("SELECT id, ts FROM requests ORDER BY id DESC LIMIT 1"),
@@ -791,7 +940,11 @@ impl RequestLog {
     }
 }
 
-fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashMap<String, i64>) -> Result<usize, String> {
+fn write_batch(
+    conn: &mut Connection,
+    pending: &[PendingRow],
+    agents: &mut HashMap<String, i64>,
+) -> Result<usize, String> {
     let tx = conn.transaction().map_err(e)?;
     // Each agent of the batch once, in the order it first appears (new ids
     // are handed out in that order, as by the Python daemon), with its newest
@@ -810,7 +963,10 @@ fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashM
             }
         }
     }
-    let mut unknown: Vec<&(String, i64)> = newest.iter().filter(|(a, _)| !agents.contains_key(a)).collect();
+    let mut unknown: Vec<&(String, i64)> = newest
+        .iter()
+        .filter(|(a, _)| !agents.contains_key(a))
+        .collect();
     if !unknown.is_empty() {
         if agents.len() > 20000 {
             agents.clear();
@@ -819,12 +975,19 @@ fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashM
             unknown = newest.iter().collect();
         }
         for (agent, ts) in &unknown {
-            tx.execute("INSERT OR IGNORE INTO agents (agent, last_ts) VALUES (?1, ?2)", params![agent, ts])
-                .map_err(e)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO agents (agent, last_ts) VALUES (?1, ?2)",
+                params![agent, ts],
+            )
+            .map_err(e)?;
         }
         for (agent, _) in &unknown {
             if let Some(id) = tx
-                .query_row("SELECT id FROM agents WHERE agent = ?1", params![agent], |r| r.get::<_, i64>(0))
+                .query_row(
+                    "SELECT id FROM agents WHERE agent = ?1",
+                    params![agent],
+                    |r| r.get::<_, i64>(0),
+                )
                 .optional()
                 .map_err(e)?
             {
@@ -834,8 +997,11 @@ fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashM
     }
     for (agent, stamp) in &newest {
         if let Some(id) = agents.get(agent) {
-            tx.execute("UPDATE agents SET last_ts = ?1 WHERE id = ?2 AND last_ts < ?1", params![stamp, id])
-                .map_err(e)?;
+            tx.execute(
+                "UPDATE agents SET last_ts = ?1 WHERE id = ?2 AND last_ts < ?1",
+                params![stamp, id],
+            )
+            .map_err(e)?;
         }
     }
     {
@@ -847,11 +1013,31 @@ fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashM
             )
             .map_err(e)?;
         for r in pending {
-            let agent_id = if r.agent.is_empty() { 0 } else { agents.get(&r.agent).copied().unwrap_or(0) };
+            let agent_id = if r.agent.is_empty() {
+                0
+            } else {
+                agents.get(&r.agent).copied().unwrap_or(0)
+            };
             stmt.execute(params![
-                r.ts, r.request_id, r.client, r.status, r.frontend, r.backend, r.server, r.method, r.host, r.path,
-                r.bytes_out, r.duration_ms, r.bad_request, r.response_ms, r.times, r.term, r.ban_reason,
-                r.authenticated_user, agent_id
+                r.ts,
+                r.request_id,
+                r.client,
+                r.status,
+                r.frontend,
+                r.backend,
+                r.server,
+                r.method,
+                r.host,
+                r.path,
+                r.bytes_out,
+                r.duration_ms,
+                r.bad_request,
+                r.response_ms,
+                r.times,
+                r.term,
+                r.ban_reason,
+                r.authenticated_user,
+                agent_id
             ])
             .map_err(e)?;
         }
@@ -863,8 +1049,11 @@ fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashM
 /// Version 1 stored HAProxy's %t (local wall clock read as UTC); move every
 /// row by the offset its hour had.
 fn local_stamps_to_utc(conn: &Connection) -> Result<i64, String> {
-    let (low, high): (Option<i64>, Option<i64>) =
-        conn.query_row("SELECT MIN(ts), MAX(ts) FROM requests", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(e)?;
+    let (low, high): (Option<i64>, Option<i64>) = conn
+        .query_row("SELECT MIN(ts), MAX(ts) FROM requests", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(e)?;
     let (Some(low), Some(high)) = (low, high) else {
         return Ok(0);
     };
@@ -881,12 +1070,17 @@ fn local_stamps_to_utc(conn: &Connection) -> Result<i64, String> {
     if shifts.is_empty() {
         return Ok(0);
     }
-    conn.execute_batch("CREATE TEMP TABLE request_shift (hour INTEGER PRIMARY KEY, offset INTEGER);").map_err(e)?;
+    conn.execute_batch(
+        "CREATE TEMP TABLE request_shift (hour INTEGER PRIMARY KEY, offset INTEGER);",
+    )
+    .map_err(e)?;
     for (h, o) in &shifts {
-        conn.execute("INSERT INTO request_shift VALUES (?1, ?2)", params![h, o]).map_err(e)?;
+        conn.execute("INSERT INTO request_shift VALUES (?1, ?2)", params![h, o])
+            .map_err(e)?;
     }
     for name in ["ix_requests_ts", "ix_requests_client", "ix_requests_status"] {
-        conn.execute_batch(&format!("DROP INDEX IF EXISTS {name};")).map_err(e)?;
+        conn.execute_batch(&format!("DROP INDEX IF EXISTS {name};"))
+            .map_err(e)?;
     }
     let moved = conn
         .execute(
@@ -951,9 +1145,13 @@ struct Found {
     total: Option<(i64, bool)>,
 }
 
-fn fetch_rows(conn: &Connection, sql: &str, args: &[SqlValue]) -> Result<Vec<HashMap<String, SqlValue>>, rusqlite::Error> {
+fn fetch_rows(
+    conn: &Connection,
+    sql: &str,
+    args: &[SqlValue],
+) -> Result<Vec<HashMap<String, SqlValue>>, rusqlite::Error> {
     let mut stmt = conn.prepare(sql)?;
-    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_owned).collect();
     let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
         let mut m = HashMap::new();
         for (i, n) in names.iter().enumerate() {
@@ -996,7 +1194,11 @@ fn search_indexed(
     .map_err(e)?;
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
-    let next = if more { rows.last().map(row_id).unwrap_or(0) } else { 0 };
+    let next = if more {
+        rows.last().map(row_id).unwrap_or(0)
+    } else {
+        0
+    };
     let total = if count {
         let mut cargs = params.clone();
         cargs.push(SqlValue::Integer(REQUEST_COUNT_CAP + 1));
@@ -1011,12 +1213,19 @@ fn search_indexed(
     } else {
         None
     };
-    Ok(Found { rows, next, complete: true, timed_out: false, stopped_at: 0, total })
+    Ok(Found {
+        rows,
+        next,
+        complete: true,
+        timed_out: false,
+        stopped_at: 0,
+        total,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn search_scan(
-    conn: &Connection,
+    conn: &mut Connection,
     clauses: &[String],
     parameters: &[SqlValue],
     since: i64,
@@ -1045,7 +1254,8 @@ fn search_scan(
         args.push(SqlValue::Integer(need));
         if !first_step {
             let d = deadline;
-            conn.progress_handler(2000, Some(move || Instant::now() > d));
+            conn.progress_handler(2000, Some(move || Instant::now() > d))
+                .map_err(|e| e.to_string())?;
         }
         let step = match fetch_rows(
             conn,
@@ -1093,13 +1303,15 @@ fn search_scan(
         total: None,
     };
     if !count {
-        conn.progress_handler(0, None::<fn() -> bool>);
+        conn.progress_handler(0, None::<fn() -> bool>)
+            .map_err(|e| e.to_string())?;
         return Ok(found);
     }
     let mut exact = !timed_out;
     if counting_from != 0 {
         let d = deadline;
-        conn.progress_handler(2000, Some(move || Instant::now() > d));
+        conn.progress_handler(2000, Some(move || Instant::now() > d))
+            .map_err(|e| e.to_string())?;
         position = counting_from;
         while position >= low && counted <= REQUEST_COUNT_CAP {
             if Instant::now() > deadline {
@@ -1125,7 +1337,8 @@ fn search_scan(
             position = floor - 1;
         }
     }
-    conn.progress_handler(0, None::<fn() -> bool>);
+    conn.progress_handler(0, None::<fn() -> bool>)
+        .map_err(|e| e.to_string())?;
     if counted > REQUEST_COUNT_CAP {
         counted = REQUEST_COUNT_CAP;
         exact = false;
@@ -1136,10 +1349,12 @@ fn search_scan(
 
 fn id_bounds(conn: &Connection, since: i64, until: i64) -> Result<(i64, i64), String> {
     let one = |sql: &str, args: &[SqlValue]| -> Result<Option<i64>, String> {
-        conn.query_row(sql, params_from_iter(args.iter()), |r| r.get::<_, Option<i64>>(0))
-            .optional()
-            .map(|v| v.flatten())
-            .map_err(e)
+        conn.query_row(sql, params_from_iter(args.iter()), |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .optional()
+        .map(|v| v.flatten())
+        .map_err(e)
     };
     let top = if until != 0 {
         one(
@@ -1161,11 +1376,15 @@ fn id_bounds(conn: &Connection, since: i64, until: i64) -> Result<(i64, i64), St
 }
 
 fn ts_at(conn: &Connection, id: i64) -> i64 {
-    conn.query_row("SELECT ts FROM requests WHERE id >= ?1 ORDER BY id LIMIT 1", params![id], |r| r.get(0))
-        .optional()
-        .ok()
-        .flatten()
-        .unwrap_or(0)
+    conn.query_row(
+        "SELECT ts FROM requests WHERE id >= ?1 ORDER BY id LIMIT 1",
+        params![id],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0)
 }
 
 fn sql_json(v: &SqlValue) -> Value {
@@ -1192,9 +1411,15 @@ fn present(conn: &Connection, rows: &[HashMap<String, SqlValue>]) -> Result<Vec<
     if !wanted.is_empty() {
         let marks = vec!["?"; wanted.len()].join(",");
         let args: Vec<SqlValue> = wanted.iter().map(|i| SqlValue::Integer(*i)).collect();
-        let mut stmt = conn.prepare(&format!("SELECT id, agent FROM agents WHERE id IN ({marks})")).map_err(e)?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id, agent FROM agents WHERE id IN ({marks})"
+            ))
+            .map_err(e)?;
         let it = stmt
-            .query_map(params_from_iter(args.iter()), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params_from_iter(args.iter()), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(e)?;
         for item in it {
             let (id, agent) = item.map_err(e)?;
@@ -1220,16 +1445,32 @@ fn present(conn: &Connection, rows: &[HashMap<String, SqlValue>]) -> Result<Vec<
             Some(SqlValue::Integer(i)) => *i,
             _ => 0,
         };
-        m.insert("user_agent".into(), json!(names.get(&agent_id).cloned().unwrap_or_default()));
+        m.insert(
+            "user_agent".into(),
+            json!(names.get(&agent_id).cloned().unwrap_or_default()),
+        );
         let status = match row.get("status") {
             Some(SqlValue::Integer(i)) => *i as u16,
             _ => 0,
         };
         let server = text(row, "server");
-        let backend = format!("{}/{}", text(row, "backend"), if server.is_empty() { "<NOSRV>" } else { server.as_str() });
+        let backend = format!(
+            "{}/{}",
+            text(row, "backend"),
+            if server.is_empty() {
+                "<NOSRV>"
+            } else {
+                server.as_str()
+            }
+        );
         m.insert(
             "refusal".into(),
-            json!(live_refusal(status, &backend, &text(row, "term"), &text(row, "ban_reason"))),
+            json!(live_refusal(
+                status,
+                &backend,
+                &text(row, "term"),
+                &text(row, "ban_reason")
+            )),
         );
         out.push(Value::Object(m));
     }
@@ -1290,8 +1531,13 @@ mod tests {
         assert_eq!(out["requests"].as_array().unwrap().len(), 1);
         assert_eq!(out["requests"][0]["user_agent"], "curl/8");
         assert_eq!(out["total"], 1);
-        let by_id = RequestQuery::build(0.0, 0.0, "", "", "", "", "rid2", "", "", false, false, 0, "");
-        assert_eq!(log.search(&by_id, 0, true, 10, 4.0).unwrap()["requests"][0]["status"], 200);
+        let by_id = RequestQuery::build(
+            0.0, 0.0, "", "", "", "", "rid2", "", "", false, false, 0, "",
+        );
+        assert_eq!(
+            log.search(&by_id, 0, true, 10, 4.0).unwrap()["requests"][0]["status"],
+            200
+        );
         let summary = log.summary(&RequestQuery::default(), 3.0).unwrap();
         assert_eq!(summary["counted"], 2);
     }
@@ -1350,14 +1596,21 @@ mod tests {
         };
         {
             let conn = Connection::open(&path).unwrap();
-            let version: i64 = conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
+            let version: i64 = conn
+                .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(version, 1);
-            assert!(!columns(&conn).iter().any(|c| c == "response_ms"), "columns added outside the transaction");
+            assert!(
+                !columns(&conn).iter().any(|c| c == "response_ms"),
+                "columns added outside the transaction"
+            );
             conn.execute_batch("DROP TRIGGER stop_version;").unwrap();
         }
         RequestLog::open(&path, &cfg).unwrap();
         let conn = Connection::open(&path).unwrap();
-        let version: i64 = conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, REQUEST_LOG_SCHEMA_VERSION);
         assert!(columns(&conn).iter().any(|c| c == "response_ms"));
     }
@@ -1377,10 +1630,20 @@ mod tests {
         for i in 0..20001 {
             agents.insert(format!("filler-{i}"), 1_000_000 + i);
         }
-        write_batch(&mut conn, &[pending(20, "new/2.0"), pending(21, "known/1.0"), pending(22, "new/2.0")], &mut agents)
-            .unwrap();
+        write_batch(
+            &mut conn,
+            &[
+                pending(20, "new/2.0"),
+                pending(21, "known/1.0"),
+                pending(22, "new/2.0"),
+            ],
+            &mut agents,
+        )
+        .unwrap();
         let ids: Vec<i64> = {
-            let mut stmt = conn.prepare("SELECT agent_id FROM requests WHERE ts >= 20 ORDER BY ts").unwrap();
+            let mut stmt = conn
+                .prepare("SELECT agent_id FROM requests WHERE ts >= 20 ORDER BY ts")
+                .unwrap();
             let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
             rows.collect::<Result<_, _>>().unwrap()
         };

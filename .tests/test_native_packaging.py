@@ -91,6 +91,23 @@ class NativePackagingTests(unittest.TestCase):
             self.assertIn(bundle, installer)
         self.assertGreaterEqual(installer.count("ha-adm-native"), 5)
 
+    def test_daemon_tokens_are_rendered_before_the_first_consumer(self):
+        plays = yaml.safe_load((ROOT / "ansible/easy-ha-proxy.yml").read_text())
+        roles = [role for play in plays for role in play.get("roles", [])
+                 if isinstance(role, dict) and role.get("role") == "haproxy-admin"]
+        stages = [role.get("task_stage") for role in roles]
+        stage = stages.index("daemons_env")
+        for consumer in ("install", "daemons", "healthd", "controld", "backupd",
+                         "updated", "alertd", "metricsd", "guardd"):
+            pos = stages.index(consumer)
+            self.assertLess(stage, pos)
+            tags = roles[pos]["tags"]
+            tags = [tags] if isinstance(tags, str) else tags
+            self.assertTrue(set(tags) - {"never"} <= set(roles[stage]["tags"]))
+        tasks = yaml.safe_load((ROLE / "tasks/daemons_env.yml").read_text())
+        template = next(task["ansible.builtin.template"] for task in tasks if "ansible.builtin.template" in task)
+        self.assertEqual((template["src"], template["mode"]), ("daemons.env.j2", "0600"))
+
     def test_native_images_follow_the_configured_channel(self):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
         jinja = Environment()
@@ -157,7 +174,9 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("go-panel-image", jobs)
         self.assertIn("native-release-image", jobs)
         go_img = jobs["go-panel-image"]
-        self.assertEqual(set(go_img["needs"]), {"go-panel", "go-parity", "javascript", "secrets"})
+        self.assertEqual(set(go_img["needs"]), {"go-panel", "go-parity", "go-vulnerabilities", "javascript", "secrets"})
+        self.assertIn("go-vulnerabilities", jobs["native-release-image"]["needs"])
+        self.assertIn("rust-vulnerabilities", jobs["native-release-image"]["needs"])
         self.assertIn("go-parity", jobs["native-release-image"]["needs"])
         self.assertEqual(set(jobs["go-parity"]["needs"]), {"go-panel", "go-agent", "rust-guardd"})
         self.assertEqual(

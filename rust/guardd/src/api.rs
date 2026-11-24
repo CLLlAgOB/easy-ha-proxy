@@ -2,9 +2,10 @@
 //! `guardd.api.GuardHandler`, with the same payloads, status codes and token.
 
 use crate::constants::{
-    clamp_str, detection_host, safe_int_str, utc_now, utc_now_f, CUSTOM_CATEGORY, DECISION_FEED_SOURCES,
-    MAX_CUSTOM_RULES, MAX_TOKEN_LENGTH, QUALITY_MAX_DAYS, SIGNATURE_OVERRIDES_KEY, UNKNOWN_HOSTS_TTL,
-    WOULD_BAN_SCORE, ADAPTIVE_BAN_CODE, CANDIDATE_MIN_ADDRESSES, CANDIDATE_TTL, decision_feed_kinds,
+    clamp_str, decision_feed_kinds, detection_host, utc_now, utc_now_f, ADAPTIVE_BAN_CODE,
+    CANDIDATE_MIN_ADDRESSES, CANDIDATE_TTL, CUSTOM_CATEGORY, DECISION_FEED_SOURCES,
+    MAX_CUSTOM_RULES, MAX_TOKEN_LENGTH, QUALITY_MAX_DAYS, SIGNATURE_OVERRIDES_KEY,
+    UNKNOWN_HOSTS_TTL, WOULD_BAN_SCORE,
 };
 use crate::engine::{dismiss_candidate, dismissed_candidates, EngineError, Shared};
 use crate::live::DIGEST_BOUNDS_MS;
@@ -27,7 +28,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_HTTP_HEADER_BYTES: u64 = 32 * 1024;
-const MAX_HTTP_BODY_BYTES: usize = 131_072;
 const MAX_HTTP_CONNECTIONS: usize = 16;
 pub const REQUEST_LOG_OVERRIDE_KEY: &str = "request_log_override";
 
@@ -98,14 +98,24 @@ fn q<'a>(r: &'a Request<'_>, name: &str) -> &'a str {
 }
 
 /// Python `policy_from_query`: a what-if policy, every value clamped.
-pub fn policy_from_query(multi: &HashMap<String, Vec<String>>, base: &ScoringPolicy) -> ScoringPolicy {
+pub fn policy_from_query(
+    multi: &HashMap<String, Vec<String>>,
+    base: &ScoringPolicy,
+) -> ScoringPolicy {
     let mut weights = base.weights.clone();
     for (name, values) in multi {
-        let Some(event_type) = name.strip_prefix("w.") else { continue };
+        let Some(event_type) = name.strip_prefix("w.") else {
+            continue;
+        };
         if !crate::constants::is_weighted_event(event_type) {
             continue;
         }
-        let v = clamp_str(values.first().map(String::as_str), base.weight(event_type), 0, 100);
+        let v = clamp_str(
+            values.first().map(String::as_str),
+            base.weight(event_type),
+            0,
+            100,
+        );
         weights.insert(event_type.to_string(), v);
     }
     let one = |k: &str| multi.get(k).and_then(|v| v.first()).map(String::as_str);
@@ -137,7 +147,9 @@ pub fn validate_token(token: &str) -> Result<String, String> {
             return Err("a prefix needs at least three characters before *".into());
         }
     }
-    let re = OK.get_or_init(|| Regex::new(&format!(r"^[A-Za-z0-9._~/@:+-]{{1,{MAX_TOKEN_LENGTH}}}$")).expect("regex"));
+    let re = OK.get_or_init(|| {
+        Regex::new(&format!(r"^[A-Za-z0-9._~/@:+-]{{1,{MAX_TOKEN_LENGTH}}}$")).expect("regex")
+    });
     if !re.is_match(base) {
         return Err("a signature may hold letters, digits and . _ ~ / @ : + - only, with an optional * at the end of a segment".into());
     }
@@ -154,9 +166,16 @@ pub fn validate_overrides(data: &Value) -> Result<Value, String> {
     };
     let empty_o = Value::Object(Map::new());
     let empty_a = Value::Array(Vec::new());
-    let added_raw = obj.get("added").filter(|v| !v.is_null() && *v != &json!({}) && *v != &json!(false)).unwrap_or(&empty_o);
-    let disabled_raw = obj.get("disabled").filter(|v| !v.is_null() && *v != &json!([]) && *v != &json!(false)).unwrap_or(&empty_a);
-    let (Some(added_raw), Some(disabled_raw)) = (added_raw.as_object(), disabled_raw.as_array()) else {
+    let added_raw = obj
+        .get("added")
+        .filter(|v| !v.is_null() && *v != &json!({}) && *v != &json!(false))
+        .unwrap_or(&empty_o);
+    let disabled_raw = obj
+        .get("disabled")
+        .filter(|v| !v.is_null() && *v != &json!([]) && *v != &json!(false))
+        .unwrap_or(&empty_a);
+    let (Some(added_raw), Some(disabled_raw)) = (added_raw.as_object(), disabled_raw.as_array())
+    else {
         return Err("expected added to be an object and disabled a list".into());
     };
     if added_raw.len() > MAX_CUSTOM_RULES || disabled_raw.len() > MAX_CUSTOM_RULES {
@@ -178,7 +197,10 @@ pub fn validate_overrides(data: &Value) -> Result<Value, String> {
     }
     let mut disabled = BTreeSet::new();
     for t in disabled_raw {
-        let text = t.as_str().map(String::from).unwrap_or_else(|| t.to_string());
+        let text = t
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| t.to_string());
         disabled.insert(validate_token(&text)?);
     }
     Ok(json!({"added": added, "disabled": disabled.into_iter().collect::<Vec<_>>()}))
@@ -189,7 +211,10 @@ pub fn load_overrides(db: &crate::secdb::SecurityDatabase) -> Value {
     if raw.is_empty() {
         return json!({"added": {}, "disabled": []});
     }
-    match serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string()).and_then(|v| validate_overrides(&v)) {
+    match serde_json::from_str::<Value>(&raw)
+        .map_err(|e| e.to_string())
+        .and_then(|v| validate_overrides(&v))
+    {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[WARNING] easy-ha-proxy-guardd: stored signature overrides are unusable ({e}); ignoring");
@@ -202,12 +227,20 @@ pub fn apply_overrides(shipped: &SignatureEngine, overrides: &Value) -> Signatur
     let added: Vec<(String, String)> = overrides
         .get("added")
         .and_then(Value::as_object)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or(CUSTOM_CATEGORY).to_string())).collect())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or(CUSTOM_CATEGORY).to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     let disabled: Vec<String> = overrides
         .get("disabled")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     shipped.with_overrides(&added, &disabled)
 }
@@ -232,7 +265,11 @@ pub fn signature_summary(sigs: &SignatureEngine, overrides: &Value) -> Value {
     rules.sort();
     let mut agents = sigs.user_agents();
     agents.sort();
-    let source = if sigs.source.is_empty() { signature_path() } else { sigs.source.clone() };
+    let source = if sigs.source.is_empty() {
+        signature_path()
+    } else {
+        sigs.source.clone()
+    };
     json!({
         "version": sigs.version,
         "source": source,
@@ -251,7 +288,8 @@ pub fn signature_summary(sigs: &SignatureEngine, overrides: &Value) -> Value {
 }
 
 pub fn signature_path() -> String {
-    std::env::var("GUARDD_SIGNATURES").unwrap_or_else(|_| "/usr/local/sbin/scanner-signatures.json".into())
+    std::env::var("GUARDD_SIGNATURES")
+        .unwrap_or_else(|_| "/usr/local/sbin/scanner-signatures.json".into())
 }
 
 /// Read the shipped list, falling back to the built-ins when it is unusable.
@@ -270,7 +308,10 @@ fn current_sigs(s: &Shared) -> Arc<SignatureEngine> {
 }
 
 fn overrides_now(s: &Shared) -> Value {
-    s.overrides.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    s.overrides
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 fn rate_warnings_payload(s: &Shared, limit: i64, now: i64) -> Result<Value, String> {
@@ -298,7 +339,10 @@ fn engine_error(e: EngineError) -> (u16, Value) {
 }
 
 fn valid_ip(text: &str) -> Option<String> {
-    text.trim().parse::<std::net::IpAddr>().ok().map(|a| a.to_string())
+    text.trim()
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|a| a.to_string())
 }
 
 fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
@@ -308,7 +352,10 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
         "/api/v1/guard/health" => {
             let e = s.engine();
             match (e.health(), s.db.stats()) {
-                (Ok(h), Ok(st)) => (200, json!({"ok": true, "ts": now, "engine": h, "database": st, "storage": s.db.storage()})),
+                (Ok(h), Ok(st)) => (
+                    200,
+                    json!({"ok": true, "ts": now, "engine": h, "database": st, "storage": s.db.storage()}),
+                ),
                 (Err(x), _) | (_, Err(x)) => err(500, x),
             }
         }
@@ -316,29 +363,46 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             let since = q(r, "since").trim().parse::<i64>().unwrap_or(0);
             let mut e = s.engine();
             let minutes = e.digests.complete(since, now);
-            (200, json!({
-                "ok": true, "now": now, "bounds_ms": DIGEST_BOUNDS_MS,
-                "minutes": serde_json::to_value(minutes).unwrap_or(Value::Null),
-                "late": e.digests.late,
-            }))
+            (
+                200,
+                json!({
+                    "ok": true, "now": now, "bounds_ms": DIGEST_BOUNDS_MS,
+                    "minutes": serde_json::to_value(minutes).unwrap_or(Value::Null),
+                    "late": e.digests.late,
+                }),
+            )
         }
         "/api/v1/guard/bans/schedule" => {
             let e = s.engine();
             match s.db.scheduled_bans() {
-                Ok(b) => (200, json!({"ok": true, "now": now, "mode": e.enforcer.mode, "enforcing": e.enforcer.allowed(), "code": ADAPTIVE_BAN_CODE, "bans": b})),
+                Ok(b) => (
+                    200,
+                    json!({"ok": true, "now": now, "mode": e.enforcer.mode, "enforcing": e.enforcer.allowed(), "code": ADAPTIVE_BAN_CODE, "bans": b}),
+                ),
                 Err(x) => err(500, x),
             }
         }
         "/api/v1/guard/reputation" => {
             let e = s.engine();
             match e.reputation_table(now, 200, None) {
-                Ok(rows) => (200, json!({"ok": true, "ts": now, "mode": e.config.mode,
-                    "addresses": rows.iter().map(|r| r.to_json(false)).collect::<Vec<_>>()})),
+                Ok(rows) => (
+                    200,
+                    json!({"ok": true, "ts": now, "mode": e.config.mode,
+                    "addresses": rows.iter().map(|r| r.to_json(false)).collect::<Vec<_>>()}),
+                ),
                 Err(x) => err(500, x),
             }
         }
         "/api/v1/guard/identities" => {
-            let users = s.live.as_ref().map(|l| l.lock().unwrap_or_else(|p| p.into_inner()).identities(utc_now_f())).unwrap_or_else(|| json!({}));
+            let users = s
+                .live
+                .as_ref()
+                .map(|l| {
+                    l.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .identities(utc_now_f())
+                })
+                .unwrap_or_else(|| json!({}));
             (200, json!({"ok": true, "users_by_ip": users}))
         }
         "/api/v1/guard/live/memory" => match s.engine().live_memory() {
@@ -350,7 +414,10 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 return err(404, "the live buffer is off");
             };
             if path.ends_with("/attackers") {
-                let a = live.lock().unwrap_or_else(|p| p.into_inner()).attackers(utc_now_f(), 10);
+                let a = live
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .attackers(utc_now_f(), 10);
                 return (200, merge(json!({"ok": true}), a));
             }
             let filters = match live_filters(&r.query) {
@@ -365,13 +432,15 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             } else {
                 None
             };
-            let lag_bytes = s.engine().cursor.lag_bytes;
+            let lag_bytes = s.lag_bytes.load(Ordering::Relaxed);
             let mut b = live.lock().unwrap_or_else(|p| p.into_inner());
             match b.snapshot(&r.query, None, banned.as_ref()) {
                 Ok(result) => {
                     let status = b.status();
                     let lag_seconds = match status["newest"].as_f64() {
-                        Some(n) if n != 0.0 => json!((result["now"].as_f64().unwrap_or(0.0) - n).max(0.0) as i64),
+                        Some(n) if n != 0.0 => {
+                            json!((result["now"].as_f64().unwrap_or(0.0) - n).max(0.0) as i64)
+                        }
                         _ => Value::Null,
                     };
                     let mut out = result;
@@ -383,14 +452,26 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Err(m) => err(400, m),
             }
         }
-        "/api/v1/guard/requests" | "/api/v1/guard/requests/status" | "/api/v1/guard/requests/summary" => {
+        "/api/v1/guard/requests"
+        | "/api/v1/guard/requests/status"
+        | "/api/v1/guard/requests/summary" => {
             let store = s.requests.read().unwrap_or_else(|p| p.into_inner()).clone();
-            let memory = if store.is_none() && !path.ends_with("/status") { s.live.clone() } else { None };
+            let memory = if store.is_none() && !path.ends_with("/status") {
+                s.live.clone()
+            } else {
+                None
+            };
             if store.is_none() && memory.is_none() {
-                return (404, json!({"ok": false, "enabled": false, "error": "the request log is off"}));
+                return (
+                    404,
+                    json!({"ok": false, "enabled": false, "error": "the request log is off"}),
+                );
             }
             if path.ends_with("/status") {
-                let st = store.as_ref().map(|x| x.status()).unwrap_or_else(|| json!({}));
+                let st = store
+                    .as_ref()
+                    .map(|x| x.status())
+                    .unwrap_or_else(|| json!({}));
                 return (200, merge(json!({"ok": true, "ts": now}), st));
             }
             let mut params = r.query.clone();
@@ -410,25 +491,54 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             if path.ends_with("/summary") {
                 let payload = match &store {
                     Some(st) => st.summary(&query, crate::reqlog::REQUEST_SUMMARY_SECONDS),
-                    None => Ok(memory.as_ref().map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).summarize_requests(&query)).unwrap_or(Value::Null)),
+                    None => Ok(memory
+                        .as_ref()
+                        .map(|m| {
+                            m.lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .summarize_requests(&query)
+                        })
+                        .unwrap_or(Value::Null)),
                 };
                 return match payload {
-                    Ok(p) => (200, merge(json!({"ok": true, "enabled": store.is_some(), "ts": now}), p)),
+                    Ok(p) => (
+                        200,
+                        merge(
+                            json!({"ok": true, "enabled": store.is_some(), "ts": now}),
+                            p,
+                        ),
+                    ),
                     Err(x) => err(500, x),
                 };
             }
-            let count = !matches!(q(r, "count").trim().to_lowercase().as_str(), "0" | "false" | "no" | "off");
+            let count = !matches!(
+                q(r, "count").trim().to_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            );
             let limit = clamp_str(Some(q(r, "limit")), 100, 1, 500);
             let before = clamp_str(Some(q(r, "before")), 0, -(1i64 << 62), 1i64 << 62);
             match &store {
                 None => {
                     let p = memory
                         .as_ref()
-                        .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).search_requests(&query, before, limit, count))
+                        .map(|m| {
+                            m.lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .search_requests(&query, before, limit, count)
+                        })
                         .unwrap_or(Value::Null);
-                    (200, merge(json!({"ok": true, "enabled": false, "ts": now}), p))
+                    (
+                        200,
+                        merge(json!({"ok": true, "enabled": false, "ts": now}), p),
+                    )
                 }
-                Some(st) => match st.search(&query, before.max(0), count, limit, crate::reqlog::REQUEST_SEARCH_SECONDS) {
+                Some(st) => match st.search(
+                    &query,
+                    before.max(0),
+                    count,
+                    limit,
+                    crate::reqlog::REQUEST_SEARCH_SECONDS,
+                ) {
                     Ok(p) => (200, merge(json!({"ok": true, "ts": now}), p)),
                     Err(x) => err(500, x),
                 },
@@ -441,19 +551,42 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 v.trim().parse::<i64>().ok()
             };
             if path.ends_with("/bans") {
-                let (Some(since), Some(offset), Some(snapshot)) = (num("since", "0"), num("offset", "0"), num("snapshot", "0")) else {
+                let (Some(since), Some(offset), Some(snapshot)) =
+                    (num("since", "0"), num("offset", "0"), num("snapshot", "0"))
+                else {
                     return bad();
                 };
                 let query: String = q(r, "q").chars().take(100).collect();
-                let terms: Vec<String> = q(r, "terms").chars().take(2048).collect::<String>().split(',').map(String::from).collect();
+                let terms: Vec<String> = q(r, "terms")
+                    .chars()
+                    .take(2048)
+                    .collect::<String>()
+                    .split(',')
+                    .map(String::from)
+                    .collect();
                 let sort = r.query.get("sort").map(String::as_str).unwrap_or("ts");
-                let direction = r.query.get("direction").map(String::as_str).unwrap_or("desc");
-                match s.db.adaptive_ban_history(&query, since.max(0), sort, direction, offset.clamp(0, 1_000_000), snapshot.clamp(0, 1 << 62), 25, &terms) {
+                let direction = r
+                    .query
+                    .get("direction")
+                    .map(String::as_str)
+                    .unwrap_or("desc");
+                match s.db.adaptive_ban_history(
+                    &query,
+                    since.max(0),
+                    sort,
+                    direction,
+                    offset.clamp(0, 1_000_000),
+                    snapshot.clamp(0, 1 << 62),
+                    25,
+                    &terms,
+                ) {
                     Ok(p) => (200, merge(json!({"ok": true}), p)),
                     Err(_) => bad(),
                 }
             } else {
-                let Some(id) = num("id", "0") else { return bad() };
+                let Some(id) = num("id", "0") else {
+                    return bad();
+                };
                 let id = id.clamp(0, 1 << 62);
                 let ip = if id == 0 {
                     match valid_ip(q(r, "ip")) {
@@ -463,7 +596,9 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 } else {
                     String::new()
                 };
-                let Some(at) = num("at", "0") else { return bad() };
+                let Some(at) = num("at", "0") else {
+                    return bad();
+                };
                 match s.db.adaptive_ban_detail(id, &ip, at.max(0), 0) {
                     Ok(Some(d)) => (200, json!({"ok": true, "ban": d})),
                     Ok(None) => err(404, "This ban record is no longer available"),
@@ -472,7 +607,12 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             }
         }
         "/api/v1/guard/decisions/feed" => {
-            let kind = r.query.get("kind").map(|k| k.trim()).filter(|k| !k.is_empty()).unwrap_or("all");
+            let kind = r
+                .query
+                .get("kind")
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty())
+                .unwrap_or("all");
             let Some(actions) = decision_feed_kinds(kind) else {
                 return err(400, "kind must be all, bans or lifts");
             };
@@ -482,9 +622,16 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Ok(mut rows) => {
                     let more = rows.len() as i64 > limit;
                     rows.truncate(limit as usize);
-                    let next = if more { rows.last().and_then(|r| r["id"].as_i64()).unwrap_or(0) } else { 0 };
+                    let next = if more {
+                        rows.last().and_then(|r| r["id"].as_i64()).unwrap_or(0)
+                    } else {
+                        0
+                    };
                     let keep = s.engine().longest_strike_retention();
-                    (200, json!({"ok": true, "decisions": rows, "next": next, "sources": DECISION_FEED_SOURCES, "keep_seconds": keep}))
+                    (
+                        200,
+                        json!({"ok": true, "decisions": rows, "next": next, "sources": DECISION_FEED_SOURCES, "keep_seconds": keep}),
+                    )
                 }
                 Err(x) => err(500, x),
             }
@@ -499,7 +646,10 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Ok(rows) => {
                     let keep = s.engine().longest_strike_retention();
                     let _ = address;
-                    (200, json!({"ok": true, "ip": address_raw, "decisions": rows, "keep_seconds": keep}))
+                    (
+                        200,
+                        json!({"ok": true, "ip": address_raw, "decisions": rows, "keep_seconds": keep}),
+                    )
                 }
                 Err(x) => err(500, x),
             }
@@ -518,31 +668,43 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Err(x) => err(500, x),
             }
         }
-        "/api/v1/guard/signatures" => (200, merge(json!({"ok": true}), signature_summary(&current_sigs(s), &overrides_now(s)))),
+        "/api/v1/guard/signatures" => (
+            200,
+            merge(
+                json!({"ok": true}),
+                signature_summary(&current_sigs(s), &overrides_now(s)),
+            ),
+        ),
         "/api/v1/guard/detection-context" => (200, s.engine().detection_state()),
         "/api/v1/guard/traps" => {
             let mut e = s.engine();
             let known = !e.site_names().is_empty();
-            (200, json!({
-                "ok": true,
-                "trap_hosts": e.trap_hosts.iter().collect::<Vec<_>>(),
-                "unknown_hosts": e.unknown_hosts.listing(50),
-                "site_names_known": known,
-                "window_days": UNKNOWN_HOSTS_TTL / 86400,
-            }))
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "trap_hosts": e.trap_hosts.iter().collect::<Vec<_>>(),
+                    "unknown_hosts": e.unknown_hosts.listing(50),
+                    "site_names_known": known,
+                    "window_days": UNKNOWN_HOSTS_TTL / 86400,
+                }),
+            )
         }
         "/api/v1/guard/signatures/candidates" => {
             let dismissed: BTreeSet<String> = dismissed_candidates(&s.db).into_iter().collect();
             let set = dismissed.iter().cloned().collect();
             let sigs = current_sigs(s);
             let list = s.engine().candidates.suggestions(&set, 100, &sigs);
-            (200, json!({
-                "ok": true,
-                "candidates": list,
-                "dismissed": dismissed.into_iter().collect::<Vec<_>>(),
-                "min_addresses": CANDIDATE_MIN_ADDRESSES,
-                "window_days": CANDIDATE_TTL / 86400,
-            }))
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "candidates": list,
+                    "dismissed": dismissed.into_iter().collect::<Vec<_>>(),
+                    "min_addresses": CANDIDATE_MIN_ADDRESSES,
+                    "window_days": CANDIDATE_TTL / 86400,
+                }),
+            )
         }
         "/api/v1/guard/shadow" => {
             let e = s.engine();
@@ -568,7 +730,10 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             match e.reputation(&raw, now, Some(&policy), None) {
                 Ok(rep) => {
                     let mut p = rep.to_json(true);
-                    p["events"] = json!(s.db.events_for_json(&raw, now - policy.window_seconds, 200).unwrap_or_default());
+                    p["events"] = json!(s
+                        .db
+                        .events_for_json(&raw, now - policy.window_seconds, 200)
+                        .unwrap_or_default());
                     p["ok"] = json!(true);
                     (200, p)
                 }
@@ -597,7 +762,9 @@ fn set_request_log(s: &Shared, enabled: bool) -> Result<Value, String> {
     } else if !enabled {
         if let Some(store) = slot.take() {
             store.flush(utc_now());
-            eprintln!("[WARNING] easy-ha-proxy-guardd: Request log disabled from the web interface");
+            eprintln!(
+                "[WARNING] easy-ha-proxy-guardd: Request log disabled from the web interface"
+            );
         }
     }
     Ok(json!({"enabled": slot.is_some(), "configured": s.config.request_log_enabled}))
@@ -610,25 +777,39 @@ fn exactly_enabled(payload: &Value) -> Result<Value, (u16, Value)> {
     }
 }
 
+fn post_body_limit(s: &Shared, path: &str, token: &str) -> Result<i64, (u16, Value)> {
+    let max = match path {
+        "/api/v1/guard/live/memory"
+        | "/api/v1/guard/first-step-page"
+        | "/api/v1/guard/shield"
+        | "/api/v1/guard/ban/manual"
+        | "/api/v1/guard/ban/forget" => 1024,
+        "/api/v1/guard/requests/enabled"
+        | "/api/v1/guard/signatures/candidates/dismiss"
+        | "/api/v1/guard/ban-durations"
+        | "/api/v1/guard/mode" => 4096,
+        "/api/v1/guard/detection-preview" => 8192,
+        "/api/v1/guard/traps" => 16_384,
+        "/api/v1/guard/signatures" => 65_536,
+        "/api/v1/guard/detection-context" => 131_072,
+        _ => return Err(err(404, "not found")),
+    };
+    if s.token.is_empty() || !constant_time_eq(token.trim(), &s.token) {
+        return Err(err(403, "forbidden"));
+    }
+    Ok(max)
+}
+
 fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
     let path = r.path.as_str();
-    let routes = [
-        "/api/v1/guard/requests/enabled", "/api/v1/guard/live/memory", "/api/v1/guard/first-step-page",
-        "/api/v1/guard/shield", "/api/v1/guard/traps", "/api/v1/guard/detection-context",
-        "/api/v1/guard/detection-preview", "/api/v1/guard/signatures/candidates/dismiss",
-        "/api/v1/guard/signatures", "/api/v1/guard/ban-durations", "/api/v1/guard/ban/manual",
-        "/api/v1/guard/ban/forget", "/api/v1/guard/mode",
-    ];
-    if !routes.contains(&path) {
-        return err(404, "not found");
-    }
-    if s.token.is_empty() || !constant_time_eq(r.token.trim(), &s.token) {
-        return err(403, "forbidden");
-    }
-    let body = |max: i64| read_payload(r, max);
+    let max = match post_body_limit(s, path, &r.token) {
+        Ok(max) => max,
+        Err(e) => return e,
+    };
+    let body = || read_payload(r, max);
     match path {
         "/api/v1/guard/requests/enabled" => {
-            let p = match body(4096) {
+            let p = match body() {
                 Ok(p) if p.is_object() => p,
                 Ok(_) => return err(400, "expected an object"),
                 Err(e) => return e,
@@ -647,7 +828,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             }
         }
         "/api/v1/guard/live/memory" => {
-            let p = match body(1024) {
+            let p = match body() {
                 Ok(p) if p.is_object() => p,
                 Ok(_) => return err(400, "expected an object"),
                 Err(e) => return e,
@@ -657,13 +838,16 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Ok(v) => (200, merge(json!({"ok": true}), v)),
                 Err(EngineError::Conflict(m)) => {
                     let current = e.live_memory().unwrap_or_else(|_| json!({}));
-                    (409, merge(json!({"ok": false, "error": m, "conflict": true}), current))
+                    (
+                        409,
+                        merge(json!({"ok": false, "error": m, "conflict": true}), current),
+                    )
                 }
                 Err(x) => engine_error(x),
             }
         }
         "/api/v1/guard/first-step-page" => {
-            let enabled = match body(1024).and_then(|p| exactly_enabled(&p)) {
+            let enabled = match body().and_then(|p| exactly_enabled(&p)) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
@@ -673,7 +857,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             }
         }
         "/api/v1/guard/shield" => {
-            let enabled = match body(1024).and_then(|p| exactly_enabled(&p)) {
+            let enabled = match body().and_then(|p| exactly_enabled(&p)) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
@@ -683,19 +867,21 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             }
         }
         "/api/v1/guard/traps" => {
-            let p = match body(16384) {
+            let p = match body() {
                 Ok(p) => p,
                 Err(e) => return e,
             };
-            match s.engine().set_trap_hosts(p.get("hosts").unwrap_or(&Value::Null)) {
+            match s
+                .engine()
+                .set_trap_hosts(p.get("hosts").unwrap_or(&Value::Null))
+            {
                 Ok(h) => (200, json!({"ok": true, "trap_hosts": h})),
                 Err(x) => engine_error(x),
             }
         }
         "/api/v1/guard/detection-context" | "/api/v1/guard/detection-preview" => {
             let preview = path.ends_with("preview");
-            let max = if preview { 8192 } else { 131_072 };
-            let p = match body(max) {
+            let p = match body() {
                 Ok(p) => p,
                 Err(_) if preview => return err(400, "invalid request fields"),
                 Err(e) => return e,
@@ -706,7 +892,13 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 let policy = e.scoring_policy();
                 let mode = e.enforcer.mode.clone();
                 let engine = &mut *e;
-                let result = engine.detection.preview(&p, &engine.sink.exclusions, utc_now(), Some(&policy), &sigs);
+                let result = engine.detection.preview(
+                    &p,
+                    &engine.sink.exclusions,
+                    utc_now(),
+                    Some(&policy),
+                    &sigs,
+                );
                 match result {
                     Ok(mut v) => {
                         v["active_mode"] = json!(mode);
@@ -718,17 +910,27 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 let db = s.db.clone();
                 match e.detection.replace(&p, &db, &sigs) {
                     Ok(()) => (200, e.detection_state()),
-                    Err(m) if m.contains("database") || m.contains("disk") => err(503, "detection storage unavailable"),
+                    Err(m) if m.contains("database") || m.contains("disk") => {
+                        err(503, "detection storage unavailable")
+                    }
                     Err(m) => err(400, m),
                 }
             }
         }
         "/api/v1/guard/signatures/candidates/dismiss" => {
-            let p = match body(4096) {
+            let p = match body() {
                 Ok(p) => p,
                 Err(e) => return e,
             };
-            let text = |k: &str| p.get(k).map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
+            let text = |k: &str| {
+                p.get(k)
+                    .map(|v| {
+                        v.as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| v.to_string())
+                    })
+                    .unwrap_or_default()
+            };
             let restore = p.get("restore").is_some_and(|v| match v {
                 Value::Bool(b) => *b,
                 Value::Null => false,
@@ -742,7 +944,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
             }
         }
         "/api/v1/guard/signatures" => {
-            let p = match body(65536) {
+            let p = match body() {
                 Ok(p) => p,
                 Err(e) => return e,
             };
@@ -750,45 +952,70 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Ok(c) => c,
                 Err(m) => return err(400, m),
             };
-            if let Err(x) = s.db.set_state(SIGNATURE_OVERRIDES_KEY, &crate::secdb::python_json(&checked)) {
+            let mut shipped = s.shipped.lock().unwrap_or_else(|p| p.into_inner());
+            if let Err(x) = s.db.set_state(
+                SIGNATURE_OVERRIDES_KEY,
+                &crate::secdb::python_json(&checked),
+            ) {
                 return err(500, x);
             }
             let path = signature_path();
-            let shipped = load_shipped_signatures(&path);
+            if let Ok(current) = SignatureEngine::from_file(&path) {
+                *shipped = Arc::new(current);
+            }
             let merged = Arc::new(apply_overrides(&shipped, &checked));
-            *s.shipped.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(shipped);
             *s.sigs.write().unwrap_or_else(|p| p.into_inner()) = merged.clone();
             *s.overrides.lock().unwrap_or_else(|p| p.into_inner()) = checked.clone();
-            (200, merge(json!({"ok": true}), signature_summary(&merged, &checked)))
+            (
+                200,
+                merge(json!({"ok": true}), signature_summary(&merged, &checked)),
+            )
         }
         "/api/v1/guard/ban-durations" => {
-            let p = match body(4096) {
+            let p = match body() {
                 Ok(p) => p,
                 Err(e) => return e,
             };
-            match s.engine().set_ban_durations(p.get("durations").unwrap_or(&Value::Null)) {
+            match s
+                .engine()
+                .set_ban_durations(p.get("durations").unwrap_or(&Value::Null))
+            {
                 Ok(steps) => (200, json!({"ok": true, "ban_durations_seconds": steps})),
                 Err(x) => engine_error(x),
             }
         }
         "/api/v1/guard/ban/manual" => {
-            let p = match body(1024) {
+            let p = match body() {
                 Ok(p) if p.is_object() => p,
                 Ok(_) => return err(400, "expected an object"),
                 Err(e) => return e,
             };
-            let ip = p.get("ip").map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
+            let ip = p
+                .get("ip")
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_default();
             match s.engine().place_manual_ban(&ip, None) {
                 Ok(v) => (200, v),
                 Err(x) => engine_error(x),
             }
         }
         "/api/v1/guard/ban/forget" => {
-            let p = match body(1024) {
+            let p = match body() {
                 Ok(p) => p,
                 Err(e) => return e,
             };
-            let ip = p.get("ip").map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
+            let ip = p
+                .get("ip")
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_default();
             match s.engine().forget_ban(&ip, None) {
                 Ok(v) => (200, v),
                 Err(x) => engine_error(x),
@@ -796,14 +1023,21 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
         }
         _ => {
             let length = r.content_length.unwrap_or(0);
-            if length <= 0 || length > 4096 {
+            if length <= 0 || length > max {
                 return err(400, "invalid Content-Length");
             }
             let p: Value = match serde_json::from_slice(r.body) {
                 Ok(p) => p,
                 Err(e) => return err(400, format!("bad json: {e}")),
             };
-            let mode = p.get("mode").map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
+            let mode = p
+                .get("mode")
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_default();
             match s.engine().set_mode(&mode, None) {
                 Ok(v) => (200, ok(v)),
                 Err(x) => engine_error(x),
@@ -824,17 +1058,28 @@ pub fn dispatch(s: &Shared, r: &Request<'_>) -> (u16, Value) {
 struct DeadlineReader {
     stream: UnixStream,
     deadline: Instant,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
 impl Read for DeadlineReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
+        loop {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || self.stop.load(Ordering::Relaxed) {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            self.stream
+                .set_read_timeout(Some(remaining.min(Duration::from_millis(200))))?;
+            match self.stream.read(buffer) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                result => return result,
+            }
         }
-        self.stream.set_read_timeout(Some(remaining))?;
-        self.stream.read(buffer)
     }
 }
 
@@ -886,6 +1131,7 @@ fn handle_client(stream: UnixStream, shared: Arc<Shared>) {
     let mut reader = BufReader::new(DeadlineReader {
         stream,
         deadline: Instant::now() + timeout,
+        stop: shared.stop.clone(),
     });
     let mut remaining = MAX_HTTP_HEADER_BYTES;
     let mut line = String::new();
@@ -893,7 +1139,9 @@ fn handle_client(stream: UnixStream, shared: Arc<Shared>) {
         return;
     }
     let mut parts = line.split_whitespace();
-    let (Some(method), Some(target)) = (parts.next(), parts.next()) else { return };
+    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+        return;
+    };
     let method = method.to_string();
     let target = target.to_string();
     let mut content_length: Option<i64> = None;
@@ -908,24 +1156,67 @@ fn handle_client(stream: UnixStream, shared: Arc<Shared>) {
         }
         if let Some((k, v)) = trimmed.split_once(':') {
             if k.eq_ignore_ascii_case("content-length") {
-                content_length = Some(safe_int_str(v));
+                let value = v.trim();
+                let length = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|_| value.bytes().all(|b| b.is_ascii_digit()));
+                if content_length.is_some() || length.is_none() {
+                    write_response(&mut writer, err(400, "invalid Content-Length"));
+                    return;
+                }
+                content_length = length;
+            } else if k.eq_ignore_ascii_case("transfer-encoding") {
+                write_response(&mut writer, err(400, "unsupported Transfer-Encoding"));
+                return;
             } else if k.eq_ignore_ascii_case("x-guardd-token") {
                 token = v.trim().to_string();
             }
         }
     }
-    let wanted = content_length.unwrap_or(0).clamp(0, MAX_HTTP_BODY_BYTES as i64) as usize;
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let wanted = if method == "POST" {
+        let limit = match post_body_limit(&shared, path, &token) {
+            Ok(limit) => limit,
+            Err(e) => {
+                write_response(&mut writer, e);
+                return;
+            }
+        };
+        match content_length {
+            Some(n) if n > 0 && n <= limit => n as usize,
+            _ => {
+                let message = if path == "/api/v1/guard/detection-preview" {
+                    "invalid request fields"
+                } else {
+                    "invalid Content-Length"
+                };
+                write_response(&mut writer, err(400, message));
+                return;
+            }
+        }
+    } else {
+        0
+    };
     let mut body = vec![0u8; wanted];
     if wanted > 0 && reader.read_exact(&mut body).is_err() {
         return;
     }
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.clone(), String::new()),
+    let (first, multi) = parse_query(query);
+    let request = Request {
+        method: &method,
+        path: path.to_string(),
+        query: first,
+        query_multi: multi,
+        token,
+        content_length,
+        body: &body,
     };
-    let (first, multi) = parse_query(&query);
-    let request = Request { method: &method, path, query: first, query_multi: multi, token, content_length, body: &body };
-    let (code, payload) = dispatch(&shared, &request);
+    write_response(&mut writer, dispatch(&shared, &request));
+}
+
+#[cfg(unix)]
+fn write_response(writer: &mut UnixStream, (code, payload): (u16, Value)) {
     let reason = match code {
         200 => "OK",
         400 => "Bad Request",
@@ -949,61 +1240,146 @@ fn handle_client(stream: UnixStream, shared: Arc<Shared>) {
 /// Serve the API until `shared.stop` is set.
 #[cfg(unix)]
 pub fn serve(socket_path: &str, shared: Arc<Shared>) -> Result<(), String> {
-    let _ = std::fs::remove_file(socket_path);
-    if let Some(parent) = std::path::Path::new(socket_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let listener = UnixListener::bind(socket_path).map_err(|e| format!("bind {socket_path}: {e}"))?;
-    set_socket_perms(socket_path);
-    listener.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
+    let listener = bind_socket(socket_path).map_err(|e| format!("bind {socket_path}: {e}"))?;
     let active = Arc::new(AtomicUsize::new(0));
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     while !shared.stop.load(Ordering::SeqCst) {
+        let mut i = 0;
+        while i < workers.len() {
+            if workers[i].is_finished() {
+                let _ = workers.swap_remove(i).join();
+            } else {
+                i += 1;
+            }
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 let Some(slot) = ConnectionSlot::acquire(&active) else {
+                    std::thread::sleep(Duration::from_millis(25));
                     continue;
                 };
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
                 let st = shared.clone();
-                if let Err(err) = std::thread::Builder::new().spawn(move || {
+                match std::thread::Builder::new().spawn(move || {
                     let _slot = slot;
                     handle_client(stream, st);
                 }) {
-                    eprintln!("[WARNING] easy-ha-proxy-guardd: cannot start API worker: {err}");
+                    Ok(worker) => workers.push(worker),
+                    Err(err) => {
+                        eprintln!("[WARNING] easy-ha-proxy-guardd: cannot start API worker: {err}")
+                    }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(25)),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25))
+            }
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
+    drop(listener);
     let _ = std::fs::remove_file(socket_path);
+    for worker in workers {
+        if worker.join().is_err() {
+            eprintln!("[WARNING] easy-ha-proxy-guardd: API worker panicked");
+        }
+    }
     Ok(())
 }
 
-/// root:hadmin 0660, like the Python daemon.
 #[cfg(unix)]
-fn set_socket_perms(socket_path: &str) {
-    use std::ffi::CString;
-    use std::os::unix::fs::PermissionsExt;
-    let group = std::env::var("GUARDD_SOCKET_GROUP").unwrap_or_else(|_| "hadmin".into());
-    if let (Ok(cpath), Ok(cgroup)) = (CString::new(socket_path), CString::new(group.clone())) {
-        // SAFETY: getgrnam returns a pointer into static storage or null.
-        let gr = unsafe { libc::getgrnam(cgroup.as_ptr()) };
-        if gr.is_null() {
-            eprintln!("[WARNING] easy-ha-proxy-guardd: Failed to set socket permissions: no group {group}");
-        } else {
-            let gid = unsafe { (*gr).gr_gid };
-            if unsafe { libc::chown(cpath.as_ptr(), 0, gid) } != 0 {
-                eprintln!("[WARNING] easy-ha-proxy-guardd: Failed to set socket permissions: chown failed");
-            }
+fn bind_socket(socket_path: &str) -> io::Result<UnixListener> {
+    use std::ffi::{CStr, CString, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::path::Path;
+
+    let path = Path::new(socket_path);
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(info) if info.file_type().is_socket() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "socket path is not a socket",
+            ))
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
-    let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660));
+    let group = std::env::var("GUARDD_SOCKET_GROUP").unwrap_or_else(|_| "hadmin".into());
+    let gid = socket_gid(&group)?;
+
+    // Bind in a private directory, then publish the configured socket in one rename.
+    let mut template =
+        CString::new(parent.join(".gXXXXXX").as_os_str().as_bytes())?.into_bytes_with_nul();
+    let directory = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+    if directory.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: mkdtemp returned the supplied, NUL-terminated buffer.
+    let directory = Path::new(OsStr::from_bytes(
+        unsafe { CStr::from_ptr(directory) }.to_bytes(),
+    ));
+    let staged = directory.join("s");
+    let result = (|| {
+        let listener = UnixListener::bind(&staged)?;
+        listener.set_nonblocking(true)?;
+        // Keep the identity of the running user for unprivileged use.
+        std::os::unix::fs::chown(&staged, None, Some(gid))?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o660))?;
+        std::fs::rename(&staged, path)?;
+        Ok(listener)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    let _ = std::fs::remove_dir(directory);
+    result
 }
 
-pub fn request_log_wanted(db: &crate::secdb::SecurityDatabase, config: &crate::runtime::GuardConfig) -> bool {
+#[cfg(unix)]
+fn socket_gid(group: &str) -> io::Result<libc::gid_t> {
+    let name = std::ffi::CString::new(group)?;
+    let mut entry = std::mem::MaybeUninit::<libc::group>::uninit();
+    let mut found = std::ptr::null_mut();
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        // SAFETY: all output buffers are writable and stay alive through the call.
+        let status = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+        } else if status != 0 {
+            return Err(io::Error::from_raw_os_error(status));
+        } else if found.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("unknown socket group {group}"),
+            ));
+        } else {
+            // SAFETY: successful lookup initialized entry.
+            return Ok(unsafe { entry.assume_init() }.gr_gid);
+        }
+    }
+}
+
+pub fn request_log_wanted(
+    db: &crate::secdb::SecurityDatabase,
+    config: &crate::runtime::GuardConfig,
+) -> bool {
     match db.get_state(REQUEST_LOG_OVERRIDE_KEY, "").as_str() {
         "on" => true,
         "off" => false,
@@ -1053,7 +1429,10 @@ mod tests {
         assert!(validate_token("/").is_err());
         assert!(validate_token("ab*").is_err());
         assert_eq!(validate_token(" .env* ").unwrap(), ".env*");
-        let v = validate_overrides(&json!({"added": {"/secret": "custom", "wp-x": ""}, "disabled": ["b", "a"]})).unwrap();
+        let v = validate_overrides(
+            &json!({"added": {"/secret": "custom", "wp-x": ""}, "disabled": ["b", "a"]}),
+        )
+        .unwrap();
         assert_eq!(v["added"]["wp-x"], "custom");
         assert_eq!(v["disabled"], json!(["a", "b"]));
         assert!(validate_overrides(&json!({"added": {"x": "Bad Cat"}})).is_err());

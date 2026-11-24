@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -143,14 +144,9 @@ func (u *Usersd) loadUsersData() (*pyyaml.Map, *pyyaml.Map, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, nil, valueErr("users file is not a regular file: %s", path)
 	}
-	raw := make([]byte, 0, fi.Size()+1)
-	buf := make([]byte, 65536)
-	for len(raw) <= usersMaxFile {
-		n, err := f.Read(buf)
-		raw = append(raw, buf[:n]...)
-		if err != nil {
-			break
-		}
+	raw, err := io.ReadAll(io.LimitReader(f, usersMaxFile+1))
+	if err != nil {
+		return nil, nil, err
 	}
 	if len(raw) > usersMaxFile {
 		return nil, nil, valueErr("users file exceeds allowed size: %s", path)

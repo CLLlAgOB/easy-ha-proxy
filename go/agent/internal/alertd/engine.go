@@ -85,8 +85,7 @@ func (e *Engine) RunLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.Sweep()
-			if err := e.store.TakeErr(); err != nil {
+			if _, err := e.Sweep(); err != nil {
 				log.Printf("alert sweep could not update the database: %v", err)
 			}
 			now := e.now()
@@ -146,34 +145,33 @@ func (e *Engine) Observe(ctx context.Context, payload map[string]any) (map[strin
 		return nil, invalidErr("the recipient is not a valid email address")
 	}
 
+	store := e.store.operation()
 	if retired, _ := payload["retired"].(bool); retired && rule.Kind == KindLevel {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		_ = e.store.TakeErr()
-		res := e.retireLocked(rule, subject, summary)
-		if err := e.store.TakeErr(); err != nil {
+		res := e.retireLocked(store, rule, subject, summary)
+		if err := store.TakeErr(); err != nil {
 			return nil, err
 		}
 		return res, nil
 	}
 
-	_ = e.store.TakeErr()
-	res := e.apply(ctx, rule, subject, active, severity, summary, detail, overrideDelay, recipient)
+	res := e.apply(ctx, store, rule, subject, active, severity, summary, detail, overrideDelay, recipient)
 	// The observation was not recorded: say so, as the Python daemon's 500
 	// does, rather than let the producer believe it was.
-	if err := e.store.TakeErr(); err != nil {
+	if err := store.TakeErr(); err != nil {
 		return nil, err
 	}
 	return res, nil
 }
 
-func (e *Engine) retireLocked(rule Rule, subject, summary string) map[string]any {
-	row, ok := e.store.GetState(rule.Name, subject)
+func (e *Engine) retireLocked(store *Store, rule Rule, subject, summary string) map[string]any {
+	row, ok := store.GetState(rule.Name, subject)
 	if !ok || row.State == StateOK {
 		return map[string]any{"rule": rule.Name, "subject": subject, "state": StateOK}
 	}
-	e.store.DropState(rule.Name, subject)
-	e.store.AddEvent(AlertEvent{
+	store.DropState(rule.Name, subject)
+	store.AddEvent(AlertEvent{
 		TS:         e.now(),
 		Rule:       rule.Name,
 		Subject:    subject,
@@ -199,6 +197,7 @@ type preparedDelivery struct {
 
 func (e *Engine) apply(
 	ctx context.Context,
+	store *Store,
 	rule Rule,
 	subject string,
 	active bool,
@@ -220,7 +219,7 @@ func (e *Engine) apply(
 	if overrideDelay != nil {
 		delay = *overrideDelay
 	}
-	row, hasRow := e.store.GetState(rule.Name, subject)
+	row, hasRow := store.GetState(rule.Name, subject)
 	state = StateOK
 	since := now
 	firstSeen := now
@@ -261,7 +260,7 @@ func (e *Engine) apply(
 		}
 	}
 
-	e.store.PutState(AlertState{
+	store.PutState(AlertState{
 		Rule:           rule.Name,
 		Subject:        subject,
 		State:          state,
@@ -278,7 +277,7 @@ func (e *Engine) apply(
 	})
 
 	if state == StateOK && hasRow && row.AcknowledgedTS > 0 {
-		e.store.ClearAcknowledgement(rule.Name, subject)
+		store.ClearAcknowledgement(rule.Name, subject)
 	}
 
 	result := map[string]any{
@@ -290,21 +289,21 @@ func (e *Engine) apply(
 		e.mu.Unlock()
 		return result
 	}
-	pending = e.prepareNotifyLocked(rule, subject, transition, severity, summary, detail, now)
+	pending = e.prepareNotifyLocked(store, rule, subject, transition, severity, summary, detail, now)
 	e.mu.Unlock()
 
 	notified := false
-	if pending != nil {
+	if pending != nil && store.err == nil {
 		// Perform channel I/O outside e.mu so slow SMTP/webhook calls never stall other producers.
 		delivered, errs := e.Deliver(ctx, pending.mailSubject, pending.body, recipient)
 		notified = len(delivered) > 0
 		e.mu.Lock()
-		e.store.SetDelivery(pending.eventID, strings.Join(delivered, ","), strings.Join(errs, "; "))
+		store.SetDelivery(pending.eventID, strings.Join(delivered, ","), strings.Join(errs, "; "))
 		if notified {
-			if cur, ok := e.store.GetState(rule.Name, subject); ok {
+			if cur, ok := store.GetState(rule.Name, subject); ok {
 				cur.LastNotifiedTS = now
 				cur.NotifyCount++
-				e.store.PutState(cur)
+				store.PutState(cur)
 			}
 		}
 		e.mu.Unlock()
@@ -328,8 +327,8 @@ func (e *Engine) shouldNotifyLocked(rule Rule, severity string) (bool, string) {
 	return true, ""
 }
 
-func (e *Engine) quietReasonLocked(rule Rule, subject, transition string, now int64) string {
-	row, ok := e.store.GetState(rule.Name, subject)
+func (e *Engine) quietReasonLocked(store *Store, rule Rule, subject, transition string, now int64) string {
+	row, ok := store.GetState(rule.Name, subject)
 	if !ok {
 		return ""
 	}
@@ -342,10 +341,10 @@ func (e *Engine) quietReasonLocked(rule Rule, subject, transition string, now in
 	return ""
 }
 
-func (e *Engine) prepareNotifyLocked(rule Rule, subject, transition, severity, summary, detail string, now int64) *preparedDelivery {
+func (e *Engine) prepareNotifyLocked(store *Store, rule Rule, subject, transition, severity, summary, detail string, now int64) *preparedDelivery {
 	allowed, reason := e.shouldNotifyLocked(rule, severity)
 	if allowed {
-		if quiet := e.quietReasonLocked(rule, subject, transition, now); quiet != "" {
+		if quiet := e.quietReasonLocked(store, rule, subject, transition, now); quiet != "" {
 			allowed, reason = false, quiet
 		}
 	}
@@ -353,12 +352,12 @@ func (e *Engine) prepareNotifyLocked(rule Rule, subject, transition, severity, s
 		allowed, reason = false, "information: no message when it ends"
 	}
 	if allowed && transition == TransitionRecovered {
-		if row, ok := e.store.GetState(rule.Name, subject); ok && row.NotifyCount == 0 {
+		if row, ok := store.GetState(rule.Name, subject); ok && row.NotifyCount == 0 {
 			allowed, reason = false, "no notification was delivered for this incident"
 		}
 	}
 	if !allowed {
-		e.store.AddEvent(AlertEvent{
+		store.AddEvent(AlertEvent{
 			TS:            now,
 			Rule:          rule.Name,
 			Subject:       subject,
@@ -371,9 +370,9 @@ func (e *Engine) prepareNotifyLocked(rule Rule, subject, transition, severity, s
 		return nil
 	}
 
-	recent := e.store.NotificationsSince(now - StormWindowSeconds)
+	recent := store.NotificationsSince(now - StormWindowSeconds)
 	if transition != TransitionRecovered && recent >= StormMaxNotifications {
-		e.store.AddEvent(AlertEvent{
+		store.AddEvent(AlertEvent{
 			TS:         now,
 			Rule:       rule.Name,
 			Subject:    subject,
@@ -389,7 +388,7 @@ func (e *Engine) prepareNotifyLocked(rule Rule, subject, transition, severity, s
 		return nil
 	}
 
-	eventID := e.store.AddEvent(AlertEvent{
+	eventID := store.AddEvent(AlertEvent{
 		TS:         now,
 		Rule:       rule.Name,
 		Subject:    subject,
@@ -474,22 +473,23 @@ func (e *Engine) Render(rule Rule, subject, transition, severity, summary, detai
 }
 
 // Sweep marks stale firing levels, closes expired stale alerts, clears aged events, and prunes hourly.
-func (e *Engine) Sweep() map[string]int {
+func (e *Engine) Sweep() (map[string]int, error) {
+	store := e.store.operation()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
 	stale, expired, cleared := 0, 0, 0
 
-	for _, row := range e.store.OpenStates() {
+	for _, row := range store.OpenStates() {
 		rule, ok := RulesByName[row.Rule]
 		if !ok {
-			e.store.DropState(row.Rule, row.Subject)
+			store.DropState(row.Rule, row.Subject)
 			continue
 		}
 		age := now - row.LastSeenTS
 		if rule.Kind == KindEvent {
 			if age >= int64(rule.AutoClear) {
-				e.store.DropState(rule.Name, row.Subject)
+				store.DropState(rule.Name, row.Subject)
 				cleared++
 			}
 			continue
@@ -498,13 +498,13 @@ func (e *Engine) Sweep() map[string]int {
 			continue
 		}
 		if row.State != StateFiring {
-			e.store.DropState(rule.Name, row.Subject)
+			store.DropState(rule.Name, row.Subject)
 			cleared++
 			continue
 		}
 		if row.StaleSinceTS == 0 {
-			e.store.MarkStale(rule.Name, row.Subject, now)
-			e.store.AddEvent(AlertEvent{
+			store.MarkStale(rule.Name, row.Subject, now)
+			store.AddEvent(AlertEvent{
 				TS:         now,
 				Rule:       rule.Name,
 				Subject:    row.Subject,
@@ -518,8 +518,8 @@ func (e *Engine) Sweep() map[string]int {
 			})
 			stale++
 		} else if now-row.StaleSinceTS >= StaleCloseAfter {
-			e.store.DropState(rule.Name, row.Subject)
-			e.store.AddEvent(AlertEvent{
+			store.DropState(rule.Name, row.Subject)
+			store.AddEvent(AlertEvent{
 				TS:         now,
 				Rule:       rule.Name,
 				Subject:    row.Subject,
@@ -536,9 +536,9 @@ func (e *Engine) Sweep() map[string]int {
 	}
 	if now-e.lastPrune >= 3600 {
 		e.lastPrune = now
-		e.store.Prune(now)
+		store.Prune(now)
 	}
-	return map[string]int{"stale": stale, "expired": expired, "cleared": cleared}
+	return map[string]int{"stale": stale, "expired": expired, "cleared": cleared}, store.TakeErr()
 }
 
 // Quieten acknowledges, mutes, or clears quiet state for an alert.
@@ -598,9 +598,9 @@ func (e *Engine) Dismiss(payload map[string]any) (map[string]any, error) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_ = e.store.TakeErr()
-	row, exists := e.store.GetState(rule.Name, subject)
-	if err := e.store.TakeErr(); err != nil {
+	store := e.store.operation()
+	row, exists := store.GetState(rule.Name, subject)
+	if err := store.TakeErr(); err != nil {
 		return nil, err
 	}
 	if !exists {
@@ -609,12 +609,12 @@ func (e *Engine) Dismiss(payload map[string]any) (map[string]any, error) {
 	if rule.Kind != KindEvent && row.StaleSinceTS <= 0 {
 		return nil, invalidErr("a condition that still holds cannot be dismissed; mute it instead")
 	}
-	e.store.DropState(rule.Name, subject)
+	store.DropState(rule.Name, subject)
 	detail := "dismissed"
 	if actor != "" {
 		detail = "dismissed by " + actor
 	}
-	e.store.AddEvent(AlertEvent{
+	store.AddEvent(AlertEvent{
 		TS:         now,
 		Rule:       rule.Name,
 		Subject:    subject,
@@ -623,7 +623,7 @@ func (e *Engine) Dismiss(payload map[string]any) (map[string]any, error) {
 		Summary:    row.Summary,
 		Detail:     detail,
 	})
-	if err := e.store.TakeErr(); err != nil {
+	if err := store.TakeErr(); err != nil {
 		return nil, err
 	}
 	return map[string]any{"rule": rule.Name, "subject": subject, "dismissed": true}, nil

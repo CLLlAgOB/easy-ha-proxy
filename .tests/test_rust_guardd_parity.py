@@ -9,13 +9,17 @@ access-log fixtures and adversarial edge cases.
 from __future__ import annotations
 
 import ctypes
+from contextlib import ExitStack
 import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -208,6 +212,85 @@ def _py_parsed_dict(req) -> dict | None:
 
 
 class RustGuarddParityTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux Unix sockets")
+    def test_daemon_drains_an_active_request_on_sigterm(self):
+        import grp
+
+        rust = _find_rust_bin()
+        if rust is None:
+            self.skipTest("guardd-core binary was not built")
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            runtime = root / "runtime.sock"
+            api = root / "api.sock"
+            log = root / "access.log"
+            log.touch()
+            config = root / "guard.json"
+            config.write_text(json.dumps({
+                "mode": "monitor",
+                "sources": {"haproxy_socket": str(runtime), "log_file": str(log)},
+            }), encoding="utf-8")
+            listener = stack.enter_context(socket.socket(socket.AF_UNIX))
+            listener.settimeout(6)
+            listener.bind(str(runtime))
+            listener.listen()
+            with subprocess.Popen(
+                [str(rust), "serve", "--config", str(config), "--socket", str(api),
+                 "--database", str(root / "security.db"), "--signatures", str(SIGNATURES_PATH)],
+                env={**os.environ, "GUARDD_SOCKET_GROUP": grp.getgrgid(os.getegid()).gr_name,
+                     "GUARDD_TOKEN": "local-test-token", "ALERTD_TOKEN": ""},
+                stderr=subprocess.DEVNULL,
+            ) as daemon:
+                try:
+                    poll, _ = listener.accept()
+                    stack.enter_context(poll)
+                    poll.settimeout(3)
+                    self.assertEqual(poll.recv(256).strip(), b"show table")
+                    deadline = time.monotonic() + 6
+                    while not api.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertEqual(stat.S_IMODE(api.stat().st_mode), 0o660)
+
+                    def connect():
+                        stream = stack.enter_context(socket.socket(socket.AF_UNIX))
+                        stream.settimeout(2)
+                        stream.connect(str(api))
+                        return stream
+
+                    health = connect()
+                    health.sendall(b"GET /api/v1/guard/health HTTP/1.0\r\n\r\n")
+                    self.assertIn(b"200 OK", health.recv(256))
+
+                    bad = connect()
+                    bad.sendall(b"POST /api/v1/guard/mode HTTP/1.0\r\nContent-Length: 5\r\n\r\n")
+                    self.assertIn(b"403 Forbidden", bad.recv(256))
+
+                    idle = connect()
+                    idle.sendall(b"GET ")
+                    active = connect()
+                    active.sendall(b"GET /api/v1/guard/live?banned=1 HTTP/1.0\r\n\r\n")
+                    reply, _ = listener.accept()
+                    stack.enter_context(reply)
+                    reply.settimeout(3)
+                    self.assertEqual(reply.recv(256).strip(), b"show table tbl_ban")
+
+                    daemon.terminate()
+                    deadline = time.monotonic() + 3
+                    while api.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertFalse(api.exists())
+                    poll.close()
+                    self.assertIsNone(daemon.poll())
+                    reply.sendall(b"# table: tbl_ban, type: ip, size:1024, used:0\n")
+                    reply.close()
+                    self.assertIn(b"200 OK", active.recv(256))
+                    self.assertEqual(idle.recv(16), b"")
+                    self.assertEqual(daemon.wait(timeout=3), 0)
+                finally:
+                    if daemon.poll() is None:
+                        daemon.kill()
+
     def test_cli_parse_matches_python_field_for_field(self) -> None:
         rust_bin = _find_rust_bin()
         if rust_bin is None:

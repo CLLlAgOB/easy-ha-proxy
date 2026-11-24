@@ -1,7 +1,9 @@
 //! `guardd-core serve`: the daemon (Python `guardd.api.main`).
 
 use guardd_core::alerts::AlertClient;
-use guardd_core::api::{apply_overrides, load_overrides, load_shipped_signatures, request_log_wanted};
+use guardd_core::api::{
+    apply_overrides, load_overrides, load_shipped_signatures, request_log_wanted,
+};
 use guardd_core::constants::{utc_now_f, MODE_OFF};
 use guardd_core::engine::{self, Engine, Shared};
 use guardd_core::reqlog::RequestLog;
@@ -47,7 +49,10 @@ pub fn run(paths: Paths) -> ExitCode {
     let db = match SecurityDatabase::open(&paths.database) {
         Ok(d) => Arc::new(d),
         Err(e) => {
-            eprintln!("[ERROR] easy-ha-proxy-guardd: cannot open security database {}: {e}", paths.database);
+            eprintln!(
+                "[ERROR] easy-ha-proxy-guardd: cannot open security database {}: {e}",
+                paths.database
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -55,7 +60,10 @@ pub fn run(paths: Paths) -> ExitCode {
     let merged = Arc::new(apply_overrides(&shipped, &overrides));
     let want_requests = request_log_wanted(&db, &config);
     if config.mode == MODE_OFF && !want_requests {
-        eprintln!("[INFO] easy-ha-proxy-guardd: Adaptive protection is off in {}; idling", paths.config);
+        eprintln!(
+            "[INFO] easy-ha-proxy-guardd: Adaptive protection is off in {}; idling",
+            paths.config
+        );
         while !STOP.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(500));
         }
@@ -74,7 +82,13 @@ pub fn run(paths: Paths) -> ExitCode {
     };
     let requests = Arc::new(RwLock::new(requests));
     let sigs = Arc::new(RwLock::new(merged));
-    let engine = Engine::new(config.clone(), db.clone(), sigs.clone(), AlertClient::from_env(), requests.clone());
+    let engine = Engine::new(
+        config.clone(),
+        db.clone(),
+        sigs.clone(),
+        AlertClient::from_env(),
+        requests.clone(),
+    );
     eprintln!(
         "[INFO] easy-ha-proxy-guardd: Starting easy-ha-proxy-guardd (Rust): mode={} (configured {}) socket={} db={} log={} interval={}s exclusions={} networks",
         engine.enforcer.mode,
@@ -88,6 +102,7 @@ pub fn run(paths: Paths) -> ExitCode {
     let stop = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Shared {
         live: engine.live.clone(),
+        lag_bytes: engine.lag_bytes.clone(),
         engine: Mutex::new(engine),
         stop: stop.clone(),
         db: db.clone(),
@@ -96,20 +111,25 @@ pub fn run(paths: Paths) -> ExitCode {
         shipped: Mutex::new(Arc::new(shipped)),
         overrides: Mutex::new(overrides),
         config,
-        token: std::env::var("GUARDD_TOKEN").unwrap_or_default().trim().to_string(),
+        token: std::env::var("GUARDD_TOKEN")
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         request_log_path: paths.request_log.clone(),
     });
     // Mirror the process-wide signal into the shared stop flag.
-    {
+    let signal_watcher = {
         let stop = stop.clone();
-        std::thread::spawn(move || loop {
-            if STOP.load(Ordering::SeqCst) {
-                stop.store(true, Ordering::SeqCst);
-                break;
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if STOP.load(Ordering::SeqCst) {
+                    stop.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
             }
-            std::thread::sleep(Duration::from_millis(200));
-        });
-    }
+        })
+    };
     let collector = {
         let s = shared.clone();
         std::thread::spawn(move || engine::run(s))
@@ -119,14 +139,24 @@ pub fn run(paths: Paths) -> ExitCode {
     #[cfg(not(unix))]
     let served: Result<(), String> = Err("serve requires Unix sockets".into());
     stop.store(true, Ordering::SeqCst);
-    let _ = collector.join();
+    let _ = signal_watcher.join();
+    let collected = collector.join();
     shared.engine().stop();
-    if let Some(store) = shared.requests.read().unwrap_or_else(|p| p.into_inner()).as_ref() {
+    if let Some(store) = shared
+        .requests
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
         store.flush(utc_now_f() as i64);
     }
     eprintln!("[INFO] easy-ha-proxy-guardd: Received signal; shutting down");
     match served {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) if collected.is_ok() => ExitCode::SUCCESS,
+        Ok(()) => {
+            eprintln!("[ERROR] easy-ha-proxy-guardd: collector panicked");
+            ExitCode::FAILURE
+        }
         Err(e) => {
             eprintln!("[ERROR] easy-ha-proxy-guardd: {e}");
             ExitCode::FAILURE

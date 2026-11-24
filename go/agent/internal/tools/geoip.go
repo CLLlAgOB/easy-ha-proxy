@@ -671,13 +671,21 @@ type mmdb struct {
 }
 
 func openMMDBFile(path string) (*mmdb, error) {
-	fi, err := os.Stat(path)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() <= 0 {
-		return nil, gerr("GeoIP database is missing or empty: %s", path)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, gerr("GeoIP database is missing or unreadable: %s", path)
 	}
-	raw, err := os.ReadFile(path)
+	defer func() { _ = file.Close() }()
+	fi, err := file.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() <= 0 || fi.Size() > geoipMaxDatabase {
+		return nil, gerr("GeoIP database is not a regular file of an accepted size: %s", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, geoipMaxDatabase+1))
 	if err != nil {
 		return nil, gerr("invalid MMDB database %s: %v", path, err)
+	}
+	if len(raw) > geoipMaxDatabase {
+		return nil, gerr("GeoIP database exceeds its size limit: %s", path)
 	}
 	r, err := parseMMDB(raw)
 	if err != nil {
@@ -709,10 +717,15 @@ func parseMMDB(raw []byte) (*mmdb, error) {
 	if r.recordSize != 24 && r.recordSize != 28 && r.recordSize != 32 {
 		return nil, fmt.Errorf("Unknown record size: %d", r.recordSize)
 	}
-	r.treeSize = int(r.nodeCount * r.recordSize / 4)
-	if r.treeSize+16 > len(raw) {
+	nodeBytes := r.recordSize / 4
+	if r.nodeCount == 0 || idx < 16 || r.nodeCount > uint64(idx-16)/nodeBytes {
 		return nil, errors.New("truncated search tree")
 	}
+	if r.ipVersion != 4 && r.ipVersion != 6 {
+		return nil, errors.New("unsupported IP version")
+	}
+	r.treeSize = int(r.nodeCount * nodeBytes)
+	r.data = raw[:idx]
 	if r.ipVersion == 6 {
 		node := uint64(0)
 		for i := 0; i < 96 && node < r.nodeCount; i++ {
@@ -743,8 +756,14 @@ func (r *mmdb) readNode(node uint64, bit int) uint64 {
 }
 
 func (r *mmdb) decode(off, base int) (any, int, error) {
+	budget := 1 << 20
+	return r.decodeAt(off, base, 0, &budget)
+}
+
+func (r *mmdb) decodeAt(off, base, depth int, budget *int) (any, int, error) {
 	d := r.data
-	if off >= len(d) {
+	*budget--
+	if depth > 32 || *budget < 0 || off < 0 || off >= len(d) {
 		return nil, off, errors.New("unexpected end of data")
 	}
 	ctrl := d[off]
@@ -752,6 +771,9 @@ func (r *mmdb) decode(off, base int) (any, int, error) {
 	typ := int(ctrl >> 5)
 	if typ == 1 {
 		size := int((ctrl >> 3) & 0x3)
+		if size+1 > len(d)-off {
+			return nil, off, errors.New("truncated pointer")
+		}
 		v := int(ctrl & 0x7)
 		var p int
 		switch size {
@@ -768,15 +790,24 @@ func (r *mmdb) decode(off, base int) (any, int, error) {
 			p = int(binary.BigEndian.Uint32(d[off : off+4]))
 			off += 4
 		}
-		val, _, err := r.decode(base+p, base)
+		if p < 0 || p >= len(d)-base {
+			return nil, off, errors.New("pointer outside data section")
+		}
+		val, _, err := r.decodeAt(base+p, base, depth+1, budget)
 		return val, off, err
 	}
 	if typ == 0 {
+		if off == len(d) {
+			return nil, off, errors.New("truncated extended type")
+		}
 		typ = int(d[off]) + 7
 		off++
 	}
 	size := int(ctrl & 0x1f)
 	if typ != 14 {
+		if size >= 29 && size-28 > len(d)-off {
+			return nil, off, errors.New("truncated size")
+		}
 		switch size {
 		case 29:
 			size = 29 + int(d[off])
@@ -789,13 +820,20 @@ func (r *mmdb) decode(off, base int) (any, int, error) {
 			off += 3
 		}
 	}
-	if off+size > len(d) && typ != 7 && typ != 11 && typ != 14 {
+	if size > len(d)-off && typ != 7 && typ != 11 && typ != 14 {
 		return nil, off, errors.New("unexpected end of data")
 	}
 	switch typ {
 	case 2:
+		*budget -= size
+		if *budget < 0 {
+			return nil, off, errors.New("MMDB decode budget exceeded")
+		}
 		return string(d[off : off+size]), off + size, nil
 	case 3:
+		if size != 8 {
+			return nil, off, errors.New("invalid double length")
+		}
 		return math.Float64frombits(binary.BigEndian.Uint64(d[off : off+8])), off + 8, nil
 	case 4:
 		return d[off : off+size], off + size, nil
@@ -818,13 +856,16 @@ func (r *mmdb) decode(off, base int) (any, int, error) {
 		}
 		return int64(int32(u)), off + size, nil
 	case 7:
-		m := make(map[string]any, size)
+		if size > (len(d)-off)/2 || size > *budget/2 {
+			return nil, off, errors.New("invalid container length")
+		}
+		m := make(map[string]any, min(size, 256))
 		for i := 0; i < size; i++ {
-			k, next, err := r.decode(off, base)
+			k, next, err := r.decodeAt(off, base, depth+1, budget)
 			if err != nil {
 				return nil, next, err
 			}
-			v, next2, err := r.decode(next, base)
+			v, next2, err := r.decodeAt(next, base, depth+1, budget)
 			if err != nil {
 				return nil, next2, err
 			}
@@ -835,9 +876,12 @@ func (r *mmdb) decode(off, base int) (any, int, error) {
 		}
 		return m, off, nil
 	case 11:
+		if size > (len(d)-off) || size > *budget {
+			return nil, off, errors.New("invalid container length")
+		}
 		arr := make([]any, size)
 		for i := 0; i < size; i++ {
-			v, next, err := r.decode(off, base)
+			v, next, err := r.decodeAt(off, base, depth+1, budget)
 			if err != nil {
 				return nil, next, err
 			}
@@ -848,6 +892,9 @@ func (r *mmdb) decode(off, base int) (any, int, error) {
 	case 14:
 		return size != 0, off, nil
 	case 15:
+		if size != 4 {
+			return nil, off, errors.New("invalid float length")
+		}
 		return float64(math.Float32frombits(binary.BigEndian.Uint32(d[off : off+4]))), off + 4, nil
 	}
 	return nil, off + size, nil
@@ -867,8 +914,16 @@ func (r *mmdb) each(f func(n mmdbNetwork, record any) error) error {
 		bits = 128
 	}
 	ipv4Max := new(big.Int).SetUint64(math.MaxUint32)
+	remaining := r.nodeCount*16 + 1
 	var walk func(node uint64, depth int, acc *big.Int) error
 	walk = func(node uint64, depth int, acc *big.Int) error {
+		if remaining == 0 {
+			return errors.New("search tree traversal limit exceeded")
+		}
+		remaining--
+		if depth > bits || (depth == bits && node < r.nodeCount) {
+			return errors.New("search tree exceeds address length")
+		}
 		if acc.Sign() != 0 && node == r.ipv4Start && r.ipVersion == 6 {
 			return nil
 		}
@@ -876,11 +931,15 @@ func (r *mmdb) each(f func(n mmdbNetwork, record any) error) error {
 			a := new(big.Int).Lsh(acc, uint(bits-depth))
 			d := depth
 			v6 := bits == 128
-			if v6 && a.Cmp(ipv4Max) <= 0 {
+			if v6 && depth >= 96 && a.Cmp(ipv4Max) <= 0 {
 				d -= 96
 				v6 = false
 			}
-			ptr := int(node) - int(r.nodeCount) + r.treeSize
+			recordOffset := node - r.nodeCount
+			if recordOffset < 16 || recordOffset >= uint64(len(r.data)-r.treeSize) {
+				return errors.New("record outside data section")
+			}
+			ptr := r.treeSize + int(recordOffset)
 			rec, _, err := r.decode(ptr, r.treeSize+16)
 			if err != nil {
 				return err

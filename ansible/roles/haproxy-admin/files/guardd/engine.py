@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -2308,6 +2309,9 @@ class GuardEngine:
         checked = str(ip or "").strip()
         if not checked:
             raise ValueError("an address is required")
+        if "%" in checked:
+            raise ValueError("invalid IP address")
+        ipaddress.ip_address(checked)
 
         with self._decisions:
             return self._forget_ban(checked, now)

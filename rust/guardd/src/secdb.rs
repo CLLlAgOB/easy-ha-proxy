@@ -24,7 +24,11 @@ pub const SCHEMA_VERSION: i64 = 3;
 pub const MAX_PATH_LENGTH: usize = 200;
 pub const MANUAL_BAN_REPLACED_MARGIN: i64 = 120;
 const OWN_BAN_DETAILS: [&str; 3] = ["code=40", "code=41", "code=50"];
-const SIGNATURE_EVENTS_SORTED: [&str; 3] = [EVENT_QUERY_INJECTION, EVENT_SCANNER_PATH, EVENT_SCANNER_DECISIVE];
+const SIGNATURE_EVENTS_SORTED: [&str; 3] = [
+    EVENT_QUERY_INJECTION,
+    EVENT_SCANNER_PATH,
+    EVENT_SCANNER_DECISIVE,
+];
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
@@ -106,8 +110,20 @@ const SCHEMA: &[&str] = &[
 ];
 
 const RATE_WARNING_COLUMNS: [&str; 14] = [
-    "ip", "site", "trust", "rate_limit", "window_s", "enforced", "started", "ended", "peak",
-    "over_limit", "requests", "rate_limited", "banned", "rate_ban",
+    "ip",
+    "site",
+    "trust",
+    "rate_limit",
+    "window_s",
+    "enforced",
+    "started",
+    "ended",
+    "peak",
+    "over_limit",
+    "requests",
+    "rate_limited",
+    "banned",
+    "rate_ban",
 ];
 
 pub type DbResult<T> = Result<T, String>;
@@ -168,7 +184,8 @@ pub fn sorted_json(v: &Value) -> String {
     fn sort(v: &Value) -> Value {
         match v {
             Value::Object(m) => {
-                let ordered: BTreeMap<&String, Value> = m.iter().map(|(k, v)| (k, sort(v))).collect();
+                let ordered: BTreeMap<&String, Value> =
+                    m.iter().map(|(k, v)| (k, sort(v))).collect();
                 let mut out = Map::new();
                 for (k, v) in ordered {
                     out.insert(k.clone(), v);
@@ -243,11 +260,17 @@ impl SecurityDatabase {
         let fresh = !p.exists();
         let conn = Connection::open(&p).map_err(|err| format!("sqlite open failed: {err}"))?;
         if fresh {
-            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;").map_err(e)?;
+            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")
+                .map_err(e)?;
         }
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")
-            .map_err(e)?;
-        let db = Self { conn: Mutex::new(conn), path: p };
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+        )
+        .map_err(e)?;
+        let db = Self {
+            conn: Mutex::new(conn),
+            path: p,
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -268,8 +291,11 @@ impl SecurityDatabase {
             .map_err(e)?;
         match current {
             None => {
-                tx.execute("INSERT INTO schema_version (version) VALUES (?1)", params![SCHEMA_VERSION])
-                    .map_err(e)?;
+                tx.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    params![SCHEMA_VERSION],
+                )
+                .map_err(e)?;
             }
             Some(v) if v > SCHEMA_VERSION => {
                 return Err(format!(
@@ -279,13 +305,24 @@ impl SecurityDatabase {
             Some(mut v) => {
                 while v < SCHEMA_VERSION {
                     match v + 1 {
-                        2 => add_column(&tx, "security_events", "handled", "INTEGER NOT NULL DEFAULT 0")?,
-                        3 => add_column(&tx, "ip_state", "authenticated_at", "INTEGER NOT NULL DEFAULT 0")?,
+                        2 => add_column(
+                            &tx,
+                            "security_events",
+                            "handled",
+                            "INTEGER NOT NULL DEFAULT 0",
+                        )?,
+                        3 => add_column(
+                            &tx,
+                            "ip_state",
+                            "authenticated_at",
+                            "INTEGER NOT NULL DEFAULT 0",
+                        )?,
                         _ => {}
                     }
                     v += 1;
                 }
-                tx.execute("UPDATE schema_version SET version = ?1", params![v]).map_err(e)?;
+                tx.execute("UPDATE schema_version SET version = ?1", params![v])
+                    .map_err(e)?;
             }
         }
         tx.commit().map_err(e)
@@ -293,7 +330,11 @@ impl SecurityDatabase {
 
     pub fn get_state(&self, key: &str, default: &str) -> String {
         self.lock()
-            .query_row("SELECT value FROM guard_state WHERE key = ?1", params![key], |r| r.get::<_, String>(0))
+            .query_row(
+                "SELECT value FROM guard_state WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
             .optional()
             .ok()
             .flatten()
@@ -388,7 +429,10 @@ impl SecurityDatabase {
         let mut updated = 0;
         for ip in ips {
             updated += tx
-                .execute("UPDATE ip_state SET authenticated_at = ?1 WHERE ip = ?2", params![ts, ip])
+                .execute(
+                    "UPDATE ip_state SET authenticated_at = ?1 WHERE ip = ?2",
+                    params![ts, ip],
+                )
                 .map_err(e)?;
         }
         tx.commit().map_err(e)?;
@@ -403,7 +447,10 @@ impl SecurityDatabase {
     }
 
     pub fn clear_ban(&self, ip: &str) -> DbResult<()> {
-        self.exec("UPDATE ip_state SET banned_until = 0, ban_code = 0 WHERE ip = ?1", params![ip])
+        self.exec(
+            "UPDATE ip_state SET banned_until = 0, ban_code = 0 WHERE ip = ?1",
+            params![ip],
+        )
     }
 
     fn exec(&self, sql: &str, p: impl rusqlite::Params) -> DbResult<()> {
@@ -412,7 +459,15 @@ impl SecurityDatabase {
 
     // -- ban decisions ------------------------------------------------------
 
-    pub fn record_decision(&self, ip: &str, ts: i64, action: &str, source: &str, outcome: &str, d: Decision<'_>) -> DbResult<i64> {
+    pub fn record_decision(
+        &self,
+        ip: &str,
+        ts: i64,
+        action: &str,
+        source: &str,
+        outcome: &str,
+        d: Decision<'_>,
+    ) -> DbResult<i64> {
         let reason = d.reason.unwrap_or_else(|| json!({}));
         let mut text = sorted_json(&reason);
         if text.len() > DECISION_REASON_MAX_BYTES {
@@ -423,7 +478,9 @@ impl SecurityDatabase {
             "INSERT INTO ban_decisions \
              (ts, ip, action, source, code, until, strike, score, policy, outcome, reason) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![ts, ip, action, source, d.code, d.until, d.strike, d.score, d.policy, outcome, text],
+            params![
+                ts, ip, action, source, d.code, d.until, d.strike, d.score, d.policy, outcome, text
+            ],
         )
         .map_err(e)?;
         Ok(conn.last_insert_rowid())
@@ -436,7 +493,15 @@ impl SecurityDatabase {
         )
     }
 
-    pub fn commit_ban(&self, decision_id: i64, ip: &str, until: i64, code: i64, now: i64, detail: &str) -> DbResult<()> {
+    pub fn commit_ban(
+        &self,
+        decision_id: i64,
+        ip: &str,
+        until: i64,
+        code: i64,
+        now: i64,
+        detail: &str,
+    ) -> DbResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(e)?;
         tx.execute(
@@ -470,20 +535,26 @@ impl SecurityDatabase {
     fn rows(&self, sql: &str, args: &[SqlValue], names: &[&str]) -> DbResult<Vec<Value>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(sql).map_err(e)?;
-        let mapped = stmt.query_map(params_from_iter(args.iter()), |r| row_object(r, names)).map_err(e)?;
+        let mapped = stmt
+            .query_map(params_from_iter(args.iter()), |r| row_object(r, names))
+            .map_err(e)?;
         mapped.collect::<Result<Vec<_>, _>>().map_err(e)
     }
 
     fn scalar_i64(&self, sql: &str, args: &[SqlValue]) -> i64 {
         self.lock()
-            .query_row(sql, params_from_iter(args.iter()), |r| r.get::<_, Option<i64>>(0))
+            .query_row(sql, params_from_iter(args.iter()), |r| {
+                r.get::<_, Option<i64>>(0)
+            })
             .ok()
             .flatten()
             .unwrap_or(0)
     }
 
-    const DECISION_COLUMNS: [&'static str; 12] =
-        ["id", "ts", "ip", "action", "source", "code", "until", "strike", "score", "policy", "outcome", "reason"];
+    const DECISION_COLUMNS: [&'static str; 12] = [
+        "id", "ts", "ip", "action", "source", "code", "until", "strike", "score", "policy",
+        "outcome", "reason",
+    ];
 
     pub fn ban_decisions(&self, ip: &str, limit: i64) -> DbResult<Vec<Value>> {
         let mut rows = self.rows(
@@ -507,10 +578,17 @@ impl SecurityDatabase {
             values.push(SqlValue::Integer(before));
         }
         if !actions.is_empty() {
-            clauses.push(format!("action IN ({})", vec!["?"; actions.len()].join(", ")));
+            clauses.push(format!(
+                "action IN ({})",
+                vec!["?"; actions.len()].join(", ")
+            ));
             values.extend(actions.iter().map(|a| SqlValue::Text((*a).into())));
         }
-        let where_ = if clauses.is_empty() { String::new() } else { format!("WHERE {} ", clauses.join(" AND ")) };
+        let where_ = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
         values.push(SqlValue::Integer(limit + 1));
         let sql = format!(
             "SELECT id, ts, ip, action, source, code, until, strike, score, policy, outcome, reason \
@@ -519,7 +597,10 @@ impl SecurityDatabase {
         let mut rows = self.rows(&sql, &values, &Self::DECISION_COLUMNS)?;
         for row in rows.iter_mut() {
             let obj = row.as_object_mut().expect("row object");
-            let reason = obj.remove("reason").and_then(|v| v.as_str().map(parse_reason)).unwrap_or_else(|| json!({}));
+            let reason = obj
+                .remove("reason")
+                .and_then(|v| v.as_str().map(parse_reason))
+                .unwrap_or_else(|| json!({}));
             obj.insert("summary".into(), decision_summary(&reason));
         }
         Ok(rows)
@@ -563,7 +644,10 @@ impl SecurityDatabase {
             }
             where_.push(')');
         }
-        let total = self.scalar_i64(&format!("SELECT COUNT(*) FROM ban_decisions WHERE {where_}"), &values);
+        let total = self.scalar_i64(
+            &format!("SELECT COUNT(*) FROM ban_decisions WHERE {where_}"),
+            &values,
+        );
         let mut page = values.clone();
         page.push(SqlValue::Integer(limit));
         page.push(SqlValue::Integer(offset));
@@ -571,30 +655,58 @@ impl SecurityDatabase {
             "SELECT id, ts, ip, until, strike, score, reason FROM ban_decisions \
              WHERE {where_} ORDER BY {column} {direction}, id {direction} LIMIT ? OFFSET ?"
         );
-        let mut rows = self.rows(&sql, &page, &["id", "ts", "ip", "until", "strike", "score", "reason"])?;
+        let mut rows = self.rows(
+            &sql,
+            &page,
+            &["id", "ts", "ip", "until", "strike", "score", "reason"],
+        )?;
         for row in rows.iter_mut() {
             let obj = row.as_object_mut().expect("row object");
-            let reason = obj.remove("reason").and_then(|v| v.as_str().map(parse_reason)).unwrap_or_else(|| json!({}));
-            let cats = decision_summary(&reason).get("categories").cloned().unwrap_or_else(|| json!([]));
+            let reason = obj
+                .remove("reason")
+                .and_then(|v| v.as_str().map(parse_reason))
+                .unwrap_or_else(|| json!({}));
+            let cats = decision_summary(&reason)
+                .get("categories")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
             obj.insert("categories".into(), cats);
         }
-        Ok(json!({"bans": rows, "total": total, "snapshot": snapshot, "offset": offset, "limit": limit}))
+        Ok(
+            json!({"bans": rows, "total": total, "snapshot": snapshot, "offset": offset, "limit": limit}),
+        )
     }
 
-    pub fn adaptive_ban_detail(&self, decision_id: i64, ip: &str, at: i64, until: i64) -> DbResult<Option<Value>> {
+    pub fn adaptive_ban_detail(
+        &self,
+        decision_id: i64,
+        ip: &str,
+        at: i64,
+        until: i64,
+    ) -> DbResult<Option<Value>> {
         let (where_, values) = if decision_id != 0 {
             ("id = ?", vec![SqlValue::Integer(decision_id)])
         } else if until != 0 {
-            ("ip = ? AND until = ?", vec![SqlValue::Text(ip.into()), SqlValue::Integer(until)])
+            (
+                "ip = ? AND until = ?",
+                vec![SqlValue::Text(ip.into()), SqlValue::Integer(until)],
+            )
         } else {
-            ("ip = ? AND ts = ?", vec![SqlValue::Text(ip.into()), SqlValue::Integer(at)])
+            (
+                "ip = ? AND ts = ?",
+                vec![SqlValue::Text(ip.into()), SqlValue::Integer(at)],
+            )
         };
         let sql = format!(
             "SELECT id, ts, ip, until, strike, score, reason FROM ban_decisions \
              WHERE {where_} AND source = 'adaptive' AND action = 'applied' AND outcome = 'applied' \
              ORDER BY id DESC LIMIT 1"
         );
-        let mut rows = self.rows(&sql, &values, &["id", "ts", "ip", "until", "strike", "score", "reason"])?;
+        let mut rows = self.rows(
+            &sql,
+            &values,
+            &["id", "ts", "ip", "until", "strike", "score", "reason"],
+        )?;
         let Some(mut row) = rows.pop() else {
             return Ok(None);
         };
@@ -608,7 +720,10 @@ impl SecurityDatabase {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(e)?;
         let mut deleted = tx
-            .execute("DELETE FROM ban_decisions WHERE ts < ?1 AND until <= ?2", params![before, now])
+            .execute(
+                "DELETE FROM ban_decisions WHERE ts < ?1 AND until <= ?2",
+                params![before, now],
+            )
             .map_err(e)?;
         deleted += tx
             .execute(
@@ -632,7 +747,12 @@ impl SecurityDatabase {
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    ManualBan { placed_at: r.get(1)?, expires_at: r.get(2)?, seen_at: r.get(3)?, reasserted: r.get(4)? },
+                    ManualBan {
+                        placed_at: r.get(1)?,
+                        expires_at: r.get(2)?,
+                        seen_at: r.get(3)?,
+                        reasserted: r.get(4)?,
+                    },
                 ))
             })
             .map_err(e)?;
@@ -650,7 +770,14 @@ impl SecurityDatabase {
         )
     }
 
-    pub fn write_manual_ban(&self, ip: &str, placed_at: i64, expires_at: i64, seen_at: i64, reasserted: i64) -> DbResult<()> {
+    pub fn write_manual_ban(
+        &self,
+        ip: &str,
+        placed_at: i64,
+        expires_at: i64,
+        seen_at: i64,
+        reasserted: i64,
+    ) -> DbResult<()> {
         self.exec(
             "INSERT INTO manual_bans (ip, placed_at, expires_at, seen_at, reasserted) \
              VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (ip) DO UPDATE SET \
@@ -661,7 +788,10 @@ impl SecurityDatabase {
     }
 
     pub fn mark_manual_reasserted(&self, ip: &str) -> DbResult<()> {
-        self.exec("UPDATE manual_bans SET reasserted = 1 WHERE ip = ?1", params![ip])
+        self.exec(
+            "UPDATE manual_bans SET reasserted = 1 WHERE ip = ?1",
+            params![ip],
+        )
     }
 
     pub fn forget_manual_ban(&self, ip: &str) -> DbResult<bool> {
@@ -682,18 +812,26 @@ impl SecurityDatabase {
     fn ip_pairs(&self, sql: &str) -> DbResult<BTreeMap<String, i64>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(sql).map_err(e)?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map_err(e)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(e)?;
         rows.collect::<Result<BTreeMap<_, _>, _>>().map_err(e)
     }
 
     pub fn set_ban_code(&self, ip: &str, code: i64) -> DbResult<()> {
-        self.exec("UPDATE ip_state SET ban_code = ?1 WHERE ip = ?2", params![code, ip])
+        self.exec(
+            "UPDATE ip_state SET ban_code = ?1 WHERE ip = ?2",
+            params![code, ip],
+        )
     }
 
     pub fn last_ban_ts(&self, ip: &str) -> i64 {
         self.scalar_i64(
             "SELECT MAX(ts) FROM security_events WHERE ip = ?1 AND event_type = ?2",
-            &[SqlValue::Text(ip.into()), SqlValue::Text(EVENT_BAN_APPLIED.into())],
+            &[
+                SqlValue::Text(ip.into()),
+                SqlValue::Text(EVENT_BAN_APPLIED.into()),
+            ],
         )
     }
 
@@ -743,7 +881,11 @@ impl SecurityDatabase {
     pub fn strike_count(&self, ip: &str, since: i64) -> i64 {
         self.scalar_i64(
             "SELECT COUNT(*) FROM security_events WHERE ip = ?1 AND event_type = ?2 AND ts >= ?3",
-            &[SqlValue::Text(ip.into()), SqlValue::Text(EVENT_BAN_APPLIED.into()), SqlValue::Integer(since)],
+            &[
+                SqlValue::Text(ip.into()),
+                SqlValue::Text(EVENT_BAN_APPLIED.into()),
+                SqlValue::Integer(since),
+            ],
         )
     }
 
@@ -773,7 +915,11 @@ impl SecurityDatabase {
 
     pub fn signature_paths_since(&self, ip: &str, since: i64) -> i64 {
         let mut args = vec![SqlValue::Text(ip.into()), SqlValue::Integer(since)];
-        args.extend(SIGNATURE_EVENTS_SORTED.iter().map(|s| SqlValue::Text((*s).into())));
+        args.extend(
+            SIGNATURE_EVENTS_SORTED
+                .iter()
+                .map(|s| SqlValue::Text((*s).into())),
+        );
         self.scalar_i64(
             "SELECT COUNT(DISTINCT detail) FROM security_events WHERE ip = ? AND ts > ? AND event_type IN (?,?,?)",
             &args,
@@ -781,8 +927,16 @@ impl SecurityDatabase {
     }
 
     pub fn last_signature(&self, ip: &str, since: i64, until: i64) -> i64 {
-        let mut args = vec![SqlValue::Text(ip.into()), SqlValue::Integer(since), SqlValue::Integer(until)];
-        args.extend(SIGNATURE_EVENTS_SORTED.iter().map(|s| SqlValue::Text((*s).into())));
+        let mut args = vec![
+            SqlValue::Text(ip.into()),
+            SqlValue::Integer(since),
+            SqlValue::Integer(until),
+        ];
+        args.extend(
+            SIGNATURE_EVENTS_SORTED
+                .iter()
+                .map(|s| SqlValue::Text((*s).into())),
+        );
         self.scalar_i64(
             "SELECT MAX(ts) FROM security_events WHERE ip = ? AND ts BETWEEN ? AND ? AND event_type IN (?,?,?)",
             &args,
@@ -818,8 +972,20 @@ impl SecurityDatabase {
         self.rows(
             "SELECT ts, event_type, source, site, category, detail, handled \
              FROM security_events WHERE ip = ?1 AND ts >= ?2 ORDER BY ts DESC, id DESC LIMIT ?3",
-            &[SqlValue::Text(ip.into()), SqlValue::Integer(since), SqlValue::Integer(limit)],
-            &["ts", "event_type", "source", "site", "category", "detail", "handled"],
+            &[
+                SqlValue::Text(ip.into()),
+                SqlValue::Integer(since),
+                SqlValue::Integer(limit),
+            ],
+            &[
+                "ts",
+                "event_type",
+                "source",
+                "site",
+                "category",
+                "detail",
+                "handled",
+            ],
         )
     }
 
@@ -828,11 +994,18 @@ impl SecurityDatabase {
         let mut stmt = conn
             .prepare("SELECT ip, COUNT(*) AS hits FROM security_events WHERE ts >= ?1 GROUP BY ip ORDER BY hits DESC LIMIT ?2")
             .map_err(e)?;
-        let rows = stmt.query_map(params![since, limit], |r| r.get::<_, String>(0)).map_err(e)?;
+        let rows = stmt
+            .query_map(params![since, limit], |r| r.get::<_, String>(0))
+            .map_err(e)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(e)
     }
 
-    pub fn enforcement_addresses(&self, after: (i64, &str), before: i64, limit: i64) -> DbResult<Vec<(i64, String)>> {
+    pub fn enforcement_addresses(
+        &self,
+        after: (i64, &str),
+        before: i64,
+        limit: i64,
+    ) -> DbResult<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
@@ -841,7 +1014,9 @@ impl SecurityDatabase {
             )
             .map_err(e)?;
         let rows = stmt
-            .query_map(params![after.0, after.1, before, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params![after.0, after.1, before, limit], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(e)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(e)
     }
@@ -849,11 +1024,18 @@ impl SecurityDatabase {
     pub fn recent_findings(&self, limit: i64) -> DbResult<Vec<(String, i64, String, bool)>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare("SELECT ip, ts, event_type, handled FROM security_events ORDER BY id DESC LIMIT ?1")
+            .prepare(
+                "SELECT ip, ts, event_type, handled FROM security_events ORDER BY id DESC LIMIT ?1",
+            )
             .map_err(e)?;
         let rows = stmt
             .query_map(params![limit], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)? != 0))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? != 0,
+                ))
             })
             .map_err(e)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(e)
@@ -863,7 +1045,11 @@ impl SecurityDatabase {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(e)?;
         let last: Option<i64> = tx
-            .query_row("SELECT last_ts FROM event_cooldowns WHERE fingerprint = ?1", params![fingerprint], |r| r.get(0))
+            .query_row(
+                "SELECT last_ts FROM event_cooldowns WHERE fingerprint = ?1",
+                params![fingerprint],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(e)?;
         if let Some(last) = last {
@@ -881,7 +1067,11 @@ impl SecurityDatabase {
         Ok(true)
     }
 
-    pub fn apply_retention(&self, events_before: i64, bans_before: i64) -> DbResult<BTreeMap<String, i64>> {
+    pub fn apply_retention(
+        &self,
+        events_before: i64,
+        bans_before: i64,
+    ) -> DbResult<BTreeMap<String, i64>> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(e)?;
         let mut events = tx
@@ -897,10 +1087,16 @@ impl SecurityDatabase {
             )
             .map_err(e)?;
         let cooldowns = tx
-            .execute("DELETE FROM event_cooldowns WHERE last_ts < ?1", params![events_before])
+            .execute(
+                "DELETE FROM event_cooldowns WHERE last_ts < ?1",
+                params![events_before],
+            )
             .map_err(e)?;
         let addresses = tx
-            .execute("DELETE FROM ip_state WHERE last_seen < ?1 AND banned_until = 0", params![events_before])
+            .execute(
+                "DELETE FROM ip_state WHERE last_seen < ?1 AND banned_until = 0",
+                params![events_before],
+            )
             .map_err(e)?;
         tx.commit().map_err(e)?;
         let mut out = BTreeMap::new();
@@ -954,7 +1150,11 @@ impl SecurityDatabase {
             "SELECT {} FROM rate_warnings ORDER BY ended DESC, id DESC LIMIT ?1",
             RATE_WARNING_COLUMNS.join(", ")
         );
-        let mut rows = self.rows(&sql, &[SqlValue::Integer(limit.max(1))], &RATE_WARNING_COLUMNS)?;
+        let mut rows = self.rows(
+            &sql,
+            &[SqlValue::Integer(limit.max(1))],
+            &RATE_WARNING_COLUMNS,
+        )?;
         for row in rows.iter_mut() {
             let obj = row.as_object_mut().expect("row object");
             obj.insert("kind".into(), json!(RATE_WARNING));
@@ -972,13 +1172,21 @@ impl SecurityDatabase {
     }
 
     pub fn rate_warning_count(&self, since: i64) -> i64 {
-        self.scalar_i64("SELECT COUNT(*) FROM rate_warnings WHERE ended >= ?1", &[SqlValue::Integer(since)])
+        self.scalar_i64(
+            "SELECT COUNT(*) FROM rate_warnings WHERE ended >= ?1",
+            &[SqlValue::Integer(since)],
+        )
     }
 
     pub fn prune_rate_warnings(&self, before: i64, keep: i64) -> DbResult<i64> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(e)?;
-        let mut deleted = tx.execute("DELETE FROM rate_warnings WHERE ended < ?1", params![before]).map_err(e)?;
+        let mut deleted = tx
+            .execute(
+                "DELETE FROM rate_warnings WHERE ended < ?1",
+                params![before],
+            )
+            .map_err(e)?;
         deleted += tx
             .execute(
                 "DELETE FROM rate_warnings WHERE id NOT IN (SELECT id FROM rate_warnings ORDER BY id DESC LIMIT ?1)",
@@ -990,7 +1198,9 @@ impl SecurityDatabase {
     }
 
     pub fn incremental_vacuum(&self, pages: i64) {
-        let _ = self.lock().execute_batch(&format!("PRAGMA incremental_vacuum({pages});"));
+        let _ = self
+            .lock()
+            .execute_batch(&format!("PRAGMA incremental_vacuum({pages});"));
     }
 
     // -- reporting --------------------------------------------------------------
@@ -1002,8 +1212,11 @@ impl SecurityDatabase {
             &[SqlValue::Integer(since)],
             &["ip", "ts", "until", "strike", "score", "reason"],
         )?;
-        let first = self.lock()
-            .query_row("SELECT MIN(ts) FROM ban_decisions", [], |r| r.get::<_, Option<i64>>(0))
+        let first = self
+            .lock()
+            .query_row("SELECT MIN(ts) FROM ban_decisions", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
             .map_err(e)?;
         let operator_lifts = self.rows(
             "SELECT ip, ts FROM ban_decisions WHERE action = 'lifted' AND source = 'operator' AND ts >= ?1",
@@ -1025,9 +1238,19 @@ impl SecurityDatabase {
                 &["ip", "authenticated_at"],
             )?
             .into_iter()
-            .map(|r| (r["ip"].as_str().unwrap_or("").to_string(), r["authenticated_at"].as_i64().unwrap_or(0)))
+            .map(|r| {
+                (
+                    r["ip"].as_str().unwrap_or("").to_string(),
+                    r["authenticated_at"].as_i64().unwrap_or(0),
+                )
+            })
             .collect();
-        let quiet = [EVENT_BAN_APPLIED, EVENT_BAN_LIFTED, EVENT_LEGACY_BAN, EVENT_LEGACY_BAN_LIFTED];
+        let quiet = [
+            EVENT_BAN_APPLIED,
+            EVENT_BAN_LIFTED,
+            EVENT_LEGACY_BAN,
+            EVENT_LEGACY_BAN_LIFTED,
+        ];
         let mut at_once = 0i64;
         let mut single = 0i64;
         {
@@ -1075,14 +1298,21 @@ impl SecurityDatabase {
             }
         }
         let mut sig_args = vec![SqlValue::Integer(since)];
-        sig_args.extend(SIGNATURE_EVENTS_SORTED.iter().map(|s| SqlValue::Text((*s).into())));
+        sig_args.extend(
+            SIGNATURE_EVENTS_SORTED
+                .iter()
+                .map(|s| SqlValue::Text((*s).into())),
+        );
         let unbanned = self.scalar_i64(
             "SELECT COUNT(DISTINCT e.ip) FROM security_events e \
              WHERE e.ts >= ? AND e.handled = 0 AND e.event_type IN (?,?,?) \
              AND NOT EXISTS (SELECT 1 FROM ban_decisions d WHERE d.ip = e.ip AND d.action = 'applied')",
             &sig_args,
         );
-        let addresses: HashSet<String> = bans.iter().map(|b| b["ip"].as_str().unwrap_or("").to_string()).collect();
+        let addresses: HashSet<String> = bans
+            .iter()
+            .map(|b| b["ip"].as_str().unwrap_or("").to_string())
+            .collect();
         let mut networks: HashMap<String, i64> = HashMap::new();
         for ip in &addresses {
             if let Some((head, _)) = ip.rsplit_once('.') {
@@ -1098,24 +1328,34 @@ impl SecurityDatabase {
         let mut steps: BTreeMap<String, i64> = BTreeMap::new();
         let mut signal_stats: BTreeMap<String, [i64; 4]> = BTreeMap::new();
         for ban in &bans {
-            *steps.entry(ban["strike"].as_i64().unwrap_or(0).to_string()).or_insert(0) += 1;
+            *steps
+                .entry(ban["strike"].as_i64().unwrap_or(0).to_string())
+                .or_insert(0) += 1;
             let ip = ban["ip"].as_str().unwrap_or("");
             let ts = ban["ts"].as_i64().unwrap_or(0);
             let until = ban["until"].as_i64().unwrap_or(0).max(ts + 86400);
-            let was_lifted = lifted_ts_by_ip.get(ip).is_some_and(|l| l.iter().any(|t| ts <= *t && *t <= until));
+            let was_lifted = lifted_ts_by_ip
+                .get(ip)
+                .is_some_and(|l| l.iter().any(|t| ts <= *t && *t <= until));
             let auth_after = auth_at_by_ip.get(ip).copied().unwrap_or(0) > ts;
             let disputed = was_lifted || auth_after;
             let reason = parse_reason(ban["reason"].as_str().unwrap_or("{}"));
             let mut seen_signals: HashSet<String> = HashSet::new();
             if let Some(evidence) = reason.get("evidence").and_then(Value::as_array) {
                 for item in evidence {
-                    let Some(obj) = item.as_object() else { continue };
+                    let Some(obj) = item.as_object() else {
+                        continue;
+                    };
                     let ev = obj.get("event_type").and_then(Value::as_str).unwrap_or("");
                     if ev.is_empty() {
                         continue;
                     }
                     let cat = obj.get("category").and_then(Value::as_str).unwrap_or("");
-                    seen_signals.insert(if cat.is_empty() { ev.to_string() } else { format!("{ev}:{cat}") });
+                    seen_signals.insert(if cat.is_empty() {
+                        ev.to_string()
+                    } else {
+                        format!("{ev}:{cat}")
+                    });
                 }
             }
             for sig in seen_signals {
@@ -1129,7 +1369,11 @@ impl SecurityDatabase {
         let mut by_signal: Vec<Value> = signal_stats
             .iter()
             .map(|(sig, st)| {
-                let rate = if st[0] > 0 { ((st[3] as f64 / st[0] as f64) * 1000.0).round() / 1000.0 } else { 0.0 };
+                let rate = if st[0] > 0 {
+                    ((st[3] as f64 / st[0] as f64) * 1000.0).round() / 1000.0
+                } else {
+                    0.0
+                };
                 json!({
                     "signal": sig,
                     "bans": st[0],
@@ -1185,9 +1429,11 @@ impl SecurityDatabase {
             .optional()
             .map_err(e)?;
         let (rows, oldest, newest): (i64, Option<i64>, Option<i64>) = conn
-            .query_row("SELECT COUNT(*), MIN(ts), MAX(ts) FROM security_events", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
+            .query_row(
+                "SELECT COUNT(*), MIN(ts), MAX(ts) FROM security_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .map_err(e)?;
         let (arows, excluded, unenf): (i64, Option<i64>, Option<i64>) = conn
             .query_row(
@@ -1201,7 +1447,9 @@ impl SecurityDatabase {
             .prepare("SELECT event_type, COUNT(*) AS value FROM security_events GROUP BY event_type ORDER BY value DESC LIMIT 20")
             .map_err(e)?;
         let mut by_type = Map::new();
-        let rows_iter = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map_err(e)?;
+        let rows_iter = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(e)?;
         for item in rows_iter {
             let (k, v) = item.map_err(e)?;
             by_type.insert(k, json!(v));
@@ -1215,7 +1463,11 @@ impl SecurityDatabase {
 
     pub fn storage(&self) -> Value {
         let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let database = size(&self.path);
         let wal = size(&self.path.with_file_name(format!("{name}-wal")));
         let shm = size(&self.path.with_file_name(format!("{name}-shm")));
@@ -1228,8 +1480,15 @@ impl SecurityDatabase {
     }
 }
 
-fn add_column(tx: &rusqlite::Transaction<'_>, table: &str, column: &str, definition: &str) -> DbResult<()> {
-    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})")).map_err(e)?;
+fn add_column(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> DbResult<()> {
+    let mut stmt = tx
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(e)?;
     let existing: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(1))
         .map_err(e)?
@@ -1238,7 +1497,11 @@ fn add_column(tx: &rusqlite::Transaction<'_>, table: &str, column: &str, definit
     if existing.iter().any(|c| c == column) {
         return Ok(());
     }
-    tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), []).map_err(e)?;
+    tx.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .map_err(e)?;
     Ok(())
 }
 
@@ -1272,13 +1535,27 @@ mod tests {
     #[test]
     fn events_come_back_newest_first() {
         let db = temp_db("order");
-        let v = Verdict { excluded: false, reason: String::new(), source: String::new() };
+        let v = Verdict {
+            excluded: false,
+            reason: String::new(),
+            source: String::new(),
+        };
         db.observe_ip("203.0.113.5", 100, &v).unwrap();
         for ts in [100, 300, 200] {
-            db.record_events(&[NewEvent { ts, ip: "203.0.113.5".into(), event_type: "SCANNER_PATH".into(), source: "t".into(), ..Default::default() }]).unwrap();
+            db.record_events(&[NewEvent {
+                ts,
+                ip: "203.0.113.5".into(),
+                event_type: "SCANNER_PATH".into(),
+                source: "t".into(),
+                ..Default::default()
+            }])
+            .unwrap();
         }
         let ev = db.events_for("203.0.113.5", 0, 500).unwrap();
-        assert_eq!(ev.iter().map(|e| e.ts).collect::<Vec<_>>(), vec![300, 200, 100]);
+        assert_eq!(
+            ev.iter().map(|e| e.ts).collect::<Vec<_>>(),
+            vec![300, 200, 100]
+        );
     }
 
     #[test]
@@ -1288,7 +1565,21 @@ mod tests {
         assert!(!db.cooldown_passed("k", 120, 60).unwrap());
         assert!(db.cooldown_passed("k", 161, 60).unwrap());
         let id = db
-            .record_decision("1.2.3.4", 10, "applied", "adaptive", "pending", Decision { code: 41, until: 3610, strike: 1, score: 60, policy: "legacy", reason: Some(json!({"b": 1, "a": [1, 2]})) })
+            .record_decision(
+                "1.2.3.4",
+                10,
+                "applied",
+                "adaptive",
+                "pending",
+                Decision {
+                    code: 41,
+                    until: 3610,
+                    strike: 1,
+                    score: 60,
+                    policy: "legacy",
+                    reason: Some(json!({"b": 1, "a": [1, 2]})),
+                },
+            )
             .unwrap();
         assert_eq!(db.pending_decisions(100).unwrap().len(), 1);
         db.settle_decision(id, "failed").unwrap();
@@ -1299,6 +1590,9 @@ mod tests {
 
     #[test]
     fn python_json_format() {
-        assert_eq!(sorted_json(&json!({"b": 1, "a": {"d": 2.5, "c": 3.0}})), r#"{"a": {"c": 3.0, "d": 2.5}, "b": 1}"#);
+        assert_eq!(
+            sorted_json(&json!({"b": 1, "a": {"d": 2.5, "c": 3.0}})),
+            r#"{"a": {"c": 3.0, "d": 2.5}, "b": 1}"#
+        );
     }
 }

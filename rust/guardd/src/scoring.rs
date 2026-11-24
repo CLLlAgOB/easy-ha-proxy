@@ -75,7 +75,11 @@ impl ScoringPolicy {
     /// Return the U02 variant where telemetry events weigh 0 and `HARD_FLOOR_EPISODE` weighs 60.
     pub fn u02(&self) -> Self {
         let mut weights = self.weights.clone();
-        for ev in [EVENT_RATE_EXCEEDED, EVENT_ERROR_RATE_EXCEEDED, EVENT_LEGACY_BAN] {
+        for ev in [
+            EVENT_RATE_EXCEEDED,
+            EVENT_ERROR_RATE_EXCEEDED,
+            EVENT_LEGACY_BAN,
+        ] {
             weights.insert(ev.to_string(), 0);
         }
         let hf = weights.entry(EVENT_HARD_FLOOR.to_string()).or_insert(0);
@@ -342,8 +346,8 @@ impl ExclusionModel {
         let mut nets = Vec::new();
         for path in &self.whitelist_files {
             let source = source_of(path);
-            if let Ok(content) = fs::read_to_string(path) {
-                for raw in content.lines() {
+            if let Ok(content) = fs::read(path) {
+                for raw in String::from_utf8_lossy(&content).lines() {
                     let line = raw.split('#').next().unwrap_or("").trim();
                     if let Some(tok) = line.split_whitespace().next() {
                         if let Some(net) = IpNet::parse(tok) {
@@ -444,9 +448,7 @@ fn source_of(path: &str) -> &'static str {
 fn is_local_addr(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
-        IpAddr::V6(v6) => {
-            v6.is_loopback() || ((v6.segments()[0] & 0xffc0) == 0xfe80)
-        }
+        IpAddr::V6(v6) => v6.is_loopback() || ((v6.segments()[0] & 0xffc0) == 0xfe80),
     }
 }
 

@@ -72,6 +72,8 @@ func constructInt(value string) (any, error) {
 	case strings.HasPrefix(v, "0x"):
 		n, err := strconv.ParseInt(v[2:], 16, 64)
 		return sign * n, err
+	case v == "":
+		return nil, fmt.Errorf("invalid integer %q", value)
 	case v[0] == '0':
 		n, err := strconv.ParseInt(v, 8, 64)
 		return sign * n, err
@@ -142,8 +144,10 @@ func constructPlain(value string) (any, error) {
 }
 
 type loader struct {
-	cache   map[*yaml.Node]any
-	aliased bool
+	cache       map[*yaml.Node]any
+	aliased     bool
+	active      map[*yaml.Node]bool
+	mergeBudget int
 }
 
 // Load is yaml.safe_load: nil for an empty document.
@@ -169,7 +173,8 @@ func LoadAliases(raw []byte) (any, bool, error) {
 	} else if !errors.Is(err, io.EOF) {
 		return nil, false, err
 	}
-	l := &loader{cache: map[*yaml.Node]any{}}
+	l := &loader{cache: map[*yaml.Node]any{}, active: map[*yaml.Node]bool{},
+		mergeBudget: max(4096, min(len(raw), 125000)*8)}
 	if len(doc.Content) == 0 {
 		return nil, false, nil
 	}
@@ -185,8 +190,15 @@ func explicitTag(n *yaml.Node) string {
 }
 
 func (l *loader) node(n *yaml.Node) (any, error) {
+	if l.active[n] {
+		return nil, fmt.Errorf("recursive YAML alias")
+	}
 	if v, ok := l.cache[n]; ok {
 		return v, nil
+	}
+	if n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode {
+		l.active[n] = true
+		defer delete(l.active, n)
 	}
 	switch n.Kind {
 	case yaml.AliasNode:
@@ -236,12 +248,20 @@ func (l *loader) node(n *yaml.Node) (any, error) {
 	case yaml.MappingNode:
 		m := NewMap()
 		l.cache[n] = m
-		pairs, err := l.flatten(n)
-		if err != nil {
-			return nil, err
+		// Resolve each source mapping once. PyYAML applies the merge
+		// sources before explicit keys, reversing each sequence of sources.
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if isMergeKey(n.Content[i]) {
+				if err := l.mergeInto(m, n.Content[i+1]); err != nil {
+					return nil, err
+				}
+			}
 		}
-		for i := 0; i+1 < len(pairs); i += 2 {
-			k, err := l.node(pairs[i])
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if isMergeKey(n.Content[i]) {
+				continue
+			}
+			k, err := l.node(n.Content[i])
 			if err != nil {
 				return nil, err
 			}
@@ -249,7 +269,7 @@ func (l *loader) node(n *yaml.Node) (any, error) {
 			case *Map, []any:
 				return nil, fmt.Errorf("found unhashable key")
 			}
-			v, err := l.node(pairs[i+1])
+			v, err := l.node(n.Content[i+1])
 			if err != nil {
 				return nil, err
 			}
@@ -276,45 +296,29 @@ func deref(n *yaml.Node) *yaml.Node {
 	return n
 }
 
-// flatten is SafeConstructor.flatten_mapping: merged pairs first.
-func (l *loader) flatten(n *yaml.Node) ([]*yaml.Node, error) {
-	merge := []*yaml.Node{}
-	own := []*yaml.Node{}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		key, value := n.Content[i], n.Content[i+1]
-		if !isMergeKey(key) {
-			own = append(own, key, value)
-			continue
-		}
-		target := deref(value)
-		switch target.Kind {
-		case yaml.MappingNode:
-			sub, err := l.flatten(target)
-			if err != nil {
-				return nil, err
-			}
-			merge = append(merge, sub...)
-		case yaml.SequenceNode:
-			subs := [][]*yaml.Node{}
-			for _, item := range target.Content {
-				item = deref(item)
-				if item.Kind != yaml.MappingNode {
-					return nil, fmt.Errorf("expected a mapping for merging, but found %s", kindName(item))
-				}
-				sub, err := l.flatten(item)
-				if err != nil {
-					return nil, err
-				}
-				subs = append(subs, sub)
-			}
-			for i := len(subs) - 1; i >= 0; i-- {
-				merge = append(merge, subs[i]...)
-			}
-		default:
-			return nil, fmt.Errorf("expected a mapping or list of mappings for merging, but found %s", kindName(target))
-		}
+func (l *loader) mergeInto(dst *Map, value *yaml.Node) error {
+	target := deref(value)
+	nodes := []*yaml.Node{target}
+	if target.Kind == yaml.SequenceNode {
+		nodes = target.Content
 	}
-	return append(merge, own...), nil
+	for i := len(nodes) - 1; i >= 0; i-- {
+		source := deref(nodes[i])
+		if source.Kind != yaml.MappingNode {
+			return fmt.Errorf("expected a mapping for merging, but found %s", kindName(source))
+		}
+		v, err := l.node(source)
+		if err != nil {
+			return err
+		}
+		m := v.(*Map)
+		l.mergeBudget -= 1 + m.Len()
+		if l.mergeBudget < 0 {
+			return fmt.Errorf("YAML merge expansion limit exceeded")
+		}
+		m.Each(dst.Set)
+	}
+	return nil
 }
 
 func kindName(n *yaml.Node) string {

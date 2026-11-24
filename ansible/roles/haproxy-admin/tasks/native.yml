@@ -100,7 +100,28 @@
         group: root
         mode: "0600"
         timeout: 60
-      when: _native_mode == 'https'
+      when:
+        - _native_mode == 'https'
+        - not (easy_ha_proxy_offline_restore | default(false) | bool)
+
+    - name: "native-daemons | Verify the cached HTTPS bundle for offline restore"
+      when:
+        - _native_mode == 'https'
+        - easy_ha_proxy_offline_restore | default(false) | bool
+      block:
+        - name: Check the locally prepared bundle
+          ansible.builtin.stat:
+            path: "/var/lib/easy-ha-proxy/native-staging/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
+            checksum_algorithm: sha256
+            follow: false
+          register: _native_cached_bundle
+
+        - name: Require the configured release checksum
+          ansible.builtin.assert:
+            that:
+              - _native_cached_bundle.stat.isreg | default(false)
+              - _native_cached_bundle.stat.checksum | default('') == native_release_checksums[_native_arch] | lower
+            fail_msg: "Prepare the verified native release bundle on this host before offline restore."
 
     - name: "native-daemons | Unpack tarball bundle into staging directory"
       ansible.builtin.unarchive:
@@ -136,25 +157,28 @@
         rev={{ ((_native_source_revision.stdout | default('') | trim)
                 if (_native_source_revision.rc | default(1)) == 0 else '') | quote }}
         stage="/var/lib/easy-ha-proxy/native-staging"
-        rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
         if [ -n "${rev}" ]; then
           img="${img}-${rev:0:12}"
-          if ! docker pull "${img}"; then
-            echo "The native binaries of revision ${rev:0:12} are not published (${img})." >&2
-            echo "Wait for that commit's CI build, or set native_release_pin_revision: false." >&2
-            exit 1
-          fi
-          built="$(docker image inspect --format '{% raw %}{{ index .Config.Labels "org.opencontainers.image.revision" }}{% endraw %}' "${img}")"
+        fi
+        {% if not (easy_ha_proxy_offline_restore | default(false) | bool) %}
+        if ! docker pull "${img}"; then
+          echo "The native binaries are not published or could not be pulled (${img})." >&2
+          exit 1
+        fi
+        {% endif %}
+        # Resolve the tag once. Check the label on the same immutable
+        # image that will supply the files, even if the tag moves.
+        ref="$(docker image inspect --format '{% raw %}{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}{% endraw %}' "${img}")"
+        if [ -n "${rev}" ]; then
+          built="$(docker image inspect --format '{% raw %}{{ index .Config.Labels "org.opencontainers.image.revision" }}{% endraw %}' "${ref}")"
           if [ "${built}" != "${rev}" ]; then
             echo "${img} was built from ${built:-an unknown revision}, not ${rev}." >&2
             exit 1
           fi
-        else
-          docker pull "${img}"
         fi
-        ref="$(docker image inspect --format '{% raw %}{{ index .RepoDigests 0 }}{% endraw %}' "${img}")"
-        cid="$(docker create "${ref}")"
+        cid="$(docker create --pull=never "${ref}")"
         trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
+        rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
         docker cp "${cid}:/sbin" "${stage}/sbin"
         docker cp "${cid}:/lib" "${stage}/lib"
         docker cp "${cid}:/SHA256SUMS" "${stage}/SHA256SUMS"
@@ -165,52 +189,118 @@
       when: _native_mode == 'oci'
       changed_when: true
 
-    - name: "native-daemons | Install easy-ha-proxy-agent binary"
-      register: _native_agent_copy
-      ansible.builtin.copy:
-        src: /var/lib/easy-ha-proxy/native-staging/sbin/easy-ha-proxy-agent
-        dest: "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: "native-daemons | Install guardd-core binary"
-      register: _native_guardd_copy
-      ansible.builtin.copy:
-        src: /var/lib/easy-ha-proxy/native-staging/sbin/guardd-core
-        dest: "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: "native-daemons | Install libguardd_core.so FFI library"
-      ansible.builtin.copy:
-        src: /var/lib/easy-ha-proxy/native-staging/lib/libguardd_core.so
-        dest: "{{ native_guardd_lib | default('/usr/local/lib/easy-ha-proxy/libguardd_core.so') }}"
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0644"
-
     - name: "native-daemons | Smoke-check easy-ha-proxy-agent binary"
       ansible.builtin.command:
         argv:
-          - "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
+          - /var/lib/easy-ha-proxy/native-staging/sbin/easy-ha-proxy-agent
           - version
       changed_when: false
 
     - name: "native-daemons | Smoke-check guardd-core binary"
       ansible.builtin.command:
         argv:
-          - "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
+          - /var/lib/easy-ha-proxy/native-staging/sbin/guardd-core
           - --help
       register: _guardd_core_smoke
       changed_when: false
       failed_when: >-
         _guardd_core_smoke.rc != 0
         and ('usage: guardd-core' not in ((_guardd_core_smoke.stdout | default('')) ~ (_guardd_core_smoke.stderr | default(''))))
+
+    - name: "native-daemons | Install the verified files with rollback on copy failure"
+      vars:
+        _native_files:
+          - source: sbin/easy-ha-proxy-agent
+            dest: "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
+            mode: "0755"
+          - source: sbin/guardd-core
+            dest: "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
+            mode: "0755"
+          - source: lib/libguardd_core.so
+            dest: "{{ native_guardd_lib | default('/usr/local/lib/easy-ha-proxy/libguardd_core.so') }}"
+            mode: "0644"
+      block:
+        - name: Record existing native files
+          ansible.builtin.stat:
+            path: "{{ item.dest }}"
+            follow: false
+          loop: "{{ _native_files }}"
+          register: _native_original
+
+        - name: Require regular files at existing installation paths
+          ansible.builtin.assert:
+            that:
+              - not item.stat.exists or (item.stat.isreg | default(false))
+          loop: "{{ _native_original.results }}"
+          loop_control:
+            label: "{{ item.item.dest }}"
+
+        - name: Replace the verified native files
+          ansible.builtin.copy:
+            src: "/var/lib/easy-ha-proxy/native-staging/{{ item.source }}"
+            dest: "{{ item.dest }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "{{ item.mode }}"
+            backup: true
+          loop: "{{ _native_files }}"
+          register: _native_install
+
+        - name: Remember which daemon binaries were replaced
+          ansible.builtin.set_fact:
+            _native_agent_copy: "{{ _native_install.results[0] }}"
+            _native_guardd_copy: "{{ _native_install.results[1] }}"
+      rescue:
+        - name: Restore the previous files saved by Ansible
+          ansible.builtin.copy:
+            src: "{{ item.backup_file }}"
+            dest: "{{ item.item.dest }}"
+            remote_src: true
+            mode: preserve
+          loop: "{{ _native_install.results | default([]) }}"
+          when: item.backup_file is defined
+          loop_control:
+            label: "{{ item.item.dest }}"
+
+        - name: Restore the original file attributes
+          ansible.builtin.file:
+            path: "{{ item.item.dest }}"
+            owner: "{{ item.stat.uid }}"
+            group: "{{ item.stat.gid }}"
+            mode: "{{ item.stat.mode }}"
+            state: file
+            follow: false
+          loop: "{{ _native_original.results | default([]) }}"
+          when:
+            - _native_install.results is defined
+            - item.stat.isreg | default(false)
+          loop_control:
+            label: "{{ item.item.dest }}"
+
+        - name: Remove newly installed files when no original existed
+          ansible.builtin.file:
+            path: "{{ item.item.dest }}"
+            state: absent
+          loop: "{{ _native_original.results | default([]) }}"
+          when:
+            - _native_install.results is defined
+            - not item.stat.exists
+          loop_control:
+            label: "{{ item.item.dest }}"
+
+        - name: Report the failed native installation
+          ansible.builtin.fail:
+            msg: "Could not install the verified native bundle. Service restarts were skipped."
+
+    - name: "native-daemons | Remove temporary copies of replaced native files"
+      ansible.builtin.file:
+        path: "{{ item.backup_file }}"
+        state: absent
+      loop: "{{ _native_install.results }}"
+      when: item.backup_file is defined
+      loop_control:
+        label: "{{ item.item.dest }}"
 
     # A replaced binary is not picked up by a running service: until a
     # restart it keeps executing the old file. try-restart touches only units
@@ -228,7 +318,6 @@
                ('easy-ha-proxy-alertd.service' if native_alertd_enabled | default(false) | bool else ''),
                ('haproxy-controld.service' if native_controld_enabled | default(false) | bool else ''),
                ('haproxy-certd.service' if native_certd_enabled | default(false) | bool else ''),
-               ('easy-ha-proxy-backupd.service' if native_backupd_enabled | default(false) | bool else ''),
                ('authelia-bansd.service' if native_authelia_bansd_enabled | default(false) | bool else ''),
                ('authelia-usersd.service' if native_authelia_usersd_enabled | default(false) | bool else ''),
                ('authelia-configd.service' if native_authelia_configd_enabled | default(false) | bool else '')
@@ -237,6 +326,32 @@
         - _native_agent_copy is changed
         - _native_agent_units | length > 0
       changed_when: true
+
+    - name: "native-daemons | Pick up the new backup broker outside active restores"
+      when:
+        - _native_agent_copy is changed
+        - native_backupd_enabled | default(false) | bool
+      block:
+        - name: Inspect the active restore marker
+          ansible.builtin.stat:
+            path: "{{ backupd_restore_active_marker }}"
+            follow: false
+          register: _native_restore_active
+
+        - name: Ask the backup broker to restart after restore cleanup
+          ansible.builtin.file:
+            path: "{{ backupd_restart_request_marker }}"
+            state: touch
+            owner: root
+            group: "{{ app_group }}"
+            mode: "0600"
+          when: _native_restore_active.stat.exists
+
+        - name: Restart the running backup broker outside a restore
+          ansible.builtin.command:
+            argv: [systemctl, try-restart, --no-block, easy-ha-proxy-backupd.service]
+          when: not _native_restore_active.stat.exists
+          changed_when: true
 
     # The update broker runs from the same binary but supervises the job that
     # may be running this playbook. A changes-only update of go/ runs this

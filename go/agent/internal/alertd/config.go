@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -295,7 +296,11 @@ func hasAnyControlChar(s string) bool {
 func cleanText(s string, limit int) string {
 	out := strings.TrimSpace(stripControlChars(s))
 	if limit > 0 && len(out) > limit {
-		return out[:limit]
+		end := limit
+		for end > 0 && !utf8.RuneStart(out[end]) {
+			end--
+		}
+		return out[:end]
 	}
 	return out
 }

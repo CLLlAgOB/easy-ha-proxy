@@ -107,3 +107,23 @@ func TestEnvRendering(t *testing.T) {
 		t.Fatal("stats")
 	}
 }
+
+func TestProtectedDomainsRejectMatchingBypassRules(t *testing.T) {
+	options := ConfigdOptions{ProtectedDomains: "admin.example.com"}
+	daemon := NewConfigd(options)
+	for _, tc := range []struct {
+		key, value string
+		rejected   bool
+	}{
+		{"domain", "*.example.com", true},
+		{"domain_regex", "^admin[.]example[.]com$", true},
+		{"domain", "*.other.example.com", false},
+	} {
+		rule := pyyaml.NewMap()
+		rule.Set("policy", "bypass")
+		rule.Set(tc.key, tc.value)
+		if err := daemon.rejectUnprotectedControlPlane([]any{rule}); (err != nil) != tc.rejected {
+			t.Errorf("%s %q: got %v", tc.key, tc.value, err)
+		}
+	}
+}

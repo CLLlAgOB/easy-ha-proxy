@@ -1,24 +1,24 @@
 package healthd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -111,50 +111,6 @@ func formatServers(servers []serverState) string {
 	return strings.Join(lines, "\n")
 }
 
-func haproxyShowStat(socketPath string) ([]map[string]string, error) {
-	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write([]byte("show stat\n")); err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	chunk := make([]byte, 65536)
-	for buf.Len() < 8*1024*1024 {
-		n, err := conn.Read(chunk)
-		buf.Write(chunk[:n])
-		if err != nil {
-			break
-		}
-	}
-	var lines []string
-	for _, l := range strings.Split(buf.String(), "\n") {
-		if strings.TrimSpace(l) != "" {
-			lines = append(lines, l)
-		}
-	}
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "# ") {
-		return nil, nil
-	}
-	header := strings.Split(lines[0][2:], ",")
-	for i := range header {
-		header[i] = strings.TrimSpace(header[i])
-	}
-	rows := make([]map[string]string, 0, len(lines)-1)
-	for _, line := range lines[1:] {
-		values := strings.Split(line, ",")
-		row := map[string]string{}
-		for i := 0; i < len(header) && i < len(values); i++ {
-			row[header[i]] = values[i]
-		}
-		rows = append(rows, row)
-	}
-	return rows, nil
-}
-
 type siteCondition struct {
 	State   string
 	Up      int
@@ -162,7 +118,7 @@ type siteCondition struct {
 	Servers []serverState
 }
 
-func siteConditionFor(siteID string, rows []map[string]string) *siteCondition {
+func siteConditionFor(siteID string, rows []haproxy.StatRow) *siteCondition {
 	backend := "be_" + siteID
 	var backendUp *bool
 	c := &siteCondition{}
@@ -230,9 +186,10 @@ func validIncident(i incident) bool {
 
 // SiteAlerts is SiteAlertEngine.
 type SiteAlerts struct {
-	alerts    *alerts.Client
-	incidents map[string]*incident
-	send      func(recipient, subject, body string) bool
+	stateDirty bool
+	alerts     *alerts.Client
+	incidents  map[string]*incident
+	send       func(recipient, subject, body string) bool
 }
 
 // NewSiteAlerts builds the engine; client may be nil or unconfigured.
@@ -245,28 +202,42 @@ func NewSiteAlerts(client *alerts.Client) *SiteAlerts {
 	return sa
 }
 
-func stateFileSafe(path string, allowMissing bool) bool {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return allowMissing
-	}
-	if err != nil || !info.Mode().IsRegular() {
-		return false
-	}
+func stateFileSafe(info os.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || int(st.Uid) != os.Geteuid() || info.Mode().Perm()&0o022 != 0 {
-		return false
+	return ok && info.Mode().IsRegular() && int(st.Uid) == os.Geteuid() && info.Mode().Perm()&0o022 == 0
+}
+
+func readSiteAlertFile(path string, maxBytes int64, state bool) ([]byte, error) {
+	flags := os.O_RDONLY | syscall.O_NONBLOCK
+	if state {
+		flags |= syscall.O_NOFOLLOW
 	}
-	return true
+	f, err := os.OpenFile(path, flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxBytes || (state && !stateFileSafe(info)) {
+		return nil, fmt.Errorf("invalid site alerts file %s", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err == nil && int64(len(data)) > maxBytes {
+		err = fmt.Errorf("site alerts file too large: %s", path)
+	}
+	return data, err
 }
 
 func loadIncidents() map[string]*incident {
 	path := siteAlertsStatePath
 	out := map[string]*incident{}
-	if !filepath.IsAbs(path) || !stateFileSafe(path, true) {
+	if !filepath.IsAbs(path) {
 		return out
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readSiteAlertFile(path, siteAlertsStateMaxBytes, true)
 	if err != nil || len(raw) == 0 || len(raw) > siteAlertsStateMaxBytes {
 		return out
 	}
@@ -288,12 +259,19 @@ func loadIncidents() map[string]*incident {
 	return out
 }
 
-func (sa *SiteAlerts) persist() bool {
+func (sa *SiteAlerts) persist() error {
 	path := siteAlertsStatePath
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("site alert state path must be absolute")
+	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o750); err != nil || !stateFileSafe(path, true) {
-		log.Printf("site-alerts: cannot persist incident state")
-		return false
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil && !stateFileSafe(info) {
+		return fmt.Errorf("invalid site alert state file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	active := map[string]*incident{}
 	for name, rec := range sa.incidents {
@@ -301,39 +279,37 @@ func (sa *SiteAlerts) persist() bool {
 			active[name] = rec
 		}
 	}
-	names := make([]string, 0, len(active))
-	for n := range active {
-		names = append(names, n)
+	raw, err := json.Marshal(map[string]any{"version": siteAlertsStateVersion, "incidents": active})
+	if err != nil {
+		return err
 	}
-	sort.Strings(names)
-	raw, _ := json.Marshal(map[string]any{"version": siteAlertsStateVersion, "incidents": active})
-	raw = append(raw, '\n')
+	if len(raw)+1 > siteAlertsStateMaxBytes || len(active) > siteAlertsStateMaxIncidents {
+		return fmt.Errorf("site alert state exceeds its size limit")
+	}
 	tmp, err := os.CreateTemp(dir, ".site-alerts.")
 	if err != nil {
-		return false
+		return err
 	}
-	tmpName := tmp.Name()
-	_ = tmp.Chmod(0o600)
-	_, werr := tmp.Write(raw)
-	_ = tmp.Sync()
-	_ = tmp.Close()
-	if werr != nil {
-		_ = os.Remove(tmpName)
-		return false
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(append(raw, '\n')); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return false
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if err := tmp.Close(); err != nil {
+		return err
 	}
-	return true
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return pyx.FsyncDir(dir)
 }
 
 func loadSites() ([]map[string]any, bool) {
-	raw, err := os.ReadFile(siteAlertsWebsites)
+	raw, err := readSiteAlertFile(siteAlertsWebsites, 16<<20, false)
 	if err != nil {
 		log.Printf("site-alerts: configuration is temporarily unavailable: %s", siteAlertsWebsites)
 		return nil, false
@@ -365,7 +341,7 @@ func loadSites() ([]map[string]any, bool) {
 }
 
 func mailState() (string, string, bool) {
-	raw, err := os.ReadFile(siteAlertsMailState)
+	raw, err := readSiteAlertFile(siteAlertsMailState, 1<<20, false)
 	if err != nil {
 		return "", "", false
 	}
@@ -410,7 +386,9 @@ func sendMail(recipient, subject, body string) bool {
 		return false
 	}
 	defer lock.Close()
-	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_SH)
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/usr/bin/docker", "exec", "-i", "mail_relay", "/usr/sbin/sendmail", "-i", "-f", sender, "--", to)
@@ -442,6 +420,15 @@ func (sa *SiteAlerts) cycle(ctx context.Context) {
 			log.Printf("site-alerts: evaluation cycle failed: %v", r)
 		}
 	}()
+	defer func() {
+		if sa.stateDirty {
+			if err := sa.persist(); err != nil {
+				log.Printf("site-alerts: cannot persist incident state: %v", err)
+			} else {
+				sa.stateDirty = false
+			}
+		}
+	}()
 	sites, ok := loadSites()
 	if !ok {
 		return
@@ -449,11 +436,15 @@ func (sa *SiteAlerts) cycle(ctx context.Context) {
 	if len(sites) == 0 {
 		if len(sa.incidents) > 0 {
 			sa.incidents = map[string]*incident{}
-			sa.persist()
+			sa.stateDirty = true
 		}
 		return
 	}
-	rows, _ := haproxyShowStat(siteAlertsSocket)
+	rows, err := haproxy.NewClient(siteAlertsSocket).ShowStat(ctx)
+	if err != nil {
+		log.Printf("site-alerts: cannot read HAProxy statistics: %v", err)
+		return
+	}
 	if len(rows) == 0 {
 		return
 	}
@@ -482,9 +473,7 @@ func (sa *SiteAlerts) cycle(ctx context.Context) {
 			changed = true
 		}
 	}
-	if changed {
-		sa.persist()
-	}
+	sa.stateDirty = sa.stateDirty || changed
 }
 
 func f64(v float64) *float64 { return &v }

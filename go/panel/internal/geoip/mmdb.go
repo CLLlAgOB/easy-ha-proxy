@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net/netip"
 	"os"
 	"sync"
@@ -118,8 +119,11 @@ func (r *Reader) lookup(ipStr string) (any, bool) {
 	if node < r.nodeCount {
 		return nil, false
 	}
-	offset := uint64(node-r.nodeCount) - 16
-	dataOffset := r.dataStart + offset
+	offset := uint64(node - r.nodeCount)
+	if offset < 16 {
+		return nil, false
+	}
+	dataOffset := r.treeSize + offset
 	if dataOffset >= uint64(len(r.data)) {
 		return nil, false
 	}
@@ -157,9 +161,25 @@ func (r *Reader) ensureLoaded() error {
 		return nil
 	}
 
-	raw, err := os.ReadFile(r.path)
+	const maxDatabase = 128 << 20
+	file, err := os.Open(r.path)
 	if err != nil {
 		return err
+	}
+	defer func() { _ = file.Close() }()
+	info, err = file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxDatabase {
+		return errors.New("invalid mmdb file or size")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxDatabase+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > maxDatabase {
+		return errors.New("mmdb exceeds its size limit")
 	}
 	idx := bytes.LastIndex(raw, metadataMarker)
 	if idx < 0 {
@@ -176,24 +196,26 @@ func (r *Reader) ensureLoaded() error {
 		return errors.New("invalid mmdb metadata")
 	}
 
-	nodeCount := uint32(toUint64(meta["node_count"]))
-	recordSize := uint16(toUint64(meta["record_size"]))
-	ipVersion := uint16(toUint64(meta["ip_version"]))
-	if nodeCount == 0 || (recordSize != 24 && recordSize != 28 && recordSize != 32) {
+	nodeCount := toUint64(meta["node_count"])
+	recordSize := toUint64(meta["record_size"])
+	ipVersion := toUint64(meta["ip_version"])
+	if nodeCount == 0 || nodeCount > uint64(^uint32(0)) ||
+		(recordSize != 24 && recordSize != 28 && recordSize != 32) ||
+		(ipVersion != 4 && ipVersion != 6) {
 		return errors.New("unsupported mmdb geometry")
 	}
-	treeSize := (uint64(recordSize) * 2 / 8) * uint64(nodeCount)
+	treeSize := (recordSize / 4) * nodeCount
 	dataStart := treeSize + 16
-	if dataStart >= uint64(len(raw)) {
+	if dataStart > uint64(idx) {
 		return errors.New("corrupt mmdb section layout")
 	}
 
 	r.mu.Lock()
 	r.mtime = info.ModTime()
-	r.data = raw
-	r.nodeCount = nodeCount
-	r.recordSize = recordSize
-	r.ipVersion = ipVersion
+	r.data = raw[:idx]
+	r.nodeCount = uint32(nodeCount)
+	r.recordSize = uint16(recordSize)
+	r.ipVersion = uint16(ipVersion)
 	r.treeSize = treeSize
 	r.dataStart = dataStart
 	r.mu.Unlock()
@@ -228,6 +250,15 @@ func (r *Reader) readNode(node uint32, right uint8) uint32 {
 }
 
 func (r *Reader) decodeValue(offset uint64, depth int) (any, uint64, error) {
+	budget := uint64(1 << 20)
+	return r.decodeAt(offset, depth, &budget)
+}
+
+func (r *Reader) decodeAt(offset uint64, depth int, budget *uint64) (any, uint64, error) {
+	if *budget == 0 {
+		return nil, offset, errors.New("mmdb decode budget exceeded")
+	}
+	*budget--
 	if depth > 32 || offset >= uint64(len(r.data)) {
 		return nil, offset, errors.New("mmdb decode bounds exceeded")
 	}
@@ -265,7 +296,7 @@ func (r *Reader) decodeValue(offset uint64, depth int) (any, uint64, error) {
 			ptr = uint64(binary.BigEndian.Uint32(r.data[offset : offset+4]))
 			offset += 4
 		}
-		v, _, err := r.decodeValue(r.dataStart+ptr, depth+1)
+		v, _, err := r.decodeAt(r.dataStart+ptr, depth+1, budget)
 		return v, offset, err
 	}
 
@@ -303,6 +334,10 @@ func (r *Reader) decodeValue(offset uint64, depth int) (any, uint64, error) {
 		if offset+size > uint64(len(r.data)) {
 			return nil, offset, errors.New("truncated string")
 		}
+		if size > *budget {
+			return nil, offset, errors.New("mmdb decode budget exceeded")
+		}
+		*budget -= size
 		return string(r.data[offset : offset+size]), offset + size, nil
 	case 5, 6, 9, 10: // uint16, uint32, uint64, uint128
 		if offset+size > uint64(len(r.data)) {
@@ -314,13 +349,16 @@ func (r *Reader) decodeValue(offset uint64, depth int) (any, uint64, error) {
 		}
 		return n, offset + size, nil
 	case 7: // map
-		m := make(map[string]any, size)
+		if size > (uint64(len(r.data))-offset)/2 || size > *budget/2 {
+			return nil, offset, errors.New("invalid map length")
+		}
+		m := make(map[string]any, min(size, 256))
 		for i := uint64(0); i < size; i++ {
-			k, nextOff, err := r.decodeValue(offset, depth+1)
+			k, nextOff, err := r.decodeAt(offset, depth+1, budget)
 			if err != nil {
 				return nil, nextOff, err
 			}
-			v, nextOff, err := r.decodeValue(nextOff, depth+1)
+			v, nextOff, err := r.decodeAt(nextOff, depth+1, budget)
 			if err != nil {
 				return nil, nextOff, err
 			}
@@ -331,9 +369,12 @@ func (r *Reader) decodeValue(offset uint64, depth int) (any, uint64, error) {
 		}
 		return m, offset, nil
 	case 11: // array
-		arr := make([]any, 0, size)
+		if size > uint64(len(r.data))-offset || size > *budget {
+			return nil, offset, errors.New("invalid array length")
+		}
+		arr := make([]any, 0, min(size, 256))
 		for i := uint64(0); i < size; i++ {
-			v, nextOff, err := r.decodeValue(offset, depth+1)
+			v, nextOff, err := r.decodeAt(offset, depth+1, budget)
 			if err != nil {
 				return nil, nextOff, err
 			}

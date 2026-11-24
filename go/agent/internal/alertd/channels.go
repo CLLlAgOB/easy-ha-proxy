@@ -60,7 +60,13 @@ var reservedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("255.255.255.255/32"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
 	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 func isReservedAddr(addr netip.Addr) bool {
@@ -157,7 +163,9 @@ func (w *WebhookChannel) Send(ctx context.Context, cfg Config, subject, body str
 }
 
 func (w *WebhookChannel) Post(ctx context.Context, cfg Config, payload map[string]any) (bool, string) {
-	target, err := ResolveWebhookTarget(ctx, cfg.WebhookURL, cfg.WebhookAllowPrivate, w.Lookup)
+	reqCtx, cancel := context.WithTimeout(ctx, WebhookTimeoutSec*time.Second)
+	defer cancel()
+	target, err := ResolveWebhookTarget(reqCtx, cfg.WebhookURL, cfg.WebhookAllowPrivate, w.Lookup)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -166,8 +174,6 @@ func (w *WebhookChannel) Post(ctx context.Context, cfg Config, payload map[strin
 		return false, err.Error()
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, WebhookTimeoutSec*time.Second)
-	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, target.RawURL, bytes.NewReader(doc))
 	if err != nil {
 		return false, err.Error()

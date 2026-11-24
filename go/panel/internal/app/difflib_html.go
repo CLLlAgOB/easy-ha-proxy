@@ -354,6 +354,9 @@ func splitLine(list *[]diffSide, num any, text string) {
 		switch rs[i] {
 		case '\x00':
 			i++
+			if i == size {
+				break
+			}
 			mark = string(rs[i])
 			i++
 		case '\x01':

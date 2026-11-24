@@ -153,10 +153,10 @@ func (d *Daemon) validateZip(r *zip.Reader) error {
 		if f.Mode()&os.ModeSymlink != 0 {
 			return vErr("ZIP symlink is not allowed: %s", f.Name)
 		}
-		expanded += int64(f.UncompressedSize64)
-		if expanded > d.Opts.MaxArchiveExpanded {
+		if d.Opts.MaxArchiveExpanded < expanded || f.UncompressedSize64 > uint64(d.Opts.MaxArchiveExpanded-expanded) {
 			return vErr("ZIP expanded size exceeds the configured limit")
 		}
+		expanded += int64(f.UncompressedSize64)
 		if f.UncompressedSize64 > 0 && f.CompressedSize64 == 0 {
 			return vErr("invalid ZIP compression metadata")
 		}

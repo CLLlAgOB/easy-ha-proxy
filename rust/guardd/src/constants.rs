@@ -37,8 +37,9 @@ pub const DECISION_DETAIL_LENGTH: usize = 240;
 pub const DECISION_REASON_MAX_BYTES: usize = 8192;
 pub const DECISIONS_KEEP_ROWS: i64 = 20000;
 pub const DECISION_PENDING_GRACE: i64 = 60;
-pub const DECISION_FEED_SOURCES: [&str; 7] =
-    ["adaptive", "operator", "restart", "haproxy", "policy", "expiry", "mode"];
+pub const DECISION_FEED_SOURCES: [&str; 7] = [
+    "adaptive", "operator", "restart", "haproxy", "policy", "expiry", "mode",
+];
 
 pub fn decision_feed_kinds(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
@@ -331,7 +332,11 @@ pub fn crc32(data: &[u8]) -> u32 {
         for (i, slot) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *slot = c;
         }
@@ -361,7 +366,10 @@ mod tests {
 
     #[test]
     fn ban_durations_validated_like_python() {
-        assert_eq!(validate_ban_durations(&json!([60, 3600])).unwrap(), vec![60, 3600]);
+        assert_eq!(
+            validate_ban_durations(&json!([60, 3600])).unwrap(),
+            vec![60, 3600]
+        );
         assert!(validate_ban_durations(&json!([])).is_err());
         assert!(validate_ban_durations(&json!([3600, 60])).is_err());
         assert!(validate_ban_durations(&json!([true])).is_err());

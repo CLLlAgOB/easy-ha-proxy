@@ -389,6 +389,18 @@ class BackupInstallerTagTests(unittest.TestCase):
 
 
 class OfflineRestoreImagePreflightTests(unittest.TestCase):
+    def test_native_restore_uses_compose_and_commit_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary)
+            (config / "authelia.yml").write_text("authelia_enabled: false\n")
+            (config / "vars.yml").write_text("haproxy_admin_image: registry.test:5000/admin:alpha\n")
+            with mock.patch("easy_ha_proxy.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout="a" * 40 + "\n",
+            )):
+                images = offline_restore_required_images(directory=config, controller_source=ROOT)
+            self.assertEqual(images, {"registry.test:5000/admin:go-alpha",
+                                      "clllagob/haproxy-admin-ui:native-alpha-" + "a"*12})
+
     def test_current_recovery_defaults_drive_the_image_preflight_set(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

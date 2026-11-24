@@ -142,6 +142,7 @@
     owner: "{{ app_user }}"
     group: "{{ app_group }}"
     recurse: true
+    follow: false
   loop:
     - "{{ haproxy_admin_data_dir }}"
     - "{{ haproxy_admin_root_dir }}/config"

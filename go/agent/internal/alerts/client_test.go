@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -53,5 +54,33 @@ func TestObserveOverUnixSocket(t *testing.T) {
 	}
 	if gotToken != "secret-token" || gotObs.Rule != "http.error_ratio" || gotObs.Subject != "be_app" || gotObs.Active == nil || !*gotObs.Active {
 		t.Fatalf("unexpected received observation: token=%q obs=%+v", gotToken, gotObs)
+	}
+}
+
+func TestObserveResendsChangesAndRetriesFailures(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "alertd.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	var requests atomic.Int32
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		_, _ = w.Write([]byte("{}"))
+	})}
+	go func() { _ = server.Serve(ln) }()
+	defer func() { _ = server.Close() }()
+	c := NewClient(sock, "token")
+	ctx := context.Background()
+	observation := Observation{Rule: "site.down", Subject: "example", Active: BoolPtr(true)}
+	if c.Observe(ctx, observation) || !c.Observe(ctx, observation) || !c.Observe(ctx, observation) {
+		t.Fatal("failed observations must be retried and accepted duplicates suppressed")
+	}
+	observation.Active = BoolPtr(false)
+	if !c.Observe(ctx, observation) || requests.Load() != 3 {
+		t.Fatalf("expected three requests including the state change, got %d", requests.Load())
 	}
 }

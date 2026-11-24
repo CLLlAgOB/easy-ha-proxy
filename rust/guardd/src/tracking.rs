@@ -141,7 +141,13 @@ impl IpActivity {
     pub fn recent_categories(&self, since: i64) -> Vec<&str> {
         self.categories
             .iter()
-            .filter_map(|(name, ts)| if *ts >= since { Some(name.as_str()) } else { None })
+            .filter_map(|(name, ts)| {
+                if *ts >= since {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -407,11 +413,7 @@ impl IpMemory {
 /// skipping IPv6, loopback, link-local, multicast, unspecified, and RFC 6598 CGNAT (`100.64.0.0/10`).
 pub fn ipv4_subnet24_key(ip: &str) -> Option<u32> {
     let addr: Ipv4Addr = ip.parse().ok()?;
-    if addr.is_loopback()
-        || addr.is_link_local()
-        || addr.is_multicast()
-        || addr.is_unspecified()
-    {
+    if addr.is_loopback() || addr.is_link_local() || addr.is_multicast() || addr.is_unspecified() {
         return None;
     }
     let o = addr.octets();
@@ -539,7 +541,9 @@ impl SubnetCorrelator {
         let hot = self
             .subnets
             .values()
-            .filter(|peers| peers.iter().filter(|&&(_, seen)| seen >= cutoff).count() >= self.min_ips)
+            .filter(|peers| {
+                peers.iter().filter(|&&(_, seen)| seen >= cutoff).count() >= self.min_ips
+            })
             .count();
         SubnetSummary {
             tracked_subnets: self.subnets.len(),
@@ -560,6 +564,7 @@ pub struct LogCursor {
     pub rotations: u64,
     pub lag_bytes: u64,
     pub last_error: Option<String>,
+    skipping_line: bool,
 }
 
 impl LogCursor {
@@ -571,24 +576,23 @@ impl LogCursor {
             rotations,
             lag_bytes: 0,
             last_error: None,
+            skipping_line: false,
         }
     }
 
-    #[cfg(unix)]
-    fn stat_inode_size(&self) -> Result<(u64, u64), String> {
-        use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(&self.path).map_err(|e| e.to_string())?;
-        Ok((meta.ino(), meta.size()))
-    }
-
-    #[cfg(not(unix))]
-    fn stat_inode_size(&self) -> Result<(u64, u64), String> {
-        let meta = std::fs::metadata(&self.path).map_err(|e| e.to_string())?;
-        Ok((1, meta.len()))
+    fn inode_size(meta: std::fs::Metadata) -> (u64, u64) {
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        };
+        #[cfg(not(unix))]
+        let inode = 1;
+        (inode, meta.len())
     }
 
     pub fn has_pending(&self) -> bool {
-        let Ok((inode, size)) = self.stat_inode_size() else {
+        let Ok((inode, size)) = std::fs::metadata(&self.path).map(Self::inode_size) else {
             return false;
         };
         if self.inode == 0 {
@@ -599,13 +603,19 @@ impl LogCursor {
 
     /// Read up to `max_bytes`, returning only complete newline-terminated lines.
     pub fn read(&mut self, max_bytes: usize) -> Vec<String> {
-        let (inode, size) = match self.stat_inode_size() {
+        if max_bytes == 0 {
+            return Vec::new();
+        }
+        let (mut file, inode, size) = match File::open(&self.path).and_then(|file| {
+            let (inode, size) = Self::inode_size(file.metadata()?);
+            Ok((file, inode, size))
+        }) {
             Ok(v) => {
                 self.last_error = None;
                 v
             }
             Err(e) => {
-                self.last_error = Some(e);
+                self.last_error = Some(e.to_string());
                 return Vec::new();
             }
         };
@@ -619,9 +629,11 @@ impl LogCursor {
             self.inode = inode;
             self.offset = 0;
             self.rotations += 1;
+            self.skipping_line = false;
         } else if size < self.offset {
             self.offset = 0;
             self.rotations += 1;
+            self.skipping_line = false;
         }
 
         if size <= self.offset {
@@ -632,18 +644,11 @@ impl LogCursor {
         let remaining = size - self.offset;
         self.lag_bytes = remaining.saturating_sub(max_bytes as u64);
 
-        let mut file = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) => {
-                self.last_error = Some(e.to_string());
-                return Vec::new();
-            }
-        };
         if let Err(e) = file.seek(SeekFrom::Start(self.offset)) {
             self.last_error = Some(e.to_string());
             return Vec::new();
         }
-        let mut buf = vec![0u8; max_bytes.min(remaining as usize)];
+        let mut buf = vec![0u8; remaining.min(max_bytes as u64) as usize];
         let n = match file.read(&mut buf) {
             Ok(n) => n,
             Err(e) => {
@@ -653,14 +658,32 @@ impl LogCursor {
         };
         buf.truncate(n);
 
-        let Some(last_nl) = memchr::memrchr(b'\n', &buf) else {
+        let mut content = buf.as_slice();
+        if self.skipping_line {
+            if let Some(end) = memchr::memchr(b'\n', content) {
+                let skipped = end + 1;
+                self.offset += skipped as u64;
+                content = &content[skipped..];
+                self.skipping_line = false;
+            } else {
+                self.offset += content.len() as u64;
+                return Vec::new();
+            }
+        }
+        let Some(last_nl) = memchr::memrchr(b'\n', content) else {
+            // A line filling an entire read budget would otherwise
+            // block every subsequent read at the same offset.
+            if content.len() == max_bytes && max_bytes >= MAX_LOG_LINE_BYTES {
+                self.offset += content.len() as u64;
+                self.skipping_line = true;
+            }
             return Vec::new();
         };
         let consumed = last_nl + 1;
         self.offset += consumed as u64;
 
         let mut lines = Vec::new();
-        for raw in buf[..consumed].split(|&b| b == b'\n') {
+        for raw in content[..consumed].split(|&b| b == b'\n') {
             let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
             if raw.is_empty() {
                 continue;
@@ -673,5 +696,36 @@ impl LogCursor {
             lines.push(String::from_utf8_lossy(bounded).into_owned());
         }
         lines
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn advances_past_a_line_that_exceeds_the_read_budget() {
+        let path =
+            std::env::temp_dir().join(format!("guardd-cursor-budget-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut cursor = LogCursor::new(&path, 0, 0, 0);
+        assert!(cursor.read(MAX_LOG_LINE_BYTES).is_empty());
+        let long = vec![b'a'; MAX_LOG_LINE_BYTES + 10];
+        std::io::Write::write_all(&mut file, &long).unwrap();
+        std::io::Write::write_all(&mut file, b"\nok\n").unwrap();
+        assert!(cursor.read(8).is_empty());
+        assert_eq!(cursor.offset, 0);
+        let mut lines = Vec::new();
+        for _ in 0..8 {
+            lines.extend(cursor.read(MAX_LOG_LINE_BYTES));
+        }
+        let pending = cursor.has_pending();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(lines, ["ok"]);
+        assert!(!pending);
     }
 }

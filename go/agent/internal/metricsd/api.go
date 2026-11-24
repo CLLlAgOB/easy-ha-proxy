@@ -371,12 +371,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
+			monitors, available := s.Collector.monitorSnapshot()
 			reqs := totals.Value("requests").(int64)
 			return omap("ok", true, "ts", until, "range", key, "range_seconds", rangeSeconds, "since", since, "until", until,
 				"site", site, "totals", totals, "requests_per_second", pyRoundN(float64(reqs)/float64(rangeSeconds), 3),
 				"connections", conns, "load", load, "health", health, "collector", s.Collector.health(),
-				"storage", s.Collector.storage.report(until), "monitors", orderedMonitors(s.Collector.monitors),
-				"sensors", s.Collector.sensors(), "log_digests", omap("available", s.Collector.digestsAvailable)), nil
+				"storage", s.Collector.storage.report(until), "monitors", orderedMonitors(monitors),
+				"sensors", s.Collector.sensors(), "log_digests", omap("available", available)), nil
 		}()
 		if err != nil {
 			fail(err)
@@ -384,7 +385,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.sendJSON(w, 200, payload)
 	case "/api/v1/metrics/monitors":
-		s.sendJSON(w, 200, omap("ok", true, "monitors", orderedMonitors(s.Collector.monitors)))
+		monitors, _ := s.Collector.monitorSnapshot()
+		s.sendJSON(w, 200, omap("ok", true, "monitors", orderedMonitors(monitors)))
 	case "/api/v1/metrics/health":
 		stats, err := s.DB.stats()
 		if err != nil {

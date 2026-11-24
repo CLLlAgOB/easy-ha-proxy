@@ -60,9 +60,42 @@ struct SignatureFile {
     #[serde(default)]
     traps: Vec<String>,
     #[serde(default)]
-    queries: Option<serde_json::Map<String, serde_json::Value>>,
+    queries: Option<OrderedRules>,
     #[serde(default)]
-    user_agents: Option<serde_json::Map<String, serde_json::Value>>,
+    user_agents: Option<OrderedRules>,
+}
+
+#[derive(Debug)]
+struct OrderedRules(Vec<(String, serde_json::Value)>);
+
+impl<'de> Deserialize<'de> for OrderedRules {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RulesVisitor;
+        impl<'de> serde::de::Visitor<'de> for RulesVisitor {
+            type Value = OrderedRules;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a mapping of signature rules")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut rules = hashlink::LinkedHashMap::new();
+                while let Some((name, value)) = map.next_entry()? {
+                    // Match Python dict ordering even for a repeated key.
+                    if let Some(previous) = rules.get_mut(&name) {
+                        *previous = value;
+                    } else {
+                        rules.insert(name, value);
+                    }
+                }
+                Ok(OrderedRules(rules.into_iter().collect()))
+            }
+        }
+        deserializer.deserialize_map(RulesVisitor)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +186,10 @@ impl SignatureEngine {
 
     /// (token as written, category) for each User-Agent rule in force.
     pub fn user_agents(&self) -> Vec<(String, String)> {
-        self.ua_rules.iter().map(|r| (r.written.clone(), r.category.clone())).collect()
+        self.ua_rules
+            .iter()
+            .map(|r| (r.written.clone(), r.category.clone()))
+            .collect()
     }
 
     pub fn decisive_categories(&self) -> &HashSet<String> {
@@ -162,7 +198,11 @@ impl SignatureEngine {
 
     /// Every category a path rule can produce.
     pub fn path_categories(&self) -> HashSet<String> {
-        self.merged_segments.values().chain(self.paths.values()).cloned().collect()
+        self.merged_segments
+            .values()
+            .chain(self.paths.values())
+            .cloned()
+            .collect()
     }
 
     /// Build an engine with the built-in fallback signatures matching Python `guardd.constants`.
@@ -217,7 +257,7 @@ impl SignatureEngine {
         let decisive: HashSet<String> = parsed.decisive.into_iter().collect();
 
         let query_rules = match parsed.queries {
-            Some(map) if !map.is_empty() => {
+            Some(OrderedRules(map)) if !map.is_empty() => {
                 let mut compiled = Vec::with_capacity(map.len());
                 let mut ok = true;
                 for (name, val) in map {
@@ -253,7 +293,7 @@ impl SignatureEngine {
         };
 
         let ua_pairs: Vec<(String, String)> = match parsed.user_agents {
-            Some(map) if !map.is_empty() => map
+            Some(OrderedRules(map)) if !map.is_empty() => map
                 .into_iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
                 .collect(),
@@ -295,9 +335,14 @@ impl SignatureEngine {
         let mut prefixes = Vec::new();
         for (token, category) in segments {
             if token.ends_with('*') && token.len() > 1 {
-                prefixes.push((token[..token.len() - 1].to_ascii_lowercase(), category.clone()));
+                prefixes.push((
+                    token[..token.len() - 1].to_ascii_lowercase(),
+                    category.clone(),
+                ));
             }
-            segments_lower.entry(token.to_ascii_lowercase()).or_insert_with(|| category.clone());
+            segments_lower
+                .entry(token.to_ascii_lowercase())
+                .or_insert_with(|| category.clone());
             segments_exact.insert(token, category);
         }
         prefixes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -361,8 +406,7 @@ impl SignatureEngine {
             return exact.as_str();
         }
         let mut probable: &str = "";
-        let trimmed = path.strip_prefix('/').unwrap_or(path);
-        for segment in trimmed.split('/').take(MAX_MATCHED_SEGMENTS) {
+        for segment in path.splitn(MAX_MATCHED_SEGMENTS + 2, '/').skip(1) {
             if segment.is_empty() {
                 continue;
             }
@@ -628,7 +672,9 @@ pub fn classify_raw_path(uri: &str) -> &'static str {
 
 /// True when a client claims a modern desktop/mobile browser UA over HTTP/1.0.
 pub fn is_proto_ua_mismatch(protocol: &str, user_agent: &str) -> bool {
-    protocol == "HTTP/1.0" && !user_agent.is_empty() && modern_browser_ua_regex().is_match(user_agent)
+    protocol == "HTTP/1.0"
+        && !user_agent.is_empty()
+        && modern_browser_ua_regex().is_match(user_agent)
 }
 
 /// True when a request uses TRACE/TRACK/CONNECT/DEBUG or a WebDAV method outside a webdav profile.

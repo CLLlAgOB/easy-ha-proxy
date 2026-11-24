@@ -1,11 +1,14 @@
 package security
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -225,5 +228,72 @@ func TestAcceptsGzip(t *testing.T) {
 		if got := acceptsGzip([]string{header}); got != want {
 			t.Errorf("%q: got %t, want %t", header, got, want)
 		}
+	}
+}
+
+func TestFormCSRFUsesBodyAndReportsSize(t *testing.T) {
+	b := NewBoundary("proxy", "session", false, nil)
+	h := b.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	token := b.CSRFTokenForSession("test")
+	for _, tc := range []struct {
+		query, body string
+		limit       int64
+		want        int
+	}{
+		{"?csrf_token=" + token, "", 256, 400},
+		{"", "csrf_token=" + token, 256, 204},
+		{"", "csrf_token=" + token, 4, 413},
+	} {
+		r := httptest.NewRequest("POST", "/form"+tc.query, strings.NewReader(tc.body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set(ProxySecretHeader, "proxy")
+		r.Header.Set("Remote-User", "admin")
+		r.Header.Set("Remote-Groups", "superadmin")
+		r.AddCookie(b.MakeSessionCookie("test"))
+		w := httptest.NewRecorder()
+		r.Body = http.MaxBytesReader(w, r.Body, tc.limit)
+		h.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Errorf("got HTTP %d, want %d", w.Code, tc.want)
+		}
+	}
+}
+
+func TestRequestCopyRemovesMultipartFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", "sample.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(part, strings.NewReader(strings.Repeat("a", (2<<20)+1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := NewBoundary("proxy", "session", false, nil)
+	h := b.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(2 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if files, err := os.ReadDir(dir); err != nil || len(files) != 1 {
+			t.Fatalf("expected a spooled file: %v, %v", files, err)
+		}
+		w.WriteHeader(204)
+	}))
+	r := httptest.NewRequest("POST", "/form", &body)
+	r.Header.Set("Content-Type", form.FormDataContentType())
+	r.Header.Set(ProxySecretHeader, "proxy")
+	r.Header.Set("Remote-User", "admin")
+	r.Header.Set("Remote-Groups", "superadmin")
+	r.AddCookie(b.MakeSessionCookie("test"))
+	r.Header.Set(CSRFHeaderPrimary, b.CSRFTokenForSession("test"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if files, err := os.ReadDir(dir); err != nil || len(files) != 0 || w.Code != 204 {
+		t.Fatalf("after request: %v, %v, HTTP %d", files, err, w.Code)
 	}
 }

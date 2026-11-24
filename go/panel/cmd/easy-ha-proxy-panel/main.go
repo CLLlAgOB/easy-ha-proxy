@@ -82,11 +82,18 @@ func runHealthcheck() error {
 	req.Header.Set("Remote-User", security.ControlPlaneHealthUser)
 	req.Header.Set("Remote-Groups", security.ControlPlaneHealthGroup)
 
-	resp, err := http.DefaultClient.Do(req)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}

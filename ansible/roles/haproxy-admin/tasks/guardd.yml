@@ -80,6 +80,7 @@
     or guardd_cfg.changed
     or guardd_signatures.changed
     or (hapadm_env_t.changed | default(false))
+    or (daemons_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-guardd | Ensure service started"
   ansible.builtin.systemd:

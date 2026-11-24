@@ -4,7 +4,9 @@
 use crate::constants::clamp_str;
 use crate::live::live_refusal;
 use crate::parser::ParsedRequest;
-use crate::reqlog::{summary_layout, RequestQuery, RequestSummary, REQUEST_COUNT_CAP, REQUEST_SUMMARY_SECONDS};
+use crate::reqlog::{
+    summary_layout, RequestQuery, RequestSummary, REQUEST_COUNT_CAP, REQUEST_SUMMARY_SECONDS,
+};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::cmp::Reverse;
@@ -54,7 +56,13 @@ pub const ENFORCEMENT_CURSOR_KEY: &str = "enforcement_scan_after";
 /// `[a-z0-9./;:_-]` made "_" (the input is already lower case).
 pub fn logged_agent(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || "./;:_-".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || "./;:_-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -64,11 +72,19 @@ pub fn line_epoch(line: &str) -> Option<f64> {
     let stamp = head.split(' ').next().unwrap_or("");
     static R: OnceLock<Regex> = OnceLock::new();
     let rx = R.get_or_init(|| {
-        Regex::new(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$").expect("regex")
+        Regex::new(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
+            .expect("regex")
     });
     let c = rx.captures(stamp)?;
-    let whole = crate::context::parse_iso_time(&format!("{}{}", &c[1], c.get(3).map(|m| m.as_str()).unwrap_or("")))?;
-    let frac: f64 = c.get(2).and_then(|m| format!("0{}", m.as_str()).parse().ok()).unwrap_or(0.0);
+    let whole = crate::context::parse_iso_time(&format!(
+        "{}{}",
+        &c[1],
+        c.get(3).map(|m| m.as_str()).unwrap_or("")
+    ))?;
+    let frac: f64 = c
+        .get(2)
+        .and_then(|m| format!("0{}", m.as_str()).parse().ok())
+        .unwrap_or(0.0);
     Some(whole as f64 + frac)
 }
 
@@ -101,7 +117,11 @@ impl LiveRecord {
             ip: req.client_ip.clone(),
             status: req.status,
             host: req.host.clone(),
-            path: if req.bad_request { "<BADREQ>".to_string() } else { req.path.chars().take(200).collect() },
+            path: if req.bad_request {
+                "<BADREQ>".to_string()
+            } else {
+                req.path.chars().take(200).collect()
+            },
             method: req.method.clone(),
             backend: req.backend.clone(),
             bytes_out: req.bytes_out,
@@ -120,7 +140,14 @@ impl LiveRecord {
     /// The size estimate the memory budget counts (Python `live_record_bytes`).
     pub fn estimated_bytes(&self) -> usize {
         let mut size = LIVE_RECORD_BASE_BYTES;
-        for v in [&self.ip, &self.path, &self.ban_reason, &self.times, &self.request_id, &self.authenticated_user] {
+        for v in [
+            &self.ip,
+            &self.path,
+            &self.ban_reason,
+            &self.times,
+            &self.request_id,
+            &self.authenticated_user,
+        ] {
             if !v.is_empty() {
                 size += LIVE_STRING_BYTES + v.chars().count();
             }
@@ -177,9 +204,11 @@ fn proc_kib(path: &str, key: &str) -> i64 {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| {
-            t.lines()
-                .find(|l| l.starts_with(key))
-                .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse::<i64>().ok()))
+            t.lines().find(|l| l.starts_with(key)).and_then(|l| {
+                l.split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<i64>().ok())
+            })
         })
         .map(|k| k * 1024)
         .unwrap_or(0)
@@ -204,9 +233,15 @@ pub fn service_memory_limit() -> i64 {
             continue;
         }
         let value = if parts[0] == "0" && parts[1].is_empty() {
-            read_first_line(&format!("/sys/fs/cgroup{}/memory.max", parts[2].trim_end_matches('/')))
+            read_first_line(&format!(
+                "/sys/fs/cgroup{}/memory.max",
+                parts[2].trim_end_matches('/')
+            ))
         } else if parts[1].split(',').any(|c| c == "memory") {
-            read_first_line(&format!("/sys/fs/cgroup/memory{}/memory.limit_in_bytes", parts[2].trim_end_matches('/')))
+            read_first_line(&format!(
+                "/sys/fs/cgroup/memory{}/memory.limit_in_bytes",
+                parts[2].trim_end_matches('/')
+            ))
         } else {
             continue;
         };
@@ -227,7 +262,9 @@ pub fn live_budget_ceiling(held_bytes: i64, host: bool) -> (i64, &'static str) {
     let rss = process_rss_bytes();
     if limit != 0 && rss != 0 {
         let baseline = (rss as f64 - held_bytes as f64 * LIVE_BUDGET_SLACK).max(0.0);
-        let room = (limit as f64 - baseline - LIVE_BUDGET_SERVICE_RESERVE) / LIVE_BUDGET_SLACK / MIB as f64;
+        let room = (limit as f64 - baseline - LIVE_BUDGET_SERVICE_RESERVE)
+            / LIVE_BUDGET_SLACK
+            / MIB as f64;
         if room < ceiling {
             ceiling = room;
             reason = "service";
@@ -236,7 +273,9 @@ pub fn live_budget_ceiling(held_bytes: i64, host: bool) -> (i64, &'static str) {
     if host {
         let available = host_memory_available();
         if available != 0 {
-            let room = (held_bytes as f64 + available as f64 * LIVE_BUDGET_HOST_SHARE / LIVE_BUDGET_SLACK) / MIB as f64;
+            let room = (held_bytes as f64
+                + available as f64 * LIVE_BUDGET_HOST_SHARE / LIVE_BUDGET_SLACK)
+                / MIB as f64;
             if room < ceiling {
                 ceiling = room;
                 reason = "host";
@@ -304,10 +343,15 @@ impl LiveFilters {
         if !self.host.is_empty() && r.host != self.host {
             return false;
         }
-        if !self.q.is_empty() && !r.path.to_lowercase().contains(&self.q) && !r.host.contains(&self.q) {
+        if !self.q.is_empty()
+            && !r.path.to_lowercase().contains(&self.q)
+            && !r.host.contains(&self.q)
+        {
             return false;
         }
-        if !self.status.is_empty() && r.status.to_string().chars().next() != self.status.chars().next() {
+        if !self.status.is_empty()
+            && r.status.to_string().chars().next() != self.status.chars().next()
+        {
             return false;
         }
         if self.blocked && r.refusal.is_empty() {
@@ -329,32 +373,53 @@ impl LiveFilters {
 }
 
 pub fn truthy(v: Option<&String>) -> bool {
-    matches!(v.map(|s| s.to_lowercase()).as_deref(), Some("1" | "true" | "yes" | "on"))
+    matches!(
+        v.map(|s| s.to_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 pub fn live_filters(raw: &HashMap<String, String>) -> Result<LiveFilters, String> {
     static IP: OnceLock<Regex> = OnceLock::new();
     static HOST: OnceLock<Regex> = OnceLock::new();
     let mut f = LiveFilters::default();
-    let ip = raw.get("ip").map(|s| s.trim().to_string()).unwrap_or_default();
+    let ip = raw
+        .get("ip")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     if !ip.is_empty() {
-        if !IP.get_or_init(|| Regex::new(r"^[0-9A-Fa-f:.]{1,45}$").expect("regex")).is_match(&ip) {
+        if !IP
+            .get_or_init(|| Regex::new(r"^[0-9A-Fa-f:.]{1,45}$").expect("regex"))
+            .is_match(&ip)
+        {
             return Err("invalid ip filter".into());
         }
         f.ip = ip;
     }
-    let host = raw.get("host").map(|s| s.trim().to_lowercase()).unwrap_or_default();
+    let host = raw
+        .get("host")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
     if !host.is_empty() {
-        if !HOST.get_or_init(|| Regex::new(r"^[a-z0-9.-]{1,253}$").expect("regex")).is_match(&host) {
+        if !HOST
+            .get_or_init(|| Regex::new(r"^[a-z0-9.-]{1,253}$").expect("regex"))
+            .is_match(&host)
+        {
             return Err("invalid host filter".into());
         }
         f.host = host;
     }
-    let q = raw.get("q").map(|s| s.trim().to_lowercase()).unwrap_or_default();
+    let q = raw
+        .get("q")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
     if !q.is_empty() {
         f.q = q.chars().take(120).collect();
     }
-    let status = raw.get("status").map(|s| s.trim().to_string()).unwrap_or_default();
+    let status = raw
+        .get("status")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     if !status.is_empty() {
         if !["1xx", "2xx", "3xx", "4xx", "5xx"].contains(&status.as_str()) {
             return Err("invalid status filter".into());
@@ -364,7 +429,10 @@ pub fn live_filters(raw: &HashMap<String, String>) -> Result<LiveFilters, String
     f.blocked = truthy(raw.get("blocked"));
     f.banned = truthy(raw.get("banned"));
     f.hide_admin = truthy(raw.get("hide_admin"));
-    let agent = raw.get("agent").map(|s| s.trim().to_lowercase()).unwrap_or_default();
+    let agent = raw
+        .get("agent")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
     if !agent.is_empty() {
         f.agent = logged_agent(&agent.chars().take(120).collect::<String>());
     }
@@ -398,7 +466,10 @@ fn server_times(values: &mut [i64]) -> Map<String, Value> {
     let pick = |q: f64| values[py_round(q * last as f64) as usize];
     m.insert("p50_ms".into(), json!(pick(0.50)));
     m.insert("p95_ms".into(), json!(pick(0.95)));
-    m.insert("avg_ms".into(), json!(values.iter().sum::<i64>() / values.len() as i64));
+    m.insert(
+        "avg_ms".into(),
+        json!(values.iter().sum::<i64>() / values.len() as i64),
+    );
     m
 }
 
@@ -435,7 +506,10 @@ impl Tally {
                 if known.is_empty() {
                     *self = Tally::One(value.to_string());
                 } else if known != value {
-                    *self = Tally::Many(vec![(known.clone(), previous_total), (value.to_string(), 1)]);
+                    *self = Tally::Many(vec![
+                        (known.clone(), previous_total),
+                        (value.to_string(), 1),
+                    ]);
                 }
             }
         }
@@ -469,7 +543,13 @@ struct SiteEntry {
 }
 
 /// Totals, addresses, sites, a timeline and the latest requests.
-pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &LiveFilters, covered: Option<i64>) -> Value {
+pub fn live_aggregate(
+    records: &[&LiveRecord],
+    now: f64,
+    window: i64,
+    filters: &LiveFilters,
+    covered: Option<i64>,
+) -> Value {
     let since = now - window as f64;
     let bucket = (window / 60).max(1);
     let buckets = ((window + bucket - 1) / bucket).max(1) as usize;
@@ -488,7 +568,8 @@ pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &
     let mut agent_order: Vec<&str> = Vec::new();
     let mut slow: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
     let mut slow_records: HashMap<usize, &LiveRecord> = HashMap::new();
-    let (mut total, mut errors_total, mut server_total, mut blocked_total) = (0i64, 0i64, 0i64, 0i64);
+    let (mut total, mut errors_total, mut server_total, mut blocked_total) =
+        (0i64, 0i64, 0i64, 0i64);
     let mut bytes_total: u64 = 0;
     let filtering = !filters.is_empty();
 
@@ -526,8 +607,18 @@ pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &
                 server_total += 1;
             }
         }
-        let answered_ms = if r.response_ms >= 0 { r.response_ms } else { -1 };
-        let reason_of = || if r.ban_reason.is_empty() { refusal.to_string() } else { r.ban_reason.clone() };
+        let answered_ms = if r.response_ms >= 0 {
+            r.response_ms
+        } else {
+            -1
+        };
+        let reason_of = || {
+            if r.ban_reason.is_empty() {
+                refusal.to_string()
+            } else {
+                r.ban_reason.clone()
+            }
+        };
         match addresses.get_mut(r.ip.as_str()) {
             None => {
                 address_order.push(r.ip.as_str());
@@ -562,7 +653,8 @@ pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &
                 if let Tally::One(known) = &entry.hosts {
                     if known.is_empty() && !r.host.is_empty() {
                         // Python keeps "" and a later host apart like any two values.
-                        entry.hosts = Tally::Many(vec![(String::new(), before), (r.host.clone(), 1)]);
+                        entry.hosts =
+                            Tally::Many(vec![(String::new(), before), (r.host.clone(), 1)]);
                     } else {
                         entry.hosts.bump(&r.host, before);
                     }
@@ -594,7 +686,10 @@ pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &
             if slow.len() < LIVE_MAX_SLOW {
                 slow.push(Reverse((answered_ms, seq)));
                 slow_records.insert(seq, r);
-            } else if slow.peek().is_some_and(|Reverse((smallest, _))| answered_ms > *smallest) {
+            } else if slow
+                .peek()
+                .is_some_and(|Reverse((smallest, _))| answered_ms > *smallest)
+            {
                 if let Some(Reverse((_, gone))) = slow.pop() {
                     slow_records.remove(&gone);
                 }
@@ -665,11 +760,18 @@ pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &
     ranked.sort_by_key(|ip| Reverse(addresses[ip].requests));
     ranked.truncate(LIVE_MAX_ADDRESSES);
     let chosen: HashSet<&str> = ranked.iter().copied().collect();
-    let mut blocked: Vec<&str> =
-        address_order.iter().copied().filter(|ip| addresses[ip].refused > 0 && !chosen.contains(ip)).collect();
+    let mut blocked: Vec<&str> = address_order
+        .iter()
+        .copied()
+        .filter(|ip| addresses[ip].refused > 0 && !chosen.contains(ip))
+        .collect();
     blocked.sort_by_key(|ip| Reverse(addresses[ip].refused));
     blocked.truncate(LIVE_MAX_BLOCKED_ADDRESSES);
-    let rows: Vec<Value> = ranked.iter().chain(blocked.iter()).map(|ip| address_row(ip, &addresses[ip])).collect();
+    let rows: Vec<Value> = ranked
+        .iter()
+        .chain(blocked.iter())
+        .map(|ip| address_row(ip, &addresses[ip]))
+        .collect();
     let mut site_list: Vec<(&str, SiteEntry)> = sites.into_iter().collect();
     site_list.sort_by_key(|(_, v)| v.first);
     site_list.sort_by_key(|(_, v)| Reverse(v.requests));
@@ -694,7 +796,11 @@ pub fn live_aggregate(records: &[&LiveRecord], now: f64, window: i64, filters: &
         .collect();
     let mut top_paths: Vec<(&str, &str)> = path_order.clone();
     top_paths.sort_by_key(|k| Reverse(paths[k][0]));
-    let mut not_found: Vec<(&str, &str)> = path_order.iter().copied().filter(|k| paths[k][2] > 0).collect();
+    let mut not_found: Vec<(&str, &str)> = path_order
+        .iter()
+        .copied()
+        .filter(|k| paths[k][2] > 0)
+        .collect();
     not_found.sort_by_key(|k| Reverse(paths[k][2]));
     let mut top_agents: Vec<&str> = agent_order.clone();
     top_agents.sort_by_key(|a| Reverse(agents[a].0));
@@ -806,7 +912,8 @@ impl LiveBuffer {
     }
 
     pub fn wanted(&self) -> bool {
-        self.wanted_at.is_some_and(|t| t.elapsed().as_secs_f64() < LIVE_WANTED_SECONDS)
+        self.wanted_at
+            .is_some_and(|t| t.elapsed().as_secs_f64() < LIVE_WANTED_SECONDS)
     }
 
     fn count(&mut self, records: &[LiveRecord]) {
@@ -865,7 +972,8 @@ impl LiveBuffer {
     fn trim(&mut self, newest: Option<f64>) -> usize {
         let mut dropped = 0usize;
         while !self.records.is_empty()
-            && (self.records.len() > self.max_records || (self.max_bytes != 0 && self.bytes > self.max_bytes))
+            && (self.records.len() > self.max_records
+                || (self.max_bytes != 0 && self.bytes > self.max_bytes))
         {
             if let Some(r) = self.records.pop_front() {
                 self.bytes -= r.estimated_bytes() as i64;
@@ -955,7 +1063,13 @@ impl LiveBuffer {
         })
     }
 
-    pub fn search_requests(&self, query: &RequestQuery, before: i64, limit: i64, count: bool) -> Value {
+    pub fn search_requests(
+        &self,
+        query: &RequestQuery,
+        before: i64,
+        limit: i64,
+        count: bool,
+    ) -> Value {
         let limit = limit.clamp(1, 500) as usize;
         let base = self.base;
         let mut top = self.records.len() as i64;
@@ -998,7 +1112,11 @@ impl LiveBuffer {
     pub fn summarize_requests(&self, query: &RequestQuery) -> Value {
         let now = crate::constants::utc_now_f();
         let oldest = self.records.front().map(|r| r.ts).unwrap_or(now);
-        let start = if query.since != 0.0 { query.since.max(oldest) } else { oldest };
+        let start = if query.since != 0.0 {
+            query.since.max(oldest)
+        } else {
+            oldest
+        };
         let end = if query.until != 0.0 { query.until } else { now };
         let (first, step, bars) = summary_layout(start, end);
         let mut summary = RequestSummary::new(first, step, bars);
@@ -1007,11 +1125,19 @@ impl LiveBuffer {
         for index in (0..self.records.len()).rev() {
             let r = &self.records[index];
             if query.matches(r) {
-                summary.add((r.ts as i64 - first).div_euclid(step), r.status, !r.refusal.is_empty(), 1);
+                summary.add(
+                    (r.ts as i64 - first).div_euclid(step),
+                    r.status,
+                    !r.refusal.is_empty(),
+                    1,
+                );
                 summary.add_client(&r.ip, 1);
                 summary.add_path(&r.host, &r.path, 1);
             }
-            if index % 4096 == 0 && index != 0 && started.elapsed().as_secs_f64() > REQUEST_SUMMARY_SECONDS {
+            if index % 4096 == 0
+                && index != 0
+                && started.elapsed().as_secs_f64() > REQUEST_SUMMARY_SECONDS
+            {
                 reached_to = r.ts as i64;
                 break;
             }
@@ -1056,11 +1182,19 @@ impl LiveBuffer {
         banned: Option<&HashSet<String>>,
     ) -> Result<Value, String> {
         self.wanted_at = Some(Instant::now());
-        let window = match raw.get("window").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let window = match raw
+            .get("window")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             None => 60,
-            Some(s) => s.parse::<i64>().map_err(|_| "window must be a number of seconds".to_string())?,
+            Some(s) => s
+                .parse::<i64>()
+                .map_err(|_| "window must be a number of seconds".to_string())?,
         };
-        let window = window.min(self.max_seconds).clamp(5, LIVE_WINDOW_MAX_SECONDS);
+        let window = window
+            .min(self.max_seconds)
+            .clamp(5, LIVE_WINDOW_MAX_SECONDS);
         let mut filters = live_filters(raw)?;
         let key = crate::secdb::sorted_json(&json!([window, filters.key_json()]));
         if filters.banned {
@@ -1073,7 +1207,12 @@ impl LiveBuffer {
         }
         let now = now.unwrap_or_else(crate::constants::utc_now_f);
         let since = now - window as f64;
-        let mut selected: Vec<&LiveRecord> = self.records.iter().rev().take_while(|r| r.ts >= since).collect();
+        let mut selected: Vec<&LiveRecord> = self
+            .records
+            .iter()
+            .rev()
+            .take_while(|r| r.ts >= since)
+            .collect();
         selected.reverse();
         let oldest = self.records.front().map(|r| r.ts).unwrap_or(now);
         let covered = if oldest <= since {
@@ -1105,10 +1244,16 @@ impl LiveBuffer {
             }
         }
         let top = |code: u16| -> Vec<Value> {
-            let mut items: Vec<(&str, i64)> =
-                totals.get(&code).map(|m| m.iter().map(|(k, v)| (*k, *v)).collect()).unwrap_or_default();
+            let mut items: Vec<(&str, i64)> = totals
+                .get(&code)
+                .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+                .unwrap_or_default();
             items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-            items.into_iter().take(limit).map(|(ip, n)| json!({"ip": ip, "count": n})).collect()
+            items
+                .into_iter()
+                .take(limit)
+                .map(|(ip, n)| json!({"ip": ip, "count": n}))
+                .collect()
         };
         json!({
             "code_400": top(400),
@@ -1120,7 +1265,13 @@ impl LiveBuffer {
 }
 
 /// An integer query parameter, clamped, with a default.
-pub fn int_param(raw: &HashMap<String, String>, name: &str, default: i64, min_v: i64, max_v: i64) -> i64 {
+pub fn int_param(
+    raw: &HashMap<String, String>,
+    name: &str,
+    default: i64,
+    min_v: i64,
+    max_v: i64,
+) -> i64 {
     clamp_str(raw.get(name).map(String::as_str), default, min_v, max_v)
 }
 
@@ -1163,7 +1314,10 @@ mod tests {
         assert_eq!(out["addresses"][0]["ip"], "1.1.1.1");
         assert_eq!(out["addresses"][0]["hosts"], 2);
         assert_eq!(out["not_found"][0]["path"], "/x");
-        let f = LiveFilters { status: "4xx".into(), ..Default::default() };
+        let f = LiveFilters {
+            status: "4xx".into(),
+            ..Default::default()
+        };
         let out = live_aggregate(&refs, 110.0, 60, &f, None);
         assert_eq!(out["totals"]["requests"], 1);
     }
@@ -1171,7 +1325,11 @@ mod tests {
     #[test]
     fn buffer_bounds_and_ids() {
         let mut b = LiveBuffer::new(2, 3600);
-        b.extend(vec![rec(1.0, "a", 200, "h", "/"), rec(2.0, "b", 200, "h", "/"), rec(3.0, "c", 200, "h", "/")]);
+        b.extend(vec![
+            rec(1.0, "a", 200, "h", "/"),
+            rec(2.0, "b", 200, "h", "/"),
+            rec(3.0, "c", 200, "h", "/"),
+        ]);
         assert_eq!(b.len(), 2);
         let q = RequestQuery::default();
         let page = b.search_requests(&q, 0, 1, true);
@@ -1183,7 +1341,10 @@ mod tests {
 
     #[test]
     fn syslog_epoch() {
-        assert_eq!(line_epoch("2026-11-22T10:00:00.500000+00:00 host haproxy[1]: x"), Some(1_795_341_600.5));
+        assert_eq!(
+            line_epoch("2026-11-22T10:00:00.500000+00:00 host haproxy[1]: x"),
+            Some(1_795_341_600.5)
+        );
         assert_eq!(line_epoch("Nov 22 10:00:00 host"), None);
     }
 }

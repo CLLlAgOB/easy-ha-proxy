@@ -595,17 +595,29 @@ func (d *Daemon) handleExternalCAUploadForm(form *multipartForm) (int, map[strin
 	for _, c := range certs {
 		canonical = append(canonical, certPEM(c)...)
 	}
-	fh, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
-	if err != nil {
+	if err := writeNewExternalCA(dest, canonical); err != nil {
 		if os.IsExist(err) {
 			return 409, map[string]any{"ok": false, "error": "certificate authority " + pyRepr(caID) + " already exists"}
 		}
 		panic(err)
 	}
-	_, _ = fh.Write(canonical)
-	_ = fh.Close()
-	_ = os.Chmod(dest, 0o644)
 	item := caItem(caID, "external", certs)
 	item["path"] = dest
 	return 200, map[string]any{"ok": true, "certificate_authority": item, "message": "External certificate authority imported."}
+}
+
+func writeNewExternalCA(dest string, data []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(dest), ".external-ca-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := errors.Join(file.Chmod(0o644), file.Sync(), file.Close()); err != nil {
+		return err
+	}
+	return os.Link(file.Name(), dest)
 }

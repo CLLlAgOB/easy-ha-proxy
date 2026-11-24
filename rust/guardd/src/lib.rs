@@ -12,9 +12,9 @@ pub mod context;
 pub mod enforcer;
 pub mod engine;
 pub mod haconfig;
-pub mod localtime;
 pub mod live;
 pub mod livebuf;
+pub mod localtime;
 pub mod parser;
 pub mod reqlog;
 pub mod runtime;
@@ -32,14 +32,15 @@ use std::os::raw::c_char;
 pub use api::constant_time_eq;
 #[cfg(unix)]
 pub use api::serve;
-pub use engine::{Engine, Shared};
 pub use enforcer::{
-    is_adaptive_code, Enforcer, EnforcementQueue, QueueStatus, ADAPTIVE_BAN_CODE,
+    is_adaptive_code, EnforcementQueue, Enforcer, QueueStatus, ADAPTIVE_BAN_CODE,
     ADAPTIVE_PAGE_CODE, MANUAL_BAN_CODE,
 };
+pub use engine::{Engine, Shared};
 pub use live::{live_refusal, CompletedMinute, MinuteDigests, RefusedCounts, DIGEST_BOUNDS_MS};
 pub use livebuf::{LiveBuffer, LiveRecord};
 pub use parser::{extract_host, parse_access_line, parse_stamp, ParsedRequest};
+pub use reqlog::RequestLog;
 pub use runtime::{
     banned_now, list_tables, load_config, parse_table, read_table, runtime_command, GuardConfig,
     RuntimeError,
@@ -48,12 +49,11 @@ pub use scoring::{
     enforceable, ip_family, score_events, state_for, ExclusionModel, ScoreContribution,
     ScoreResult, ScoringPolicy, StoredEvent, Verdict,
 };
+pub use secdb::SecurityDatabase;
 pub use signatures::{
     classify_raw_path, is_asset, is_authentication_endpoint, is_proto_ua_mismatch,
     is_unusual_method_probe, normalize_path, user_agent_token, SignatureEngine,
 };
-pub use reqlog::RequestLog;
-pub use secdb::SecurityDatabase;
 pub use tracking::{
     format_subnet24, ipv4_subnet24_key, IpActivity, IpMemory, LogCursor, SubnetCorrelator,
     SubnetSummary,
@@ -71,17 +71,20 @@ pub struct GuarddHandle {
 /// `sig_path` must be either null or a valid NUL-terminated UTF-8 C string.
 #[no_mangle]
 pub unsafe extern "C" fn guardd_engine_new(sig_path: *const c_char) -> *mut GuarddHandle {
-    let engine = if sig_path.is_null() {
-        SignatureEngine::builtin()
-    } else {
-        match CStr::from_ptr(sig_path).to_str() {
-            Ok(p) if !p.is_empty() => {
-                SignatureEngine::from_file(p).unwrap_or_else(|_| SignatureEngine::builtin())
+    std::panic::catch_unwind(|| {
+        let engine = if sig_path.is_null() {
+            SignatureEngine::builtin()
+        } else {
+            match CStr::from_ptr(sig_path).to_str() {
+                Ok(p) if !p.is_empty() => {
+                    SignatureEngine::from_file(p).unwrap_or_else(|_| SignatureEngine::builtin())
+                }
+                _ => SignatureEngine::builtin(),
             }
-            _ => SignatureEngine::builtin(),
-        }
-    };
-    Box::into_raw(Box::new(GuarddHandle { engine }))
+        };
+        Box::into_raw(Box::new(GuarddHandle { engine }))
+    })
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Destroy a handle returned by `guardd_engine_new`.
@@ -108,20 +111,27 @@ pub unsafe extern "C" fn guardd_parse_batch_json(
     if handle.is_null() || lines_utf8.is_null() {
         return std::ptr::null_mut();
     }
-    let engine = &(*handle).engine;
-    let Ok(input) = CStr::from_ptr(lines_utf8).to_str() else {
-        return std::ptr::null_mut();
-    };
-    let parsed: Vec<Option<ParsedRequest>> = input
-        .lines()
-        .map(|line| parse_access_line(line, engine))
-        .collect();
-    let Ok(json) = serde_json::to_string(&parsed) else {
-        return std::ptr::null_mut();
-    };
-    CString::new(json)
-        .map(CString::into_raw)
-        .unwrap_or(std::ptr::null_mut())
+    std::panic::catch_unwind(|| {
+        let engine = &(*handle).engine;
+        let Ok(input) = CStr::from_ptr(lines_utf8).to_str() else {
+            return std::ptr::null_mut();
+        };
+        let parsed: Vec<Option<ParsedRequest>> = if input.is_empty() {
+            Vec::new()
+        } else {
+            input
+                .split('\n')
+                .map(|line| parse_access_line(line.strip_suffix('\r').unwrap_or(line), engine))
+                .collect()
+        };
+        let Ok(json) = serde_json::to_string(&parsed) else {
+            return std::ptr::null_mut();
+        };
+        CString::new(json)
+            .map(CString::into_raw)
+            .unwrap_or(std::ptr::null_mut())
+    })
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Free a string returned by `guardd_parse_batch_json`.
@@ -193,13 +203,22 @@ mod tests {
         assert_eq!(sigs.classify_path("/.env"), "secrets");
         assert_eq!(sigs.classify_path("/api/.env.production"), "secrets");
         assert!(sigs.category_is_decisive("secrets"));
-        assert_eq!(sigs.classify_path("/api/secondfactor/webauthn/credentials"), "");
+        assert_eq!(
+            sigs.classify_path("/api/secondfactor/webauthn/credentials"),
+            ""
+        );
         assert_eq!(sigs.classify_path("/static/wp-admin/logo.png"), "");
         assert_eq!(sigs.classify_path("/wp-admin/install.php"), "wordpress");
 
-        assert_eq!(sigs.classify_query("/x?a=wget+http://1.2.3.4/a.sh"), "fetch-and-run");
+        assert_eq!(
+            sigs.classify_query("/x?a=wget+http://1.2.3.4/a.sh"),
+            "fetch-and-run"
+        );
         assert_eq!(sigs.classify_query("/x?cmd=hello"), "");
-        assert_eq!(sigs.classify_query("/x?f=%252e%252e%252f%252e%252e%252fetc"), "traversal");
+        assert_eq!(
+            sigs.classify_query("/x?f=%252e%252e%252f%252e%252e%252fetc"),
+            "traversal"
+        );
         assert_eq!(sigs.classify_query("/x?a=;id"), "shell-chaining");
 
         assert_eq!(classify_raw_path("/../../etc/passwd"), "path-traversal");
@@ -212,11 +231,20 @@ mod tests {
         let enc = sigs.observation_flags("/%252eenv");
         assert!(enc.contains(&"observe:encoded-sensitive-path"));
 
-        assert_eq!(sigs.classify_user_agent("sqlmap/1.7"), ("sqlmap", "scanner-tool"));
+        assert_eq!(
+            sigs.classify_user_agent("sqlmap/1.7"),
+            ("sqlmap", "scanner-tool")
+        );
         assert_eq!(sigs.classify_user_agent("Mozilla/5.0"), ("", ""));
 
-        assert!(is_proto_ua_mismatch("HTTP/1.0", "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36"));
-        assert!(!is_proto_ua_mismatch("HTTP/2.0", "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36"));
+        assert!(is_proto_ua_mismatch(
+            "HTTP/1.0",
+            "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36"
+        ));
+        assert!(!is_proto_ua_mismatch(
+            "HTTP/2.0",
+            "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36"
+        ));
         assert!(is_unusual_method_probe("TRACE", "web"));
         assert!(is_unusual_method_probe("PROPFIND", "web"));
         assert!(!is_unusual_method_probe("PROPFIND", "webdav"));
@@ -239,8 +267,14 @@ mod tests {
             }
         }
         assert_eq!(mem.len(), 20);
-        assert!(mem.get("198.51.100.1").is_some(), "repeat IP must survive flood");
-        assert!(mem.get("198.51.100.2").is_some(), "promoted IP must survive flood");
+        assert!(
+            mem.get("198.51.100.1").is_some(),
+            "repeat IP must survive flood"
+        );
+        assert!(
+            mem.get("198.51.100.2").is_some(),
+            "promoted IP must survive flood"
+        );
     }
 
     #[test]
@@ -252,9 +286,18 @@ mod tests {
         assert!(ipv4_subnet24_key("198.51.100.10").is_some());
 
         let mut corr = SubnetCorrelator::default_config();
-        assert_eq!(corr.observe("198.51.100.1", 1000), ("198.51.100.0/24".to_string(), 1));
-        assert_eq!(corr.observe("198.51.100.2", 1010), ("198.51.100.0/24".to_string(), 2));
-        assert_eq!(corr.observe("198.51.100.3", 1020), ("198.51.100.0/24".to_string(), 3));
+        assert_eq!(
+            corr.observe("198.51.100.1", 1000),
+            ("198.51.100.0/24".to_string(), 1)
+        );
+        assert_eq!(
+            corr.observe("198.51.100.2", 1010),
+            ("198.51.100.0/24".to_string(), 2)
+        );
+        assert_eq!(
+            corr.observe("198.51.100.3", 1020),
+            ("198.51.100.0/24".to_string(), 3)
+        );
         assert_eq!(corr.triggers, 1);
         assert_eq!(corr.summary(1020).hot_subnets, 1);
     }

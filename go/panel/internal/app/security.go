@@ -360,6 +360,10 @@ func (a *App) registerSecurity() {
 		if c.R.ContentLength > 131072 {
 			return c.JSON(413, newMap("ok", false, "error", "settings too large"))
 		}
+		payload, tooLarge := c.silentJSONLimit(131072)
+		if tooLarge {
+			return c.JSON(413, newMap("ok", false, "error", "settings too large"))
+		}
 		current, err := guarddGet("/api/v1/guard/detection-context", nil, 15*time.Second)
 		if err != nil {
 			return c.guarddFailure(err)
@@ -368,7 +372,6 @@ func (a *App) registerSecurity() {
 		if !found {
 			return fmt.Errorf("KeyError: 'config'")
 		}
-		payload := c.SilentJSON()
 		body, isMap := asMap(payload)
 		if !isMap {
 			return c.JSON(400, newMap("ok", false, "error", "expected an object"))
@@ -401,7 +404,11 @@ func (a *App) registerSecurity() {
 		if c.R.ContentLength > 8192 {
 			return c.JSON(413, newMap("ok", false, "error", "request too large"))
 		}
-		body, isMap := asMap(c.SilentJSON())
+		payload, tooLarge := c.silentJSONLimit(8192)
+		if tooLarge {
+			return c.JSON(413, newMap("ok", false, "error", "request too large"))
+		}
+		body, isMap := asMap(payload)
 		if !isMap {
 			return c.JSON(400, newMap("ok", false, "error", "invalid request fields"))
 		}

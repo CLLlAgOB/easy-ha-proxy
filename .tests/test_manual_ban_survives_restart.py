@@ -87,6 +87,12 @@ class Gateway(unittest.TestCase):
 
 
 class AManualBan(Gateway):
+    def test_forget_rejects_non_address_before_using_database(self):
+        with mock.patch.object(self.database, "scheduled_bans") as scheduled:
+            with self.assertRaises(ValueError):
+                self.engine.forget_ban("not an address")
+        scheduled.assert_not_called()
+
     def test_is_remembered_with_the_end_the_table_gave_it(self):
         self.ban_by_hand(exp_ms=3600 * 1000)
         self.poll(T0)

@@ -13,8 +13,9 @@ import (
 	"syscall"
 )
 
+var Version = "dev"
+
 const (
-	Version              = "0.4.0-alpha"
 	DefaultListenAddr    = "0.0.0.0:5000"
 	DefaultSecretFile    = "/var/lib/haproxy-admin/secret_key"
 	DefaultMaxBodyBytes  = 32 * 1024 * 1024

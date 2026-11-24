@@ -11,12 +11,13 @@ ARG TARGETARCH
 RUN apk add --no-cache tzdata ca-certificates file
 
 WORKDIR /src/go/panel
+COPY VERSION /src/VERSION
 COPY go/panel/go.mod go/panel/go.sum ./
 COPY go/panel/ ./
 
 RUN set -euo pipefail; \
     GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-amd64}" CGO_ENABLED=0 \
-    go build -trimpath -ldflags="-s -w" \
+    go build -trimpath -ldflags="-s -w -X easy-ha-proxy/panel/internal/config.Version=$(tr -d '\r' < /src/VERSION)" \
     -o /out/easy-ha-proxy-panel ./cmd/easy-ha-proxy-panel; \
     arch="${TARGETARCH:-amd64}"; \
     desc="$(file /out/easy-ha-proxy-panel)"; \

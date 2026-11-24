@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -213,9 +214,12 @@ func errorReply(err error) map[string]any {
 
 // Serve accepts connections on ln until ctx is canceled.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
-	go func() {
-		<-ctx.Done()
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	var active sync.WaitGroup
+	defer func() {
+		stop()
 		_ = ln.Close()
+		active.Wait()
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -227,10 +231,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 		select {
 		case s.slots <- struct{}{}:
-			go func(c net.Conn) {
+			active.Go(func() {
 				defer func() { <-s.slots }()
-				s.ServeConn(ctx, c)
-			}(conn)
+				s.ServeConn(ctx, conn)
+			})
 		default:
 			_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 			_, _ = io.WriteString(conn, `{"ok":false,"error":"too many active requests","error_code":"busy"}`+"\n")

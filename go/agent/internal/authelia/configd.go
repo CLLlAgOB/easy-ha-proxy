@@ -143,7 +143,7 @@ func NewConfigd(opts ConfigdOptions) *Configd {
 		opts.DockerBin = "docker"
 	}
 	return &Configd{Opts: opts, mailRevisionKey: key(), notifyRevisionKey: key(), revealedAt: map[string]time.Time{},
-		protectedDomains: func() string { return os.Getenv("EASY_HA_PROXY_PROTECTED_DOMAINS") }}
+		protectedDomains: func() string { return opts.ProtectedDomains }}
 }
 
 func (c *Configd) managedVarsFile() string { return filepath.Join(c.Opts.ManagedConfigDir, "vars.yml") }
@@ -863,25 +863,42 @@ func (c *Configd) rejectUnprotectedControlPlane(rules []any) error {
 		if policy != "bypass" {
 			continue
 		}
-		var candidates []string
-		switch d := rule.Value("domain").(type) {
-		case string:
-			candidates = []string{d}
-		case []any:
-			for _, it := range d {
-				candidates = append(candidates, pyStr(it))
+		for _, domain := range ruleStrings(rule.Value("domain")) {
+			name := strings.TrimRight(strings.ToLower(pyStrip(domain)), ".")
+			for host := range protected {
+				if host == name || strings.HasPrefix(name, "*.") && strings.HasSuffix(host, name[1:]) {
+					return newErr("ValueError", "rules[%d]: policy 'bypass' is not allowed for the protected domain %s", i, host)
+				}
 			}
-		default:
-			continue
 		}
-		for _, cand := range candidates {
-			name := strings.TrimRight(strings.ToLower(pyStrip(cand)), ".")
-			if protected[name] {
-				return newErr("ValueError", "rules[%d]: policy 'bypass' is not allowed for the protected domain %s", i, name)
+		for _, pattern := range ruleStrings(rule.Value("domain_regex")) {
+			expression, err := regexp.Compile(pattern)
+			if err != nil {
+				return newErr("ValueError", "rules[%d]: invalid domain_regex", i)
+			}
+			for host := range protected {
+				if expression.MatchString(host) {
+					return newErr("ValueError", "rules[%d]: policy 'bypass' is not allowed for the protected domain %s", i, host)
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func ruleStrings(value any) []string {
+	switch value := value.(type) {
+	case string:
+		return []string{value}
+	case []any:
+		items := make([]string, 0, len(value))
+		for _, item := range value {
+			items = append(items, pyStr(item))
+		}
+		return items
+	default:
+		return nil
+	}
 }
 
 // pyStrOr is str(value or "").
@@ -990,8 +1007,13 @@ func (c *Configd) handleSettingsUpdate(req *pyyaml.Map) (map[string]any, error) 
 	if err := rejectUnsafeValues(cfg, false); err != nil {
 		return map[string]any{"ok": false, "error": errText(err)}, nil
 	}
-	if ses, ok := cfg.Value("session").(*pyyaml.Map); ok {
-		ses.Delete("secret")
+	if session, present := cfg.Get("session"); present {
+		settings, ok := session.(*pyyaml.Map)
+		if !ok {
+			return map[string]any{"ok": false, "error": "session settings must be a mapping"}, nil
+		}
+		settings.Delete("secret")
+		settings.Delete("redis")
 	}
 	root, _, err := c.loadConfigData()
 	if err != nil {

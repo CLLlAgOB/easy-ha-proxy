@@ -102,7 +102,10 @@ func (d *Daemon) listDNSProviders() map[string]any {
 					break
 				}
 			}
-			fi, _ := os.Stat(path)
+			fi, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
 			profiles = append(profiles, map[string]any{
 				"name": name, "provider": provider,
 				"plugin_available": available[dnsProviders[provider].Plugin] && dnsProviders[provider].Plugin != "",

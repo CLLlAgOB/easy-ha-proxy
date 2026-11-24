@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"errors"
+	"mime"
 	"net/http"
 	"os"
 	"regexp"
@@ -62,9 +63,10 @@ var portalUploadPath = regexp.MustCompile(`^/haproxy/sites/[^/]+/portal/files$`)
 func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limit := s.Cfg.MaxBodyBytes
-		if r.URL.Path == "/system/backups/api/uploads" && s.Cfg.MaxUploadBytes > 0 {
+		mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if mediaType == "application/octet-stream" && r.URL.Path == "/system/backups/api/uploads" && s.Cfg.MaxUploadBytes > 0 {
 			limit = s.Cfg.MaxUploadBytes
-		} else if portalUploadPath.MatchString(r.URL.Path) {
+		} else if mediaType == "application/octet-stream" && portalUploadPath.MatchString(r.URL.Path) {
 			// access_portal.upload takes an attachment of up to 128 MiB.
 			limit = 128 * 1024 * 1024
 		}

@@ -808,7 +808,11 @@ func percentFormat(orig any, format string, args any) (any, error) {
 		case 's':
 			b.WriteString(fmt.Sprintf("%"+spec+"s", Str(conv(v))))
 		case 'r':
-			b.WriteString(fmt.Sprintf("%"+spec+"s", Repr(v)))
+			repr := Repr(v)
+			if html {
+				repr = escapeString(repr)
+			}
+			b.WriteString(fmt.Sprintf("%"+spec+"s", repr))
 		case 'd', 'i':
 			n, f, isInt, ok := asNumber(v)
 			if !ok {

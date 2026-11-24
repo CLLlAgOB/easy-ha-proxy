@@ -1917,15 +1917,51 @@ def offline_restore_required_images(
                 f"the current recovery template: {template}."
             )
 
+    # Evaluate trusted role defaults in dependency order. Restored values
+    # are data, including when they contain Jinja delimiters.
+    from jinja2 import StrictUndefined
+    from jinja2.sandbox import SandboxedEnvironment
+
+    overrides = {**variables, **authelia}
+    env = SandboxedEnvironment(undefined=StrictUndefined)
+    env.filters["bool"] = lambda value: str(value).lower() in ("true", "1", "on", "yes")
+    env.filters["regex_replace"] = lambda value, pattern, replacement: re.sub(pattern, replacement, value)
+
+    def resolve(key: str, fallback: Any = "") -> Any:
+        value = effective.get(key, fallback)
+        if key not in overrides and isinstance(value, str) and "{{" in value:
+            value = env.from_string(value).render(effective)
+        effective[key] = value
+        return value
+
+    def enabled(key: str, fallback: bool = False) -> bool:
+        return env.filters["bool"](resolve(key, fallback))
+
     images: set[str] = set()
-    if bool(effective.get("haproxy_admin_use_docker", True)):
-        images.add(str(effective.get("haproxy_admin_image", "")).strip())
-    if bool(effective.get("authelia_enabled", False)):
+    resolve("haproxy_admin_image_channel")
+    if enabled("haproxy_admin_use_docker", True):
+        field = "haproxy_admin_go_image" if enabled("haproxy_admin_use_go_panel") else "haproxy_admin_image"
+        images.add(str(resolve(field)).strip())
+
+    native = enabled("native_daemons_enabled")
+    native = native or any(enabled(key) for key in effective if key.startswith("native_") and key.endswith("_enabled"))
+    if native and not resolve("native_local_bundle_dir") and not resolve("native_release_base_url"):
+        reference = str(resolve("native_release_image")).strip()
+        if enabled("native_release_pin_revision", True):
+            revision = subprocess.run(
+                ["git", "-c", f"safe.directory={controller_source}", "-C", str(controller_source), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=False,
+            )
+            if revision.returncode == 0:
+                reference += "-" + revision.stdout.strip()[:12]
+        images.add(reference)
+
+    if enabled("authelia_enabled"):
         images.add(
             "authelia/authelia:"
             + str(effective.get("authelia_version", "")).strip()
         )
-        if bool(effective.get("authelia_session_redis_enabled", True)):
+        if enabled("authelia_session_redis_enabled", True):
             images.add(str(effective.get("authelia_redis_image", "")).strip())
         # The relay service is always rendered (possibly behind a profile),
         # and the spool migration may recreate an existing legacy relay even

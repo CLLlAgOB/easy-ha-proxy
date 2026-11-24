@@ -139,3 +139,23 @@ func TestQuietenReportsAFailedWrite(t *testing.T) {
 		t.Fatalf("a failed observation must be an error, got %v", err)
 	}
 }
+
+func TestStoreErrorsStayWithTheirOperation(t *testing.T) {
+	store, err := NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	failed := store.operation()
+	ok := store.operation()
+	if _, err := failed.exec("UPDATE missing_table SET id=0"); err == nil {
+		t.Fatal("expected database failure")
+	}
+	ok.OpenStates()
+	if err := ok.TakeErr(); err != nil {
+		t.Fatalf("unrelated operation failed: %v", err)
+	}
+	if err := failed.TakeErr(); err == nil {
+		t.Fatal("original operation lost its error")
+	}
+}

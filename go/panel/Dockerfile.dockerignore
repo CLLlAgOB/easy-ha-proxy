@@ -1,4 +1,5 @@
 **
+!VERSION
 !go/panel/go.mod
 !go/panel/go.sum
 !go/panel/cmd/

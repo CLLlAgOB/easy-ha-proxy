@@ -100,23 +100,24 @@ pub fn load_config(path: impl AsRef<Path>) -> GuardConfig {
             .to_string()
     };
 
-    let str_list = |map: Option<&serde_json::Map<String, Value>>, key: &str, fallback: Vec<String>| {
-        let Some(arr) = map.and_then(|m| m.get(key)).and_then(Value::as_array) else {
-            return fallback;
+    let str_list =
+        |map: Option<&serde_json::Map<String, Value>>, key: &str, fallback: Vec<String>| {
+            let Some(arr) = map.and_then(|m| m.get(key)).and_then(Value::as_array) else {
+                return fallback;
+            };
+            let items: Vec<String> = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            if items.is_empty() {
+                fallback
+            } else {
+                items
+            }
         };
-        let items: Vec<String> = arr
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        if items.is_empty() {
-            fallback
-        } else {
-            items
-        }
-    };
 
     GuardConfig {
         mode,
@@ -215,7 +216,10 @@ impl RuntimeError {
     /// A lift refused, a table read that was not the table, an answer too
     /// large to have been read whole: the ban's state is unknown (R01/R10).
     pub fn ban_table_unsure(&self) -> bool {
-        matches!(self, Self::AnswerTooLarge(_) | Self::TableUnreadable(_) | Self::LiftRefused(_))
+        matches!(
+            self,
+            Self::AnswerTooLarge(_) | Self::TableUnreadable(_) | Self::LiftRefused(_)
+        )
     }
 }
 
@@ -223,7 +227,9 @@ impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "{e}"),
-            Self::AnswerTooLarge(m) | Self::TableUnreadable(m) | Self::LiftRefused(m) => write!(f, "{m}"),
+            Self::AnswerTooLarge(m) | Self::TableUnreadable(m) | Self::LiftRefused(m) => {
+                write!(f, "{m}")
+            }
         }
     }
 }
@@ -242,7 +248,6 @@ impl From<io::Error> for RuntimeError {
 pub fn runtime_command(socket_path: &str, command: &str) -> Result<String, RuntimeError> {
     let mut stream = UnixStream::connect(socket_path)?;
     let timeout = Duration::from_secs(RUNTIME_TIMEOUT_SECONDS);
-    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
 
     let mut payload = Vec::with_capacity(command.len() + 1);
@@ -250,9 +255,15 @@ pub fn runtime_command(socket_path: &str, command: &str) -> Result<String, Runti
     payload.push(b'\n');
     stream.write_all(&payload)?;
 
+    let deadline = std::time::Instant::now() + timeout;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 65_536];
     loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+        }
+        stream.set_read_timeout(Some(remaining))?;
         let n = stream.read(&mut chunk)?;
         if n == 0 {
             break;

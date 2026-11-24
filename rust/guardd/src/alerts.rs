@@ -27,14 +27,29 @@ impl AlertClient {
     pub fn from_env() -> Option<Self> {
         let socket_path = std::env::var("ALERTD_SOCKET_PATH")
             .unwrap_or_else(|_| "/run/easy-ha-proxy/easy-ha-proxy-alertd.sock".into());
-        let token = std::env::var("ALERTD_TOKEN").unwrap_or_default().trim().to_string();
+        let token = std::env::var("ALERTD_TOKEN")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if token.is_empty() || socket_path.is_empty() {
             return None;
         }
-        Some(Self { socket_path, token, last: Mutex::new(HashMap::new()), warned: Mutex::new(false) })
+        Some(Self {
+            socket_path,
+            token,
+            last: Mutex::new(HashMap::new()),
+            warned: Mutex::new(false),
+        })
     }
 
-    pub fn observe(&self, rule: &str, subject: &str, active: Option<bool>, summary: &str, detail: &str) -> bool {
+    pub fn observe(
+        &self,
+        rule: &str,
+        subject: &str,
+        active: Option<bool>,
+        summary: &str,
+        detail: &str,
+    ) -> bool {
         let key = format!("{rule}\u{0}{subject}");
         let signature = format!("{active:?}\u{0}{summary}\u{0}{detail}");
         {
@@ -107,7 +122,10 @@ impl AlertClient {
                 let mut warned = self.warned.lock().unwrap_or_else(|p| p.into_inner());
                 if !*warned {
                     *warned = true;
-                    eprintln!("alertd unreachable at {} ({err}); notifications are paused", self.socket_path);
+                    eprintln!(
+                        "alertd unreachable at {} ({err}); notifications are paused",
+                        self.socket_path
+                    );
                 }
                 false
             }

@@ -72,10 +72,10 @@ func (d *Daemon) validateZip(zr *zip.Reader) ([]*zip.File, error) {
 		if (f.ExternalAttrs>>16)&0o170000 == 0o120000 {
 			return nil, vErr("archive contains a symbolic link")
 		}
-		expanded += int64(f.UncompressedSize64)
-		if expanded > d.Opts.MaxArchiveExpandedBytes {
+		if d.Opts.MaxArchiveExpandedBytes < expanded || f.UncompressedSize64 > uint64(d.Opts.MaxArchiveExpandedBytes-expanded) {
 			return nil, vErr("archive expands beyond the allowed size")
 		}
+		expanded += int64(f.UncompressedSize64)
 		if f.CompressedSize64 > 0 && f.UncompressedSize64 > 1024*1024 &&
 			float64(f.UncompressedSize64)/float64(f.CompressedSize64) > float64(d.Opts.MaxCompressionRatio) {
 			return nil, vErr("archive has a suspicious compression ratio")

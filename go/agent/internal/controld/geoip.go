@@ -344,7 +344,7 @@ func (d *Daemon) geoipConfigure(countries, expectedRevision any) (map[string]any
 // pyIPAddress is str(ipaddress.ip_address(text)).
 func pyIPAddress(text string) (string, error) {
 	addr, err := netip.ParseAddr(text)
-	if err != nil {
+	if err != nil || addr.Zone() != "" {
 		return "", fmt.Errorf("%s does not appear to be an IPv4 or IPv6 address", pyRepr(text))
 	}
 	return addr.String(), nil

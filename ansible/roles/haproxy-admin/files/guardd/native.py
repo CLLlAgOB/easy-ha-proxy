@@ -83,6 +83,8 @@ class _NativeBridge:
     def parse_batch(self, lines: List[str]) -> Optional[List[Optional[ParsedRequest]]]:
         if not lines:
             return []
+        if any("\x00" in line or "\n" in line for line in lines):
+            return None
         with self._lock:
             lib = self._ensure_loaded_locked()
             if lib is None:

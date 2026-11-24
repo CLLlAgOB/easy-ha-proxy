@@ -150,4 +150,3 @@ impl MinuteDigests {
         out
     }
 }
-

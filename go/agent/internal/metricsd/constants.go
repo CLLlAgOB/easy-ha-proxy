@@ -5,15 +5,17 @@
 package metricsd
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"math"
-	"net"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
 )
 
 var (
@@ -615,29 +617,11 @@ func LoadConfig(path string) Config {
 
 // runtimeCommand is runtime_command: one Runtime API command, raw reply.
 func runtimeCommand(socketPath, command string) (string, error) {
-	conn, err := net.DialTimeout("unix", socketPath, runtimeTimeout)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(runtimeTimeout))
-	if _, err := conn.Write([]byte(command + "\n")); err != nil {
-		return "", err
-	}
-	data := []byte{}
-	buf := make([]byte, 65536)
-	for len(data) < runtimeMaxBytes {
-		_ = conn.SetReadDeadline(time.Now().Add(runtimeTimeout))
-		n, err := conn.Read(buf)
-		data = append(data, buf[:n]...)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return "", err
-			}
-			break
-		}
-	}
-	return strings.ToValidUTF8(string(data), "�"), nil
+	client := haproxy.NewClient(socketPath)
+	client.Timeout = runtimeTimeout
+	client.MaxBytes = runtimeMaxBytes
+	payload, err := client.Command(context.Background(), command)
+	return strings.ToValidUTF8(payload, "�"), err
 }
 
 // parseShowStat is parse_show_stat.

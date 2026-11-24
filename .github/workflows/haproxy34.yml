@@ -4,6 +4,7 @@ on:
   push:
     branches: [alpha]
     paths:
+      - 'go/**'
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
       - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
@@ -21,6 +22,7 @@ on:
       - '.github/workflows/haproxy34.yml'
   pull_request:
     paths:
+      - 'go/**'
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
       - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'

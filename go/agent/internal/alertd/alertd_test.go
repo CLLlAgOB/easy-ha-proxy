@@ -137,7 +137,10 @@ func TestSweepStaleExpiredAndDismiss(t *testing.T) {
 
 	// Past stale_after (900s): marked stale, NOT recovered.
 	now += 1000
-	counts := eng.Sweep()
+	counts, err := eng.Sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if counts["stale"] != 1 {
 		t.Fatalf("expected 1 stale alert, got %+v", counts)
 	}

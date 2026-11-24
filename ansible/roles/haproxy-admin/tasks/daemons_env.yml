@@ -1,0 +1,19 @@
+---
+- name: Ensure /etc/easy-ha-proxy directory exists for daemon token file
+  ansible.builtin.file:
+    path: "{{ (daemons_env_file | default('/etc/easy-ha-proxy/daemons.env')) | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render root-only daemon IPC token file
+  ansible.builtin.template:
+    src: daemons.env.j2
+    dest: "{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  register: daemons_env_t

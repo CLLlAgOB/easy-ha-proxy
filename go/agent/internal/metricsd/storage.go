@@ -1704,30 +1704,27 @@ func (d *Database) storageGrowth(now, current int64) *OMap {
 func (d *Database) stats() (*OMap, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	one := func(q string) []any {
-		rows, err := queryRows(d.db, q)
-		if err != nil || len(rows) == 0 {
-			return nil
+	var version, objects, minuteCount, hourCount, events, freelist int64
+	var oldestMinute, newestMinute, oldestHour, newestHour any
+	for _, query := range []struct {
+		sql  string
+		dest []any
+	}{
+		{"SELECT version FROM schema_version", []any{&version}},
+		{"SELECT COUNT(*) FROM objects", []any{&objects}},
+		{"SELECT COUNT(*), MIN(bucket_ts), MAX(bucket_ts) FROM metric_1m", []any{&minuteCount, &oldestMinute, &newestMinute}},
+		{"SELECT COUNT(*), MIN(bucket_ts), MAX(bucket_ts) FROM metric_1h", []any{&hourCount, &oldestHour, &newestHour}},
+		{"SELECT COUNT(*) FROM server_state_events", []any{&events}},
+		{"PRAGMA freelist_count", []any{&freelist}},
+	} {
+		if err := d.db.QueryRow(query.sql).Scan(query.dest...); err != nil {
+			return nil, err
 		}
-		return rows[0]
 	}
-	version := one("SELECT version FROM schema_version")
-	objects := one("SELECT COUNT(*) AS value FROM objects")
-	minutes := one("SELECT COUNT(*) AS value, MIN(bucket_ts) AS oldest, MAX(bucket_ts) AS newest FROM metric_1m")
-	hours := one("SELECT COUNT(*) AS value, MIN(bucket_ts) AS oldest, MAX(bucket_ts) AS newest FROM metric_1h")
-	events := one("SELECT COUNT(*) AS value FROM server_state_events")
-	freelist := one("PRAGMA freelist_count")
-	var v, fl int64
-	if version != nil {
-		v = i64(version[0])
-	}
-	if freelist != nil {
-		fl = i64(freelist[0])
-	}
-	return omap("schema_version", v, "objects", i64(objects[0]),
-		"metric_1m", omap("rows", i64(minutes[0]), "oldest_bucket_ts", nullable(minutes[1]), "newest_bucket_ts", nullable(minutes[2])),
-		"metric_1h", omap("rows", i64(hours[0]), "oldest_bucket_ts", nullable(hours[1]), "newest_bucket_ts", nullable(hours[2])),
-		"state_events", i64(events[0]), "freelist_pages", fl), nil
+	return omap("schema_version", version, "objects", objects,
+		"metric_1m", omap("rows", minuteCount, "oldest_bucket_ts", oldestMinute, "newest_bucket_ts", newestMinute),
+		"metric_1h", omap("rows", hourCount, "oldest_bucket_ts", oldestHour, "newest_bucket_ts", newestHour),
+		"state_events", events, "freelist_pages", freelist), nil
 }
 
 func fileSize(p string) int64 {

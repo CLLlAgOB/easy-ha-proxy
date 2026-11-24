@@ -3,11 +3,11 @@
 package unixrpc
 
 import (
+	"errors"
 	"net"
-	"os"
 )
 
-// PeerUID falls back to the current process UID on non-Linux hosts.
+// PeerUID is unavailable on hosts without Linux peer credentials.
 func PeerUID(_ net.Conn) (int, error) {
-	return os.Getuid(), nil
+	return -1, errors.New("Unix peer credentials are unsupported")
 }

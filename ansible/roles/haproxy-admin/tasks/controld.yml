@@ -69,6 +69,7 @@
           or haproxy_controld_package.changed
           or haproxy_controld_unit.changed
           or (hapadm_env_t.changed | default(false))
+          or (daemons_env_t.changed | default(false))
         )
         else 'started'
       }}

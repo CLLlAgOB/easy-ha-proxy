@@ -211,10 +211,9 @@ func (s *BansdServer) HandleRequest(ctx context.Context, req map[string]any) map
 
 // Serve accepts connections on ln until ctx is canceled.
 func (s *BansdServer) Serve(ctx context.Context, ln net.Listener) error {
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	defer func() { _ = ln.Close() }()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -223,7 +222,12 @@ func (s *BansdServer) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return err
 		}
-		s.slots <- struct{}{}
+		select {
+		case s.slots <- struct{}{}:
+		case <-ctx.Done():
+			_ = conn.Close()
+			return nil
+		}
 		go func(c net.Conn) {
 			defer func() { <-s.slots }()
 			serveJSONLineConn(ctx, c, s.Opts.MaxRequestBytes, func(ctx context.Context, req map[string]any) map[string]any {
@@ -254,7 +258,7 @@ func RunBansd(opts BansdOptions) error {
 
 func serveJSONLineConn(ctx context.Context, conn net.Conn, maxBytes int, fn func(context.Context, map[string]any) map[string]any) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 
 	lr := io.LimitReader(conn, int64(maxBytes)+1)
 	line, err := bufio.NewReaderSize(lr, 4096).ReadString('\n')
@@ -279,6 +283,7 @@ func serveJSONLineConn(ctx context.Context, conn net.Conn, maxBytes int, fn func
 }
 
 func writeLineJSON(conn net.Conn, payload map[string]any) {
+	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		raw = []byte(`{"ok":false,"error":"marshal error"}`)
@@ -316,11 +321,11 @@ func validIPNetwork(text string) bool {
 	}
 	addrText, mask, hasMask := strings.Cut(text, "/")
 	addr, err := netip.ParseAddr(addrText)
-	if err != nil || addr.Zone() != "" && hasMask {
+	if err != nil || addr.Zone() != "" {
 		return false
 	}
 	if !hasMask {
-		return addr.Zone() == "" || addr.Is6()
+		return true
 	}
 	if n, err := strconv.Atoi(mask); err == nil && strings.Trim(mask, "0123456789") == "" && mask != "" {
 		return n >= 0 && n <= addr.BitLen()

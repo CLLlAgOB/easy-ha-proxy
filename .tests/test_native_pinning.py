@@ -30,9 +30,15 @@ if cmd[0] == "pull":
 if cmd[:2] == ["image", "inspect"]:
     fmt, img = cmd[3], cmd[4]
     if "RepoDigests" in fmt:
+        if img not in images: sys.exit(1)
         print(img.split(":")[0] + "@sha256:" + hashlib.sha256(img.encode()).hexdigest())
     else:
-        print(images[img])
+        for tag, revision in images.items():
+            digest = tag.split(":")[0] + "@sha256:" + hashlib.sha256(tag.encode()).hexdigest()
+            if img == digest:
+                print(revision)
+                sys.exit(0)
+        sys.exit(1)
     sys.exit(0)
 if cmd[0] == "create":
     print("cid-1")
@@ -64,9 +70,10 @@ def pull_script() -> str:
 
 @unittest.skipIf(sys.platform == "win32", "runs the rendered bash script")
 class NativePinningTests(unittest.TestCase):
-    def run_pull(self, images, revision_rc=0):
+    def run_pull(self, images, revision_rc=0, offline=False):
         from jinja2 import Environment
         env = Environment()
+        env.filters["bool"] = bool
         env.filters["quote"] = lambda value: shlex.quote(str(value))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -74,6 +81,7 @@ class NativePinningTests(unittest.TestCase):
             stage.mkdir()
             script = env.from_string(pull_script()).render(
                 native_release_image="clllagob/haproxy-admin-ui:native-alpha",
+                easy_ha_proxy_offline_restore=offline,
                 _native_source_revision={"rc": revision_rc, "stdout": REV + "\n"},
             ).replace("/var/lib/easy-ha-proxy/native-staging", str(stage))
             bindir = root / "bin"
@@ -99,6 +107,16 @@ class NativePinningTests(unittest.TestCase):
         record = json.loads(image_json)
         self.assertEqual((record["image"], record["revision"]), (pinned, REV))
         self.assertTrue(record["digest"].startswith("clllagob/haproxy-admin-ui@sha256:"))
+
+    def test_offline_restore_uses_only_the_cached_commit_image(self):
+        pinned = "clllagob/haproxy-admin-ui:native-alpha-" + REV[:12]
+        result, calls, _ = self.run_pull({pinned: REV}, offline=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(call.startswith("pull ") for call in calls))
+        self.assertTrue(any(call.startswith("create --pull=never ") for call in calls))
+        result, calls, _ = self.run_pull({}, offline=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith(("pull ", "create ")) for call in calls))
 
     def test_an_image_built_from_another_commit_is_refused(self):
         pinned = "clllagob/haproxy-admin-ui:native-alpha-" + REV[:12]

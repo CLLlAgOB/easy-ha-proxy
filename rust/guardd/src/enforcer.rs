@@ -208,13 +208,18 @@ impl Enforcer {
         if !answer.trim().is_empty() {
             self.failed += 1;
             let snippet: String = answer.trim().chars().take(200).collect();
-            return Err(RuntimeError::LiftRefused(format!("HAProxy refused to lift the ban on {ip}: {snippet}")));
+            return Err(RuntimeError::LiftRefused(format!(
+                "HAProxy refused to lift the ban on {ip}: {snippet}"
+            )));
         }
         Ok(true)
     }
 
     fn clear_entry(&mut self, ip: &str) -> Result<(), RuntimeError> {
-        let answer = runtime_command(&self.haproxy_socket, &format!("clear table tbl_ban key {ip}"))?;
+        let answer = runtime_command(
+            &self.haproxy_socket,
+            &format!("clear table tbl_ban key {ip}"),
+        )?;
         if !answer.trim().is_empty() {
             self.failed += 1;
             let snippet: String = answer.trim().chars().take(200).collect();
@@ -227,7 +232,10 @@ impl Enforcer {
 }
 
 fn field_i64(fields: &HashMap<String, String>, name: &str) -> i64 {
-    fields.get(name).and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0)
+    fields
+        .get(name)
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,12 +320,25 @@ impl EnforcementQueue {
     /// flood (Python `EnforcementQueue.batch`).
     pub fn batch(&self, max_items: usize) -> Vec<(String, u64)> {
         let with_gen = |ip: &String| self.entries.get(ip).map(|&(_, g)| (ip.clone(), g));
-        let mut urgent: Vec<(String, u64)> =
-            self.urgent.iter().filter_map(with_gen).take(max_items - max_items / 4).collect();
-        let ordinary: Vec<(String, u64)> =
-            self.normal.iter().filter_map(with_gen).take(max_items - urgent.len()).collect();
+        let mut urgent: Vec<(String, u64)> = self
+            .urgent
+            .iter()
+            .filter_map(with_gen)
+            .take(max_items - max_items / 4)
+            .collect();
+        let ordinary: Vec<(String, u64)> = self
+            .normal
+            .iter()
+            .filter_map(with_gen)
+            .take(max_items - urgent.len())
+            .collect();
         if urgent.len() + ordinary.len() < max_items {
-            urgent = self.urgent.iter().filter_map(with_gen).take(max_items - ordinary.len()).collect();
+            urgent = self
+                .urgent
+                .iter()
+                .filter_map(with_gen)
+                .take(max_items - ordinary.len())
+                .collect();
         }
         urgent.extend(ordinary);
         urgent

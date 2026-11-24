@@ -228,15 +228,15 @@ jobs:
 
       - name: Clippy
         working-directory: rust/guardd
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Rust unit tests
         working-directory: rust/guardd
-        run: cargo test
+        run: cargo test --locked
 
       - name: Release build (x86_64)
         working-directory: rust/guardd
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Cross-compile release build (aarch64 / NanoPi ARM64)
         working-directory: rust/guardd
@@ -246,7 +246,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-          cargo build --release --target aarch64-unknown-linux-gnu
+          cargo build --locked --release --target aarch64-unknown-linux-gnu
           file target/aarch64-unknown-linux-gnu/release/guardd-core target/aarch64-unknown-linux-gnu/release/libguardd_core.so
 
       - name: Python-vs-Rust differential parity
@@ -304,8 +304,8 @@ jobs:
         working-directory: go/agent
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/easy-ha-proxy-agent-linux-amd64 ./cmd/easy-ha-proxy-agent
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/easy-ha-proxy-agent-linux-arm64 ./cmd/easy-ha-proxy-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=$(cat ../../VERSION)" -o dist/easy-ha-proxy-agent-linux-amd64 ./cmd/easy-ha-proxy-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=$(cat ../../VERSION)" -o dist/easy-ha-proxy-agent-linux-arm64 ./cmd/easy-ha-proxy-agent
           ls -lh dist/
           file dist/easy-ha-proxy-agent-linux-amd64 dist/easy-ha-proxy-agent-linux-arm64
           ./dist/easy-ha-proxy-agent-linux-amd64 version
@@ -349,8 +349,8 @@ jobs:
         working-directory: go/panel
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/easy-ha-proxy-panel-linux-amd64 ./cmd/easy-ha-proxy-panel
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/easy-ha-proxy-panel-linux-arm64 ./cmd/easy-ha-proxy-panel
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X easy-ha-proxy/panel/internal/config.Version=$(cat ../../VERSION)" -o dist/easy-ha-proxy-panel-linux-amd64 ./cmd/easy-ha-proxy-panel
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X easy-ha-proxy/panel/internal/config.Version=$(cat ../../VERSION)" -o dist/easy-ha-proxy-panel-linux-arm64 ./cmd/easy-ha-proxy-panel
           ls -lh dist/
           file dist/easy-ha-proxy-panel-linux-amd64 dist/easy-ha-proxy-panel-linux-arm64
           ./dist/easy-ha-proxy-panel-linux-amd64 version
@@ -423,6 +423,19 @@ jobs:
           chmod +x "$GUARDD_RUST_BIN"
           test -f "$GUARDD_RUST_LIB"
           python -m unittest -v test_rust_guardd_parity
+
+  rust-vulnerabilities:
+    name: Rust dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the locked dependency tree
+        working-directory: rust/guardd
+        run: |
+          cargo install cargo-audit --locked --version 0.23.0
+          cargo audit
 
   go-vulnerabilities:
     name: Go vulnerability scan (${{ matrix.module }})
@@ -661,7 +674,7 @@ jobs:
   # or :go-latest without modifying jobs.image.
   go-panel-image:
     name: Publish the Go web panel image
-    needs: [go-panel, go-parity, javascript, secrets]
+    needs: [go-panel, go-parity, go-vulnerabilities, javascript, secrets]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
@@ -675,7 +688,7 @@ jobs:
       - name: Fingerprint the Go web panel
         id: tree
         run: |
-          tree="$(git ls-tree -r --full-tree HEAD -- go/panel docker/app/haproxy_admin/static docker/app/haproxy_admin/translations docker/app/haproxy_admin/templates | sha256sum | cut -d' ' -f1)"
+          tree="$(git ls-tree -r --full-tree HEAD -- VERSION go/panel docker/app/haproxy_admin/static docker/app/haproxy_admin/translations docker/app/haproxy_admin/templates | sha256sum | cut -d' ' -f1)"
           echo "tree=${tree}" >> "$GITHUB_OUTPUT"
           echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
@@ -757,7 +770,7 @@ jobs:
   # extra configuration.
   native-release-image:
     name: Publish native host binaries OCI image
-    needs: [rust-guardd, go-agent, go-parity, native-release, secrets]
+    needs: [rust-guardd, go-agent, go-parity, native-release, go-vulnerabilities, rust-vulnerabilities, secrets]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')

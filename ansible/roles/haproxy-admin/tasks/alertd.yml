@@ -71,6 +71,7 @@
     or alert_client_script.changed
     or alertd_unit.changed
     or (hapadm_env_t.changed | default(false))
+    or (daemons_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-alertd | Ensure service started"
   ansible.builtin.systemd:

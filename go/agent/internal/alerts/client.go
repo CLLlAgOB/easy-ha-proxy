@@ -4,11 +4,14 @@ package alerts
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +19,9 @@ const (
 	DefaultSocketPath = "/run/easy-ha-proxy/easy-ha-proxy-alertd.sock"
 	DefaultTimeout    = 3 * time.Second
 	TokenHeader       = "X-Alertd-Token"
+	resendUnchanged   = 2 * time.Minute
+	maxRecentAlerts   = 2000
+	maxAlertResponse  = 64 * 1024
 )
 
 // Observation matches the POST /api/v1/alerts/notify contract of easy-ha-proxy-alertd.
@@ -43,6 +49,13 @@ type Client struct {
 	SocketPath string
 	Token      string
 	httpClient *http.Client
+	mu         sync.Mutex
+	recent     map[[2]string]acceptedObservation
+}
+
+type acceptedObservation struct {
+	hash [sha256.Size]byte
+	at   time.Time
 }
 
 // FromEnv constructs a Client from ALERTD_SOCKET_PATH and ALERTD_TOKEN.
@@ -68,6 +81,7 @@ func NewClient(socketPath, token string) *Client {
 	return &Client{
 		SocketPath: socketPath,
 		Token:      strings.TrimSpace(token),
+		recent:     make(map[[2]string]acceptedObservation),
 		httpClient: &http.Client{
 			Transport: tr,
 			Timeout:   DefaultTimeout,
@@ -89,6 +103,15 @@ func (c *Client) Observe(ctx context.Context, obs Observation) bool {
 	if err != nil {
 		return false
 	}
+	key := [2]string{obs.Rule, obs.Subject}
+	hash := sha256.Sum256(body)
+	started := time.Now()
+	c.mu.Lock()
+	previous, ok := c.recent[key]
+	c.mu.Unlock()
+	if ok && previous.hash == hash && started.Sub(previous.at) < resendUnchanged {
+		return true
+	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
@@ -105,6 +128,18 @@ func (c *Client) Observe(ctx context.Context, obs Observation) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAlertResponse))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if previous, exists := c.recent[key]; !exists || started.After(previous.at) {
+		if len(c.recent) >= maxRecentAlerts && !exists {
+			clear(c.recent)
+		}
+		c.recent[key] = acceptedObservation{hash: hash, at: started}
+	}
+	return true
 }

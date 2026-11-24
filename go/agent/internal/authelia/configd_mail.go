@@ -604,7 +604,7 @@ func validateMailHost(value any) (string, error) {
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		cand = host[1 : len(host)-1]
 	}
-	if a, err := netip.ParseAddr(cand); err == nil {
+	if a, err := netip.ParseAddr(cand); err == nil && a.Zone() == "" {
 		return a.String(), nil
 	}
 	for _, label := range strings.Split(strings.TrimRight(host, "."), ".") {

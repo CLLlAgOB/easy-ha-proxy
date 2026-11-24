@@ -42,8 +42,14 @@ pub fn read_shield_files(path: &str) -> Option<BTreeMap<String, String>> {
         &R,
         r"(?m)^\s*# guardd-shield segments=(?P<segments>\S+) paths=(?P<paths>\S+) exempt=(?P<exempt>\S+)\s*$",
     );
-    let p = if path.is_empty() { haproxy_config_path() } else { path.to_string() };
-    let text = fs::read(&p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())?;
+    let p = if path.is_empty() {
+        haproxy_config_path()
+    } else {
+        path.to_string()
+    };
+    let text = fs::read(&p)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())?;
     let c = marker.captures(&text)?;
     let mut out = BTreeMap::new();
     for k in ["segments", "paths", "exempt"] {
@@ -75,7 +81,11 @@ pub fn shield_entries(
     }
     let enforcing = |category: &str| {
         sigs.category_is_decisive(category)
-            && modes.get(&format!("path:{category}")).map(String::as_str).unwrap_or("enforce") == "enforce"
+            && modes
+                .get(&format!("path:{category}"))
+                .map(String::as_str)
+                .unwrap_or("enforce")
+                == "enforce"
     };
     let mut skipped = BTreeSet::new();
     for (token, category) in sigs.segment_map() {
@@ -115,9 +125,15 @@ pub fn shield_entries(
             }
         }
     }
-    for (key, len) in [("segments", result.segments.len()), ("paths", result.paths.len()), ("exempt", result.exempt.len())] {
+    for (key, len) in [
+        ("segments", result.segments.len()),
+        ("paths", result.paths.len()),
+        ("exempt", result.exempt.len()),
+    ] {
         if len > SHIELD_MAX_ENTRIES {
-            return Err(format!("the path shield would hold {len} {key}; refusing a list that large"));
+            return Err(format!(
+                "the path shield would hold {len} {key}; refusing a list that large"
+            ));
         }
     }
     result.skipped = skipped.into_iter().take(20).collect();
@@ -149,7 +165,9 @@ impl PathShield {
 
     /// The patterns HAProxy holds for one list.
     pub fn current(&self, name: &str) -> Result<BTreeSet<String>, String> {
-        let answer = self.command(&format!("show acl {name}")).map_err(|e| e.to_string())?;
+        let answer = self
+            .command(&format!("show acl {name}"))
+            .map_err(|e| e.to_string())?;
         let mut values = BTreeSet::new();
         for line in answer.lines() {
             let mut parts = line.split_whitespace();
@@ -164,7 +182,9 @@ impl PathShield {
             }
             if !line.trim().is_empty() && !line.starts_with('#') {
                 let snippet: String = line.trim().chars().take(120).collect();
-                return Err(format!("HAProxy did not return the list {name}: {snippet:?}"));
+                return Err(format!(
+                    "HAProxy did not return the list {name}: {snippet:?}"
+                ));
             }
         }
         Ok(values)
@@ -172,10 +192,14 @@ impl PathShield {
 
     pub fn replace(&self, name: &str, values: &BTreeSet<String>) -> Result<(), String> {
         static R: OnceLock<Regex> = OnceLock::new();
-        let answer = self.command(&format!("prepare acl {name}")).map_err(|e| e.to_string())?;
+        let answer = self
+            .command(&format!("prepare acl {name}"))
+            .map_err(|e| e.to_string())?;
         let Some(c) = rx(&R, r"New version created:\s*(\d+)").captures(&answer) else {
             let snippet: String = answer.trim().chars().take(120).collect();
-            return Err(format!("HAProxy did not prepare the list {name}: {snippet:?}"));
+            return Err(format!(
+                "HAProxy did not prepare the list {name}: {snippet:?}"
+            ));
         };
         let version = c[1].to_string();
         for value in values {
@@ -188,7 +212,9 @@ impl PathShield {
                 return Err(format!("HAProxy refused {value:?} for {name}: {snippet}"));
             }
         }
-        let refused = self.command(&format!("commit acl @{version} {name}")).map_err(|e| e.to_string())?;
+        let refused = self
+            .command(&format!("commit acl @{version} {name}"))
+            .map_err(|e| e.to_string())?;
         if !refused.trim().is_empty() {
             let snippet: String = refused.trim().chars().take(120).collect();
             return Err(format!("HAProxy did not commit the list {name}: {snippet}"));
@@ -214,7 +240,11 @@ impl PathShield {
             return status;
         };
         let outcome = (|| -> Result<(), String> {
-            for (key, set) in [("exempt", &wanted.exempt), ("segments", &wanted.segments), ("paths", &wanted.paths)] {
+            for (key, set) in [
+                ("exempt", &wanted.exempt),
+                ("segments", &wanted.segments),
+                ("paths", &wanted.paths),
+            ] {
                 let name = &files[key];
                 if &self.current(name)? != set {
                     self.replace(name, set)?;

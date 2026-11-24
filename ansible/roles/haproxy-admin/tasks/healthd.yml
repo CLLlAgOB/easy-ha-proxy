@@ -70,6 +70,7 @@
     or healthd_unit.changed
     or healthd_cfg.changed
     or (hapadm_env_t.changed | default(false))
+    or (daemons_env_t.changed | default(false))
 
 - name: "haproxy-healthd | Ensure service started"
   ansible.builtin.systemd:

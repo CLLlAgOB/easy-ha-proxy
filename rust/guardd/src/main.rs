@@ -171,7 +171,11 @@ fn cmd_seed_db(sec_path: &str, req_path: &str, sig_path: Option<&str>) -> ExitCo
             return ExitCode::FAILURE;
         }
     };
-    let verdict = Verdict { excluded: false, reason: String::new(), source: String::new() };
+    let verdict = Verdict {
+        excluded: false,
+        reason: String::new(),
+        source: String::new(),
+    };
     let seeded = sec
         .set_state("mode_override", "enforce")
         .and_then(|_| sec.observe_ip("198.51.100.77", 1_786_429_000, &verdict))
@@ -193,7 +197,10 @@ fn cmd_seed_db(sec_path: &str, req_path: &str, sig_path: Option<&str>) -> ExitCo
     }
     let evs = sec.events_for("198.51.100.77", 0, 500).unwrap_or_default();
     let score = score_events(&evs, 1_786_429_000, &ScoringPolicy::default());
-    let cfg = GuardConfig { request_log_enabled: true, ..Default::default() };
+    let cfg = GuardConfig {
+        request_log_enabled: true,
+        ..Default::default()
+    };
     let rlog = match RequestLog::open(req_path, &cfg) {
         Ok(r) => r,
         Err(e) => {
@@ -243,23 +250,47 @@ fn main() -> ExitCode {
         i += 1;
     }
     let opt = |k: &str, env_name: &str, default: &str| {
-        opts.get(k).cloned().unwrap_or_else(|| env::var(env_name).unwrap_or_else(|_| default.to_string()))
+        opts.get(k)
+            .cloned()
+            .unwrap_or_else(|| env::var(env_name).unwrap_or_else(|_| default.to_string()))
     };
     match sub {
         "parse" => cmd_parse(opts.get("signatures").map(String::as_str)),
         "bench" => {
-            let lines = opts.get("lines").and_then(|v| v.parse::<usize>().ok()).unwrap_or(50_000).max(1);
+            let lines = opts
+                .get("lines")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50_000)
+                .max(1);
             cmd_bench(lines, opts.get("signatures").map(String::as_str))
         }
         "serve" => serve::run(serve::Paths {
             config: opt("config", "GUARDD_CONFIG", "/opt/haproxy-admin/guardd.json"),
-            database: opt("database", "GUARDD_DATABASE", "/var/lib/easy-ha-proxy/security/security.db"),
-            socket: opt("socket", "GUARDD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-guardd.sock"),
-            signatures: opt("signatures", "GUARDD_SIGNATURES", "/usr/local/sbin/scanner-signatures.json"),
-            request_log: env::var("GUARDD_REQUEST_LOG").unwrap_or_else(|_| "/var/lib/easy-ha-proxy/requests/requests.db".into()),
+            database: opt(
+                "database",
+                "GUARDD_DATABASE",
+                "/var/lib/easy-ha-proxy/security/security.db",
+            ),
+            socket: opt(
+                "socket",
+                "GUARDD_SOCKET_PATH",
+                "/run/easy-ha-proxy/easy-ha-proxy-guardd.sock",
+            ),
+            signatures: opt(
+                "signatures",
+                "GUARDD_SIGNATURES",
+                "/usr/local/sbin/scanner-signatures.json",
+            ),
+            request_log: opt(
+                "requests",
+                "GUARDD_REQUEST_LOG",
+                "/var/lib/easy-ha-proxy/requests/requests.db",
+            ),
         }),
         "seed-db" => match (opts.get("database"), opts.get("requests")) {
-            (Some(sec), Some(req)) => cmd_seed_db(sec, req, opts.get("signatures").map(String::as_str)),
+            (Some(sec), Some(req)) => {
+                cmd_seed_db(sec, req, opts.get("signatures").map(String::as_str))
+            }
             _ => {
                 eprintln!("usage: guardd-core seed-db --security-db PATH --requests-db PATH [--signatures PATH]");
                 ExitCode::from(2)

@@ -27,19 +27,28 @@ var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // SilentJSON is request.get_json(silent=True): nil unless a JSON body parses.
 func (c *Ctx) SilentJSON() any {
+	value, _ := c.silentJSONLimit(0)
+	return value
+}
+
+func (c *Ctx) silentJSONLimit(limit int64) (any, bool) {
 	ct, _, _ := mime.ParseMediaType(c.R.Header.Get("Content-Type"))
 	if ct != "application/json" && !(strings.HasPrefix(ct, "application/") && strings.HasSuffix(ct, "+json")) {
-		return nil
+		return nil, false
 	}
-	raw, err := io.ReadAll(c.R.Body)
+	var reader io.Reader = c.R.Body
+	if limit > 0 {
+		reader = io.LimitReader(reader, limit+1)
+	}
+	raw, err := io.ReadAll(reader)
+	if limit > 0 && int64(len(raw)) > limit {
+		return nil, true
+	}
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	v, err := pyyaml.JSONLoads(raw)
-	if err != nil {
-		return nil
-	}
-	return v
+	value, _ := pyyaml.JSONLoads(raw)
+	return value, false
 }
 
 // silentJSONMap is request.get_json(silent=True) or {}.

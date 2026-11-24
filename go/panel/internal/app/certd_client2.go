@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/textproto"
 	"strings"
@@ -39,7 +40,7 @@ func certdMultipart(path string, fields [][2]string, fileField, filename, fileTy
 		_ = w.WriteField(kv[0], kv[1])
 	}
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fileField, filename))
+	h.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": fileField, "filename": filename}))
 	h.Set("Content-Type", fileType)
 	part, _ := w.CreatePart(h)
 	_, _ = part.Write(data)
@@ -131,10 +132,14 @@ func CertdListAll() *Map {
 	if err != nil {
 		return emptyCertList("haproxy-certd unreachable: " + pyOSError(err))
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return emptyCertList(fmt.Sprintf("haproxy-certd HTTP %d", resp.StatusCode))
+	}
+	const maxResponse = 16 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	if err != nil || len(raw) > maxResponse {
+		return emptyCertList("haproxy-certd incomplete or oversized response")
 	}
 	v, err := pyyaml.JSONLoads(raw)
 	if err != nil {
