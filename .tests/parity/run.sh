@@ -64,6 +64,10 @@ if [[ $WHAT == all || $WHAT == agent ]]; then
          "agent-renew bash /repo/.tests/parity/agent/tools/renew.sh")
 fi
 
+if [[ ${#jobs[@]} -eq 0 ]]; then
+  echo "parity: nothing selected by '$WHAT${ONLY:+ $ONLY}'"
+  exit 1
+fi
 printf '%s\n' "${jobs[@]}" | xargs -P "$JOBS" -I{} bash -c 'run_in {}' && status=0 || status=1
 [[ $status -eq 0 ]] && echo "parity: all ${#jobs[@]} runs identical" || echo "parity: differences found"
 exit $status
