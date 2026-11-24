@@ -294,7 +294,11 @@ func (s *State) Snapshot(refresh bool) map[string]any {
 
 // ForceRefresh collects afresh and records state changes as events.
 func (s *State) ForceRefresh() map[string]any {
+	// Deferred, as Python's "with self._collect_lock": net/http recovers a
+	// panic in the handler, and a lock still held then would block every
+	// later health request.
 	s.collectMu.Lock()
+	defer s.collectMu.Unlock()
 	newCache, sig := s.collect()
 	now := utcNowISO()
 	s.mu.Lock()
@@ -316,7 +320,6 @@ func (s *State) ForceRefresh() map[string]any {
 	s.lastCollect = time.Now()
 	out := deepCopy(s.cache)
 	s.mu.Unlock()
-	s.collectMu.Unlock()
 	out["meta"] = map[string]any{"cached": false, "cache_age_seconds": 0}
 	return out
 }
