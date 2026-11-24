@@ -43,7 +43,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Prepare disposable native tools
         run: |
           sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer
@@ -62,7 +62,7 @@ jobs:
       matrix:
         release: [bookworm, trixie]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Prepare disposable native tools
         run: |
           apt-get update

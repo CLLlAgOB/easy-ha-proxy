@@ -249,3 +249,17 @@ class TheRunners(unittest.TestCase):
                 runner = str(job.get("runs-on", ""))
                 with self.subTest(workflow=path.name, job=name):
                     self.assertNotIn("latest", runner)
+
+    def test_all_actions_are_pinned_to_full_commit_shas(self):
+        import re
+
+        sha_pin = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            jobs = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("jobs") or {}
+            for job_name, job in jobs.items():
+                for step_def in job.get("steps") or []:
+                    uses = step_def.get("uses")
+                    if not uses or uses.startswith("./"):
+                        continue
+                    with self.subTest(workflow=path.name, job=job_name, uses=uses):
+                        self.assertRegex(uses, sha_pin)

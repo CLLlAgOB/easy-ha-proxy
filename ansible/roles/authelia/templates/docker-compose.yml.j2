@@ -4,7 +4,7 @@ services:
 {% set container_timezone = authelia_timezone | default('', true) or easy_ha_proxy_host_timezone | default('UTC', true) %}
 {% if authelia_session_redis_enabled | default(true) %}
   authelia-redis:
-    image: {{ authelia_redis_image | default('redis:8.10.3-alpine') }}
+    image: {{ authelia_redis_image | default('redis:8.12.0-alpine') }}
     container_name: authelia-redis
     restart: unless-stopped
     user: "{{ authelia_redis_uid }}:{{ authelia_redis_gid }}"
