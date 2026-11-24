@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,53 +64,6 @@ func TestStoreSharesThePythonDatabase(t *testing.T) {
 	_ = db.QueryRow("SELECT COUNT(*) FROM alert_events").Scan(&events)
 	if version != SchemaVersion || ackTS != 130 || ackBy != "operator" || firstSeen != 90 || events != 2 {
 		t.Fatalf("database after Go: version=%d ack=%d/%q first_seen=%d events=%d", version, ackTS, ackBy, firstSeen, events)
-	}
-}
-
-// The JSON state an earlier Go daemon kept beside the database is imported
-// once, then set aside.
-func TestStoreImportsTheEarlierGoState(t *testing.T) {
-	dir := t.TempDir()
-	legacy := filepath.Join(dir, "alerts-state.json")
-	_ = os.WriteFile(legacy, []byte(`{"schema_version":2,"next_event_id":3,
-		"states":[{"rule":"backup.failed","subject":"nightly","state":"firing","severity":"warning","since_ts":50,
-		"first_seen_ts":50,"last_seen_ts":60,"acknowledged_ts":55,"acknowledged_by":"ops","muted_until":0}],
-		"events":[{"id":1,"ts":50,"rule":"backup.failed","subject":"nightly","transition":"fired","severity":"warning"},
-		{"id":2,"ts":55,"rule":"backup.failed","subject":"nightly","transition":"acknowledged","severity":"warning"}]}`), 0o640)
-	// The database already holds the Python daemon's history: an older row
-	// for the same alert, and an event.
-	old, err := NewStore(filepath.Join(dir, "alerts.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	old.PutState(AlertState{Rule: "backup.failed", Subject: "nightly", State: StateFiring, Severity: "warning",
-		SinceTS: 10, FirstSeenTS: 10, LastSeenTS: 20})
-	old.PutState(AlertState{Rule: "site.down", Subject: "kept", State: StateFiring, Severity: "critical",
-		SinceTS: 10, FirstSeenTS: 10, LastSeenTS: 999})
-	old.AddEvent(AlertEvent{TS: 10, Rule: "backup.failed", Subject: "nightly", Transition: TransitionFired, Severity: "warning"})
-	old.Close()
-
-	store, err := NewStore(filepath.Join(dir, "alerts.db"), legacy)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	defer store.Close()
-	row, ok := store.GetState("backup.failed", "nightly")
-	if !ok || row.AcknowledgedBy != "ops" || row.LastSeenTS != 60 || row.FirstSeenTS != 10 {
-		t.Fatalf("the newer JSON row must replace the older one (keeping the earliest first sight): %+v", row)
-	}
-	if kept, _ := store.GetState("site.down", "kept"); kept.LastSeenTS != 999 {
-		t.Fatalf("a database row the JSON does not hold must stay: %+v", kept)
-	}
-	if total, _ := store.Events(EventFilter{}); total != 3 {
-		t.Fatalf("events not imported beside the database's own: %d", total)
-	}
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Fatal("the JSON state must be set aside after the import")
-	}
-	matches, _ := filepath.Glob(legacy + ".imported-*")
-	if len(matches) != 1 {
-		t.Fatalf("expected one imported copy, got %v", matches)
 	}
 }
 

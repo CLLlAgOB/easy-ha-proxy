@@ -11,7 +11,7 @@ import (
 
 func TestEmptySubjectDefaultsToDashAndIsAccepted(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "alerts.db"), filepath.Join(dir, "state.json"))
+	store, err := NewStore(filepath.Join(dir, "alerts.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestCleanTextTruncatesByRunesNotBytes(t *testing.T) {
 
 func TestRetryMailTimerStopsOnEngineClose(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "alerts.db"), filepath.Join(dir, "state.json"))
+	store, err := NewStore(filepath.Join(dir, "alerts.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

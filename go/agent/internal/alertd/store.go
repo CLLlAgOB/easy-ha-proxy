@@ -7,14 +7,12 @@ package alertd
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -146,10 +144,8 @@ func (s *Store) operation() *Store {
 }
 
 // NewStore opens or creates the alert database at path; "" keeps it in
-// memory (tests). legacyJSON, if it names an existing file, is the state an
-// earlier Go daemon kept outside the database: it is imported once and set
-// aside, so nothing recorded during that period is lost.
-func NewStore(path string, legacyJSON ...string) (*Store, error) {
+// memory (tests).
+func NewStore(path string) (*Store, error) {
 	dsn := "file::memory:"
 	fresh := true
 	if path != "" {
@@ -187,14 +183,6 @@ func NewStore(path string, legacyJSON ...string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
-	}
-	for _, legacy := range legacyJSON {
-		if legacy != "" {
-			if err := s.importLegacyJSON(legacy); err != nil {
-				_ = db.Close()
-				return nil, fmt.Errorf("importing %s: %w", legacy, err)
-			}
-		}
 	}
 	return s, nil
 }
@@ -247,69 +235,6 @@ func (s *Store) migrate() error {
 		}
 	}
 	return tx.Commit()
-}
-
-type legacySnapshot struct {
-	States []AlertState `json:"states"`
-	Events []AlertEvent `json:"events"`
-}
-
-// importLegacyJSON brings the JSON state of an earlier Go daemon into the
-// database: rows the database does not hold yet, and every event (renumbered,
-// keeping its time). The file is then renamed, never read again.
-func (s *Store) importLegacyJSON(path string) error {
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	var snap legacySnapshot
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &snap); err != nil {
-			return err
-		}
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, st := range snap.States {
-		var trigger any
-		if st.TriggerDelay != nil {
-			trigger = *st.TriggerDelay
-		}
-		// The same alert in both: the row seen last is the current one (the
-		// JSON was written after the database stopped being used, but a row
-		// the JSON never touched again may be older than the database's).
-		if _, err := tx.Exec("INSERT INTO alert_state ("+stateColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "+
-			"ON CONFLICT(rule, subject) DO UPDATE SET state = excluded.state, severity = excluded.severity, "+
-			"since_ts = excluded.since_ts, first_seen_ts = MIN(alert_state.first_seen_ts, excluded.first_seen_ts), "+
-			"last_seen_ts = excluded.last_seen_ts, last_notified_ts = excluded.last_notified_ts, "+
-			"notify_count = excluded.notify_count, summary = excluded.summary, detail = excluded.detail, "+
-			"trigger_delay = excluded.trigger_delay, recipient = excluded.recipient, "+
-			"acknowledged_ts = excluded.acknowledged_ts, acknowledged_by = excluded.acknowledged_by, "+
-			"muted_until = excluded.muted_until, stale_since_ts = excluded.stale_since_ts "+
-			"WHERE excluded.last_seen_ts > alert_state.last_seen_ts",
-			st.Rule, st.Subject, st.State, st.Severity, st.SinceTS, st.FirstSeenTS, st.LastSeenTS, st.LastNotifiedTS,
-			st.NotifyCount, st.Summary, st.Detail, trigger, st.Recipient, st.AcknowledgedTS, st.AcknowledgedBy,
-			st.MutedUntil, st.StaleSinceTS); err != nil {
-			return err
-		}
-	}
-	for _, ev := range snap.Events {
-		if _, err := tx.Exec("INSERT INTO alert_events (ts, rule, subject, transition, severity, summary, detail, delivered, delivery_error) "+
-			"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", ev.TS, ev.Rule, ev.Subject, ev.Transition, ev.Severity, ev.Summary,
-			ev.Detail, ev.Delivered, ev.DeliveryError); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return os.Rename(path, fmt.Sprintf("%s.imported-%d", path, time.Now().Unix()))
 }
 
 // Close closes the database.

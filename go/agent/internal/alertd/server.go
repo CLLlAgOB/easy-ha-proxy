@@ -265,7 +265,7 @@ func (s *Server) handleMailRetry(w http.ResponseWriter, r *http.Request) {
 // Run starts the alertd daemon on its AF_UNIX socket and blocks until SIGTERM/SIGINT.
 func Run(opts DaemonOptions) error {
 	cfg := LoadConfig(opts.ConfigPath)
-	store, err := NewStore(opts.DatabasePath, opts.StatePath)
+	store, err := NewStore(opts.DatabasePath)
 	if err != nil {
 		return err
 	}
