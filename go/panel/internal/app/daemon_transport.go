@@ -146,12 +146,22 @@ type HTTPOptions struct {
 }
 
 func (u *UnixHTTP) client(timeout time.Duration) *http.Client {
+	return unixSocketClient(u.SocketPath, timeout)
+}
+
+// unixSocketClient talks HTTP to a daemon's AF_UNIX socket one connection per
+// request, as the Python clients' UnixHTTPConnection did. Each call builds its
+// own Transport, so a kept-alive connection would never be reused: it would
+// only hold the socket and two goroutines here, and a handler goroutine in the
+// daemon, until the daemon's idle timeout closed it.
+func unixSocketClient(socketPath string, timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
-				return d.DialContext(ctx, "unix", u.SocketPath)
+				return d.DialContext(ctx, "unix", socketPath)
 			},
 		},
 	}

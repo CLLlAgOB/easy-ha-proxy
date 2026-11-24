@@ -5,12 +5,9 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net"
-	"net/http"
 	"net/textproto"
 	"strings"
 	"time"
@@ -129,12 +126,7 @@ func emptyCertList(err string) *Map {
 
 // CertdListAll is list_all_certs.
 func CertdListAll() *Map {
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", certdSocketPath)
-		},
-	}}
+	client := unixSocketClient(certdSocketPath, 5*time.Second)
 	resp, err := client.Get(certdBaseURL("/certs/list"))
 	if err != nil {
 		return emptyCertList("haproxy-certd unreachable: " + pyOSError(err))

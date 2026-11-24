@@ -4,13 +4,11 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/textproto"
 	"os"
@@ -69,12 +67,7 @@ func pyQuotePlus(s string) string {
 }
 
 func certdPost(path string, body []byte, contentType string, timeout time.Duration) (*certdResponse, error) {
-	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", certdSocketPath)
-		},
-	}}
+	client := unixSocketClient(certdSocketPath, timeout)
 	req, err := http.NewRequest("POST", certdBaseURL(path), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
