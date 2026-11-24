@@ -271,7 +271,18 @@ func (s *Store) importLegacyJSON(path string) error {
 		if st.TriggerDelay != nil {
 			trigger = *st.TriggerDelay
 		}
-		if _, err := tx.Exec("INSERT OR IGNORE INTO alert_state ("+stateColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		// The same alert in both: the row seen last is the current one (the
+		// JSON was written after the database stopped being used, but a row
+		// the JSON never touched again may be older than the database's).
+		if _, err := tx.Exec("INSERT INTO alert_state ("+stateColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "+
+			"ON CONFLICT(rule, subject) DO UPDATE SET state = excluded.state, severity = excluded.severity, "+
+			"since_ts = excluded.since_ts, first_seen_ts = MIN(alert_state.first_seen_ts, excluded.first_seen_ts), "+
+			"last_seen_ts = excluded.last_seen_ts, last_notified_ts = excluded.last_notified_ts, "+
+			"notify_count = excluded.notify_count, summary = excluded.summary, detail = excluded.detail, "+
+			"trigger_delay = excluded.trigger_delay, recipient = excluded.recipient, "+
+			"acknowledged_ts = excluded.acknowledged_ts, acknowledged_by = excluded.acknowledged_by, "+
+			"muted_until = excluded.muted_until, stale_since_ts = excluded.stale_since_ts "+
+			"WHERE excluded.last_seen_ts > alert_state.last_seen_ts",
 			st.Rule, st.Subject, st.State, st.Severity, st.SinceTS, st.FirstSeenTS, st.LastSeenTS, st.LastNotifiedTS,
 			st.NotifyCount, st.Summary, st.Detail, trigger, st.Recipient, st.AcknowledgedTS, st.AcknowledgedBy,
 			st.MutedUntil, st.StaleSinceTS); err != nil {
