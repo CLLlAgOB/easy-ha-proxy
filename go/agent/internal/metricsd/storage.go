@@ -767,10 +767,6 @@ func storeBaselinesTx(t *sql.Tx, b map[baselineKey]baselineVal) error {
 	return nil
 }
 
-func (d *Database) storeBaselines(b map[baselineKey]baselineVal) error {
-	return d.tx(func(t *sql.Tx) error { return storeBaselinesTx(t, b) })
-}
-
 func sortedIDs[V any](m map[int64]V) []int64 {
 	ids := make([]int64, 0, len(m))
 	for k := range m {

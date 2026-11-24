@@ -103,13 +103,6 @@ func (m *mdiffState) makeLine(lines *[]string, key byte, side int) diffSide {
 	return diffSide{m.numLines[side], "\x00" + string(key) + text + "\x01"}
 }
 
-func pop0(l []string) string {
-	if len(l) == 0 {
-		return ""
-	}
-	return l[0]
-}
-
 // lineIteratorStep produces the next rows of _line_iterator into the queue;
 // false when the generator has returned.
 func (m *mdiffState) lineIteratorStep() bool {

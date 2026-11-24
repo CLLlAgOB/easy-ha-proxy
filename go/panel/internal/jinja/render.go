@@ -223,8 +223,6 @@ func (ctx *context) renderRoot(t *Template, out *strings.Builder) error {
 	return nil
 }
 
-type discard struct{}
-
 func (ctx *context) renderNodes(t *Template, nodes []node, f *frame, out *strings.Builder, st *renderState) error {
 	for _, n := range nodes {
 		if err := ctx.renderNode(t, n, f, out, st); err != nil {
@@ -334,8 +332,6 @@ func (ctx *context) renderNode(t *Template, n node, f *frame, out *strings.Build
 	}
 	return nil
 }
-
-func finalizeOut(v any) any { return v }
 
 func wrapErr(t *Template, line int, err error) error {
 	if t == nil {
@@ -453,8 +449,8 @@ func (ctx *context) renderFor(t *Template, x *forNode, f *frame, out *strings.Bu
 	if err != nil {
 		return wrapErr(t, x.line, err)
 	}
-	lf := f.child()
 	if x.cond != nil {
+		lf := f.child()
 		var kept []any
 		for _, it := range items {
 			if err := ctx.assignTarget(x.target, it, lf); err != nil {
@@ -469,18 +465,15 @@ func (ctx *context) renderFor(t *Template, x *forNode, f *frame, out *strings.Bu
 			}
 		}
 		items = kept
-		lf = f.child()
 	}
 	if len(items) == 0 {
 		return ctx.renderNodes(t, x.els, f, out, st)
 	}
-	loop := &loopObj{items: items}
 	for i, it := range items {
 		// Each iteration starts from the enclosing scope again: a name set in
 		// the body does not carry into the next iteration (Jinja 3).
-		lf = f.child()
-		loop = &loopObj{items: items, index: i}
-		lf.vars["loop"] = loop
+		lf := f.child()
+		lf.vars["loop"] = &loopObj{items: items, index: i}
 		if err := ctx.assignTarget(x.target, it, lf); err != nil {
 			return err
 		}

@@ -287,11 +287,6 @@ func writeLineJSON(conn net.Conn, payload map[string]any) {
 	_, _ = conn.Write(raw)
 }
 
-func asStr(v any) string {
-	s, _ := v.(string)
-	return s
-}
-
 // setBansSocketPerms is set_socket_perms: root:<group>, mode 0660.
 func setBansSocketPerms(path, group string) {
 	gid := os.Getgid()

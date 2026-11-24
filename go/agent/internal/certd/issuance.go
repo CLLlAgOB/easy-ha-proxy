@@ -58,10 +58,6 @@ func rcValue(rc *int) any {
 	return *rc
 }
 
-type pinnedErr struct{ msg string }
-
-func (e *pinnedErr) Error() string { return e.msg }
-
 // shadowConflicts is _shadow_conflicts.
 func shadowConflicts(destination string, data []byte) []string {
 	certs, err := loadPEMCertificates(data)

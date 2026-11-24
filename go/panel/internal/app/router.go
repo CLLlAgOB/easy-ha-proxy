@@ -16,7 +16,6 @@ type flaskRule struct {
 	rule          string
 	methods       []string
 	strictSlashes bool
-	defaults      map[string]string
 }
 
 type ruleArg struct {

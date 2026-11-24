@@ -828,14 +828,6 @@ func publicBackup(v map[string]any) map[string]any {
 	}
 }
 
-func (d *Daemon) listBackups() []map[string]any {
-	all := d.allBackups()
-	if len(all) > d.Opts.ListLimit {
-		return all[:d.Opts.ListLimit]
-	}
-	return all
-}
-
 // allBackups is every valid archive on this server, newest first.
 func (d *Daemon) allBackups() []map[string]any {
 	matches, _ := filepath.Glob(filepath.Join(d.Opts.BackupsDir(), "*"+MetaSuffix))

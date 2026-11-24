@@ -991,8 +991,8 @@ func (d *Daemon) autoRebootTick() (string, error) {
 		return "disabled", nil
 	}
 	local := d.localTime()
-	due, key := autoRebootDue(record, local)
-	if !due {
+	// Checked again under the lock below, where the window key is taken.
+	if due, _ := autoRebootDue(record, local); !due {
 		return "waiting", nil
 	}
 	if _, _, err := d.autoRebootTool(); err != nil {
@@ -1015,7 +1015,7 @@ func (d *Daemon) autoRebootTick() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	due, key = autoRebootDue(record, local)
+	due, key := autoRebootDue(record, local)
 	if !due || pyx.Map(d.osSecuritySnapshot()["policy"])["mode"] == "system" {
 		return "disabled", nil
 	}

@@ -1440,14 +1440,6 @@ func (c *Collector) pullDigests(now int64) (int, error) {
 	return written, nil
 }
 
-func isFloatNumber(v any) bool {
-	if n, ok := v.(json.Number); ok {
-		return strings.ContainsAny(n.String(), ".eE")
-	}
-	_, ok := v.(float64)
-	return ok
-}
-
 func pyStrValue(v any) string {
 	switch x := v.(type) {
 	case json.Number:

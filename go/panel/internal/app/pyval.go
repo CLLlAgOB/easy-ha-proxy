@@ -88,14 +88,6 @@ func digitValue(r rune) int {
 	return 0
 }
 
-func isPyInt(v any) bool {
-	switch v.(type) {
-	case int64, int:
-		return true
-	}
-	return false
-}
-
 func asMap(v any) (*Map, bool) {
 	m, ok := v.(*Map)
 	return m, ok && m != nil

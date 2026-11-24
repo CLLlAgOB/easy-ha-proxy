@@ -136,7 +136,6 @@ var chartSeries = map[string][]string{
 }
 
 var hostCharts = map[string]bool{"cpu": true, "memory": true, "disk": true, "diskio": true, "network": true, "temperature": true}
-var derivedCharts = map[string]bool{"percentiles": true}
 
 var digestBoundsMS = []int64{5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 10000, 30000}
 

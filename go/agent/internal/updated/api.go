@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
@@ -1086,5 +1085,3 @@ func Run(opts Options) error {
 	log.Printf("Listening on %s", d.Opts.SocketPath)
 	return srv.ListenAndServe(ctx, d.Opts.SocketPath, 0o600)
 }
-
-var _ = alerts.Observation{}

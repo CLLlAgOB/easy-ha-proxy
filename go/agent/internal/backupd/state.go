@@ -48,8 +48,6 @@ type Daemon struct {
 	stop      chan struct{}
 	shutOnce  sync.Once
 	stopOnce  sync.Once
-	opHeld    bool
-	opHeldMu  sync.Mutex
 	transient func() bool
 	python    string
 	rootUID   int // the owner trusted for daemon-written files (root)

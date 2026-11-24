@@ -35,12 +35,6 @@ func guarddGet(path string, params []QueryValue, timeout time.Duration) (*Map, e
 	return asObject(guarddTransport().Get(path, HTTPOptions{Params: params, Timeout: timeout}))
 }
 
-// guarddChange is _change: a 400 is the operator's mistake and comes back
-// as a Rejected carrying the daemon's words.
-func guarddChange(path string, body any, timeout time.Duration) (*Map, error) {
-	return asObject(guarddTransport().Post(path, body, HTTPOptions{Timeout: timeout, WithToken: true, RejectedStatus: 400}))
-}
-
 // guarddRequestLog is _request_log_get: a 404 with a body means the feature
 // is off, not that the daemon is down.
 func guarddRequestLog(path string, params []QueryValue) (*Map, error) {

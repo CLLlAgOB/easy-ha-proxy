@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -204,24 +203,9 @@ func pyNetErr(err error) string {
 	return err.Error()
 }
 
-// isExecMissing reports a child that could not start at all.
-func isExecMissing(err error) bool {
-	var ee *exec.Error
-	if errors.As(err, &ee) {
-		return true
-	}
-	var pe *os.PathError
-	return errors.As(err, &pe)
-}
-
 func isRuntime(err error) bool {
 	var re *runtimeError
 	return errors.As(err, &re)
-}
-
-func isValue(err error) bool {
-	var ve *valueError
-	return errors.As(err, &ve)
 }
 
 func isNotExist(err error) bool {

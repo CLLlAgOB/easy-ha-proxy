@@ -579,9 +579,7 @@ func itemLookup(obj, key any) (any, bool) {
 }
 
 func indexSeq(x []any, key any) (any, bool) {
-	if _, isBool := key.(bool); isBool {
-		// bool is an int in Python
-	}
+	// A bool indexes like 0 or 1, as in Python: asNumber reads it as an int.
 	i, _, isInt, ok := asNumber(key)
 	if !ok || !isInt {
 		return nil, false
