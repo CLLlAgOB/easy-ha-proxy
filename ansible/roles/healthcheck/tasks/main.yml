@@ -17,25 +17,75 @@
          | selectattr('enabled')
          | list }}
 
-# ----------------- Checking the systemd services -----------------
+# ----------------- Probing the host -----------------
 
-# systemctl rather than the systemd module: is-active answers for a unit that
-# does not exist, where the module would fail.
-- name: "Status check | systemd is-active for each service"  # noqa: command-instead-of-module
+- name: "Status check | detect the installed HAProxy package provider"
   ansible.builtin.command:
-    cmd: "systemctl is-active {{ item.name }}"
-  check_mode: false
-  loop: "{{ status_check_systemd_enabled }}"
-  loop_control:
-    label: "{{ item.label | default(item.name) }}"
-  register: status_check_systemd_result
+    argv:
+      - dpkg-query
+      - --show
+      - "--showformat=${db:Status-Status}"
+      - haproxy-awslc
+  register: status_check_haproxy_provider
   changed_when: false
   failed_when: false
-  # Reconciliation and snapd may restart units moments before this check;
-  # only a state that survives a few probes is a real problem.
-  retries: "{{ status_check_is_active_retries | default(3) }}"
-  delay: "{{ status_check_is_active_delay | default(4) }}"
-  until: status_check_systemd_result.rc == 0
+  check_mode: false
+
+- name: "Status check | select the actual HAProxy package name"
+  ansible.builtin.set_fact:
+    status_check_haproxy_apt_package: >-
+      {{ 'haproxy-awslc' if status_check_haproxy_provider.rc == 0
+         and status_check_haproxy_provider.stdout == 'installed' else 'haproxy' }}
+  changed_when: false
+
+- name: "Status check | prepare managed artifacts list"
+  ansible.builtin.set_fact:
+    status_check_managed_artifacts_enabled: >-
+      {{
+        status_check_managed_artifacts | default([])
+        | selectattr('enabled')
+        | list
+      }}
+    status_check_managed_artifact_versions: {}
+    status_check_managed_artifacts_outdated: []
+  changed_when: false
+
+# Every unit, file, package and container is probed in one pass (files/
+# status_probe.py) rather than one Ansible loop item each, which cost about
+# 0.4 s per item on an ARM gateway. The probe returns each part in the shape
+# the loops registered, so the summaries below read the same results.
+# Units are asked with systemctl is-active, which answers for a unit that does
+# not exist, where the systemd module would fail.
+- name: "Status check | probe services, files, packages and containers in one pass"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', 'status_probe.py') }}"
+      - >-
+        {{ {
+             'units': status_check_systemd_enabled,
+             'retries': status_check_is_active_retries | default(3) | int,
+             'delay': status_check_is_active_delay | default(4) | int,
+             'daemon_files': status_check_systemd_enabled | selectattr('version_file', 'defined') | list,
+             'artifacts': status_check_managed_artifacts_enabled,
+             'apt': status_check_apt_packages | default([]),
+             'docker': status_check_docker_enabled,
+             'snaps': status_check_snap_packages | default([])
+           } | to_json }}
+  check_mode: false
+  register: status_check_probe_run
+  changed_when: false
+
+- name: "Status check | read the probe"
+  ansible.builtin.set_fact:
+    status_check_probe: "{{ status_check_probe_run.stdout | from_json }}"
+  changed_when: false
+
+- name: "Status check | systemd is-active for each service"
+  ansible.builtin.set_fact:
+    status_check_systemd_result: "{{ status_check_probe.systemd }}"
+  changed_when: false
 
 - name: "Status check | initialize helper daemon version data"
   ansible.builtin.set_fact:
@@ -44,19 +94,8 @@
   changed_when: false
 
 - name: "Status check | inspect installed helper daemon versions"
-  ansible.builtin.stat:
-    path: "{{ item.version_file }}"
-    checksum_algorithm: sha256
-    get_checksum: true
-  loop: >-
-    {{
-      status_check_systemd_enabled
-      | selectattr('version_file', 'defined')
-      | list
-    }}
-  loop_control:
-    label: "{{ item.name }}"
-  register: status_check_daemon_version_result
+  ansible.builtin.set_fact:
+    status_check_daemon_version_result: "{{ status_check_probe.daemon_versions }}"
   changed_when: false
 
 - name: "Status check | prepare helper daemon version map"
@@ -255,14 +294,8 @@
 # ----------------- Checking the Docker containers -----------------
 
 - name: "Status check | docker containers info"
-  when: status_check_docker_enabled | length > 0
-  community.docker.docker_container_info:
-    name: "{{ item.name }}"
-  loop: "{{ status_check_docker_enabled }}"
-  loop_control:
-    label: "{{ item.label | default(item.name) }}"
-  register: status_check_docker_result
-  failed_when: false
+  ansible.builtin.set_fact:
+    status_check_docker_result: "{{ status_check_probe.docker }}"
   changed_when: false
 
 - name: "Status check | summary for Docker containers"
@@ -320,27 +353,9 @@
 
 # ----------------- Managed executables -----------------
 
-- name: "Status check | prepare managed artifacts list"
-  ansible.builtin.set_fact:
-    status_check_managed_artifacts_enabled: >-
-      {{
-        status_check_managed_artifacts | default([])
-        | selectattr('enabled')
-        | list
-      }}
-    status_check_managed_artifact_versions: {}
-    status_check_managed_artifacts_outdated: []
-  changed_when: false
-
 - name: "Status check | inspect managed artifacts"
-  ansible.builtin.stat:
-    path: "{{ item.path }}"
-    checksum_algorithm: sha256
-    get_checksum: true
-  loop: "{{ status_check_managed_artifacts_enabled }}"
-  loop_control:
-    label: "{{ item.label }}"
-  register: status_check_managed_artifact_result
+  ansible.builtin.set_fact:
+    status_check_managed_artifact_result: "{{ status_check_probe.artifacts }}"
   changed_when: false
 
 - name: "Status check | prepare managed artifact version map"
@@ -403,42 +418,15 @@
 
 # ----------------- System package versions -----------------
 
-- name: "Status check | detect the installed HAProxy package provider"
-  ansible.builtin.command:
-    argv:
-      - dpkg-query
-      - --show
-      - "--showformat=${db:Status-Status}"
-      - haproxy-awslc
-  register: status_check_haproxy_provider
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: "Status check | select the actual HAProxy package name"
-  ansible.builtin.set_fact:
-    status_check_haproxy_apt_package: >-
-      {{ 'haproxy-awslc' if status_check_haproxy_provider.rc == 0
-         and status_check_haproxy_provider.stdout == 'installed' else 'haproxy' }}
-  changed_when: false
-
 - name: "Status check | initialize package failures"
   ansible.builtin.set_fact:
     status_check_package_failed: []
   changed_when: false
 
 - name: "Status check | installed APT package versions"
-  ansible.builtin.command:
-    argv:
-      - dpkg-query
-      - --show
-      - "--showformat=${Version}"
-      - "{{ item }}"
-  check_mode: false
-  loop: "{{ status_check_apt_packages | default([]) }}"
-  register: status_check_apt_installed_result
+  ansible.builtin.set_fact:
+    status_check_apt_installed_result: "{{ status_check_probe.apt_installed }}"
   changed_when: false
-  failed_when: false
 
 - name: "Status check | collect missing APT packages"
   ansible.builtin.set_fact:
@@ -451,16 +439,9 @@
   changed_when: false
 
 - name: "Status check | APT candidate package versions"
-  ansible.builtin.command:
-    argv:
-      - apt-cache
-      - policy
-      - "{{ item }}"
-  check_mode: false
-  loop: "{{ status_check_apt_packages | default([]) }}"
-  register: status_check_apt_candidate_result
+  ansible.builtin.set_fact:
+    status_check_apt_candidate_result: "{{ status_check_probe.apt_candidate }}"
   changed_when: false
-  failed_when: false
 
 - name: "Status check | summary for APT package versions"
   ansible.builtin.debug:
@@ -474,16 +455,9 @@
   changed_when: false
 
 - name: "Status check | installed snap package versions"
-  ansible.builtin.command:
-    argv:
-      - snap
-      - list
-      - "{{ item }}"
-  check_mode: false
-  loop: "{{ status_check_snap_packages | default([]) }}"
-  register: status_check_snap_result
+  ansible.builtin.set_fact:
+    status_check_snap_result: "{{ status_check_probe.snaps }}"
   changed_when: false
-  failed_when: false
 
 - name: "Status check | collect missing snap packages"
   ansible.builtin.set_fact:
