@@ -289,7 +289,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go/agent/go.mod
           cache: false
 
       - name: Go vet
@@ -329,7 +329,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go/panel/go.mod
           cache: false
 
       - name: Go vet
@@ -370,6 +370,72 @@ jobs:
           name: go-panel-binaries
           path: go/panel/dist/
           retention-days: 14
+
+  go-parity:
+    name: Native and Python parity (${{ matrix.arch }})
+    needs: [go-panel, go-agent, rust-guardd]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: go-panel-binaries
+          path: parity/panel
+      - uses: actions/download-artifact@v4
+        with:
+          name: go-agent-binaries
+          path: parity/agent
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-guardd-binaries
+          path: parity/guardd
+      - name: Compare read-only panel requests and server-state output
+        env:
+          PANEL_BIN: ${{ github.workspace }}/parity/panel/easy-ha-proxy-panel-linux-${{ matrix.arch }}
+          AGENT_BIN: ${{ github.workspace }}/parity/agent/easy-ha-proxy-agent-linux-${{ matrix.arch }}
+        run: |
+          python -m pip install -r docker/app/requirements.txt
+          chmod +x "$PANEL_BIN" "$AGENT_BIN"
+          python .tests/integration/native_parity_smoke.py
+      - name: Compare the packaged Rust guardd with Python
+        env:
+          PYTHONPATH: .tests:installer
+          GUARDD_RUST_BIN: parity/guardd/guardd-core-linux-${{ matrix.arch }}
+          GUARDD_RUST_LIB: parity/guardd/libguardd_core-linux-${{ matrix.arch }}.so
+        run: |
+          chmod +x "$GUARDD_RUST_BIN"
+          test -f "$GUARDD_RUST_LIB"
+          python -m unittest -v test_rust_guardd_parity
+
+  go-vulnerabilities:
+    name: Go vulnerability scan (${{ matrix.module }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [agent, panel]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/${{ matrix.module }}/go.mod
+          cache-dependency-path: go/${{ matrix.module }}/go.sum
+      - name: Check reachable Go vulnerabilities
+        working-directory: go/${{ matrix.module }}
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 
   native-release:
     name: Native release bundles (amd64 + arm64)
@@ -590,7 +656,7 @@ jobs:
   # or :go-latest without modifying jobs.image.
   go-panel-image:
     name: Publish the Go web panel image
-    needs: [go-panel, javascript, secrets]
+    needs: [go-panel, go-parity, javascript, secrets]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
@@ -683,7 +749,7 @@ jobs:
   # extra configuration.
   native-release-image:
     name: Publish native host binaries OCI image
-    needs: [rust-guardd, go-agent, native-release, secrets]
+    needs: [rust-guardd, go-agent, go-parity, native-release, secrets]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')

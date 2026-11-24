@@ -115,7 +115,7 @@ type MatchResult struct {
 	Rule     *compiledRule
 	Args     map[string]string
 	Redirect string   // strict-slashes redirect target (308)
-	Allowed  []string // non-empty when only the method did not match (405)
+	Allowed  []string // methods for an automatic OPTIONS response or a 405
 }
 
 // Match finds the endpoint for method and path.
@@ -126,7 +126,7 @@ func (rt *Router) Match(method, path string) MatchResult {
 		if m == nil {
 			continue
 		}
-		if !c.methods[method] {
+		if method == "OPTIONS" || !c.methods[method] {
 			for k := range c.methods {
 				allowed[k] = true
 			}

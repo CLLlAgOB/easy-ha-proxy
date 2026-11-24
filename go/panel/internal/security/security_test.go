@@ -162,7 +162,8 @@ func TestGzipJSONMiddleware(t *testing.T) {
 	big := `{"ok":true,"data":"` + strings.Repeat("a", 2048) + `"}`
 	h := GzipJSONMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_, _ = w.Write([]byte(big))
+		_, _ = w.Write([]byte(big[:100]))
+		_, _ = w.Write([]byte(big[100:]))
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
@@ -184,5 +185,45 @@ func TestGzipJSONMiddleware(t *testing.T) {
 	}
 	if string(decoded) != big {
 		t.Fatalf("decoded payload mismatch")
+	}
+}
+
+func TestGzipLeavesDownloadsStreaming(t *testing.T) {
+	for _, contentType := range []string{"application/octet-stream", "application/json"} {
+		t.Run(contentType, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h := GzipJSONMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", contentType)
+				w.Header().Set("Content-Disposition", "attachment")
+				_, _ = io.WriteString(w, "first chunk")
+				if rec.Body.String() != "first chunk" {
+					t.Fatal("download was buffered")
+				}
+				if err := http.NewResponseController(w).Flush(); err != nil {
+					t.Fatal(err)
+				}
+				_, _ = io.WriteString(w, " and the rest")
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			h.ServeHTTP(rec, req)
+			if !rec.Flushed || rec.Body.String() != "first chunk and the rest" || rec.Header().Get("Content-Encoding") != "" {
+				t.Fatalf("unexpected download response: %s, headers %v", rec.Body, rec.Header())
+			}
+		})
+	}
+}
+
+func TestAcceptsGzip(t *testing.T) {
+	for header, want := range map[string]bool{
+		"br, gzip;q=0.5": true,
+		"gzip;q=0, *":   false,
+		"not-gzip":      false,
+		"br":            false,
+		"*;q=0.5":       true,
+	} {
+		if got := acceptsGzip([]string{header}); got != want {
+			t.Errorf("%q: got %t, want %t", header, got, want)
+		}
 	}
 }

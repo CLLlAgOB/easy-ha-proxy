@@ -4,7 +4,7 @@
 # are copied directly without duplication:
 #   docker build -f go/panel/Dockerfile -t easy-ha-proxy-panel:go .
 
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

@@ -122,6 +122,23 @@ class TheRules(unittest.TestCase):
                 self.assertEqual(found["admin-container"]["details"]["requires"], [["changes", "all"]])
                 self.assertEqual(found["all"]["state"], "available")
 
+    def test_unverified_go_candidate_is_blocked(self):
+        for running, offered in ((None, None), (OLD, None), (OLD, OTHER)):
+            with self.subTest(running=running, offered=offered):
+                items = components(running=running, offered=offered)
+                update_plan.link_web_application(items, NEW, require_fingerprint=True)
+                found = by_id(items)
+                self.assertEqual(found["all"]["state"], "blocked")
+                self.assertEqual(found["admin-container"]["state"], "blocked")
+
+    def test_a_verified_go_candidate_can_replace_an_unlabelled_image(self):
+        items = components(running=None, offered=NEW)
+        update_plan.link_web_application(items, NEW, require_fingerprint=True)
+        found = by_id(items)
+        self.assertEqual(found["all"]["details"]["scope"]["requires"], [["admin-container"]])
+        self.assertEqual(found["all"]["state"], "available")
+        self.assertEqual(found["admin-container"]["state"], "available")
+
 
 class TheFingerprints(unittest.TestCase):
     def test_the_tree_is_the_sha256_of_ls_tree(self):
@@ -140,11 +157,29 @@ class TheFingerprints(unittest.TestCase):
             self.assertIsNone(update_plan._web_tree(Path(temporary) / "no-git", runner))
         self.assertEqual(calls[0][3:], ("ls-tree", "-r", "--full-tree", "HEAD", "--", "Dockerfile", ".dockerignore", "docker/app"))
 
+    def test_go_tree_and_label_match_ci(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        listing = "100644 blob " + "a" * 40 + "\tgo/panel/Dockerfile\n"
+        runner = mock.Mock()
+        runner.run.return_value = CommandResult(0, listing)
+        expected = hashlib.sha256(listing.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".git").mkdir()
+            self.assertEqual(update_plan._web_tree(root, runner, "go-"), expected)
+        self.assertEqual(runner.run.call_args.args[0][8:], update_plan.GO_WEB_TREE_INPUTS)
+        self.assertIn("HEAD -- " + " ".join(update_plan.GO_WEB_TREE_INPUTS), workflow)
+        self.assertIn(update_plan.GO_WEB_TREE_LABEL + "=", workflow)
+        config = {"config": {"Labels": {update_plan.GO_WEB_TREE_LABEL: expected}}}
+        runner.run.return_value = CommandResult(0, json.dumps(config))
+        self.assertEqual(update_plan._remote_web_tree("example/ui:go-alpha", runner), expected)
+
     def test_labels_of_a_multi_platform_index_and_a_single_image(self):
         index = {"linux/amd64": {"config": {"Labels": {update_plan.WEB_TREE_LABEL: NEW}}},
                  "linux/arm64": {"config": {"Labels": {update_plan.WEB_TREE_LABEL: NEW}}}}
         single = {"config": {"Labels": {update_plan.WEB_TREE_LABEL: OLD}}}
-        for payload, expected in ((index, NEW), (single, OLD), ({"config": {"Labels": {}}}, None)):
+        mixed = {**index, "linux/arm64": single}
+        for payload, expected in ((index, NEW), (mixed, None), (single, OLD), ({"config": {"Labels": {}}}, None)):
             runner = mock.Mock(run=lambda argv, timeout, payload=payload: CommandResult(0, json.dumps(payload)))
             with self.subTest(expected=expected):
                 self.assertEqual(update_plan._remote_web_tree("example/ui:alpha", runner), expected)

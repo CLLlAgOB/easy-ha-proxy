@@ -237,14 +237,5 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		_ = os.Remove(socketPath)
 	}()
 	srv := &http.Server{Handler: s, ReadHeaderTimeout: 30 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shut, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shut)
-	}()
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		return err
-	}
-	return nil
+	return unixrpc.ServeHTTP(ctx, srv, ln, 3*time.Second)
 }

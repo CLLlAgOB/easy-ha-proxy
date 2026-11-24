@@ -20,6 +20,7 @@ import (
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // NewDaemon builds a daemon over opts.
@@ -552,20 +553,9 @@ func Run(opts Options) error {
 	go d.expiryWatch(ctx)
 	go d.trashPurgeLoop(ctx)
 	srv := &http.Server{Handler: d, ReadHeaderTimeout: requestTimeoutSeconds * time.Second, IdleTimeout: requestTimeoutSeconds * time.Second}
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		s := <-sigs
-		log.Printf("Received signal %v; shutting down", s)
-		shut, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		_ = srv.Shutdown(shut)
-	}()
+	serveCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	log.Printf("haproxy-certd is listening on unix://%s", opts.SocketPath)
-	err = srv.Serve(ln)
-	_ = os.Remove(opts.SocketPath)
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
+	defer os.Remove(opts.SocketPath)
+	return unixrpc.ServeHTTP(serveCtx, srv, ln, 5*time.Second)
 }

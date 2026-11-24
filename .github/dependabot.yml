@@ -46,6 +46,18 @@ updates:
       - dependency-name: python
         update-types: [version-update:semver-major, version-update:semver-minor]
 
+  - package-ecosystem: gomod
+    directories: [/go/agent, /go/panel]
+    target-branch: alpha
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /rust/guardd
+    target-branch: alpha
+    schedule:
+      interval: weekly
+
   # Every action in one pull request, major versions included: the publish
   # job does not run on pull requests, so a green check says little about
   # them one by one, and their release notes are read together anyway.

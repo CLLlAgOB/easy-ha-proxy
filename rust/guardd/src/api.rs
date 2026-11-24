@@ -17,16 +17,18 @@ use crate::watchers::RATE_WARNINGS_KEEP_DAYS;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::atomic::Ordering;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+const MAX_HTTP_HEADER_BYTES: u64 = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 131_072;
+const MAX_HTTP_CONNECTIONS: usize = 16;
 pub const REQUEST_LOG_OVERRIDE_KEY: &str = "request_log_override";
 
 /// Constant-time comparison of the control token.
@@ -819,40 +821,96 @@ pub fn dispatch(s: &Shared, r: &Request<'_>) -> (u16, Value) {
 }
 
 #[cfg(unix)]
+struct DeadlineReader {
+    stream: UnixStream,
+    deadline: Instant,
+}
+
+#[cfg(unix)]
+impl Read for DeadlineReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buffer)
+    }
+}
+
+fn read_header_line(
+    reader: &mut impl BufRead,
+    remaining: &mut u64,
+    line: &mut String,
+) -> io::Result<()> {
+    line.clear();
+    let bytes = reader.take(*remaining).read_line(line)? as u64;
+    *remaining -= bytes;
+    if !line.ends_with('\n') {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct ConnectionSlot(Arc<AtomicUsize>);
+
+#[cfg(unix)]
+impl ConnectionSlot {
+    fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < MAX_HTTP_CONNECTIONS).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Self(active.clone()))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
 fn handle_client(stream: UnixStream, shared: Arc<Shared>) {
-    let timeout = Some(Duration::from_secs(REQUEST_TIMEOUT_SECS));
-    let _ = stream.set_read_timeout(timeout);
-    let _ = stream.set_write_timeout(timeout);
+    let timeout = Duration::from_secs(REQUEST_TIMEOUT_SECS);
+    if stream.set_write_timeout(Some(timeout)).is_err() {
+        return;
+    }
     let Ok(mut writer) = stream.try_clone() else {
         return;
     };
-    let mut reader = BufReader::new(stream);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+    let mut reader = BufReader::new(DeadlineReader {
+        stream,
+        deadline: Instant::now() + timeout,
+    });
+    let mut remaining = MAX_HTTP_HEADER_BYTES;
+    let mut line = String::new();
+    if read_header_line(&mut reader, &mut remaining, &mut line).is_err() {
         return;
     }
-    let mut parts = request_line.split_whitespace();
+    let mut parts = line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else { return };
     let method = method.to_string();
     let target = target.to_string();
     let mut content_length: Option<i64> = None;
     let mut token = String::new();
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let trimmed = line.trim_end_matches(['\r', '\n']);
-                if trimmed.is_empty() {
-                    break;
-                }
-                if let Some((k, v)) = trimmed.split_once(':') {
-                    if k.eq_ignore_ascii_case("content-length") {
-                        content_length = Some(safe_int_str(v));
-                    } else if k.eq_ignore_ascii_case("x-guardd-token") {
-                        token = v.trim().to_string();
-                    }
-                }
+        if read_header_line(&mut reader, &mut remaining, &mut line).is_err() {
+            return;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            if k.eq_ignore_ascii_case("content-length") {
+                content_length = Some(safe_int_str(v));
+            } else if k.eq_ignore_ascii_case("x-guardd-token") {
+                token = v.trim().to_string();
             }
         }
     }
@@ -898,12 +956,23 @@ pub fn serve(socket_path: &str, shared: Arc<Shared>) -> Result<(), String> {
     let listener = UnixListener::bind(socket_path).map_err(|e| format!("bind {socket_path}: {e}"))?;
     set_socket_perms(socket_path);
     listener.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
+    let active = Arc::new(AtomicUsize::new(0));
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                let _ = stream.set_nonblocking(false);
+                let Some(slot) = ConnectionSlot::acquire(&active) else {
+                    continue;
+                };
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let st = shared.clone();
-                std::thread::spawn(move || handle_client(stream, st));
+                if let Err(err) = std::thread::Builder::new().spawn(move || {
+                    let _slot = slot;
+                    handle_client(stream, st);
+                }) {
+                    eprintln!("[WARNING] easy-ha-proxy-guardd: cannot start API worker: {err}");
+                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(25)),
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -953,6 +1022,31 @@ pub fn truthy_param(v: Option<&String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_budget_preserves_the_body() {
+        let mut input = &b"Host: local\r\n\r\nbody"[..];
+        let mut remaining = 15;
+        let mut line = String::new();
+        read_header_line(&mut input, &mut remaining, &mut line).unwrap();
+        assert_eq!(line, "Host: local\r\n");
+        read_header_line(&mut input, &mut remaining, &mut line).unwrap();
+        assert_eq!(line, "\r\n");
+        assert_eq!(remaining, 0);
+        assert_eq!(input, b"body");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_slots_are_reusable() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut slots: Vec<_> = (0..MAX_HTTP_CONNECTIONS)
+            .map(|_| ConnectionSlot::acquire(&active).unwrap())
+            .collect();
+        assert!(ConnectionSlot::acquire(&active).is_none());
+        drop(slots.pop());
+        assert!(ConnectionSlot::acquire(&active).is_some());
+    }
 
     #[test]
     fn tokens_and_overrides() {

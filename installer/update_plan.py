@@ -43,6 +43,7 @@ DEFAULT_SOURCE_DIR = Path("/opt/easy-ha-proxy/source")
 DEFAULT_CONFIG_DIR = Path("/etc/easy-ha-proxy")
 DEFAULT_AUTHELIA_COMPOSE = Path("/opt/authelia/docker-compose.yml")
 DEFAULT_ADMIN_COMPOSE = Path("/opt/haproxy-admin/docker-compose.yml")
+DEFAULT_ADMIN_IMAGE = "clllagob/haproxy-admin-ui:latest"
 DEFAULT_REPOSITORY = "https://github.com/CLLlAgOB/easy-ha-proxy.git"
 DEFAULT_BRANCH = "main"
 
@@ -71,6 +72,14 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # source an image belongs to, whatever line endings the build machine used.
 WEB_TREE_LABEL = "io.easy-ha-proxy.source-tree"
 WEB_TREE_INPUTS = ("Dockerfile", ".dockerignore", "docker/app")
+GO_WEB_TREE_LABEL = "io.easy-ha-proxy.go-panel-tree"
+GO_WEB_TREE_INPUTS = (
+    "go/panel",
+    "docker/app/haproxy_admin/static",
+    "docker/app/haproxy_admin/translations",
+    "docker/app/haproxy_admin/templates",
+)
+ADMIN_DEFAULTS = Path("ansible/roles/haproxy-admin/defaults/main.yml")
 _WEB_TREE_RE = re.compile(r"^[0-9a-f]{64}$")
 # Components that move the host to the candidate source revision. "changes"
 # is not in the plan as a component of its own; it lives in all's scope.
@@ -703,13 +712,14 @@ def _changelog(
         return None
 
 
-def _web_tree(root: Path, runner: Runner) -> str | None:
+def _web_tree(root: Path, runner: Runner, flavour: str = "") -> str | None:
     """The web application's build-input fingerprint for a Git source tree."""
     try:
         if not (root / ".git").exists():
             return None
+        inputs = GO_WEB_TREE_INPUTS if flavour == "go-" else WEB_TREE_INPUTS
         result = runner.run(
-            ("git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--", *WEB_TREE_INPUTS),
+            ("git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--", *inputs),
             timeout=GIT_TIMEOUT,
         )
         if result.returncode != 0 or not result.stdout.strip():
@@ -729,7 +739,7 @@ def _labels_from_config(config: Any) -> dict[str, str]:
 
 
 def _web_tree_label(labels: dict[str, str]) -> str | None:
-    value = (labels.get(WEB_TREE_LABEL) or "").strip().lower()
+    value = (labels.get(GO_WEB_TREE_LABEL, labels.get(WEB_TREE_LABEL)) or "").strip().lower()
     return value if _WEB_TREE_RE.fullmatch(value) else None
 
 
@@ -758,7 +768,12 @@ def _remote_web_tree(image: str, runner: Runner) -> str | None:
             return None
         data = json.loads(result.stdout or "null")
         if isinstance(data, dict) and "config" not in data:
-            data = next((value for value in data.values() if isinstance(value, dict)), None)
+            trees = {
+                _web_tree_label(_labels_from_config(config))
+                for platform, config in data.items()
+                if not platform.startswith("unknown/")
+            }
+            return trees.pop() if len(trees) == 1 else None
         return _web_tree_label(_labels_from_config(data))
     except Exception:  # noqa: BLE001
         return None
@@ -1320,6 +1335,18 @@ def _flavoured(reference: str | None, flavour: str) -> str | None:
     return f"{repository}:{flavour}{tag}"
 
 
+def _target_panel_flavour(root: Path, variables: dict[str, Any]) -> str | None:
+    flag = "haproxy_admin_use_go_panel"
+    if flag in variables:
+        value = variables[flag]
+    else:
+        defaults, error = _read_mapping(root / ADMIN_DEFAULTS)
+        if error or not defaults:
+            return None
+        value = defaults.get(flag, False)
+    return "go-" if str(value).lower() in {"true", "yes", "on", "1"} else ""
+
+
 def _probe_image(image: str, runner: Runner) -> dict[str, Any]:
     if (
         not image
@@ -1863,6 +1890,8 @@ def _probe_admin_compose(
     configured_image: str | None,
     configured_channel: str,
     target_channel: str,
+    target_flavour: str | None = None,
+    go_image: str | None = None,
 ) -> dict[str, Any]:
     if not compose_file.is_file():
         return _component(
@@ -1921,14 +1950,16 @@ def _probe_admin_compose(
                 "image_count": len(images),
             },
         )
-    base_image = configured_image or current_image
     normalized_current = _normalized_tagged_image(current_image)
-    # The Go panel is published under "go-<channel>" in the same repository
-    # and chosen by the deployment, not by the channel. Keep the flavour the
-    # gateway runs, or every check would offer a "channel change" that the
-    # next deployment undoes, and the applied digest would never match.
-    flavour = _panel_flavour(normalized_current)
-    target_image = _tagged_image(base_image, flavour + target_channel)
+    # Use the candidate's deployment defaults when available, including when
+    # a source update switches the panel implementation.
+    flavour = _panel_flavour(normalized_current) if target_flavour is None else target_flavour
+    explicit_go_image = go_image if flavour == "go-" else None
+    base_image = configured_image or (DEFAULT_ADMIN_IMAGE if target_flavour is not None else current_image)
+    target_image = (
+        _normalized_tagged_image(explicit_go_image) if explicit_go_image
+        else _tagged_image(base_image, flavour + target_channel)
+    )
     if not target_image or not normalized_current:
         return _component(
             "admin-container",
@@ -2017,7 +2048,9 @@ def _probe_admin_compose(
         if ids:
             running_images = {current_image: ids}
     image_detail["current_source_tree"] = _running_web_tree(current_image, running_images, runner)
-    image_detail["available_source_tree"] = _remote_web_tree(target_image, runner)
+    image_detail["available_source_tree"] = _remote_web_tree(
+        f"{_image_repository(target_image)}@{candidate}", runner,
+    )
     # Record running evidence even when a newer release has appeared in the
     # registry. The broker checks the reviewed digest and this evidence after
     # applying; a newer candidate must neither hide an old container nor make
@@ -2027,7 +2060,7 @@ def _probe_admin_compose(
 
     configured_reference = (
         _flavoured(_normalized_tagged_image(configured_image), flavour)
-        if configured_image
+        if configured_image and not explicit_go_image
         else target_image
     )
     channel_change = (
@@ -2088,7 +2121,9 @@ def _block(component: dict[str, Any], reason: str, summary: str) -> None:
     component["details"] = {**(component.get("details") or {}), "reason": reason}
 
 
-def link_web_application(components: list[dict[str, Any]], target_tree: str | None) -> None:
+def link_web_application(
+    components: list[dict[str, Any]], target_tree: str | None, *, require_fingerprint: bool = False,
+) -> None:
     """Make the host and the web application move together.
 
     The web application talks to the host's daemons and renders HAProxy's
@@ -2106,9 +2141,8 @@ def link_web_application(components: list[dict[str, Any]], target_tree: str | No
     - An image rebuilt from the same files (a new base layer, say) goes alone,
       and so does a host update that leaves the web files as they were.
 
-    Without the labels -- images published before them, or a source tree
-    without Git -- it falls back to installing the two together whenever both
-    have updates.
+    Older Flask images can fall back to installing the two together when
+    both have updates. Go deployments require a verified fingerprint.
     """
     by_id = {str(item.get("id")): item for item in components}
     source = by_id.get("all")
@@ -2133,7 +2167,7 @@ def link_web_application(components: list[dict[str, Any]], target_tree: str | No
             details.setdefault("requires", []).append(clause)
 
     host_choices = (["changes"] if changes_offered else []) + host_ids
-    exact = bool(target_tree and running and (offered or not admin_offered))
+    exact = require_fingerprint or bool(target_tree and running and (offered or not admin_offered))
 
     if not exact:
         # Without labels the two are paired whenever both move.
@@ -2144,9 +2178,9 @@ def link_web_application(components: list[dict[str, Any]], target_tree: str | No
             require("admin-container", host_choices)
         return
 
-    host_needs_web = host_offered and source_moves and target_tree != running
+    host_needs_web = host_offered and source_moves and (not target_tree or target_tree != running)
     if host_needs_web:
-        if admin_offered and offered == target_tree:
+        if admin_offered and target_tree and offered == target_tree:
             for component_id in host_choices:
                 # The full stack pulls the image itself.
                 if component_id != "all":
@@ -2163,10 +2197,10 @@ def link_web_application(components: list[dict[str, Any]], target_tree: str | No
                 scope["reason"] = "web-application-not-published"
             host_choices = []
 
-    if admin_offered and offered != running:
-        if host_choices and source_moves and offered == target_tree:
+    if admin_offered and (offered != running or (require_fingerprint and not offered)):
+        if host_choices and source_moves and target_tree and offered == target_tree:
             require("admin-container", host_choices)
-        elif not source_moves and offered == target_tree:
+        elif not source_moves and target_tree and offered == target_tree:
             pass  # the host already has this image's source: it catches up
         else:
             _block(
@@ -2286,6 +2320,8 @@ def build_update_plan(
             else:
                 candidate_source = None
         comparison_source = candidate_source or Path(source_dir)
+        target_panel_flavour = _target_panel_flavour(comparison_source, variables)
+        configured_go_image = variables.get("haproxy_admin_go_image")
         image_changes = _source_image_changes(
             Path(source_dir), candidate_source, variables
         )
@@ -2327,6 +2363,8 @@ def build_update_plan(
                 configured_image=configured_image,
                 configured_channel=configured_image_channel,
                 target_channel=resolved_image_channel,
+                target_flavour=target_panel_flavour,
+                go_image=configured_go_image.strip() if isinstance(configured_go_image, str) else None,
             ),
         ]
         if include_haproxy:
@@ -2365,17 +2403,20 @@ def build_update_plan(
             item.get("id") == "admin-container" and item.get("state") == "available"
             for item in components
         )
+        if target_panel_flavour is None:
+            admin_images = (components[5].get("details") or {}).get("images") or [{}]
+            target_panel_flavour = _panel_flavour(admin_images[0].get("target_image"))
         if components[0].get("state") == "available":
             target_tree = (
-                _web_tree(candidate_source, command_runner)
+                _web_tree(candidate_source, command_runner, target_panel_flavour)
                 if candidate_source is not None
                 else None
             )
         elif admin_offered:
-            target_tree = _web_tree(Path(source_dir), command_runner)
+            target_tree = _web_tree(Path(source_dir), command_runner, target_panel_flavour)
         else:
             target_tree = None
-        link_web_application(components, target_tree)
+        link_web_application(components, target_tree, require_fingerprint=target_panel_flavour == "go-")
 
     if (
         resolved_source_channel == "github"

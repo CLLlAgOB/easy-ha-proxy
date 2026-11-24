@@ -4,25 +4,24 @@
 package security
 
 import (
-	"fmt"
-	"html"
-
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"easy-ha-proxy/panel/internal/pyyaml"
 	"encoding/base64"
 	"encoding/hex"
-	"io"
+	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"easy-ha-proxy/panel/internal/pyyaml"
 )
 
 const (
@@ -402,12 +401,16 @@ type securityResponseWriter struct {
 	wroteHeader bool
 }
 
+func (w *securityResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *securityResponseWriter) WriteHeader(code int) {
 	if w.wroteHeader {
 		return
 	}
-	w.wroteHeader = true
 	w.applyHeaders(code)
+	if code >= 200 || code == http.StatusSwitchingProtocols {
+		w.wroteHeader = true
+	}
 	w.ResponseWriter.WriteHeader(code)
 }
 
@@ -418,17 +421,17 @@ func (w *securityResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
-func (w *securityResponseWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+func (w *securityResponseWriter) FlushError() error {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
 	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
+func (w *securityResponseWriter) Flush() { _ = w.FlushError() }
+
 func (w *securityResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
-		return h.Hijack()
-	}
-	return nil, nil, http.ErrNotSupported
+	return http.NewResponseController(w.ResponseWriter).Hijack()
 }
 
 func (w *securityResponseWriter) applyHeaders(status int) {
@@ -489,54 +492,134 @@ func setDefault(h http.Header, key, val string) {
 // client accepts gzip encoding.
 func GzipJSONMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
-			next.ServeHTTP(w, r)
-			return
+		writer := &gzipResponseWriter{
+			ResponseWriter: w,
+			compress:       r.Method != http.MethodHead && acceptsGzip(r.Header.Values("Accept-Encoding")),
 		}
-		rec := &bufferedResponse{
-			header: make(http.Header),
-			status: http.StatusOK,
+		next.ServeHTTP(writer, r)
+		if writer.gzip != nil {
+			_ = writer.gzip.Close()
+		} else if writer.status != 0 && !writer.started {
+			_ = writer.start(false)
 		}
-		next.ServeHTTP(rec, r)
-
-		// Copy headers to the real ResponseWriter.
-		dst := w.Header()
-		for k, vals := range rec.header {
-			dst[k] = append([]string(nil), vals...)
-		}
-
-		body := rec.buf.Bytes()
-		ct := strings.ToLower(dst.Get("Content-Type"))
-		alreadyEncoded := dst.Get("Content-Encoding") != ""
-		if !alreadyEncoded && strings.HasPrefix(ct, "application/json") && len(body) >= CompressMinBytes {
-			var gzBuf bytes.Buffer
-			gz, err := gzip.NewWriterLevel(&gzBuf, 6)
-			if err == nil {
-				_, _ = gz.Write(body)
-				_ = gz.Close()
-				dst.Set("Content-Encoding", "gzip")
-				dst.Add("Vary", "Accept-Encoding")
-				dst.Del("Content-Length")
-				w.WriteHeader(rec.status)
-				_, _ = w.Write(gzBuf.Bytes())
-				return
-			}
-		}
-
-		w.WriteHeader(rec.status)
-		_, _ = io.Copy(w, bytes.NewReader(body))
 	})
 }
 
-type bufferedResponse struct {
-	header http.Header
-	buf    bytes.Buffer
-	status int
+func acceptsGzip(values []string) bool {
+	wildcard := false
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			coding, params, _ := strings.Cut(item, ";")
+			coding = strings.ToLower(strings.TrimSpace(coding))
+			if coding != "gzip" && coding != "*" {
+				continue
+			}
+			allowed := true
+			for _, param := range strings.Split(params, ";") {
+				key, raw, _ := strings.Cut(param, "=")
+				if strings.EqualFold(strings.TrimSpace(key), "q") {
+					q, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+					allowed = err == nil && q > 0 && q <= 1
+				}
+			}
+			if coding == "gzip" {
+				return allowed
+			}
+			wildcard = allowed
+		}
+	}
+	return wildcard
 }
 
-func (b *bufferedResponse) Header() http.Header         { return b.header }
-func (b *bufferedResponse) WriteHeader(code int)        { b.status = code }
-func (b *bufferedResponse) Write(p []byte) (int, error) { return b.buf.Write(p) }
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	prefix   []byte
+	gzip     *gzip.Writer
+	status   int
+	compress bool
+	started  bool
+}
+
+func (w *gzipResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *gzipResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	if status < 200 && status != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.status = status
+	h := w.Header()
+	contentType, _, _ := strings.Cut(h.Get("Content-Type"), ";")
+	isJSON := strings.EqualFold(strings.TrimSpace(contentType), "application/json")
+	if !isJSON || status < 200 || status == http.StatusNoContent || status == http.StatusResetContent ||
+		status == http.StatusPartialContent || status == http.StatusNotModified || h.Get("Content-Encoding") != "" ||
+		h.Get("Content-Disposition") != "" || h.Get("Content-Range") != "" {
+		w.compress = false
+	} else {
+		h.Add("Vary", "Accept-Encoding")
+	}
+	if !w.compress {
+		_ = w.start(false)
+	}
+}
+
+func (w *gzipResponseWriter) start(compress bool) error {
+	w.started = true
+	if compress {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Del("Content-Length")
+		w.gzip = gzip.NewWriter(w.ResponseWriter)
+	}
+	w.ResponseWriter.WriteHeader(w.status)
+	if len(w.prefix) == 0 {
+		return nil
+	}
+	prefix := w.prefix
+	w.prefix = nil
+	_, err := w.Write(prefix)
+	return err
+}
+
+func (w *gzipResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if !w.started {
+		if len(p) < CompressMinBytes-len(w.prefix) {
+			w.prefix = append(w.prefix, p...)
+			return len(p), nil
+		}
+		if err := w.start(true); err != nil {
+			return 0, err
+		}
+	}
+	if w.gzip != nil {
+		return w.gzip.Write(p)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *gzipResponseWriter) FlushError() error {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if !w.started {
+		if err := w.start(false); err != nil {
+			return err
+		}
+	}
+	if w.gzip != nil {
+		if err := w.gzip.Flush(); err != nil {
+			return err
+		}
+	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *gzipResponseWriter) Flush() { _ = w.FlushError() }
 
 func randomNonce() string {
 	buf := make([]byte, 16)

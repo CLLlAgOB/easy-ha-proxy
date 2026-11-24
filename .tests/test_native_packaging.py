@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import unittest
 
+from jinja2 import Environment
 import yaml
 
 
@@ -70,7 +72,6 @@ class NativePackagingTests(unittest.TestCase):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
         self.assertIs(defaults["native_daemons_enabled"], True)
         self.assertIs(defaults["haproxy_admin_use_go_panel"], True)
-        self.assertEqual(defaults["native_release_image"], "clllagob/haproxy-admin-ui:native-alpha")
         self.assertEqual(defaults["native_agent_bin"], "/usr/local/sbin/easy-ha-proxy-agent")
         self.assertEqual(defaults["native_guardd_bin"], "/usr/local/sbin/guardd-core")
         self.assertEqual(
@@ -90,6 +91,25 @@ class NativePackagingTests(unittest.TestCase):
             self.assertIn(bundle, installer)
         self.assertGreaterEqual(installer.count("ha-adm-native"), 5)
 
+    def test_native_images_follow_the_configured_channel(self):
+        defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
+        jinja = Environment()
+        jinja.filters["regex_replace"] = lambda value, pattern, replacement: re.sub(pattern, replacement, value)
+        for channel in ("alpha", "latest"):
+            with self.subTest(channel=channel):
+                image = f"registry.example:5000/panel:{channel}"
+                context = {"haproxy_admin_image": image}
+                context["haproxy_admin_image_channel"] = jinja.from_string(
+                    defaults["haproxy_admin_image_channel"]
+                ).render(context)
+                self.assertEqual(
+                    jinja.from_string(defaults["haproxy_admin_go_image"]).render(context),
+                    f"registry.example:5000/panel:go-{channel}",
+                )
+                self.assertEqual(
+                    jinja.from_string(defaults["native_release_image"]).render(context),
+                    f"clllagob/haproxy-admin-ui:native-{channel}",
+                )
     def test_all_eight_service_templates_support_opt_in_and_python_fallback(self):
         for tpl_name, flag, native_fragment, py_exec in SERVICE_TOGGLES:
             text = (TEMPLATES / tpl_name).read_text(encoding="utf-8")
@@ -137,7 +157,13 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("go-panel-image", jobs)
         self.assertIn("native-release-image", jobs)
         go_img = jobs["go-panel-image"]
-        self.assertEqual(set(go_img["needs"]), {"go-panel", "javascript", "secrets"})
+        self.assertEqual(set(go_img["needs"]), {"go-panel", "go-parity", "javascript", "secrets"})
+        self.assertIn("go-parity", jobs["native-release-image"]["needs"])
+        self.assertEqual(set(jobs["go-parity"]["needs"]), {"go-panel", "go-agent", "rust-guardd"})
+        self.assertEqual(
+            {item["arch"] for item in jobs["go-parity"]["strategy"]["matrix"]["include"]},
+            {"amd64", "arm64"},
+        )
         publish_step = next(s for s in go_img["steps"] if s.get("name") == "Publish Go panel image")
         self.assertIn("--platform linux/amd64,linux/arm64", publish_step["run"])
         self.assertIn("-f go/panel/Dockerfile", publish_step["run"])

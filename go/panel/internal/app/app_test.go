@@ -3,6 +3,7 @@ package app
 import (
 	"compress/gzip"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -100,6 +101,37 @@ func TestSimplePagesRender(t *testing.T) {
 		a.ServeHTTP(rec, req)
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<!doctype html>") {
 			t.Errorf("%s: %d %s", path, rec.Code, rec.Body.String()[:min(300, rec.Body.Len())])
+		}
+	}
+}
+
+func TestAutomaticOptions(t *testing.T) {
+	a := testApp(t)
+	a.Router = NewRouter([]flaskRule{
+		{endpoint: "test.write", rule: "/write", methods: []string{http.MethodPost}},
+		{endpoint: "test.writeSlash", rule: "/write-slash/", methods: []string{http.MethodPost}, strictSlashes: true},
+	})
+	unexpectedHandler := func(*Ctx) error {
+		t.Fatal("automatic OPTIONS called the route handler")
+		return nil
+	}
+	a.Handle("test.write", unexpectedHandler)
+	a.Handle("test.writeSlash", unexpectedHandler)
+	for _, tc := range []struct {
+		path, allow string
+		status      int
+	}{
+		{"/write", "OPTIONS, POST", http.StatusOK},
+		{"/write-slash?x=1", "", http.StatusPermanentRedirect},
+		{"/missing", "", http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		a.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, tc.path, nil))
+		if rec.Code != tc.status || rec.Header().Get("Allow") != tc.allow {
+			t.Errorf("OPTIONS %s: got %d, headers %v", tc.path, rec.Code, rec.Header())
+		}
+		if tc.status == http.StatusOK && rec.Body.Len() != 0 {
+			t.Errorf("OPTIONS %s returned a body", tc.path)
 		}
 	}
 }

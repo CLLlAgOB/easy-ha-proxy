@@ -1,8 +1,6 @@
 module github.com/CLLlAgOB/easy-ha-proxy/go/agent
 
-go 1.24.0
-
-toolchain go1.24.13
+go 1.27.4
 
 require (
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78

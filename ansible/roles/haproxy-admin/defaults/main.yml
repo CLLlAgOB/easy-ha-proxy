@@ -158,7 +158,8 @@ haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
 # Container image and name.
 haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
 haproxy_admin_use_go_panel: true
-haproxy_admin_go_image: "clllagob/haproxy-admin-ui:go-alpha"
+haproxy_admin_image_channel: "{{ 'alpha' if haproxy_admin_image.endswith(':alpha') else 'latest' }}"
+haproxy_admin_go_image: "{{ haproxy_admin_image | regex_replace(':[^/:]+$', '') }}:go-{{ haproxy_admin_image_channel }}"
 haproxy_admin_container_name: "haproxy-admin"
 
 # UI port exposed on localhost.
@@ -287,7 +288,7 @@ native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url
 # together with mandatory SHA-256 checksums per architecture.
-native_release_image: "clllagob/haproxy-admin-ui:native-alpha"
+native_release_image: "clllagob/haproxy-admin-ui:native-{{ haproxy_admin_image_channel }}"
 native_local_bundle_dir: ""
 native_release_base_url: ""
 native_release_checksums: {}

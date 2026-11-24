@@ -1,6 +1,6 @@
 services:
   haproxy-admin:
-    image: "{{ haproxy_admin_go_image | default('clllagob/haproxy-admin-ui:go-alpha') if haproxy_admin_use_go_panel | default(false) | bool else haproxy_admin_image }}"
+    image: "{{ haproxy_admin_go_image if haproxy_admin_use_go_panel | default(false) | bool else haproxy_admin_image }}"
     container_name: "{{ haproxy_admin_container_name }}"
     restart: unless-stopped
     read_only: true

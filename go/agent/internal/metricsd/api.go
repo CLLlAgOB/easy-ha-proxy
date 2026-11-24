@@ -20,6 +20,7 @@ import (
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // Server serves the read API over the Unix socket.
@@ -447,20 +448,10 @@ func Main() error {
 		log.Printf("Failed to set socket permissions: %v", err)
 	}
 	srv := &http.Server{Handler: &Server{Collector: col, DB: db}, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
-	go func() {
-		<-ctx.Done()
-		log.Printf("Received signal; shutting down")
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
-	}()
-	err = srv.Serve(ln)
+	err = unixrpc.ServeHTTP(ctx, srv, ln, 5*time.Second)
 	col.Stop()
 	if _, statErr := os.Stat(SocketPath); statErr == nil {
 		_ = os.Remove(SocketPath)
-	}
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
 	}
 	return err
 }

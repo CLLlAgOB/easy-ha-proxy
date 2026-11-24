@@ -140,3 +140,4 @@ Thumbs.db
 
 # ESLint, installed by CI and by hand, never committed
 node_modules/
+.audit-alpha

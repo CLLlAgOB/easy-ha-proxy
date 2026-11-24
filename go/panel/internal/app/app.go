@@ -107,6 +107,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c := a.newCtx(w, r, m)
 	if len(m.Allowed) > 0 {
 		w.Header().Set("Allow", strings.Join(m.Allowed, ", "))
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		c.abortPage(http.StatusMethodNotAllowed, "")
 		return
 	}
