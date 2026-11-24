@@ -23,23 +23,23 @@ const (
 	KindLevel = "level"
 	KindEvent = "event"
 
-	StaleCloseAfter        = 7 * 86400
-	MaxMuteSeconds         = 30 * 86400
-	EvaluateIntervalSec    = 15
-	RetentionDays          = 90
-	MaxEventRows           = 50000
-	MaxStateRows           = 5000
-	MaxTextChars           = 2000
-	MaxSubjectChars        = 200
-	StormWindowSeconds     = 300
-	StormMaxNotifications  = 8
-	MailQueueCheckSeconds  = 300
-	MailStuckSeconds       = 15 * 60
-	MailRetryRecheckSec    = 30
-	ConfigVersion          = 2
-	WebhookTimeoutSec      = 10
-	WebhookMaxRespBytes    = 8192
-	WebhookUserAgent       = "easy-ha-proxy-alertd/1.0"
+	StaleCloseAfter       = 7 * 86400
+	MaxMuteSeconds        = 30 * 86400
+	EvaluateIntervalSec   = 15
+	RetentionDays         = 90
+	MaxEventRows          = 50000
+	MaxStateRows          = 5000
+	MaxTextChars          = 2000
+	MaxSubjectChars       = 200
+	StormWindowSeconds    = 300
+	StormMaxNotifications = 8
+	MailQueueCheckSeconds = 300
+	MailStuckSeconds      = 15 * 60
+	MailRetryRecheckSec   = 30
+	ConfigVersion         = 2
+	WebhookTimeoutSec     = 10
+	WebhookMaxRespBytes   = 8192
+	WebhookUserAgent      = "easy-ha-proxy-alertd/1.0"
 )
 
 // Rule defines one condition the gateway knows how to track and notify about.

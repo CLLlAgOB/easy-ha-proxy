@@ -22,7 +22,7 @@ type fakeChannel struct {
 	failWith string
 }
 
-func (f *fakeChannel) Name() string        { return f.name }
+func (f *fakeChannel) Name() string          { return f.name }
 func (f *fakeChannel) Available(Config) bool { return f.avail }
 func (f *fakeChannel) Send(_ context.Context, _ Config, subject, _ string) (bool, string) {
 	f.mu.Lock()

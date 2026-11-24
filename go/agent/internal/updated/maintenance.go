@@ -254,7 +254,9 @@ func pyValuesRepr(values map[string]any) string {
 	if len(values) == 0 {
 		return ""
 	}
-	quote := func(s string) string { return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", `\'`) + "'" }
+	quote := func(s string) string {
+		return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", `\'`) + "'"
+	}
 	parts := []string{}
 	for _, k := range []string{"components", "job_id", "error"} {
 		v, ok := values[k]

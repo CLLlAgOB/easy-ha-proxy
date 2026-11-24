@@ -23,33 +23,33 @@ const (
 
 // Config holds the immutable runtime configuration loaded at startup.
 type Config struct {
-	ListenAddr       string
-	ProxySecret      string
-	SecretKey        string
-	SecretFile       string
-	DefaultLanguage  string
-	DebugRoutes      bool
-	StaticDir        string
-	TranslationsDir  string
-	Timezone         string
-	ServerTimezone   string
+	ListenAddr         string
+	ProxySecret        string
+	SecretKey          string
+	SecretFile         string
+	DefaultLanguage    string
+	DebugRoutes        bool
+	StaticDir          string
+	TranslationsDir    string
+	Timezone           string
+	ServerTimezone     string
 	AuditDatabase      string
 	ConfigDir          string
 	ConfigBackupDir    string
 	HAProxySocket      string
-	HAProxyCfg       string
-	HAProxyLog       string
-	WhitelistGlobal  string
-	WhitelistGeo     string
-	GeoIPDBPath      string
-	BanTable         string
-	BackupUploadsDir string
+	HAProxyCfg         string
+	HAProxyLog         string
+	WhitelistGlobal    string
+	WhitelistGeo       string
+	GeoIPDBPath        string
+	BanTable           string
+	BackupUploadsDir   string
 	BackupDownloadsDir string
-	ExcludeExact     []string
-	ExcludePrefix    []string
-	MaxBodyBytes     int64
-	MaxUploadBytes   int64
-	SessionSecure    bool
+	ExcludeExact       []string
+	ExcludePrefix      []string
+	MaxBodyBytes       int64
+	MaxUploadBytes     int64
+	SessionSecure      bool
 
 	// Host daemon Unix sockets and tokens.
 	HealthdSocket       string

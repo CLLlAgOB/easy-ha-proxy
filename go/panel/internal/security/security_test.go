@@ -217,10 +217,10 @@ func TestGzipLeavesDownloadsStreaming(t *testing.T) {
 func TestAcceptsGzip(t *testing.T) {
 	for header, want := range map[string]bool{
 		"br, gzip;q=0.5": true,
-		"gzip;q=0, *":   false,
-		"not-gzip":      false,
-		"br":            false,
-		"*;q=0.5":       true,
+		"gzip;q=0, *":    false,
+		"not-gzip":       false,
+		"br":             false,
+		"*;q=0.5":        true,
 	} {
 		if got := acceptsGzip([]string{header}); got != want {
 			t.Errorf("%q: got %t, want %t", header, got, want)

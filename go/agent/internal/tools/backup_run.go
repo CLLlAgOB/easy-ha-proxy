@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	defaultBackupdSocket   = "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock"
-	maxBackupRunRespBytes  = 1024 * 1024
+	defaultBackupdSocket  = "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock"
+	maxBackupRunRespBytes = 1024 * 1024
 )
 
 // RunBackupScheduled asks backupd to run the scheduled copy and returns exact exit codes (0/1/2).
