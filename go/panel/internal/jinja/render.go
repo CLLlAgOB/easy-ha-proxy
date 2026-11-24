@@ -22,6 +22,9 @@ type Environment struct {
 	Autoescape   bool
 	TrimBlocks   bool
 	LstripBlocks bool
+	// MaxRenderSteps caps the nodes and loop iterations of one render;
+	// zero means DefaultMaxRenderSteps.
+	MaxRenderSteps int
 
 	mu    sync.Mutex
 	cache map[string]*Template
@@ -118,16 +121,23 @@ func (env *Environment) Render(name string, vars map[string]any) (string, error)
 	return env.RenderTemplate(t, vars)
 }
 
+// DefaultMaxRenderSteps stops a runaway loop, not a large configuration:
+// haproxy.cfg.j2 takes some 250-500 steps per site, so the earlier 200,000
+// failed between 400 and 800 plain sites, where Python's Jinja has no
+// limit at all. Five million leaves room for ten thousand rich sites and
+// still ends a runaway render within seconds.
+const DefaultMaxRenderSteps = 5_000_000
+
 const (
 	maxRenderDepth = 64
-	maxRenderSteps = 200_000
 	maxOutputBytes = 16 << 20
 )
 
 type renderBudget struct {
-	depth  int
-	steps  int
-	output int
+	depth    int
+	steps    int
+	output   int
+	maxSteps int
 }
 
 func (b *renderBudget) enter() error {
@@ -147,8 +157,8 @@ func (b *renderBudget) leave() {
 
 func (b *renderBudget) step() error {
 	b.steps++
-	if b.steps > maxRenderSteps {
-		return errf("template execution budget (%d steps) exceeded", maxRenderSteps)
+	if b.steps > b.maxSteps {
+		return errf("template execution budget (%d steps) exceeded", b.maxSteps)
 	}
 	return nil
 }
@@ -164,6 +174,13 @@ func (b *renderBudget) addOutput(n int) error {
 	return nil
 }
 
+func (env *Environment) maxRenderSteps() int {
+	if env.MaxRenderSteps > 0 {
+		return env.MaxRenderSteps
+	}
+	return DefaultMaxRenderSteps
+}
+
 // RenderTemplate renders a parsed template.
 func (env *Environment) RenderTemplate(t *Template, vars map[string]any) (string, error) {
 	ctx := &context{
@@ -171,7 +188,7 @@ func (env *Environment) RenderTemplate(t *Template, vars map[string]any) (string
 		parent: map[string]any{},
 		vars:   map[string]any{},
 		blocks: map[string][]*blockNode{},
-		budget: &renderBudget{},
+		budget: &renderBudget{maxSteps: env.maxRenderSteps()},
 	}
 	for k, v := range env.Globals {
 		ctx.parent[k] = v

@@ -101,12 +101,28 @@ func TestMED24RecursionAndExecutionBudgets(t *testing.T) {
 
 	t.Run("execution step budget stops huge nested loops", func(t *testing.T) {
 		env := NewEnvironment(nil)
+		env.MaxRenderSteps = 200_000
 		parsed, err := env.FromString("loop", `{% for i in range(1000) %}{% for j in range(1000) %}x{% endfor %}{% endfor %}`)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := env.RenderTemplate(parsed, nil); err == nil || !strings.Contains(err.Error(), "budget") {
 			t.Fatalf("expected execution budget error, got %v", err)
+		}
+	})
+
+	// haproxy.cfg.j2 takes some 250-500 steps per site: the default must
+	// render a gateway of thousands of sites, which the earlier 200,000-step
+	// cap refused between 400 and 800 plain ones.
+	t.Run("default budget renders a large configuration", func(t *testing.T) {
+		env := NewEnvironment(nil)
+		parsed, err := env.FromString("big", `{% for i in range(1000) %}{% for j in range(1000) %}x{% endfor %}{% endfor %}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := env.RenderTemplate(parsed, nil)
+		if err != nil || len(got) != 1_000_000 {
+			t.Fatalf("a million-iteration render failed: len=%d err=%v", len(got), err)
 		}
 	})
 }
