@@ -1,0 +1,90 @@
+sites:
+- name: docker.example.test
+  domain: docker.example.test
+  backend_ip: 127.0.0.1
+  backend_port: 3000
+  authelia_enabled: true
+  rate_ban: false
+  tcp_check: true
+  err_ignore_rules: ignore
+  hsts: '15552000'
+  le_managed: true
+  servers:
+  - name: srv1
+    host: 127.0.0.1
+    port: 3000
+    weight: 100
+- name: nc.example.test
+  domain: nc.example.test
+  backend_ip: 127.0.0.1
+  backend_port: 1443
+  backend_host: nc.example.test
+  authelia_enabled: false
+  backend_ssl: true
+  backend_ssl_verify: false
+  tcp_check: true
+  max_req_rate: 600
+  err_limit: 100
+  health_uri: /
+  health_status: 302
+  hsts: '15552000'
+  le_managed: true
+  servers:
+  - name: srv1
+    host: 127.0.0.1
+    port: 1443
+    weight: 100
+- name: mgt.example.test
+  domain: mgt.example.test
+  backend_ip: 127.0.0.1
+  backend_port: 9890
+  backend_host: mgt.example.test
+  authelia_enabled: false
+  zero_trust: true
+  backend_ssl: true
+  backend_ssl_verify: false
+  hsts: '15552000'
+  le_managed: true
+  servers:
+  - name: srv1
+    host: 127.0.0.1
+    port: 9890
+    weight: 100
+- name: npv.example.test
+  domain: npv.example.test
+  tcp_passthrough: false
+  alt_names:
+  - data.example.test
+  authelia_enabled: true
+  zero_trust: false
+  backend_ssl: true
+  backend_ssl_verify: false
+  tcp_check: true
+  le_managed: true
+  servers:
+  - name: xray
+    host: 127.0.0.1
+    port: 9443
+    weight: 100
+- name: data.example.test
+  domain: www.orange.pl
+  tcp_passthrough: true
+  backend_ip: 127.0.0.1
+  backend_port: 3443
+  tcp_check: tcp
+  servers:
+  - name: srv1
+    host: 127.0.0.1
+    port: 3443
+    weight: 100
+- name: netdata.example.test
+  domain: netdata.example.test
+  backend_ip: 127.0.0.1
+  backend_port: 10444
+  zero_trust: true
+  le_managed: true
+  servers:
+  - name: srv1
+    host: 127.0.0.1
+    port: 10444
+    weight: 100

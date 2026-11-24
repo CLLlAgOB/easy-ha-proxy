@@ -637,7 +637,48 @@ func (o CertDeliverOptions) deliverAll(lg certLogger, lineage string, domains []
 	return results
 }
 
-const certDeliverUsage = "usage: easy-ha-proxy-cert-deliver [-h] [--lineage LINEAGE] [--domains DOMAINS] [--target TARGET]\n"
+// certDeliverUsage is argparse's usage line for the worker, wrapped as
+// argparse wraps it: to the terminal width (COLUMNS, else 80) less two.
+func certDeliverUsage() string {
+	const prefix, prog = "usage: ", "easy-ha-proxy-cert-deliver"
+	parts := []string{"[-h]", "[--lineage LINEAGE]", "[--domains DOMAINS]", "[--target TARGET]"}
+	columns := 80
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS"))); err == nil && n > 0 {
+		columns = n
+	}
+	width := columns - 2
+	whole := prog + " " + strings.Join(parts, " ")
+	if len(prefix)+len(whole) <= width {
+		return prefix + whole + "\n"
+	}
+	// argparse's get_lines: fill each line up to width, continuation lines
+	// indented under the first option.
+	lines := func(parts []string, indent string, first int) []string {
+		var out, line []string
+		length := first
+		for _, part := range parts {
+			if length+1+len(part) > width && len(line) > 0 {
+				out = append(out, indent+strings.Join(line, " "))
+				line, length = nil, len(indent)-1
+			}
+			line = append(line, part)
+			length += len(part) + 1
+		}
+		if len(line) > 0 {
+			out = append(out, indent+strings.Join(line, " "))
+		}
+		return out
+	}
+	var out []string
+	if float64(len(prefix)+len(prog)) <= 0.75*float64(width) {
+		indent := strings.Repeat(" ", len(prefix)+len(prog)+1)
+		out = lines(append([]string{prog}, parts...), indent, len(prefix)-1)
+		out[0] = out[0][len(indent):]
+	} else {
+		out = append([]string{prog}, lines(parts, strings.Repeat(" ", len(prefix)), len(prefix)-1)...)
+	}
+	return prefix + strings.Join(out, "\n") + "\n"
+}
 
 // parseCertDeliverArgs follows argparse for the worker's three options:
 // "--opt value", "--opt=value" and unambiguous abbreviations.
@@ -709,11 +750,11 @@ func RunCertDeliver(args []string, opts CertDeliverOptions, stdout, stderr io.Wr
 		"--lineage": &lineageArg, "--domains": &domainsArg, "--target": &targetArg,
 	})
 	if help {
-		fmt.Fprint(stdout, certDeliverUsage)
+		fmt.Fprint(stdout, certDeliverUsage())
 		return 0
 	}
 	if problem != "" {
-		fmt.Fprint(stderr, certDeliverUsage)
+		fmt.Fprint(stderr, certDeliverUsage())
 		fmt.Fprintf(stderr, "easy-ha-proxy-cert-deliver: error: %s\n", problem)
 		return 2
 	}

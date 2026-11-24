@@ -1,0 +1,69 @@
+haproxy_socket: "/run/haproxy/admin.sock"
+haproxy_socket_group: "hadmin"
+haproxy_certs_dir: /etc/haproxy/certs
+authelia_enabled: true
+root_domain: example.test
+aut_domain: aut.example.test
+admin_domain: ha.example.test
+admin_ips_file: /etc/haproxy/admin.allow
+admin_ips_enabled: false
+admin_allowed_ips:
+- 127.0.0.1
+admin_dyn_enabled: false
+admin_dyn_hostname: domain.local
+enable_http80: true
+zero_trust: true
+enable_geoip: false
+geoip_country_codes:
+- RU
+- BY
+- KZ
+admin_password: parity-test-password
+certbot_email: admin@example.test
+site_defaults:
+  balance: roundrobin
+  sticky: none
+  backend_port: 80
+  backend_ssl: false
+  backend_ssl_verify: false
+  redirect_to_https: true
+  maintenance: false
+  hsts: 31536000
+  compress: false
+  add_headers: {}
+  max_req_rate: 200
+  rate_window: 20s
+  rate_ban: true
+  rate_errors: 20
+  geo_mode: allow
+  waf: none
+  tcp_check: false
+  health_uri: /
+  health_status: 200
+  http_request_timeout: 5s
+  conn_table_expire: 30s
+  conn_rate_window: 10s
+  conn_rate_burst: 200
+  conn_cur_limit: 500
+  err_limit: 20
+  err_window: 20s
+  other_err_window: 20s
+  other_err_limit: 20
+  other_err_exclude_enabled: true
+  other_err_exclude_exact:
+  - path: /
+    methods:
+    - GET
+  enable_splice_global: false
+  ban_policy: u02
+mail_notify_enabled: true
+mail_notify_only_for: []
+mail_notify_to: admin@example.net
+mail_notify_from: admin@example.net
+mail_smtp_host: post.example.net
+mail_smtp_port: 465
+mail_smtp_user: mailer
+mail_smtp_auth: 'on'
+mail_smtp_ssl_mode: smtps
+mail_smtp_tls_trust_file: /etc/ssl/certs/ca-certificates.crt
+haproxy_nbthread: 2
