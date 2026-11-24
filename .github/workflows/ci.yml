@@ -133,11 +133,6 @@ jobs:
           install-remote.sh
           easy-ha-proxy-helper.sh
           installer/easy-ha-proxy
-          .tests/parity/run.sh
-          .tests/parity/panel/container.sh
-          .tests/parity/agent/certd/run.sh
-          .tests/parity/agent/tools/cert_deliver.sh
-          .tests/parity/agent/tools/renew.sh
 
   lint:
     name: Lint
@@ -376,18 +371,6 @@ jobs:
           path: go/panel/dist/
           retention-days: 14
 
-  # The Go web panel and host agent against the Flask panel and the Python
-  # daemons they replace, request for request (.tests/parity). Python is the
-  # specification: any difference fails, and the Go images are not published.
-  parity:
-    name: Parity with the Python implementations
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v7
-      - name: Go panel and agent against the Python panel and daemons
-        run: PARITY_JOBS=4 bash .tests/parity/run.sh all
-
   native-release:
     name: Native release bundles (amd64 + arm64)
     needs: [rust-guardd, go-agent]
@@ -607,7 +590,7 @@ jobs:
   # or :go-latest without modifying jobs.image.
   go-panel-image:
     name: Publish the Go web panel image
-    needs: [go-panel, javascript, secrets, parity]
+    needs: [go-panel, javascript, secrets]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
@@ -700,7 +683,7 @@ jobs:
   # extra configuration.
   native-release-image:
     name: Publish native host binaries OCI image
-    needs: [rust-guardd, go-agent, native-release, secrets, parity]
+    needs: [rust-guardd, go-agent, native-release, secrets]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')

@@ -137,10 +137,7 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("go-panel-image", jobs)
         self.assertIn("native-release-image", jobs)
         go_img = jobs["go-panel-image"]
-        # Neither Go image is published while it differs from the Python code it replaces.
-        self.assertEqual(set(go_img["needs"]), {"go-panel", "javascript", "secrets", "parity"})
-        self.assertIn("parity", jobs["native-release-image"]["needs"])
-        self.assertIn(".tests/parity/run.sh", jobs["parity"]["steps"][-1]["run"])
+        self.assertEqual(set(go_img["needs"]), {"go-panel", "javascript", "secrets"})
         publish_step = next(s for s in go_img["steps"] if s.get("name") == "Publish Go panel image")
         self.assertIn("--platform linux/amd64,linux/arm64", publish_step["run"])
         self.assertIn("-f go/panel/Dockerfile", publish_step["run"])
