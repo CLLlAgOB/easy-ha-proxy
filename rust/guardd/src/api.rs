@@ -859,7 +859,7 @@ struct ConnectionSlot(Arc<AtomicUsize>);
 impl ConnectionSlot {
     fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
         active
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_HTTP_CONNECTIONS).then_some(count + 1)
             })
             .ok()?;
