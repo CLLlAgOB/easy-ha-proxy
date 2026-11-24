@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"sort"
 	"strings"
@@ -85,6 +86,9 @@ func (e *Engine) RunLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			e.Sweep()
+			if err := e.store.TakeErr(); err != nil {
+				log.Printf("alert sweep could not update the database: %v", err)
+			}
 			now := e.now()
 			if now-lastMailCheck >= MailQueueCheckSeconds {
 				lastMailCheck = now
@@ -145,10 +149,22 @@ func (e *Engine) Observe(ctx context.Context, payload map[string]any) (map[strin
 	if retired, _ := payload["retired"].(bool); retired && rule.Kind == KindLevel {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return e.retireLocked(rule, subject, summary), nil
+		_ = e.store.TakeErr()
+		res := e.retireLocked(rule, subject, summary)
+		if err := e.store.TakeErr(); err != nil {
+			return nil, err
+		}
+		return res, nil
 	}
 
-	return e.apply(ctx, rule, subject, active, severity, summary, detail, overrideDelay, recipient), nil
+	_ = e.store.TakeErr()
+	res := e.apply(ctx, rule, subject, active, severity, summary, detail, overrideDelay, recipient)
+	// The observation was not recorded: say so, as the Python daemon's 500
+	// does, rather than let the producer believe it was.
+	if err := e.store.TakeErr(); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func (e *Engine) retireLocked(rule Rule, subject, summary string) map[string]any {
@@ -552,8 +568,11 @@ func (e *Engine) Quieten(payload map[string]any) (map[string]any, error) {
 	}
 
 	e.mu.Lock()
-	found := e.store.SetQuiet(rule.Name, subject, ackTS, ackBy, mutedUntil)
+	found, err := e.store.SetQuiet(rule.Name, subject, ackTS, ackBy, mutedUntil)
 	e.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, notFoundErr("no such alert")
 	}
@@ -579,7 +598,11 @@ func (e *Engine) Dismiss(payload map[string]any) (map[string]any, error) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	_ = e.store.TakeErr()
 	row, exists := e.store.GetState(rule.Name, subject)
+	if err := e.store.TakeErr(); err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, notFoundErr("no such alert")
 	}
@@ -600,17 +623,20 @@ func (e *Engine) Dismiss(payload map[string]any) (map[string]any, error) {
 		Summary:    row.Summary,
 		Detail:     detail,
 	})
+	if err := e.store.TakeErr(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"rule": rule.Name, "subject": subject, "dismissed": true}, nil
 }
 
 // DeleteHistory deletes selected, older, or all history rows.
 func (e *Engine) DeleteHistory(payload map[string]any) (int, error) {
 	if all, _ := payload["all"].(bool); all {
-		return e.store.DeleteEvents(nil, true, 0), nil
+		return e.store.DeleteEvents(nil, true, 0)
 	}
 	if rawBefore, has := payload["before"]; has && rawBefore != nil {
 		before := int64(clampInt(asInt(rawBefore, 0), 1, 2000000000))
-		return e.store.DeleteEvents(nil, false, before), nil
+		return e.store.DeleteEvents(nil, false, before)
 	}
 	rawIDs, ok := payload["ids"].([]any)
 	if !ok || len(rawIDs) == 0 {
@@ -629,7 +655,7 @@ func (e *Engine) DeleteHistory(payload map[string]any) (int, error) {
 			return 0, invalidErr("ids must be numbers")
 		}
 	}
-	return e.store.DeleteEvents(ids, false, 0), nil
+	return e.store.DeleteEvents(ids, false, 0)
 }
 
 // Portal returns the header banner alerts that are unacknowledged and unmuted.

@@ -184,7 +184,8 @@ func runAlertd(args []string) {
 	fs := flag.NewFlagSet("alertd", flag.ExitOnError)
 	fs.StringVar(&opts.ConfigPath, "config", opts.ConfigPath, "path to alertd.json")
 	fs.StringVar(&opts.SocketPath, "socket", opts.SocketPath, "AF_UNIX socket path")
-	fs.StringVar(&opts.StatePath, "state", opts.StatePath, "path to persisted alert state JSON")
+	fs.StringVar(&opts.DatabasePath, "database", opts.DatabasePath, "path to the alert database (alerts.db)")
+	fs.StringVar(&opts.StatePath, "state", opts.StatePath, "JSON state of an earlier Go alertd, imported once")
 	_ = fs.Parse(args)
 
 	if err := alertd.Run(opts); err != nil {

@@ -36,7 +36,7 @@ func (f *fakeChannel) Send(_ context.Context, _ Config, subject, _ string) (bool
 
 func TestEngineLifecycleEscalationRecoveryAndStormControl(t *testing.T) {
 	now := int64(1700000000)
-	store, err := NewStore(filepath.Join(t.TempDir(), "alerts-state.json"))
+	store, err := NewStore(filepath.Join(t.TempDir(), "alerts.db"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestUnixSocketHTTPServerAuthAndConfigRedaction(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "alertd.sock")
 	cfgPath := filepath.Join(dir, "alertd.json")
-	store, _ := NewStore(filepath.Join(dir, "state.json"))
+	store, _ := NewStore(filepath.Join(dir, "alerts.db"))
 	ch := &fakeChannel{name: "email", avail: true}
 	eng := NewEngine(DaemonOptions{ConfigPath: cfgPath, GatewayName: "gw-test"}, DefaultConfig(), store, []Channel{ch})
 	eng.lookupHook = func(_ context.Context, _ string) ([]netip.Addr, error) {

@@ -41,7 +41,8 @@ type Config struct {
 type DaemonOptions struct {
 	SocketPath         string
 	SocketGroup        string
-	StatePath          string
+	DatabasePath       string // alerts.db, shared with the Python daemon
+	StatePath          string // JSON an earlier Go daemon kept; imported once
 	ConfigPath         string
 	Token              string
 	GatewayName        string
@@ -64,14 +65,15 @@ func OptionsFromEnv() DaemonOptions {
 	if gateway == "" {
 		gateway = hostname
 	}
+	dbPath := envOr("ALERTD_DATABASE", "/var/lib/easy-ha-proxy/alerts/alerts.db")
 	statePath := strings.TrimSpace(os.Getenv("ALERTD_STATE_FILE"))
 	if statePath == "" {
-		dbPath := envOr("ALERTD_DATABASE", "/var/lib/easy-ha-proxy/alerts/alerts.db")
 		statePath = filepath.Join(filepath.Dir(dbPath), "alerts-state.json")
 	}
 	return DaemonOptions{
 		SocketPath:         envOr("ALERTD_SOCKET_PATH", "/run/easy-ha-proxy/easy-ha-proxy-alertd.sock"),
 		SocketGroup:        envOr("ALERTD_SOCKET_GROUP", "hadmin"),
+		DatabasePath:       dbPath,
 		StatePath:          statePath,
 		ConfigPath:         envOr("ALERTD_CONFIG", "/opt/haproxy-admin/alertd.json"),
 		Token:              strings.TrimSpace(os.Getenv("ALERTD_TOKEN")),

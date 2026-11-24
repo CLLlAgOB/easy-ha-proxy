@@ -313,6 +313,11 @@ jobs:
           (cd dist && sha256sum easy-ha-proxy-agent-linux-* > SHA256SUMS.go)
           cat dist/SHA256SUMS.go
 
+      # The Python and the Go alertd share alerts.db: an update to the agent
+      # and a rollback must keep every event, acknowledgement and mute.
+      - name: Alert history survives an update to the agent and a rollback
+        run: python3 .tests/integration/alertd_upgrade_rollback.py --agent go/agent/dist/easy-ha-proxy-agent-linux-amd64
+
       - name: Upload Go agent artifacts
         uses: actions/upload-artifact@v4
         with:
