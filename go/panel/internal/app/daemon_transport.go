@@ -4,7 +4,6 @@ package app
 // daemons over their sockets.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -177,6 +176,22 @@ func (u *UnixHTTP) Post(path string, body any, o HTTPOptions) (any, error) {
 	return u.request("POST", path, body, o)
 }
 
+const maxDaemonResponseBytes int64 = 16 << 20
+
+func readBoundedBody(resp *http.Response, limit int64) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("daemon response exceeds %d bytes", limit)
+	}
+	if resp.ContentLength > 0 && int64(len(raw)) < resp.ContentLength {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return raw, nil
+}
+
 func (u *UnixHTTP) request(method, path string, body any, o HTTPOptions) (any, error) {
 	target := "http://localhost" + path
 	if len(o.Params) > 0 {
@@ -209,7 +224,7 @@ func (u *UnixHTTP) request(method, path string, body any, o HTTPOptions) (any, e
 		return nil, &Unavailable{pyOSError(err)}
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(bufio.NewReader(resp.Body))
+	raw, err := readBoundedBody(resp, maxDaemonResponseBytes)
 	if err != nil {
 		return nil, &Unavailable{pyOSError(err)}
 	}

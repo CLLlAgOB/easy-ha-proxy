@@ -69,7 +69,7 @@ func healthdCall(method, path string, params []QueryValue, body any, timeout tim
 		return nil, &Unavailable{pyOSError(err)}
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readBoundedBody(resp, maxDaemonResponseBytes)
 	if err != nil {
 		return nil, &Unavailable{pyOSError(err)}
 	}

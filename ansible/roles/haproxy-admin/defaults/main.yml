@@ -292,6 +292,12 @@ native_release_image: "clllagob/haproxy-admin-ui:native-{{ haproxy_admin_image_c
 # Install the binaries CI built from the checked-out revision (the channel tag
 # plus "-<12 hex of the commit>"), never whatever the channel tag points at now.
 native_release_pin_revision: true
+# Optional Sigstore Cosign verification for native OCI release images.
+# When enabled, cosign must be installed and verification must succeed before
+# any binary is extracted from the image (fails closed).
+native_release_verify_signature: false
+native_release_cosign_identity_regexp: "^https://github\\.com/CLLlAgOB/easy-ha-proxy/\\.github/workflows/ci\\.yml@refs/heads/(main|alpha)$"
+native_release_cosign_oidc_issuer: "https://token.actions.githubusercontent.com"
 native_local_bundle_dir: ""
 native_release_base_url: ""
 native_release_checksums: {}

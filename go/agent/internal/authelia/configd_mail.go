@@ -1,6 +1,7 @@
 package authelia
 
 import (
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -192,10 +193,13 @@ func stageFile(path string, data []byte, prev *syscall.Stat_t, forceMode int) (s
 	if _, err := tmp.Write(data); err != nil {
 		return fail(err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncTempFile(tmp); err != nil {
 		return fail(err)
 	}
-	tmp.Close()
+	if err := closeTempFile(tmp); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
 	return name, nil
 }
 
@@ -285,7 +289,7 @@ func (c *Configd) commitMailFiles(order []string, updates map[string][]byte, sna
 		if rerr != nil {
 			return rerr
 		}
-		if string(current) != string(snaps[p].data) {
+		if !hmac.Equal(current, snaps[p].data) {
 			return newErr("MailSettingsConflictError", "managed mail source changed during validation: %s", p)
 		}
 	}
@@ -1361,7 +1365,7 @@ func (c *Configd) handleMailTest(req *pyyaml.Map) map[string]any {
 		return fail(err)
 	}
 	current := c.mailRevision(st)
-	if revision != current {
+	if !hmac.Equal([]byte(revision), []byte(current)) {
 		return map[string]any{"ok": false, "conflict": true,
 			"error":    "Mail settings changed after this page was loaded. Reload them before sending a test message.",
 			"revision": current}
@@ -1431,7 +1435,7 @@ func (c *Configd) handleMailUpdate(req *pyyaml.Map) map[string]any {
 		return outer(err)
 	}
 	current := c.mailRevision(st)
-	if revision != current {
+	if !hmac.Equal([]byte(revision), []byte(current)) {
 		return map[string]any{"ok": false, "conflict": true,
 			"error": "Mail settings changed after this page was loaded. Reload them and review your changes.", "revision": current}
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -105,7 +106,7 @@ func StrOr(v any) string {
 	if !Truthy(v) {
 		return ""
 	}
-	if f, ok := v.(float64); ok && f == math.Trunc(f) {
+	if f, ok := v.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) && f == math.Trunc(f) && math.Abs(f) < 1e16 {
 		return strconv.FormatInt(int64(f), 10)
 	}
 	return Str(v)
@@ -282,7 +283,8 @@ func Decode(raw []byte) (any, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
-	if dec.More() {
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("Extra data")
 	}
 	return v, nil

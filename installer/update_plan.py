@@ -96,6 +96,8 @@ _SECRET_QUERY_RE = re.compile(
 
 SERVICE_SOURCE_PATHS: tuple[Path, ...] = (
     Path("installer/haproxy_server_state.py"),
+    Path("go/agent"),
+    Path("rust/guardd"),
     Path("ansible/easy-ha-proxy.yml"),
     Path("ansible/roles/authelia"),
     Path("ansible/roles/cert"),
@@ -105,6 +107,44 @@ SERVICE_SOURCE_PATHS: tuple[Path, ...] = (
     Path("ansible/roles/haproxy-admin"),
     Path("ansible/roles/healthcheck"),
     Path("ansible/roles/update_packages"),
+)
+
+NATIVE_STAGING_METADATA = Path("/var/lib/easy-ha-proxy/native-staging/image.json")
+NATIVE_DAEMON_ARTIFACTS: tuple[tuple[str, str, Path, Path], ...] = (
+    (
+        "easy-ha-proxy-agent",
+        "Native Go host agent",
+        Path("/usr/local/sbin/easy-ha-proxy-agent"),
+        Path("go/agent"),
+    ),
+    (
+        "guardd-core",
+        "Native Rust adaptive protection engine",
+        Path("/usr/local/sbin/guardd-core"),
+        Path("rust/guardd"),
+    ),
+    (
+        "libguardd_core",
+        "Native Rust adaptive protection library",
+        Path("/usr/local/lib/easy-ha-proxy/libguardd_core.so"),
+        Path("rust/guardd"),
+    ),
+)
+_NATIVE_ENABLE_KEYS: tuple[str, ...] = (
+    "native_daemons_enabled",
+    "native_guardd_enabled",
+    "native_guardd_ffi_enabled",
+    "native_healthd_enabled",
+    "native_metricsd_enabled",
+    "native_alertd_enabled",
+    "native_controld_enabled",
+    "native_certd_enabled",
+    "native_backupd_enabled",
+    "native_updated_enabled",
+    "native_authelia_bansd_enabled",
+    "native_authelia_usersd_enabled",
+    "native_authelia_configd_enabled",
+    "native_tools_enabled",
 )
 
 
@@ -920,6 +960,8 @@ def _service_fingerprint(root: Path) -> str | None:
             if (
                 relative in excluded
                 or "/__pycache__/" in f"/{relative}/"
+                or "/target/" in f"/{relative}/"
+                or "/dist/" in f"/{relative}/"
                 or relative.endswith(".pyc")
                 or relative.endswith("haproxy-admin.zip")
             ):
@@ -1068,12 +1110,81 @@ def _daemon_digest(path: Path, artifact_id: str) -> str:
     return combined.hexdigest()
 
 
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _native_daemons_enabled(
+    source_dir: Path,
+    variables: dict[str, Any] | None,
+    resolve_installed: Callable[[Path], Path],
+) -> bool:
+    if variables:
+        explicit = [k for k in _NATIVE_ENABLE_KEYS if k in variables]
+        if explicit:
+            return any(_truthy_flag(variables[k]) for k in explicit)
+    defaults, _ = _read_mapping(source_dir / ADMIN_DEFAULTS)
+    if "native_daemons_enabled" in defaults:
+        return _truthy_flag(defaults["native_daemons_enabled"])
+    if resolve_installed(NATIVE_STAGING_METADATA).is_file():
+        return True
+    return any(
+        resolve_installed(installed_path).is_file()
+        for _, _, installed_path, _ in NATIVE_DAEMON_ARTIFACTS
+    )
+
+
+def _dir_fingerprint(root: Path, rel_dir: Path) -> str | None:
+    target = root / rel_dir
+    if not target.is_dir():
+        return None
+    files: dict[str, Path] = {}
+    for candidate in target.rglob("*"):
+        if not candidate.is_file():
+            continue
+        relative = candidate.relative_to(root).as_posix()
+        if "/target/" in f"/{relative}/" or "/dist/" in f"/{relative}/" or "/__pycache__/" in f"/{relative}/":
+            continue
+        files[relative] = candidate
+    if not files:
+        return None
+    digest = hashlib.sha256()
+    try:
+        for relative, path in sorted(files.items()):
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(_sha256(path).encode("ascii"))
+            digest.update(b"\x00")
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _read_native_metadata(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _probe_daemons(
     source_dir: Path,
     *,
     artifact_path: Callable[[Path], Path] | None = None,
     remote_candidate_required: bool = False,
     candidate_error: str | None = None,
+    variables: dict[str, Any] | None = None,
+    installed_source: Path | None = None,
+    target_revision: str | None = None,
 ) -> dict[str, Any]:
     resolve_installed = artifact_path or (lambda path: path)
     artifacts: list[dict[str, Any]] = []
@@ -1113,6 +1224,61 @@ def _probe_daemons(
             )
             available = True
         artifacts.append(item)
+
+    if _native_daemons_enabled(source_dir, variables, resolve_installed):
+        meta = _read_native_metadata(resolve_installed(NATIVE_STAGING_METADATA))
+        installed_rev = ""
+        if meta and isinstance(meta.get("revision"), str):
+            raw_rev = meta["revision"].strip().lower()
+            if _REVISION_RE.fullmatch(raw_rev):
+                installed_rev = raw_rev
+        target_rev = ""
+        if isinstance(target_revision, str):
+            raw_target = target_revision.strip().lower()
+            if _REVISION_RE.fullmatch(raw_target):
+                target_rev = raw_target
+        source_changed_cache: dict[Path, bool] = {}
+        base_source = installed_source or source_dir
+        for artifact_id, label, installed_path, rel_src_dir in NATIVE_DAEMON_ARTIFACTS:
+            installed = resolve_installed(installed_path)
+            item = {"id": artifact_id, "label": label, "native": True}
+            if rel_src_dir not in source_changed_cache:
+                if base_source != source_dir:
+                    old_fp = _dir_fingerprint(base_source, rel_src_dir)
+                    new_fp = _dir_fingerprint(source_dir, rel_src_dir)
+                    source_changed_cache[rel_src_dir] = (
+                        old_fp is not None and new_fp is not None and old_fp != new_fp
+                    )
+                else:
+                    source_changed_cache[rel_src_dir] = False
+            native_src_changed = source_changed_cache[rel_src_dir]
+            checked += 1
+            if not installed.is_file():
+                item.update({"state": "available", "reason": "installed-file-missing"})
+                available = True
+            elif native_src_changed:
+                item.update({
+                    "state": "available",
+                    "reason": "native-source-changed",
+                    "current_revision": installed_rev or None,
+                    "available_revision": target_rev or None,
+                })
+                available = True
+            elif target_rev and installed_rev != target_rev:
+                item.update({
+                    "state": "available",
+                    "reason": "revision-mismatch" if installed_rev else "native-metadata-missing",
+                    "current_revision": installed_rev or None,
+                    "available_revision": target_rev,
+                })
+                available = True
+            else:
+                item.update({
+                    "state": "current",
+                    "current_revision": installed_rev or None,
+                    "available_revision": target_rev or installed_rev or None,
+                })
+            artifacts.append(item)
 
     details = {
         "comparison": "installed-files-to-managed-source",
@@ -2349,6 +2515,13 @@ def build_update_plan(
                     source["state"] == "available" and candidate_source is None
                 ),
                 candidate_error=candidate_error,
+                variables=variables,
+                installed_source=Path(source_dir),
+                target_revision=(
+                    str(source.get("available_version") or source.get("current_version") or "")
+                    if source.get("available_version") or source.get("current_version")
+                    else None
+                ),
             ),
             _probe_os(command_runner, freshness if include_haproxy else None,
                       haproxy_update_status.PACKAGES if protected else frozenset()),

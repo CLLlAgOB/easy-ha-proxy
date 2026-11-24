@@ -126,11 +126,29 @@ type Template struct {
 	blocks map[string]*blockNode
 }
 
+const maxParseDepth = 64
+
 type parser struct {
 	name   string
 	toks   []token
 	pos    int
+	depth  int
 	blocks map[string]*blockNode
+}
+
+func (p *parser) enterDepth() error {
+	p.depth++
+	if p.depth > maxParseDepth {
+		p.depth--
+		return p.errf("maximum template nesting depth (%d) exceeded", maxParseDepth)
+	}
+	return nil
+}
+
+func (p *parser) leaveDepth() {
+	if p.depth > 0 {
+		p.depth--
+	}
 }
 
 func parse(name, src string) (*Template, error) { return parseWith(name, src, lexOpts{}) }
@@ -191,6 +209,10 @@ func (p *parser) skipName(name string) bool {
 // subparse reads nodes until a block tag whose name is in ends; it returns the
 // end tag's name with the parser positioned after that name.
 func (p *parser) subparse(ends []string) ([]node, string, error) {
+	if err := p.enterDepth(); err != nil {
+		return nil, "", err
+	}
+	defer p.leaveDepth()
 	var body []node
 	for {
 		t := p.cur()
@@ -562,6 +584,10 @@ func (p *parser) parseTuple(withCondexpr bool, extraEnd []string, explicitParens
 }
 
 func (p *parser) parseExpression(withCondexpr bool) (expr, error) {
+	if err := p.enterDepth(); err != nil {
+		return nil, err
+	}
+	defer p.leaveDepth()
 	if withCondexpr {
 		return p.parseCondexpr()
 	}

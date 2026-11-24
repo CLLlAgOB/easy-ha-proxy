@@ -2,8 +2,9 @@
 
 use crate::runtime::{read_table, runtime_command, GuardConfig, RuntimeError, MODE_ENFORCE};
 use crate::scoring::enforceable;
+use hashlink::LinkedHashMap;
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 pub const ADAPTIVE_BAN_CODE: i64 = 40;
 pub const ADAPTIVE_PAGE_CODE: i64 = 41;
@@ -250,10 +251,8 @@ pub struct QueueStatus {
 #[derive(Debug)]
 pub struct EnforcementQueue {
     limit: usize,
-    urgent: VecDeque<String>,
-    normal: VecDeque<String>,
-    /// ip -> (is_urgent, generation)
-    entries: HashMap<String, (bool, u64)>,
+    urgent: LinkedHashMap<String, u64>,
+    normal: LinkedHashMap<String, u64>,
     generation: u64,
     pub overflowed: u64,
 }
@@ -262,9 +261,8 @@ impl EnforcementQueue {
     pub fn new(limit: usize) -> Self {
         Self {
             limit: limit.max(1),
-            urgent: VecDeque::new(),
-            normal: VecDeque::new(),
-            entries: HashMap::new(),
+            urgent: LinkedHashMap::new(),
+            normal: LinkedHashMap::new(),
             generation: 0,
             overflowed: 0,
         }
@@ -273,19 +271,22 @@ impl EnforcementQueue {
     pub fn mark(&mut self, ip: &str, is_urgent: bool) {
         self.generation += 1;
         let gen = self.generation;
-        if let Some((was_urgent, g)) = self.entries.get_mut(ip) {
+        if let Some(g) = self.urgent.get_mut(ip) {
             *g = gen;
-            if is_urgent && !*was_urgent {
-                *was_urgent = true;
-                self.normal.retain(|x| x != ip);
-                self.urgent.push_back(ip.to_string());
+            return;
+        }
+        if let Some(g) = self.normal.get_mut(ip) {
+            if is_urgent {
+                self.normal.remove(ip);
+                self.urgent.insert(ip.to_string(), gen);
+            } else {
+                *g = gen;
             }
             return;
         }
-        if self.entries.len() >= self.limit {
+        if self.urgent.len() + self.normal.len() >= self.limit {
             if is_urgent {
-                if let Some(evicted) = self.normal.pop_front() {
-                    self.entries.remove(&evicted);
+                if self.normal.pop_front().is_some() {
                     self.overflowed += 1;
                 } else {
                     self.overflowed += 1;
@@ -296,11 +297,10 @@ impl EnforcementQueue {
                 return;
             }
         }
-        self.entries.insert(ip.to_string(), (is_urgent, gen));
         if is_urgent {
-            self.urgent.push_back(ip.to_string());
+            self.urgent.insert(ip.to_string(), gen);
         } else {
-            self.normal.push_back(ip.to_string());
+            self.normal.insert(ip.to_string(), gen);
         }
     }
 
@@ -312,32 +312,31 @@ impl EnforcementQueue {
         self.urgent
             .iter()
             .take(max_items)
-            .filter_map(|ip| self.entries.get(ip).map(|&(_, g)| (ip.clone(), g)))
+            .map(|(ip, &g)| (ip.clone(), g))
             .collect()
     }
 
     /// Ordinary findings keep a quarter of the batch even during a decisive
     /// flood (Python `EnforcementQueue.batch`).
     pub fn batch(&self, max_items: usize) -> Vec<(String, u64)> {
-        let with_gen = |ip: &String| self.entries.get(ip).map(|&(_, g)| (ip.clone(), g));
         let mut urgent: Vec<(String, u64)> = self
             .urgent
             .iter()
-            .filter_map(with_gen)
             .take(max_items - max_items / 4)
+            .map(|(ip, &g)| (ip.clone(), g))
             .collect();
         let ordinary: Vec<(String, u64)> = self
             .normal
             .iter()
-            .filter_map(with_gen)
             .take(max_items - urgent.len())
+            .map(|(ip, &g)| (ip.clone(), g))
             .collect();
         if urgent.len() + ordinary.len() < max_items {
             urgent = self
                 .urgent
                 .iter()
-                .filter_map(with_gen)
                 .take(max_items - ordinary.len())
+                .map(|(ip, &g)| (ip.clone(), g))
                 .collect();
         }
         urgent.extend(ordinary);
@@ -345,17 +344,12 @@ impl EnforcementQueue {
     }
 
     pub fn acknowledge(&mut self, ip: &str, generation: u64) {
-        let Some(&(was_urgent, cur_gen)) = self.entries.get(ip) else {
-            return;
-        };
-        if cur_gen != generation {
+        if self.urgent.get(ip) == Some(&generation) {
+            self.urgent.remove(ip);
             return;
         }
-        self.entries.remove(ip);
-        if was_urgent {
-            self.urgent.retain(|x| x != ip);
-        } else {
-            self.normal.retain(|x| x != ip);
+        if self.normal.get(ip) == Some(&generation) {
+            self.normal.remove(ip);
         }
     }
 
@@ -403,5 +397,40 @@ mod tests {
         q.mark(&ip, true);
         q.acknowledge(&ip, old_gen);
         assert_eq!(q.status().urgent, 2);
+    }
+
+    #[test]
+    fn queue_at_upper_volume_is_fast() {
+        let limit = crate::livebuf::ENFORCEMENT_QUEUE_LIMIT;
+        let mut q = EnforcementQueue::new(limit);
+        let start = std::time::Instant::now();
+        for i in 0..limit {
+            let ip = format!("198.51.{}.{}", (i / 256) % 256, i % 256);
+            q.mark(&ip, false);
+        }
+        // Promote half from normal to urgent, then drain in batches of 200.
+        for i in 0..(limit / 2) {
+            let ip = format!("198.51.{}.{}", (i / 256) % 256, i % 256);
+            q.mark(&ip, true);
+        }
+        let mut drained = 0usize;
+        loop {
+            let batch = q.batch(200);
+            if batch.is_empty() {
+                break;
+            }
+            for (ip, gen) in batch {
+                q.acknowledge(&ip, gen);
+                drained += 1;
+            }
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(drained, limit);
+        assert_eq!(q.status().urgent, 0);
+        assert_eq!(q.status().ordinary, 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "enforcement queue operations at {limit} took {elapsed:?}"
+        );
     }
 }

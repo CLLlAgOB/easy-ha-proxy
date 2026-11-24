@@ -3,8 +3,11 @@ package unixrpc
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -13,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -35,31 +39,77 @@ func ResolveUID(username string, fallback int) int {
 }
 
 // ChownSocket applies optional user/group ownership and permissions to a Unix socket.
-func ChownSocket(socketPath, userName, groupName string, mode os.FileMode) {
+func ChownSocket(socketPath, userName, groupName string, mode os.FileMode) error {
 	uid := -1
 	gid := -1
 	if u := strings.TrimSpace(userName); u != "" {
 		if n, err := strconv.Atoi(u); err == nil {
 			uid = n
 		} else if info, err := user.Lookup(u); err == nil {
-			if n, err := strconv.Atoi(info.Uid); err == nil {
-				uid = n
+			n, convErr := strconv.Atoi(info.Uid)
+			if convErr != nil {
+				return fmt.Errorf("invalid uid for user %q: %w", u, convErr)
 			}
+			uid = n
+		} else if os.Geteuid() == 0 {
+			return fmt.Errorf("lookup socket user %q: %w", u, err)
 		}
 	}
 	if g := strings.TrimSpace(groupName); g != "" {
 		if n, err := strconv.Atoi(g); err == nil {
 			gid = n
 		} else if info, err := user.LookupGroup(g); err == nil {
-			if n, err := strconv.Atoi(info.Gid); err == nil {
-				gid = n
+			n, convErr := strconv.Atoi(info.Gid)
+			if convErr != nil {
+				return fmt.Errorf("invalid gid for group %q: %w", g, convErr)
 			}
+			gid = n
+		} else if os.Geteuid() == 0 {
+			return fmt.Errorf("lookup socket group %q: %w", g, err)
 		}
 	}
 	if uid >= 0 || gid >= 0 {
-		_ = os.Chown(socketPath, uid, gid)
+		if err := os.Chown(socketPath, uid, gid); err != nil {
+			if os.Geteuid() == 0 || !errors.Is(err, syscall.EPERM) {
+				return fmt.Errorf("chown socket %s: %w", socketPath, err)
+			}
+		}
 	}
-	_ = os.Chmod(socketPath, mode)
+	if err := os.Chmod(socketPath, mode); err != nil {
+		return fmt.Errorf("chmod socket %s: %w", socketPath, err)
+	}
+	return nil
+}
+
+// ListenUnix binds a Unix socket at a private temporary path, applies owner/group
+// and permissions via ChownSocket, and atomically publishes it at socketPath.
+func ListenUnix(socketPath, userName, groupName string, mode os.FileMode) (net.Listener, error) {
+	dir := filepath.Dir(socketPath)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, err
+	}
+	var rnd [4]byte
+	_, _ = rand.Read(rnd[:])
+	tmpPath := filepath.Join(dir, fmt.Sprintf(".s.%d.%s", os.Getpid(), hex.EncodeToString(rnd[:])))
+	_ = os.Remove(tmpPath)
+	ln, err := net.Listen("unix", tmpPath)
+	if err != nil {
+		return nil, err
+	}
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	if err := ChownSocket(tmpPath, userName, groupName, mode); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+	if err := os.Rename(tmpPath, socketPath); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+	return ln, nil
 }
 
 // Error carries a structured error_code matching backupd and updated wire replies.
@@ -243,17 +293,15 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// ListenAndServe binds socketPath with mode 0600 and serves until ctx is canceled.
+// ListenAndServe binds socketPath with mode and serves until ctx is canceled.
 func (s *Server) ListenAndServe(ctx context.Context, socketPath string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
-		return err
-	}
-	_ = os.Remove(socketPath)
-	ln, err := net.Listen("unix", socketPath)
+	ln, err := ListenUnix(socketPath, s.SocketUser, s.SocketGroup, mode)
 	if err != nil {
 		return err
 	}
-	ChownSocket(socketPath, s.SocketUser, s.SocketGroup, mode)
-	defer os.Remove(socketPath)
+	defer func() {
+		_ = ln.Close()
+		_ = os.Remove(socketPath)
+	}()
 	return s.Serve(ctx, ln)
 }

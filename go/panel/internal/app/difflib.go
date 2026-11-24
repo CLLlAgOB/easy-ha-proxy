@@ -320,7 +320,7 @@ func (d *differ) fancyReplace(a []string, alo, ahi int, b []string, blo, bhi int
 		if eqi < 0 {
 			return d.plainReplace(a, alo, ahi, b, blo, bhi)
 		}
-		besti, bestj, bestRatio = eqi, eqj, 1.0
+		besti, bestj = eqi, eqj
 	} else {
 		eqi = -1
 	}

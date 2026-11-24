@@ -37,10 +37,18 @@ StateDirectory=easy-ha-proxy
 StateDirectoryMode=0750
 UMask=0007
 PrivateTmp=yes
+ProtectSystem=strict
 ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
+RestrictRealtime=yes
 LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+MemoryMax={{ healthd_memory_max | default('128M') }}
 
 [Install]
 WantedBy=multi-user.target

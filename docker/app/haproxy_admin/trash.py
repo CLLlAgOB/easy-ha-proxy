@@ -387,7 +387,8 @@ def _summary(item: Dict[str, Any], days: int) -> Dict[str, Any]:
     elif kind == "tcp":
         detail = f"{entry.get('bind_ip') or '*'}:{entry.get('bind_port') or ''}"
     else:
-        detail = f"udp {entry.get('listen_port') or ''} -> {entry.get('backend_ip') or ''}"
+        backend = entry.get("backend_host") or entry.get("backend_ip") or ""
+        detail = f"udp {entry.get('listen_port') or ''} -> {backend}"
     deleted_at = int(item.get("deleted_at") or 0)
     return {
         "source": "panel",

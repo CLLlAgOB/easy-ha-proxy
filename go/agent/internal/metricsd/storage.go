@@ -1044,13 +1044,16 @@ func scope(site, alias string) (string, []any) {
 	return alias + ".kind = 'backend' AND " + alias + ".proxy = ?", []any{site}
 }
 
-func (d *Database) sites() []any {
-	rows, _ := d.queryAll("SELECT proxy, first_seen, last_seen FROM objects WHERE kind = 'backend' ORDER BY proxy")
+func (d *Database) sites() ([]any, error) {
+	rows, err := d.queryAll("SELECT proxy, first_seen, last_seen FROM objects WHERE kind = 'backend' ORDER BY proxy")
+	if err != nil {
+		return nil, err
+	}
 	out := []any{}
 	for _, r := range rows {
 		out = append(out, omap("proxy", textOf(r[0]), "first_seen", i64(r[1]), "last_seen", i64(r[2])))
 	}
-	return out
+	return out, nil
 }
 
 func nullable(v any) any {

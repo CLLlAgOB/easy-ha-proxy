@@ -435,17 +435,19 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
     bytes_text = head.group("bytes")
     bytes_out = 0 if bytes_text == "-" else int(bytes_text)
     stamp = parse_stamp(head.group("stamp"))
-    identifier = _ID_FIELD.search(remainder)
-    request_id = identifier.group("id") if identifier else ""
     term = remainder.split(None, 1)[0] if remainder else ""
-    ban_reason = ""
-    if 'ban_reason="' in remainder:
-        found = _BAN_REASON_FIELD.search(remainder)
-        ban_reason = found.group("reason")[:160] if found else ""
 
     tail = _ACCESS_TAIL.search(remainder)
     if tail is None:
-        if _BAD_REQUEST_TAIL.search(remainder):
+        bad = _BAD_REQUEST_TAIL.search(remainder)
+        if bad is not None:
+            bad_prefix = remainder[:bad.start()]
+            identifier = _ID_FIELD.search(bad_prefix)
+            request_id = identifier.group("id") if identifier else ""
+            ban_reason = ""
+            if 'ban_reason="' in bad_prefix:
+                found = _BAN_REASON_FIELD.search(bad_prefix)
+                ban_reason = found.group("reason")[:160] if found else ""
             return ParsedRequest(
                 client_ip=client,
                 status=status,
@@ -465,13 +467,20 @@ def parse_access_line(line: str) -> Optional[ParsedRequest]:
 
     uri = tail.group("uri")
     # Only the part before the request line: the URI is the client's to write.
-    agent_field = _UA_FIELD.search(remainder, 0, tail.start())
+    prefix = remainder[:tail.start()]
+    identifier = _ID_FIELD.search(prefix)
+    request_id = identifier.group("id") if identifier else ""
+    ban_reason = ""
+    if 'ban_reason="' in prefix:
+        found = _BAN_REASON_FIELD.search(prefix)
+        ban_reason = found.group("reason")[:160] if found else ""
+    agent_field = _UA_FIELD.search(prefix)
     user_agent = agent_field.group("ua")[:MAX_USER_AGENT_LENGTH] if agent_field else ""
     if user_agent == "-":
         user_agent = ""
     # The Host header, when the frontend captures it, is a labelled field; the
     # absolute-form URI is the fallback and is rare in practice.
-    host_field = _HOST_FIELD.search(remainder)
+    host_field = _HOST_FIELD.search(prefix)
     host = host_field.group("host") if host_field else extract_host(uri)
     if host in ("-", "{}"):
         host = ""

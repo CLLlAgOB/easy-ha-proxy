@@ -22,7 +22,8 @@ func builtinRange(args []any, _ *Map) (any, error) {
 		}
 		ints[i] = n
 	}
-	var start, stop, step int64 = 0, 0, 1
+	var start, stop int64
+	step := int64(1)
 	switch len(ints) {
 	case 1:
 		stop = ints[0]
@@ -221,6 +222,9 @@ func builtinFilters() map[string]FilterFunc {
 				parts[i] = Str(it)
 			}
 			return strings.Join(parts, Str(d)), nil
+		}
+		if _, ok := d.(Markup); ok {
+			html = true
 		}
 		for _, it := range items {
 			if _, ok := it.(Markup); ok {
@@ -569,7 +573,15 @@ func builtinFilters() map[string]FilterFunc {
 			return math.Floor(fl*p) / p, nil
 		}
 		// Python round() on the value is half-to-even on the binary value;
-		// strconv formatting rounds the exact binary value the same way.
+		// strconv formatting rounds the exact binary value the same way for
+		// non-negative precision. Negative precision rounds to powers of 10.
+		if precision < 0 {
+			scale := math.Pow(10, float64(-precision))
+			if math.IsInf(scale, 0) || scale == 0 {
+				return 0.0, nil
+			}
+			return math.RoundToEven(fl/scale) * scale, nil
+		}
 		s := strconv.FormatFloat(fl, 'f', int(precision), 64)
 		r, _ := strconv.ParseFloat(s, 64)
 		return r, nil

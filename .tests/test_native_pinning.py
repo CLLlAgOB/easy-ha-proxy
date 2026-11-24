@@ -70,7 +70,15 @@ def pull_script() -> str:
 
 @unittest.skipIf(sys.platform == "win32", "runs the rendered bash script")
 class NativePinningTests(unittest.TestCase):
-    def run_pull(self, images, revision_rc=0, offline=False):
+    def run_pull(
+        self,
+        images,
+        revision_rc=0,
+        offline=False,
+        verify_signature=False,
+        cosign_script=None,
+        image_name="clllagob/haproxy-admin-ui:native-alpha",
+    ):
         from jinja2 import Environment
         env = Environment()
         env.filters["bool"] = bool
@@ -80,18 +88,32 @@ class NativePinningTests(unittest.TestCase):
             stage = root / "stage"
             stage.mkdir()
             script = env.from_string(pull_script()).render(
-                native_release_image="clllagob/haproxy-admin-ui:native-alpha",
+                native_release_image=image_name,
                 easy_ha_proxy_offline_restore=offline,
+                native_release_verify_signature=verify_signature,
+                native_release_cosign_identity_regexp="^https://github\\.com/CLLlAgOB/easy-ha-proxy/\\.github/workflows/ci\\.yml@refs/heads/(main|alpha)$",
+                native_release_cosign_oidc_issuer="https://token.actions.githubusercontent.com",
                 _native_source_revision={"rc": revision_rc, "stdout": REV + "\n"},
             ).replace("/var/lib/easy-ha-proxy/native-staging", str(stage))
             bindir = root / "bin"
             bindir.mkdir()
             (bindir / "docker").write_text(FAKE_DOCKER)
             (bindir / "docker").chmod(0o755)
+            path_env = f"{bindir}{os.pathsep}{os.environ['PATH']}"
+            if cosign_script is not None:
+                (bindir / "cosign").write_text(cosign_script)
+                (bindir / "cosign").chmod(0o755)
+            elif verify_signature:
+                # Ensure cosign is NOT found on PATH when testing missing-cosign fail-closed.
+                filtered = [
+                    p for p in os.environ["PATH"].split(os.pathsep)
+                    if not (Path(p) / "cosign").is_file()
+                ]
+                path_env = f"{bindir}{os.pathsep}" + os.pathsep.join(filtered)
             calls = root / "calls"
             result = subprocess.run(
                 ["bash", "-c", script], capture_output=True, text=True, timeout=30,
-                env=dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                env=dict(os.environ, PATH=path_env,
                          IMAGES=json.dumps(images), CALLS=str(calls)))
             image_json = (stage / "image.json").read_text() if (stage / "image.json").exists() else ""
             return result, calls.read_text().splitlines() if calls.exists() else [], image_json
@@ -136,6 +158,29 @@ class NativePinningTests(unittest.TestCase):
         result, calls, _ = self.run_pull({"clllagob/haproxy-admin-ui:native-alpha": "whatever"}, revision_rc=128)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("pull clllagob/haproxy-admin-ui:native-alpha", calls)
+
+    def test_signature_verification_fails_closed_when_cosign_missing_or_invalid(self):
+        pinned = "clllagob/haproxy-admin-ui:native-alpha-" + REV[:12]
+        # Missing cosign fails closed before docker create.
+        res, calls, _ = self.run_pull({pinned: REV}, verify_signature=True, cosign_script=None)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("cosign is not installed", res.stderr)
+        self.assertFalse(any(c.startswith("create ") for c in calls))
+
+        # Invalid signature fails closed before docker create.
+        bad_cosign = "#!/bin/sh\necho 'invalid signature' >&2\nexit 1\n"
+        res, calls, _ = self.run_pull({pinned: REV}, verify_signature=True, cosign_script=bad_cosign)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("invalid signature", res.stderr)
+        self.assertFalse(any(c.startswith("create ") for c in calls))
+
+        # Valid signature succeeds and extracts files.
+        good_cosign = "#!/bin/sh\necho \"cosign $*\" >> \"$CALLS\"\nexit 0\n"
+        res, calls, image_json = self.run_pull({pinned: REV}, verify_signature=True, cosign_script=good_cosign)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(any(c.startswith("cosign verify ") for c in calls))
+        self.assertTrue(any(c.startswith("create ") for c in calls))
+        self.assertEqual(json.loads(image_json)["revision"], REV)
 
 
 if __name__ == "__main__":

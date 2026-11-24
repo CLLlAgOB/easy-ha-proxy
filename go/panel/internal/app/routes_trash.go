@@ -108,22 +108,28 @@ func (a *App) registerTrashRoutes() {
 		if err != nil {
 			return c.JSON(400, newMap("ok", false, "error", err.Error()))
 		}
-		release, err := TrashSettingsLock()
-		if err != nil {
-			log.Printf("trash settings not saved: %v", err)
+		var errText string
+		lockErr := func() error {
+			release, lerr := TrashSettingsLock()
+			if lerr != nil {
+				return lerr
+			}
+			defer release()
+			days, err = SetTrashKeepDays(days)
+			if err == nil {
+				if answer, cerr := CertdDNSTimeout("trash/settings", newMap("keep_days", days), 15); cerr != nil {
+					log.Printf("certd unavailable: %v", cerr)
+					errText = "The certificate service does not answer"
+				} else if !truthy(answer.Value("ok")) {
+					errText = pyStr(orValue(answer.Value("error"), "certd refused"))
+				}
+			}
+			return nil
+		}()
+		if lockErr != nil {
+			log.Printf("trash settings not saved: %v", lockErr)
 			return c.JSON(500, newMap("ok", false, "error", "The trash settings could not be saved"))
 		}
-		errText := ""
-		days, err = SetTrashKeepDays(days)
-		if err == nil {
-			if answer, cerr := CertdDNSTimeout("trash/settings", newMap("keep_days", days), 15); cerr != nil {
-				log.Printf("certd unavailable: %v", cerr)
-				errText = "The certificate service does not answer"
-			} else if !truthy(answer.Value("ok")) {
-				errText = pyStr(orValue(answer.Value("error"), "certd refused"))
-			}
-		}
-		release()
 		if err != nil {
 			if _, isTrash := err.(*TrashError); isTrash {
 				return c.JSON(400, newMap("ok", false, "error", err.Error()))

@@ -77,13 +77,14 @@ pub fn parse_access_line(line: &str, sigs: &SignatureEngine) -> Option<ParsedReq
     let remainder = skip_ws_required(rest)?;
 
     let ts = parse_stamp(stamp_str);
-    let request_id = find_labelled_field(remainder, "id=").unwrap_or("");
     let term = next_token(remainder).map(|(t, _)| t).unwrap_or("");
-    let ban_reason = find_ban_reason(remainder);
 
     // 4. Tail: "<METHOD> <URI> HTTP/<ver>" or "<BADREQ>"
     let Some((tail_start, method, uri, protocol)) = parse_access_tail(remainder) else {
-        if remainder.trim_end().ends_with("<BADREQ>") {
+        let trimmed = remainder.trim_end();
+        if let Some(before_badreq) = trimmed.strip_suffix("<BADREQ>") {
+            let request_id = find_labelled_field(before_badreq, "id=").unwrap_or("");
+            let ban_reason = find_ban_reason(before_badreq);
             return Some(ParsedRequest {
                 client_ip: client_ip.to_string(),
                 status,
@@ -112,7 +113,10 @@ pub fn parse_access_line(line: &str, sigs: &SignatureEngine) -> Option<ParsedReq
         return None;
     };
 
+    // Only parse labelled metadata before the request line: the URI is client-controlled.
     let prefix = &remainder[..tail_start];
+    let request_id = find_labelled_field(prefix, "id=").unwrap_or("");
+    let ban_reason = find_ban_reason(prefix);
     let raw_ua = find_labelled_field_allow_empty(prefix, "ua=").unwrap_or("");
     let user_agent = if raw_ua == "-" {
         String::new()
@@ -120,7 +124,7 @@ pub fn parse_access_line(line: &str, sigs: &SignatureEngine) -> Option<ParsedReq
         truncate_chars(raw_ua, MAX_USER_AGENT_LENGTH).to_string()
     };
 
-    let host_raw = find_labelled_field(remainder, "host=");
+    let host_raw = find_labelled_field(prefix, "host=");
     let host = match host_raw {
         Some(h) if h != "-" && h != "{}" => truncate_chars(h, MAX_HOST_LENGTH).to_string(),
         _ => extract_host(uri),
@@ -445,16 +449,21 @@ fn find_labelled_field_allow_empty<'a>(s: &'a str, key: &str) -> Option<&'a str>
     None
 }
 
-fn find_ban_reason(remainder: &str) -> &str {
+fn find_ban_reason(prefix: &str) -> &str {
     const MARKER: &str = "ban_reason=\"";
-    let Some(pos) = remainder.find(MARKER) else {
-        return "";
-    };
-    let rest = &remainder[pos + MARKER.len()..];
-    let Some(end) = memchr::memchr(b'"', rest.as_bytes()) else {
-        return "";
-    };
-    truncate_chars(&rest[..end], 160)
+    let mut start = 0;
+    while let Some(rel) = prefix[start..].find(MARKER) {
+        let pos = start + rel;
+        if pos == 0 || prefix.as_bytes()[pos - 1].is_ascii_whitespace() {
+            let rest = &prefix[pos + MARKER.len()..];
+            let Some(end) = memchr::memchr(b'"', rest.as_bytes()) else {
+                return "";
+            };
+            return truncate_chars(&rest[..end], 160);
+        }
+        start = pos + 1;
+    }
+    ""
 }
 
 /// Match `(?P<method>[A-Z]{3,10})\s+(?P<uri>\S+)\s+(?P<proto>HTTP/[0-9.]+)\s*$` from the right.
@@ -534,11 +543,32 @@ fn authenticated_username(prefix: &str) -> String {
     let Some(decoded) = unquote_strict(raw) else {
         return String::new();
     };
-    if decoded.chars().count() <= 128 && decoded.chars().all(|c| !c.is_control()) {
+    if decoded.chars().count() <= 128 && decoded.chars().all(is_py_printable) {
         decoded
     } else {
         String::new()
     }
+}
+
+fn is_py_printable(c: char) -> bool {
+    if c.is_control() {
+        return false;
+    }
+    if c.is_whitespace() && c != ' ' {
+        return false;
+    }
+    // Reject Unicode format / BiDi / invisible control characters that Python's str.isprintable() rejects.
+    !matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202F}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
 }
 
 /// Fourth field of `%TR/%Tw/%Tc/%Tr/%Ta`, or -1 when absent.
@@ -559,4 +589,55 @@ fn response_time(times: &str) -> i64 {
 fn total_time(times: &str) -> i64 {
     let tail = times.rsplit('/').next().unwrap_or("");
     tail.parse::<i64>().unwrap_or(0).max(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uri_cannot_spoof_host_id_or_ban_reason() {
+        let sigs = SignatureEngine::builtin();
+        let line = r#"2026-04-12T10:00:00+00:00 gw haproxy[1]: 203.0.113.9:12345 [12/Apr/2026:10:00:00.000] fe_https be_app/s1 0/0/1/2/3 200 123 ---- host=real.example id=real-id ua=Mozilla/5.0 GET /x?host=evil.example&id=fake&ban_reason="spoofed" HTTP/1.1"#;
+        let parsed = parse_access_line(line, &sigs).expect("should parse");
+        assert_eq!(parsed.host, "real.example");
+        assert_eq!(parsed.request_id, "real-id");
+        assert_eq!(parsed.ban_reason, "");
+
+        let line_no_meta = r#"2026-04-12T10:00:00+00:00 gw haproxy[1]: 203.0.113.9:12345 [12/Apr/2026:10:00:00.000] fe_https be_app/s1 0/0/1/2/3 200 123 ---- GET /x?host=evil.example&id=fake&ban_reason="spoofed" HTTP/1.1"#;
+        let parsed2 = parse_access_line(line_no_meta, &sigs).expect("should parse");
+        assert_eq!(parsed2.host, "");
+        assert_eq!(parsed2.request_id, "");
+        assert_eq!(parsed2.ban_reason, "");
+    }
+
+    #[test]
+    fn ban_reason_requires_whitespace_boundary() {
+        let sigs = SignatureEngine::builtin();
+        let line = r#"2026-04-12T10:00:00+00:00 gw haproxy[1]: 203.0.113.9:12345 [12/Apr/2026:10:00:00.000] fe_https <NOSRV> 0/0/1/2/3 403 0 ---- xban_reason="not-real" GET / HTTP/1.1"#;
+        let parsed = parse_access_line(line, &sigs).expect("should parse");
+        assert_eq!(parsed.ban_reason, "");
+
+        let real = r#"2026-04-12T10:00:00+00:00 gw haproxy[1]: 203.0.113.9:12345 [12/Apr/2026:10:00:00.000] fe_https <NOSRV> 0/0/1/2/3 403 0 ---- ban_reason="rate_limit" GET / HTTP/1.1"#;
+        let parsed_real = parse_access_line(real, &sigs).expect("should parse");
+        assert_eq!(parsed_real.ban_reason, "rate_limit");
+    }
+
+    #[test]
+    fn authenticated_username_rejects_bidi_and_line_separator_chars() {
+        let sigs = SignatureEngine::builtin();
+        // %E2%80%AE = U+202E (RIGHT-TO-LEFT OVERRIDE), %E2%80%A8 = U+2028 (LINE SEPARATOR)
+        for bad in ["alice%E2%80%AEbob", "alice%E2%80%A8bob", "alice%0Abob"] {
+            let line = format!(
+                "2026-04-12T10:00:00+00:00 gw haproxy[1]: 203.0.113.9:12345 [12/Apr/2026:10:00:00.000] fe_https be_app/s1 0/0/1/2/3 200 123 ---- auth_user={bad} GET / HTTP/1.1"
+            );
+            let parsed = parse_access_line(&line, &sigs).expect("should parse");
+            assert_eq!(parsed.authenticated_user, "", "should reject {bad}");
+        }
+        let good = "2026-04-12T10:00:00+00:00 gw haproxy[1]: 203.0.113.9:12345 [12/Apr/2026:10:00:00.000] fe_https be_app/s1 0/0/1/2/3 200 123 ---- auth_user=alice_01 GET / HTTP/1.1";
+        assert_eq!(
+            parse_access_line(good, &sigs).unwrap().authenticated_user,
+            "alice_01"
+        );
+    }
 }

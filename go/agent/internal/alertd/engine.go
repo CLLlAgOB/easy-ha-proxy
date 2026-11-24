@@ -32,15 +32,21 @@ func notFoundErr(msg string) error { return codedError{kind: ErrNotFound, msg: m
 
 // Engine implements the alertd state machine, storm control, quietening, and sweep loop.
 type Engine struct {
-	mu         sync.Mutex
-	configMu   sync.Mutex
-	config     Config
-	store      *Store
-	channels   []Channel
-	opts       DaemonOptions
-	nowFn      func() int64
-	lastPrune  int64
-	lookupHook LookupIPFunc
+	mu           sync.Mutex
+	configMu     sync.Mutex
+	retryMu      sync.Mutex
+	retryTimer   *time.Timer
+	retryDelay   time.Duration
+	retryCancel  context.CancelFunc
+	retryCtx     context.Context
+	retryStopped bool
+	config       Config
+	store        *Store
+	channels     []Channel
+	opts         DaemonOptions
+	nowFn        func() int64
+	lastPrune    int64
+	lookupHook   LookupIPFunc
 }
 
 // NewEngine constructs an AlertEngine with explicit options, store, and optional custom channels.
@@ -56,12 +62,31 @@ func NewEngine(opts DaemonOptions, cfg Config, store *Store, channels []Channel)
 			&WebhookChannel{},
 		}
 	}
+	retryCtx, retryCancel := context.WithCancel(context.Background())
 	return &Engine{
-		config:   cfg,
-		store:    store,
-		channels: channels,
-		opts:     opts,
-		nowFn:    func() int64 { return time.Now().Unix() },
+		config:      cfg,
+		store:       store,
+		channels:    channels,
+		opts:        opts,
+		nowFn:       func() int64 { return time.Now().Unix() },
+		retryDelay:  MailRetryRecheckSec * time.Second,
+		retryCtx:    retryCtx,
+		retryCancel: retryCancel,
+	}
+}
+
+// Close cancels any pending background retry timer.
+func (e *Engine) Close() {
+	e.retryMu.Lock()
+	e.retryStopped = true
+	if e.retryTimer != nil {
+		e.retryTimer.Stop()
+		e.retryTimer = nil
+	}
+	cancel := e.retryCancel
+	e.retryMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -77,6 +102,7 @@ func formatISOSec(ts int64) string {
 
 // RunLoop executes periodic sweeps and mail queue checks until ctx is canceled.
 func (e *Engine) RunLoop(ctx context.Context) {
+	defer e.Close()
 	ticker := time.NewTicker(EvaluateIntervalSec * time.Second)
 	defer ticker.Stop()
 	var lastMailCheck int64
@@ -955,8 +981,23 @@ func (e *Engine) RetryMail(ctx context.Context) (map[string]any, error) {
 	if err := exec.CommandContext(cmdCtx, e.opts.DockerBin, "exec", e.opts.MailRelayContainer, "postqueue", "-f").Run(); err != nil {
 		return nil, fmt.Errorf("the mail relay could not be asked to retry: %v", err)
 	}
-	time.AfterFunc(MailRetryRecheckSec*time.Second, func() {
-		e.CheckMailQueue(context.Background())
-	})
+	e.retryMu.Lock()
+	if !e.retryStopped {
+		if e.retryTimer != nil {
+			e.retryTimer.Stop()
+		}
+		delay := e.retryDelay
+		if delay <= 0 {
+			delay = MailRetryRecheckSec * time.Second
+		}
+		bgCtx := e.retryCtx
+		e.retryTimer = time.AfterFunc(delay, func() {
+			if bgCtx.Err() != nil {
+				return
+			}
+			e.CheckMailQueue(bgCtx)
+		})
+	}
+	e.retryMu.Unlock()
 	return map[string]any{"retried": true, "recheck_in": MailRetryRecheckSec}, nil
 }

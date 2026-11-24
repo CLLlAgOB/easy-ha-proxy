@@ -1,6 +1,7 @@
 package jinja
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -390,12 +391,19 @@ func strFormat(s string, html bool, args []any, kwargs *Map) (any, error) {
 				v = args[auto]
 				auto++
 			case field[0] >= '0' && field[0] <= '9':
-				n := 0
+				allDigits := true
 				for _, d := range field {
-					n = n*10 + int(d-'0')
+					if d < '0' || d > '9' {
+						allDigits = false
+						break
+					}
 				}
-				if n >= len(args) {
-					return nil, errf("Replacement index %d out of range", n)
+				if !allDigits {
+					return nil, errf("invalid format field %q", field)
+				}
+				n, err := strconv.Atoi(field)
+				if err != nil || n < 0 || n >= len(args) {
+					return nil, errf("Replacement index %s out of range", field)
 				}
 				v = args[n]
 			default:

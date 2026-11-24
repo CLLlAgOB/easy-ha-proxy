@@ -215,8 +215,12 @@ func Abort(code int, description string) error {
 const sessionCookie = "easy_ha_proxy_flask_session"
 
 func (c *Ctx) sign(payload string) string {
+	user := ""
+	if c.ID != nil {
+		user = c.ID.User
+	}
 	mac := hmac.New(sha256.New, c.App.secret)
-	mac.Write([]byte("session|" + payload))
+	mac.Write([]byte("session|" + user + "\x00" + payload))
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }
 

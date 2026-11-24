@@ -79,12 +79,13 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # "web application" update pulls it. Nothing on the host changes.
     ("Dockerfile", ()),
     ("docker/*", ()),
+    ("go/panel/*", ()),
     # Native Rust hot-path core and Go host agent. The sources do not deploy,
     # but CI publishes their binaries from them, and only the native stage
     # installs those binaries and restarts the daemons that run them. Mapped
     # to nothing, a changes-only update after a Go fix kept the old binary.
-    ("rust/*", ("ha-adm-native",)),
-    ("go/*", ("ha-adm-native",)),
+    ("rust/guardd/*", ("ha-adm-native",)),
+    ("go/agent/*", ("ha-adm-native",)),
     # Install entry points and the menu helper run from the source directory
     # itself, and the refreshed source is already in place.
     ("install.sh", ()),
@@ -251,6 +252,7 @@ TAG_LABELS: dict[str, str] = {
     "ha-adm-backupd": "Backups",
     "ha-adm-updated": "Update service",
     "ha-adm-daemons": "Helper daemons",
+    "ha-adm-native": "Native host binaries",
     "ha-adm-journald": "Journal retention",
     "ha-adm-install": "Admin host setup",
     "ha-adm-cfg": "Web application's copy of the HAProxy template",

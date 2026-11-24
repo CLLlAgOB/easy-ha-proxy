@@ -82,11 +82,12 @@ pub fn run(paths: Paths) -> ExitCode {
     };
     let requests = Arc::new(RwLock::new(requests));
     let sigs = Arc::new(RwLock::new(merged));
+    let alerts = AlertClient::from_env().map(Arc::new);
     let engine = Engine::new(
         config.clone(),
         db.clone(),
         sigs.clone(),
-        AlertClient::from_env(),
+        alerts.clone(),
         requests.clone(),
     );
     eprintln!(
@@ -104,6 +105,8 @@ pub fn run(paths: Paths) -> ExitCode {
         live: engine.live.clone(),
         lag_bytes: engine.lag_bytes.clone(),
         engine: Mutex::new(engine),
+        decisions: Mutex::new(()),
+        alerts,
         stop: stop.clone(),
         db: db.clone(),
         requests,

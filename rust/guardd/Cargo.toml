@@ -3,7 +3,7 @@ name = "guardd-core"
 version = "0.1.0"
 edition = "2021"
 description = "High-throughput Rust log parsing, signature matching, and bounded IP/subnet tracking core for easy-ha-proxy-guardd"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [lib]
 name = "guardd_core"

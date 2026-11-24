@@ -123,6 +123,15 @@
               - _native_cached_bundle.stat.checksum | default('') == native_release_checksums[_native_arch] | lower
             fail_msg: "Prepare the verified native release bundle on this host before offline restore."
 
+    - name: "native-daemons | Clear previous staged files before unpacking tarball bundle"
+      ansible.builtin.file:
+        path: "/var/lib/easy-ha-proxy/native-staging/{{ item }}"
+        state: absent
+      loop:
+        - sbin
+        - lib
+      when: _native_mode in ['local', 'https']
+
     - name: "native-daemons | Unpack tarball bundle into staging directory"
       ansible.builtin.unarchive:
         src: "/var/lib/easy-ha-proxy/native-staging/easy-ha-proxy-native-linux-{{ _native_arch }}.tar.gz"
@@ -160,6 +169,10 @@
         if [ -n "${rev}" ]; then
           img="${img}-${rev:0:12}"
         fi
+        prev_digest=""
+        if [ -f "${stage}/image.json" ]; then
+          prev_digest="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("digest", ""))' "${stage}/image.json" 2>/dev/null || true)"
+        fi
         {% if not (easy_ha_proxy_offline_restore | default(false) | bool) %}
         if ! docker pull "${img}"; then
           echo "The native binaries are not published or could not be pulled (${img})." >&2
@@ -176,6 +189,16 @@
             exit 1
           fi
         fi
+        {% if (native_release_verify_signature | default(false) | bool) and not (easy_ha_proxy_offline_restore | default(false) | bool) %}
+        if ! command -v cosign >/dev/null 2>&1; then
+          echo "native_release_verify_signature is enabled, but cosign is not installed." >&2
+          exit 1
+        fi
+        cosign verify \
+          --certificate-identity-regexp {{ native_release_cosign_identity_regexp | default('^https://github\\.com/CLLlAgOB/easy-ha-proxy/\\.github/workflows/ci\\.yml@refs/heads/(main|alpha)$') | quote }} \
+          --certificate-oidc-issuer {{ native_release_cosign_oidc_issuer | default('https://token.actions.githubusercontent.com') | quote }} \
+          "${ref}"
+        {% endif %}
         cid="$(docker create --pull=never "${ref}")"
         trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
         rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
@@ -183,11 +206,16 @@
         docker cp "${cid}:/lib" "${stage}/lib"
         docker cp "${cid}:/SHA256SUMS" "${stage}/SHA256SUMS"
         (cd "${stage}" && sha256sum -c SHA256SUMS)
-        printf '{"image": "%s", "digest": "%s", "revision": "%s"}\n' "${img}" "${ref}" "${rev}" > "${stage}/image.json"
+        python3 -c 'import json, sys; open(sys.argv[1], "w", encoding="utf-8").write(json.dumps({"image": sys.argv[2], "digest": sys.argv[3], "revision": sys.argv[4]}) + "\n")' \
+          "${stage}/image.json" "${img}" "${ref}" "${rev}"
+        if [ "${prev_digest}" != "${ref}" ]; then
+          echo "NATIVE_BUNDLE_CHANGED"
+        fi
       args:
         executable: /bin/bash
+      register: _native_oci_pull
       when: _native_mode == 'oci'
-      changed_when: true
+      changed_when: "'NATIVE_BUNDLE_CHANGED' in (_native_oci_pull.stdout | default(''))"
 
     - name: "native-daemons | Smoke-check easy-ha-proxy-agent binary"
       ansible.builtin.command:

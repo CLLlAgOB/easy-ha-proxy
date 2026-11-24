@@ -50,12 +50,12 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
-	app.EnsureWhitelistFile()
-	app.StartTrashPurger()
-	srv := server.New(cfg, nil)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	app.EnsureWhitelistFile()
+	app.StartTrashPurger(ctx)
+	srv := server.New(cfg, nil)
 
 	log.Printf("easy-ha-proxy-panel %s listening on %s", config.Version, cfg.ListenAddr)
 	return srv.ListenAndServe(ctx)

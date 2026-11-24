@@ -2,6 +2,7 @@ package controld
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // NewDaemon builds the daemon state; alerts come from the environment.
@@ -41,56 +44,21 @@ func Run(opts Options) error {
 	return d.controlSocketLoop()
 }
 
-func (d *Daemon) controlSocketLoop() error {
-	path := d.Opts.ControlSocket
-	if _, err := os.Stat(path); err == nil {
-		if err := os.Remove(path); err != nil {
-			log.Printf("Failed to unlink old socket %s: %v", path, err)
-			return err
-		}
-	}
-	dir := filepath.Dir(path)
-	if dir == "" {
-		dir = "/run"
-	}
-	if err := os.MkdirAll(dir, 0o777); err != nil {
-		return err
-	}
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		log.Printf("Failed to bind/listen on %s: %v", path, err)
-		return err
-	}
-	if err := os.Chmod(path, 0o660); err != nil {
-		ln.Close()
-		log.Printf("Failed to bind/listen on %s: %v", path, err)
-		return err
-	}
-	log.Printf("haproxy-controld is listening on %s", path)
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-	stopping := make(chan os.Signal, 1)
-	go func() {
-		s := <-sigs
-		stopping <- s
-		ln.Close()
+// Serve accepts control socket clients until ctx is canceled and waits for
+// in-flight operations to finish before returning.
+func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	var active sync.WaitGroup
+	defer func() {
+		stop()
+		_ = ln.Close()
+		active.Wait()
 	}()
 	slots := make(chan struct{}, 32)
-	defer func() {
-		select {
-		case s := <-stopping:
-			log.Printf("Received signal %d; shutting down", s.(syscall.Signal))
-		default:
-		}
-		ln.Close()
-		if _, err := os.Stat(path); err == nil {
-			_ = os.Remove(path)
-		}
-	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if len(stopping) > 0 || errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
 				return nil
 			}
 			var ne net.Error
@@ -104,15 +72,46 @@ func (d *Daemon) controlSocketLoop() error {
 		default:
 			_ = conn.SetDeadline(time.Now().Add(time.Second))
 			_, _ = conn.Write([]byte("ERROR busy\n"))
-			conn.Close()
+			_ = conn.Close()
 			continue
 		}
+		active.Add(1)
 		go func(c net.Conn) {
+			defer active.Done()
 			defer func() { <-slots }()
 			defer c.Close()
 			d.handleClient(c)
 		}(conn)
 	}
+}
+
+func (d *Daemon) controlSocketLoop() error {
+	path := d.Opts.ControlSocket
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "/run"
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	ln, err := unixrpc.ListenUnix(path, "", "", 0o660)
+	if err != nil {
+		log.Printf("Failed to bind/listen on %s: %v", path, err)
+		return err
+	}
+	log.Printf("haproxy-controld is listening on %s", path)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	defer func() {
+		if ctx.Err() != nil {
+			log.Printf("Received shutdown signal; draining active operations")
+		}
+		_ = ln.Close()
+		if _, err := os.Stat(path); err == nil {
+			_ = os.Remove(path)
+		}
+	}()
+	return d.Serve(ctx, ln)
 }
 
 type replier struct{ c net.Conn }
@@ -290,7 +289,7 @@ func (d *Daemon) handleClient(conn net.Conn) {
 	case strings.HasPrefix(cmd, "check-config "):
 		rc, stdout, stderr, err := d.haproxyCheckConfigFromB64(pySplitN(cmd, " ", 1)[1])
 		if err != nil {
-			r.send("ERROR check-config: " + pyErr(err))
+			r.send("ERROR check-config: " + pyErr(err) + "\n")
 			return
 		}
 		r.send(fmt.Sprintf("OK %d\n%s\n%s\n", rc, base64.StdEncoding.EncodeToString([]byte(stdout)),

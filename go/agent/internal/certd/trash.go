@@ -293,7 +293,7 @@ func (d *Daemon) trashKeepDays() int {
 	if json.Unmarshal(raw, &payload) != nil || payload == nil {
 		return 0
 	}
-	v, ok := pyx.Get(payload, "keep_days", float64(0)), true
+	v := pyx.Get(payload, "keep_days", float64(0))
 	n, ok := pyIntLoose(v)
 	if !ok || n < 0 || n > trashMaxKeepDays {
 		return 0

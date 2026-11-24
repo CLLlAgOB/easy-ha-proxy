@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -207,11 +208,38 @@ func (c *Catalog) SelectLanguage(r *http.Request) string {
 		}
 	}
 	if al := r.Header.Get("Accept-Language"); al != "" {
+		bestCode := ""
+		bestQ := 0.0
 		for _, part := range strings.Split(al, ",") {
-			tag := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
-			if code := c.NormalizeLanguage(tag); code != "" {
-				return code
+			segs := strings.Split(part, ";")
+			tag := strings.TrimSpace(segs[0])
+			if tag == "" {
+				continue
 			}
+			q := 1.0
+			valid := true
+			for _, param := range segs[1:] {
+				k, v, ok := strings.Cut(strings.TrimSpace(param), "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+					continue
+				}
+				parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+				if err != nil || math.IsNaN(parsed) || parsed < 0 || parsed > 1 {
+					valid = false
+					break
+				}
+				q = parsed
+			}
+			if !valid || q <= 0 {
+				continue
+			}
+			if code := c.NormalizeLanguage(tag); code != "" && q > bestQ {
+				bestCode = code
+				bestQ = q
+			}
+		}
+		if bestCode != "" {
+			return bestCode
 		}
 	}
 	return c.defaultLang

@@ -120,7 +120,8 @@ class TheConfiguration(unittest.TestCase):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
         ecosystems = set(dependabot_entries(config))
         self.assertEqual(ecosystems, {("pip", "/docker/app"), ("pip", "/installer"),
-                                      ("docker", "/"), ("github-actions", "/"),
+                                      ("docker", "/"), ("docker", "/go/panel"),
+                                      ("github-actions", "/"),
                                       ("gomod", "/go/agent"), ("gomod", "/go/panel"),
                                       ("cargo", "/rust/guardd")})
         self.assertTrue(all(item["target-branch"] == "alpha" for item in config["updates"]))

@@ -131,13 +131,18 @@ func (a *App) readHAProxyVersion() any {
 
 func (a *App) haproxyVersion() any {
 	haproxyVer.mu.Lock()
-	defer haproxyVer.mu.Unlock()
 	if !haproxyVer.at.IsZero() && time.Since(haproxyVer.at) < haproxyVersionTTL {
-		return haproxyVer.value
+		v := haproxyVer.value
+		haproxyVer.mu.Unlock()
+		return v
 	}
-	haproxyVer.value = a.readHAProxyVersion()
+	haproxyVer.mu.Unlock()
+	v := a.readHAProxyVersion()
+	haproxyVer.mu.Lock()
+	haproxyVer.value = v
 	haproxyVer.at = time.Now()
-	return haproxyVer.value
+	haproxyVer.mu.Unlock()
+	return v
 }
 
 func buildEntry(revision, committedAt, webTree any) any {

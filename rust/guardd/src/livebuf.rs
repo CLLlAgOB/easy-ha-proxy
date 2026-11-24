@@ -852,7 +852,9 @@ pub fn live_aggregate(
 
 // -- the buffer ---------------------------------------------------------------
 
-type Identities = Vec<(String, Vec<(String, f64)>)>;
+use hashlink::LinkedHashMap;
+
+type Identities = LinkedHashMap<String, Vec<(String, f64)>>;
 
 #[derive(Debug)]
 pub struct LiveBuffer {
@@ -892,7 +894,7 @@ impl LiveBuffer {
             started: crate::constants::utc_now_f(),
             evicted_for_size: 0,
             hourly: HashMap::new(),
-            identities: Vec::new(),
+            identities: LinkedHashMap::new(),
         }
     }
 
@@ -919,11 +921,7 @@ impl LiveBuffer {
     fn count(&mut self, records: &[LiveRecord]) {
         for r in records {
             if !r.authenticated_user.is_empty() {
-                let pos = self.identities.iter().position(|(ip, _)| *ip == r.ip);
-                let mut users = match pos {
-                    Some(p) => self.identities.remove(p).1,
-                    None => Vec::new(),
-                };
+                let mut users = self.identities.remove(&r.ip).unwrap_or_default();
                 match users.iter_mut().find(|(u, _)| *u == r.authenticated_user) {
                     Some(e) => e.1 = e.1.max(r.ts),
                     None => users.push((r.authenticated_user.clone(), r.ts)),
@@ -938,9 +936,9 @@ impl LiveBuffer {
                         users.remove(i);
                     }
                 }
-                self.identities.push((r.ip.clone(), users));
+                self.identities.insert(r.ip.clone(), users);
                 if self.identities.len() > 1024 {
-                    self.identities.remove(0);
+                    self.identities.pop_front();
                 }
             }
             let size = r.estimated_bytes() as i64;
@@ -1346,5 +1344,37 @@ mod tests {
             Some(1_795_341_600.5)
         );
         assert_eq!(line_epoch("Nov 22 10:00:00 host"), None);
+    }
+
+    #[test]
+    fn identities_at_upper_volume_is_bounded_and_fast() {
+        let mut b = LiveBuffer::new(2048, 3600);
+        let mut batch = Vec::with_capacity(2048);
+        for i in 0..2048u32 {
+            let mut r = rec(
+                1000.0 + i as f64,
+                &format!("198.51.{}.{}", (i / 256) % 256, i % 256),
+                200,
+                "app.example",
+                "/",
+            );
+            r.authenticated_user = format!("user{}", i % 16);
+            batch.push(r);
+        }
+        let start = Instant::now();
+        b.extend(batch);
+        let elapsed = start.elapsed();
+        assert_eq!(b.identities.len(), 1024);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "identities ingestion too slow: {elapsed:?}"
+        );
+        let map = b.identities(3100.0);
+        assert_eq!(map.as_object().unwrap().len(), 1024);
+        assert!(map.get("198.51.0.0").is_none(), "oldest IP must be evicted");
+        assert!(
+            map.get("198.51.7.255").is_some(),
+            "newest IP must be retained"
+        );
     }
 }

@@ -634,11 +634,19 @@ func (c *Configd) validateConfigViaAuthelia(tmpHostPath string) error {
 	return nil
 }
 
+var (
+	syncTempFile  = func(f *os.File) error { return f.Sync() }
+	closeTempFile = func(f *os.File) error { return f.Close() }
+)
+
 func (c *Configd) saveConfigData(root *pyyaml.Map) error {
 	cfg := c.Opts.ConfigFile
 	var prev *syscall.Stat_t
 	var st syscall.Stat_t
-	if err := syscall.Stat(cfg, &st); err == nil {
+	if err := syscall.Lstat(cfg, &st); err == nil {
+		if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+			return newErr("ValueError", "config file is not a regular file: %s", cfg)
+		}
 		prev = &st
 	} else if err != syscall.ENOENT {
 		log.Printf("Failed to stat %s before save: %v", cfg, err)
@@ -667,22 +675,29 @@ func (c *Configd) saveConfigData(root *pyyaml.Map) error {
 		}
 	}()
 	if _, err := tmp.WriteString(text); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+	if err := syncTempFile(tmp); err != nil {
+		_ = tmp.Close()
 		return err
 	}
 	if uid != -1 {
 		if err := tmp.Chown(uid, gid); err != nil {
+			if os.Geteuid() == 0 || !errors.Is(err, syscall.EPERM) {
+				_ = tmp.Close()
+				return err
+			}
 			log.Printf("Failed to set owner/group on temp config file: %v", err)
 		}
 	}
 	if err := tmp.Chmod(0o640); err != nil {
-		log.Printf("Failed to set mode on temp config file: %v", err)
+		_ = tmp.Close()
+		return err
 	}
-	tmp.Close()
+	if err := closeTempFile(tmp); err != nil {
+		return err
+	}
 	if err := c.validateConfigViaAuthelia(tmpPath); err != nil {
 		return err
 	}
@@ -1181,6 +1196,22 @@ func jsonErrText(err error) string {
 	return "Expecting value: line 1 column 1 (char 0)"
 }
 
+// Serve accepts connections on ln one at a time until ctx is canceled or ln fails.
+func (c *Configd) Serve(ctx context.Context, ln net.Listener) error {
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		c.serveConn(conn)
+	}
+}
+
 // RunConfigd is main(): serve the socket one request at a time.
 func RunConfigd(opts ConfigdOptions) error {
 	c := NewConfigd(opts)
@@ -1191,32 +1222,24 @@ func RunConfigd(opts ConfigdOptions) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(opts.SocketPath, 0o660)
+	if err := os.Chmod(opts.SocketPath, 0o660); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(opts.SocketPath)
+		return err
+	}
 	log.Printf("authelia-configd listening on %s", opts.SocketPath)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
 	defer func() {
 		if ctx.Err() != nil {
 			log.Printf("Got signal, shutting down")
 		}
+		_ = ln.Close()
 		if _, err := os.Stat(opts.SocketPath); err == nil {
 			_ = os.Remove(opts.SocketPath)
 		}
 	}()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return nil
-		}
-		c.serveConn(conn)
-	}
+	return c.Serve(ctx, ln)
 }
 
 var _ = bufio.NewReader

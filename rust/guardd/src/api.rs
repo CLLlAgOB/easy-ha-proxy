@@ -581,7 +581,7 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                     &terms,
                 ) {
                     Ok(p) => (200, merge(json!({"ok": true}), p)),
-                    Err(_) => bad(),
+                    Err(_) => err(500, "adaptive ban history unavailable"),
                 }
             } else {
                 let Some(id) = num("id", "0") else {
@@ -602,7 +602,7 @@ fn get(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 match s.db.adaptive_ban_detail(id, &ip, at.max(0), 0) {
                     Ok(Some(d)) => (200, json!({"ok": true, "ban": d})),
                     Ok(None) => err(404, "This ban record is no longer available"),
-                    Err(_) => bad(),
+                    Err(_) => err(500, "adaptive ban detail unavailable"),
                 }
             }
         }
@@ -861,7 +861,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            match s.engine().set_shield(&enabled, None) {
+            match s.set_shield(&enabled, None) {
                 Ok(state) => (200, json!({"ok": true, "path_shield": state})),
                 Err(x) => engine_error(x),
             }
@@ -910,10 +910,20 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                 let db = s.db.clone();
                 match e.detection.replace(&p, &db, &sigs) {
                     Ok(()) => (200, e.detection_state()),
-                    Err(m) if m.contains("database") || m.contains("disk") => {
-                        err(503, "detection storage unavailable")
+                    Err(m) => {
+                        let lower = m.to_ascii_lowercase();
+                        if lower.contains("database")
+                            || lower.contains("disk")
+                            || lower.contains("locked")
+                            || lower.contains("busy")
+                            || lower.contains("readonly")
+                            || lower.contains("sqlite")
+                        {
+                            err(503, "detection storage unavailable")
+                        } else {
+                            err(400, m)
+                        }
                     }
-                    Err(m) => err(400, m),
                 }
             }
         }
@@ -998,7 +1008,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                         .unwrap_or_else(|| v.to_string())
                 })
                 .unwrap_or_default();
-            match s.engine().place_manual_ban(&ip, None) {
+            match s.place_manual_ban(&ip, None) {
                 Ok(v) => (200, v),
                 Err(x) => engine_error(x),
             }
@@ -1016,7 +1026,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                         .unwrap_or_else(|| v.to_string())
                 })
                 .unwrap_or_default();
-            match s.engine().forget_ban(&ip, None) {
+            match s.forget_ban(&ip, None) {
                 Ok(v) => (200, v),
                 Err(x) => engine_error(x),
             }
@@ -1038,7 +1048,7 @@ fn post(s: &Shared, r: &Request<'_>) -> (u16, Value) {
                         .unwrap_or_else(|| v.to_string())
                 })
                 .unwrap_or_default();
-            match s.engine().set_mode(&mode, None) {
+            match s.set_mode(&mode, None) {
                 Ok(v) => (200, ok(v)),
                 Err(x) => engine_error(x),
             }

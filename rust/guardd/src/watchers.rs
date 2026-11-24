@@ -125,7 +125,7 @@ pub struct TrustedRates {
     any_allow_list: bool,
     signature: Option<Option<(i128, u64)>>,
     checked: Option<Instant>,
-    counters: HashMap<(String, String), TrustedCounter>,
+    counters: hashlink::LinkedHashMap<(String, String), TrustedCounter>,
     order: u64,
     finished: Vec<Episode>,
     pub max_keys: usize,
@@ -150,7 +150,7 @@ impl TrustedRates {
             any_allow_list: false,
             signature: None,
             checked: None,
-            counters: HashMap::new(),
+            counters: hashlink::LinkedHashMap::new(),
             order: 0,
             finished: Vec::new(),
             max_keys: max_keys.max(1),
@@ -255,37 +255,31 @@ impl TrustedRates {
         let key = (request.client_ip.clone(), site.id.clone());
         self.order += 1;
         let order = self.order;
-        if !self.counters.contains_key(&key) {
-            self.counters.insert(
-                key.clone(),
-                TrustedCounter {
-                    start: ts,
-                    curr: 0,
-                    prev: 0,
-                    episode: None,
-                    order,
-                },
-            );
-            if self.counters.len() > self.max_keys {
-                if let Some(oldest) = self
-                    .counters
-                    .iter()
-                    .min_by_key(|(_, c)| c.order)
-                    .map(|(k, _)| k.clone())
-                {
-                    if let Some(c) = self.counters.remove(&oldest) {
+        let mut counter = match self.counters.remove(&key) {
+            Some(c) => c,
+            None => {
+                if self.counters.len() >= self.max_keys {
+                    if let Some((_, c)) = self.counters.pop_front() {
                         self.evicted += 1;
                         if let Some(ep) = c.episode {
                             self.finish(ep);
                         }
                     }
                 }
+                TrustedCounter {
+                    start: ts,
+                    curr: 0,
+                    prev: 0,
+                    episode: None,
+                    order,
+                }
             }
-        }
+        };
+        counter.order = order;
+        self.counters.insert(key.clone(), counter);
         let Some(counter) = self.counters.get_mut(&key) else {
             return;
         };
-        counter.order = order;
         let rate = counter.add(ts, site.window);
         let mut opened = false;
         if rate > site.limit {

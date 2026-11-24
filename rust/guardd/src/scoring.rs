@@ -222,7 +222,7 @@ pub fn score_events(events: &[StoredEvent], now: i64, policy: &ScoringPolicy) ->
         });
     }
 
-    let score = (total.round() as i64).clamp(0, 100);
+    let score = (crate::livebuf::py_round(total) as i64).clamp(0, 100);
     let state = state_for(score);
     let categories = per_category
         .into_iter()
@@ -240,7 +240,7 @@ pub fn score_events(events: &[StoredEvent], now: i64, policy: &ScoringPolicy) ->
 
 #[inline]
 fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
+    crate::livebuf::py_round(v * 100.0) / 100.0
 }
 
 #[derive(Debug, Clone, Copy)]

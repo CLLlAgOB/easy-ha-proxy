@@ -589,6 +589,9 @@ func (a *App) registerSecurity() {
 			if err != nil {
 				return err
 			}
+			if entry.Actor == "" {
+				entry.Actor = c.User()
+			}
 			audit(result, &entry)
 			c.RecordRequest(action, entry)
 			return c.JSON(200, result)

@@ -12,7 +12,7 @@ import (
 
 var (
 	headerNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
-	subjectRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._:/@*-]{0,199}$`)
+	subjectRe    = regexp.MustCompile(`^(?:-|[A-Za-z0-9][A-Za-z0-9 ._:/@*-]{0,199})$`)
 	emailRe      = regexp.MustCompile(`^[^@\s]{1,64}@[^@\s]{1,253}\.[A-Za-z0-9-]{2,63}$`)
 )
 
@@ -295,12 +295,8 @@ func hasAnyControlChar(s string) bool {
 
 func cleanText(s string, limit int) string {
 	out := strings.TrimSpace(stripControlChars(s))
-	if limit > 0 && len(out) > limit {
-		end := limit
-		for end > 0 && !utf8.RuneStart(out[end]) {
-			end--
-		}
-		return out[:end]
+	if limit > 0 && utf8.RuneCountInString(out) > limit {
+		return string([]rune(out)[:limit])
 	}
 	return out
 }

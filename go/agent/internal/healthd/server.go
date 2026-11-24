@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -161,6 +159,10 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": fmt.Sprintf("bad json: %v", err)})
 		return
 	}
+	if payload == nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "payload must be a JSON object"})
+		return
+	}
 	text := func(k string) string {
 		v, _ := payload[k].(string)
 		return strings.TrimSpace(v)
@@ -170,7 +172,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request) {
 	case kind != "systemd" && kind != "docker":
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "kind must be systemd|docker"})
 		return
-	case name == "":
+	case name == "" || strings.HasPrefix(name, "-"):
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "name is required"})
 		return
 	case action != "start" && action != "stop" && action != "restart" && action != "reload":
@@ -219,23 +221,18 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request) {
 
 // Serve binds and serves over socketPath until ctx is canceled.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
-	_ = os.Remove(socketPath)
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
-		return err
-	}
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		return err
-	}
 	grp := strings.TrimSpace(os.Getenv("HEALTHD_SOCKET_GROUP"))
 	if grp == "" {
 		grp = "hadmin"
 	}
-	unixrpc.ChownSocket(socketPath, "", grp, 0o660)
+	ln, err := unixrpc.ListenUnix(socketPath, "", grp, 0o660)
+	if err != nil {
+		return err
+	}
 	defer func() {
 		_ = ln.Close()
 		_ = os.Remove(socketPath)
 	}()
-	srv := &http.Server{Handler: s, ReadHeaderTimeout: 30 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+	srv := &http.Server{Handler: s, ReadHeaderTimeout: 30 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 90 * time.Second}
 	return unixrpc.ServeHTTP(ctx, srv, ln, 3*time.Second)
 }

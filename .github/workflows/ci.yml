@@ -369,6 +369,13 @@ jobs:
           sleep 1
           docker exec -e HAPROXY_ADMIN_PROXY_SECRET=ci-test-secret "$cid" /usr/local/bin/easy-ha-proxy-panel healthcheck
 
+      - name: Scan Go panel container image (Trivy)
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.58.2 image
+          --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed
+          easy-ha-proxy-panel:ci-check
+
       - name: Upload Go panel artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -559,6 +566,13 @@ jobs:
           docker run --rm haproxy-admin-ui:check
           sh -c 'pip check && python -c "import app"'
 
+      - name: Scan web application image (Trivy)
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.58.2 image
+          --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed
+          haproxy-admin-ui:check
+
   # The web application image, published from the commit CI has just tested.
   # Each image is labelled with the fingerprint of its build inputs (the
   # sha256 of `git ls-tree` over Dockerfile, .dockerignore and docker/app):
@@ -680,6 +694,9 @@ jobs:
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
     env:
       REPOSITORY: clllagob/haproxy-admin-ui
     steps:
@@ -724,6 +741,9 @@ jobs:
       - uses: docker/setup-buildx-action@v4
         if: steps.credentials.outputs.ready == 'true'
 
+      - uses: sigstore/cosign-installer@v3
+        if: steps.credentials.outputs.ready == 'true'
+
       - name: Publish Go panel image
         if: steps.credentials.outputs.ready == 'true'
         env:
@@ -762,7 +782,9 @@ jobs:
               --push \
               .
           fi
-          echo "Published ${channel_image} (go-panel tree ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"
+          digest="$(docker buildx imagetools inspect "${channel_image}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          cosign sign --yes "${REPOSITORY}@${digest}"
+          echo "Published and signed ${channel_image} (go-panel tree ${TREE:0:16}, ${digest})" >> "$GITHUB_STEP_SUMMARY"
 
   # Multi-arch scratch OCI image carrying the precompiled Rust (guardd-core)
   # and Go (easy-ha-proxy-agent) host binaries for linux/amd64 and linux/arm64,
@@ -776,6 +798,9 @@ jobs:
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     env:
       REPOSITORY: clllagob/haproxy-admin-ui
     steps:
@@ -818,6 +843,9 @@ jobs:
       - uses: docker/setup-buildx-action@v4
         if: steps.credentials.outputs.ready == 'true'
 
+      - uses: sigstore/cosign-installer@v3
+        if: steps.credentials.outputs.ready == 'true'
+
       - name: Stage and publish multi-arch native binaries OCI image
         if: steps.credentials.outputs.ready == 'true'
         run: |
@@ -851,4 +879,6 @@ jobs:
             --tag "${REPOSITORY}:${channel}-${GITHUB_SHA::12}" \
             --push \
             native-oci/ctx
-          echo "Published ${REPOSITORY}:${channel} (amd64 + arm64)" >> "$GITHUB_STEP_SUMMARY"
+          digest="$(docker buildx imagetools inspect "${REPOSITORY}:${channel}-${GITHUB_SHA::12}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          cosign sign --yes "${REPOSITORY}@${digest}"
+          echo "Published and signed ${REPOSITORY}:${channel} (amd64 + arm64, ${digest})" >> "$GITHUB_STEP_SUMMARY"

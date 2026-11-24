@@ -1370,7 +1370,7 @@ impl SecurityDatabase {
             .iter()
             .map(|(sig, st)| {
                 let rate = if st[0] > 0 {
-                    ((st[3] as f64 / st[0] as f64) * 1000.0).round() / 1000.0
+                    crate::livebuf::py_round((st[3] as f64 / st[0] as f64) * 1000.0) / 1000.0
                 } else {
                     0.0
                 };
@@ -1397,7 +1397,10 @@ impl SecurityDatabase {
         by_signal.truncate(25);
         let covered = (now - since.max(first.unwrap_or(now))).max(0);
         let bans_per_day = if covered >= 3600 {
-            json!(((bans.len() as f64 * 86400.0 / covered as f64) * 10.0).round() / 10.0)
+            json!(
+                crate::livebuf::py_round((bans.len() as f64 * 86400.0 / covered as f64) * 10.0)
+                    / 10.0
+            )
         } else {
             Value::Null
         };

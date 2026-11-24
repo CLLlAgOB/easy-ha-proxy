@@ -179,13 +179,13 @@ func promJobs() (any, error) {
 			}
 		}
 	}
-	backup, err := JSONLineRequest(strings.TrimSpace(envOr("EASY_HA_PROXY_BACKUPD_SOCKET", "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock")),
+	backup, err := JSONLineRequest(backupdSocketPath(),
 		newMap("action", "status"), "full-backup", 5*time.Second, 64*1024, 4*1024*1024)
 	if err != nil {
 		return nil, err
 	}
 	absorb("backup", backup)
-	update, err := JSONLineRequest(strings.TrimSpace(envOr("EASY_HA_PROXY_UPDATED_SOCKET", "/run/easy-ha-proxy/easy-ha-proxy-updated.sock")),
+	update, err := JSONLineRequest(updatedSocketPath(),
 		newMap("action", "status"), "software-update", 10*time.Second, 64*1024, 4*1024*1024)
 	if err != nil {
 		return nil, err

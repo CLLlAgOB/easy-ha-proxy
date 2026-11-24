@@ -118,9 +118,61 @@ func (env *Environment) Render(name string, vars map[string]any) (string, error)
 	return env.RenderTemplate(t, vars)
 }
 
+const (
+	maxRenderDepth = 64
+	maxRenderSteps = 200_000
+	maxOutputBytes = 16 << 20
+)
+
+type renderBudget struct {
+	depth  int
+	steps  int
+	output int
+}
+
+func (b *renderBudget) enter() error {
+	b.depth++
+	if b.depth > maxRenderDepth {
+		b.depth--
+		return errf("maximum template recursion depth (%d) exceeded", maxRenderDepth)
+	}
+	return nil
+}
+
+func (b *renderBudget) leave() {
+	if b.depth > 0 {
+		b.depth--
+	}
+}
+
+func (b *renderBudget) step() error {
+	b.steps++
+	if b.steps > maxRenderSteps {
+		return errf("template execution budget (%d steps) exceeded", maxRenderSteps)
+	}
+	return nil
+}
+
+func (b *renderBudget) addOutput(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	b.output += n
+	if b.output > maxOutputBytes {
+		return errf("template output budget (%d bytes) exceeded", maxOutputBytes)
+	}
+	return nil
+}
+
 // RenderTemplate renders a parsed template.
 func (env *Environment) RenderTemplate(t *Template, vars map[string]any) (string, error) {
-	ctx := &context{env: env, parent: map[string]any{}, vars: map[string]any{}, blocks: map[string][]*blockNode{}}
+	ctx := &context{
+		env:    env,
+		parent: map[string]any{},
+		vars:   map[string]any{},
+		blocks: map[string][]*blockNode{},
+		budget: &renderBudget{},
+	}
 	for k, v := range env.Globals {
 		ctx.parent[k] = v
 	}
@@ -141,6 +193,7 @@ type context struct {
 	parent map[string]any
 	vars   map[string]any
 	blocks map[string][]*blockNode
+	budget *renderBudget
 }
 
 type frame struct {
@@ -209,6 +262,10 @@ type renderState struct {
 }
 
 func (ctx *context) renderRoot(t *Template, out *strings.Builder) error {
+	if err := ctx.budget.enter(); err != nil {
+		return err
+	}
+	defer ctx.budget.leave()
 	for name, b := range t.blocks {
 		ctx.blocks[name] = append(ctx.blocks[name], b)
 	}
@@ -225,6 +282,9 @@ func (ctx *context) renderRoot(t *Template, out *strings.Builder) error {
 
 func (ctx *context) renderNodes(t *Template, nodes []node, f *frame, out *strings.Builder, st *renderState) error {
 	for _, n := range nodes {
+		if err := ctx.budget.step(); err != nil {
+			return err
+		}
 		if err := ctx.renderNode(t, n, f, out, st); err != nil {
 			return err
 		}
@@ -232,17 +292,21 @@ func (ctx *context) renderNodes(t *Template, nodes []node, f *frame, out *string
 	return nil
 }
 
-func (ctx *context) write(out *strings.Builder, st *renderState, s string) {
+func (ctx *context) write(out *strings.Builder, st *renderState, s string) error {
 	if st != nil && st.parentTmpl != nil {
-		return
+		return nil
+	}
+	if err := ctx.budget.addOutput(len(s)); err != nil {
+		return err
 	}
 	out.WriteString(s)
+	return nil
 }
 
 func (ctx *context) renderNode(t *Template, n node, f *frame, out *strings.Builder, st *renderState) error {
 	switch x := n.(type) {
 	case *textNode:
-		ctx.write(out, st, x.text)
+		return ctx.write(out, st, x.text)
 	case *outputNode:
 		if st != nil && st.parentTmpl != nil {
 			return nil
@@ -251,7 +315,11 @@ func (ctx *context) renderNode(t *Template, n node, f *frame, out *strings.Build
 		if err != nil {
 			return wrapErr(t, x.line, err)
 		}
-		out.WriteString(ctx.env.output(v))
+		s := ctx.env.output(v)
+		if err := ctx.budget.addOutput(len(s)); err != nil {
+			return wrapErr(t, x.line, err)
+		}
+		out.WriteString(s)
 	case *ifNode:
 		for i, test := range x.tests {
 			v, err := ctx.eval(test, f)
@@ -322,7 +390,7 @@ func (ctx *context) renderNode(t *Template, n node, f *frame, out *strings.Build
 				vars[k] = v
 			}
 		}
-		sub := &context{env: ctx.env, parent: vars, vars: map[string]any{}, blocks: map[string][]*blockNode{}}
+		sub := &context{env: ctx.env, parent: vars, vars: map[string]any{}, blocks: map[string][]*blockNode{}, budget: ctx.budget}
 		return sub.renderRoot(it, out)
 	case *macroNode:
 		m := &Macro{node: x, tmpl: t, ctx: ctx, closure: f}
@@ -346,6 +414,10 @@ func wrapErr(t *Template, line int, err error) error {
 func itoa(n int) string { return Str(int64(n)) }
 
 func (ctx *context) renderBlock(name string, index int, f *frame, out *strings.Builder) error {
+	if err := ctx.budget.enter(); err != nil {
+		return err
+	}
+	defer ctx.budget.leave()
 	stack := ctx.blocks[name]
 	if index >= len(stack) {
 		return errf("no parent block '%s'", name)
@@ -470,6 +542,9 @@ func (ctx *context) renderFor(t *Template, x *forNode, f *frame, out *strings.Bu
 		return ctx.renderNodes(t, x.els, f, out, st)
 	}
 	for i, it := range items {
+		if err := ctx.budget.step(); err != nil {
+			return err
+		}
 		// Each iteration starts from the enclosing scope again: a name set in
 		// the body does not carry into the next iteration (Jinja 3).
 		lf := f.child()
@@ -493,6 +568,10 @@ type Macro struct {
 }
 
 func (m *Macro) Call(args []any, kwargs *Map) (any, error) {
+	if err := m.ctx.budget.enter(); err != nil {
+		return nil, err
+	}
+	defer m.ctx.budget.leave()
 	mf := &frame{vars: map[string]any{}, parent: m.closure, ctx: m.ctx}
 	if m.closure.toplevel {
 		mf.parent = nil

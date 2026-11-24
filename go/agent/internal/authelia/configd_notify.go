@@ -150,7 +150,7 @@ func (c *Configd) openNotificationSnapshot(config *pyyaml.Map) (*notifySnapshot,
 	if err := syscall.Fstat(fd, &after); err != nil {
 		return nil, err
 	}
-	mtimeNS := func(st *syscall.Stat_t) int64 { return st.Mtim.Sec*1e9 + st.Mtim.Nsec }
+	mtimeNS := func(st *syscall.Stat_t) int64 { return int64(st.Mtim.Sec)*1e9 + int64(st.Mtim.Nsec) }
 	if before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size || mtimeNS(&before) != mtimeNS(&after) {
 		return nil, inboxConflict("the local notification changed while it was being read")
 	}
@@ -297,16 +297,21 @@ func (c *Configd) writeNotificationState(state *pyyaml.Map) error {
 			_ = os.Remove(name)
 		}
 	}()
-	_ = tmp.Chmod(0o600)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+	if err := syncTempFile(tmp); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	tmp.Close()
+	if err := closeTempFile(tmp); err != nil {
+		return err
+	}
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}

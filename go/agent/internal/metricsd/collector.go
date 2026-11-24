@@ -610,14 +610,17 @@ func (c *Collector) poll() (int, error) {
 	}
 	bucketTS := now - now%bucketSeconds
 	observed := 0
+	var pendingTraffic []alerts.Observation
 	err = func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if !c.hasBucket {
 			c.bucketTS, c.hasBucket = bucketTS, true
 		} else if bucketTS != c.bucketTS {
-			if _, err := c.flushLocked(c.bucketTS); err != nil {
-				return err
+			_, obs, ferr := c.flushLocked(c.bucketTS)
+			pendingTraffic = obs
+			if ferr != nil {
+				return ferr
 			}
 			c.bucketTS = bucketTS
 		}
@@ -647,6 +650,7 @@ func (c *Collector) poll() (int, error) {
 		}
 		return nil
 	}()
+	c.sendObservations(pendingTraffic)
 	if err != nil {
 		return 0, err
 	}
@@ -702,15 +706,16 @@ func (c *Collector) slowThresholds() map[string]int64 {
 	return c.thresholds
 }
 
-func (c *Collector) reportTraffic(rows map[int64]map[string]int64) {
+func (c *Collector) trafficObservationsLocked(rows map[int64]map[string]int64) []alerts.Observation {
 	if c.storage.alerts == nil {
-		return
+		return nil
 	}
 	names := map[int64]objectKey{}
 	for k, id := range c.objectIDs {
 		names[id] = k
 	}
 	own := c.slowThresholds()
+	var obs []alerts.Observation
 	for _, id := range sortedIDs(rows) {
 		row := rows[id]
 		key, ok := names[id]
@@ -732,7 +737,7 @@ func (c *Collector) reportTraffic(rows map[int64]map[string]int64) {
 				summary = fmt.Sprintf("%s: %d%% of responses were server errors", proxy, percent)
 				detail = fmt.Sprintf("%d of %d responses in the last minute were 5xx (threshold %d%%)", errs, requests, c.cfg.AlertErrorRatioPercent)
 			}
-			observe(c.storage.alerts, alerts.Observation{Rule: "http.error_ratio", Subject: proxy, Active: alerts.BoolPtr(failing), Summary: summary, Detail: detail})
+			obs = append(obs, alerts.Observation{Rule: "http.error_ratio", Subject: proxy, Active: alerts.BoolPtr(failing), Summary: summary, Detail: detail})
 		}
 		ownMS, hasOwn := own[proxy]
 		threshold := c.cfg.AlertSlowResponseMS
@@ -751,11 +756,21 @@ func (c *Collector) reportTraffic(rows map[int64]map[string]int64) {
 				}
 				detail = fmt.Sprintf("average over the last minute, %d requests (threshold %d ms%s)", requests, threshold, suffix)
 			}
-			observe(c.storage.alerts, alerts.Observation{Rule: "response.slow", Subject: proxy, Active: alerts.BoolPtr(slow), Summary: summary, Detail: detail})
+			obs = append(obs, alerts.Observation{Rule: "response.slow", Subject: proxy, Active: alerts.BoolPtr(slow), Summary: summary, Detail: detail})
 		} else if hasOwn && ownMS == 0 {
-			observe(c.storage.alerts, alerts.Observation{Rule: "response.slow", Subject: proxy, Active: alerts.BoolPtr(false),
+			obs = append(obs, alerts.Observation{Rule: "response.slow", Subject: proxy, Active: alerts.BoolPtr(false),
 				Summary: proxy + ": slow-response alerts are off for this site"})
 		}
+	}
+	return obs
+}
+
+func (c *Collector) sendObservations(obs []alerts.Observation) {
+	if c.storage.alerts == nil || len(obs) == 0 {
+		return
+	}
+	for _, o := range obs {
+		observe(c.storage.alerts, o)
 	}
 }
 
@@ -1312,24 +1327,28 @@ func (c *Collector) trackState(id int64, status string, now int64) error {
 }
 
 func (c *Collector) flush(force bool) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.hasBucket {
-		return 0, nil
-	}
-	now := utcNow()
-	current := now - now%bucketSeconds
-	if !force && current == c.bucketTS {
-		return 0, nil
-	}
-	n, err := c.flushLocked(c.bucketTS)
-	c.bucketTS = current
+	n, pending, err := func() (int, []alerts.Observation, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.hasBucket {
+			return 0, nil, nil
+		}
+		now := utcNow()
+		current := now - now%bucketSeconds
+		if !force && current == c.bucketTS {
+			return 0, nil, nil
+		}
+		n, obs, err := c.flushLocked(c.bucketTS)
+		c.bucketTS = current
+		return n, obs, err
+	}()
+	c.sendObservations(pending)
 	return n, err
 }
 
-func (c *Collector) flushLocked(bucketTS int64) (int, error) {
+func (c *Collector) flushLocked(bucketTS int64) (int, []alerts.Observation, error) {
 	if len(c.buckets) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	rows := map[int64]map[string]int64{}
 	for id, b := range c.buckets {
@@ -1340,26 +1359,27 @@ func (c *Collector) flushLocked(bucketTS int64) (int, error) {
 	if len(rows) == 0 {
 		c.buckets = map[int64]*Bucket{}
 		c.bucketReported = false
-		return 0, nil
+		return 0, nil, nil
 	}
+	var pending []alerts.Observation
 	if !c.bucketReported {
-		c.reportTraffic(rows)
+		pending = c.trafficObservationsLocked(rows)
 		c.bucketReported = true
 	}
 	if c.storage.writesPaused {
 		c.bucketsDropped += int64(len(rows))
 		c.buckets = map[int64]*Bucket{}
 		c.bucketReported = false
-		return 0, nil
+		return 0, pending, nil
 	}
 	if err := c.db.writeBuckets(bucketTS, rows, true, c.baselines); err != nil {
-		return 0, err
+		return 0, pending, err
 	}
 	c.buckets = map[int64]*Bucket{}
 	c.bucketReported = false
 	c.lastFlushTS = bucketTS
 	c.bucketsWritten += int64(len(rows))
-	return len(rows), nil
+	return len(rows), pending, nil
 }
 
 // Monitor maps are replaced, never mutated, once they are published.

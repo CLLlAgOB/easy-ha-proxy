@@ -121,6 +121,7 @@
       tags: restore-network
 
     - name: Allow haproxy reader user to read Authelia log (current file)
+      become: true
       ansible.posix.acl:
         path: "{{ authelia_log_file }}"
         entity: "{{ authelia_log_reader_user }}"
@@ -129,6 +130,7 @@
         state: present
 
     - name: Ensure default ACL for Authelia logs dir
+      become: true
       ansible.posix.acl:
         path: "{{ authelia_logs_dir }}"
         entity: "{{ authelia_log_reader_user }}"
@@ -137,24 +139,63 @@
         default: yes
         state: present
 
-    - name: Ensure default ACL for Authelia root dir
+    - name: Remove inherited default ACL for log reader on Authelia root dir
+      become: true
       ansible.posix.acl:
         path: "{{ authelia_root_dir }}"
         entity: "{{ authelia_log_reader_user }}"
         etype: user
-        permissions: rx
         default: yes
-        state: present
+        state: absent
+
+    - name: Remove inherited default ACL for log reader on Authelia redis dir
+      when: authelia_session_redis_enabled | default(true)
+      become: true
+      ansible.posix.acl:
+        path: "{{ authelia_redis_data_dir }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        default: yes
+        state: absent
+
+    - name: Check existing private Authelia paths for stale log-reader ACL cleanup
+      become: true
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ authelia_config_file }}"
+        - "{{ authelia_env_file }}"
+        - "{{ authelia_docker_compose_file }}"
+        - "{{ authelia_root_dir }}/notification.log"
+        - "{{ authelia_root_dir }}/{{ authelia_storage_local_path | default('/config/db.sqlite3') | basename }}"
+        - "{{ authelia_root_dir }}/{{ authelia_storage_local_path | default('/config/db.sqlite3') | basename }}-wal"
+        - "{{ authelia_root_dir }}/{{ authelia_storage_local_path | default('/config/db.sqlite3') | basename }}-shm"
+        - "{{ authelia_root_dir }}/{{ authelia_storage_local_path | default('/config/db.sqlite3') | basename }}-journal"
+        - "{{ authelia_redis_data_dir }}"
+      register: authelia_private_acl_paths
+
+    - name: Remove inherited log-reader ACL from private Authelia files and dirs
+      become: true
+      ansible.posix.acl:
+        path: "{{ item.item }}"
+        entity: "{{ authelia_log_reader_user }}"
+        etype: user
+        state: absent
+      loop: "{{ authelia_private_acl_paths.results }}"
+      when: item.stat.exists and not item.stat.islnk
 
     - name: Allow haproxy reader user to traverse Authelia root dir (non-default ACL)
+      become: true
       ansible.posix.acl:
         path: "{{ authelia_root_dir }}"
         entity: "{{ authelia_log_reader_user }}"
         etype: user
-        permissions: rx
+        permissions: x
         state: present
 
     - name: Allow haproxy reader user to traverse Authelia logs dir (non-default ACL)
+      become: true
       ansible.posix.acl:
         path: "{{ authelia_logs_dir }}"
         entity: "{{ authelia_log_reader_user }}"

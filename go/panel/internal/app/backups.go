@@ -60,8 +60,25 @@ func backupMaxUpload() int64 {
 	return envInt64("EASY_HA_PROXY_BACKUP_MAX_UPLOAD_BYTES", 8*1024*1024*1024)
 }
 
+func envOrFirst(names []string, def string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
+			return v
+		}
+	}
+	return def
+}
+
+func backupdSocketPath() string {
+	return envOrFirst([]string{"EASY_HA_PROXY_BACKUPD_SOCKET", "BACKUPD_SOCKET_PATH"}, "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock")
+}
+
+func updatedSocketPath() string {
+	return envOrFirst([]string{"EASY_HA_PROXY_UPDATED_SOCKET", "UPDATED_SOCKET_PATH"}, "/run/easy-ha-proxy/easy-ha-proxy-updated.sock")
+}
+
 func backupRequest(payload *Map, timeout time.Duration) (*Map, error) {
-	return JSONLineRequest(strings.TrimSpace(envOr("EASY_HA_PROXY_BACKUPD_SOCKET", "/run/easy-ha-proxy/easy-ha-proxy-backupd.sock")),
+	return JSONLineRequest(backupdSocketPath(),
 		payload, "full-backup", timeout, 64*1024, 4*1024*1024)
 }
 
@@ -226,10 +243,12 @@ func (c *Ctx) uploadArchive() error {
 		}
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fail(0, pyOSError(err), false)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return fail(0, pyOSError(err), false)
+	}
 	if written != length {
 		return fail(syscall.EIO, pyErrnoError(syscall.EIO, "upload ended before the declared size"), false)
 	}

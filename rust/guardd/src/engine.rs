@@ -290,12 +290,34 @@ impl SiteNames {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingAlert {
+    pub rule: String,
+    pub subject: String,
+    pub active: Option<bool>,
+    pub summary: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedBan {
+    ip: String,
+    now: i64,
+    duration: i64,
+    code: i64,
+    score: i64,
+    after_page: bool,
+    categories: String,
+    decision: i64,
+}
+
 pub struct Engine {
     pub config: GuardConfig,
     pub db: Arc<SecurityDatabase>,
     pub sigs: Arc<RwLock<Arc<SignatureEngine>>>,
     pub requests: Arc<RwLock<Option<Arc<RequestLog>>>>,
-    pub alerts: Option<AlertClient>,
+    pub alerts: Option<Arc<AlertClient>>,
+    pending_alerts: Vec<PendingAlert>,
     pub sink: Sink,
     pub enforcer: Enforcer,
     failing_reported: bool,
@@ -354,7 +376,7 @@ impl Engine {
         config: GuardConfig,
         db: Arc<SecurityDatabase>,
         sigs: Arc<RwLock<Arc<SignatureEngine>>>,
-        alerts: Option<AlertClient>,
+        alerts: Option<Arc<AlertClient>>,
         requests: Arc<RwLock<Option<Arc<RequestLog>>>>,
     ) -> Self {
         let now = utc_now();
@@ -437,6 +459,7 @@ impl Engine {
             sigs,
             requests,
             alerts,
+            pending_alerts: Vec::new(),
             sink,
             enforcer,
             failing_reported: false,
@@ -536,13 +559,38 @@ impl Engine {
         n
     }
 
-    fn read_back(
-        &self,
+    fn queue_alert(
+        &mut self,
+        rule: &str,
+        subject: &str,
+        active: Option<bool>,
+        summary: String,
+        detail: String,
+    ) {
+        if self.alerts.is_none() {
+            return;
+        }
+        self.pending_alerts.push(PendingAlert {
+            rule: rule.to_string(),
+            subject: subject.to_string(),
+            active,
+            summary,
+            detail,
+        });
+    }
+
+    pub fn take_pending_alerts(&mut self) -> Vec<PendingAlert> {
+        std::mem::take(&mut self.pending_alerts)
+    }
+
+    fn read_back_file(
+        log_file: &str,
+        sigs: &SignatureEngine,
         start: u64,
         end: u64,
         horizon: f64,
     ) -> std::io::Result<(Vec<LiveRecord>, bool, u64)> {
-        let mut f = File::open(&self.config.log_file)?;
+        let mut f = File::open(log_file)?;
         f.seek(SeekFrom::Start(start))?;
         let mut data = vec![0u8; (end - start) as usize];
         let n = f.read(&mut data)?;
@@ -556,7 +604,6 @@ impl Engine {
             slice = &slice[cut..];
             boundary = start + cut as u64;
         }
-        let sigs = self.sig();
         let mut records = Vec::new();
         let mut reached_back = start == 0;
         for raw in slice.split(|&b| b == b'\n') {
@@ -572,11 +619,21 @@ impl Engine {
                 reached_back = true;
                 continue;
             }
-            if let Some(req) = parse_access_line(&line, &sigs) {
+            if let Some(req) = parse_access_line(&line, sigs) {
                 records.push(LiveRecord::from_parsed(&req, ts));
             }
         }
         Ok((records, reached_back, boundary))
+    }
+
+    fn read_back(
+        &self,
+        start: u64,
+        end: u64,
+        horizon: f64,
+    ) -> std::io::Result<(Vec<LiveRecord>, bool, u64)> {
+        let sigs = self.sig();
+        Self::read_back_file(&self.config.log_file, &sigs, start, end, horizon)
     }
 
     fn live_full(&self) -> bool {
@@ -751,50 +808,6 @@ impl Engine {
     }
 
     // -- collection -----------------------------------------------------------------
-
-    fn poll(
-        &mut self,
-        tables: Result<(Tables, BTreeSet<String>), String>,
-    ) -> Result<Value, String> {
-        let now = utc_now();
-        self.sink.exclusions.reload_files(false);
-        self.refresh_ban_policy(now)?;
-        let (tables, unreadable) = tables?;
-        self.unreadable_tables = unreadable;
-        let mut from_tables = self.ingest_tables(&tables, now)?;
-        from_tables += self.ingest_hard_floor(now)?;
-        let budget = (64 * 1024).max(
-            self.config
-                .log_read_bytes_per_cycle
-                .saturating_sub(self.cycle_bytes),
-        );
-        let from_log = self.ingest_log(now, Some(budget))?;
-        self.flush_rate_warnings(now, from_log == 0);
-        let enforcement = self
-            .apply_enforcement(Some(now))
-            .map_err(|e| e.to_string())?;
-        self.db.set_state(
-            "log_cursor",
-            &crate::secdb::python_json(&cursor_state(&self.cursor)),
-        )?;
-        self.sync_shield(now);
-        self.weekly_summary_tick(Some(now));
-        let sigs = self.sig();
-        let _ = &sigs;
-        self.login_correlations
-            .poll(now, &self.sink.exclusions, &mut self.detection, &self.db)?;
-        self.detection.persist(now, false, &self.db)?;
-        self.polls_total += 1;
-        self.last_poll_ts = Some(now);
-        self.consecutive_failures = 0;
-        self.last_error = None;
-        Ok(json!({
-            "table_events": from_tables,
-            "log_lines": from_log,
-            "banned": enforcement["applied"].as_array().map(Vec::len).unwrap_or(0),
-            "lifted": enforcement["lifted"].as_array().map(Vec::len).unwrap_or(0),
-        }))
-    }
 
     fn read_tables(socket: &str, stop: &AtomicBool) -> Result<(Tables, BTreeSet<String>), String> {
         let available = list_tables(socket).map_err(|e| e.to_string())?;
@@ -1403,6 +1416,10 @@ impl Engine {
         self.lag_bytes
             .store(self.cursor.lag_bytes, Ordering::Relaxed);
         self.cycle_bytes += self.cursor.offset.saturating_sub(before) as usize;
+        self.ingest_log_lines(&lines, now)
+    }
+
+    fn ingest_log_lines(&mut self, lines: &[String], now: i64) -> Result<usize, String> {
         if lines.is_empty() {
             return Ok(0);
         }
@@ -1415,7 +1432,7 @@ impl Engine {
             .clone();
         let mut parsed = 0u64;
         let mut live_batch = Vec::new();
-        for line in &lines {
+        for line in lines {
             let Some(request) = parse_access_line(line, &sigs) else {
                 continue;
             };
@@ -2312,18 +2329,17 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn apply_row_decision(
-        &mut self,
+    fn prepare_row_decision(
+        &self,
         row: &Reputation,
         now: i64,
-        scheduled: &mut BTreeMap<String, i64>,
-        codes: &mut BTreeMap<String, i64>,
-        standing: &mut HashMap<String, i64>,
-        applied: &mut Vec<String>,
-    ) -> EResult<bool> {
+        scheduled: &BTreeMap<String, i64>,
+        codes: &BTreeMap<String, i64>,
+        standing: &HashMap<String, i64>,
+    ) -> EResult<Option<PreparedBan>> {
         let ip = row.ip.as_str();
         if row.score < WOULD_BAN_SCORE {
-            return Ok(false);
+            return Ok(None);
         }
         let mut after_page = false;
         if scheduled.get(ip).copied().unwrap_or(0) > now {
@@ -2332,16 +2348,16 @@ impl Engine {
                 && self.db.signature_paths_since(ip, self.db.last_ban_ts(ip))
                     >= PAGE_ESCALATION_PATHS;
             if !escalate {
-                return Ok(false);
+                return Ok(None);
             }
             after_page = true;
         }
         let standing_code = standing.get(ip).copied().unwrap_or(ADAPTIVE_BAN_CODE);
         if standing_code != ADAPTIVE_BAN_CODE && standing_code != ADAPTIVE_PAGE_CODE {
-            return Ok(false);
+            return Ok(None);
         }
         if !self.ban_blockers(row, now, None).is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let last_ban = self.db.last_ban_ts(ip);
         let mut floor = last_ban;
@@ -2353,7 +2369,7 @@ impl Engine {
             }
         }
         if last_ban != 0 && self.db.newest_finding_ts(ip) <= floor {
-            return Ok(false);
+            return Ok(None);
         }
         let duration = self.ban_duration(ip, now)?;
         let level = self.strike_level(ip, now)?;
@@ -2381,11 +2397,6 @@ impl Engine {
                 reason: Some(reason),
             },
         )?;
-        if !self.enforcer.ban(ip, code)? {
-            self.db.settle_decision(decision, "failed")?;
-            self.sink.queue.mark(ip, true);
-            return Ok(false);
-        }
         let mut cats: Vec<&String> = row.categories.keys().collect();
         cats.sort();
         let categories = cats
@@ -2393,52 +2404,102 @@ impl Engine {
             .map(|s| s.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        self.db.commit_ban(
-            decision,
-            ip,
-            now + duration,
-            code,
+        Ok(Some(PreparedBan {
+            ip: ip.to_string(),
             now,
+            duration,
+            code,
+            score: row.score,
+            after_page,
+            categories,
+            decision,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_row_decision(
+        &mut self,
+        prep: PreparedBan,
+        banned: bool,
+        scheduled: &mut BTreeMap<String, i64>,
+        codes: &mut BTreeMap<String, i64>,
+        standing: &mut HashMap<String, i64>,
+        applied: &mut Vec<String>,
+    ) -> EResult<bool> {
+        let ip = prep.ip.as_str();
+        if !banned {
+            self.db.settle_decision(prep.decision, "failed")?;
+            self.sink.queue.mark(ip, true);
+            return Ok(false);
+        }
+        self.db.commit_ban(
+            prep.decision,
+            ip,
+            prep.now + prep.duration,
+            prep.code,
+            prep.now,
             &format!(
-                "score={} seconds={duration} [{categories}]{}",
-                row.score,
-                if after_page { " after the page" } else { "" }
+                "score={} seconds={} [{}]{}",
+                prep.score,
+                prep.duration,
+                prep.categories,
+                if prep.after_page {
+                    " after the page"
+                } else {
+                    ""
+                }
             ),
         )?;
-        scheduled.insert(ip.to_string(), now + duration);
-        codes.insert(ip.to_string(), code);
-        standing.insert(ip.to_string(), code);
+        scheduled.insert(prep.ip.clone(), prep.now + prep.duration);
+        codes.insert(prep.ip.clone(), prep.code);
+        standing.insert(prep.ip.clone(), prep.code);
         self.sink.events_recorded += 1;
-        applied.push(ip.to_string());
+        applied.push(prep.ip.clone());
         log_warn(&format!(
-            "Adaptive ban applied to {ip} for {duration}s (score {}){}",
-            row.score,
-            if code == ADAPTIVE_PAGE_CODE {
+            "Adaptive ban applied to {ip} for {}s (score {}){}",
+            prep.duration,
+            prep.score,
+            if prep.code == ADAPTIVE_PAGE_CODE {
                 " -- a page first"
-            } else if after_page {
+            } else if prep.after_page {
                 " -- went on after the page"
             } else {
                 ""
             }
         ));
-        if let Some(alerts) = &self.alerts {
-            alerts.observe(
-                "security.hostile_ip",
-                ip,
-                None,
-                &format!("Adaptive protection banned {ip} for {duration}s"),
-                &format!(
-                    "score {} over {}; the ban lifts automatically when it expires",
-                    row.score,
-                    if categories.is_empty() {
-                        "no category".to_string()
-                    } else {
-                        categories.clone()
-                    }
-                ),
-            );
-        }
+        self.queue_alert(
+            "security.hostile_ip",
+            ip,
+            None,
+            format!("Adaptive protection banned {ip} for {}s", prep.duration),
+            format!(
+                "score {} over {}; the ban lifts automatically when it expires",
+                prep.score,
+                if prep.categories.is_empty() {
+                    "no category".to_string()
+                } else {
+                    prep.categories
+                }
+            ),
+        );
         Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_row_decision(
+        &mut self,
+        row: &Reputation,
+        now: i64,
+        scheduled: &mut BTreeMap<String, i64>,
+        codes: &mut BTreeMap<String, i64>,
+        standing: &mut HashMap<String, i64>,
+        applied: &mut Vec<String>,
+    ) -> EResult<bool> {
+        let Some(prep) = self.prepare_row_decision(row, now, scheduled, codes, standing)? else {
+            return Ok(false);
+        };
+        let banned = self.enforcer.ban(&prep.ip, prep.code)?;
+        self.finish_row_decision(prep, banned, scheduled, codes, standing, applied)
     }
 
     fn check_burst(&mut self, banned: usize, now: i64) {
@@ -2463,15 +2524,16 @@ impl Engine {
             return;
         }
         self.burst_reported = Some(now);
-        if let Some(alerts) = &self.alerts {
-            alerts.observe(
-                "security.burst",
-                "gateway",
-                None,
-                &format!("{count} addresses banned in the last {} minutes", BURST_WINDOW_SECONDS / 60),
-                "Either a campaign is under way or a rule has started to match ordinary clients; the adaptive protection page shows who and why.",
-            );
-        }
+        self.queue_alert(
+            "security.burst",
+            "gateway",
+            None,
+            format!(
+                "{count} addresses banned in the last {} minutes",
+                BURST_WINDOW_SECONDS / 60
+            ),
+            "Either a campaign is under way or a rule has started to match ordinary clients; the adaptive protection page shows who and why.".into(),
+        );
     }
 
     pub fn report_failing(&mut self) {
@@ -2480,7 +2542,9 @@ impl Engine {
             return;
         }
         self.failing_reported = failing;
-        let Some(alerts) = &self.alerts else { return };
+        if self.alerts.is_none() {
+            return;
+        }
         if failing {
             let err: String = self
                 .last_error
@@ -2489,18 +2553,20 @@ impl Engine {
                 .chars()
                 .take(200)
                 .collect();
-            alerts.observe(
+            self.queue_alert(
                 ENGINE_FAILING_RULE,
                 "guardd",
                 Some(true),
-                &format!("Adaptive protection keeps failing: {err}"),
-                "Until it works again nothing is scored or banned and no ban decision is recorded; bans already in HAProxy stay. The service journal of easy-ha-proxy-guardd has the details; a full disk is the usual cause.",
+                format!("Adaptive protection keeps failing: {err}"),
+                "Until it works again nothing is scored or banned and no ban decision is recorded; bans already in HAProxy stay. The service journal of easy-ha-proxy-guardd has the details; a full disk is the usual cause.".into(),
             );
         } else {
-            alerts.clear(
+            self.queue_alert(
                 ENGINE_FAILING_RULE,
                 "guardd",
-                "Adaptive protection works again",
+                Some(false),
+                "Adaptive protection works again".into(),
+                String::new(),
             );
         }
     }
@@ -2817,9 +2883,7 @@ impl Engine {
             return false;
         };
         let (summary, detail) = self.weekly_summary_text(&report);
-        if let Some(alerts) = &self.alerts {
-            alerts.observe(WEEKLY_SUMMARY_RULE, &week, None, &summary, &detail);
-        }
+        self.queue_alert(WEEKLY_SUMMARY_RULE, &week, None, summary, detail);
         self.db.set_state(WEEKLY_SUMMARY_KEY, &week).is_ok()
     }
 
@@ -3448,6 +3512,8 @@ fn stat_inode_size(path: &str) -> Option<(u64, u64)> {
 /// the live page never waits for a poll.
 pub struct Shared {
     pub engine: Mutex<Engine>,
+    pub decisions: Mutex<()>,
+    pub alerts: Option<Arc<AlertClient>>,
     pub stop: Arc<AtomicBool>,
     pub lag_bytes: Arc<AtomicU64>,
     pub db: Arc<SecurityDatabase>,
@@ -3464,6 +3530,797 @@ pub struct Shared {
 impl Shared {
     pub fn engine(&self) -> MutexGuard<'_, Engine> {
         lock(&self.engine)
+    }
+
+    pub fn flush_alerts(&self) {
+        let batch = self.engine().take_pending_alerts();
+        if batch.is_empty() {
+            return;
+        }
+        let Some(alerts) = &self.alerts else { return };
+        for a in batch {
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            alerts.observe(&a.rule, &a.subject, a.active, &a.summary, &a.detail);
+        }
+    }
+
+    fn merge_enforcer_deltas(&self, before: &Enforcer, after: &Enforcer) {
+        let mut e = self.engine();
+        e.enforcer.refused += after.refused.saturating_sub(before.refused);
+        e.enforcer.applied += after.applied.saturating_sub(before.applied);
+        e.enforcer.failed += after.failed.saturating_sub(before.failed);
+        e.enforcer.lifted += after.lifted.saturating_sub(before.lifted);
+    }
+
+    pub fn continue_refill_step(&self) -> Option<Duration> {
+        let (inode, boundary, horizon, log_file, live, sigs) = {
+            let mut e = self.engine();
+            let (inode, boundary, horizon) = e.refill_resume.take()?;
+            let live = e.live.clone()?;
+            if boundary == 0 || e.live_full() {
+                return None;
+            }
+            (
+                inode,
+                boundary,
+                horizon,
+                e.config.log_file.clone(),
+                live,
+                e.sig(),
+            )
+        };
+        if stat_inode_size(&log_file).map(|(i, _)| i) != Some(inode) {
+            return None;
+        }
+        let started = Instant::now();
+        let start = boundary.saturating_sub(LIVE_REFILL_CHUNK_BYTES);
+        let Ok((records, reached_back, first)) =
+            Engine::read_back_file(&log_file, &sigs, start, boundary, horizon)
+        else {
+            return None;
+        };
+        if let Some(first_ts) = records.first().map(|r| r.ts) {
+            lock(&live).refill(records, if reached_back { horizon } else { first_ts });
+        }
+        if reached_back {
+            return None;
+        }
+        let next = if first < boundary { first } else { start };
+        self.engine().refill_resume = Some((inode, next, horizon));
+        Some(started.elapsed().max(Duration::from_millis(50)))
+    }
+
+    fn ingest_log_detached(&self, now: i64, max_bytes: Option<usize>) -> Result<usize, String> {
+        let (mut cursor, budget) = {
+            let e = self.engine();
+            let limit = max_bytes.unwrap_or(e.config.log_read_bytes_per_cycle);
+            (e.cursor.clone(), limit)
+        };
+        let before = cursor.offset;
+        let lines = cursor.read(budget);
+        let delta = cursor.offset.saturating_sub(before) as usize;
+        self.lag_bytes.store(cursor.lag_bytes, Ordering::Relaxed);
+        let mut e = self.engine();
+        e.cursor = cursor;
+        e.cycle_bytes += delta;
+        e.ingest_log_lines(&lines, now)
+    }
+
+    fn sync_shield_locked(&self, _decisions: &MutexGuard<'_, ()>, now: i64) -> Value {
+        let (haproxy_socket, config_path, prev_status, wanted) = {
+            let e = self.engine();
+            let sigs = e.sig();
+            let wanted = shield_entries(
+                &e.enforcer.mode,
+                e.shield_enabled,
+                &e.detection.config.modes,
+                &e.detection.config.exceptions,
+                now,
+                &sigs,
+            );
+            (
+                e.shield.haproxy_socket.clone(),
+                e.shield.config_path.clone(),
+                e.shield.status.clone(),
+                wanted,
+            )
+        };
+        let status = match wanted {
+            Ok(w) => {
+                let mut detached = PathShield {
+                    haproxy_socket,
+                    config_path,
+                    status: prev_status,
+                };
+                detached.sync(&w, now)
+            }
+            Err(err) => {
+                let mut s = prev_status;
+                s["active"] = json!(false);
+                s["error"] = json!(err.chars().take(300).collect::<String>());
+                s
+            }
+        };
+        self.engine().shield.status = status.clone();
+        status
+    }
+
+    pub fn set_shield(&self, enabled: &Value, now: Option<i64>) -> EResult<Value> {
+        let Some(enabled) = enabled.as_bool() else {
+            return Err(EngineError::Value("enabled must be true or false".into()));
+        };
+        let decisions = lock(&self.decisions);
+        {
+            let mut e = self.engine();
+            e.db.set_state(SHIELD_ENABLED_KEY, if enabled { "1" } else { "0" })?;
+            e.shield_enabled = enabled;
+        }
+        log_warn(&format!(
+            "Path shield switched {}",
+            if enabled { "on" } else { "off" }
+        ));
+        self.sync_shield_locked(&decisions, now.unwrap_or_else(utc_now));
+        Ok(self.engine().shield_state())
+    }
+
+    fn settle_pending_decisions_locked(
+        &self,
+        _decisions: &MutexGuard<'_, ()>,
+        now: i64,
+    ) -> Result<(), String> {
+        let pending = self.db.pending_decisions(now - DECISION_PENDING_GRACE)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut enforcer = self.engine().enforcer.clone();
+        let before = enforcer.clone();
+        let standing = match enforcer.active_bans() {
+            Ok(s) => s,
+            Err(e) => {
+                log_warn(&format!(
+                    "Could not read the ban table to settle decisions: {e}"
+                ));
+                return Ok(());
+            }
+        };
+        let scheduled = self.db.scheduled_bans()?;
+        let outcome = (|| -> Result<(), String> {
+            for d in pending {
+                let ip = d["ip"].as_str().unwrap_or("").to_string();
+                let id = d["id"].as_i64().unwrap_or(0);
+                let until = d["until"].as_i64().unwrap_or(0);
+                let ts = d["ts"].as_i64().unwrap_or(0);
+                let code = standing.get(&ip).copied();
+                let adaptive =
+                    code.is_some_and(|c| c == ADAPTIVE_BAN_CODE || c == ADAPTIVE_PAGE_CODE);
+                if adaptive && !scheduled.contains_key(&ip) && until > now {
+                    self.db.commit_ban(
+                        id,
+                        &ip,
+                        until,
+                        code.unwrap_or(ADAPTIVE_BAN_CODE),
+                        ts,
+                        &format!("score={} seconds={} [settled]", d["score"], until - ts),
+                    )?;
+                    log_warn(&format!("Recorded the ban on {ip} applied before a crash"));
+                    continue;
+                }
+                if adaptive && !scheduled.contains_key(&ip) {
+                    if let Err(e) = enforcer.lift(&ip) {
+                        if e.ban_table_unsure() {
+                            log_warn(&e.to_string());
+                            continue;
+                        }
+                        return Err(e.to_string());
+                    }
+                }
+                self.db.settle_decision(id, "abandoned")?;
+            }
+            Ok(())
+        })();
+        self.merge_enforcer_deltas(&before, &enforcer);
+        outcome
+    }
+
+    fn apply_enforcement_locked(&self, decisions: &MutexGuard<'_, ()>, now: i64) -> EResult<Value> {
+        let mut applied: Vec<String> = Vec::new();
+        let mut lifted: Vec<String> = Vec::new();
+        self.settle_pending_decisions_locked(decisions, now)?;
+        let mut scheduled = self.db.scheduled_bans()?;
+        let mut codes = self.db.scheduled_ban_codes()?;
+        let (mut enforcer, ban_policy) = {
+            let mut e = self.engine();
+            e.enforcement_checked = 0;
+            (e.enforcer.clone(), e.sink.ban_policy)
+        };
+        let before = enforcer.clone();
+        let enforcing = enforcer.allowed();
+
+        let result: EResult<Value> = (|| {
+            for (ip, until) in scheduled.clone() {
+                let served = until <= now;
+                if enforcing && !served {
+                    continue;
+                }
+                let taken_off = match enforcer.lift(&ip) {
+                    Ok(t) => t,
+                    Err(e) if e.ban_table_unsure() => {
+                        log_warn(&format!("{e}; trying again next cycle"));
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if taken_off {
+                    lifted.push(ip.clone());
+                    let code = codes
+                        .get(&ip)
+                        .copied()
+                        .filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE)
+                        .unwrap_or(ADAPTIVE_BAN_CODE);
+                    let mut e = self.engine();
+                    e.sink.emit(
+                        &ip,
+                        EVENT_BAN_LIFTED,
+                        now,
+                        "guardd",
+                        "",
+                        "",
+                        if enforcing {
+                            "expired"
+                        } else {
+                            "enforcement disabled"
+                        },
+                        false,
+                        Some(format!("{ip}|{EVENT_BAN_LIFTED}|{until}")),
+                    )?;
+                    e.db.record_decision(
+                        &ip,
+                        now,
+                        "lifted",
+                        if served { "expiry" } else { "mode" },
+                        "applied",
+                        Decision {
+                            code,
+                            until,
+                            policy: ban_policy,
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                if served {
+                    self.db.clear_ban(&ip)?;
+                }
+            }
+            if !enforcing {
+                let mut extra: Vec<String> = enforcer.adaptive_bans()?.into_keys().collect();
+                extra.sort();
+                for ip in extra {
+                    if scheduled.contains_key(&ip) {
+                        continue;
+                    }
+                    match enforcer.lift(&ip) {
+                        Ok(true) => lifted.push(ip),
+                        Ok(false) => {}
+                        Err(e) if e.ban_table_unsure() => {
+                            log_warn(&format!("{e}; trying again next cycle"))
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                self.engine().apply_promotions();
+                return Ok(json!({"applied": applied, "lifted": lifted, "enforcing": false}));
+            }
+            let mut standing = enforcer.active_bans()?;
+            for (ip, until) in &scheduled {
+                if *until <= now || standing.contains_key(ip) {
+                    continue;
+                }
+                let code = codes
+                    .get(ip)
+                    .copied()
+                    .filter(|c| *c == ADAPTIVE_BAN_CODE || *c == ADAPTIVE_PAGE_CODE)
+                    .unwrap_or(ADAPTIVE_BAN_CODE);
+                if enforcer.ban(ip, code)? {
+                    log_info(&format!("Re-asserted the ban on {ip}, gone from the table"));
+                }
+            }
+            let (policy, pending, scan_after, mut scan_before) = {
+                let mut e = self.engine();
+                e.enforcement_checked = 0;
+                let policy = e.scoring_policy();
+                let pending = e
+                    .sink
+                    .queue
+                    .batch(ENFORCEMENT_BATCH - ENFORCEMENT_SWEEP_RESERVE);
+                if e.enforcement_scan_before == 0 {
+                    e.enforcement_scan_before = now;
+                }
+                (
+                    policy,
+                    pending,
+                    e.enforcement_scan_after.clone(),
+                    e.enforcement_scan_before,
+                )
+            };
+
+            let mut check_ip = |ip: &str,
+                                scheduled: &mut BTreeMap<String, i64>,
+                                codes: &mut BTreeMap<String, i64>,
+                                standing: &mut HashMap<String, i64>,
+                                applied: &mut Vec<String>|
+             -> EResult<()> {
+                let prep = {
+                    let e = self.engine();
+                    let row = e.reputation(ip, now, Some(&policy), Some(scheduled))?;
+                    e.prepare_row_decision(&row, now, scheduled, codes, standing)?
+                };
+                if let Some(prep) = prep {
+                    let banned = enforcer.ban(&prep.ip, prep.code)?;
+                    let mut e = self.engine();
+                    e.finish_row_decision(prep, banned, scheduled, codes, standing, applied)?;
+                }
+                Ok(())
+            };
+
+            let mut seen = HashSet::new();
+            for (ip, generation) in &pending {
+                seen.insert(ip.clone());
+                self.engine().enforcement_checked += 1;
+                check_ip(ip, &mut scheduled, &mut codes, &mut standing, &mut applied)?;
+                self.engine().sink.queue.acknowledge(ip, *generation);
+            }
+            let allowance = (ENFORCEMENT_BATCH - pending.len()) as i64;
+            let mut after = scan_after;
+            let mut addresses =
+                self.db
+                    .enforcement_addresses((after.0, &after.1), scan_before, allowance)?;
+            if addresses.is_empty() && after != (0, String::new()) {
+                after = (0, String::new());
+                scan_before = now;
+                {
+                    let mut e = self.engine();
+                    e.enforcement_scan_after = after.clone();
+                    e.enforcement_scan_before = scan_before;
+                }
+                addresses = self.db.enforcement_addresses((0, ""), now, allowance)?;
+            }
+            for (first_seen, ip) in &addresses {
+                if !seen.contains(ip) {
+                    self.engine().enforcement_checked += 1;
+                    check_ip(ip, &mut scheduled, &mut codes, &mut standing, &mut applied)?;
+                }
+                after = (*first_seen, ip.clone());
+                self.engine().enforcement_scan_after = after.clone();
+            }
+            if (addresses.len() as i64) < allowance {
+                after = (0, String::new());
+                scan_before = 0;
+                let mut e = self.engine();
+                e.enforcement_scan_after = after.clone();
+                e.enforcement_scan_before = 0;
+            }
+            self.db.set_state(
+                ENFORCEMENT_CURSOR_KEY,
+                &crate::secdb::python_json(&json!({
+                    "after": [after.0, after.1],
+                    "before": scan_before,
+                })),
+            )?;
+            {
+                let mut e = self.engine();
+                if !applied.is_empty() {
+                    e.check_burst(applied.len(), now);
+                }
+                e.apply_promotions();
+            }
+            Ok(json!({"applied": applied, "lifted": lifted, "enforcing": true}))
+        })();
+        self.merge_enforcer_deltas(&before, &enforcer);
+        result
+    }
+
+    pub fn apply_urgent_enforcement(&self, now: Option<i64>) -> EResult<Value> {
+        let now = now.unwrap_or_else(utc_now);
+        let _decisions = lock(&self.decisions);
+        let (mut enforcer, policy, urgent_batch) = {
+            let e = self.engine();
+            if !e.enforcer.allowed() || !e.sink.queue.has_urgent() {
+                return Ok(json!({"applied": [], "enforcing": e.enforcer.allowed()}));
+            }
+            (
+                e.enforcer.clone(),
+                e.scoring_policy(),
+                e.sink.queue.urgent_batch(ENFORCEMENT_BATCH),
+            )
+        };
+        let before = enforcer.clone();
+        let result: EResult<Value> = (|| {
+            let mut scheduled = self.db.scheduled_bans()?;
+            let mut codes = self.db.scheduled_ban_codes()?;
+            let mut standing = enforcer.active_bans()?;
+            let mut applied = Vec::new();
+            for (ip, generation) in urgent_batch {
+                let prep = {
+                    let e = self.engine();
+                    let row = e.reputation(&ip, now, Some(&policy), Some(&scheduled))?;
+                    e.prepare_row_decision(&row, now, &scheduled, &codes, &standing)?
+                };
+                if let Some(prep) = prep {
+                    let banned = enforcer.ban(&prep.ip, prep.code)?;
+                    let mut e = self.engine();
+                    e.finish_row_decision(
+                        prep,
+                        banned,
+                        &mut scheduled,
+                        &mut codes,
+                        &mut standing,
+                        &mut applied,
+                    )?;
+                }
+                self.engine().sink.queue.acknowledge(&ip, generation);
+            }
+            if !applied.is_empty() {
+                let mut e = self.engine();
+                e.fast_enforcements += applied.len() as u64;
+                e.check_burst(applied.len(), now);
+            }
+            Ok(json!({"applied": applied, "enforcing": true}))
+        })();
+        self.merge_enforcer_deltas(&before, &enforcer);
+        self.flush_alerts();
+        result
+    }
+
+    pub fn place_manual_ban(&self, ip: &str, now: Option<i64>) -> EResult<Value> {
+        let now = now.unwrap_or_else(utc_now);
+        let checked = ip.trim().to_string();
+        if !enforceable(&checked) {
+            return Err(EngineError::Value(
+                "only an IPv4 address can be banned".into(),
+            ));
+        }
+        let _decisions = lock(&self.decisions);
+        let (enforcer, haproxy_socket, ban_policy) = {
+            let e = self.engine();
+            (
+                e.enforcer.clone(),
+                e.config.haproxy_socket.clone(),
+                e.sink.ban_policy,
+            )
+        };
+        let mut remembered = true;
+        let previous = self
+            .db
+            .manual_bans()
+            .ok()
+            .and_then(|m| m.get(&checked).copied());
+        if let Err(e) =
+            self.db
+                .write_manual_ban(&checked, now, now + MANUAL_BAN_DEFAULT_SECONDS, now, 0)
+        {
+            remembered = false;
+            log_warn(&format!(
+                "Could not remember the manual ban on {checked}: {e}"
+            ));
+        }
+        let put_back = |db: &SecurityDatabase| {
+            if !remembered {
+                return;
+            }
+            match previous {
+                Some(p) => {
+                    let _ = db.write_manual_ban(
+                        &checked,
+                        p.placed_at,
+                        p.expires_at,
+                        p.seen_at,
+                        p.reasserted,
+                    );
+                }
+                None => {
+                    let _ = db.forget_manual_ban(&checked);
+                }
+            }
+        };
+        let placed = match enforcer.restore(&checked, MANUAL_BAN_CODE) {
+            Ok(p) => p,
+            Err(e) => {
+                put_back(&self.db);
+                return Err(EngineError::Refused(e.to_string()));
+            }
+        };
+        if !placed {
+            put_back(&self.db);
+            return Err(EngineError::Refused(format!(
+                "HAProxy refused the ban on {checked}"
+            )));
+        }
+        let mut until = now + MANUAL_BAN_DEFAULT_SECONDS;
+        if let Ok(rows) = read_table(&haproxy_socket, "tbl_ban", &format!("key {checked}")) {
+            if let Some(fields) = rows.get(&checked) {
+                let exp = field_int(fields, "exp");
+                if exp > 0 {
+                    until = now + exp / 1000;
+                }
+            }
+        }
+        let outcome = self
+            .db
+            .write_manual_ban(&checked, now, until, now, 0)
+            .and_then(|_| {
+                self.db.record_decision(
+                    &checked,
+                    now,
+                    "applied",
+                    "operator",
+                    "applied",
+                    Decision {
+                        code: MANUAL_BAN_CODE,
+                        until,
+                        policy: ban_policy,
+                        ..Default::default()
+                    },
+                )
+            });
+        if let Err(e) = outcome {
+            remembered = false;
+            log_warn(&format!(
+                "Banned {checked} by hand, but could not remember it: {e}"
+            ));
+        }
+        log_warn(&format!("Ban placed by hand on {checked} until {until}"));
+        Ok(
+            json!({"ok": true, "ip": checked, "code": MANUAL_BAN_CODE, "until": until, "remembered": remembered}),
+        )
+    }
+
+    pub fn forget_ban(&self, ip: &str, now: Option<i64>) -> EResult<Value> {
+        let now = now.unwrap_or_else(utc_now);
+        let checked = ip.trim().to_string();
+        if checked.is_empty() {
+            return Err(EngineError::Value("an address is required".into()));
+        }
+        if checked.parse::<std::net::IpAddr>().is_err() {
+            return Err(EngineError::Value("invalid IP address".into()));
+        }
+        let _decisions = lock(&self.decisions);
+        let mut enforcer = self.engine().enforcer.clone();
+        let before = enforcer.clone();
+        let held = self
+            .db
+            .scheduled_bans()?
+            .get(&checked)
+            .copied()
+            .unwrap_or(0);
+        self.db.clear_ban(&checked)?;
+        let manual = self.db.forget_manual_ban(&checked)?;
+        let mut refused = String::new();
+        let mut lifted = false;
+        let mut released = false;
+        let io_res: EResult<()> = (|| {
+            match enforcer.lift(&checked) {
+                Ok(l) => {
+                    lifted = l;
+                    match enforcer.release(&checked) {
+                        Ok(r) => released = r,
+                        Err(e) if e.ban_table_unsure() => {
+                            refused = e.to_string();
+                            log_warn(&refused);
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                Err(e) if e.ban_table_unsure() => {
+                    refused = e.to_string();
+                    log_warn(&refused);
+                }
+                Err(e) => return Err(e.into()),
+            }
+            Ok(())
+        })();
+        self.merge_enforcer_deltas(&before, &enforcer);
+        io_res?;
+        let mut e = self.engine();
+        if held != 0 || lifted {
+            e.sink.emit(
+                &checked,
+                EVENT_BAN_LIFTED,
+                now,
+                "operator",
+                "",
+                "",
+                "cleared by hand",
+                false,
+                Some(format!("{checked}|{EVENT_BAN_LIFTED}|{now}")),
+            )?;
+            log_warn(&format!(
+                "Ban on {checked} cleared by hand; the schedule is dropped"
+            ));
+        }
+        let legacy = e.settle_legacy_observed(&checked);
+        if held != 0 || lifted || manual || legacy != 0 {
+            let code = if held != 0 || lifted {
+                ADAPTIVE_BAN_CODE
+            } else if manual {
+                MANUAL_BAN_CODE
+            } else {
+                legacy
+            };
+            e.db.record_decision(
+                &checked,
+                now,
+                "lifted",
+                "operator",
+                if refused.is_empty() {
+                    "applied"
+                } else {
+                    "failed"
+                },
+                Decision {
+                    code,
+                    until: held,
+                    policy: e.sink.ban_policy,
+                    ..Default::default()
+                },
+            )?;
+        }
+        e.apply_promotions();
+        Ok(json!({
+            "ok": true,
+            "refused": refused,
+            "ip": checked,
+            "was_scheduled": held != 0,
+            "lifted": lifted || released,
+            "cleared": refused.is_empty(),
+        }))
+    }
+
+    pub fn set_mode(&self, mode: &str, now: Option<i64>) -> EResult<Value> {
+        let mode = mode.trim().to_lowercase();
+        if !SUPPORTED_MODES.contains(&mode.as_str()) {
+            return Err(EngineError::Value(format!(
+                "mode must be one of {}",
+                SUPPORTED_MODES.join(", ")
+            )));
+        }
+        let now = now.unwrap_or_else(utc_now);
+        let decisions = lock(&self.decisions);
+        let previous = {
+            let mut e = self.engine();
+            let prev = e.enforcer.mode.clone();
+            e.db.set_state("mode_override", &mode)?;
+            e.enforcer.mode = mode.clone();
+            prev
+        };
+        log_warn(&format!(
+            "Adaptive protection mode changed: {previous} -> {mode}"
+        ));
+        let mut result = self.apply_enforcement_locked(&decisions, now)?;
+        self.sync_shield_locked(&decisions, now);
+        self.flush_alerts();
+        result["mode"] = json!(mode);
+        result["previous"] = json!(previous);
+        Ok(result)
+    }
+
+    pub fn run_maintenance(&self) -> Result<Value, String> {
+        let now = utc_now();
+        let (retention_days, longest_strike) = {
+            let e = self.engine();
+            (e.config.event_retention_days, e.longest_strike_retention())
+        };
+        let cutoff = now - retention_days * 86400;
+        let ban_cutoff = cutoff.min(now - longest_strike);
+        let mut deleted = self.db.apply_retention(cutoff, ban_cutoff)?;
+        deleted.insert(
+            "rate_warnings".into(),
+            self.db.prune_rate_warnings(
+                now - RATE_WARNINGS_KEEP_DAYS * 86400,
+                RATE_WARNINGS_KEEP_ROWS,
+            )?,
+        );
+        deleted.insert(
+            "ban_decisions".into(),
+            self.db
+                .prune_decisions(ban_cutoff, DECISIONS_KEEP_ROWS, now)?,
+        );
+        if deleted.values().any(|v| *v != 0) {
+            self.db.incremental_vacuum(256);
+        }
+        let (pruned, tracked) = {
+            let mut e = self.engine();
+            let pruned = e.memory.prune(now - 6 * 3600);
+            e.sink.subnets.prune(now);
+            e.candidates.prune(now - CANDIDATE_TTL);
+            e.unknown_hosts.prune(now - UNKNOWN_HOSTS_TTL);
+            e.detection.persist(now, true, &self.db)?;
+            let _ =
+                e.db.set_state(CANDIDATES_KEY, &e.candidates.snapshot(2000).to_string());
+            let _ =
+                e.db.set_state(UNKNOWN_HOSTS_KEY, &e.unknown_hosts.snapshot().to_string());
+            (pruned, e.memory.len())
+        };
+        let ordered = [
+            "events",
+            "cooldowns",
+            "addresses",
+            "rate_warnings",
+            "ban_decisions",
+        ];
+        let text = format!(
+            "{{{}}}",
+            ordered
+                .iter()
+                .map(|k| format!("\"{k}\": {}", deleted.get(*k).copied().unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        log_info(&format!(
+            "Maintenance: deleted={text} pruned_ips={pruned} tracked={tracked}"
+        ));
+        Ok(json!({"deleted": deleted, "pruned_ips": pruned}))
+    }
+
+    fn poll_cycle(
+        &self,
+        tables: Result<(Tables, BTreeSet<String>), String>,
+    ) -> Result<Value, String> {
+        let now = utc_now();
+        let (from_tables, budget) = {
+            let mut e = self.engine();
+            e.sink.exclusions.reload_files(false);
+            e.refresh_ban_policy(now)?;
+            let (tables, unreadable) = tables?;
+            e.unreadable_tables = unreadable;
+            let mut from_tables = e.ingest_tables(&tables, now)?;
+            from_tables += e.ingest_hard_floor(now)?;
+            let budget = (64 * 1024).max(
+                e.config
+                    .log_read_bytes_per_cycle
+                    .saturating_sub(e.cycle_bytes),
+            );
+            (from_tables, budget)
+        };
+        let from_log = self.ingest_log_detached(now, Some(budget))?;
+        self.engine().flush_rate_warnings(now, from_log == 0);
+        let decisions = lock(&self.decisions);
+        let enforcement = self
+            .apply_enforcement_locked(&decisions, now)
+            .map_err(|e| e.to_string())?;
+        {
+            let e = self.engine();
+            e.db.set_state(
+                "log_cursor",
+                &crate::secdb::python_json(&cursor_state(&e.cursor)),
+            )?;
+        }
+        self.sync_shield_locked(&decisions, now);
+        drop(decisions);
+        {
+            let mut e = self.engine();
+            e.weekly_summary_tick(Some(now));
+            let Engine {
+                login_correlations,
+                sink,
+                detection,
+                db,
+                ..
+            } = &mut *e;
+            login_correlations.poll(now, &sink.exclusions, detection, db)?;
+            detection.persist(now, false, db)?;
+            e.polls_total += 1;
+            e.last_poll_ts = Some(now);
+            e.consecutive_failures = 0;
+            e.last_error = None;
+        }
+        Ok(json!({
+            "table_events": from_tables,
+            "log_lines": from_log,
+            "banned": enforcement["applied"].as_array().map(Vec::len).unwrap_or(0),
+            "lifted": enforcement["lifted"].as_array().map(Vec::len).unwrap_or(0),
+        }))
     }
 }
 
@@ -3505,7 +4362,7 @@ pub fn run(shared: Arc<Shared>) {
                 if bg.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let wait = bg.engine().continue_refill_step();
+                let wait = bg.continue_refill_step();
                 match wait {
                     Some(d) => {
                         added += 1;
@@ -3528,26 +4385,27 @@ pub fn run(shared: Arc<Shared>) {
         if shared.stop.load(Ordering::SeqCst) {
             break;
         }
-        {
-            let mut e = shared.engine();
-            match e.poll(tables) {
-                Ok(_) => {}
-                Err(err) => {
+        match shared.poll_cycle(tables) {
+            Ok(_) => {}
+            Err(err) => {
+                let n = {
+                    let mut e = shared.engine();
                     e.consecutive_failures += 1;
                     e.last_error = Some(err.clone());
-                    let n = e.consecutive_failures;
-                    if n == 1 || n == 10 || n.is_multiple_of(60) {
-                        log_warn(&format!("Poll failed ({n} in a row): {err}"));
-                    }
+                    e.consecutive_failures
+                };
+                if n == 1 || n == 10 || n.is_multiple_of(60) {
+                    log_warn(&format!("Poll failed ({n} in a row): {err}"));
                 }
             }
-            e.report_failing();
-            if Instant::now() >= next_maintenance {
-                if let Err(err) = e.run_maintenance() {
-                    log_warn(&format!("Maintenance pass failed: {err}"));
-                }
-                next_maintenance = Instant::now() + Duration::from_secs_f64(maintenance_every);
+        }
+        shared.engine().report_failing();
+        shared.flush_alerts();
+        if Instant::now() >= next_maintenance {
+            if let Err(err) = shared.run_maintenance() {
+                log_warn(&format!("Maintenance pass failed: {err}"));
             }
+            next_maintenance = Instant::now() + Duration::from_secs_f64(maintenance_every);
         }
         let deadline = started + Duration::from_secs_f64(interval);
         let tick = FAST_REACTION_TICK_SECONDS.min(LIVE_FAST_TICK_SECONDS);
@@ -3564,18 +4422,25 @@ pub fn run(shared: Arc<Shared>) {
             if sleep_unless_stopped(&shared.stop, Duration::from_secs_f64(tick.min(remaining))) {
                 break;
             }
-            let mut e = shared.engine();
-            let live_watching = e.live.as_ref().is_some_and(|l| lock(l).wanted());
-            if !live_watching && !e.cursor.has_pending() {
-                continue;
-            }
-            let share = (64 * 1024).max((read_budget as f64 * tick / interval.max(1.0)) as usize);
-            let allowance = share.min(read_budget.saturating_sub(e.cycle_bytes));
+            let allowance = {
+                let e = shared.engine();
+                let live_watching = e.live.as_ref().is_some_and(|l| lock(l).wanted());
+                if !live_watching && !e.cursor.has_pending() {
+                    continue;
+                }
+                let share =
+                    (64 * 1024).max((read_budget as f64 * tick / interval.max(1.0)) as usize);
+                share.min(read_budget.saturating_sub(e.cycle_bytes))
+            };
             if allowance > 0 {
                 let now_tick = utc_now();
-                let _ = e.ingest_log(now_tick, Some(allowance));
-                if e.enforcer.allowed() && e.sink.queue.has_urgent() {
-                    let _ = e.apply_urgent_enforcement(Some(now_tick));
+                let _ = shared.ingest_log_detached(now_tick, Some(allowance));
+                let urgent = {
+                    let e = shared.engine();
+                    e.enforcer.allowed() && e.sink.queue.has_urgent()
+                };
+                if urgent {
+                    let _ = shared.apply_urgent_enforcement(Some(now_tick));
                 }
             }
         }

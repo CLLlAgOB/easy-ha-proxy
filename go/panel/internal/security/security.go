@@ -298,21 +298,21 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 		}
 		id.IsSuperadmin = hasGroup(groups, "superadmin")
 
-		// 7. Session-bound CSRF token management.
-		sid, validCookie := b.readSessionCookie(r)
+		// 7. User-bound session cookie and per-response masked CSRF token.
+		sid, validCookie := b.readSessionCookieForUser(r, id.User)
 		if !validCookie {
 			sid = randomHex(24)
-			b.setSessionCookie(sw, sid)
+			b.setSessionCookieForUser(sw, sid, id.User)
 		}
 		id.SessionID = sid
-		id.CSRFToken = b.CSRFTokenForSession(sid)
+		id.CSRFToken = b.CSRFTokenForSessionUser(sid, id.User)
 
 		if isMutatingMethod(r.Method) {
 			if !validCookie {
 				b.writeError(sw, r, http.StatusBadRequest, "CSRF validation failed")
 				return
 			}
-			ok, err := b.verifyCSRF(r, id.CSRFToken)
+			ok, err := b.verifyCSRF(r, sid, id.User)
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) || errors.Is(err, multipart.ErrMessageTooLarge) {
 				b.writeError(sw, r, http.StatusRequestEntityTooLarge, "Request Entity Too Large")
@@ -328,23 +328,69 @@ func (b *Boundary) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-// CSRFTokenForSession derives a deterministic HMAC-SHA256 CSRF token bound to
-// the session identifier and the panel secret key.
-func (b *Boundary) CSRFTokenForSession(sessionID string) string {
+func (b *Boundary) rawCSRFSecret(sessionID, username string) []byte {
 	mac := hmac.New(sha256.New, []byte(b.SecretKey))
 	mac.Write([]byte("csrf:"))
+	mac.Write([]byte(username))
+	mac.Write([]byte{0})
 	mac.Write([]byte(sessionID))
-	return hex.EncodeToString(mac.Sum(nil))
+	return mac.Sum(nil)
 }
 
-func (b *Boundary) signSession(sessionID string) string {
+func maskTokenBytes(raw []byte) string {
+	mask := make([]byte, len(raw))
+	if _, err := rand.Read(mask); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
+	masked := make([]byte, len(raw))
+	for i := range raw {
+		masked[i] = raw[i] ^ mask[i]
+	}
+	out := make([]byte, len(raw)*2)
+	copy(out, mask)
+	copy(out[len(raw):], masked)
+	return hex.EncodeToString(out)
+}
+
+func unmaskAndCompareCSRF(candidate string, expected []byte) bool {
+	if len(expected) == 0 || len(candidate) != len(expected)*4 {
+		return false
+	}
+	decoded, err := hex.DecodeString(candidate)
+	if err != nil || len(decoded) != len(expected)*2 {
+		return false
+	}
+	mask := decoded[:len(expected)]
+	masked := decoded[len(expected):]
+	unmasked := make([]byte, len(expected))
+	for i := range expected {
+		unmasked[i] = mask[i] ^ masked[i]
+	}
+	return subtle.ConstantTimeCompare(unmasked, expected) == 1
+}
+
+// CSRFTokenForSessionUser issues a freshly XOR-masked CSRF token bound to the
+// session identifier and authenticated username (BREACH mitigation).
+func (b *Boundary) CSRFTokenForSessionUser(sessionID, username string) string {
+	return maskTokenBytes(b.rawCSRFSecret(sessionID, username))
+}
+
+// CSRFTokenForSession issues a freshly XOR-masked CSRF token for an empty user
+// (retained for compatibility with callers without a username).
+func (b *Boundary) CSRFTokenForSession(sessionID string) string {
+	return b.CSRFTokenForSessionUser(sessionID, "")
+}
+
+func (b *Boundary) signSessionForUser(sessionID, username string) string {
 	mac := hmac.New(sha256.New, []byte(b.SecretKey))
 	mac.Write([]byte("sid:"))
+	mac.Write([]byte(username))
+	mac.Write([]byte{0})
 	mac.Write([]byte(sessionID))
 	return sessionID + "." + hex.EncodeToString(mac.Sum(nil))
 }
 
-func (b *Boundary) readSessionCookie(r *http.Request) (string, bool) {
+func (b *Boundary) readSessionCookieForUser(r *http.Request, username string) (string, bool) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil || c == nil || c.Value == "" {
 		return "", false
@@ -353,17 +399,17 @@ func (b *Boundary) readSessionCookie(r *http.Request) (string, bool) {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", false
 	}
-	expected := b.signSession(parts[0])
+	expected := b.signSessionForUser(parts[0], username)
 	if subtle.ConstantTimeCompare([]byte(expected), []byte(c.Value)) != 1 {
 		return "", false
 	}
 	return parts[0], true
 }
 
-func (b *Boundary) setSessionCookie(w http.ResponseWriter, sessionID string) {
+func (b *Boundary) setSessionCookieForUser(w http.ResponseWriter, sessionID, username string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
-		Value:    b.signSession(sessionID),
+		Value:    b.signSessionForUser(sessionID, username),
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   b.SessionSecure,
@@ -371,11 +417,11 @@ func (b *Boundary) setSessionCookie(w http.ResponseWriter, sessionID string) {
 	})
 }
 
-// MakeSessionCookie builds a signed session cookie (for tests and clients).
-func (b *Boundary) MakeSessionCookie(sessionID string) *http.Cookie {
+// MakeSessionCookieForUser builds a signed session cookie bound to username.
+func (b *Boundary) MakeSessionCookieForUser(sessionID, username string) *http.Cookie {
 	return &http.Cookie{
 		Name:     SessionCookieName,
-		Value:    b.signSession(sessionID),
+		Value:    b.signSessionForUser(sessionID, username),
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   b.SessionSecure,
@@ -383,10 +429,16 @@ func (b *Boundary) MakeSessionCookie(sessionID string) *http.Cookie {
 	}
 }
 
-func (b *Boundary) verifyCSRF(r *http.Request, expected string) (bool, error) {
-	if expected == "" {
+// MakeSessionCookie builds a signed session cookie for an empty username.
+func (b *Boundary) MakeSessionCookie(sessionID string) *http.Cookie {
+	return b.MakeSessionCookieForUser(sessionID, "")
+}
+
+func (b *Boundary) verifyCSRF(r *http.Request, sessionID, username string) (bool, error) {
+	if sessionID == "" {
 		return false, nil
 	}
+	expected := b.rawCSRFSecret(sessionID, username)
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	var err error
 	switch mediaType {
@@ -404,7 +456,7 @@ func (b *Boundary) verifyCSRF(r *http.Request, expected string) (bool, error) {
 		r.PostForm.Get(CSRFFormField),
 	} {
 		token := strings.TrimSpace(candidate)
-		if token != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(token)) == 1 {
+		if token != "" && unmaskAndCompareCSRF(token, expected) {
 			return true, nil
 		}
 	}

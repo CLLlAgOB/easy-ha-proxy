@@ -102,10 +102,22 @@ services:
       - TZ={{ container_timezone }}
     ports:
       - "127.0.0.1:9091:9091"
-{% if relay_enabled %}
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -x /app/healthcheck.sh ]; then /app/healthcheck.sh; else wget -qO- http://127.0.0.1:9091/api/health >/dev/null 2>&1; fi"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+{% if (authelia_session_redis_enabled | default(true)) or relay_enabled %}
     depends_on:
+{% if authelia_session_redis_enabled | default(true) %}
+      authelia-redis:
+        condition: service_healthy
+{% endif %}
+{% if relay_enabled %}
       mail_relay:
         condition: service_healthy
+{% endif %}
 {% endif %}
 
 networks:

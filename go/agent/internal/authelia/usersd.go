@@ -207,22 +207,29 @@ func (u *Usersd) saveUsersData(root *pyyaml.Map) error {
 		}
 	}()
 	if _, err := tmp.WriteString(text); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+	if err := syncTempFile(tmp); err != nil {
+		_ = tmp.Close()
 		return err
 	}
 	if uid != -1 {
 		if err := tmp.Chown(uid, gid); err != nil {
+			if os.Geteuid() == 0 || !errors.Is(err, syscall.EPERM) {
+				_ = tmp.Close()
+				return err
+			}
 			log.Printf("Failed to set owner/group on temp users file: %v", err)
 		}
 	}
 	if err := tmp.Chmod(0o640); err != nil {
-		log.Printf("Failed to set mode on temp users file: %v", err)
+		_ = tmp.Close()
+		return err
 	}
-	tmp.Close()
+	if err := closeTempFile(tmp); err != nil {
+		return err
+	}
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
@@ -651,6 +658,22 @@ func (u *Usersd) serveConn(conn net.Conn) {
 	_, _ = conn.Write(replyJSON(resp))
 }
 
+// Serve accepts connections on ln one at a time until ctx is canceled or ln fails.
+func (u *Usersd) Serve(ctx context.Context, ln net.Listener) error {
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		u.serveConn(conn)
+	}
+}
+
 // RunUsersd is main(): serve the socket one request at a time.
 func RunUsersd(opts UsersdOptions) error {
 	u := NewUsersd(opts)
@@ -661,24 +684,19 @@ func RunUsersd(opts UsersdOptions) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(opts.SocketPath, 0o660)
+	if err := os.Chmod(opts.SocketPath, 0o660); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(opts.SocketPath)
+		return err
+	}
 	log.Printf("authelia-usersd listening on %s", opts.SocketPath)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
 	defer func() {
+		_ = ln.Close()
 		if _, err := os.Stat(opts.SocketPath); err == nil {
 			_ = os.Remove(opts.SocketPath)
 		}
 	}()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return nil
-		}
-		u.serveConn(conn)
-	}
+	return u.Serve(ctx, ln)
 }

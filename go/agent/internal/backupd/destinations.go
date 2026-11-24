@@ -1206,7 +1206,6 @@ func (d *Daemon) s3Request(record map[string]any, method, key string, query map[
 	}
 	authorization := s3Authorization(method, canonicalURI, canonicalQuery, headers, payloadSHA,
 		pyStr(record["access_key"]), secret, region, amzDate)
-	secret = ""
 	timeout := time.Duration(d.Opts.S3TimeoutSeconds) * time.Second
 	port := endpoint.Port()
 	if port == "" {

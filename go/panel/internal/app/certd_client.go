@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -78,7 +77,7 @@ func certdPost(path string, body []byte, contentType string, timeout time.Durati
 		return nil, &OSError{pyOSError(err)}
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readBoundedBody(resp, maxDaemonResponseBytes)
 	if err != nil {
 		return nil, &OSError{pyOSError(err)}
 	}

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from contextlib import closing
 from http.client import HTTPConnection
+from http.cookies import SimpleCookie
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -20,13 +22,31 @@ APP = ROOT / "docker/app/haproxy_admin"
 PROXY = {"X-Easy-HA-Proxy-Secret": "parity-ci-local-proxy"}
 HEALTH = {**PROXY, "Remote-User": "easy-ha-proxy-healthcheck", "Remote-Groups": "healthcheck"}
 ADMIN = {**PROXY, "Remote-User": "parity-admin", "Remote-Groups": "superadmin"}
+OPERATOR = {**PROXY, "Remote-User": "parity-op", "Remote-Groups": "admins"}
+_META_CSRF_RE = re.compile(r'name="csrf-token"\s+content="([^"]+)"')
+
+
+def request_panel(port, method, path, headers, body=None):
+    with closing(HTTPConnection("127.0.0.1", port, timeout=3)) as connection:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        return response.status, response.read(), response.getheaders()
 
 
 def read_panel(port, path, headers):
-    with closing(HTTPConnection("127.0.0.1", port, timeout=2)) as connection:
-        connection.request("GET", path, headers=headers)
-        response = connection.getresponse()
-        return response.status, response.read()
+    status, body, _ = request_panel(port, "GET", path, headers)
+    return status, body
+
+
+def extract_cookie_header(headers):
+    parts = []
+    for key, val in headers:
+        if key.lower() == "set-cookie":
+            cookie = SimpleCookie()
+            cookie.load(val)
+            for name, morsel in cookie.items():
+                parts.append(f"{name}={morsel.value}")
+    return "; ".join(parts)
 
 
 class NativeParitySmoke(unittest.TestCase):
@@ -94,6 +114,112 @@ class NativeParitySmoke(unittest.TestCase):
                 status, body = read_panel(port, path, ADMIN)
                 self.assertEqual(status, 200)
                 self.assertEqual((status, body), (legacy.status_code, legacy.data))
+
+        # MED-35: RBAC boundary parity (unauthenticated & non-superadmin vs superadmin).
+        with self.subTest("rbac-missing-proxy-secret"):
+            legacy = flask.get("/api/control-plane-health", headers={"Remote-User": "nobody", "Remote-Groups": "superadmin"})
+            status, _ = read_panel(port, "/api/control-plane-health", {"Remote-User": "nobody", "Remote-Groups": "superadmin"})
+            self.assertEqual(status, legacy.status_code)
+            self.assertEqual(status, 403)
+
+        with self.subTest("rbac-admins-blocked-on-superadmin-route"):
+            legacy = flask.get("/haproxy", headers=OPERATOR)
+            status, _ = read_panel(port, "/haproxy", OPERATOR)
+            self.assertEqual(status, legacy.status_code)
+            self.assertEqual(status, 403)
+
+        # MED-35: CSRF enforcement & mutating route parity (/language + /api/whitelist-global).
+        with self.subTest("csrf-missing-token-rejected"):
+            form = b"language=ru&next=/"
+            hdrs = {**ADMIN, "Content-Type": "application/x-www-form-urlencoded"}
+            legacy = flask.post("/language", data=form, headers=hdrs)
+            status, _, _ = request_panel(port, "POST", "/language", hdrs, body=form)
+            self.assertEqual(status, legacy.status_code)
+            self.assertEqual(status, 400)
+
+        with self.subTest("csrf-valid-mutating-language-and-whitelist"):
+            legacy_get = flask.get("/", headers=ADMIN)
+            self.assertEqual(legacy_get.status_code, 200)
+            legacy_csrf = _META_CSRF_RE.search(legacy_get.get_data(as_text=True))
+            self.assertIsNotNone(legacy_csrf)
+
+            go_status, go_html, go_hdrs = request_panel(port, "GET", "/", ADMIN)
+            self.assertEqual(go_status, 200)
+            go_csrf = _META_CSRF_RE.search(go_html.decode("utf-8", "replace"))
+            self.assertIsNotNone(go_csrf)
+            go_cookie = extract_cookie_header(go_hdrs)
+            self.assertIn("easy_ha_proxy_session=", go_cookie)
+
+            # Query-string CSRF must be rejected on both stacks.
+            form = b"language=ru&next=/"
+            legacy_qs = flask.post(
+                f"/language?csrf_token={legacy_csrf.group(1)}",
+                data=form,
+                headers={**ADMIN, "Content-Type": "application/x-www-form-urlencoded"},
+            )
+            go_qs_status, _, _ = request_panel(
+                port,
+                "POST",
+                f"/language?csrf_token={go_csrf.group(1)}",
+                {**ADMIN, "Content-Type": "application/x-www-form-urlencoded", "Cookie": go_cookie},
+                body=form,
+            )
+            self.assertEqual(go_qs_status, legacy_qs.status_code)
+            self.assertEqual(go_qs_status, 400)
+
+            # Header CSRF + matching session cookie succeeds on form POST /language (303 + cookie).
+            legacy_ok = flask.post(
+                "/language",
+                data=form,
+                headers={
+                    **ADMIN,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-CSRF-Token": legacy_csrf.group(1),
+                },
+            )
+            go_ok_status, _, go_ok_hdrs = request_panel(
+                port,
+                "POST",
+                "/language",
+                {
+                    **ADMIN,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": go_cookie,
+                    "X-CSRF-Token": go_csrf.group(1),
+                },
+                body=form,
+            )
+            self.assertEqual(go_ok_status, legacy_ok.status_code)
+            self.assertEqual(go_ok_status, 303)
+            self.assertIn("easy_ha_proxy_language=ru", extract_cookie_header(go_ok_hdrs))
+
+            # Form mutating route with CSRF: /api/whitelist-global (writes IP to file;
+            # runtime HAProxy reload socket is absent in smoke container so both return 502).
+            wl_body = b"ip=203.0.113.55"
+            legacy_wl = flask.post(
+                "/api/whitelist-global",
+                data=wl_body,
+                headers={
+                    **ADMIN,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-CSRF-Token": legacy_csrf.group(1),
+                },
+            )
+            go_wl_status, go_wl_body, _ = request_panel(
+                port,
+                "POST",
+                "/api/whitelist-global",
+                {
+                    **ADMIN,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": go_cookie,
+                    "X-CSRF-Token": go_csrf.group(1),
+                },
+                body=wl_body,
+            )
+            self.assertEqual(go_wl_status, legacy_wl.status_code)
+            self.assertEqual(go_wl_status, 502)
+            self.assertTrue(len(go_wl_body) > 0)
 
     def test_server_state(self):
         with tempfile.TemporaryDirectory() as directory:

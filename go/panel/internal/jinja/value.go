@@ -643,11 +643,7 @@ func binop(op string, a, b any) (any, error) {
 			return m, nil
 		case "**":
 			if aint && bint && bi >= 0 {
-				r := int64(1)
-				for i := int64(0); i < bi; i++ {
-					r *= ai
-				}
-				return r, nil
+				return intPow(ai, bi)
 			}
 			return math.Pow(af, bf), nil
 		}
@@ -682,17 +678,16 @@ func binop(op string, a, b any) (any, error) {
 		}
 	case "*":
 		if s, ok := isStr(a); ok && bok && bint {
-			return repeatStr(a, s, bi), nil
+			return repeatStr(a, s, bi)
 		}
 		if s, ok := isStr(b); ok && aok && aint {
-			return repeatStr(b, s, ai), nil
+			return repeatStr(b, s, ai)
 		}
 		if x, ok := a.([]any); ok && bok && bint {
-			out := []any{}
-			for i := int64(0); i < bi; i++ {
-				out = append(out, x...)
-			}
-			return out, nil
+			return repeatSlice(x, bi)
+		}
+		if x, ok := b.([]any); ok && aok && aint {
+			return repeatSlice(x, ai)
 		}
 	case "%":
 		if s, ok := isStr(a); ok {
@@ -714,15 +709,97 @@ func undefName(a, b any) string {
 	return ""
 }
 
-func repeatStr(orig any, s string, n int64) any {
-	if n < 0 {
-		n = 0
+const (
+	maxRepeatBytes = 1 << 20
+	maxRepeatItems = 100_000
+	maxPowExponent = 1024
+)
+
+func mulInt64Overflow(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, false
+	}
+	res := a * b
+	if res/b != a || (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
+		return 0, true
+	}
+	return res, false
+}
+
+func intPow(base, exp int64) (int64, error) {
+	if exp < 0 {
+		return 0, errf("negative integer exponent")
+	}
+	if exp == 0 {
+		return 1, nil
+	}
+	if base == 0 {
+		return 0, nil
+	}
+	if base == 1 {
+		return 1, nil
+	}
+	if base == -1 {
+		if exp%2 == 0 {
+			return 1, nil
+		}
+		return -1, nil
+	}
+	if exp > maxPowExponent {
+		return 0, errf("exponent %d exceeds maximum allowed (%d)", exp, maxPowExponent)
+	}
+	res := int64(1)
+	b := base
+	e := exp
+	for e > 0 {
+		if e&1 == 1 {
+			next, ov := mulInt64Overflow(res, b)
+			if ov {
+				return 0, errf("integer exponentiation overflow")
+			}
+			res = next
+		}
+		e >>= 1
+		if e > 0 {
+			next, ov := mulInt64Overflow(b, b)
+			if ov {
+				return 0, errf("integer exponentiation overflow")
+			}
+			b = next
+		}
+	}
+	return res, nil
+}
+
+func repeatStr(orig any, s string, n int64) (any, error) {
+	if n <= 0 || len(s) == 0 {
+		if _, ok := orig.(Markup); ok {
+			return Markup(""), nil
+		}
+		return "", nil
+	}
+	if n > int64(maxRepeatBytes)/int64(len(s)) {
+		return nil, errf("string repetition exceeds maximum allowed size (%d bytes)", maxRepeatBytes)
 	}
 	r := strings.Repeat(s, int(n))
 	if _, ok := orig.(Markup); ok {
-		return Markup(r)
+		return Markup(r), nil
 	}
-	return r
+	return r, nil
+}
+
+func repeatSlice(x []any, n int64) ([]any, error) {
+	if n <= 0 || len(x) == 0 {
+		return []any{}, nil
+	}
+	if n > int64(maxRepeatItems)/int64(len(x)) {
+		return nil, errf("list repetition exceeds maximum allowed length (%d items)", maxRepeatItems)
+	}
+	out := make([]any, 0, int(n)*len(x))
+	for i := int64(0); i < n; i++ {
+		out = append(out, x...)
+	}
+	return out, nil
 }
 
 // percentFormat is str % args for the conversions templates use.

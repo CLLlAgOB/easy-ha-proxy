@@ -9,6 +9,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
+    mem_limit: "{{ haproxy_admin_mem_limit | default('128m' if (haproxy_admin_use_go_panel | default(false) | bool) else '256m') }}"
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
 

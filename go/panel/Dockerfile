@@ -13,6 +13,7 @@ RUN apk add --no-cache tzdata ca-certificates file
 WORKDIR /src/go/panel
 COPY VERSION /src/VERSION
 COPY go/panel/go.mod go/panel/go.sum ./
+RUN go mod download
 COPY go/panel/ ./
 
 RUN set -euo pipefail; \

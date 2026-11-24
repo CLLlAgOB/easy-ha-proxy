@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -1493,16 +1494,115 @@ func pruneReleases(dir string, keep int) error {
 	return nil
 }
 
-func downloadFile(url, dest string, out io.Writer) error {
+const geoipMaxRedirects = 5
+
+var (
+	geoipLookupIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return []netip.Addr{addr}, nil
+		}
+		return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	}
+	geoipHTTPTransport http.RoundTripper
+	geoipReservedNets  = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("255.255.255.255/32"),
+		netip.MustParsePrefix("64:ff9b::/96"),
+		netip.MustParsePrefix("64:ff9b:1::/48"),
+		netip.MustParsePrefix("100::/64"),
+		netip.MustParsePrefix("2001::/23"),
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("2002::/16"),
+		netip.MustParsePrefix("fec0::/10"),
+	}
+)
+
+func isGeoIPBlockedAddr(raw netip.Addr) bool {
+	addr := raw.Unmap()
+	if !addr.IsValid() || addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsInterfaceLocalMulticast() ||
+		addr.IsUnspecified() || !addr.IsGlobalUnicast() {
+		return true
+	}
+	for _, p := range geoipReservedNets {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateGeoIPURL(ctx context.Context, u *url.URL, requireHTTPS bool) error {
+	if u == nil {
+		return gerr("GeoIP URL is missing")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if requireHTTPS {
+		if scheme != "https" {
+			return gerr("GeoIP redirect to non-HTTPS scheme %q is not allowed", u.Scheme)
+		}
+	} else if scheme != "https" && scheme != "http" {
+		return gerr("unsupported GeoIP URL scheme %q", u.Scheme)
+	}
+	if u.User != nil {
+		return gerr("GeoIP URL must not include credentials")
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" {
+		return gerr("GeoIP URL has no host")
+	}
+	addrs, err := geoipLookupIP(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		return gerr("cannot resolve GeoIP host %q: %v", host, err)
+	}
+	for _, addr := range addrs {
+		if isGeoIPBlockedAddr(addr) {
+			return gerr("GeoIP redirect host %q resolves to disallowed address %s", host, addr)
+		}
+	}
+	return nil
+}
+
+func geoipCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > geoipMaxRedirects {
+		return gerr("too many GeoIP redirects (limit %d)", geoipMaxRedirects)
+	}
+	if err := validateGeoIPURL(req.Context(), req.URL, true); err != nil {
+		return err
+	}
+	return nil
+}
+
+func downloadFile(rawURL, dest string, out io.Writer) error {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return gerr("download failed for %s: %v", rawURL, err)
+	}
 	var last error
 	for attempt := 1; attempt <= 3; attempt++ {
 		err := func() error {
-			req, err := http.NewRequest("GET", url, nil)
+			reqCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := validateGeoIPURL(reqCtx, parsedURL, strings.EqualFold(parsedURL.Scheme, "https")); err != nil {
+				return err
+			}
+			req, err := http.NewRequestWithContext(reqCtx, "GET", rawURL, nil)
 			if err != nil {
 				return err
 			}
 			req.Header.Set("User-Agent", "easy-ha-proxy-geoip-updater/1")
-			client := &http.Client{Timeout: 60 * time.Second}
+			client := &http.Client{
+				Timeout:       60 * time.Second,
+				Transport:     geoipHTTPTransport,
+				CheckRedirect: geoipCheckRedirect,
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				return err
@@ -1515,10 +1615,13 @@ func downloadFile(url, dest string, out io.Writer) error {
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-			n, err := io.Copy(f, io.LimitReader(resp.Body, geoipMaxCompressed+1))
-			if err != nil {
-				return err
+			n, copyErr := io.Copy(f, io.LimitReader(resp.Body, geoipMaxCompressed+1))
+			closeErr := f.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
 			}
 			if n > geoipMaxCompressed {
 				return gerr("compressed GeoIP download is too large")
@@ -1540,7 +1643,7 @@ func downloadFile(url, dest string, out io.Writer) error {
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 	}
-	return gerr("download failed for %s: %v", url, last)
+	return gerr("download failed for %s: %v", rawURL, last)
 }
 
 type httpStatusErr struct {

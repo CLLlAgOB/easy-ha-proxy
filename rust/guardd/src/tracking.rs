@@ -449,8 +449,7 @@ pub struct SubnetCorrelator {
     pub min_ips: usize,
     pub max_subnets: usize,
     pub max_ips_per_subnet: usize,
-    order: Vec<u32>,
-    subnets: HashMap<u32, Vec<(u32, i64)>>,
+    subnets: hashlink::LinkedHashMap<u32, Vec<(u32, i64)>>,
     pub triggers: u64,
 }
 
@@ -467,8 +466,7 @@ impl SubnetCorrelator {
             min_ips,
             max_subnets: max_subnets.max(16),
             max_ips_per_subnet: max_ips_per_subnet.max(min_ips),
-            order: Vec::with_capacity(max_subnets.min(1024)),
-            subnets: HashMap::with_capacity(max_subnets.min(1024)),
+            subnets: hashlink::LinkedHashMap::with_capacity(max_subnets.min(1024)),
             triggers: 0,
         }
     }
@@ -485,23 +483,18 @@ impl SubnetCorrelator {
         let ip_u32 = u32::from(ip.parse::<Ipv4Addr>().expect("validated IPv4"));
         let cutoff = now - self.window_seconds;
 
-        if !self.subnets.contains_key(&subnet_key) {
-            while self.subnets.len() >= self.max_subnets {
-                if !self.order.is_empty() {
-                    let oldest = self.order.remove(0);
-                    self.subnets.remove(&oldest);
-                } else {
-                    break;
+        let mut peers = match self.subnets.remove(&subnet_key) {
+            Some(existing) => existing,
+            None => {
+                while self.subnets.len() >= self.max_subnets {
+                    if self.subnets.pop_front().is_none() {
+                        break;
+                    }
                 }
+                Vec::with_capacity(8)
             }
-            self.order.push(subnet_key);
-            self.subnets.insert(subnet_key, Vec::with_capacity(8));
-        } else if let Some(pos) = self.order.iter().position(|&k| k == subnet_key) {
-            self.order.remove(pos);
-            self.order.push(subnet_key);
-        }
+        };
 
-        let peers = self.subnets.get_mut(&subnet_key).expect("inserted");
         peers.retain(|&(_, seen)| seen >= cutoff);
         if let Some(pos) = peers.iter().position(|&(p, _)| p == ip_u32) {
             peers.remove(pos);
@@ -511,6 +504,7 @@ impl SubnetCorrelator {
             peers.remove(0);
         }
         let count = peers.len();
+        self.subnets.insert(subnet_key, peers);
         if count >= self.min_ips {
             self.triggers += 1;
         }
@@ -529,9 +523,6 @@ impl SubnetCorrelator {
         let removed = empty.len();
         for key in empty {
             self.subnets.remove(&key);
-            if let Some(pos) = self.order.iter().position(|&k| k == key) {
-                self.order.remove(pos);
-            }
         }
         removed
     }
@@ -556,7 +547,7 @@ impl SubnetCorrelator {
 }
 
 /// Incremental log-file reader tracking `(inode, offset)` across rotations and truncations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogCursor {
     pub path: PathBuf,
     pub inode: u64,

@@ -8,12 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -276,31 +273,14 @@ func Run(opts DaemonOptions) error {
 	engine := NewEngine(opts, cfg, store, nil)
 	srv := &Server{Engine: engine, Token: opts.Token}
 
-	if err := os.MkdirAll(filepath.Dir(opts.SocketPath), 0o755); err != nil {
-		return err
-	}
-	_ = os.Remove(opts.SocketPath)
-	ln, err := net.Listen("unix", opts.SocketPath)
+	ln, err := unixrpc.ListenUnix(opts.SocketPath, "", opts.SocketGroup, 0o660)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = ln.Close() }()
-	if opts.SocketGroup != "" {
-		group, err := user.LookupGroup(opts.SocketGroup)
-		if err != nil {
-			return err
-		}
-		gid, err := strconv.Atoi(group.Gid)
-		if err != nil {
-			return err
-		}
-		if err := os.Chown(opts.SocketPath, -1, gid); err != nil {
-			return err
-		}
-	}
-	if err := os.Chmod(opts.SocketPath, 0o660); err != nil {
-		return err
-	}
+	defer func() {
+		_ = ln.Close()
+		_ = os.Remove(opts.SocketPath)
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

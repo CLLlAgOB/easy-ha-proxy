@@ -337,17 +337,29 @@ func (a *App) registerTCPRoutes() {
 		name := orStr(orValue(get(tcp, "name"), noneIfEmpty(orig)))
 		expected := orValue(payload.Value("revision"), nil)
 		op := c.op()
-		release, err := op.Lock("tcp")
-		if err != nil {
-			return err
+		var before any
+		var okSave bool
+		var msg, revision string
+		err = func() error {
+			release, lerr := op.Lock("tcp")
+			if lerr != nil {
+				return lerr
+			}
+			defer release()
+			before = storedTCP(orig)
+			var serr error
+			okSave, msg, serr = SaveTCPFromJSON(op, tcp, orig, expected)
+			if serr == nil && okSave {
+				revision = TCPRevision(name)
+			}
+			return serr
+		}()
+		if err != nil && !okSave && before == nil {
+			if _, stale := err.(*StaleEntry); !stale {
+				// Lock acquisition error before reading storedTCP.
+				return err
+			}
 		}
-		before := storedTCP(orig)
-		okSave, msg, err := SaveTCPFromJSON(op, tcp, orig, expected)
-		revision := ""
-		if err == nil && okSave {
-			revision = TCPRevision(name)
-		}
-		release()
 		act := "tcp_proxy.create"
 		if truthy(before) {
 			act = "tcp_proxy.update"

@@ -3,6 +3,7 @@ package app
 // Port of trash.py: deleted sites, TCP proxies and UDP forwards.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -240,16 +241,22 @@ func SetTrashKeepDays(value any) (int64, error) {
 		return 0, err
 	}
 	now := nowFloat()
-	dir, release, err := trashLocked()
+	var gone []*Map
+	err = func() error {
+		dir, release, lerr := trashLocked()
+		if lerr != nil {
+			return lerr
+		}
+		defer release()
+		if werr := trashWrite(filepath.Join(dir, trashSettings), newMap("keep_days", days)); werr != nil {
+			return werr
+		}
+		gone = trashPurgeLocked(dir, now, days)
+		return nil
+	}()
 	if err != nil {
 		return 0, err
 	}
-	if err := trashWrite(filepath.Join(dir, trashSettings), newMap("keep_days", days)); err != nil {
-		release()
-		return 0, err
-	}
-	gone := trashPurgeLocked(dir, now, days)
-	release()
 	forgetPages(gone)
 	return days, nil
 }
@@ -391,22 +398,25 @@ func TrashKeep(op *Op, kind, name string, entry any, extra *Map) (string, error)
 	if op != nil {
 		actor = op.Actor
 	}
-	dir, release, err := trashLocked()
+	var gone []*Map
+	err := func() error {
+		dir, release, lerr := trashLocked()
+		if lerr != nil {
+			return lerr
+		}
+		defer release()
+		path, _ := trashPendingPath(dir, id)
+		werr := trashWrite(path, newMap("id", id, "kind", kind, "name", name, "deleted_at", int64(now),
+			"deleted_by", actor, "entry", entry, "extra", copyMap(extra)))
+		if werr == nil {
+			gone = trashPurgeLocked(dir, now, -1)
+		}
+		return werr
+	}()
 	if err != nil {
 		if te, ok := err.(*TrashError); ok {
 			return "", te
 		}
-		return "", &TrashError{pyOSError(err)}
-	}
-	path, _ := trashPendingPath(dir, id)
-	err = trashWrite(path, newMap("id", id, "kind", kind, "name", name, "deleted_at", int64(now),
-		"deleted_by", actor, "entry", entry, "extra", copyMap(extra)))
-	var gone []*Map
-	if err == nil {
-		gone = trashPurgeLocked(dir, now, -1)
-	}
-	release()
-	if err != nil {
 		log.Printf("The %s %s could not be kept in the trash", kind, pyRepr(name))
 		return "", &TrashError{pyOSError(err)}
 	}
@@ -501,7 +511,7 @@ func trashSummary(item *Map, days int64) *Map {
 	case "tcp":
 		detail = fmt.Sprintf("%s:%s", pyStr(orValue(entry.Value("bind_ip"), "*")), pyStr(orValue(entry.Value("bind_port"), "")))
 	default:
-		detail = fmt.Sprintf("udp %s -> %s", pyStr(orValue(entry.Value("listen_port"), "")), pyStr(orValue(entry.Value("backend_ip"), "")))
+		detail = fmt.Sprintf("udp %s -> %s", pyStr(orValue(entry.Value("listen_port"), "")), pyStr(orValue(entry.Value("backend_host"), entry.Value("backend_ip"), "")))
 	}
 	deletedAt := pyIntOr0(orValue(item.Value("deleted_at"), int64(0)))
 	return newMap("source", "panel", "id", item.Value("id"), "kind", kind, "name", orValue(item.Value("name"), ""),
@@ -512,19 +522,27 @@ func trashSummary(item *Map, days int64) *Map {
 // TrashListWithTerm is list_with_term.
 func TrashListWithTerm() ([]any, int64, error) {
 	now := nowFloat()
-	dir, release, err := trashLocked()
+	var days int64
+	var gone []*Map
+	var found []*Map
+	err := func() error {
+		dir, release, err := trashLocked()
+		if err != nil {
+			return err
+		}
+		defer release()
+		days = TrashKeepDays()
+		gone = trashPurgeLocked(dir, now, days)
+		for _, p := range globSuffix(dir, ".json") {
+			if trashIDRe.MatchString(stem(p)) {
+				found = append(found, trashRead(p))
+			}
+		}
+		return nil
+	}()
 	if err != nil {
 		return nil, 0, err
 	}
-	days := TrashKeepDays()
-	gone := trashPurgeLocked(dir, now, days)
-	var found []*Map
-	for _, p := range globSuffix(dir, ".json") {
-		if trashIDRe.MatchString(stem(p)) {
-			found = append(found, trashRead(p))
-		}
-	}
-	release()
 	forgetPages(gone)
 	var listed []*Map
 	for _, it := range found {
@@ -549,12 +567,19 @@ func TrashListWithTerm() ([]any, int64, error) {
 
 // TrashPurge is purge().
 func TrashPurge() (int, error) {
-	dir, release, err := trashLocked()
+	var gone []*Map
+	err := func() error {
+		dir, release, err := trashLocked()
+		if err != nil {
+			return err
+		}
+		defer release()
+		gone = trashPurgeLocked(dir, nowFloat(), -1)
+		return nil
+	}()
 	if err != nil {
 		return 0, err
 	}
-	gone := trashPurgeLocked(dir, nowFloat(), -1)
-	release()
 	forgetPages(gone)
 	return len(gone), nil
 }
@@ -562,54 +587,76 @@ func TrashPurge() (int, error) {
 // TrashRestore is restore().
 func TrashRestore(op *Op, id string) (*Map, error) {
 	now := nowFloat()
-	dir, release, err := trashLocked()
+	var path, claim string
+	var item *Map
+	var expiredItem *Map
+	err := func() error {
+		dir, release, err := trashLocked()
+		if err != nil {
+			return err
+		}
+		defer release()
+		p, err := trashPath(dir, id)
+		if err != nil {
+			return err
+		}
+		it := trashRead(p)
+		if it == nil {
+			return &TrashError{"Unknown trash item"}
+		}
+		cl := strings.TrimSuffix(p, ".json") + trashClaim
+		if trashExpired(pyIntOr0(orValue(it.Value("deleted_at"), int64(0))), now, TrashKeepDays()) {
+			_ = os.Remove(p)
+			expiredItem = it
+			return &TrashError{"Unknown trash item"}
+		}
+		if err := os.Rename(p, cl); err != nil {
+			return err
+		}
+		t := time.Now()
+		_ = os.Chtimes(cl, t, t)
+		path, claim, item = p, cl, it
+		return nil
+	}()
+	if expiredItem != nil {
+		forgetPages([]*Map{expiredItem})
+	}
 	if err != nil {
 		return nil, err
 	}
-	path, err := trashPath(dir, id)
-	if err != nil {
-		release()
-		return nil, err
-	}
-	item := trashRead(path)
-	if item == nil {
-		release()
-		return nil, &TrashError{"Unknown trash item"}
-	}
-	claim := strings.TrimSuffix(path, ".json") + trashClaim
-	if trashExpired(pyIntOr0(orValue(item.Value("deleted_at"), int64(0))), now, TrashKeepDays()) {
-		_ = os.Remove(path)
-		release()
-		forgetPages([]*Map{item})
-		return nil, &TrashError{"Unknown trash item"}
-	}
-	if err := os.Rename(path, claim); err != nil {
-		release()
-		return nil, err
-	}
-	t := time.Now()
-	_ = os.Chtimes(claim, t, t)
-	release()
 	giveBack := func() {
 		_, rel, err := trashLocked()
 		if err != nil {
 			return
 		}
+		defer rel()
 		_ = os.Rename(claim, path)
-		rel()
 	}
+	restored := false
+	defer func() {
+		if !restored {
+			giveBack()
+		}
+	}()
 	kind := pyStr(item.Value("kind"))
 	restorer, ok := trashRestorers[kind]
 	if !ok {
-		giveBack()
 		return nil, fmt.Errorf("no restorer for %s", kind)
 	}
-	extra := copyMap(orValue(item.Value("extra"), pyyaml.NewMap()).(*Map))
-	okRestore, message, info := restorer(op, item.Value("entry").(*Map), extra)
+	extraMap, ok := orValue(item.Value("extra"), pyyaml.NewMap()).(*Map)
+	if !ok {
+		extraMap = pyyaml.NewMap()
+	}
+	entryMap, ok := item.Value("entry").(*Map)
+	if !ok || entryMap == nil {
+		return nil, &TrashError{"Corrupted trash item"}
+	}
+	extra := copyMap(extraMap)
+	okRestore, message, info := restorer(op, entryMap, extra)
 	if !okRestore {
-		giveBack()
 		return newMap("ok", false, "error", message, "kind", kind, "name", item.Value("name")), nil
 	}
+	restored = true
 	result := newMap("ok", true, "message", message, "kind", kind, "name", item.Value("name"))
 	if info != nil {
 		info.Each(func(k, v any) {
@@ -619,8 +666,10 @@ func TrashRestore(op *Op, id string) (*Map, error) {
 		})
 	}
 	if _, rel, err := trashLocked(); err == nil {
-		_ = os.Remove(claim)
-		rel()
+		func() {
+			defer rel()
+			_ = os.Remove(claim)
+		}()
 	}
 	return result, nil
 }
@@ -640,22 +689,27 @@ func TrashRestoreAccessPage(name, stored string) string {
 
 // TrashRemove is remove().
 func TrashRemove(id string) (*Map, error) {
-	dir, release, err := trashLocked()
+	var item *Map
+	err := func() error {
+		dir, release, err := trashLocked()
+		if err != nil {
+			return err
+		}
+		defer release()
+		path, err := trashPath(dir, id)
+		if err != nil {
+			return err
+		}
+		item = trashRead(path)
+		if item == nil {
+			return &TrashError{"Unknown trash item"}
+		}
+		_ = os.Remove(path)
+		return nil
+	}()
 	if err != nil {
 		return nil, err
 	}
-	path, err := trashPath(dir, id)
-	if err != nil {
-		release()
-		return nil, err
-	}
-	item := trashRead(path)
-	if item == nil {
-		release()
-		return nil, &TrashError{"Unknown trash item"}
-	}
-	_ = os.Remove(path)
-	release()
 	forgetPages([]*Map{item})
 	return newMap("ok", true, "kind", item.Value("kind"), "name", item.Value("name")), nil
 }
@@ -666,44 +720,66 @@ func TrashEmptyDetailed() (int, []string, error) {
 	var gone []*Map
 	var failed []string
 	removed := 0
-	dir, release, err := trashLocked()
+	err := func() error {
+		dir, release, err := trashLocked()
+		if err != nil {
+			return err
+		}
+		defer release()
+		for _, c := range globSuffix(dir, trashClaim) {
+			info, err := os.Stat(c)
+			if err != nil {
+				continue
+			}
+			if now-float64(info.ModTime().UnixNano())/1e9 > claimSecs && trashIDRe.MatchString(stem(c)) && !isSymlink(c) {
+				_ = os.Rename(c, strings.TrimSuffix(c, trashClaim)+".json")
+			}
+		}
+		for _, p := range globSuffix(dir, ".json") {
+			if trashIDRe.MatchString(stem(p)) && !isSymlink(p) {
+				item := trashRead(p)
+				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+					failed = append(failed, stem(p)+": "+pyOSError(err))
+					continue
+				}
+				removed++
+				if item != nil {
+					gone = append(gone, item)
+				}
+			}
+		}
+		return nil
+	}()
 	if err != nil {
 		return 0, nil, err
 	}
-	for _, c := range globSuffix(dir, trashClaim) {
-		info, err := os.Stat(c)
-		if err != nil {
-			continue
-		}
-		if now-float64(info.ModTime().UnixNano())/1e9 > claimSecs && trashIDRe.MatchString(stem(c)) && !isSymlink(c) {
-			_ = os.Rename(c, strings.TrimSuffix(c, trashClaim)+".json")
-		}
-	}
-	for _, p := range globSuffix(dir, ".json") {
-		if trashIDRe.MatchString(stem(p)) && !isSymlink(p) {
-			item := trashRead(p)
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-				failed = append(failed, stem(p)+": "+pyOSError(err))
-				continue
-			}
-			removed++
-			if item != nil {
-				gone = append(gone, item)
-			}
-		}
-	}
-	release()
 	forgetPages(gone)
 	return removed, failed, nil
 }
 
-// StartTrashPurger is ensure_purger: a purge every hour.
-func StartTrashPurger() {
+// StartTrashPurger is ensure_purger: a purge every hour until ctx is canceled.
+func StartTrashPurger(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
 		for {
-			time.Sleep(time.Hour)
-			if _, err := TrashPurge(); err != nil {
-				log.Printf("The trash could not be purged: %v", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				func() {
+					defer func() {
+						if rec := recover(); rec != nil {
+							log.Printf("Trash purger recovered from panic: %v", rec)
+						}
+					}()
+					if _, err := TrashPurge(); err != nil {
+						log.Printf("The trash could not be purged: %v", err)
+					}
+				}()
 			}
 		}
 	}()

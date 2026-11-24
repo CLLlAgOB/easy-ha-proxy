@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 )
@@ -176,6 +177,14 @@ func DeepCopy(v any) any {
 	return v
 }
 
+func marshalJSONString(s string) []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s)
+	return bytes.TrimRight(buf.Bytes(), "\n")
+}
+
 // MarshalJSON writes the pairs in order, keys turned into strings the way
 // json.dumps does.
 func (m *Map) MarshalJSON() ([]byte, error) {
@@ -185,8 +194,7 @@ func (m *Map) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		k, _ := json.Marshal(jsonKey(m.keys[i]))
-		buf.Write(k)
+		buf.Write(marshalJSONString(jsonKey(m.keys[i])))
 		buf.WriteByte(':')
 		v, err := marshalValue(m.vals[i])
 		if err != nil {
@@ -220,8 +228,19 @@ func marshalValue(v any) ([]byte, error) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	switch x := v.(type) {
+	case *Map:
+		return x.MarshalJSON()
 	case float64:
-		return []byte(FloatRepr(x)), nil
+		switch {
+		case math.IsNaN(x):
+			return []byte("NaN"), nil
+		case math.IsInf(x, 1):
+			return []byte("Infinity"), nil
+		case math.IsInf(x, -1):
+			return []byte("-Infinity"), nil
+		default:
+			return []byte(FloatRepr(x)), nil
+		}
 	case Timestamp:
 		return nil, fmt.Errorf("Object of type datetime is not JSON serializable")
 	case []any:

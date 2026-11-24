@@ -14,12 +14,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 65536;
 
-#[derive(Debug)]
 pub struct AlertClient {
     pub socket_path: String,
     token: String,
     last: Mutex<HashMap<String, (String, Instant)>>,
     warned: Mutex<bool>,
+}
+
+impl std::fmt::Debug for AlertClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlertClient")
+            .field("socket_path", &self.socket_path)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl AlertClient {

@@ -41,20 +41,24 @@ func (s *Server) sendJSON(w http.ResponseWriter, code int, payload any) {
 	_, _ = io.WriteString(w, body)
 }
 
-func (s *Server) site(query url.Values) string {
+func (s *Server) site(query url.Values) (string, error) {
 	requested := ""
 	if v := query["site"]; len(v) > 0 {
 		requested = strings.TrimSpace(v[0])
 	}
 	if requested == "" || strings.ToLower(requested) == "all" {
-		return ""
+		return "", nil
 	}
-	for _, e := range s.DB.sites() {
+	sites, err := s.DB.sites()
+	if err != nil {
+		return "", err
+	}
+	for _, e := range sites {
 		if e.(*OMap).Value("proxy") == requested {
-			return requested
+			return requested, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func orderedMonitors(m map[string]bool) *OMap {
@@ -271,7 +275,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fail := func(err error) { s.sendJSON(w, 500, omap("ok", false, "error", err.Error())) }
 	switch path {
 	case "/api/v1/metrics/sites":
-		s.sendJSON(w, 200, omap("ok", true, "sites", s.DB.sites()))
+		sites, err := s.DB.sites()
+		if err != nil {
+			fail(err)
+			return
+		}
+		s.sendJSON(w, 200, omap("ok", true, "sites", sites))
 	case "/api/v1/metrics/series":
 		chart := ""
 		if v := query["chart"]; len(v) > 0 {
@@ -296,7 +305,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			wanted = v[0]
 		}
 		wanted = strings.ToLower(strings.TrimSpace(wanted))
-		payload, err := s.DB.series(chart, s.site(query), since, until, wanted != "0" && wanted != "false" && wanted != "no")
+		site, err := s.site(query)
+		if err != nil {
+			fail(err)
+			return
+		}
+		payload, err := s.DB.series(chart, site, since, until, wanted != "0" && wanted != "false" && wanted != "no")
 		if err != nil {
 			fail(err)
 			return
@@ -340,7 +354,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, 200, payload)
 	case "/api/v1/metrics/states":
 		key, since, until := resolveWindow(query)
-		payload, err := s.DB.stateTimeline(s.site(query), since, until)
+		site, err := s.site(query)
+		if err != nil {
+			fail(err)
+			return
+		}
+		payload, err := s.DB.stateTimeline(site, since, until)
 		if err != nil {
 			fail(err)
 			return
@@ -352,7 +371,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, 200, payload)
 	case "/api/v1/metrics/summary":
 		key, since, until := resolveWindow(query)
-		site := s.site(query)
+		site, err := s.site(query)
+		if err != nil {
+			fail(err)
+			return
+		}
 		rangeSeconds := maxI(1, until-since)
 		payload, err := func() (*OMap, error) {
 			totals, err := s.DB.totals(site, since, until)

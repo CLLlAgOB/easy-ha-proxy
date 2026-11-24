@@ -46,6 +46,12 @@ updates:
       - dependency-name: python
         update-types: [version-update:semver-major, version-update:semver-minor]
 
+  - package-ecosystem: docker
+    directory: /go/panel
+    target-branch: alpha
+    schedule:
+      interval: weekly
+
   - package-ecosystem: gomod
     directories: [/go/agent, /go/panel]
     target-branch: alpha

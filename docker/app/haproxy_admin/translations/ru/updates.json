@@ -54,6 +54,7 @@
     "Backups": "Резервные копии",
     "Update service": "Служба обновлений",
     "Helper daemons": "Вспомогательные демоны",
+    "Native host binaries": "Нативные бинарные файлы хоста",
     "Journal retention": "Хранение журнала",
     "Admin host setup": "Подготовка хоста панели",
     "Web application's copy of the HAProxy template": "Копия шаблона HAProxy в веб-приложении",

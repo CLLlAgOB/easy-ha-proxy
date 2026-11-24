@@ -6,7 +6,6 @@ package app
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"mime"
 	"mime/multipart"
 	"net/textproto"
@@ -136,9 +135,8 @@ func CertdListAll() *Map {
 	if resp.StatusCode >= 400 {
 		return emptyCertList(fmt.Sprintf("haproxy-certd HTTP %d", resp.StatusCode))
 	}
-	const maxResponse = 16 << 20
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
-	if err != nil || len(raw) > maxResponse {
+	raw, err := readBoundedBody(resp, maxDaemonResponseBytes)
+	if err != nil {
 		return emptyCertList("haproxy-certd incomplete or oversized response")
 	}
 	v, err := pyyaml.JSONLoads(raw)

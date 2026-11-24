@@ -1810,30 +1810,35 @@ func RevertToLastAppliedState(op *Op) (bool, string) {
 		{StateTCP, TCPYAML, "tcp.yml"},
 		{StateVars, ConfigYAML, "vars.yml"},
 	}
-	release, err := op.LockAll("websites", "tcp", "vars")
-	if err != nil {
+	if err := func() error {
+		release, err := op.LockAll("websites", "tcp", "vars")
+		if err != nil {
+			return err
+		}
+		defer release()
+		for _, m := range mapping {
+			if !fileExists(m.src) {
+				continue
+			}
+			raw, err := os.ReadFile(m.src)
+			if err == nil {
+				mode := os.FileMode(0o640)
+				if info, e := os.Stat(m.dst); e == nil {
+					mode = info.Mode().Perm()
+				}
+				_ = os.MkdirAll(filepath.Dir(m.dst), 0o777)
+				err = atomicWriteSnapshot(m.dst, raw, mode)
+			}
+			if err != nil {
+				errs = append(errs, m.label+": "+pyOSError(err))
+				continue
+			}
+			anyRestored = true
+		}
+		return nil
+	}(); err != nil {
 		return false, err.Error()
 	}
-	for _, m := range mapping {
-		if !fileExists(m.src) {
-			continue
-		}
-		raw, err := os.ReadFile(m.src)
-		if err == nil {
-			mode := os.FileMode(0o640)
-			if info, e := os.Stat(m.dst); e == nil {
-				mode = info.Mode().Perm()
-			}
-			_ = os.MkdirAll(filepath.Dir(m.dst), 0o777)
-			err = atomicWriteSnapshot(m.dst, raw, mode)
-		}
-		if err != nil {
-			errs = append(errs, m.label+": "+pyOSError(err))
-			continue
-		}
-		anyRestored = true
-	}
-	release()
 	note := ""
 	if anyRestored {
 		note = followBackendSets(op, "discarded changes", nil, true)

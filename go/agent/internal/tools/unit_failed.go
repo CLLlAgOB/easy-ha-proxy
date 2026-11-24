@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
 type unitAlertRule struct {
@@ -69,10 +70,7 @@ func ParseJournalLastWords(raw string) string {
 		lines = lines[len(lines)-unitJournalLines:]
 	}
 	joined := strings.Join(lines, " | ")
-	if len(joined) > unitMaxDetailChars {
-		joined = joined[:unitMaxDetailChars]
-	}
-	return joined
+	return pyx.TruncRunes(joined, unitMaxDetailChars)
 }
 
 // RunUnitFailed reports a failed systemd unit to alertd, returning exact CLI exit codes.
