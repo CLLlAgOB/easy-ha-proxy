@@ -177,8 +177,8 @@
     # A replaced binary is not picked up by a running service: until a
     # restart it keeps executing the old file. try-restart touches only units
     # that are running, so a fresh install (units not there yet) is a no-op.
-    # The update broker is left alone: it supervises the update job running
-    # this playbook, and its own unit task restarts it when that is safe.
+    # The update broker is handled below: it may supervise the update job
+    # running this playbook.
     - name: "native-daemons | Restart running daemons that use the replaced agent binary"
       ansible.builtin.command:
         argv: "{{ ['systemctl', 'try-restart'] + _native_agent_units }}"
@@ -198,6 +198,42 @@
       when:
         - _native_agent_copy is changed
         - _native_agent_units | length > 0
+      changed_when: true
+
+    # The update broker runs from the same binary but supervises the job that
+    # may be running this playbook. A changes-only update of go/ runs this
+    # stage alone, not updated.yml, so the broker's restart is arranged here:
+    # during an update it is asked to restart once its job ends (the marker it
+    # watches); outside one it is restarted now. Left out, the old broker kept
+    # serving from the replaced file.
+    - name: "native-daemons | Inspect the active update marker"
+      ansible.builtin.stat:
+        path: "{{ updated_active_marker | default('/run/easy-ha-proxy/easy-ha-proxy-update.active') }}"
+        follow: false
+      register: _native_update_active
+      when:
+        - _native_agent_copy is changed
+        - native_updated_enabled | default(false) | bool
+
+    - name: "native-daemons | Ask the update broker to restart once its job ends"
+      ansible.builtin.file:
+        path: "{{ updated_restart_request_marker | default('/run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested') }}"
+        state: touch
+        owner: root
+        group: "{{ app_group | default('hadmin') }}"
+        mode: "0600"
+      when:
+        - _native_agent_copy is changed
+        - native_updated_enabled | default(false) | bool
+        - _native_update_active.stat.exists
+
+    - name: "native-daemons | Restart the update broker on the replaced binary"
+      ansible.builtin.command:
+        argv: [systemctl, try-restart, easy-ha-proxy-updated.service]
+      when:
+        - _native_agent_copy is changed
+        - native_updated_enabled | default(false) | bool
+        - not _native_update_active.stat.exists
       changed_when: true
 
     - name: "native-daemons | Restart guardd when its Rust binary was replaced"

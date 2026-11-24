@@ -788,11 +788,23 @@ func (d *Daemon) updateCommand(component, sourceChannel, imageChannel, expectedR
 	return command, nil
 }
 
+// runningReplacedBinary reports whether this process still executes a file
+// that has since been replaced on disk: Linux shows its executable link as
+// "<path> (deleted)" then.
+var runningReplacedBinary = func() bool {
+	link, err := os.Readlink("/proc/self/exe")
+	return err == nil && strings.HasSuffix(link, " (deleted)")
+}
+
+// requestSelfRestartIfNeeded restarts the broker once no job of its own is
+// running, when the installer asked for it (the restart marker) or when the
+// agent binary it runs from was replaced underneath it -- the marker can be
+// missed (an older installer, a manual copy), the deleted executable cannot.
 func (d *Daemon) requestSelfRestartIfNeeded() {
 	d.autoMu.Lock()
 	running := d.cycleRunning
 	d.autoMu.Unlock()
-	if running || !exists(d.Opts.RestartRequestMarker) {
+	if running || (!exists(d.Opts.RestartRequestMarker) && !runningReplacedBinary()) {
 		return
 	}
 	rc, _, _, err := d.commandRunner(10*time.Second, childEnvironment(), systemctlPath, "try-restart", "--no-block", d.Opts.ServiceName)

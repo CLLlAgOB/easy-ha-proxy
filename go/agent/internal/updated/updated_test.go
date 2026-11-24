@@ -165,3 +165,38 @@ func TestListJobsCache(t *testing.T) {
 		t.Fatalf("a removed job is still listed: %v %v", got, d.jobCache)
 	}
 }
+
+// A broker whose binary was replaced under it restarts itself once no job of
+// its own runs, with or without the installer's restart marker.
+func TestBrokerRestartsWhenItsBinaryWasReplaced(t *testing.T) {
+	d := newTestDaemon(t)
+	var calls []string
+	d.commandRunner = func(_ time.Duration, _ []string, argv ...string) (int, string, string, error) {
+		calls = append(calls, strings.Join(argv, " "))
+		return 0, "", "", nil
+	}
+	replaced := false
+	old := runningReplacedBinary
+	runningReplacedBinary = func() bool { return replaced }
+	defer func() { runningReplacedBinary = old }()
+
+	d.requestSelfRestartIfNeeded()
+	if len(calls) != 0 {
+		t.Fatalf("restarted without a reason: %v", calls)
+	}
+	replaced = true
+	d.autoMu.Lock()
+	d.cycleRunning = true
+	d.autoMu.Unlock()
+	d.requestSelfRestartIfNeeded()
+	if len(calls) != 0 {
+		t.Fatalf("restarted while its own cycle runs: %v", calls)
+	}
+	d.autoMu.Lock()
+	d.cycleRunning = false
+	d.autoMu.Unlock()
+	d.requestSelfRestartIfNeeded()
+	if len(calls) != 1 || !strings.Contains(calls[0], "try-restart --no-block") {
+		t.Fatalf("expected one deferred self-restart, got %v", calls)
+	}
+}
