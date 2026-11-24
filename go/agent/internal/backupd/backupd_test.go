@@ -187,7 +187,17 @@ func TestBackupInspectRestoreRoundTrip(t *testing.T) {
 	if !strings.Contains(rjob["output"].(map[string]any)["stdout"].(string), "--scope config --skip-ssh") {
 		t.Fatalf("restore argv: %v", rjob["output"])
 	}
-	if _, err := os.Lstat(d.Opts.RestoreActiveMarker); err == nil {
+	// The worker removes the marker in its deferred cleanup, after the job
+	// already reads completed: under -race and a loaded machine that takes
+	// longer than waitJob's grace, so wait for it with a deadline.
+	markerGone := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Lstat(d.Opts.RestoreActiveMarker); os.IsNotExist(err) {
+			markerGone = true
+			break
+		}
+	}
+	if !markerGone {
 		t.Fatal("restore marker left behind")
 	}
 	del := mustCall(t, d, map[string]any{"action": "delete", "kind": "backup", "id": backupID, "confirmation": "DELETE"})
