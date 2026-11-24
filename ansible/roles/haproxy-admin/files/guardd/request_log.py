@@ -503,6 +503,9 @@ class RequestLog:
         if unknown:
             if len(self._agents) > 20000:
                 self._agents.clear()
+                # The known agents of this batch were just forgotten too:
+                # resolve them again, or their lines would get agent id 0.
+                unknown = list(newest)
             self._conn.executemany(
                 "INSERT OR IGNORE INTO agents (agent, last_ts) VALUES (?, ?)",
                 [(agent, newest[agent]) for agent in unknown],

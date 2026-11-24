@@ -441,7 +441,7 @@ impl RequestLog {
             fs::create_dir_all(parent).map_err(|err| format!("mkdir failed: {err}"))?;
         }
         let fresh = !p.exists();
-        let conn = Connection::open(&p).map_err(e)?;
+        let mut conn = Connection::open(&p).map_err(e)?;
         if fresh {
             conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;").map_err(e)?;
         }
@@ -459,23 +459,28 @@ impl RequestLog {
                 .map_err(e)?;
         }
         let version = found.unwrap_or(REQUEST_LOG_SCHEMA_VERSION);
+        // One transaction for the new columns, the move to UTC and the new
+        // version, as the Python migration's: interrupted between the move
+        // and the version, the next start would move every stamp again.
+        let tx = conn.transaction().map_err(e)?;
         let present: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(requests)").map_err(e)?;
+            let mut stmt = tx.prepare("PRAGMA table_info(requests)").map_err(e)?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(e)?;
             rows.collect::<Result<_, _>>().map_err(e)?
         };
         for (name, kind) in ADDED_COLUMNS {
             if !present.iter().any(|c| c == name) {
-                conn.execute(&format!("ALTER TABLE requests ADD COLUMN {name} {kind}"), []).map_err(e)?;
+                tx.execute(&format!("ALTER TABLE requests ADD COLUMN {name} {kind}"), []).map_err(e)?;
             }
         }
         if version < 2 {
-            local_stamps_to_utc(&conn)?;
+            local_stamps_to_utc(&tx)?;
         }
         if version < REQUEST_LOG_SCHEMA_VERSION {
-            conn.execute("UPDATE schema_version SET version = ?1", params![REQUEST_LOG_SCHEMA_VERSION])
+            tx.execute("UPDATE schema_version SET version = ?1", params![REQUEST_LOG_SCHEMA_VERSION])
                 .map_err(e)?;
         }
+        tx.commit().map_err(e)?;
         Ok(Self {
             path: p,
             conn: Mutex::new(conn),
@@ -788,20 +793,30 @@ impl RequestLog {
 
 fn write_batch(conn: &mut Connection, pending: &[PendingRow], agents: &mut HashMap<String, i64>) -> Result<usize, String> {
     let tx = conn.transaction().map_err(e)?;
+    // Each agent of the batch once, in the order it first appears (new ids
+    // are handed out in that order, as by the Python daemon), with its newest
+    // time; the index keeps a batch of many lines from scanning the list.
     let mut newest: Vec<(String, i64)> = Vec::new();
+    let mut position: HashMap<&str, usize> = HashMap::new();
     for row in pending {
         if row.agent.is_empty() {
             continue;
         }
-        match newest.iter_mut().find(|(a, _)| *a == row.agent) {
-            Some(entry) => entry.1 = entry.1.max(row.ts),
-            None => newest.push((row.agent.clone(), row.ts)),
+        match position.get(row.agent.as_str()) {
+            Some(&i) => newest[i].1 = newest[i].1.max(row.ts),
+            None => {
+                position.insert(row.agent.as_str(), newest.len());
+                newest.push((row.agent.clone(), row.ts));
+            }
         }
     }
-    let unknown: Vec<&(String, i64)> = newest.iter().filter(|(a, _)| !agents.contains_key(a)).collect();
+    let mut unknown: Vec<&(String, i64)> = newest.iter().filter(|(a, _)| !agents.contains_key(a)).collect();
     if !unknown.is_empty() {
         if agents.len() > 20000 {
             agents.clear();
+            // The known agents of this batch were just forgotten too: resolve
+            // them again, or their lines would be stored without an agent.
+            unknown = newest.iter().collect();
         }
         for (agent, ts) in &unknown {
             tx.execute("INSERT OR IGNORE INTO agents (agent, last_ts) VALUES (?1, ?2)", params![agent, ts])
@@ -1279,5 +1294,98 @@ mod tests {
         assert_eq!(log.search(&by_id, 0, true, 10, 4.0).unwrap()["requests"][0]["status"], 200);
         let summary = log.summary(&RequestQuery::default(), 3.0).unwrap();
         assert_eq!(summary["counted"], 2);
+    }
+
+    fn pending(ts: i64, agent: &str) -> PendingRow {
+        PendingRow {
+            ts,
+            request_id: String::new(),
+            client: "203.0.113.1".into(),
+            status: 200,
+            frontend: String::new(),
+            backend: String::new(),
+            server: String::new(),
+            method: "GET".into(),
+            host: String::new(),
+            path: "/".into(),
+            bytes_out: 0,
+            duration_ms: 0,
+            bad_request: 0,
+            response_ms: -1,
+            times: String::new(),
+            term: String::new(),
+            ban_reason: String::new(),
+            authenticated_user: String::new(),
+            agent: agent.into(),
+        }
+    }
+
+    // The new columns, the move to UTC and the new version are one
+    // transaction: a migration stopped before the version is written leaves
+    // nothing half done for the next start to apply a second time.
+    #[test]
+    fn version_one_migration_is_all_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("guardd-reqlog-mig-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("requests.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for stmt in SCHEMA {
+                conn.execute(stmt, []).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO schema_version (version) VALUES (1);
+                 INSERT INTO requests (ts, client) VALUES (1700000000, '203.0.113.1');
+                 CREATE TRIGGER stop_version BEFORE UPDATE ON schema_version BEGIN SELECT RAISE(ABORT, 'stopped'); END;",
+            )
+            .unwrap();
+        }
+        let cfg = GuardConfig::default();
+        assert!(RequestLog::open(&path, &cfg).is_err());
+        let columns = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn.prepare("PRAGMA table_info(requests)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.collect::<Result<_, _>>().unwrap()
+        };
+        {
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(version, 1);
+            assert!(!columns(&conn).iter().any(|c| c == "response_ms"), "columns added outside the transaction");
+            conn.execute_batch("DROP TRIGGER stop_version;").unwrap();
+        }
+        RequestLog::open(&path, &cfg).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, REQUEST_LOG_SCHEMA_VERSION);
+        assert!(columns(&conn).iter().any(|c| c == "response_ms"));
+    }
+
+    // A full agent cache is cleared before new agents are added; an agent the
+    // cache knew, in the same batch, must still be stored with its id.
+    #[test]
+    fn known_agent_keeps_its_id_when_the_cache_is_cleared() {
+        let dir = std::env::temp_dir().join(format!("guardd-reqlog-ua-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let cfg = GuardConfig::default();
+        let log = RequestLog::open(dir.join("requests.db"), &cfg).unwrap();
+        let mut conn = log.conn();
+        let mut agents: HashMap<String, i64> = HashMap::new();
+        write_batch(&mut conn, &[pending(10, "known/1.0")], &mut agents).unwrap();
+        let known = agents["known/1.0"];
+        for i in 0..20001 {
+            agents.insert(format!("filler-{i}"), 1_000_000 + i);
+        }
+        write_batch(&mut conn, &[pending(20, "new/2.0"), pending(21, "known/1.0"), pending(22, "new/2.0")], &mut agents)
+            .unwrap();
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT agent_id FROM requests WHERE ts >= 20 ORDER BY ts").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+            rows.collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(ids[1], known, "the known agent lost its id");
+        assert!(ids[0] > 0 && ids[0] == ids[2] && ids[0] != known);
+        assert!(agents.len() < 100, "the cache was not cleared");
     }
 }

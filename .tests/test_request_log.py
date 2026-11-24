@@ -118,6 +118,31 @@ class StoreTestCase(unittest.TestCase):
         return self.store.flush(self.now)
 
 
+class AgentCacheTests(StoreTestCase):
+    def test_a_known_agent_keeps_its_id_when_the_cache_is_cleared(self):
+        # A full cache is cleared before the batch's new agents are added; an
+        # agent the cache knew, in the same batch, must keep its id, not 0.
+        import dataclasses
+
+        text = line()
+
+        def add(agent):
+            record = dataclasses.replace(guardd.parse_access_line(text), user_agent=agent)
+            self.store.add(record, guardd.line_epoch(text))
+
+        add("known/1.0")
+        self.store.flush(self.now)
+        known = self.store._agents["known/1.0"]
+        self.store._agents.update({f"filler-{i}": 1_000_000 + i for i in range(20001)})
+        add("new/2.0")
+        add("known/1.0")
+        self.store.flush(self.now)
+        ids = [row[0] for row in self.store._conn.execute("SELECT agent_id FROM requests ORDER BY id")]
+        self.assertEqual(ids[-1], known)
+        self.assertNotIn(ids[-2], (0, known))
+        self.assertLess(len(self.store._agents), 100)
+
+
 class IngestTests(StoreTestCase):
     def test_records_are_written_in_one_batch_per_cycle(self):
         # One statement per cycle rather than one per line: at the measured
