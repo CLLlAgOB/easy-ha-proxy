@@ -289,6 +289,9 @@ native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url
 # together with mandatory SHA-256 checksums per architecture.
 native_release_image: "clllagob/haproxy-admin-ui:native-{{ haproxy_admin_image_channel }}"
+# Install the binaries CI built from the checked-out revision (the channel tag
+# plus "-<12 hex of the commit>"), never whatever the channel tag points at now.
+native_release_pin_revision: true
 native_local_bundle_dir: ""
 native_release_base_url: ""
 native_release_checksums: {}

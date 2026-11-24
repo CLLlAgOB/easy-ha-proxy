@@ -109,19 +109,57 @@
         remote_src: true
       when: _native_mode in ['local', 'https']
 
+    # The binaries must be the ones CI built from the revision being installed.
+    # The floating channel tag moves with every push, and SHA256SUMS inside the
+    # image only proves the image is intact, not which commit it came from.
+    - name: "native-daemons | Read the source revision being installed"
+      ansible.builtin.command:
+        # safe.directory: a checkout owned by another user must not read as "no revision".
+        argv: [git, -c, "safe.directory={{ playbook_dir | dirname }}", -C, "{{ playbook_dir | dirname }}", rev-parse, HEAD]
+      register: _native_source_revision
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - _native_mode == 'oci'
+        - native_release_pin_revision | default(true) | bool
+
+    # Pinned: the image CI tags with that commit (<channel tag>-<12 hex>), whose
+    # revision label must name the same commit, copied out by its digest so a
+    # concurrent push cannot swap it in between. The digest and revision are
+    # kept beside the staging files. Without a git checkout, or with
+    # native_release_pin_revision false, the channel tag is used as before.
     - name: "native-daemons | Pull and verify native binary bundle from OCI image"
       ansible.builtin.shell: |
         set -euo pipefail
         img={{ native_release_image | quote }}
+        rev={{ ((_native_source_revision.stdout | default('') | trim)
+                if (_native_source_revision.rc | default(1)) == 0 else '') | quote }}
         stage="/var/lib/easy-ha-proxy/native-staging"
         rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
-        docker pull "${img}"
-        cid="$(docker create "${img}")"
+        if [ -n "${rev}" ]; then
+          img="${img}-${rev:0:12}"
+          if ! docker pull "${img}"; then
+            echo "The native binaries of revision ${rev:0:12} are not published (${img})." >&2
+            echo "Wait for that commit's CI build, or set native_release_pin_revision: false." >&2
+            exit 1
+          fi
+          built="$(docker image inspect --format '{% raw %}{{ index .Config.Labels "org.opencontainers.image.revision" }}{% endraw %}' "${img}")"
+          if [ "${built}" != "${rev}" ]; then
+            echo "${img} was built from ${built:-an unknown revision}, not ${rev}." >&2
+            exit 1
+          fi
+        else
+          docker pull "${img}"
+        fi
+        ref="$(docker image inspect --format '{% raw %}{{ index .RepoDigests 0 }}{% endraw %}' "${img}")"
+        cid="$(docker create "${ref}")"
         trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
         docker cp "${cid}:/sbin" "${stage}/sbin"
         docker cp "${cid}:/lib" "${stage}/lib"
         docker cp "${cid}:/SHA256SUMS" "${stage}/SHA256SUMS"
         (cd "${stage}" && sha256sum -c SHA256SUMS)
+        printf '{"image": "%s", "digest": "%s", "revision": "%s"}\n' "${img}" "${ref}" "${rev}" > "${stage}/image.json"
       args:
         executable: /bin/bash
       when: _native_mode == 'oci'
