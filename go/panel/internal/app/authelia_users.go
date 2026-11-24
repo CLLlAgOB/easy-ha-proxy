@@ -874,8 +874,12 @@ func (a *App) registerAutheliaUsers() {
 			}
 			return c.Redirect(c.URLFor("routes.authelia_bans", args...), 303)
 		}
-		bans := GetAutheliaBans()
-		logs, logsErr := GetAutheliaLogs(logIP, logUser, logLevel)
+		// The ban list comes from authelia-bansd, the log from a file: read both at once.
+		var bans *Map
+		var logs []any
+		var logsErr any
+		concurrently(func() { bans = GetAutheliaBans() },
+			func() { logs, logsErr = GetAutheliaLogs(logIP, logUser, logLevel) })
 		return c.Render("authelia_bans.html", map[string]any{"bans": bans, "bans_error": bans.Value("error"), "logs": logs,
 			"logs_error": logsErr, "log_ip": logIP, "log_user": logUser, "log_level": logLevel})
 	})

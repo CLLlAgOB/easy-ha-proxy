@@ -83,7 +83,7 @@ func (d *Daemon) installedDNSPlugins() map[string]bool {
 }
 
 func (d *Daemon) listDNSProviders() map[string]any {
-	available := d.installedDNSPlugins()
+	available := d.listedDNSPlugins()
 	profiles := []any{}
 	if isDir(d.Opts.DNSCredentialsDir) {
 		for _, path := range globSorted(filepath.Join(d.Opts.DNSCredentialsDir, "*.ini")) {

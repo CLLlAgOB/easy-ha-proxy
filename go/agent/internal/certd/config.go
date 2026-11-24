@@ -167,6 +167,7 @@ type Daemon struct {
 	standbyMu    sync.Mutex // _STANDBY_SWITCH_LOCK
 	trashMu      sync.Mutex // TRASH_LOCK
 	alertsClient alertSink
+	plugins      pluginCache // listedDNSPlugins
 }
 
 // certWarnDaysFor is cert_warn_days.

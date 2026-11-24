@@ -477,7 +477,12 @@ func OpenDatabase(path string) (*Database, error) {
 		pragmas = append(pragmas, "PRAGMA auto_vacuum=INCREMENTAL")
 	}
 	pragmas = append(pragmas, "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL", "PRAGMA foreign_keys=ON",
-		"PRAGMA busy_timeout=5000")
+		"PRAGMA busy_timeout=5000",
+		// An 8 MiB page cache instead of 2 MiB: a day's CPU or memory chart
+		// reads ~33k component rows, and the pure-Go SQLite pays for every
+		// page it reads back from the file (measured ~25% faster on a copy
+		// of a gateway's 34 MB database). The one connection keeps it.
+		"PRAGMA cache_size=-8192")
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
 			db.Close()
