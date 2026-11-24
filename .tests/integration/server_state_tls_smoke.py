@@ -11,6 +11,11 @@ import subprocess
 import tempfile
 import time
 
+# The dumper's native-agent placeholder, rendered empty: these runs exercise the
+# Python normalizer they name, which the dumper then uses.
+NATIVE_AGENT = ("{{ (native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent')) if (native_tools_enabled"
+                " | default(native_daemons_enabled | default(true)) | bool) else '' }}")
+
 
 def rpc(path, command):
     with socket.socket(socket.AF_UNIX) as client:
@@ -87,7 +92,7 @@ def main(template, normalizer):
                 "{{ haproxy_socket | default('/run/haproxy/admin.sock') }}", str(root / "admin.sock")
             ).replace(
                 "{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}", str(root / "state")
-            )
+            ).replace(NATIVE_AGENT, "")
             assert "{{" not in script
             (root / "dump.sh").write_text(script)
             with running(root, old_tls, False, old_port) as control:

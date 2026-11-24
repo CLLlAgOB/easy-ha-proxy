@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from server_state_tls_smoke import main as tls_cases, rpc, running, state
+from server_state_tls_smoke import NATIVE_AGENT, main as tls_cases, rpc, running, state
 
 
 def transition(template, normalizer, before, after, commands=(), expected=None, probe=None, snapshot_expected=None):
@@ -22,7 +22,8 @@ def transition(template, normalizer, before, after, commands=(), expected=None, 
         root = Path(directory)
         script = template.read_text().replace(
             "{{ haproxy_socket | default('/run/haproxy/admin.sock') }}", str(root / "admin.sock")
-        ).replace("{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}", str(root / "state"))
+        ).replace("{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}", str(root / "state")
+        ).replace(NATIVE_AGENT, "")
         (root / "dump.sh").write_text(script)
         with running(root, load=False, **{"tls": False, **before}) as control:
             for command in commands:
