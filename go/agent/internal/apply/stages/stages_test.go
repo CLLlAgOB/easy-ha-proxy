@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -168,5 +169,32 @@ func TestTheRoleListsTheAgentsParts(t *testing.T) {
 	}
 	for name := range listed {
 		t.Errorf("go_installer_parts lists %s, which the agent does not have", name)
+	}
+}
+
+// main.yml writes the parts out (a static import's name is templated from the
+// role parameters alone); they must be the same parts as go_installer_parts.
+func TestMainYmlSendsTheSamePartsToTheFallback(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", "haproxy-admin", "tasks", "main.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	start, end := strings.Index(text, "task_stage in ["), strings.Index(text, "]\n")
+	if start < 0 || end < start {
+		t.Fatalf("main.yml has no inline part list:\n%s", text)
+	}
+	var listed []string
+	for _, item := range strings.Split(text[start+len("task_stage in ["):end], ",") {
+		listed = append(listed, strings.Trim(strings.TrimSpace(item), "'"))
+	}
+	sort.Strings(listed)
+	var parts []string
+	for name := range Parts() {
+		parts = append(parts, name)
+	}
+	sort.Strings(parts)
+	if strings.Join(listed, ",") != strings.Join(parts, ",") {
+		t.Fatalf("main.yml lists %v, the agent has %v", listed, parts)
 	}
 }

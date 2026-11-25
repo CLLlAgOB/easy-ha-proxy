@@ -9,30 +9,19 @@
 # -------------------------------------------------------------------
 # 4) The helper daemons (moved into stages of their own)
 # -------------------------------------------------------------------
-# Each one runs with the Go installer when the agent has it (go_part.yml),
-# else from its task file.
+# These run with the Go installer in one call when the agent has them
+# (go_part.yml); each one it does not run is included from its task file
+# (dynamic, so a part the agent ran costs one skipped task; see go_fallback.yml).
 - import_tasks: go_part.yml
   vars:
-    go_part: certd
-- import_tasks: certd.yml
-  when: not go_runs_certd
-- import_tasks: go_part.yml
-  vars:
-    go_part: controld
-- import_tasks: controld.yml
-  when: not go_runs_controld
-- import_tasks: go_part.yml
-  vars:
-    go_part: backupd
-- import_tasks: backupd.yml
-  when: not go_runs_backupd
-- import_tasks: go_part.yml
-  vars:
-    go_part: iptables-ban
-- import_tasks: iptables-ban.yml
-  when: not go_runs_iptables_ban
-- import_tasks: go_part.yml
-  vars:
-    go_part: iptables-udp
-- import_tasks: iptables-udp.yml
-  when: not go_runs_iptables_udp
+    go_parts: [certd, controld, backupd, iptables-ban, iptables-udp]
+- include_tasks: {file: certd.yml, apply: {tags: [always]}}
+  when: "'certd' not in (go_agent_part_names | default([]))"
+- include_tasks: {file: controld.yml, apply: {tags: [always]}}
+  when: "'controld' not in (go_agent_part_names | default([]))"
+- include_tasks: {file: backupd.yml, apply: {tags: [always]}}
+  when: "'backupd' not in (go_agent_part_names | default([]))"
+- include_tasks: {file: iptables-ban.yml, apply: {tags: [always]}}
+  when: "'iptables-ban' not in (go_agent_part_names | default([]))"
+- include_tasks: {file: iptables-udp.yml, apply: {tags: [always]}}
+  when: "'iptables-udp' not in (go_agent_part_names | default([]))"

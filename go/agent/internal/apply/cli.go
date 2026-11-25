@@ -66,7 +66,10 @@ func runParts(stdout io.Writer) int {
 type Summary struct {
 	Changed   bool            `json:"changed"`
 	Registers map[string]bool `json:"registers"`
-	Counts    map[string]int  `json:"counts"`
+	// Exports are the registers some part reads (its Reads), the only ones
+	// Ansible needs to keep as facts for later calls.
+	Exports map[string]bool `json:"exports"`
+	Counts  map[string]int  `json:"counts"`
 }
 
 // runStage checks (plan) or applies (run) a stage or one part. It prints one
@@ -82,15 +85,15 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 	source := fs.String("source", "/opt/easy-ha-proxy/source", "the checkout holding ansible/")
 	config := fs.String("config", "/etc/easy-ha-proxy", "the managed configuration")
 	stage := fs.String("stage", "", "a stage: "+strings.Join(stages.Names(), ", "))
-	part := fs.String("part", "", "one part (a task file)")
 	taskStage := fs.String("task-stage", "", "the task_stage of the role entry running the part")
 	asJSON := fs.Bool("json", false, "print the journal (JSON lines) instead of a table")
-	var changed, skipTags list
+	var changed, skipTags, partNames list
+	fs.Var(&partNames, "part", "a part (a task file); repeat to run several in order in one run")
 	extra := pairs{}
 	fs.Var(&changed, "changed", "a registered result of an earlier stage that changed (repeatable)")
 	fs.Var(&skipTags, "skip-tag", "a task tag to skip, as --skip-tags (repeatable)")
 	fs.Var(extra, "extra", "an extra variable, key=value (repeatable)")
-	if err := fs.Parse(args); err != nil || (*stage == "") == (*part == "") {
+	if err := fs.Parse(args); err != nil || (*stage == "") == (len(partNames) == 0) {
 		fmt.Fprintf(stderr, "usage: easy-ha-proxy-agent %s (--stage NAME | --part NAME) ...\n", name)
 		return 2
 	}
@@ -112,8 +115,12 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 		extra["easy_ha_proxy_target"] = "easy_ha_proxy"
 	}
 	ctx := stages.Context{SourceDir: *source, ConfigDir: *config, Facts: hostFacts, Sys: run.Sys, Extra: extra}
-	if *part != "" {
-		err = stages.RunPart(ctx, *part, *taskStage, run)
+	if len(partNames) > 0 {
+		for _, name := range partNames {
+			if err = stages.RunPart(ctx, name, *taskStage, run); err != nil {
+				break
+			}
+		}
 	} else {
 		err = stages.Run(ctx, *stage, run)
 	}
@@ -130,7 +137,16 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	counts := run.Counts()
-	summary := Summary{Changed: counts["changed"]+counts["would_change"] > 0, Registers: run.Registers(), Counts: counts}
+	registers := run.Registers()
+	exports := map[string]bool{}
+	for _, p := range stages.Parts() {
+		for _, name := range p.Reads {
+			if v, ok := registers[name]; ok {
+				exports[name] = v
+			}
+		}
+	}
+	summary := Summary{Changed: counts["changed"]+counts["would_change"] > 0, Registers: registers, Exports: exports, Counts: counts}
 	raw, _ := json.Marshal(summary)
 	fmt.Fprintln(stdout, string(raw))
 	if err != nil {

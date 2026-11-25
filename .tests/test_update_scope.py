@@ -63,7 +63,8 @@ def playbook_entries() -> list[tuple[str, str, set[str]]]:
     return entries
 
 
-_IMPORT_RE = re.compile(r"(?:import_tasks|include_tasks):\s*['\"]?([\w./-]+\.yml)")
+# import_tasks: x.yml, include_tasks: x.yml, and include_tasks: {file: x.yml, apply: ...}.
+_IMPORT_RE = re.compile(r"(?:import_tasks|include_tasks):\s*(?:\{\s*file:\s*)?['\"]?([\w./-]+\.yml)")
 
 
 def stage_text(role: str, stage: str, seen: set | None = None) -> tuple[str, set[str]]:
