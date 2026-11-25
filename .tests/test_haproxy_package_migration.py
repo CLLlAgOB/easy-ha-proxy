@@ -56,6 +56,25 @@ class Boundaries(unittest.TestCase):
                         engine.health()
                     probe.assert_not_called()
 
+    def test_the_probe_trusts_the_internal_ca_where_the_installer_keeps_it(self):
+        # It looked under /etc/easy-ha-proxy, where the CA never is: on an
+        # internal-CA installation every HAProxy update and migration stopped
+        # at this probe with CERTIFICATE_VERIFY_FAILED.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('HAPROXY_CA_ROOT_DIR', None)
+            self.assertEqual(m.internal_ca_path(), Path('/etc/haproxy/certificate-authorities/internal/ca.crt'))
+        with tempfile.TemporaryDirectory() as root:
+            ca = Path(root) / 'internal' / 'ca.crt'
+            ca.parent.mkdir()
+            ca.write_text('a root\n', encoding='utf-8')
+            context = Mock()
+            with patch.dict(os.environ, {'HAPROXY_CA_ROOT_DIR': root}), \
+                    patch.object(m.ssl, 'create_default_context', return_value=context), \
+                    patch.object(m, 'LocalTLS') as connection:
+                connection.return_value.getresponse.return_value.status = 200
+                self.assertEqual(m.local_probe('admin.example.test', '/api/control-plane-health'), 200)
+            context.load_verify_locations.assert_called_once_with(cafile=str(ca))
+
     def test_combined_transition_holds_the_actual_lock_across_refresh_prepare_and_apply(self):
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / 'maintenance.lock'

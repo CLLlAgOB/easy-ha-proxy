@@ -419,11 +419,20 @@ class LocalTLS(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(connection, server_hostname=self.host)
 
 
+def internal_ca_path() -> Path:
+    """The internal root CA, where the installer and certd keep it."""
+    root = os.environ.get('HAPROXY_CA_ROOT_DIR', '/etc/haproxy/certificate-authorities')
+    return Path(root) / 'internal' / 'ca.crt'
+
+
 def local_probe(domain: str, path: str) -> int:
     if not re.fullmatch(r'[A-Za-z0-9.-]+', domain):
         raise MigrationError('Invalid control-plane hostname')
     context = ssl.create_default_context()
-    ca = Path('/etc/easy-ha-proxy/certificate-authorities/internal/ca.crt')
+    # The panel and Authelia of an internal-CA installation present that CA's
+    # certificates. It was looked for under /etc/easy-ha-proxy, where it never
+    # is, so every HAProxy update and migration there stopped at this probe.
+    ca = internal_ca_path()
     if ca.is_file():
         context.load_verify_locations(cafile=str(ca))
     connection = LocalTLS(domain, 443, timeout=5, context=context)
