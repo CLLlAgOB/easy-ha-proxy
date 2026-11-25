@@ -23,6 +23,12 @@ var folded = map[string]bool{
 	"Check the HAProxy Admin runtime variables for GeoIP selection": true, // stat, read in the conditions
 	"Check whether the legacy cron command is installed":            true, // stat, read in the conditions
 	"Check whether a local GeoIP release is already active":         true, // stat, read in the conditions
+	"Stat whitelist_global_file":                                    true, // stat, read in the conditions
+	"haproxy-admin | Inspect restored change log files":             true, // stat, read in the conditions
+	"Check the locally prepared bundle":                             true, // stat, read in the assert
+	"Record existing native files":                                  true, // stat, read in the assert
+	"Inspect the active restore marker":                             true, // stat, read in the conditions
+	"native-daemons | Inspect the active update marker":             true, // stat, read in the conditions
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
@@ -42,12 +48,26 @@ func taskNames(t *testing.T, dir, file string) []string {
 	walk = func(list []any) {
 		for _, task := range list {
 			m := task.(*pyyaml.Map)
-			imported, ok := m.Value("import_tasks").(string)
-			if !ok {
-				imported, ok = m.Value("ansible.builtin.import_tasks").(string)
+			imported, ok := "", false
+			for _, key := range []string{"import_tasks", "ansible.builtin.import_tasks", "include_tasks", "ansible.builtin.include_tasks"} {
+				if imported, ok = m.Value(key).(string); ok {
+					break
+				}
 			}
 			if ok {
 				names = append(names, taskNames(t, dir, imported)...)
+				continue
+			}
+			// import_role with tasks_from: that role's task file in place.
+			for _, key := range []string{"import_role", "ansible.builtin.import_role"} {
+				if role, isMap := m.Value(key).(*pyyaml.Map); isMap {
+					from, _ := role.Value("tasks_from").(string)
+					name, _ := role.Value("name").(string)
+					names = append(names, taskNames(t, filepath.Join(dir, "..", "..", name, "tasks"), from)...)
+					ok = true
+				}
+			}
+			if ok {
 				continue
 			}
 			if block, ok := m.Value("block").([]any); ok {
@@ -237,5 +257,47 @@ func TestMainYmlSendsTheSamePartsToTheFallback(t *testing.T) {
 		if strings.Join(listed, ",") != strings.Join(files, ",") {
 			t.Errorf("%s main.yml lists %v, the agent has %v", role, listed, files)
 		}
+	}
+}
+
+// The shell tasks' scripts and native-cleanup's list are kept in Go word for
+// word; hold them to the task files.
+func TestShellScriptsMatchTheTaskFiles(t *testing.T) {
+	root := repoRoot(t)
+	load := func(file string) []any {
+		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", "haproxy-admin", "tasks", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := pyyaml.Load(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doc.([]any)
+	}
+	native := load("native.yml")[0].(*pyyaml.Map).Value("block").([]any)
+	found := false
+	for _, task := range native {
+		m := task.(*pyyaml.Map)
+		if m.Value("name") == "native-daemons | Pull and verify native binary bundle from OCI image" {
+			found = true
+			if m.Value("ansible.builtin.shell") != nativeOCIPull {
+				t.Error("the OCI pull script differs from native.yml's")
+			}
+		}
+	}
+	if !found {
+		t.Error("native.yml has no OCI pull task")
+	}
+	cleanup := load("native-cleanup.yml")[0].(*pyyaml.Map)
+	if cleanup.Value("ansible.builtin.shell") != nativeCleanup {
+		t.Error("the cleanup script differs from native-cleanup.yml's")
+	}
+	var paths []string
+	for _, p := range cleanup.Value("vars").(*pyyaml.Map).Value("native_legacy_paths").([]any) {
+		paths = append(paths, p.(string))
+	}
+	if strings.Join(paths, ",") != strings.Join(nativeLegacyPaths, ",") {
+		t.Errorf("native_legacy_paths: task file %v, Go %v", paths, nativeLegacyPaths)
 	}
 }

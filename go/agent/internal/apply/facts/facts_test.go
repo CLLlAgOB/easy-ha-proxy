@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -162,5 +163,47 @@ func TestServicesJoinUnitsAndUnitFiles(t *testing.T) {
 	check("fail2ban.service", "inactive", "disabled")
 	if _, ok := svc.Get("ssh.socket"); ok {
 		t.Fatal("only service units")
+	}
+}
+
+// The time zone probe's order and its refusal of anything but a zone name.
+func TestTimezoneFollowsThePlaysProbe(t *testing.T) {
+	root := t.TempDir()
+	none := func(string, ...string) (string, error) { return "", errors.New("no timedatectl") }
+	says := func(zone string) Runner {
+		return func(string, ...string) (string, error) { return zone + "\n", nil }
+	}
+	if got := Timezone(says("Europe/Moscow"), root); got != "Europe/Moscow" {
+		t.Fatalf("timedatectl: %q", got)
+	}
+	if got := Timezone(none, root); got != "UTC" {
+		t.Fatalf("nothing to read: %q", got)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	zoneinfo := filepath.Join(root, "usr", "share", "zoneinfo", "posix", "Asia")
+	if err := os.MkdirAll(zoneinfo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(zoneinfo, "Tokyo"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(zoneinfo, "Tokyo"), filepath.Join(root, "etc", "localtime")); err != nil {
+		t.Fatal(err)
+	}
+	if got := Timezone(none, root); got != "Asia/Tokyo" {
+		t.Fatalf("/etc/localtime: %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "timezone"), []byte("America/New_York\nignored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Timezone(none, root); got != "America/New_York" {
+		t.Fatalf("/etc/timezone first: %q", got)
+	}
+	for _, bad := range []string{"../etc/passwd", "/abs", "Europe/", "Euro pe", "a;b"} {
+		if got := Timezone(says(bad), root); got != "UTC" {
+			t.Fatalf("%q was taken: %q", bad, got)
+		}
 	}
 }

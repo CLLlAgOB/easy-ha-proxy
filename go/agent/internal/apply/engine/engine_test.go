@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -400,5 +401,104 @@ func TestAptInstallRefreshesWithoutCallingItAChange(t *testing.T) {
 	installed = "haproxy-awslc\tii \t3.4.2-1\n"
 	if c := check(t, f.System, pinned); c.Needed {
 		t.Fatal("a version inside the pin is not")
+	}
+}
+
+// lineinfile: the last line the expression finds is replaced, else the line
+// goes at the end (after a newline the file lacked); no change when it is
+// already there.
+func TestLineInFileFollowsAnsible(t *testing.T) {
+	f := newFake(t)
+	f.write(t, "/c/vars.yml", "a: 1\nhaproxy_nbthread: 1\nb: 2\n  haproxy_nbthread : 3\nc: 3", 0o644)
+	line := &LineInFile{Path: "/c/vars.yml", Regexp: regexp.MustCompile(`^\s*haproxy_nbthread\s*:`), Line: "haproxy_nbthread: 2"}
+	c := check(t, f.System, line)
+	if !c.Needed || c.Summary != "line replaced" {
+		t.Fatalf("replace: %+v", c)
+	}
+	if err := line.Apply(f.System, c); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(f.Path("/c/vars.yml"))
+	if string(got) != "a: 1\nhaproxy_nbthread: 1\nb: 2\nhaproxy_nbthread: 2\nc: 3" {
+		t.Fatalf("only the last match is replaced: %q", got)
+	}
+	if c := check(t, f.System, line); c.Needed {
+		t.Fatalf("already there: %+v", c)
+	}
+	add := &LineInFile{Path: "/c/vars.yml", Regexp: regexp.MustCompile(`^\s*haproxy_socket\s*:`), Line: `haproxy_socket: "/run/x"`}
+	c = check(t, f.System, add)
+	if err := add.Apply(f.System, c); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = os.ReadFile(f.Path("/c/vars.yml"))
+	if !strings.HasSuffix(string(got), "c: 3\nhaproxy_socket: \"/run/x\"\n") {
+		t.Fatalf("added at the end after a newline: %q", got)
+	}
+	missing := &LineInFile{Path: "/c/none.yml", Regexp: regexp.MustCompile(`x`), Line: "x"}
+	if _, err := missing.Check(f.System); err == nil {
+		t.Fatal("a missing file is an error without create:")
+	}
+}
+
+// changed_when over the output: the command runs on apply only, and the
+// step is changed only when the output says so.
+func TestCommandOutcomeDecidesTheChange(t *testing.T) {
+	f := newFake(t)
+	out := "Container x Started\n"
+	f.Exec = func(name string, args ...string) (string, int, error) {
+		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+		return out, 0, nil
+	}
+	cmd := func() *Command {
+		return &Command{Argv: []string{"docker", "compose", "up"}, Dir: "/opt/x", Env: []string{"A=b"}, MergeStderr: true,
+			ChangedWhen: func(o string, _ int) bool { return strings.Contains(o, "Started") }}
+	}
+	plan := NewRun(Plan, f.System, nil)
+	if err := plan.Do("s", []Step{{Name: "up", Register: "up", Resource: cmd()}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 || plan.Changed("up") {
+		t.Fatalf("plan ran it or called it changed: %v", f.calls)
+	}
+	apply := NewRun(Apply, f.System, nil)
+	if err := apply.Do("s", []Step{{Name: "up", Register: "up", Notify: []string{"h"}, Resource: cmd()}}); err != nil {
+		t.Fatal(err)
+	}
+	if !apply.Changed("up") || apply.Results[0].Status != "changed" || len(apply.Notified()) != 1 {
+		t.Fatalf("outcome: %+v %v", apply.Results, apply.Notified())
+	}
+	if f.calls[0] != `/bin/sh -c exec "$@" 2>&1 sh env -C /opt/x A=b docker compose up` {
+		t.Fatalf("argv: %q", f.calls[0])
+	}
+	out = "up to date\n"
+	again := NewRun(Apply, f.System, nil)
+	if err := again.Do("s", []Step{{Name: "up", Register: "up", Resource: cmd()}}); err != nil {
+		t.Fatal(err)
+	}
+	if again.Changed("up") || again.Results[0].Status != "ok" {
+		t.Fatalf("no change in the output: %+v", again.Results)
+	}
+}
+
+// recurse: every entry below the directory that is not the owner's.
+func TestTreeAndAttrs(t *testing.T) {
+	f := newFake(t)
+	f.write(t, "/d/a/b.txt", "x", 0o640)
+	tree := &Tree{Path: "/d", Owner: "u", Group: "g"}
+	if c := check(t, f.System, tree); c.Needed {
+		t.Fatalf("everything is the current user's already: %+v", c)
+	}
+	f.LookupUser = func(string) (int, error) { return os.Getuid() + 1, nil }
+	if c := check(t, f.System, tree); !c.Needed || c.Summary != "owner of 3 entries" {
+		t.Fatalf("another owner: %+v", c)
+	}
+	attrs := &Attrs{Path: "/d/missing"}
+	if _, err := attrs.Check(f.System); err == nil {
+		t.Fatal("state: file on a missing file is an error")
+	}
+	attrs = &Attrs{Path: "/d/a/b.txt", Mode: 0o644}
+	c := check(t, f.System, attrs)
+	if !c.Needed || c.Summary != "mode 0640 -> 0644" {
+		t.Fatalf("mode: %+v", c)
 	}
 }

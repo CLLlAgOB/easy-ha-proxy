@@ -196,7 +196,17 @@ func (r *Run) do(step Step, res *Result) error {
 	if !c.Needed {
 		res.Status = "ok"
 		if c.Run && r.Mode == Apply {
-			return resource.Apply(r.Sys, c)
+			if err := resource.Apply(r.Sys, c); err != nil {
+				return err
+			}
+			if o, ok := resource.(Outcome); ok && o.Changed() {
+				res.Status, res.Summary = "changed", "ran, changed"
+				if step.Register != "" {
+					r.changed[step.Register] = true
+					r.registers[step.Register] = true
+				}
+				r.notify(step.Notify)
+			}
 		}
 		return nil
 	}

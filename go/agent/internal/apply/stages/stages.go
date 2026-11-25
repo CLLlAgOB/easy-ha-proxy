@@ -19,6 +19,11 @@ type Context struct {
 	Facts                map[string]any
 	Extra                map[string]any
 	Sys                  *engine.System
+	// SetFacts are set_fact values of earlier task files; Handed collects
+	// the ones the parts run here set and name in Facts (both may be nil).
+	SetFacts, Handed map[string]any
+	// HostTimezone is facts.Timezone, once per run.
+	HostTimezone string
 }
 
 // Part is one task file of a role, the unit Ansible hands to the agent during
@@ -35,6 +40,9 @@ type Part struct {
 	// Exports are registers Ansible's handlers read: handed back as facts
 	// with the ones other parts read.
 	Exports []string
+	// Facts are set_fact values later task files read: handed back with
+	// their values, and to the later parts of the same run.
+	Facts []string
 	// Reads are registered results of other task files (or of Ansible) the
 	// part's conditions read; Ansible passes the changed ones as seeds.
 	Reads []string
@@ -105,7 +113,8 @@ func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
 		taskStage = part.TaskFile()
 	}
 	set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Role: part.Role,
-		Params: map[string]any{"task_stage": taskStage}, Extra: ctx.Extra, Facts: ctx.Facts})
+		Params: map[string]any{"task_stage": taskStage}, Extra: ctx.Extra, Facts: ctx.Facts, SetFacts: ctx.SetFacts,
+		HostTimezone: ctx.HostTimezone})
 	if err != nil {
 		return fmt.Errorf("%s/%s: %w", part.Role, part.Name, err)
 	}
@@ -114,7 +123,18 @@ func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
 	if b.err != nil {
 		return fmt.Errorf("%s/%s: %w", part.Role, part.Name, b.err)
 	}
-	return run.Do(part.Role+"/"+part.Name, steps)
+	err = run.Do(part.Role+"/"+part.Name, steps)
+	for _, name := range part.Facts {
+		if v, ok := set.Fact(name); ok {
+			if ctx.Handed != nil {
+				ctx.Handed[name] = v
+			}
+			if ctx.SetFacts != nil {
+				ctx.SetFacts[name] = v
+			}
+		}
+	}
+	return err
 }
 
 // Builder gives a part's steps their values; the first error is kept and
@@ -209,14 +229,18 @@ func (b *Builder) CopyFile(src, dest, owner, group, mode string, opts ...func(*F
 }
 
 // CopySrc is a copy task whose src: is a path (templated), not a role file.
-func (b *Builder) CopySrc(src, dest, owner, group, mode string) func(*engine.Run) (engine.Resource, error) {
+func (b *Builder) CopySrc(src, dest, owner, group, mode string, opts ...func(*FileOpts)) func(*engine.Run) (engine.Resource, error) {
+	o := FileOpts{Force: true}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	src, dest, owner, group, m := b.S(src), b.S(dest), b.S(owner), b.S(group), b.Mode(mode)
 	return func(*engine.Run) (engine.Resource, error) {
 		raw, err := os.ReadFile(src)
 		if err != nil {
 			return nil, err
 		}
-		return &engine.File{Path: dest, Content: raw, Owner: owner, Group: group, Mode: m}, nil
+		return &engine.File{Path: dest, Content: raw, Owner: owner, Group: group, Mode: m, OnlyIfMissing: !o.Force}, nil
 	}
 }
 

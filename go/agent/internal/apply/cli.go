@@ -71,8 +71,11 @@ type Summary struct {
 	Exports map[string]bool `json:"exports"`
 	// Notified are the handlers the steps notified; during the hybrid period
 	// Ansible notifies its own handlers with them.
-	Notified []string       `json:"notified"`
-	Counts   map[string]int `json:"counts"`
+	Notified []string `json:"notified"`
+	// Facts are the set_fact values later task files read (the parts'
+	// Facts), with their values; Ansible keeps them and hands them back.
+	Facts  map[string]any `json:"facts"`
+	Counts map[string]int `json:"counts"`
 }
 
 // runStage checks (plan) or applies (run) a stage or one part. It prints one
@@ -96,6 +99,7 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 	fs.Var(&changed, "changed", "a registered result of an earlier stage that changed (repeatable)")
 	fs.Var(&skipTags, "skip-tag", "a task tag to skip, as --skip-tags (repeatable)")
 	fs.Var(extra, "extra", "an extra variable, key=value (repeatable)")
+	factsJSON := fs.String("facts", "", "set_fact values of earlier task files, as a JSON object")
 	if err := fs.Parse(args); err != nil || (*stage == "") == (len(partNames) == 0) {
 		fmt.Fprintf(stderr, "usage: easy-ha-proxy-agent %s (--stage NAME | --part NAME) ...\n", name)
 		return 2
@@ -117,7 +121,16 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 	if _, ok := extra["easy_ha_proxy_target"]; !ok {
 		extra["easy_ha_proxy_target"] = "easy_ha_proxy"
 	}
-	ctx := stages.Context{SourceDir: *source, ConfigDir: *config, Facts: hostFacts, Sys: run.Sys, Extra: extra}
+	setFacts := map[string]any{}
+	if *factsJSON != "" {
+		if setFacts, err = parseFacts(*factsJSON); err != nil {
+			fmt.Fprintf(stderr, "--facts: %v\n", err)
+			return 2
+		}
+	}
+	handed := map[string]any{}
+	ctx := stages.Context{SourceDir: *source, ConfigDir: *config, Facts: hostFacts, Sys: run.Sys, Extra: extra,
+		SetFacts: setFacts, Handed: handed, HostTimezone: facts.Timezone(facts.Exec, "")}
 	if len(partNames) > 0 {
 		for _, name := range partNames {
 			if err = stages.RunPart(ctx, name, *taskStage, run); err != nil {
@@ -150,7 +163,7 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	summary := Summary{Changed: counts["changed"]+counts["would_change"] > 0, Registers: registers, Exports: exports,
-		Notified: run.Notified(), Counts: counts}
+		Notified: run.Notified(), Facts: handed, Counts: counts}
 	if summary.Notified == nil {
 		summary.Notified = []string{}
 	}
@@ -198,7 +211,7 @@ func runVars(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	set, err := vars.Load(vars.Options{SourceDir: *source, ConfigDir: *config, Play: *play, Role: *role,
-		Params: params, Extra: extra, Facts: hostFacts})
+		Params: params, Extra: extra, Facts: hostFacts, HostTimezone: facts.Timezone(facts.Exec, "")})
 	if err != nil {
 		fmt.Fprintf(stderr, "vars: %v\n", err)
 		return 1
@@ -234,4 +247,47 @@ func runVars(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, text)
 	return 0
+}
+
+// parseFacts reads --facts: a JSON object whose numbers become int64 where
+// they are whole, as YAML would have read them.
+func parseFacts(raw string) (map[string]any, error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var out map[string]any
+	if err := dec.Decode(&out); err != nil {
+		return nil, err
+	}
+	for k, v := range out {
+		out[k] = fromJSON(v)
+	}
+	return out, nil
+}
+
+func fromJSON(v any) any {
+	switch x := v.(type) {
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n
+		}
+		f, _ := x.Float64()
+		return f
+	case []any:
+		for i := range x {
+			x[i] = fromJSON(x[i])
+		}
+		return x
+	case map[string]any:
+		m := pyyaml.NewMap()
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			m.Set(k, fromJSON(x[k]))
+		}
+		return m
+	}
+	return v
 }

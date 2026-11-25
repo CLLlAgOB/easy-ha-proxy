@@ -46,7 +46,13 @@ type Options struct {
 	Params    map[string]any
 	Extra     map[string]any // --extra-vars
 	Facts     map[string]any // setup facts, without the ansible_ prefix
-	CheckMode bool
+	// SetFacts are set_fact values earlier task files left (during the
+	// hybrid period, handed over by Ansible from earlier agent calls).
+	SetFacts map[string]any
+	// HostTimezone is what the first play's time zone probe found
+	// (facts.Timezone); empty leaves easy_ha_proxy_host_timezone unset.
+	HostTimezone string
+	CheckMode    bool
 }
 
 // UndefinedError is a variable no source defines.
@@ -178,8 +184,12 @@ func Load(opts Options) (*Set, error) {
 	}
 	s.push("include_vars secrets.yml", secrets)
 
-	// 6. set_fact, filled by stages.
-	s.push("set_fact", pyyaml.NewMap())
+	// 6. set_fact: what earlier task files set, then filled by stages.
+	setFacts := pyyaml.NewMap()
+	for _, k := range sortedKeys(opts.SetFacts) {
+		setFacts.Set(k, opts.SetFacts[k])
+	}
+	s.push("set_fact", setFacts)
 
 	// 7. Role parameters.
 	params := pyyaml.NewMap()
@@ -190,7 +200,28 @@ func Load(opts Options) (*Set, error) {
 
 	s.push("extra vars", extra)
 	s.push("magic vars", magic)
+	s.preTasks(opts)
 	return s, nil
+}
+
+// preTasks are the first play's pre_tasks that set facts (all tagged
+// always, so every run has them, and set_fact keeps them for the later play
+// too): each value is computed once, from what is below it, as set_fact
+// does. One that cannot be computed is left unset: Ansible would have
+// stopped the play there, and the agent fails where a task reads it.
+func (s *Set) preTasks(opts Options) {
+	for _, f := range []struct{ name, expr string }{
+		{"haproxy_admin_proxy_secret", "{{ haproxy_admin_proxy_secret | default(authelia_session_secret | hash('sha256'), true) }}"},
+		{"certbot_domains", "{{ (sites | map(attribute='domain') | list) + [ admin_domain ] + ( [ aut_domain ] if authelia_enabled | default(false) | bool else [] ) }}"},
+	} {
+		if v, err := s.Template(f.expr); err == nil {
+			s.SetFact(f.name, v)
+		}
+		s.failure = nil
+	}
+	if opts.HostTimezone != "" {
+		s.SetFact("easy_ha_proxy_host_timezone", opts.HostTimezone)
+	}
 }
 
 // newEnv is the Jinja environment Ansible templates variables with:
@@ -295,6 +326,16 @@ func (s *Set) Get(name string) (any, error) {
 	}
 	s.cache[name] = v
 	return v, nil
+}
+
+// Fact is a set_fact value, if one was set.
+func (s *Set) Fact(name string) (any, bool) {
+	for _, l := range s.layers {
+		if l.name == "set_fact" {
+			return l.values.Get(name)
+		}
+	}
+	return nil, false
 }
 
 // SetFact is a stage's set_fact: above the playbook's sources, below role

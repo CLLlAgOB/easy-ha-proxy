@@ -292,6 +292,13 @@ go_installer_parts:
   - haproxy/install
   - haproxy/apparmor
   - haproxy/config
+  - native
+  - getuseruid
+  - packages
+  - fs
+  - config
+  - start
+  - native-cleanup
   - geoip_acl/geoip
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.

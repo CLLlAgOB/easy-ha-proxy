@@ -21,14 +21,30 @@ type Command struct {
 	Delay   time.Duration
 	// Probe marks a read-only command: it runs in plan mode too, and its
 	// output is kept for later steps' conditions.
-	Probe  bool
-	Output string
-	Code   int
+	Probe bool
+	// ChangedWhen is changed_when over the output (and exit code): the
+	// command runs on apply and reports changed only when it holds.
+	ChangedWhen func(out string, code int) bool
+	// Dir and Env are chdir: and environment: (through env -C, so the
+	// System's Exec needs nothing more).
+	Dir string
+	Env []string
+	// MergeStderr keeps standard error in Output too (stderr: read by a
+	// changed_when).
+	MergeStderr bool
+	Output      string
+	Code        int
+
+	changed bool
 }
+
+// Changed is the outcome of a command with ChangedWhen.
+func (c *Command) Changed() bool { return c.changed }
 
 func (c *Command) Describe() string { return "command " + strings.Join(c.Argv, " ") }
 
 func (c *Command) Check(sys *System) (Change, error) {
+	c.changed = false
 	if c.Probe {
 		return Change{Summary: "read"}, c.run(sys)
 	}
@@ -38,7 +54,32 @@ func (c *Command) Check(sys *System) (Change, error) {
 	return Change{Summary: "runs on apply", Run: true}, nil
 }
 
-func (c *Command) Apply(sys *System, _ Change) error { return c.run(sys) }
+func (c *Command) Apply(sys *System, _ Change) error {
+	if err := c.run(sys); err != nil {
+		return err
+	}
+	if c.ChangedWhen != nil {
+		c.changed = c.ChangedWhen(c.Output, c.Code)
+	}
+	return nil
+}
+
+// argv is the command as it is executed: in its directory, with its
+// environment, standard error merged when asked.
+func (c *Command) argv() []string {
+	argv := c.Argv
+	if c.Dir != "" || len(c.Env) > 0 {
+		prefix := []string{"env"}
+		if c.Dir != "" {
+			prefix = append(prefix, "-C", c.Dir)
+		}
+		argv = append(append(prefix, c.Env...), argv...)
+	}
+	if c.MergeStderr {
+		argv = append([]string{"/bin/sh", "-c", `exec "$@" 2>&1`, "sh"}, argv...)
+	}
+	return argv
+}
 
 func (c *Command) run(sys *System) error {
 	var lastErr error
@@ -46,7 +87,8 @@ func (c *Command) run(sys *System) error {
 		if attempt > 0 {
 			time.Sleep(c.Delay)
 		}
-		out, code, err := sys.Exec(c.Argv[0], c.Argv[1:]...)
+		argv := c.argv()
+		out, code, err := sys.Exec(argv[0], argv[1:]...)
 		c.Output, c.Code = out, code
 		switch {
 		case err != nil:

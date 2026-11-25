@@ -5,6 +5,7 @@
 # parameters alone (a test keeps the two equal).
 - import_tasks: >-
     {{ 'go_fallback.yml'
-       if task_stage in ['daemons_env', 'certd', 'controld', 'backupd', 'iptables-ban', 'iptables-udp',
+       if task_stage in ['native', 'getuseruid', 'packages', 'fs', 'config', 'start', 'native-cleanup',
+                         'daemons_env', 'certd', 'controld', 'backupd', 'iptables-ban', 'iptables-udp',
                          'updated', 'alertd', 'metricsd', 'guardd', 'healthd', 'journald-retention']
        else task_stage ~ '.yml' }}
