@@ -62,6 +62,10 @@ _ADMIN = "ansible/roles/haproxy-admin"
 _HAPROXY = "ansible/roles/haproxy"
 _CERT = "ansible/roles/cert"
 _AUTHELIA = "ansible/roles/authelia"
+# The native stage installs the agent; the others run the task files the Go
+# installer takes over (go_installer_parts): the daemons, journald, and the
+# install stage for certd and the iptables loaders.
+_GO_INSTALLER = ("ha-adm-native", "ha-adm-daemons", "ha-adm-journald", "ha-adm-install")
 RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Nothing to deploy.
     (".tests/*", ()),
@@ -78,14 +82,17 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # templates and static files in go/panel/web); the "web application"
     # update pulls it. Nothing on the host changes -- except for the packages
     # the host agent compiles too (the Jinja engine and the Python-compatible
-    # YAML), which reach the host only through the native stage.
-    ("go/panel/shared/*", ("ha-adm-native",)),
+    # YAML): a new agent, and the Go installer renders the parts with them.
+    ("go/panel/shared/*", _GO_INSTALLER),
     ("go/panel/*", ()),
     # Native Rust hot-path core and Go host agent. The sources do not deploy,
     # but CI publishes their binaries from them, and only the native stage
     # installs those binaries and restarts the daemons that run them. Mapped
     # to nothing, a changes-only update after a Go fix kept the old binary.
     ("rust/guardd/*", ("ha-adm-native",)),
+    # The Go installer (agent apply) runs the daemon task files Ansible hands
+    # it: a change there must reach those stages, not only the new binary.
+    ("go/agent/internal/apply/*", _GO_INSTALLER),
     ("go/agent/*", ("ha-adm-native",)),
     # Install entry points and the menu helper run from the source directory
     # itself, and the refreshed source is already in place.

@@ -27,11 +27,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		case "vars":
 			return runVars(args[1:], stdout, stderr)
 		case "plan":
-			return runPlan(args[1:], stdout, stderr)
+			return runStage(engine.Plan, args[1:], stdout, stderr)
+		case "run":
+			return runStage(engine.Apply, args[1:], stdout, stderr)
+		case "parts":
+			return runParts(stdout)
 		}
 	}
 	fmt.Fprintln(stderr, "usage: easy-ha-proxy-agent apply vars [--play N] [--role NAME] [--param k=v]... [--extra k=v]... [--names FILE]")
-	fmt.Fprintln(stderr, "       easy-ha-proxy-agent apply plan --stage NAME [--changed REGISTER]... [--json]")
+	fmt.Fprintln(stderr, "       easy-ha-proxy-agent apply plan|run (--stage NAME | --part NAME [--task-stage NAME])")
+	fmt.Fprintln(stderr, "                            [--changed REGISTER]... [--skip-tag TAG]... [--extra k=v]... [--json]")
+	fmt.Fprintln(stderr, "       easy-ha-proxy-agent apply parts")
 	return 2
 }
 
@@ -40,19 +46,52 @@ type list []string
 func (l *list) String() string     { return strings.Join(*l, ",") }
 func (l *list) Set(s string) error { *l = append(*l, s); return nil }
 
-// runPlan checks a stage against the host and prints what an apply would
-// change, step by step. It changes nothing.
-func runPlan(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("apply plan", flag.ContinueOnError)
+// runParts prints the parts this agent can run and the registered results
+// each one reads, for Ansible to decide which task files to hand over.
+func runParts(stdout io.Writer) int {
+	out := map[string]any{}
+	for name, part := range stages.Parts() {
+		reads := part.Reads
+		if reads == nil {
+			reads = []string{}
+		}
+		out[name] = map[string]any{"role": part.Role, "reads": reads}
+	}
+	raw, _ := json.Marshal(map[string]any{"parts": out})
+	fmt.Fprintln(stdout, string(raw))
+	return 0
+}
+
+// Summary is runStage's last line: what Ansible reads back.
+type Summary struct {
+	Changed   bool            `json:"changed"`
+	Registers map[string]bool `json:"registers"`
+	Counts    map[string]int  `json:"counts"`
+}
+
+// runStage checks (plan) or applies (run) a stage or one part. It prints one
+// line per step, then a JSON summary line: whether anything changed (or would)
+// and every registered result with whether it changed.
+func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
+	name := "apply plan"
+	if mode == engine.Apply {
+		name = "apply run"
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	source := fs.String("source", "/opt/easy-ha-proxy/source", "the checkout holding ansible/")
 	config := fs.String("config", "/etc/easy-ha-proxy", "the managed configuration")
-	stage := fs.String("stage", "", "the stage: "+strings.Join(stages.Names(), ", "))
+	stage := fs.String("stage", "", "a stage: "+strings.Join(stages.Names(), ", "))
+	part := fs.String("part", "", "one part (a task file)")
+	taskStage := fs.String("task-stage", "", "the task_stage of the role entry running the part")
 	asJSON := fs.Bool("json", false, "print the journal (JSON lines) instead of a table")
-	var changed list
+	var changed, skipTags list
+	extra := pairs{}
 	fs.Var(&changed, "changed", "a registered result of an earlier stage that changed (repeatable)")
-	if err := fs.Parse(args); err != nil || *stage == "" {
-		fmt.Fprintln(stderr, "usage: easy-ha-proxy-agent apply plan --stage NAME [--changed REGISTER]... [--json]")
+	fs.Var(&skipTags, "skip-tag", "a task tag to skip, as --skip-tags (repeatable)")
+	fs.Var(extra, "extra", "an extra variable, key=value (repeatable)")
+	if err := fs.Parse(args); err != nil || (*stage == "") == (*part == "") {
+		fmt.Fprintf(stderr, "usage: easy-ha-proxy-agent %s (--stage NAME | --part NAME) ...\n", name)
 		return 2
 	}
 	hostFacts, err := facts.Setup(facts.Options{})
@@ -64,10 +103,20 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 	if *asJSON {
 		journal = stdout
 	}
-	run := engine.NewRun(engine.Plan, engine.Host(), journal, changed...)
-	ctx := stages.Context{SourceDir: *source, ConfigDir: *config, Facts: hostFacts, Sys: run.Sys,
-		Extra: map[string]any{"easy_ha_proxy_config_dir": *config, "easy_ha_proxy_target": "easy_ha_proxy"}}
-	err = stages.Run(ctx, *stage, run)
+	run := engine.NewRun(mode, engine.Host(), journal, changed...)
+	for _, tag := range skipTags {
+		run.SkipTags[tag] = true
+	}
+	extra["easy_ha_proxy_config_dir"] = *config
+	if _, ok := extra["easy_ha_proxy_target"]; !ok {
+		extra["easy_ha_proxy_target"] = "easy_ha_proxy"
+	}
+	ctx := stages.Context{SourceDir: *source, ConfigDir: *config, Facts: hostFacts, Sys: run.Sys, Extra: extra}
+	if *part != "" {
+		err = stages.RunPart(ctx, *part, *taskStage, run)
+	} else {
+		err = stages.Run(ctx, *stage, run)
+	}
 	if !*asJSON {
 		for _, res := range run.Results {
 			line := fmt.Sprintf("%-12s %s", res.Status, res.Step)
@@ -79,12 +128,13 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 			}
 			fmt.Fprintln(stdout, line)
 		}
-		counts := run.Counts()
-		fmt.Fprintf(stdout, "\n%d steps: %d ok, %d would change, %d skipped\n", len(run.Results),
-			counts["ok"], counts["would_change"], counts["skipped"])
 	}
+	counts := run.Counts()
+	summary := Summary{Changed: counts["changed"]+counts["would_change"] > 0, Registers: run.Registers(), Counts: counts}
+	raw, _ := json.Marshal(summary)
+	fmt.Fprintln(stdout, string(raw))
 	if err != nil {
-		fmt.Fprintf(stderr, "plan: %v\n", err)
+		fmt.Fprintf(stderr, "%s: %v\n", name, err)
 		return 1
 	}
 	return 0

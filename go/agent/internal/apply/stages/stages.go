@@ -21,11 +21,15 @@ type Context struct {
 	Sys                  *engine.System
 }
 
-// Part is one role entry of the playbook a stage covers: its steps are built
-// with that entry's variables (role and task_stage).
+// Part is one task file of a role, the unit Ansible hands to the agent during
+// the hybrid period: roles/<Role>/tasks/<Name>.yml. Its steps are built with
+// the variables of the role entry that runs it (task_stage defaults to Name).
 type Part struct {
-	Role, TaskStage string
-	Build           func(b *Builder) []engine.Step
+	Name, Role string
+	// Reads are registered results of other task files (or of Ansible) the
+	// part's conditions read; Ansible passes the changed ones as seeds.
+	Reads []string
+	Build func(b *Builder) []engine.Step
 }
 
 // Stage is a named list of parts, run in order.
@@ -34,9 +38,20 @@ type Stage struct {
 	Parts []Part
 }
 
-var registry = map[string]Stage{}
+var (
+	registry = map[string]Stage{}
+	parts    = map[string]Part{}
+)
 
-func register(s Stage) { registry[s.Name] = s }
+func register(s Stage) {
+	registry[s.Name] = s
+	for _, p := range s.Parts {
+		parts[p.Name] = p
+	}
+}
+
+// Parts lists every part with the results it reads, for Ansible to ask.
+func Parts() map[string]Part { return parts }
 
 // Names lists the stages.
 func Names() []string {
@@ -55,21 +70,34 @@ func Run(ctx Context, name string, run *engine.Run) error {
 		return fmt.Errorf("no stage %q (stages: %v)", name, Names())
 	}
 	for _, part := range stage.Parts {
-		set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Role: part.Role,
-			Params: map[string]any{"task_stage": part.TaskStage}, Extra: ctx.Extra, Facts: ctx.Facts})
-		if err != nil {
-			return fmt.Errorf("%s/%s: %w", part.Role, part.TaskStage, err)
-		}
-		b := &Builder{Set: set, Sys: ctx.Sys, RoleDir: filepath.Join(ctx.SourceDir, "ansible", "roles", part.Role)}
-		steps := part.Build(b)
-		if b.err != nil {
-			return fmt.Errorf("%s/%s: %w", part.Role, part.TaskStage, b.err)
-		}
-		if err := run.Do(part.Role+"/"+part.TaskStage, steps); err != nil {
+		if err := RunPart(ctx, part.Name, "", run); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// RunPart runs one part with the variables of the role entry task_stage
+// ("" means the part's own name).
+func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
+	part, ok := parts[name]
+	if !ok {
+		return fmt.Errorf("no part %q", name)
+	}
+	if taskStage == "" {
+		taskStage = part.Name
+	}
+	set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Role: part.Role,
+		Params: map[string]any{"task_stage": taskStage}, Extra: ctx.Extra, Facts: ctx.Facts})
+	if err != nil {
+		return fmt.Errorf("%s/%s: %w", part.Role, part.Name, err)
+	}
+	b := &Builder{Set: set, Sys: ctx.Sys, RoleDir: filepath.Join(ctx.SourceDir, "ansible", "roles", part.Role)}
+	steps := part.Build(b)
+	if b.err != nil {
+		return fmt.Errorf("%s/%s: %w", part.Role, part.Name, b.err)
+	}
+	return run.Do(part.Role+"/"+part.Name, steps)
 }
 
 // Builder gives a part's steps their values; the first error is kept and
@@ -160,15 +188,46 @@ func (b *Builder) CopyFile(src, dest, owner, group, mode string) func(*engine.Ru
 }
 
 // CopyContent is a copy task with content: (templated like any argument).
-func (b *Builder) CopyContent(content, dest, owner, group, mode string) func(*engine.Run) (engine.Resource, error) {
+func (b *Builder) CopyContent(content, dest, owner, group, mode string, opts ...func(*FileOpts)) func(*engine.Run) (engine.Resource, error) {
+	o := FileOpts{Force: true}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	dest, owner, group, m := b.S(dest), b.S(owner), b.S(group), b.Mode(mode)
 	return func(*engine.Run) (engine.Resource, error) {
 		out, err := b.Set.Render(content)
 		if err != nil {
 			return nil, err
 		}
-		return &engine.File{Path: dest, Content: []byte(out), Owner: owner, Group: group, Mode: m}, nil
+		return &engine.File{Path: dest, Content: []byte(out), Owner: owner, Group: group, Mode: m, OnlyIfMissing: !o.Force}, nil
 	}
+}
+
+// List templates a task argument to a list of strings (a loop: list).
+func (b *Builder) List(expr string) []string {
+	v, err := b.Set.Template(expr)
+	if err != nil {
+		b.fail(fmt.Errorf("%q: %w", expr, err))
+		return nil
+	}
+	items, ok := v.([]any)
+	if !ok {
+		if v == nil || v == "" {
+			return nil
+		}
+		b.fail(fmt.Errorf("%q is not a list", expr))
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			b.fail(fmt.Errorf("%q: item %v is not a string", expr, item))
+			return nil
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // Dir is a file task with state: directory.

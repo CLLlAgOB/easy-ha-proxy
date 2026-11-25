@@ -1,0 +1,90 @@
+---
+# roles/haproxy-admin/tasks/go_part.yml
+#
+# Hands one task file (go_part) to the Go installer during the hybrid period.
+# The installed agent lists what it can run ("easy-ha-proxy-agent apply
+# parts"); for such a part it checks every step against the host and changes
+# only what differs, exactly as the task file would, and the results it
+# registered come back as facts, so later tasks read them as before. Without
+# an agent that has the part (an older binary early in an update), or with
+# easy_ha_proxy_go_installer: false, the task file itself runs: the import
+# that follows this file checks go_runs_<part>.
+#
+# Each part has its own go_runs_<part> fact on purpose: an import's when: is
+# evaluated again for every imported task, so one shared flag set by a part
+# nested in install.yml would skip the rest of install.yml.
+
+- name: "{{ go_part }} | Ask the Go installer which parts it runs"
+  ansible.builtin.command:
+    argv:
+      - "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
+      - apply
+      - parts
+  register: go_agent_parts_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  # Once per run, and again after the native stage replaced the binary.
+  when:
+    - easy_ha_proxy_go_installer | default(true) | bool
+    - >-
+      go_agent_parts is not defined
+      or ((_native_agent_copy | default({})) is changed and not (go_agent_parts_after_native | default(false)))
+
+- name: "{{ go_part }} | Remember the parts the Go installer runs"
+  ansible.builtin.set_fact:
+    go_agent_parts: >-
+      {{
+        (go_agent_parts_probe.stdout | from_json).parts
+        if (go_agent_parts_probe.rc | default(1)) == 0 and (go_agent_parts_probe.stdout | default('')) is match('[{]')
+        else {}
+      }}
+    go_agent_parts_after_native: "{{ (_native_agent_copy | default({})) is changed }}"
+  when: go_agent_parts_probe is not skipped
+
+- name: "{{ go_part }} | Note who runs it"
+  ansible.builtin.set_fact:
+    "go_runs_{{ go_part | replace('-', '_') }}": >-
+      {{ (easy_ha_proxy_go_installer | default(true) | bool) and go_part in (go_agent_parts | default({})) }}
+
+- name: "{{ go_part }} | Run it with the Go installer"
+  ansible.builtin.command:
+    argv: >-
+      {%- set argv = [native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent'), 'apply',
+                      ('plan' if ansible_check_mode else 'run'), '--part', go_part, '--task-stage', task_stage] -%}
+      {%- for name in go_agent_parts[go_part].reads -%}
+      {%-   set result = lookup('vars', name, default={}) -%}
+      {%-   if result is mapping and (result.changed | default(false) | bool) -%}
+      {%-     set _ = argv.extend(['--changed', name]) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for tag in ansible_skip_tags | default([]) -%}
+      {%-   set _ = argv.extend(['--skip-tag', tag]) -%}
+      {%- endfor -%}
+      {%- for name in go_installer_forwarded_vars -%}
+      {#-   lookup's default=none means "no default": a sentinel instead -#}
+      {%-   set value = lookup('vars', name, default='__go_unset__') -%}
+      {%-   if value != '__go_unset__' -%}
+      {%-     set _ = argv.extend(['--extra', name ~ '=' ~ value]) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ argv }}
+  register: go_part_result
+  changed_when: (go_part_result.stdout_lines | last | from_json).changed
+  check_mode: false
+  when: lookup('vars', 'go_runs_' ~ (go_part | replace('-', '_')))
+
+- name: "{{ go_part }} | Show what the Go installer changed"
+  ansible.builtin.debug:
+    msg: "{{ go_part_result.stdout_lines[:-1] | reject('match', '^(ok|skipped) ') | list }}"
+  when:
+    - lookup('vars', 'go_runs_' ~ (go_part | replace('-', '_')))
+    - go_part_result is changed
+
+- name: "{{ go_part }} | Pass on what it registered"
+  ansible.builtin.set_fact:
+    "{{ item.key }}": "{{ {'changed': item.value} }}"
+  loop: "{{ (go_part_result.stdout_lines | last | from_json).registers | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: lookup('vars', 'go_runs_' ~ (go_part | replace('-', '_')))

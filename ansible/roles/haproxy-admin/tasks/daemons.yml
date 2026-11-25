@@ -1,14 +1,48 @@
 ---
-# Installing all of haproxy-admin's helper daemons in one stage
+# Installing all of haproxy-admin's helper daemons in one stage. native.yml
+# installs the agent itself and stays with Ansible; the others run with the
+# Go installer when the agent has them (go_part.yml).
 
 - import_tasks: native.yml
+- import_tasks: go_part.yml
+  vars:
+    go_part: certd
 - import_tasks: certd.yml
+  when: not go_runs_certd
+- import_tasks: go_part.yml
+  vars:
+    go_part: controld
 - import_tasks: controld.yml
+  when: not go_runs_controld
+- import_tasks: go_part.yml
+  vars:
+    go_part: backupd
 - import_tasks: backupd.yml
+  when: not go_runs_backupd
+- import_tasks: go_part.yml
+  vars:
+    go_part: updated
 - import_tasks: updated.yml
+  when: not go_runs_updated
 # alertd first: it installs the shared alert client that the producers below
 # import from their own directory.
+- import_tasks: go_part.yml
+  vars:
+    go_part: alertd
 - import_tasks: alertd.yml
+  when: not go_runs_alertd
+- import_tasks: go_part.yml
+  vars:
+    go_part: metricsd
 - import_tasks: metricsd.yml
+  when: not go_runs_metricsd
+- import_tasks: go_part.yml
+  vars:
+    go_part: guardd
 - import_tasks: guardd.yml
+  when: not go_runs_guardd
+- import_tasks: go_part.yml
+  vars:
+    go_part: healthd
 - import_tasks: healthd.yml
+  when: not go_runs_healthd

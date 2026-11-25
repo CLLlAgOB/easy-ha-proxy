@@ -9,8 +9,30 @@
 # -------------------------------------------------------------------
 # 4) The helper daemons (moved into stages of their own)
 # -------------------------------------------------------------------
+# Each one runs with the Go installer when the agent has it (go_part.yml),
+# else from its task file.
+- import_tasks: go_part.yml
+  vars:
+    go_part: certd
 - import_tasks: certd.yml
+  when: not go_runs_certd
+- import_tasks: go_part.yml
+  vars:
+    go_part: controld
 - import_tasks: controld.yml
+  when: not go_runs_controld
+- import_tasks: go_part.yml
+  vars:
+    go_part: backupd
 - import_tasks: backupd.yml
+  when: not go_runs_backupd
+- import_tasks: go_part.yml
+  vars:
+    go_part: iptables-ban
 - import_tasks: iptables-ban.yml
+  when: not go_runs_iptables_ban
+- import_tasks: go_part.yml
+  vars:
+    go_part: iptables-udp
 - import_tasks: iptables-udp.yml
+  when: not go_runs_iptables_udp

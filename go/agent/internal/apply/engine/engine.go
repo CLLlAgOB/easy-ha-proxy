@@ -31,6 +31,9 @@ const (
 type Change struct {
 	Needed  bool
 	Summary string // one line: "content 1832 -> 1840 bytes", "would restart"
+	// Run asks for Apply even though nothing is reported changed: a command
+	// task with changed_when: false still runs on every apply.
+	Run bool
 }
 
 // Resource is one thing on the host a step manages.
@@ -50,6 +53,7 @@ type Step struct {
 	When     func(r *Run) bool              // nil runs always
 	Resource Resource                       // what the step manages
 	Build    func(r *Run) (Resource, error) // or builds it when it runs (from earlier results)
+	Tags     []string                       // the task's own tags; a run can skip them
 }
 
 // Result is one step's outcome, as the journal records it.
@@ -70,15 +74,19 @@ type Run struct {
 	Sys     *System
 	Journal io.Writer // JSON lines, one per step; nil writes none
 	Results []Result
+	// SkipTags are Ansible's --skip-tags for the steps' own tags.
+	SkipTags map[string]bool
 
-	changed map[string]bool
+	changed   map[string]bool
+	registers map[string]bool // every register this run reached, changed or not
 }
 
 // NewRun starts a run. seed names steps of earlier stages (or of Ansible,
 // during the hybrid period) that changed something, so their dependents here
 // still restart.
 func NewRun(mode Mode, sys *System, journal io.Writer, seed ...string) *Run {
-	r := &Run{Mode: mode, Sys: sys, Journal: journal, changed: map[string]bool{}}
+	r := &Run{Mode: mode, Sys: sys, Journal: journal, SkipTags: map[string]bool{},
+		changed: map[string]bool{}, registers: map[string]bool{}}
 	for _, name := range seed {
 		r.changed[name] = true
 	}
@@ -102,6 +110,16 @@ func (r *Run) ChangedAny(registers ...string) bool {
 // MarkChanged records a change made outside a step's resource.
 func (r *Run) MarkChanged(register string) { r.changed[register] = true }
 
+// Registers is every register the run's steps reached, with whether it
+// changed: what Ansible would have registered, skipped steps included.
+func (r *Run) Registers() map[string]bool {
+	out := make(map[string]bool, len(r.registers))
+	for k, v := range r.registers {
+		out[k] = v
+	}
+	return out
+}
+
 // Do runs a stage's steps in order and stops at the first failure.
 func (r *Run) Do(stage string, steps []Step) error {
 	for _, step := range steps {
@@ -121,6 +139,15 @@ func (r *Run) Do(stage string, steps []Step) error {
 }
 
 func (r *Run) do(step Step, res *Result) error {
+	if step.Register != "" && !r.registers[step.Register] {
+		r.registers[step.Register] = false
+	}
+	for _, tag := range step.Tags {
+		if r.SkipTags[tag] {
+			res.Status, res.Summary = "skipped", "tag "+tag+" skipped"
+			return nil
+		}
+	}
 	if step.When != nil && !step.When(r) {
 		res.Status = "skipped"
 		return nil
@@ -145,10 +172,14 @@ func (r *Run) do(step Step, res *Result) error {
 	res.Summary = c.Summary
 	if !c.Needed {
 		res.Status = "ok"
+		if c.Run && r.Mode == Apply {
+			return resource.Apply(r.Sys, c)
+		}
 		return nil
 	}
 	if step.Register != "" {
 		r.changed[step.Register] = true
+		r.registers[step.Register] = true
 	}
 	if r.Mode == Plan {
 		res.Status = "would_change"

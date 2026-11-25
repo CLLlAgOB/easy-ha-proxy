@@ -262,3 +262,54 @@ func TestParseMode(t *testing.T) {
 		t.Error("symbolic modes are not supported")
 	}
 }
+
+func TestCommandsSysctlLoopsAndTags(t *testing.T) {
+	f := newFake(t)
+	run := NewRun(Apply, f.System, nil)
+	run.SkipTags["restore-network"] = true
+	probe := &Command{Argv: []string{"certbot", "plugins"}, Probe: true}
+	steps := []Step{
+		{Name: "install", Tags: []string{"restore-network"}, Resource: &Packages{Names: []string{"x"}}},
+		{Name: "ipset", Resource: &Command{Argv: []string{"ipset", "create", "a"}}},
+		{Name: "probe", Resource: probe},
+		{Name: "sysctl", Register: "fwd", Resource: &Sysctl{Name: "net.ipv4.ip_forward", Value: "1", File: "/s.conf", Reload: true}},
+		{Name: "loop", Register: "loop", Resource: &Multi{Desc: "dirs", Items: []Resource{&Dir{Path: "/a"}, &Dir{Path: "/b"}}}},
+		{Name: "skipped", Register: "never", When: func(*Run) bool { return false }},
+	}
+	f.write(t, "/s.conf", "# keep\nnet.ipv4.ip_forward = 0\nnet.core.x=5\nnet.core.x=6\n", 0o644)
+	if err := run.Do("demo", steps); err != nil {
+		t.Fatal(err)
+	}
+	statuses := []string{}
+	for _, r := range run.Results {
+		statuses = append(statuses, r.Status)
+	}
+	if strings.Join(statuses, ",") != "skipped,ok,ok,changed,changed,skipped" {
+		t.Fatalf("statuses: %v", statuses)
+	}
+	joined := strings.Join(f.calls, "\n")
+	if strings.Contains(joined, "dpkg-query") || !strings.Contains(joined, "ipset create a") ||
+		!strings.Contains(joined, "certbot plugins") || !strings.Contains(joined, "sysctl -p /s.conf") {
+		t.Fatalf("calls: %v", f.calls)
+	}
+	got, _ := os.ReadFile(f.Path("/s.conf"))
+	if string(got) != "# keep\nnet.ipv4.ip_forward=1\nnet.core.x=5\n" {
+		t.Fatalf("sysctl file, rewritten as the module does: %q", got)
+	}
+	if regs := run.Registers(); !regs["fwd"] || !regs["loop"] || regs["never"] {
+		t.Fatalf("registers: %v", regs)
+	}
+	if _, ok := run.Registers()["never"]; !ok {
+		t.Fatal("a skipped step's register is reported too, as unchanged")
+	}
+
+	// A plan runs probes but no other command.
+	f.calls = nil
+	plan := NewRun(Plan, f.System, nil)
+	if err := plan.Do("demo", steps[1:3]); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 || !strings.HasPrefix(f.calls[0], "certbot") {
+		t.Fatalf("a plan ran: %v", f.calls)
+	}
+}

@@ -16,6 +16,33 @@ import (
 var folded = map[string]bool{
 	"haproxy-controld | Check runtime environment":          true, // stat, read in the conditions
 	"easy-ha-proxy-backupd | Inspect active restore marker": true, // stat, read in the conditions
+	"easy-ha-proxy-updated | Inspect active update marker":  true, // stat, read in the conditions
+}
+
+// taskNames lists a task file's task names in order, its import_tasks
+// expanded in place, folded tasks left out.
+func taskNames(t *testing.T, dir, file string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := pyyaml.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, task := range doc.([]any) {
+		m := task.(*pyyaml.Map)
+		if imported, ok := m.Value("import_tasks").(string); ok {
+			names = append(names, taskNames(t, dir, imported)...)
+			continue
+		}
+		if name, _ := m.Value("name").(string); !folded[name] {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func repoRoot(t *testing.T) string {
@@ -30,22 +57,7 @@ func TestStagesFollowTheirTaskFiles(t *testing.T) {
 	root := repoRoot(t)
 	for _, name := range Names() {
 		for _, part := range registry[name].Parts {
-			path := filepath.Join(root, "ansible", "roles", part.Role, "tasks", part.TaskStage+".yml")
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			doc, err := pyyaml.Load(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var want []string
-			for _, task := range doc.([]any) {
-				taskName, _ := task.(*pyyaml.Map).Value("name").(string)
-				if !folded[taskName] {
-					want = append(want, taskName)
-				}
-			}
+			want := taskNames(t, filepath.Join(root, "ansible", "roles", part.Role, "tasks"), part.Name+".yml")
 			b := &Builder{Set: nil, Sys: &engine.System{}, RoleDir: ""}
 			b.Set = mustSet(t, root, part)
 			var got []string
@@ -55,7 +67,7 @@ func TestStagesFollowTheirTaskFiles(t *testing.T) {
 				}
 			}
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
-				t.Errorf("%s/%s:\n  stage: %q\n  tasks: %q", part.Role, part.TaskStage, got, want)
+				t.Errorf("%s/%s:\n  stage: %q\n  tasks: %q", part.Role, part.Name, got, want)
 			}
 		}
 	}
@@ -90,7 +102,7 @@ func mustSet(t *testing.T, root string, part Part) *vars.Set {
 		t.Fatal(err)
 	}
 	set, err := vars.Load(vars.Options{SourceDir: source, ConfigDir: config, Role: part.Role,
-		Params: map[string]any{"task_stage": part.TaskStage}})
+		Params: map[string]any{"task_stage": part.Name}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +116,8 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 	root := repoRoot(t)
 	for _, c := range []struct{ file, task, content string }{
 		{"haproxy-admin/tasks/journald-retention.yml", "journald | Configure retention (MaxRetentionSec/MaxFileSec)", journaldRetention},
+		{"haproxy-admin/tasks/certd.yml", "Install the certificate delivery worker", certDeliver},
+		{"haproxy-admin/tasks/iptables-udp.yml", "iptables-udp | Ensure a managed udp.yml exists (empty by default)", udpForwards},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", c.file))
 		if err != nil {
@@ -128,5 +142,31 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		if !found {
 			t.Errorf("%s: no task %q", c.file, c.task)
 		}
+	}
+}
+
+// The role's go_installer_parts names exactly the parts the agent has, so
+// Ansible asks about every one and about nothing else.
+func TestTheRoleListsTheAgentsParts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", "haproxy-admin", "defaults", "main.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := pyyaml.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, name := range doc.(*pyyaml.Map).Value("go_installer_parts").([]any) {
+		listed[name.(string)] = true
+	}
+	for name := range Parts() {
+		if !listed[name] {
+			t.Errorf("part %s is missing from go_installer_parts", name)
+		}
+		delete(listed, name)
+	}
+	for name := range listed {
+		t.Errorf("go_installer_parts lists %s, which the agent does not have", name)
 	}
 }

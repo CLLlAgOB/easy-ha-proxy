@@ -161,9 +161,16 @@ class WhatAChangeNeeds(unittest.TestCase):
         self.assertEqual(scope["tags"], ["ha-adm-cfg", "ha-cfg", "status"])
 
     def test_the_shared_go_packages_refresh_the_native_binaries(self):
-        # The agent compiles go/panel/shared too: a change there is a new agent.
+        # The agent compiles go/panel/shared too, and the Go installer renders
+        # the daemon task files with it: a new agent and those stages.
         scope = update_scope.scope_for(["go/panel/shared/jinja/render.go", "go/panel/internal/app/app.go"])
         self.assertFalse(scope["full"])
+        self.assertEqual(scope["tags"], ["ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "status"])
+
+    def test_a_go_installer_change_runs_the_stages_it_takes_over(self):
+        scope = update_scope.scope_for(["go/agent/internal/apply/stages/daemons.go"])
+        self.assertEqual(scope["tags"], ["ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "status"])
+        scope = update_scope.scope_for(["go/agent/internal/healthd/healthd.go"])
         self.assertEqual(scope["tags"], ["ha-adm-native", "status"])
 
     def test_documentation_tests_and_the_web_application_deploy_nothing(self):

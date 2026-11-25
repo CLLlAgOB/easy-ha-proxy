@@ -3,19 +3,23 @@ package stages
 import "github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
 
 // The native daemons stage: the root daemons' token file, configs, units and
-// services. Each part transcribes roles/haproxy-admin/tasks/<task_stage>.yml.
-// Still to come in this stage: updated, certd, the iptables units and the
-// native binary bundle.
+// services, and the iptables loaders. Each part transcribes
+// roles/haproxy-admin/tasks/<name>.yml. native.yml, which installs the agent
+// binary itself, stays with Ansible during the hybrid period.
 func init() {
 	register(Stage{Name: "daemons", Parts: []Part{
-		{Role: "haproxy-admin", TaskStage: "daemons_env", Build: daemonsEnv},
-		{Role: "haproxy-admin", TaskStage: "healthd", Build: healthd},
-		{Role: "haproxy-admin", TaskStage: "controld", Build: controld},
-		{Role: "haproxy-admin", TaskStage: "backupd", Build: backupd},
-		{Role: "haproxy-admin", TaskStage: "alertd", Build: alertd},
-		{Role: "haproxy-admin", TaskStage: "metricsd", Build: metricsd},
-		{Role: "haproxy-admin", TaskStage: "guardd", Build: guardd},
-		{Role: "haproxy-admin", TaskStage: "journald-retention", Build: journald},
+		{Name: "daemons_env", Role: "haproxy-admin", Build: daemonsEnv},
+		{Name: "certd", Role: "haproxy-admin", Reads: envChanged, Build: certd},
+		{Name: "controld", Role: "haproxy-admin", Reads: envChanged, Build: controld},
+		{Name: "backupd", Role: "haproxy-admin", Reads: envChanged, Build: backupd},
+		{Name: "iptables-ban", Role: "haproxy-admin", Build: iptablesBan},
+		{Name: "iptables-udp", Role: "haproxy-admin", Build: iptablesUDP},
+		{Name: "updated", Role: "haproxy-admin", Reads: with("_native_agent_copy"), Build: updated},
+		{Name: "alertd", Role: "haproxy-admin", Reads: envChanged, Build: alertd},
+		{Name: "metricsd", Role: "haproxy-admin", Reads: envChanged, Build: metricsd},
+		{Name: "guardd", Role: "haproxy-admin", Reads: envChanged, Build: guardd},
+		{Name: "healthd", Role: "haproxy-admin", Reads: envChanged, Build: healthd},
+		{Name: "journald-retention", Role: "haproxy-admin", Build: journald},
 	}})
 }
 

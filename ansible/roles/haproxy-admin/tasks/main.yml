@@ -1,1 +1,8 @@
+# A role entry whose task file the Go installer may run (go_installer_parts)
+# asks the agent first (go_part.yml); every other task file runs as it is.
+- import_tasks: go_part.yml
+  vars:
+    go_part: "{{ task_stage }}"
+  when: task_stage in go_installer_parts
 - import_tasks: '{{ task_stage }}.yml'
+  when: not (lookup('vars', 'go_runs_' ~ (task_stage | replace('-', '_')), default=false) | bool)
