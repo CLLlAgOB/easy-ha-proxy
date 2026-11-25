@@ -29,6 +29,10 @@ var folded = map[string]bool{
 	"Record existing native files":                                  true, // stat, read in the assert
 	"Inspect the active restore marker":                             true, // stat, read in the conditions
 	"native-daemons | Inspect the active update marker":             true, // stat, read in the conditions
+	"Check if Docker GPG keyring already exists":                    true, // stat, read in the conditions
+	"Check whether Docker Engine is installed":                      true, // stat, read in the conditions
+	"Inspect the existing Docker configuration file":                true, // stat, read in the assert
+	"Check if /etc/docker/daemon.json exists":                       true, // stat, read with the file
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
@@ -62,6 +66,9 @@ func taskNames(t *testing.T, dir, file string) []string {
 			for _, key := range []string{"import_role", "ansible.builtin.import_role"} {
 				if role, isMap := m.Value(key).(*pyyaml.Map); isMap {
 					from, _ := role.Value("tasks_from").(string)
+					if !strings.HasSuffix(from, ".yml") {
+						from += ".yml"
+					}
 					name, _ := role.Value("name").(string)
 					names = append(names, taskNames(t, filepath.Join(dir, "..", "..", name, "tasks"), from)...)
 					ok = true
@@ -163,6 +170,7 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy/tasks/config.yml", "Install private HAProxy runtime environment", haproxyEnvironment},
 		{"haproxy/tasks/config.yml", "Configure HAProxy to load its private environment", haproxySecretDropIn},
 		{"haproxy/tasks/config.yml", "server-state | Normalize state before every cold start", haproxyStateGuard},
+		{"docker/tasks/docker.yml", "Add Docker APT repository", dockerRepo},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", c.file))
 		if err != nil {

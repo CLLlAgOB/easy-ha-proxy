@@ -75,7 +75,7 @@ class Wiring(unittest.TestCase):
                         if t.get("ansible.builtin.import_role", {}).get("tasks_from") == "live_restore")
         upgrade = next(i for i, t in enumerate(tasks) if t.get("apt", {}).get("upgrade"))
         self.assertLess(imported, upgrade)
-        install = yaml.safe_load((ROOT / "ansible/roles/docker/tasks/main.yml").read_text())
+        install = yaml.safe_load((ROOT / "ansible/roles/docker/tasks/docker.yml").read_text())
         self.assertTrue(any(t.get("ansible.builtin.import_tasks") == "live_restore.yml" for t in install))
 
 

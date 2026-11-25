@@ -299,6 +299,7 @@ go_installer_parts:
   - config
   - start
   - native-cleanup
+  - docker/docker
   - geoip_acl/geoip
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.

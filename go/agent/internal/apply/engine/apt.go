@@ -175,7 +175,8 @@ func (g *GetURL) Check(sys *System) (Change, error) {
 		return Change{}, err
 	}
 	sum := sha256.Sum256(raw)
-	if hex.EncodeToString(sum[:]) != strings.ToLower(g.SHA256) {
+	// Without a checksum an existing file is kept, as get_url (force: no) does.
+	if g.SHA256 != "" && hex.EncodeToString(sum[:]) != strings.ToLower(g.SHA256) {
 		return Change{Needed: true, Summary: "checksum differs, download " + g.URL}, nil
 	}
 	fi, err := os.Lstat(sys.Path(g.Dest))
@@ -202,12 +203,12 @@ func (g *GetURL) Apply(sys *System, _ Change) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: %s", g.URL, resp.Status)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 512<<20))
 	if err != nil {
 		return err
 	}
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != strings.ToLower(g.SHA256) {
+	if got := hex.EncodeToString(sum[:]); g.SHA256 != "" && got != strings.ToLower(g.SHA256) {
 		return fmt.Errorf("download %s: sha256 %s, want %s", g.URL, got, g.SHA256)
 	}
 	uid, gid, err := sys.ids(g.Owner, g.Group)
