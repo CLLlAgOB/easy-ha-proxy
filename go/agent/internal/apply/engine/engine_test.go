@@ -131,6 +131,59 @@ func TestFileWritesOnlyWhatDiffers(t *testing.T) {
 	}
 }
 
+// validate: checks the new content in a temporary file, with the
+// environment the task gives it; a refusal leaves the old file and no
+// temporary one behind.
+func TestFileValidateKeepsTheOldContentWhenRefused(t *testing.T) {
+	f := newFake(t)
+	f.write(t, "/etc/haproxy/haproxy.cfg", "old\n", 0o644)
+	var seen []string
+	f.ExecEnv = func(env []string, name string, args ...string) (string, int, error) {
+		tmp := args[len(args)-1]
+		raw, err := os.ReadFile(tmp)
+		if err != nil {
+			t.Fatalf("the check could not read the temporary file: %v", err)
+		}
+		seen = append(seen, strings.Join(env, ",")+" "+string(raw))
+		if strings.Contains(string(raw), "bad") {
+			return "[ALERT] parsing\n", 1, nil
+		}
+		return "", 0, nil
+	}
+	check := func(sys *System, tmp string) error {
+		_, code, err := sys.RunEnv([]string{"SECRET=s"}, "haproxy", "-c", "-f", tmp)
+		if err == nil && code != 0 {
+			err = os.ErrInvalid
+		}
+		return err
+	}
+	file := &File{Path: "/etc/haproxy/haproxy.cfg", Content: []byte("bad\n"), Validate: check}
+	c, err := file.Check(f.System)
+	if err != nil || !c.Needed {
+		t.Fatalf("check: %+v %v", c, err)
+	}
+	if err := file.Apply(f.System, c); err == nil {
+		t.Fatal("a refused configuration was applied")
+	}
+	if got, _ := os.ReadFile(f.Path("/etc/haproxy/haproxy.cfg")); string(got) != "old\n" {
+		t.Fatalf("the old file was replaced: %q", got)
+	}
+	if entries, _ := os.ReadDir(f.Path("/etc/haproxy")); len(entries) != 1 {
+		t.Fatalf("a temporary file was left behind: %v", entries)
+	}
+	file.Content = []byte("good\n")
+	c, _ = file.Check(f.System)
+	if err := file.Apply(f.System, c); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(f.Path("/etc/haproxy/haproxy.cfg")); string(got) != "good\n" {
+		t.Fatalf("an accepted configuration was not written: %q", got)
+	}
+	if strings.Join(seen, "|") != "SECRET=s bad\n|SECRET=s good\n" {
+		t.Fatalf("the check saw %q", seen)
+	}
+}
+
 func TestDirAbsentAndTouch(t *testing.T) {
 	f := newFake(t)
 	dir := &Dir{Path: "/var/lib/x/y", Mode: 0o750}

@@ -32,6 +32,9 @@ type Part struct {
 	File string
 	// PreTask marks a part the play's pre_tasks run, not a role entry.
 	PreTask bool
+	// Exports are registers Ansible's handlers read: handed back as facts
+	// with the ones other parts read.
+	Exports []string
 	// Reads are registered results of other task files (or of Ansible) the
 	// part's conditions read; Ansible passes the changed ones as seeds.
 	Reads []string
@@ -205,6 +208,18 @@ func (b *Builder) CopyFile(src, dest, owner, group, mode string, opts ...func(*F
 	}
 }
 
+// CopySrc is a copy task whose src: is a path (templated), not a role file.
+func (b *Builder) CopySrc(src, dest, owner, group, mode string) func(*engine.Run) (engine.Resource, error) {
+	src, dest, owner, group, m := b.S(src), b.S(dest), b.S(owner), b.S(group), b.Mode(mode)
+	return func(*engine.Run) (engine.Resource, error) {
+		raw, err := os.ReadFile(src)
+		if err != nil {
+			return nil, err
+		}
+		return &engine.File{Path: dest, Content: raw, Owner: owner, Group: group, Mode: m}, nil
+	}
+}
+
 // CopyContent is a copy task with content: (templated like any argument).
 func (b *Builder) CopyContent(content, dest, owner, group, mode string, opts ...func(*FileOpts)) func(*engine.Run) (engine.Resource, error) {
 	o := FileOpts{Force: true}
@@ -258,6 +273,9 @@ type FileOpts struct{ Force, LstripBlocks bool }
 
 // NoForce is force: false.
 func NoForce(o *FileOpts) { o.Force = false }
+
+// LstripBlocks is a template task's lstrip_blocks: true.
+func LstripBlocks(o *FileOpts) { o.LstripBlocks = true }
 
 // Changed is a when: condition over registered results.
 func Changed(registers ...string) func(*engine.Run) bool {

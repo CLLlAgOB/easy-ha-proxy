@@ -17,6 +17,9 @@ type File struct {
 	Owner, Group  string
 	Mode          os.FileMode
 	OnlyIfMissing bool // force: false -- write it if absent, never touch it after
+	// Validate is the template module's validate: run on the new content in
+	// a temporary file before it replaces the old one; an error keeps the old.
+	Validate func(sys *System, tmpPath string) error
 
 	writeContent, fixAttrs bool
 }
@@ -66,7 +69,11 @@ func (f *File) Apply(sys *System, _ Change) error {
 		return err
 	}
 	if f.writeContent {
-		return writeAtomic(sys.Path(f.Path), f.Content, uid, gid, f.Mode)
+		var check func(string) error
+		if f.Validate != nil {
+			check = func(tmp string) error { return f.Validate(sys, tmp) }
+		}
+		return writeAtomicChecked(sys.Path(f.Path), f.Content, uid, gid, f.Mode, check)
 	}
 	if f.fixAttrs {
 		return setAttrs(sys.Path(f.Path), uid, gid, f.Mode)
@@ -78,6 +85,12 @@ func (f *File) Apply(sys *System, _ Change) error {
 // and mode before it is renamed into place (a reader that is not root must be
 // able to read the new file at once), syncs it, and renames it.
 func writeAtomic(path string, content []byte, uid, gid int, mode os.FileMode) error {
+	return writeAtomicChecked(path, content, uid, gid, mode, nil)
+}
+
+// writeAtomicChecked is writeAtomic with a check of the temporary file
+// before the rename.
+func writeAtomicChecked(path string, content []byte, uid, gid int, mode os.FileMode, check func(string) error) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".ehp-")
 	if err != nil {
@@ -108,6 +121,11 @@ func writeAtomic(path string, content []byte, uid, gid int, mode os.FileMode) er
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if check != nil {
+		if err := check(tmp.Name()); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err

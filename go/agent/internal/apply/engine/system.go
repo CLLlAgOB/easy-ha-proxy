@@ -19,11 +19,22 @@ type System struct {
 	// Exec runs a command: its standard output and exit code; err only when it
 	// could not run at all.
 	Exec func(name string, args ...string) (stdout string, code int, err error)
+	// ExecEnv is Exec with extra environment variables (a secret a check needs
+	// stays out of the argument list). Nil falls back to Exec without them.
+	ExecEnv func(env []string, name string, args ...string) (stdout string, code int, err error)
+}
+
+// RunEnv runs a command with extra environment variables.
+func (s *System) RunEnv(env []string, name string, args ...string) (string, int, error) {
+	if s.ExecEnv == nil {
+		return s.Exec(name, args...)
+	}
+	return s.ExecEnv(env, name, args...)
 }
 
 // Host is the real system.
 func Host() *System {
-	return &System{LookupUser: lookupUser, LookupGroup: lookupGroup, Exec: execCommand}
+	return &System{LookupUser: lookupUser, LookupGroup: lookupGroup, Exec: execCommand, ExecEnv: execCommandEnv}
 }
 
 // Path maps a host path into Root.
@@ -57,7 +68,14 @@ func lookupGroup(name string) (int, error) {
 }
 
 func execCommand(name string, args ...string) (string, int, error) {
+	return execCommandEnv(nil, name, args...)
+}
+
+func execCommandEnv(env []string, name string, args ...string) (string, int, error) {
 	cmd := exec.Command(name, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()

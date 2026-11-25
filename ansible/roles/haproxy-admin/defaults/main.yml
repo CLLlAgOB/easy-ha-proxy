@@ -291,6 +291,7 @@ go_installer_parts:
   - haproxy/protection
   - haproxy/install
   - haproxy/apparmor
+  - haproxy/config
   - geoip_acl/geoip
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.

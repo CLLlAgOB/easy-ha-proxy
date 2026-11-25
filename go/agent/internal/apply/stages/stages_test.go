@@ -140,6 +140,9 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy/tasks/apparmor.yml", "AppArmor | deploy local rules for rsyslogd (HAProxy chroot socket)", apparmorRsyslogd},
 		{"haproxy/tasks/package.yml", "HAProxy package | Keep package updates within the selected branch", haproxyPin},
 		{"haproxy/tasks/install.yml", "Ensure admin IPs file exists with static admin_allowed_ips", adminIPs},
+		{"haproxy/tasks/config.yml", "Install private HAProxy runtime environment", haproxyEnvironment},
+		{"haproxy/tasks/config.yml", "Configure HAProxy to load its private environment", haproxySecretDropIn},
+		{"haproxy/tasks/config.yml", "server-state | Normalize state before every cold start", haproxyStateGuard},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", c.file))
 		if err != nil {

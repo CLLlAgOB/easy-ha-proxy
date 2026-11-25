@@ -6,11 +6,21 @@
 # roles/haproxy-admin/tasks/go_fallback.yml for the include and its tags).
 # The handlers the agent's steps notified are notified here, so Ansible runs
 # them at the end of the play exactly as for its own tasks: HAProxy must not
-# reload before config.yml has written haproxy.cfg on a fresh install.
+# reload before config.yml has written haproxy.cfg on a fresh install. The
+# results the apply handler reads to choose restart or reload come back as
+# facts (go_part.yml's exports).
 
 - ansible.builtin.import_tasks: ../../haproxy-admin/tasks/go_part.yml
   vars:
     go_parts: ["haproxy/{{ task_stage }}"]
+
+- name: "haproxy/{{ task_stage }} | Hand the notified handler to Ansible: validate haproxy"
+  ansible.builtin.debug:
+    msg: The Go installer changed haproxy.cfg or its environment; HAProxy checks it at the end of the play.
+  changed_when: true
+  notify: validate haproxy
+  when: >-
+    'validate haproxy' in ((go_part_result.stdout_lines | default(['{}']) | last | from_json).notified | default([]))
 
 - name: "haproxy/{{ task_stage }} | Hand the notified handler to Ansible: apply haproxy"
   ansible.builtin.debug:

@@ -10,14 +10,17 @@ import (
 
 // The HAProxy stage: roles/haproxy's task files, as "haproxy/<file>": the
 // package protection the first play runs before anything else, the install
-// stage (package, directories, bootstrap, pages) and AppArmor. config.yml
-// follows. Their handlers (apply haproxy, the AppArmor chain) are handed back
-// to Ansible during the hybrid period.
+// stage (package, directories, bootstrap, pages), AppArmor, and config.yml
+// (haproxy.cfg and what it reads). Their handlers (validate and apply haproxy,
+// the AppArmor chain) are handed back to Ansible during the hybrid period,
+// with the two results the apply handler reads to choose restart or reload.
 func init() {
 	register(Stage{Name: "haproxy", Parts: []Part{
 		{Name: "haproxy/protection", Role: "haproxy", File: "protection", PreTask: true, Build: haproxyProtection},
 		{Name: "haproxy/install", Role: "haproxy", File: "install", Build: haproxyInstall},
 		{Name: "haproxy/apparmor", Role: "haproxy", File: "apparmor", Build: haproxyAppArmor},
+		{Name: "haproxy/config", Role: "haproxy", File: "config", Build: haproxyConfig,
+			Exports: []string{"haproxy_runtime_environment", "haproxy_secret_dropin"}},
 	}})
 }
 

@@ -143,7 +143,7 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 	registers := run.Registers()
 	exports := map[string]bool{}
 	for _, p := range stages.Parts() {
-		for _, name := range p.Reads {
+		for _, name := range append(append([]string{}, p.Reads...), p.Exports...) {
 			if v, ok := registers[name]; ok {
 				exports[name] = v
 			}
