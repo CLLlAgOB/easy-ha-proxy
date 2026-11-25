@@ -190,14 +190,18 @@ func (b *Builder) Template(src, dest, owner, group, mode string, opts ...func(*F
 }
 
 // CopyFile is a copy task with src: a file of the role's files/ directory.
-func (b *Builder) CopyFile(src, dest, owner, group, mode string) func(*engine.Run) (engine.Resource, error) {
+func (b *Builder) CopyFile(src, dest, owner, group, mode string, opts ...func(*FileOpts)) func(*engine.Run) (engine.Resource, error) {
+	o := FileOpts{Force: true}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	dest, owner, group, m := b.S(dest), b.S(owner), b.S(group), b.Mode(mode)
 	return func(*engine.Run) (engine.Resource, error) {
 		raw, err := os.ReadFile(filepath.Join(b.RoleDir, "files", src))
 		if err != nil {
 			return nil, err
 		}
-		return &engine.File{Path: dest, Content: raw, Owner: owner, Group: group, Mode: m}, nil
+		return &engine.File{Path: dest, Content: raw, Owner: owner, Group: group, Mode: m, OnlyIfMissing: !o.Force}, nil
 	}
 }
 

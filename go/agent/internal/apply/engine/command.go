@@ -181,3 +181,67 @@ func (m *Multi) Apply(sys *System, _ Change) error {
 	}
 	return nil
 }
+
+// CronAbsent is the cron module with state=absent: the "#Ansible: <Name>"
+// line and the job under it leave the user's crontab.
+type CronAbsent struct{ Name, User string }
+
+func (c *CronAbsent) Describe() string { return "cron entry " + c.Name }
+
+func (c *CronAbsent) lines(sys *System) ([]string, bool, error) {
+	out, code, err := sys.Exec("crontab", "-l", "-u", c.User)
+	if err != nil {
+		return nil, false, err
+	}
+	if code != 0 {
+		return nil, false, nil // no crontab at all
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for _, line := range lines {
+		if line == "#Ansible: "+c.Name {
+			return lines, true, nil
+		}
+	}
+	return lines, false, nil
+}
+
+func (c *CronAbsent) Check(sys *System) (Change, error) {
+	_, found, err := c.lines(sys)
+	if err != nil || !found {
+		return Change{}, err
+	}
+	return Change{Needed: true, Summary: "remove"}, nil
+}
+
+func (c *CronAbsent) Apply(sys *System, _ Change) error {
+	lines, found, err := c.lines(sys)
+	if err != nil || !found {
+		return err
+	}
+	var kept []string
+	for i := 0; i < len(lines); i++ {
+		if lines[i] == "#Ansible: "+c.Name {
+			i++ // and its job
+			continue
+		}
+		kept = append(kept, lines[i])
+	}
+	tmp, err := os.CreateTemp("", "ehp-crontab-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(strings.Join(kept, "\n") + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+	out, code, err := sys.Exec("crontab", "-u", c.User, tmp.Name())
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("crontab -u %s: exit %d %s", c.User, code, strings.TrimSpace(out))
+	}
+	return nil
+}

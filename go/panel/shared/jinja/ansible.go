@@ -96,10 +96,33 @@ func AnsibleBasename(_ *Environment, v any, _ []any, _ *Map) (any, error) {
 	return s[strings.LastIndex(s, "/")+1:], nil
 }
 
+// AnsibleQuote is Ansible's quote filter, Python's shlex.quote.
+func AnsibleQuote(_ *Environment, v any, _ []any, _ *Map) (any, error) {
+	if u, ok := v.(Undefined); ok {
+		return nil, &UndefinedError{Name: u.Name}
+	}
+	s := Str(v)
+	if v == nil {
+		s = ""
+	}
+	if s == "" {
+		return "''", nil
+	}
+	for _, r := range s {
+		safe := r < 128 && (r == '_' || r == '@' || r == '%' || r == '+' || r == '=' || r == ':' || r == ',' ||
+			r == '.' || r == '/' || r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
+		if !safe {
+			return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'", nil
+		}
+	}
+	return s, nil
+}
+
 // AddAnsibleFilters registers the Ansible filters this project's templates
 // and role defaults use beyond Jinja's own.
 func AddAnsibleFilters(env *Environment) {
 	env.Filters["bool"] = AnsibleBool
+	env.Filters["quote"] = AnsibleQuote
 	env.Filters["hash"] = AnsibleHash
 	env.Filters["dirname"] = AnsibleDirname
 	env.Filters["basename"] = AnsibleBasename

@@ -15,11 +15,14 @@ import (
 
 // Tasks a stage folds into the conditions of later steps instead of running.
 var folded = map[string]bool{
-	"haproxy-controld | Check runtime environment":          true, // stat, read in the conditions
-	"easy-ha-proxy-backupd | Inspect active restore marker": true, // stat, read in the conditions
-	"easy-ha-proxy-updated | Inspect active update marker":  true, // stat, read in the conditions
-	"Check if HAProxy was initialized before":               true, // stat, read in the conditions
-	"AppArmor | info if disabled":                           true, // stat, read in the conditions
+	"haproxy-controld | Check runtime environment":                  true, // stat, read in the conditions
+	"easy-ha-proxy-backupd | Inspect active restore marker":         true, // stat, read in the conditions
+	"easy-ha-proxy-updated | Inspect active update marker":          true, // stat, read in the conditions
+	"Check if HAProxy was initialized before":                       true, // stat, read in the conditions
+	"AppArmor | info if disabled":                                   true, // stat, read in the conditions
+	"Check the HAProxy Admin runtime variables for GeoIP selection": true, // stat, read in the conditions
+	"Check whether the legacy cron command is installed":            true, // stat, read in the conditions
+	"Check whether a local GeoIP release is already active":         true, // stat, read in the conditions
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
