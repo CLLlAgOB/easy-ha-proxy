@@ -76,12 +76,16 @@ func TestJinjaVectors(t *testing.T) {
 	}
 }
 
-// TestParsePanelTemplates parses every Flask template the panel renders.
+// TestParsePanelTemplates parses every template the panel renders. They live
+// in go/panel/web; read from their earlier place, the test skipped itself.
 func TestParsePanelTemplates(t *testing.T) {
-	dir := filepath.Join("..", "..", "..", "..", "docker", "app", "haproxy_admin", "templates")
+	dir := filepath.Join("..", "..", "web", "templates")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Skip("templates not available:", err)
+		t.Fatal("the panel templates are missing:", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no panel templates in", dir)
 	}
 	for _, e := range entries {
 		src, err := os.ReadFile(filepath.Join(dir, e.Name()))

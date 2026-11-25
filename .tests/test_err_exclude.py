@@ -20,24 +20,31 @@ import re
 import unittest
 from pathlib import Path
 
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "ansible" / "roles" / "haproxy" / "templates"
 TEMPLATE = TEMPLATES / "haproxy.cfg.j2"
-sys.path.insert(0, str(ROOT / "docker" / "app"))
 
 try:
     from jinja2 import Environment, FileSystemLoader
-
-    # The same two filters Ansible supplies; the repository already exposes
-    # them for exactly this purpose.
-    from haproxy_admin.services_haproxy_config import (
-        jinja_combine,
-        jinja_regex_replace,
-    )
 except ImportError:  # pragma: no cover
     Environment = None
+
+
+# The two filters Ansible supplies to this template. They came from the Flask
+# panel, and when it was removed these tests skipped themselves.
+def jinja_regex_replace(value, pattern, replacement):
+    return "" if value is None else re.sub(pattern, replacement, str(value))
+
+
+def jinja_combine(value, other, recursive=False):
+    base = {} if value is None else dict(value)
+    for key, item in dict(other or {}).items():
+        if recursive and isinstance(base.get(key), dict) and isinstance(item, dict):
+            base[key] = jinja_combine(base[key], item, recursive=True)
+        else:
+            base[key] = item
+    return base
 
 
 @unittest.skipIf(Environment is None, "jinja2 is not installed")
