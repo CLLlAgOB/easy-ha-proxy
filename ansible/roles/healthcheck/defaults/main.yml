@@ -42,6 +42,18 @@ status_check_systemd_units:
     label: "Software update broker"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
+  - name: "easy-ha-proxy-alertd.service"
+    label: "Alerting daemon"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "easy-ha-proxy-guardd.service"
+    label: "Adaptive protection daemon"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
+  - name: "easy-ha-proxy-metricsd.service"
+    label: "Metrics collector daemon"
+    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
+
   # The Authelia bans daemon (regulation helper)
   - name: "authelia-bansd.service"
     label: "Authelia regulation bans daemon"

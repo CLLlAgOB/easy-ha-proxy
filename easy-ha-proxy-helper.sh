@@ -1239,6 +1239,33 @@ source_revision_of() {
 # The native binaries are pinned to the commit they were built from, so they
 # are due whenever the source to compare with is another commit -- what the
 # daemons component of `easy-ha-proxy update` installs.
+# A configuration switch as the playbook reads it: vars.yml, then authelia.yml.
+config_switch() {
+  local name="$1"
+  local value=""
+  local file=""
+
+  for file in "${config_dir}/vars.yml" "${config_dir}/authelia.yml"; do
+    [[ -r "${file}" ]] || continue
+    value="$(yaml_scalar "${name}" "${file}")"
+    [[ -n "${value}" ]] && break
+  done
+  printf '%s\n' "${value,,}"
+}
+
+# Authelia's daemons are installed only where Authelia (and that daemon) is
+# switched on; a missing one is then no sign of a pending update.
+unit_expected() {
+  case "$1" in
+    authelia-*) [[ "$(config_switch authelia_enabled)" == true ]] || return 1 ;;
+  esac
+  case "$1" in
+    authelia-bansd.service) [[ "$(config_switch authelia_bans_daemon_enabled)" != false ]] ;;
+    authelia-configd.service) [[ "$(config_switch authelia_configd_enabled)" != false ]] ;;
+    *) return 0 ;;
+  esac
+}
+
 daemon_updates_available() {
   local comparison_root="${1:-${source_dir}}"
   local wanted=""
@@ -1247,6 +1274,7 @@ daemon_updates_available() {
   for i in "${!daemon_units[@]}"; do
     if command -v systemctl >/dev/null 2>&1 &&
        ! systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
+      unit_expected "${daemon_units[i]}" || continue
       return 0
     fi
     [[ -x "${daemon_binaries[i]}" ]] || return 0

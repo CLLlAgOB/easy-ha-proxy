@@ -387,35 +387,3 @@
         argv: [systemctl, try-restart, easy-ha-proxy-guardd.service]
       when: _native_guardd_copy is changed
       changed_when: true
-
-    # Gateways installed before the Python implementation was removed still
-    # carry its scripts and packages, and the Rust library only it loaded.
-    # Nothing runs them any more; they go so no one starts one by hand.
-    - name: "native-daemons | Remove the former Python daemons and the FFI library"
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /usr/local/sbin/easy-ha-proxy-alertd.py
-        - /usr/local/sbin/easy_ha_proxy_alert_client.py
-        - /usr/local/sbin/easy-ha-proxy-backupd.py
-        - /usr/local/sbin/easy-ha-proxy-backup-run.py
-        - /usr/local/sbin/easy-ha-proxy-unit-failed.py
-        - /usr/local/sbin/easy-ha-proxy-guardd.py
-        - /usr/local/sbin/easy-ha-proxy-metricsd.py
-        - /usr/local/sbin/easy-ha-proxy-updated.py
-        - /usr/local/sbin/haproxy-certd.py
-        - /usr/local/sbin/haproxy-controld.py
-        - /usr/local/sbin/haproxy-healthd.py
-        - /usr/local/sbin/haproxy-udp-forward.py
-        - /usr/local/sbin/authelia-bansd.py
-        - /usr/local/sbin/authelia-configd.py
-        - /usr/local/sbin/authelia-usersd.py
-        - /usr/local/sbin/backupd
-        - /usr/local/sbin/certd
-        - /usr/local/sbin/controld
-        - /usr/local/sbin/guardd
-        - /usr/local/sbin/metricsd
-        - /usr/local/sbin/updated
-        - /usr/local/sbin/__pycache__
-        - /usr/local/lib/easy-ha-proxy/libguardd_core.so

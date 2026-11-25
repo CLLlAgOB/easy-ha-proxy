@@ -27,7 +27,8 @@
 
 # The update broker starts this role in a separate transient systemd unit.
 # Restarting the broker from needrestart makes apt wait for the broker while
-# the broker waits for apt, so the update cannot finish.  The backup broker
+# the broker waits for apt, so the update cannot finish; restarting the job
+# unit itself would stop apt half way.  The backup broker
 # uses the same long-running job model.  Neither service is supplied by an APT
 # package; their Ansible roles perform the required restarts after code changes.
 - name: Keep needrestart from stopping active maintenance brokers
@@ -39,6 +40,7 @@
     content: |
       # Managed by easy-ha-proxy.
       $nrconf{override_rc}{qr(^easy-ha-proxy-updated\.service$)} = 0;
+      $nrconf{override_rc}{qr(^easy-ha-proxy-updated-job-[0-9a-f]{12}\.service$)} = 0;
       $nrconf{override_rc}{qr(^easy-ha-proxy-backupd\.service$)} = 0;
   when: update_packages_needrestart.stat.exists
 

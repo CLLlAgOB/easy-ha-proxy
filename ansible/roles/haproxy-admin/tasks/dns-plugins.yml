@@ -42,6 +42,7 @@
   delay: 5
   until: dns_plugin_install is succeeded
   changed_when: dns_plugin_install.rc == 0
+  tags: restore-network
 
 - name: "dns-plugins | Allow certbot plugins to run with root privileges"
   ansible.builtin.command: snap set certbot trust-plugin-with-root=ok

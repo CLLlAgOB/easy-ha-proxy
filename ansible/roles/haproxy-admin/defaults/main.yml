@@ -158,7 +158,7 @@ haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
 # Container image and name. haproxy_admin_image carries the release channel
 # (set-channels writes it); the panel runs the matching go-<channel> image.
 haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
-haproxy_admin_image_channel: "{{ 'alpha' if haproxy_admin_image.endswith(':alpha') else 'latest' }}"
+haproxy_admin_image_channel: "{{ 'alpha' if haproxy_admin_image.endswith((':alpha', ':go-alpha')) else 'latest' }}"
 haproxy_admin_go_image: "{{ haproxy_admin_image | regex_replace(':[^/:]+$', '') }}:go-{{ haproxy_admin_image_channel }}"
 haproxy_admin_container_name: "haproxy-admin"
 

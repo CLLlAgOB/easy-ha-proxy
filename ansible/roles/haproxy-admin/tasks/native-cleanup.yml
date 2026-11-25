@@ -1,0 +1,52 @@
+---
+# Gateways installed before the Python implementation was removed still carry
+# its scripts and packages, and the Rust library only it loaded. Nothing runs
+# them once every unit starts the native binaries, so they go -- but only
+# here, at the end of the run, and only a file no installed unit names any
+# more. Removed in the native stage, a run that stopped half way (a failed
+# certificate, a refused HAProxy configuration) or one limited to some tags
+# left units of the earlier version pointing at scripts that were gone, the
+# update broker's own among them.
+- name: "native-cleanup | Remove the former Python daemons no installed unit names"
+  vars:
+    native_legacy_paths:
+      - /usr/local/sbin/easy-ha-proxy-alertd.py
+      - /usr/local/sbin/easy_ha_proxy_alert_client.py
+      - /usr/local/sbin/easy-ha-proxy-backupd.py
+      - /usr/local/sbin/easy-ha-proxy-backup-run.py
+      - /usr/local/sbin/easy-ha-proxy-unit-failed.py
+      - /usr/local/sbin/easy-ha-proxy-guardd.py
+      - /usr/local/sbin/easy-ha-proxy-metricsd.py
+      - /usr/local/sbin/easy-ha-proxy-updated.py
+      - /usr/local/sbin/haproxy-certd.py
+      - /usr/local/sbin/haproxy-controld.py
+      - /usr/local/sbin/haproxy-healthd.py
+      - /usr/local/sbin/haproxy-udp-forward.py
+      - /usr/local/sbin/authelia-bansd.py
+      - /usr/local/sbin/authelia-configd.py
+      - /usr/local/sbin/authelia-usersd.py
+      - /usr/local/sbin/backupd
+      - /usr/local/sbin/certd
+      - /usr/local/sbin/controld
+      - /usr/local/sbin/guardd
+      - /usr/local/sbin/metricsd
+      - /usr/local/sbin/updated
+      - /usr/local/sbin/__pycache__
+      - /usr/local/lib/easy-ha-proxy/libguardd_core.so
+  ansible.builtin.shell: |
+    set -euo pipefail
+    removed=""
+    for path in {{ native_legacy_paths | map('quote') | join(' ') }}; do
+      [ -e "$path" ] || [ -L "$path" ] || continue
+      if grep -rqsF -- "$path" /etc/systemd/system /run/systemd/system /usr/lib/systemd/system; then
+        echo "kept $path: an installed unit still names it" >&2
+        continue
+      fi
+      rm -rf -- "$path"
+      removed="$removed $path"
+    done
+    if [ -n "$removed" ]; then echo "removed:$removed"; fi
+  args:
+    executable: /bin/bash
+  register: native_cleanup
+  changed_when: "'removed:' in native_cleanup.stdout"

@@ -278,6 +278,12 @@
       task_stage: start
       tags: ha-adm-start
 
+    # Last: the former Python daemons go once every unit has been written for
+    # the native binaries, and only the files no installed unit names.
+    - role: haproxy-admin
+      task_stage: native-cleanup
+      tags: ha-adm-native
+
     - role: haproxy-admin
       task_stage: update_haproxy_admin
       tags: 
