@@ -187,3 +187,19 @@ class SshProtectionTests(unittest.TestCase):
         for value in ['192.0.2.4\nenabled = false', 'fe80::1%eth0', '--config', '192.0.2.4/33']:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 ssh.trusted_addresses([value])
+
+    def test_monitor_without_fail2ban_is_the_answer_the_broker_gives_itself(self):
+        # go/agent/internal/updated/api.go skips this tool once a minute while
+        # neither file exists and assumes exactly this answer.
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / 'fail2ban'
+            (config / 'jail.d').mkdir(parents=True)
+            with patch.object(ssh, 'CLIENT', str(Path(directory) / 'fail2ban-client')), \
+                 patch.object(ssh, 'CONFIG', config), \
+                 patch.object(ssh, 'DROP_IN', config / 'jail.d/99-easy-ha-proxy-sshd.local'), \
+                 patch.object(ssh, 'quick', side_effect=AssertionError('no command expected')):
+                result = ssh.snapshot(monitor=True)
+        self.assertEqual((result['state'], result['managed'], 'error' in result), ('not_installed', False, False))
+        broker = (Path(__file__).resolve().parents[1] / 'go/agent/internal/updated/api.go').read_text()
+        self.assertIn(f'fail2banClientPath = "{ssh.CLIENT}"', broker)
+        self.assertIn(f'fail2banDropInPath = "{ssh.DROP_IN}"', broker)

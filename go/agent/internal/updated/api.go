@@ -306,6 +306,22 @@ func (d *Daemon) sshProtectionQuery(operation string, options ...string) (map[st
 	return nil, uErr("verification_failed", "Could not read Fail2ban on the server")
 }
 
+// The two files installer/ssh_protection.py starts from. With neither on the
+// host its monitor answer can only be "Fail2ban not installed, nothing
+// managed", so the minute's watch gives that answer itself instead of starting
+// Python for it (about 50 ms of CPU a minute on a host without Fail2ban).
+var (
+	fail2banClientPath = "/usr/bin/fail2ban-client"
+	fail2banDropInPath = "/etc/fail2ban/jail.d/99-easy-ha-proxy-sshd.local"
+)
+
+func (d *Daemon) sshMonitorStatus() (map[string]any, error) {
+	if !lexists(fail2banClientPath) && !lexists(fail2banDropInPath) {
+		return map[string]any{"ok": true, "state": "not_installed", "managed": false}, nil
+	}
+	return d.sshProtectionQuery("monitor")
+}
+
 func (d *Daemon) sshMonitoringEnabled() (bool, error) {
 	if !exists(d.Opts.SSHMonitorPath()) {
 		return true, nil
@@ -386,7 +402,7 @@ func (d *Daemon) sshProtectionWatchLoop() {
 				expected, samples, retired = false, nil, true
 				return nil
 			}
-			status, err := d.sshProtectionQuery("monitor")
+			status, err := d.sshMonitorStatus()
 			if err != nil {
 				return err
 			}
