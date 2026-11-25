@@ -66,7 +66,7 @@ _AUTHELIA = "ansible/roles/authelia"
 # installer takes over (go_installer_parts): the daemons, journald, the
 # install stage for certd and the iptables loaders, and HAProxy's install
 # and AppArmor stages (with the protection pre-task), and GeoIP.
-_GO_INSTALLER = ("ha-adm-native", "ha-adm-daemons", "ha-adm-journald", "ha-adm-install", "ha-install", "apparmor", "geo", "ha-cfg", "ha-adm-cfg", "ha-adm-start", "docker")
+_GO_INSTALLER = ("ha-adm-native", "ha-adm-daemons", "ha-adm-journald", "ha-adm-install", "ha-install", "apparmor", "geo", "ha-cfg", "ha-adm-cfg", "ha-adm-start", "docker", "authelia")
 RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Nothing to deploy.
     (".tests/*", ()),

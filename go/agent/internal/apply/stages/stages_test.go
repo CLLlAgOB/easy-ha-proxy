@@ -15,24 +15,28 @@ import (
 
 // Tasks a stage folds into the conditions of later steps instead of running.
 var folded = map[string]bool{
-	"haproxy-controld | Check runtime environment":                  true, // stat, read in the conditions
-	"easy-ha-proxy-backupd | Inspect active restore marker":         true, // stat, read in the conditions
-	"easy-ha-proxy-updated | Inspect active update marker":          true, // stat, read in the conditions
-	"Check if HAProxy was initialized before":                       true, // stat, read in the conditions
-	"AppArmor | info if disabled":                                   true, // stat, read in the conditions
-	"Check the HAProxy Admin runtime variables for GeoIP selection": true, // stat, read in the conditions
-	"Check whether the legacy cron command is installed":            true, // stat, read in the conditions
-	"Check whether a local GeoIP release is already active":         true, // stat, read in the conditions
-	"Stat whitelist_global_file":                                    true, // stat, read in the conditions
-	"haproxy-admin | Inspect restored change log files":             true, // stat, read in the conditions
-	"Check the locally prepared bundle":                             true, // stat, read in the assert
-	"Record existing native files":                                  true, // stat, read in the assert
-	"Inspect the active restore marker":                             true, // stat, read in the conditions
-	"native-daemons | Inspect the active update marker":             true, // stat, read in the conditions
-	"Check if Docker GPG keyring already exists":                    true, // stat, read in the conditions
-	"Check whether Docker Engine is installed":                      true, // stat, read in the conditions
-	"Inspect the existing Docker configuration file":                true, // stat, read in the assert
-	"Check if /etc/docker/daemon.json exists":                       true, // stat, read with the file
+	"haproxy-controld | Check runtime environment":                           true, // stat, read in the conditions
+	"easy-ha-proxy-backupd | Inspect active restore marker":                  true, // stat, read in the conditions
+	"easy-ha-proxy-updated | Inspect active update marker":                   true, // stat, read in the conditions
+	"Check if HAProxy was initialized before":                                true, // stat, read in the conditions
+	"AppArmor | info if disabled":                                            true, // stat, read in the conditions
+	"Check the HAProxy Admin runtime variables for GeoIP selection":          true, // stat, read in the conditions
+	"Check whether the legacy cron command is installed":                     true, // stat, read in the conditions
+	"Check whether a local GeoIP release is already active":                  true, // stat, read in the conditions
+	"Stat whitelist_global_file":                                             true, // stat, read in the conditions
+	"haproxy-admin | Inspect restored change log files":                      true, // stat, read in the conditions
+	"Check the locally prepared bundle":                                      true, // stat, read in the assert
+	"Record existing native files":                                           true, // stat, read in the assert
+	"Inspect the active restore marker":                                      true, // stat, read in the conditions
+	"native-daemons | Inspect the active update marker":                      true, // stat, read in the conditions
+	"Check if Docker GPG keyring already exists":                             true, // stat, read in the conditions
+	"Check whether Docker Engine is installed":                               true, // stat, read in the conditions
+	"Inspect the existing Docker configuration file":                         true, // stat, read in the assert
+	"Check if /etc/docker/daemon.json exists":                                true, // stat, read with the file
+	"Check the Authelia users file":                                          true, // stat, read in the conditions
+	"Stat Authelia log file":                                                 true, // stat, read in the conditions
+	"Check existing private Authelia paths for stale log-reader ACL cleanup": true, // stat, read in the conditions
+	"Look for the Redis session dump":                                        true, // stat, read in the conditions
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
@@ -105,6 +109,14 @@ func TestStagesFollowTheirTaskFiles(t *testing.T) {
 			want := taskNames(t, filepath.Join(root, "ansible", "roles", part.Role, "tasks"), part.TaskFile()+".yml")
 			b := &Builder{Set: nil, Sys: &engine.System{}, RoleDir: ""}
 			b.Set = mustSet(t, root, part)
+			// A templated task name is compared as Ansible shows it.
+			for i, name := range want {
+				if strings.Contains(name, "{{") {
+					if out, err := b.Set.Render(name); err == nil {
+						want[i] = out
+					}
+				}
+			}
 			var got []string
 			for _, step := range part.Build(b) {
 				if len(got) == 0 || got[len(got)-1] != step.Name {
@@ -239,7 +251,7 @@ func TestTheRoleListsTheAgentsParts(t *testing.T) {
 // templated from the role parameters alone); they must be that role's parts,
 // the pre-task ones aside.
 func TestMainYmlSendsTheSamePartsToTheFallback(t *testing.T) {
-	for _, role := range []string{"haproxy-admin", "haproxy"} {
+	for _, role := range []string{"haproxy-admin", "haproxy", "authelia"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", role, "tasks", "main.yml"))
 		if err != nil {
 			t.Fatal(err)

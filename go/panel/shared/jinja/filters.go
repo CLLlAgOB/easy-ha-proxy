@@ -328,6 +328,41 @@ func builtinFilters() map[string]FilterFunc {
 		}
 		return strings.ToUpper(s.(string)), nil
 	}
+	// indent(width=4, first=False, blank=False), as Jinja's do_indent: a
+	// newline is added before splitting, so a trailing one survives.
+	f["indent"] = func(_ *Environment, v any, args []any, kwargs *Map) (any, error) {
+		s := Str(v)
+		indention := "    "
+		switch w := argOr(args, kwargs, 0, "width", int64(4)).(type) {
+		case string:
+			indention = w
+		case int64:
+			indention = strings.Repeat(" ", int(w))
+		}
+		first := Truthy(argOr(args, kwargs, 1, "first", false))
+		blank := Truthy(argOr(args, kwargs, 2, "blank", false))
+		lines := splitLines(s + "\n")
+		var rv string
+		if blank {
+			rv = strings.Join(lines, "\n"+indention)
+		} else {
+			rv = lines[0]
+			if len(lines) > 1 {
+				rest := make([]string, len(lines)-1)
+				for i, line := range lines[1:] {
+					if line != "" {
+						line = indention + line
+					}
+					rest[i] = line
+				}
+				rv += "\n" + strings.Join(rest, "\n")
+			}
+		}
+		if first {
+			rv = indention + rv
+		}
+		return rv, nil
+	}
 	f["trim"] = func(_ *Environment, v any, args []any, kwargs *Map) (any, error) {
 		s := softStr(v)
 		chars := argOr(args, kwargs, 0, "chars", nil)
@@ -833,4 +868,16 @@ func builtinTests() map[string]TestFunc {
 		return ok, nil
 	}
 	return t
+}
+
+// splitLines is str.splitlines() for \n, \r\n and \r endings.
+func splitLines(s string) []string {
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n"), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
 }

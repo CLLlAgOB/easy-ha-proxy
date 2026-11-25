@@ -23,6 +23,7 @@ type Outcome interface {
 // if missing, its primary group and shell kept as asked.
 type User struct {
 	Name, Group, Shell string
+	UID                string // "" leaves it to useradd
 	System, NoHome     bool
 
 	create bool
@@ -54,6 +55,9 @@ func (u *User) Check(sys *System) (Change, error) {
 			notes = append(notes, fmt.Sprintf("group %s -> %d", fields[3], gid))
 		}
 	}
+	if u.UID != "" && fields[2] != u.UID {
+		notes = append(notes, "uid "+fields[2]+" -> "+u.UID)
+	}
 	if u.Shell != "" && fields[6] != u.Shell {
 		notes = append(notes, "shell "+fields[6]+" -> "+u.Shell)
 	}
@@ -71,6 +75,9 @@ func (u *User) Apply(sys *System, _ Change) error {
 		if u.NoHome {
 			args = append(args, "--no-create-home")
 		}
+	}
+	if u.UID != "" {
+		args = append(args, "-u", u.UID)
 	}
 	if u.Group != "" {
 		args = append(args, "-g", u.Group)

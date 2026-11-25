@@ -26,8 +26,19 @@ type File struct {
 
 func (f *File) Describe() string { return "file " + f.Path }
 
+// RenderDir, when set, receives every file content a check compares (named
+// after its path, mode 0600), so a plan's difference can be read on the host
+// itself; "apply plan --render-to DIR" sets it.
+var RenderDir string
+
 func (f *File) Check(sys *System) (Change, error) {
 	f.writeContent, f.fixAttrs = false, false
+	if RenderDir != "" {
+		name := strings.ReplaceAll(strings.TrimPrefix(f.Path, "/"), "/", "_")
+		if err := os.WriteFile(filepath.Join(RenderDir, name), f.Content, 0o600); err != nil {
+			return Change{}, err
+		}
+	}
 	fi, err := os.Lstat(sys.Path(f.Path))
 	if errors.Is(err, os.ErrNotExist) {
 		f.writeContent = true
@@ -262,16 +273,35 @@ func (a *Absent) Check(sys *System) (Change, error) {
 func (a *Absent) Apply(sys *System, _ Change) error { return os.RemoveAll(sys.Path(a.Path)) }
 
 // Touch is file state=touch: create if missing and set the times; Ansible
-// reports it changed every time, and so does this.
+// reports it changed every time, and so does this. With Preserve
+// (access_time and modification_time: preserve) an existing file keeps its
+// times and changes only when its owner, group or mode do.
 type Touch struct {
 	Path         string
 	Owner, Group string
 	Mode         os.FileMode
+	Preserve     bool
 }
 
 func (t *Touch) Describe() string { return "touch " + t.Path }
 
-func (t *Touch) Check(*System) (Change, error) { return Change{Needed: true, Summary: "touch"}, nil }
+func (t *Touch) Check(sys *System) (Change, error) {
+	if !t.Preserve {
+		return Change{Needed: true, Summary: "touch"}, nil
+	}
+	fi, err := os.Lstat(sys.Path(t.Path))
+	if errors.Is(err, os.ErrNotExist) {
+		return Change{Needed: true, Summary: "create"}, nil
+	}
+	if err != nil {
+		return Change{}, err
+	}
+	notes, err := attrNotes(sys, fi, t.Owner, t.Group, t.Mode)
+	if err != nil {
+		return Change{}, err
+	}
+	return Change{Needed: len(notes) > 0, Summary: strings.Join(notes, "; ")}, nil
+}
 
 func (t *Touch) Apply(sys *System, _ Change) error {
 	path := sys.Path(t.Path)

@@ -300,6 +300,7 @@ go_installer_parts:
   - start
   - native-cleanup
   - docker/docker
+  - authelia/install
   - geoip_acl/geoip
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.

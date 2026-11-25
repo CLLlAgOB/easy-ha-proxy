@@ -1,1 +1,5 @@
-- import_tasks: '{{ task_stage }}.yml'
+# The task files the Go installer may run go through go_fallback.yml (the
+# agent runs them, or else the task file is included); every other one is
+# imported as it is. A test keeps the list equal to the authelia parts.
+- import_tasks: >-
+    {{ 'go_fallback.yml' if task_stage in ['install'] else task_stage ~ '.yml' }}

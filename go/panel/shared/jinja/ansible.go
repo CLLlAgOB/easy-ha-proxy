@@ -128,4 +128,8 @@ func AddAnsibleFilters(env *Environment) {
 	env.Filters["basename"] = AnsibleBasename
 	env.Filters["regex_replace"] = RegexReplaceFilter
 	env.Filters["combine"] = CombineFilter
+	env.Filters["to_json"] = AnsibleToJSON
+	env.Filters["to_nice_json"] = AnsibleToNiceJSON
+	env.Filters["to_nice_yaml"] = AnsibleToNiceYAML
+	env.Filters["ternary"] = AnsibleTernary
 }

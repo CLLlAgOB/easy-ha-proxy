@@ -166,11 +166,11 @@ class WhatAChangeNeeds(unittest.TestCase):
         # the daemon task files with it: a new agent and those stages.
         scope = update_scope.scope_for(["go/panel/shared/jinja/render.go", "go/panel/internal/app/app.go"])
         self.assertFalse(scope["full"])
-        self.assertEqual(scope["tags"], ["apparmor", "docker", "geo", "ha-adm-cfg", "ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "ha-adm-start", "ha-cfg", "ha-install", "status"])
+        self.assertEqual(scope["tags"], ["apparmor", "authelia", "docker", "geo", "ha-adm-cfg", "ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "ha-adm-start", "ha-cfg", "ha-install", "status"])
 
     def test_a_go_installer_change_runs_the_stages_it_takes_over(self):
         scope = update_scope.scope_for(["go/agent/internal/apply/stages/daemons.go"])
-        self.assertEqual(scope["tags"], ["apparmor", "docker", "geo", "ha-adm-cfg", "ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "ha-adm-start", "ha-cfg", "ha-install", "status"])
+        self.assertEqual(scope["tags"], ["apparmor", "authelia", "docker", "geo", "ha-adm-cfg", "ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "ha-adm-start", "ha-cfg", "ha-install", "status"])
         scope = update_scope.scope_for(["go/agent/internal/healthd/healthd.go"])
         self.assertEqual(scope["tags"], ["ha-adm-native", "status"])
 

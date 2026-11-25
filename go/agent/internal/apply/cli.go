@@ -93,6 +93,7 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 	stage := fs.String("stage", "", "a stage: "+strings.Join(stages.Names(), ", "))
 	taskStage := fs.String("task-stage", "", "the task_stage of the role entry running the part")
 	asJSON := fs.Bool("json", false, "print the journal (JSON lines) instead of a table")
+	renderTo := fs.String("render-to", "", "plan only: write each file's would-be content into this directory (0600)")
 	var changed, skipTags, partNames list
 	fs.Var(&partNames, "part", "a part (a task file); repeat to run several in order in one run")
 	extra := pairs{}
@@ -108,6 +109,17 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "facts: %v\n", err)
 		return 1
+	}
+	if *renderTo != "" {
+		if mode == engine.Apply {
+			fmt.Fprintln(stderr, "--render-to is for apply plan")
+			return 2
+		}
+		if err := os.MkdirAll(*renderTo, 0o700); err != nil {
+			fmt.Fprintf(stderr, "--render-to: %v\n", err)
+			return 1
+		}
+		engine.RenderDir = *renderTo
 	}
 	var journal io.Writer
 	if *asJSON {

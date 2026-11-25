@@ -218,36 +218,51 @@ func (g *GetURL) Apply(sys *System, _ Change) error {
 	return writeAtomic(sys.Path(g.Dest), raw, uid, gid, g.Mode)
 }
 
-// Group is the group module with state=present.
+// Group is the group module with state=present, with its gid when GID is
+// set (an existing group with another gid is given this one).
 type Group struct {
 	Name   string
+	GID    string
 	System bool
+
+	exists bool
 }
 
 func (g *Group) Describe() string { return "group " + g.Name }
 
 func (g *Group) Check(sys *System) (Change, error) {
-	_, code, err := sys.Exec("getent", "group", g.Name)
+	out, code, err := sys.Exec("getent", "group", g.Name)
 	if err != nil {
 		return Change{}, err
 	}
-	if code == 0 {
-		return Change{}, nil
+	g.exists = code == 0
+	if !g.exists {
+		return Change{Needed: true, Summary: "create"}, nil
 	}
-	return Change{Needed: true, Summary: "create"}, nil
+	fields := strings.Split(strings.TrimSpace(out), ":")
+	if g.GID != "" && len(fields) > 2 && fields[2] != g.GID {
+		return Change{Needed: true, Summary: "gid " + fields[2] + " -> " + g.GID}, nil
+	}
+	return Change{}, nil
 }
 
 func (g *Group) Apply(sys *System, _ Change) error {
-	args := []string{g.Name}
-	if g.System {
-		args = []string{"--system", g.Name}
+	tool, args := "groupadd", []string{}
+	if g.exists {
+		tool = "groupmod"
+	} else if g.System {
+		args = append(args, "--system")
 	}
-	out, code, err := sys.Exec("groupadd", args...)
+	if g.GID != "" {
+		args = append(args, "-g", g.GID)
+	}
+	args = append(args, g.Name)
+	out, code, err := sys.Exec(tool, args...)
 	if err != nil {
 		return err
 	}
 	if code != 0 {
-		return fmt.Errorf("groupadd %s: exit %d %s", g.Name, code, strings.TrimSpace(out))
+		return fmt.Errorf("%s %s: exit %d %s", tool, g.Name, code, strings.TrimSpace(out))
 	}
 	return nil
 }
