@@ -26,9 +26,6 @@ pub mod signatures;
 pub mod tracking;
 pub mod watchers;
 
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-
 pub use api::constant_time_eq;
 #[cfg(unix)]
 pub use api::serve;
@@ -58,92 +55,6 @@ pub use tracking::{
     format_subnet24, ipv4_subnet24_key, IpActivity, IpMemory, LogCursor, SubnetCorrelator,
     SubnetSummary,
 };
-
-/// Opaque handle for C-ABI callers (e.g., optional Python `ctypes` bridge).
-pub struct GuarddHandle {
-    pub engine: SignatureEngine,
-}
-
-/// Create a `GuarddHandle` from an optional `scanner-signatures.json` path.
-/// Pass NULL or an invalid path to fall back to built-in signatures.
-///
-/// # Safety
-/// `sig_path` must be either null or a valid NUL-terminated UTF-8 C string.
-#[no_mangle]
-pub unsafe extern "C" fn guardd_engine_new(sig_path: *const c_char) -> *mut GuarddHandle {
-    std::panic::catch_unwind(|| {
-        let engine = if sig_path.is_null() {
-            SignatureEngine::builtin()
-        } else {
-            match CStr::from_ptr(sig_path).to_str() {
-                Ok(p) if !p.is_empty() => {
-                    SignatureEngine::from_file(p).unwrap_or_else(|_| SignatureEngine::builtin())
-                }
-                _ => SignatureEngine::builtin(),
-            }
-        };
-        Box::into_raw(Box::new(GuarddHandle { engine }))
-    })
-    .unwrap_or(std::ptr::null_mut())
-}
-
-/// Destroy a handle returned by `guardd_engine_new`.
-///
-/// # Safety
-/// `handle` must be a valid pointer obtained from `guardd_engine_new` (or null).
-#[no_mangle]
-pub unsafe extern "C" fn guardd_engine_free(handle: *mut GuarddHandle) {
-    if !handle.is_null() {
-        drop(Box::from_raw(handle));
-    }
-}
-
-/// Parse a newline-separated batch of HAProxy access-log lines and return a
-/// JSON array of `Option<ParsedRequest>` entries (caller must free with `guardd_string_free`).
-///
-/// # Safety
-/// `handle` must be a valid handle; `lines_utf8` must be a valid NUL-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn guardd_parse_batch_json(
-    handle: *const GuarddHandle,
-    lines_utf8: *const c_char,
-) -> *mut c_char {
-    if handle.is_null() || lines_utf8.is_null() {
-        return std::ptr::null_mut();
-    }
-    std::panic::catch_unwind(|| {
-        let engine = &(*handle).engine;
-        let Ok(input) = CStr::from_ptr(lines_utf8).to_str() else {
-            return std::ptr::null_mut();
-        };
-        let parsed: Vec<Option<ParsedRequest>> = if input.is_empty() {
-            Vec::new()
-        } else {
-            input
-                .split('\n')
-                .map(|line| parse_access_line(line.strip_suffix('\r').unwrap_or(line), engine))
-                .collect()
-        };
-        let Ok(json) = serde_json::to_string(&parsed) else {
-            return std::ptr::null_mut();
-        };
-        CString::new(json)
-            .map(CString::into_raw)
-            .unwrap_or(std::ptr::null_mut())
-    })
-    .unwrap_or(std::ptr::null_mut())
-}
-
-/// Free a string returned by `guardd_parse_batch_json`.
-///
-/// # Safety
-/// `ptr` must be a pointer returned by `guardd_parse_batch_json` (or null).
-#[no_mangle]
-pub unsafe extern "C" fn guardd_string_free(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        drop(CString::from_raw(ptr));
-    }
-}
 
 #[cfg(test)]
 mod tests {
