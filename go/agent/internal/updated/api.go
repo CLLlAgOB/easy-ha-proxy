@@ -1070,6 +1070,9 @@ func Run(opts Options) error {
 	if err := d.recoverStaleJobs(); err != nil {
 		return fmt.Errorf("Cannot start update broker: %w", err)
 	}
+	if pending := d.pendingLegacyRecheck(); pending != nil {
+		go d.runLegacyRecheck(pending)
+	}
 	go d.autoCheckLoop()
 	if d.alertsOn() {
 		go d.sshProtectionWatchLoop()

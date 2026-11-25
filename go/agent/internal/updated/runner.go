@@ -786,8 +786,14 @@ func validateAppliedContainerDigests(stored, applied map[string]any, components 
 		return err
 	}
 	if !sameDigests(actual, expected) {
-		return uErr("verification_failed", "an applied image digest differs from the reviewed update plan")
+		return uErr("verification_failed", legacyDigestError)
 	}
+	return verifyRunningContainers(applied, components)
+}
+
+// verifyRunningContainers fails when the check after an update cannot show
+// that every selected container runs the image it reports.
+func verifyRunningContainers(applied map[string]any, components []string) error {
 	m, _ := planComponentMap(applied)
 	for _, id := range containerComponentsFor(components) {
 		for _, it := range pyx.List(pyx.Map(m[id]["details"])["images"]) {
