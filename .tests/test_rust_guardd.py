@@ -261,6 +261,62 @@ class RustGuarddTests(unittest.TestCase):
                     if daemon.poll() is None:
                         daemon.kill()
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux Unix sockets")
+    def test_the_api_answers_without_waiting_out_a_nap(self):
+        # The accept loop slept 25 ms whenever no connection was waiting, so a
+        # request that came after the previous answer waited out a whole nap:
+        # every panel page that asked guardd took 25 ms more.
+        import grp
+        import statistics
+
+        rust = _find_rust_bin()
+        if rust is None:
+            self.skipTest("guardd-core binary was not built")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            api = root / "api.sock"
+            log = root / "access.log"
+            log.touch()
+            config = root / "guard.json"
+            config.write_text(json.dumps({
+                "mode": "monitor",
+                "poll_interval_seconds": 60,
+                "sources": {"haproxy_socket": str(root / "missing.sock"), "log_file": str(log)},
+            }), encoding="utf-8")
+            with subprocess.Popen(
+                [str(rust), "serve", "--config", str(config), "--socket", str(api),
+                 "--database", str(root / "security.db"), "--signatures", str(SIGNATURES_PATH)],
+                env={**os.environ, "GUARDD_SOCKET_GROUP": grp.getgrgid(os.getegid()).gr_name,
+                     "GUARDD_TOKEN": "local-test-token", "ALERTD_TOKEN": ""},
+                stderr=subprocess.DEVNULL,
+            ) as daemon:
+                try:
+                    deadline = time.monotonic() + 20
+                    while not api.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+
+                    def ask():
+                        started = time.monotonic()
+                        with socket.socket(socket.AF_UNIX) as stream:
+                            stream.settimeout(2)
+                            stream.connect(str(api))
+                            stream.sendall(b"GET /api/v1/guard/health HTTP/1.0\r\n\r\n")
+                            reply = b""
+                            while chunk := stream.recv(4096):
+                                reply += chunk
+                        self.assertIn(b"200 OK", reply)
+                        return time.monotonic() - started
+
+                    ask()
+                    times = [ask() for _ in range(20)]
+                    self.assertLess(statistics.median(times), 0.010, times)
+                    daemon.terminate()
+                    self.assertEqual(daemon.wait(timeout=5), 0)
+                finally:
+                    if daemon.poll() is None:
+                        daemon.kill()
+
     def test_parser_matches_the_recorded_reference(self) -> None:
         rust_bin = _find_rust_bin()
         if rust_bin is None:

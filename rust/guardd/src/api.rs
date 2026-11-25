@@ -1247,6 +1247,25 @@ fn write_response(writer: &mut UnixStream, (code, payload): (u16, Value)) {
     let _ = writer.flush();
 }
 
+/// How long the accept loop waits for a connection before it looks at the
+/// stop flag again.
+#[cfg(unix)]
+const ACCEPT_STOP_CHECK: Duration = Duration::from_millis(500);
+
+/// Wait until the listener has a connection to accept, or the timeout ends.
+#[cfg(unix)]
+fn wait_for_connection(listener: &UnixListener, timeout: Duration) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+    // SAFETY: one valid pollfd that outlives the call.
+    unsafe { libc::poll(&mut fd, 1, millis) > 0 }
+}
+
 /// Serve the API until `shared.stop` is set.
 #[cfg(unix)]
 pub fn serve(socket_path: &str, shared: Arc<Shared>) -> Result<(), String> {
@@ -1261,6 +1280,13 @@ pub fn serve(socket_path: &str, shared: Arc<Shared>) -> Result<(), String> {
             } else {
                 i += 1;
             }
+        }
+        // Wait for a connection in poll(2), not in fixed sleeps: a request was
+        // answered only after the 25 ms nap it arrived in, and forty naps a
+        // second kept this thread busy while nothing happened. The timeout
+        // only bounds how late a shutdown is noticed.
+        if !wait_for_connection(&listener, ACCEPT_STOP_CHECK) {
+            continue;
         }
         match listener.accept() {
             Ok((stream, _)) => {
@@ -1282,9 +1308,8 @@ pub fn serve(socket_path: &str, shared: Arc<Shared>) -> Result<(), String> {
                     }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(25))
-            }
+            // Another waiter took it, or a spurious wake-up: wait again.
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
