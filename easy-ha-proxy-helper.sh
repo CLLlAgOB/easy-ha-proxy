@@ -1239,16 +1239,18 @@ source_revision_of() {
 # The native binaries are pinned to the commit they were built from, so they
 # are due whenever the source to compare with is another commit -- what the
 # daemons component of `easy-ha-proxy update` installs.
-# A configuration switch as the playbook reads it: vars.yml, then authelia.yml.
+# A configuration switch as the playbook reads it: vars.yml, then authelia.yml,
+# the later file's value winning, as in its vars_files.
 config_switch() {
   local name="$1"
   local value=""
+  local found=""
   local file=""
 
   for file in "${config_dir}/vars.yml" "${config_dir}/authelia.yml"; do
     [[ -r "${file}" ]] || continue
-    value="$(yaml_scalar "${name}" "${file}")"
-    [[ -n "${value}" ]] && break
+    found="$(yaml_scalar "${name}" "${file}")"
+    [[ -n "${found}" ]] && value="${found}"
   done
   printf '%s\n' "${value,,}"
 }

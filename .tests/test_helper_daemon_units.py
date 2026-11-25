@@ -42,6 +42,9 @@ class UnitExpected(unittest.TestCase):
         self.assertFalse(self.expected("authelia-usersd.service", "authelia_enabled: false\n"))
         self.assertFalse(self.expected("authelia-usersd.service"))
         self.assertTrue(self.expected("authelia-usersd.service", "root_domain: example.com\n", on))
+        # authelia.yml is read after vars.yml and wins, as in the playbook.
+        self.assertFalse(self.expected("authelia-usersd.service", on, "authelia_enabled: false\n"))
+        self.assertTrue(self.expected("authelia-usersd.service", "authelia_enabled: false\n", on))
         self.assertFalse(self.expected("authelia-bansd.service", on + "authelia_bans_daemon_enabled: false\n"))
         self.assertFalse(self.expected("authelia-configd.service", on + "authelia_configd_enabled: false\n"))
         self.assertTrue(self.expected("authelia-configd.service", on + "authelia_bans_daemon_enabled: false\n"))

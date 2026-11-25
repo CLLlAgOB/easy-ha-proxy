@@ -8,7 +8,14 @@ gone, the update broker's own among them.
 
 from pathlib import Path
 import re
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
+
+from jinja2 import Environment
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN = ROOT / "ansible" / "roles" / "haproxy-admin" / "tasks"
@@ -34,15 +41,63 @@ class NativeCleanupOrder(unittest.TestCase):
                       "start"):
             self.assertLess(positions[stage], cleanup, stage)
 
-    def test_a_file_an_installed_unit_names_is_kept(self):
+    def test_the_list_names_the_update_broker(self):
         cleanup = (ADMIN / "native-cleanup.yml").read_text(encoding="utf-8")
-        check = cleanup.index('grep -rqsF -- "$path" /etc/systemd/system')
-        self.assertLess(check, cleanup.index('rm -rf -- "$path"'))
         self.assertIn("/usr/local/sbin/easy-ha-proxy-updated.py", cleanup)
 
     def test_the_changes_map_knows_the_cleanup(self):
         scope = (ROOT / "installer" / "update_scope.py").read_text(encoding="utf-8")
         self.assertIn('tasks/native-cleanup.yml", ("ha-adm-native",)', scope)
+
+
+@unittest.skipIf(shutil.which("bash") is None, "bash is required")
+class TheCleanupScript(unittest.TestCase):
+    """Runs the task's own script on files and units in a temporary directory."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.units = self.root / "units"
+        self.units.mkdir()
+        task = yaml.safe_load((ADMIN / "native-cleanup.yml").read_text(encoding="utf-8"))[0]
+        self.legacy = [self.root / "easy-ha-proxy-guardd.py", self.root / "easy_ha_proxy_alert_client.py",
+                       self.root / "updated"]
+        environment = Environment()
+        environment.filters["quote"] = shlex.quote  # Ansible's quote filter
+        script = environment.from_string(task["ansible.builtin.shell"]).render(
+            native_legacy_paths=[str(path) for path in self.legacy])
+        self.script = script.replace("/etc/systemd/system /run/systemd/system /usr/lib/systemd/system",
+                                     str(self.units))
+        self.assertIn(str(self.units), self.script)
+
+    def run_cleanup(self):
+        done = subprocess.run(["bash", "-c", self.script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def place_legacy_files(self):
+        self.legacy[0].write_text("daemon\n", encoding="utf-8")
+        self.legacy[1].write_text("client\n", encoding="utf-8")
+        self.legacy[2].mkdir()
+
+    def test_nothing_goes_while_a_unit_still_starts_a_former_daemon(self):
+        self.place_legacy_files()
+        (self.units / "easy-ha-proxy-guardd.service").write_text(
+            f"[Service]\nExecStart=/usr/bin/python3 {self.legacy[0]}\n", encoding="utf-8")
+        self.assertNotIn("removed:", self.run_cleanup())
+        # The daemon a unit starts keeps the client it imports, which no unit names.
+        self.assertTrue(all(path.exists() for path in self.legacy))
+
+    def test_everything_goes_once_no_unit_names_it(self):
+        self.place_legacy_files()
+        (self.units / "easy-ha-proxy-guardd.service").write_text(
+            "[Service]\nExecStart=/usr/local/sbin/guardd-core serve\n", encoding="utf-8")
+        self.assertIn("removed:", self.run_cleanup())
+        self.assertFalse(any(path.exists() for path in self.legacy))
+
+    def test_a_cleaned_gateway_reports_no_change(self):
+        self.assertEqual(self.run_cleanup(), "")
 
 
 class NeedrestartKeepsTheUpdateJob(unittest.TestCase):

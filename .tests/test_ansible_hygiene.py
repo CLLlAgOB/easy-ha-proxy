@@ -167,7 +167,8 @@ class ThePEMBuildRewritesOnlyWhatChanged(unittest.TestCase):
         environment = Environment()
         environment.filters["quote"] = shlex.quote  # Ansible's quote filter
         script = environment.from_string(self.source).render(
-            lineage=lineage, dest=dest, haproxy_certs_available_dir=str(self.root / "available"))
+            lineage=lineage, dest=dest, haproxy_certs_available_dir=str(self.root / "available"),
+            haproxy_certs_dir=str(self.root / "certs"))
         return script.replace("/etc/letsencrypt/live/", f"{self.root}/live/")
 
     def issue(self, text):
@@ -225,6 +226,17 @@ class ThePEMBuildRewritesOnlyWhatChanged(unittest.TestCase):
                               env=self.environment, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertFalse(marker.exists())
+
+    def test_a_destination_outside_the_certificate_directory_is_refused(self):
+        # cert_path is the site's own; as root it could name any file.
+        self.issue("one")
+        for dest in (self.root / "elsewhere" / "x.pem", self.root / "certs" / ".." / "escape.pem",
+                     self.root / "certs" / "notes.txt"):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            self.script = self.render("shop.example.com", str(dest))
+            self.assertFalse(self.build(), dest)
+            self.assertFalse(dest.exists(), dest)
+            self.assertFalse((self.root / "escape.pem").exists())
 
 
 if __name__ == "__main__":

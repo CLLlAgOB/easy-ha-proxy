@@ -31,6 +31,14 @@
     lineage={{ lineage | quote }}
     dest={{ dest | quote }}
     available={{ (haproxy_certs_available_dir | default('/etc/haproxy/certs-available')) | quote }}
+    certs_dir="$(realpath -m -- {{ (haproxy_certs_dir | default('/etc/haproxy/certs')) | quote }})"
+
+    # cert_path comes from websites.yml, which the panel writes; this runs as
+    # root, so it may only name a .pem file in the HAProxy certificate directory.
+    case "$(realpath -m -- "$dest")" in
+      "$certs_dir"/*.pem) ;;
+      *) echo "Skip $lineage: $dest is not a .pem file in $certs_dir" >&2; exit 0 ;;
+    esac
 
     full="/etc/letsencrypt/live/$lineage/fullchain.pem"
     key="/etc/letsencrypt/live/$lineage/privkey.pem"
@@ -85,6 +93,14 @@
     lineage={{ lineage | quote }}
     dest={{ dest | quote }}
     available={{ (haproxy_certs_available_dir | default('/etc/haproxy/certs-available')) | quote }}
+    certs_dir="$(realpath -m -- {{ (haproxy_certs_dir | default('/etc/haproxy/certs')) | quote }})"
+
+    # cert_path comes from websites.yml, which the panel writes; this runs as
+    # root, so it may only name a .pem file in the HAProxy certificate directory.
+    case "$(realpath -m -- "$dest")" in
+      "$certs_dir"/*.pem) ;;
+      *) echo "Skip $lineage: $dest is not a .pem file in $certs_dir" >&2; exit 0 ;;
+    esac
 
     full="/etc/letsencrypt/live/$lineage/fullchain.pem"
     key="/etc/letsencrypt/live/$lineage/privkey.pem"
