@@ -667,7 +667,8 @@ jobs:
               --push \
               .
           fi
-          digest="$(docker buildx imagetools inspect "${channel_image}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          # The tree-keyed tag never moves; a later run may already have moved the channel tag.
+          digest="$(docker buildx imagetools inspect "${key_image}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           cosign sign --yes "${REPOSITORY}@${digest}"
           echo "Published and signed ${channel_image} (go-panel tree ${TREE:0:16}, ${digest})" >> "$GITHUB_STEP_SUMMARY"
 

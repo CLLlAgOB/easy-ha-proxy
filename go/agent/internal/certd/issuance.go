@@ -524,6 +524,8 @@ func (d *Daemon) saveCertDelivery(payload map[string]any) (map[string]any, error
 	if err != nil {
 		return nil, err
 	}
+	d.deliveryMu.Lock()
+	defer d.deliveryMu.Unlock()
 	recordPath, keyFile, knownFile := d.deliveryPaths(name)
 	if err := os.MkdirAll(d.Opts.DeliveryDir, 0o700); err != nil {
 		return nil, err
@@ -622,12 +624,7 @@ func (d *Daemon) saveCertDelivery(payload map[string]any) (map[string]any, error
 			return nil, err
 		}
 	}
-	raw := jsonIndent(record)
-	tmp := strings.TrimSuffix(recordPath, ".json") + ".json.tmp"
-	if err := writeModeFile(tmp, raw, 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp, recordPath); err != nil {
+	if err := writePrivateFile(recordPath, jsonIndent(record)); err != nil {
 		return nil, err
 	}
 	anyDomains := make([]any, len(domains))
@@ -646,12 +643,10 @@ func orDefault(v any, def string) string {
 	return s
 }
 
+// writeSecret replaces path through a temporary file of its own, so two
+// saves never write into the same one.
 func writeSecret(path, text string) error {
-	tmp := path + ".tmp"
-	if err := writeModeFile(tmp, []byte(text), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writePrivateFile(path, []byte(text))
 }
 
 func (d *Daemon) deleteCertDelivery(name any, actor string) (map[string]any, error) {
@@ -659,6 +654,8 @@ func (d *Daemon) deleteCertDelivery(name any, actor string) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
+	d.deliveryMu.Lock()
+	defer d.deliveryMu.Unlock()
 	a, b, c := d.deliveryPaths(checked)
 	paths := []string{a, b, c}
 	kept := ""
@@ -721,14 +718,20 @@ func (d *Daemon) testCertDelivery(name any) (map[string]any, error) {
 	}
 	output := strings.TrimSpace(strings.ToValidUTF8(string(res.stdout)+string(res.stderr), "�"))
 	outcome := map[string]any{"ok": res.rc == 0, "output": tailRunes(output, 4000), "lineage": filepath.Base(lineage)}
-	record["last_result"] = map[string]any{"ok": res.rc == 0, "at": time.Now().Unix(), "detail": tailRunes(output, 400)}
-	raw := jsonIndent(record)
-	tmp := strings.TrimSuffix(recordPath, ".json") + ".json.tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// The worker ran for up to three minutes, and the target may have been
+	// edited or removed meanwhile: only the result is written, onto what the
+	// record holds now, not onto the copy read before the run.
+	d.deliveryMu.Lock()
+	defer d.deliveryMu.Unlock()
+	if !isFile(recordPath) {
+		return outcome, nil
+	}
+	current, err := readJSONMap(recordPath)
+	if err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(tmp, 0o600)
-	if err := os.Rename(tmp, recordPath); err != nil {
+	current["last_result"] = map[string]any{"ok": res.rc == 0, "at": time.Now().Unix(), "detail": tailRunes(output, 400)}
+	if err := writePrivateFile(recordPath, jsonIndent(current)); err != nil {
 		return nil, err
 	}
 	return outcome, nil

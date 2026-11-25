@@ -141,6 +141,9 @@ func (c *Ctx) portalSend(f *os.File, item *Map, done func()) error {
 		return nil
 	}
 	rc := http.NewResponseController(c.W)
+	// The server sets no write timeout of its own, so a deadline left on the
+	// connection would cut short the next request that reuses it.
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 	deadline := time.Now().Add(portalDownloadSeconds * time.Second)
 	buf := make([]byte, 64*1024)
 	for {
@@ -395,15 +398,23 @@ func (a *App) registerAccessPortal() {
 			turn.Close()
 			<-portalDownloadSlots
 		}
+		// Given back however this returns, a panic included, until the
+		// download itself takes it over.
+		handedOver := false
+		defer func() {
+			if !handedOver {
+				release()
+			}
+		}()
 		f, item, err := portalOpenDownload(strOrEmpty(site.Value("name")), c.Args["identifier"])
 		if err != nil {
-			release()
 			var missing *portalNotFound
 			if errors.As(err, &missing) {
 				return Abort(404, "")
 			}
 			return err
 		}
+		handedOver = true
 		return c.portalSend(f, item, func() {
 			f.Close()
 			release()

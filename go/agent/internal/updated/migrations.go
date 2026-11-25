@@ -1144,16 +1144,29 @@ func (d *Daemon) osSecuritySnapshot() map[string]any {
 	return result
 }
 
+// cachedInspect is a copy of the last Linux settings read and when it was taken.
+func (d *Daemon) cachedInspect() (map[string]any, time.Time) {
+	d.inspectCacheMu.Lock()
+	defer d.inspectCacheMu.Unlock()
+	if d.inspectValue == nil {
+		return nil, d.inspectAt
+	}
+	return pyx.Copy(d.inspectValue), d.inspectAt
+}
+
 func (d *Daemon) osSecurityLiveSettings() map[string]any {
+	// inspectMu is held for the whole read; the cached answer has its own
+	// lock, so a request that finds the read running still gets the last
+	// answer without racing the reader that replaces it.
 	if !d.inspectMu.TryLock() {
-		if d.inspectValue != nil {
-			return pyx.Copy(d.inspectValue)
+		if cached, _ := d.cachedInspect(); cached != nil {
+			return cached
 		}
 		return map[string]any{"error": "Reading current Linux settings…"}
 	}
 	defer d.inspectMu.Unlock()
-	if !d.inspectAt.IsZero() && time.Since(d.inspectAt) < 30*time.Second {
-		return pyx.Copy(d.inspectValue)
+	if cached, at := d.cachedInspect(); !at.IsZero() && time.Since(at) < 30*time.Second {
+		return cached
 	}
 	value := func() map[string]any {
 		tool, raw, err := d.osSecurityTool()
@@ -1181,8 +1194,10 @@ func (d *Daemon) osSecurityLiveSettings() map[string]any {
 		}
 		return m
 	}()
+	d.inspectCacheMu.Lock()
 	d.inspectAt = time.Now()
 	d.inspectValue = value
+	d.inspectCacheMu.Unlock()
 	return pyx.Copy(value)
 }
 
@@ -1373,7 +1388,9 @@ func (d *Daemon) osSecurityWorker(jobID string, lock *os.File, action string, po
 	logText := ""
 	defer func() {
 		d.inspectMu.Lock()
+		d.inspectCacheMu.Lock()
 		d.inspectAt, d.inspectValue = time.Time{}, nil
+		d.inspectCacheMu.Unlock()
 		d.inspectMu.Unlock()
 		d.osSecurityNotifications(d.osSecuritySnapshot())
 		_ = os.Remove(d.Opts.ActiveMarker)

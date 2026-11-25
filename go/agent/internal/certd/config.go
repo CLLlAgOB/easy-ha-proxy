@@ -166,6 +166,7 @@ type Daemon struct {
 	caMu         sync.Mutex // CA_LOCK (not reentrant)
 	standbyMu    sync.Mutex // _STANDBY_SWITCH_LOCK
 	trashMu      sync.Mutex // TRASH_LOCK
+	deliveryMu   sync.Mutex // delivery target records
 	alertsClient alertSink
 	plugins      pluginCache // listedDNSPlugins
 }

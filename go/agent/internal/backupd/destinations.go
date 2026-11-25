@@ -1309,9 +1309,16 @@ func (d *Daemon) s3Upload(record map[string]any, archive, remoteName, expected s
 	}
 	payload := remoteChecksumBody(expected, remoteName)
 	sum := sha256.Sum256(payload)
-	if _, _, err := d.s3Request(record, "PUT", remoteName+".sha256", nil, bytes.NewReader(payload),
-		hex.EncodeToString(sum[:]), int64(len(payload))); err != nil {
+	status, body, err = d.s3Request(record, "PUT", remoteName+".sha256", nil, bytes.NewReader(payload),
+		hex.EncodeToString(sum[:]), int64(len(payload)))
+	if err != nil {
 		return nil, err
+	}
+	// Refused, the checksum file is missing at the destination; the copy is
+	// not reported as verified.
+	if status != 200 && status != 201 {
+		detail := truncRunes(strings.TrimSpace(strings.ToValidUTF8(string(body), "�")), 400)
+		return nil, bErr("upstream", "the checksum upload failed (%d): %s", status, detail)
 	}
 	return map[string]any{"bytes": size, "verified": true, "verified_by": "signed-put"}, nil
 }

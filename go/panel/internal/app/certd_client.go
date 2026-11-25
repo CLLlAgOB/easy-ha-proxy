@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -356,9 +357,13 @@ func CertdUpload(siteName, domain string, pem []byte, filename, externalCAID str
 		_ = w.WriteField(kv[0], kv[1])
 	}
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="cert_file"; filename="%s"`, filename))
+	// The uploaded file's own name: quoted and escaped, as certd_client2 does.
+	h.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "cert_file", "filename": filename}))
 	h.Set("Content-Type", "application/x-pem-file")
-	part, _ := w.CreatePart(h)
+	part, err := w.CreatePart(h)
+	if err != nil {
+		return newMap("ok", false, "error", "could not prepare the certificate upload: "+err.Error())
+	}
 	_, _ = part.Write(pem)
 	_ = w.Close()
 	resp, err := certdPost("/certs/upload", buf.Bytes(), w.FormDataContentType(), 60*time.Second)

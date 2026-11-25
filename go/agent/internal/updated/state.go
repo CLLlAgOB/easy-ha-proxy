@@ -36,25 +36,26 @@ type Daemon struct {
 	shutOnce sync.Once
 	stopOnce sync.Once
 
-	autoMu        sync.Mutex
-	autoNextAt    float64
-	autoRetry     float64
-	autoNight     string
-	cycleRunning  bool
-	metadataFree  bool // METADATA_CONTEXT.unlocked for the running auto check
-	buildMu       sync.Mutex
-	buildAt       time.Time
-	buildValue    map[string]any
-	inspectMu     sync.Mutex
-	inspectAt     time.Time
-	inspectValue  map[string]any
-	watchAt       float64
-	watchReason   *string
-	transient     func() bool
-	rootUID       int
-	sleep         func(time.Duration)
-	now           func() time.Time
-	commandRunner func(timeout time.Duration, env []string, argv ...string) (int, string, string, error)
+	autoMu         sync.Mutex
+	autoNextAt     float64
+	autoRetry      float64
+	autoNight      string
+	cycleRunning   bool
+	metadataFree   bool // METADATA_CONTEXT.unlocked for the running auto check
+	buildMu        sync.Mutex
+	buildAt        time.Time
+	buildValue     map[string]any
+	inspectMu      sync.Mutex
+	inspectCacheMu sync.Mutex // guards inspectAt and inspectValue
+	inspectAt      time.Time
+	inspectValue   map[string]any
+	watchAt        float64
+	watchReason    *string
+	transient      func() bool
+	rootUID        int
+	sleep          func(time.Duration)
+	now            func() time.Time
+	commandRunner  func(timeout time.Duration, env []string, argv ...string) (int, string, string, error)
 }
 
 // NewDaemon builds a daemon over opts without touching the filesystem.
