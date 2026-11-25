@@ -25,6 +25,13 @@ type Environment struct {
 	// MaxRenderSteps caps the nodes and loop iterations of one render;
 	// zero means DefaultMaxRenderSteps.
 	MaxRenderSteps int
+	// Resolve, when set, is asked for a name that neither the template nor
+	// the render's vars define: Ansible templates a variable only when a
+	// template reads it, so a value may depend on another one lazily.
+	Resolve func(name string) (any, bool)
+	// StrictUndefined makes printing an undefined name an *UndefinedError
+	// instead of "", as Ansible's undefined does.
+	StrictUndefined bool
 
 	mu    sync.Mutex
 	cache map[string]*Template
@@ -238,6 +245,11 @@ func (f *frame) resolve(name string) (any, bool) {
 	if v, ok := f.ctx.parent[name]; ok {
 		return v, true
 	}
+	if f.ctx.env.Resolve != nil {
+		if v, ok := f.ctx.env.Resolve(name); ok {
+			return normalize(v), true
+		}
+	}
 	return nil, false
 }
 
@@ -331,6 +343,14 @@ func (ctx *context) renderNode(t *Template, n node, f *frame, out *strings.Build
 		v, err := ctx.eval(x.e, f)
 		if err != nil {
 			return wrapErr(t, x.line, err)
+		}
+		if ctx.env.StrictUndefined {
+			switch u := v.(type) {
+			case Undefined:
+				return wrapErr(t, x.line, &UndefinedError{Name: u.Name})
+			case *Undefined:
+				return wrapErr(t, x.line, &UndefinedError{Name: u.Name})
+			}
 		}
 		s := ctx.env.output(v)
 		if err := ctx.budget.addOutput(len(s)); err != nil {

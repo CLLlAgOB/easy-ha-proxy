@@ -16,6 +16,7 @@ import (
 	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alertd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/authelia"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/backupd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certd"
@@ -81,6 +82,8 @@ func main() {
 		os.Exit(runCertDeliver(args))
 	case "update-geoip":
 		os.Exit(runUpdateGeoIP(args))
+	case "apply":
+		os.Exit(apply.Run(args, os.Stdout, os.Stderr))
 	case "probe-host":
 		text, _ := pyyaml.JSONDumps(metricsd.ProbeHost(), false, false)
 		fmt.Println(text)
@@ -91,7 +94,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|probe-host|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|probe-host|apply|version> [flags]")
 }
 
 func runUDPForward(args []string) int {
