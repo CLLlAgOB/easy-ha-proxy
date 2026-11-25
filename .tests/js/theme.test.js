@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const source = fs.readFileSync(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/theme.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "../../go/panel/web/static/js/theme.js"), "utf8");
 
 function boot({saved = null, dark = false, blocked = false} = {}) {
   const classes = new Set();

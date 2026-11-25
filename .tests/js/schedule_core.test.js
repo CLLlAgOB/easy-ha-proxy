@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict");
-const create = require("../../docker/app/haproxy_admin/static/js/server_time.js");
-const {build} = require("../../docker/app/haproxy_admin/static/js/schedule_core.js");
+const create = require("../../go/panel/web/static/js/server_time.js");
+const {build} = require("../../go/panel/web/static/js/schedule_core.js");
 
 test("one maintenance window replaces individual installation restart and reboot schedules", () => {
   const now = Date.parse("2026-11-08T00:00:00Z");

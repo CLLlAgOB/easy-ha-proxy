@@ -1940,12 +1940,11 @@ def offline_restore_required_images(
     images: set[str] = set()
     resolve("haproxy_admin_image_channel")
     if enabled("haproxy_admin_use_docker", True):
-        field = "haproxy_admin_go_image" if enabled("haproxy_admin_use_go_panel") else "haproxy_admin_image"
-        images.add(str(resolve(field)).strip())
+        images.add(str(resolve("haproxy_admin_go_image")).strip())
 
-    native = enabled("native_daemons_enabled")
-    native = native or any(enabled(key) for key in effective if key.startswith("native_") and key.endswith("_enabled"))
-    if native and not resolve("native_local_bundle_dir") and not resolve("native_release_base_url"):
+    # The host daemons are the native binaries, always: unless they come from
+    # a local bundle or an HTTPS release, their OCI image must be at hand.
+    if not resolve("native_local_bundle_dir") and not resolve("native_release_base_url"):
         reference = str(resolve("native_release_image")).strip()
         if enabled("native_release_pin_revision", True):
             revision = subprocess.run(

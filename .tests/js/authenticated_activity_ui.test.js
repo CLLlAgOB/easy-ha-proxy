@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const dir = path.join(__dirname, "../../docker/app/haproxy_admin/static/js");
+const dir = path.join(__dirname, "../../go/panel/web/static/js");
 const {russianCatalogue} = require("./catalogue.js");
 
 function page(script, expose, payload = {}) {

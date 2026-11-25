@@ -90,10 +90,10 @@ var (
 	haproxySettledPhases      = setOf("committed", "rolled_back", "aborted", "preparing", "prepared")
 	osSecurityModes           = setOf("system", "notify", "auto", "window", "daily")
 	osSecurityIntervals       = []int64{1, 2, 4, 6, 12, 24}
-	webTreeInputs             = []string{"Dockerfile", ".dockerignore", "docker/app"}
-	// The Go panel image's inputs, as CI fingerprints them (go_web_tree).
-	goWebTreeInputs = []string{"go/panel", "docker/app/haproxy_admin/static", "docker/app/haproxy_admin/translations",
-		"docker/app/haproxy_admin/templates"}
+	// The panel image's inputs, exactly as CI fingerprints them into its
+	// io.easy-ha-proxy.go-panel-tree label and EHP_SOURCE_TREE (go_web_tree).
+	// VERSION is among them: without it every footer read "differs".
+	goWebTreeInputs = []string{"VERSION", "go/panel"}
 )
 
 func setOf(items ...string) map[string]bool {

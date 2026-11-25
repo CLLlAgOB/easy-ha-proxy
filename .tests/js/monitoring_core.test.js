@@ -8,7 +8,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/monitoring_core.js"));
+const core = require(path.join(__dirname, "../../go/panel/web/static/js/monitoring_core.js"));
 
 test("linked cursors follow clock time across different bucket sizes and widths", () => {
   const minute = {points: [600, 660, 720, 780, 840, 900], step: 60, left: 50, plotWidth: 500};

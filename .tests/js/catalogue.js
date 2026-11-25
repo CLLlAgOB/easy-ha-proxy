@@ -5,7 +5,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const CATALOGUES = path.join(__dirname, "../../docker/app/haproxy_admin/translations");
+const CATALOGUES = path.join(__dirname, "../../go/panel/web/translations");
 
 function russianCatalogue() {
   const messages = {};

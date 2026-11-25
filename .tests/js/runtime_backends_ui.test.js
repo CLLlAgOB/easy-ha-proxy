@@ -15,7 +15,7 @@ function page() {
   let requests = 0;
   const window = {t: (key) => catalogue[key] || key,
     EasyHaProxyTime: {formatter: () => new Intl.DateTimeFormat("en")}};
-  const file = path.join(__dirname, "../../docker/app/haproxy_admin/static/js/haproxy_backends.js");
+  const file = path.join(__dirname, "../../go/panel/web/static/js/haproxy_backends.js");
   const source = fs.readFileSync(file, "utf8").replace(/\}\)\(\);\s*$/, "window.testView = {serverStatus, renderServer, CHECK_FAILURES};})();");
   vm.runInNewContext(source, {window, document, Intl, fetch: async () => { ++requests; }});
   return {api: window.testView, catalogue, requests: () => requests};

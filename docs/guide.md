@@ -525,9 +525,9 @@ web files than the host has.
 The host and the web application are installed as one version. The web
 application talks to the host's daemons and renders HAProxy's configuration
 from the host's template, so one without the other can break the panel. Each
-published image is labelled `io.easy-ha-proxy.source-tree` with the sha256 of
-`git ls-tree` over its build inputs (`Dockerfile`, `.dockerignore`,
-`docker/app`); Git objects are the same on every machine, so a gateway
+published image is labelled `io.easy-ha-proxy.go-panel-tree` with the sha256 of
+`git ls-tree` over its build inputs (`VERSION` and `go/panel`, which holds the
+templates and static files in `go/panel/web`); Git objects are the same on every machine, so a gateway
 computes the same value from the source it would install. When that source
 has other web files than the running image, the host update is offered only
 together with the web application ("Installed together with"), and only once
@@ -1748,16 +1748,17 @@ public repository.
 
 ## Development checks
 
-Every test lives in `.tests/`, which is outside the Docker build context, so
-none of it reaches the runtime image. `.github/workflows/ci.yml` runs exactly
-the commands below on Python 3.10 to 3.14 -- every interpreter a supported
-host ships, from Ubuntu 22.04 to Ubuntu 26.04 and Debian 13.
+Every Python and JavaScript test lives in `.tests/`, outside the Docker
+build context, so none of it reaches the runtime image; the Go and Rust tests
+sit beside their code (`go test ./...` in `go/agent` and `go/panel`, `cargo
+test` in `rust/guardd`). `.github/workflows/ci.yml` runs the commands below on
+Python 3.10 to 3.14 -- every interpreter a supported host ships, from Ubuntu
+22.04 to Ubuntu 26.04 and Debian 13 -- because the installer and the host
+tools the brokers run use the platform interpreter.
 
 ```bash
 python3 -m py_compile installer/easy_ha_proxy.py
-python3 -m compileall -q docker/app \
-  ansible/roles/authelia/files \
-  ansible/roles/haproxy-admin/files
+python3 -m compileall -q installer ansible/roles
 PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
@@ -1766,7 +1767,7 @@ shellcheck -S warning install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
 ruff check .   # mistakes only, see ruff.toml
 
-for script in docker/app/haproxy_admin/static/js/*.js; do node --check "$script"; done
+for script in go/panel/web/static/js/*.js; do node --check "$script"; done
 node --test .tests/js/*.test.js
 
 ansible-galaxy collection install -r ansible/requirements.yml
@@ -1784,26 +1785,26 @@ translator's rules in `i18n.js`, which are also run against the real Russian
 catalogue. New page logic of that kind
 belongs there too, rather than in a test that searches the source for a line.
 
-After the checks pass, a push to `alpha` or `main` publishes the web
-application image from that commit (`alpha`, or `latest`), labelled with the
-fingerprint of its build inputs that gateways use to pair it with its source.
-An image built from the same web files is reused; `main` promotes the alpha
-build. This needs the repository secrets `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN`; without them the job publishes nothing and says so. A pull
-request builds the image without publishing it and checks that it starts.
+After the checks pass, a push to `alpha` or `main` publishes the web panel
+image (`go-alpha`, or `go-latest`) and the native host binaries
+(`native-<channel>-<commit>`) from that commit, each labelled with what it was
+built from so gateways can pair it with their source. This needs the
+repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`; without them
+the jobs publish nothing and say so. A pull request builds the panel image
+without publishing it.
 
-Dependabot proposes updates for the requirements files, the Dockerfile and the
-workflows against `alpha`. It does not offer what cannot be taken: ansible-core
-stays on 2.17, the last series that runs on Ubuntu 22.04's Python 3.10; the
-image's Python moves only by patch releases; the installer's ranges move only
-when a release falls outside them. The weekly **Dependencies** workflow reports
+Dependabot proposes updates for the installer's requirements, the Go modules,
+the Rust crate, the panel's Dockerfile and the workflows against `alpha`. It
+does not offer what cannot be taken: ansible-core stays on 2.17, the last
+series that runs on Ubuntu 22.04's Python 3.10; the installer's ranges move
+only when a release falls outside them. The weekly **Dependencies** workflow reports
 known vulnerabilities (pip-audit) and keeps one issue open while a version
 pinned in an Ansible role (Authelia, Redis, the mail relay, the GeoIP packages)
 or a Galaxy collection has a newer release; for a collection, only releases
 that support the pinned ansible-core count.
 
 UI translations are JSON catalogs under
-[`docker/app/haproxy_admin/translations/`](../docker/app/haproxy_admin/translations/README.md).
+[`go/panel/web/translations/`](../go/panel/web/translations/README.md).
 Adding a catalog automatically adds its language to the interface selector;
 templates do not need to be copied. English is the canonical source language;
 other languages map English strings to translations.

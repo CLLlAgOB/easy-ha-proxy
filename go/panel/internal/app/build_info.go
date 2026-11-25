@@ -175,13 +175,8 @@ func (a *App) buildFooter(c *Ctx) any {
 	var host any
 	rep, isMap := reported.(*pyyaml.Map)
 	if isMap {
-		// This panel's image is fingerprinted like the host's go_web_tree; a
-		// broker that does not report it yet leaves the Flask web_tree.
-		tree := rep.Value("go_web_tree")
-		if !truthy(tree) {
-			tree = rep.Value("web_tree")
-		}
-		host = buildEntry(rep.Value("revision"), rep.Value("committed_at"), tree)
+		// This panel's image is fingerprinted like the host's go_web_tree.
+		host = buildEntry(rep.Value("revision"), rep.Value("committed_at"), rep.Value("go_web_tree"))
 	}
 	var match any
 	if pm, ok := panel.(*pyyaml.Map); ok {

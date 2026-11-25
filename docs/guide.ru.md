@@ -512,8 +512,9 @@ sudo python3 /opt/easy-ha-proxy/source/installer/os_upgrade_guard.py --recover-r
 Хост и веб-приложение ставятся как одна версия. Веб-приложение обращается к
 службам хоста и строит конфигурацию HAProxy по шаблону с хоста, поэтому одно
 без другого может сломать панель. Каждый публикуемый образ получает метку
-`io.easy-ha-proxy.source-tree` — sha256 от `git ls-tree` по входным файлам
-сборки (`Dockerfile`, `.dockerignore`, `docker/app`). Объекты git одинаковы на
+`io.easy-ha-proxy.go-panel-tree` — sha256 от `git ls-tree` по входным файлам
+сборки (`VERSION` и `go/panel`, где в `go/panel/web` лежат шаблоны и
+статические файлы). Объекты git одинаковы на
 любой машине, поэтому шлюз считает то же значение по исходникам, которые
 собирается установить. Если в них другие файлы веб-приложения, чем в
 запущенном образе, обновление хоста предлагается только вместе с
@@ -1578,17 +1579,18 @@ Inventory, host variables и секреты намеренно не входят
 
 ## Разработка и проверки
 
-Все тесты лежат в `.tests/`, которая находится вне контекста сборки Docker,
-поэтому ничего из них не попадает в рабочий образ. `.github/workflows/ci.yml`
-выполняет ровно приведённые ниже команды на Python от 3.10 до 3.14 -- на
-каждом интерпретаторе поддерживаемых систем, от Ubuntu 22.04 до Ubuntu 26.04 и
-Debian 13.
+Все тесты на Python и JavaScript лежат в `.tests/`, вне контекста сборки
+Docker, поэтому ничего из них не попадает в рабочий образ; тесты Go и Rust
+лежат рядом с кодом (`go test ./...` в `go/agent` и `go/panel`, `cargo test`
+в `rust/guardd`). `.github/workflows/ci.yml` выполняет приведённые ниже
+команды на Python от 3.10 до 3.14 -- на каждом интерпретаторе поддерживаемых
+систем, от Ubuntu 22.04 до Ubuntu 26.04 и Debian 13, -- потому что установщик
+и инструменты хоста, которые запускают брокеры, работают на системном
+интерпретаторе.
 
 ```bash
 python3 -m py_compile installer/easy_ha_proxy.py
-python3 -m compileall -q docker/app \
-  ansible/roles/authelia/files \
-  ansible/roles/haproxy-admin/files
+python3 -m compileall -q installer ansible/roles
 PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
@@ -1597,7 +1599,7 @@ shellcheck -S warning install.sh install-local.sh install-remote.sh \
   easy-ha-proxy-helper.sh installer/easy-ha-proxy
 ruff check .   # только явные ошибки, см. ruff.toml
 
-for script in docker/app/haproxy_admin/static/js/*.js; do node --check "$script"; done
+for script in go/panel/web/static/js/*.js; do node --check "$script"; done
 node --test .tests/js/*.test.js
 
 ansible-galaxy collection install -r ansible/requirements.yml
@@ -1616,18 +1618,17 @@ ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 Новую логику такого рода стоит класть туда же, а не в тест, который ищет
 строку в исходнике.
 
-Когда проверки прошли, пуш в `alpha` или `main` публикует образ
-веб-приложения из этого коммита (`alpha` или `latest`) с меткой-отпечатком
-входных файлов сборки, по которой шлюзы связывают его с исходниками. Образ из
-тех же файлов используется повторно, а `main` повышает уже собранный alpha.
-Нужны секреты репозитория `DOCKERHUB_USERNAME` и `DOCKERHUB_TOKEN`; без них
-задача ничего не публикует и пишет об этом. Pull request собирает образ без
-публикации и проверяет, что он запускается.
+Когда проверки прошли, пуш в `alpha` или `main` публикует из этого коммита
+образ веб-панели (`go-alpha` или `go-latest`) и нативные бинарные файлы хоста
+(`native-<канал>-<коммит>`), каждый с меткой того, из чего он собран, по
+которой шлюзы связывают его с исходниками. Нужны секреты репозитория
+`DOCKERHUB_USERNAME` и `DOCKERHUB_TOKEN`; без них задачи ничего не публикуют и
+пишут об этом. Pull request собирает образ панели без публикации.
 
-Dependabot предлагает обновления для файлов requirements, Dockerfile и
-workflow в ветку `alpha`. Того, что взять нельзя, он не предлагает: ansible-core
-остаётся на 2.17 -- последней серии, которая работает на Python 3.10 из Ubuntu
-22.04; Python образа обновляется только патч-выпусками; диапазоны установщика
+Dependabot предлагает обновления для requirements установщика, модулей Go,
+крейта Rust, Dockerfile панели и workflow в ветку `alpha`. Того, что взять
+нельзя, он не предлагает: ansible-core остаётся на 2.17 -- последней серии,
+которая работает на Python 3.10 из Ubuntu 22.04; диапазоны установщика
 сдвигаются, только когда выпуск выходит за их границы. Еженедельный workflow
 **Dependencies** сообщает об известных уязвимостях (pip-audit) и держит
 открытым одно issue, пока у версии, закреплённой в роли Ansible (Authelia,
@@ -1636,7 +1637,7 @@ Redis, почтовый релей, пакеты GeoIP), или у коллек�
 ansible-core.
 
 Переводы UI хранятся в JSON-каталогах в
-[`docker/app/haproxy_admin/translations/`](../docker/app/haproxy_admin/translations/README.md).
+[`go/panel/web/translations/`](../go/panel/web/translations/README.md).
 После добавления каталога новый язык автоматически появляется в переключателе;
 копировать шаблоны не требуется. Канонический язык исходников — английский;
 остальные каталоги сопоставляют английские строки с переводом.

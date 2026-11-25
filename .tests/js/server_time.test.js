@@ -1,6 +1,6 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict");
-const create = require("../../docker/app/haproxy_admin/static/js/server_time.js");
+const create = require("../../go/panel/web/static/js/server_time.js");
 const msk = create({zone: "Europe/Moscow"}, "en-GB");
 
 test("server zone formats UTC backups, native timers and calendar filters consistently", () => {

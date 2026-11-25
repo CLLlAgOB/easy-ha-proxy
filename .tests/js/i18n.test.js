@@ -11,7 +11,7 @@ const vm = require("node:vm");
 
 const {russianCatalogue} = require("./catalogue.js");
 
-const STATIC = path.join(__dirname, "../../docker/app/haproxy_admin/static/js");
+const STATIC = path.join(__dirname, "../../go/panel/web/static/js");
 const i18n = require(path.join(STATIC, "i18n.js"));
 const monitoring = require(path.join(STATIC, "monitoring_core.js"));
 

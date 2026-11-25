@@ -1,6 +1,6 @@
 // Package security enforces the trusted-proxy authentication boundary, RBAC,
 // session-bound CSRF protection, security headers, same-origin redirects, and
-// response compression with full parity to docker/app/haproxy_admin/security.py.
+// response compression (ported from the former Flask panel's security.py).
 package security
 
 import (

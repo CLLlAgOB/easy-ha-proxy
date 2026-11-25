@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# Multi-stage build for the native Go easy-ha-proxy web admin panel.
-# Build from the repository root so shared static JS/CSS and i18n catalogs
-# are copied directly without duplication:
+# Multi-stage build for the easy-ha-proxy web admin panel. The templates,
+# static JS/CSS and i18n catalogues live in go/panel/web. Build from the
+# repository root (VERSION is read from there):
 #   docker build -f go/panel/Dockerfile -t easy-ha-proxy-panel:go .
 
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS builder
@@ -31,9 +31,9 @@ FROM scratch
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /out/easy-ha-proxy-panel /usr/local/bin/easy-ha-proxy-panel
-COPY docker/app/haproxy_admin/static /app/static
-COPY docker/app/haproxy_admin/translations /app/translations
-COPY docker/app/haproxy_admin/templates /app/templates
+COPY go/panel/web/static /app/static
+COPY go/panel/web/translations /app/translations
+COPY go/panel/web/templates /app/templates
 
 # Which build this is, for the panel's footer and its comparison with the
 # host: CI passes the commit, its date and the Go panel's source tree (the

@@ -1,7 +1,8 @@
-// Package app is the Go port of the Flask application in
-// docker/app/haproxy_admin: the same endpoints (by Flask endpoint name), the
-// same templates rendered by internal/jinja, and the same answers. The
-// Python code is the specification; each file names the module it ports.
+// Package app is the web administration panel. It began as a port of the
+// former Flask application (removed after the Go panel replaced it): the
+// endpoints keep their Flask endpoint names, the Jinja templates in
+// go/panel/web are rendered by internal/jinja, and the file comments still
+// name the Python module each part came from.
 package app
 
 import (

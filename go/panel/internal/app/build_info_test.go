@@ -7,12 +7,12 @@ import (
 	"easy-ha-proxy/panel/internal/pyyaml"
 )
 
-// The Go panel image is fingerprinted over the Go panel's inputs, which the
-// host reports as go_web_tree; the Flask web_tree is the fallback for a
-// broker that does not report it yet.
+// The panel image is fingerprinted over the panel's inputs, which the host
+// reports as go_web_tree. A web_tree from an older broker (the Flask image's
+// fingerprint) is not comparable and must not decide the match.
 func TestFooterComparesThePanelWithTheHostsGoTree(t *testing.T) {
 	a := testApp(t)
-	goTree, flaskTree := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	goTree := strings.Repeat("a", 64)
 	t.Setenv("EHP_BUILD_REVISION", strings.Repeat("1", 40))
 	t.Setenv("EHP_BUILD_DATE", "2026-11-24T10:00:00+00:00")
 	t.Setenv("EHP_SOURCE_TREE", goTree)
@@ -30,16 +30,16 @@ func TestFooterComparesThePanelWithTheHostsGoTree(t *testing.T) {
 		RememberBadge(summary)
 	}
 
-	remember("web_tree", flaskTree, "go_web_tree", goTree)
+	remember("go_web_tree", goTree)
 	if got := a.buildFooter(nil).(*pyyaml.Map).Value("match"); got != true {
 		t.Fatalf("same Go tree must match, got %v", got)
 	}
-	remember("web_tree", flaskTree, "go_web_tree", strings.Repeat("c", 64))
+	remember("go_web_tree", strings.Repeat("c", 64))
 	if got := a.buildFooter(nil).(*pyyaml.Map).Value("match"); got != false {
 		t.Fatalf("a different Go tree must not match, got %v", got)
 	}
 	remember("web_tree", goTree)
-	if got := a.buildFooter(nil).(*pyyaml.Map).Value("match"); got != true {
-		t.Fatalf("without go_web_tree the web_tree is compared, got %v", got)
+	if got := a.buildFooter(nil).(*pyyaml.Map).Value("match"); got != nil {
+		t.Fatalf("without go_web_tree there is nothing to compare, got %v", got)
 	}
 }

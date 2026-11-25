@@ -1,6 +1,6 @@
 // Package i18n implements the translation catalog loader, browser language
 // selection, immutable /i18n/messages.js asset builder, and JSON response
-// localization with parity to docker/app/haproxy_admin/i18n.py.
+// localization, as the former Flask panel's i18n.py did.
 package i18n
 
 import (

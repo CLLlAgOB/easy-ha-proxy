@@ -33,7 +33,6 @@ jobs:
       - name: pip-audit
         run: |
           pip install pip-audit==2.7.3
-          pip-audit --progress-spinner off -r docker/app/requirements.txt
           # PYSEC-2026-3458 (CVE-2026-11332): argument injection in
           # `ansible-galaxy role install` from a malicious role's
           # requirements. The installer only installs collections from the

@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoadRealRepositoryTranslations(t *testing.T) {
-	realDir := filepath.Join("..", "..", "..", "..", "docker", "app", "haproxy_admin", "translations")
+	realDir := filepath.Join("..", "..", "web", "translations")
 	cat, err := LoadDir(realDir, "en")
 	if err != nil {
 		t.Fatalf("LoadDir(%s) failed: %v", realDir, err)

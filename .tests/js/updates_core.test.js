@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/updates_core.js"));
+const core = require(path.join(__dirname, "../../go/panel/web/static/js/updates_core.js"));
 
 test("live reboot state wins over a finished job and keeps manual reboot independent", () => {
   assert.equal(core.rebootState({reboot_required: false}, {result: {reboot_required: true}}).required, false);
