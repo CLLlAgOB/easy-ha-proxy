@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 product="easy-ha-proxy"
 repository="${EASY_HA_PROXY_REPOSITORY:-https://github.com/CLLlAgOB/easy-ha-proxy.git}"
-branch="${EASY_HA_PROXY_BRANCH:-main}"
+config_dir="${EASY_HA_PROXY_CONFIG_DIR:-/etc/easy-ha-proxy}"
 install_root="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
 source_dir="${install_root}/source"
 venv_dir="${install_root}/venv"
@@ -35,6 +35,33 @@ die() {
   printf '\n[%s] ERROR: %s\n' "${product}" "$*" >&2
   exit 1
 }
+
+# The branch this gateway follows, which checks compare with and updates
+# fetch: an explicit EASY_HA_PROXY_BRANCH, else the branch the installer
+# recorded in metadata.yml (the alpha channel records alpha), else main.
+# easy-ha-proxy-helper.sh and install-local.sh resolve it the same way.
+gateway_branch() {
+  local recorded=""
+  if [[ -n "${EASY_HA_PROXY_BRANCH:-}" ]]; then
+    printf '%s\n' "${EASY_HA_PROXY_BRANCH}"
+    return
+  fi
+  if [[ -r "${config_dir}/metadata.yml" ]]; then
+    recorded="$(
+      awk -F':[[:space:]]*' '$1 == "branch" {gsub(/["\047[:space:]]/, "", $2); print $2; exit}' \
+        "${config_dir}/metadata.yml" 2>/dev/null || true
+    )"
+  fi
+  # Only a plain branch name is taken from the file.
+  if [[ "${recorded}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ &&
+        "${recorded}" != *..* && "${recorded}" != *//* &&
+        "${recorded}" != */ && "${recorded}" != *.lock ]]; then
+    printf '%s\n' "${recorded}"
+  else
+    printf 'main\n'
+  fi
+}
+branch="$(gateway_branch)"
 
 if [[ "${EUID}" -ne 0 ]]; then
   die "Run as root, for example: sudo bash /tmp/easy-ha-proxy-install-local.sh"

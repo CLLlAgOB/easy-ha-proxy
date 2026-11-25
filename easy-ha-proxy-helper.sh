@@ -3,8 +3,6 @@ set -Eeuo pipefail
 
 product="easy-ha-proxy"
 helper_version="2026.07.19-web-updates1"
-branch="${EASY_HA_PROXY_BRANCH:-main}"
-raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/easy-ha-proxy/${branch}}"
 install_home="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
 config_dir="${EASY_HA_PROXY_CONFIG_DIR:-/etc/easy-ha-proxy}"
 reboot_schedule_marker="/run/easy-ha-proxy/reboot-scheduled"
@@ -222,17 +220,49 @@ if [[ "${EUID}" -ne 0 ]]; then
       sudo_arguments+=(--image-channel "${image_channel}")
     [[ -n "${new_domain}" ]] && sudo_arguments+=(--new-domain "${new_domain}")
     [[ "${plan_only}" == true ]] && sudo_arguments+=(--plan-only)
-    exec sudo \
-      env \
-        EASY_HA_PROXY_HOME="${install_home}" \
-        EASY_HA_PROXY_CONFIG_DIR="${config_dir}" \
-        EASY_HA_PROXY_BRANCH="${branch}" \
-        EASY_HA_PROXY_RAW_BASE="${raw_base}" \
-        EASY_HA_PROXY_LOCAL_INSTALLER="${local_installer}" \
-        EASY_HA_PROXY_LANGUAGE="${language}" \
-        "${sudo_arguments[@]}"
+    sudo_environment=(
+      EASY_HA_PROXY_HOME="${install_home}"
+      EASY_HA_PROXY_CONFIG_DIR="${config_dir}"
+      EASY_HA_PROXY_LOCAL_INSTALLER="${local_installer}"
+      EASY_HA_PROXY_LANGUAGE="${language}"
+    )
+    # Pass the branch only when it was given: root reads the recorded one,
+    # which this user may not be allowed to read.
+    [[ -n "${EASY_HA_PROXY_BRANCH:-}" ]] &&
+      sudo_environment+=(EASY_HA_PROXY_BRANCH="${EASY_HA_PROXY_BRANCH}")
+    [[ -n "${EASY_HA_PROXY_RAW_BASE:-}" ]] &&
+      sudo_environment+=(EASY_HA_PROXY_RAW_BASE="${EASY_HA_PROXY_RAW_BASE}")
+    exec sudo env "${sudo_environment[@]}" "${sudo_arguments[@]}"
   fi
 fi
+
+# The branch this gateway follows, which checks compare with and updates
+# fetch: an explicit EASY_HA_PROXY_BRANCH, else the branch the installer
+# recorded in metadata.yml (the alpha channel records alpha), else main.
+# easy-ha-proxy-helper.sh and install-local.sh resolve it the same way.
+gateway_branch() {
+  local recorded=""
+  if [[ -n "${EASY_HA_PROXY_BRANCH:-}" ]]; then
+    printf '%s\n' "${EASY_HA_PROXY_BRANCH}"
+    return
+  fi
+  if [[ -r "${config_dir}/metadata.yml" ]]; then
+    recorded="$(
+      awk -F':[[:space:]]*' '$1 == "branch" {gsub(/["\047[:space:]]/, "", $2); print $2; exit}' \
+        "${config_dir}/metadata.yml" 2>/dev/null || true
+    )"
+  fi
+  # Only a plain branch name is taken from the file.
+  if [[ "${recorded}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ &&
+        "${recorded}" != *..* && "${recorded}" != *//* &&
+        "${recorded}" != */ && "${recorded}" != *.lock ]]; then
+    printf '%s\n' "${recorded}"
+  else
+    printf 'main\n'
+  fi
+}
+branch="$(gateway_branch)"
+raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/easy-ha-proxy/${branch}}"
 
 metadata_file="${config_dir}/metadata.yml"
 source_dir="${install_home}/source"
@@ -685,7 +715,7 @@ choose_deployment_channels() {
     current_source="$(yaml_scalar source_channel "${metadata_file}")"
     [[ "${current_source}" == local ]] || current_source="github"
     printf '\n%s\n' "$(message 'Source code for this update:' 'Исходный код для этого обновления:')"
-    printf '  1) GitHub main\n'
+    printf '  1) GitHub %s\n' "${branch}"
     printf '  2) %s\n' "$(message 'Already synchronized local source' 'Уже синхронизированные локальные исходники')"
     choice="$(read_menu_choice "$(message 'Choose source' 'Выберите источник')")"
     if [[ -z "${choice}" ]]; then
