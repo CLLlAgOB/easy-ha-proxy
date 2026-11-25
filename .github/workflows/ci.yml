@@ -20,11 +20,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go/agent/go.mod
+          cache: false
+      - name: Build the agent
+        working-directory: go/agent
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/easy-ha-proxy-agent" ./cmd/easy-ha-proxy-agent
       - name: Exercise mixed legacy and nft filters in a disposable gateway
         run: |
           docker run --rm --privileged \
-            -v "$GITHUB_WORKSPACE:/src:ro" python:3.12 \
-            bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq iptables iproute2 ipset python3-yaml >/dev/null && /usr/bin/python3 /src/.tests/integration/udp_forward_smoke.py'
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/easy-ha-proxy-agent:/usr/local/sbin/easy-ha-proxy-agent:ro" \
+            -e AGENT_BIN=/usr/local/sbin/easy-ha-proxy-agent python:3.12 \
+            bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq iptables iproute2 ipset >/dev/null && /usr/bin/python3 /src/.tests/integration/udp_forward_smoke.py'
 
   server-state:
     name: HAProxy server-state restoration
@@ -58,12 +66,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The host daemons run on the platform interpreter rather than a
-        # bundled one, so every supported release is exercised: 3.10 is
-        # Ubuntu 22.04, 3.11 is Debian 12, 3.12 is Ubuntu 24.04 and the
-        # admin UI image, 3.13 is Debian 13, 3.14 is Ubuntu 26.04. The
-        # newer ones are where the standard library loses modules (cgi went
-        # in 3.13).
+        # The installer and the host tools the update and backup brokers
+        # run (full_backup, update_plan, os_security, ...) use the platform
+        # interpreter rather than a bundled one, so every supported release
+        # is exercised: 3.10 is Ubuntu 22.04, 3.11 is Debian 12, 3.12 is
+        # Ubuntu 24.04, 3.13 is Debian 13, 3.14 is Ubuntu 26.04. The newer
+        # ones are where the standard library loses modules (cgi went in
+        # 3.13).
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -72,20 +81,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: |
-            docker/app/requirements.txt
-            installer/requirements.txt
+          cache-dependency-path: installer/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r docker/app/requirements.txt -r installer/requirements.txt
+        run: pip install -r installer/requirements.txt
 
-      - name: Byte-compile the installer, the UI and every daemon
+      - name: Byte-compile the installer and the role helpers
         run: |
           python -m py_compile installer/easy_ha_proxy.py
-          python -m compileall -q docker/app ansible/roles/authelia/files ansible/roles/haproxy-admin/files
+          python -m compileall -q installer ansible/roles
 
       # Everything lives in .tests/, so one discovery covers the installer,
-      # the helper daemons and the admin UI.
+      # the playbook's templates and the panel's templates and scripts.
       - name: Regression tests
         env:
           PYTHONPATH: installer
@@ -196,7 +203,7 @@ jobs:
 
       - name: Parse every script
         run: |
-          for script in docker/app/haproxy_admin/static/js/*.js; do
+          for script in go/panel/web/static/js/*.js; do
             node --check "$script"
           done
 
@@ -208,7 +215,7 @@ jobs:
       - name: ESLint
         run: |
           npm install --no-save --no-package-lock --ignore-scripts eslint@9.39.1 @eslint/js@9.39.1 globals@16.4.0
-          npx --no-install eslint docker/app/haproxy_admin/static/js .tests/js
+          npx --no-install eslint go/panel/web/static/js .tests/js
 
   rust-guardd:
     name: Rust guardd-core
@@ -247,14 +254,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           cargo build --locked --release --target aarch64-unknown-linux-gnu
-          file target/aarch64-unknown-linux-gnu/release/guardd-core target/aarch64-unknown-linux-gnu/release/libguardd_core.so
+          file target/aarch64-unknown-linux-gnu/release/guardd-core
 
-      - name: Python-vs-Rust differential parity
+      # The daemon against fake HAProxy and alert sockets, and the parser
+      # against the fields the Python reference recorded before its removal.
+      - name: Daemon and parser checks
         env:
-          PYTHONPATH: .tests:installer
+          PYTHONPATH: .tests
           GUARDD_RUST_BIN: rust/guardd/target/release/guardd-core
-          GUARDD_RUST_LIB: rust/guardd/target/release/libguardd_core.so
-        run: python3 -m unittest -v test_rust_guardd_parity
+        run: python3 -m unittest -v test_rust_guardd
 
       - name: Hot-path benchmark
         run: >-
@@ -267,10 +275,8 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/guardd-core dist/guardd-core-linux-amd64
-          cp target/release/libguardd_core.so dist/libguardd_core-linux-amd64.so
           cp target/aarch64-unknown-linux-gnu/release/guardd-core dist/guardd-core-linux-arm64
-          cp target/aarch64-unknown-linux-gnu/release/libguardd_core.so dist/libguardd_core-linux-arm64.so
-          (cd dist && sha256sum guardd-core-linux-* libguardd_core-linux-* > SHA256SUMS.rust)
+          (cd dist && sha256sum guardd-core-linux-* > SHA256SUMS.rust)
           cat dist/SHA256SUMS.rust
 
       - name: Upload Rust artifacts
@@ -313,10 +319,15 @@ jobs:
           (cd dist && sha256sum easy-ha-proxy-agent-linux-* > SHA256SUMS.go)
           cat dist/SHA256SUMS.go
 
-      # The Python and the Go alertd share alerts.db: an update to the agent
-      # and a rollback must keep every event, acknowledgement and mute.
-      - name: Alert history survives an update to the agent and a rollback
-        run: python3 .tests/integration/alertd_upgrade_rollback.py --agent go/agent/dist/easy-ha-proxy-agent-linux-amd64
+      # Gateways on 1.1.x keep alerts.db the Python alertd wrote: the update to
+      # the agent must keep every event, acknowledgement and mute.
+      - name: Alert history survives the update from the Python alertd
+        run: |
+          git fetch --no-tags --depth=1 origin refs/tags/v1.1.3:refs/tags/v1.1.3
+          git show v1.1.3:ansible/roles/haproxy-admin/files/easy-ha-proxy-alertd.py > "$RUNNER_TEMP/alertd-1.1.py"
+          python3 .tests/integration/alertd_upgrade_from_python.py \
+            --agent go/agent/dist/easy-ha-proxy-agent-linux-amd64 \
+            --python-alertd "$RUNNER_TEMP/alertd-1.1.py"
 
       - name: Scan Go agent binaries (Trivy)
         run: >-
@@ -391,8 +402,11 @@ jobs:
           path: go/panel/dist/
           retention-days: 14
 
+  # The built binaries of each architecture: the panel's healthcheck, static
+  # files, RBAC and CSRF, the agent's server-state against the installer's
+  # normalizer, and the packaged guardd-core's daemon and parser checks.
   go-parity:
-    name: Native and Python parity (${{ matrix.arch }})
+    name: Native smoke (${{ matrix.arch }})
     needs: [go-panel, go-agent, rust-guardd]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -421,23 +435,20 @@ jobs:
         with:
           name: rust-guardd-binaries
           path: parity/guardd
-      - name: Compare read-only panel requests and server-state output
+      - name: Panel and agent smoke
         env:
           PANEL_BIN: ${{ github.workspace }}/parity/panel/easy-ha-proxy-panel-linux-${{ matrix.arch }}
           AGENT_BIN: ${{ github.workspace }}/parity/agent/easy-ha-proxy-agent-linux-${{ matrix.arch }}
         run: |
-          python -m pip install -r docker/app/requirements.txt
           chmod +x "$PANEL_BIN" "$AGENT_BIN"
-          python .tests/integration/native_parity_smoke.py
-      - name: Compare the packaged Rust guardd with Python
+          python .tests/integration/native_smoke.py
+      - name: The packaged guardd-core
         env:
-          PYTHONPATH: .tests:installer
+          PYTHONPATH: .tests
           GUARDD_RUST_BIN: parity/guardd/guardd-core-linux-${{ matrix.arch }}
-          GUARDD_RUST_LIB: parity/guardd/libguardd_core-linux-${{ matrix.arch }}.so
         run: |
           chmod +x "$GUARDD_RUST_BIN"
-          test -f "$GUARDD_RUST_LIB"
-          python -m unittest -v test_rust_guardd_parity
+          python -m unittest -v test_rust_guardd
 
   rust-vulnerabilities:
     name: Rust dependency audit
@@ -493,11 +504,10 @@ jobs:
           mkdir -p release-out
           for arch in amd64 arm64; do
             stage="release-staging/bundle-${arch}"
-            mkdir -p "${stage}/sbin" "${stage}/lib"
+            mkdir -p "${stage}/sbin"
             install -m 0755 "release-staging/rust/guardd-core-linux-${arch}" "${stage}/sbin/guardd-core"
-            install -m 0644 "release-staging/rust/libguardd_core-linux-${arch}.so" "${stage}/lib/libguardd_core.so"
             install -m 0755 "release-staging/go/easy-ha-proxy-agent-linux-${arch}" "${stage}/sbin/easy-ha-proxy-agent"
-            tar -C "${stage}" -czf "release-out/easy-ha-proxy-native-linux-${arch}.tar.gz" sbin lib
+            tar -C "${stage}" -czf "release-out/easy-ha-proxy-native-linux-${arch}.tar.gz" sbin
           done
           (cd release-out && sha256sum easy-ha-proxy-native-linux-*.tar.gz > SHA256SUMS && sha256sum -c SHA256SUMS)
           ls -lh release-out/
@@ -553,166 +563,15 @@ jobs:
       - name: Syntax-check the playbook
         run: ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 
-  # A pull request is built, not published: a new base image or a new pin
-  # that will not install shows up here, before it is merged, rather than in
-  # the publish job afterwards. One platform is enough for that.
-  image-check:
-    name: Build the web application image (pull requests)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Build
-        run: docker build --tag haproxy-admin-ui:check .
-
-      # The packages must agree with each other and the application must
-      # start; the warnings about host paths it cannot see are expected.
-      - name: Smoke test
-        run: >-
-          docker run --rm haproxy-admin-ui:check
-          sh -c 'pip check && python -c "import app"'
-
-      - name: Scan web application image (Trivy)
-        run: >-
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
-          aquasec/trivy:0.58.2@sha256:665030f4d33a82c1e8d9d5e0453365842236723c1ee5cc3becca698268e66a56
-          image --scanners vuln --no-progress
-          --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed
-          haproxy-admin-ui:check
-
-  # The web application image, published from the commit CI has just tested.
-  # Each image is labelled with the fingerprint of its build inputs (the
-  # sha256 of `git ls-tree` over Dockerfile, .dockerignore and docker/app):
-  # gateways pair the host with the web application by it, and hold a host
-  # update back until the matching image exists. Publishing here, on every
-  # push, is what keeps that wait short.
-  image:
-    name: Publish the web application image
-    # Every check gates publication, the secret scan and the server-state
-    # test included: an image must not go out beside a commit that leaks a
-    # key or breaks the state HAProxy restores from.
-    needs: [python, shell, ansible, lint, javascript, udp-forwarding, server-state, secrets]
-    if: >-
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      REPOSITORY: clllagob/haproxy-admin-ui
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Fingerprint the web application
-        id: tree
-        run: |
-          tree="$(git ls-tree -r --full-tree HEAD -- Dockerfile .dockerignore docker/app | sha256sum | cut -d' ' -f1)"
-          echo "tree=${tree}" >> "$GITHUB_OUTPUT"
-          # The footer's build: the commit's time, which a shallow checkout has.
-          echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
-          if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            echo "channel=latest" >> "$GITHUB_OUTPUT"
-            echo "key=source-${tree}" >> "$GITHUB_OUTPUT"
-          else
-            echo "channel=alpha" >> "$GITHUB_OUTPUT"
-            echo "key=alpha-${tree}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Without the secrets (a fork, say) the job says so and stops quietly.
-      - name: Check for registry credentials
-        id: credentials
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set; the image was not published."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
-        if: steps.credentials.outputs.ready == 'true'
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
-        if: steps.credentials.outputs.ready == 'true'
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-        if: steps.credentials.outputs.ready == 'true'
-
-      # An image built from these exact web files is reused, not rebuilt: the
-      # channel is just pointed at it. main is usually alpha promoted, so its
-      # build is normally there already under the alpha key.
-      - name: Publish
-        if: steps.credentials.outputs.ready == 'true'
-        env:
-          TREE: ${{ steps.tree.outputs.tree }}
-          BUILT_AT: ${{ steps.tree.outputs.date }}
-          KEY: ${{ steps.tree.outputs.key }}
-          CHANNEL: ${{ steps.tree.outputs.channel }}
-        run: |
-          key_image="${REPOSITORY}:${KEY}"
-          channel_image="${REPOSITORY}:${CHANNEL}"
-          alpha_image="${REPOSITORY}:alpha-${TREE}"
-          if docker buildx imagetools inspect "${key_image}" >/dev/null 2>&1; then
-            echo "Already built: ${key_image}"
-            docker buildx imagetools create --tag "${channel_image}" "${key_image}"
-          elif [ "${CHANNEL}" = "latest" ] && docker buildx imagetools inspect "${alpha_image}" >/dev/null 2>&1; then
-            echo "Promoting ${alpha_image}"
-            docker buildx imagetools create --tag "${key_image}" --tag "${channel_image}" "${alpha_image}"
-          else
-            # Tried on each platform before anything is pushed. A push straight
-            # to alpha or main never went through the pull-request build, and
-            # an image whose packages disagree, or that cannot even import the
-            # application, would have reached the gateways as it was.
-            for platform in linux/amd64 linux/arm64; do
-              docker buildx build --platform "${platform}" --load --tag haproxy-admin-ui:check . || exit 1
-              docker run --rm --platform "${platform}" haproxy-admin-ui:check \
-                sh -c 'pip check && python -c "import app"' || exit 1
-            done
-            docker buildx build \
-              --platform linux/amd64,linux/arm64 \
-              --label "org.opencontainers.image.version=${CHANNEL}" \
-              --label "io.easy-ha-proxy.source-tree=${TREE}" \
-              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-              --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-              --build-arg "EHP_BUILD_REVISION=${GITHUB_SHA}" \
-              --build-arg "EHP_BUILD_DATE=${BUILT_AT}" \
-              --build-arg "EHP_SOURCE_TREE=${TREE}" \
-              --tag "${key_image}" \
-              --tag "${channel_image}" \
-              --push \
-              .
-          fi
-          echo "Published ${channel_image} (web files ${TREE:0:16})" >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-        if: steps.credentials.outputs.ready == 'true'
-
-      - name: Sign published image
-        if: steps.credentials.outputs.ready == 'true'
-        env:
-          CHANNEL: ${{ steps.tree.outputs.channel }}
-        run: |
-          digest="$(docker buildx imagetools inspect "${REPOSITORY}:${CHANNEL}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          cosign sign --yes "${REPOSITORY}@${digest}"
-          echo "Signed ${REPOSITORY}@${digest}" >> "$GITHUB_STEP_SUMMARY"
-
-  # Multi-arch native Go web panel image (linux/amd64 + linux/arm64).
-  # Published independently of the Python web image so opt-in gateways using
-  # `haproxy_admin_use_go_panel: true` can pull clllagob/haproxy-admin-ui:go-alpha
-  # or :go-latest without modifying jobs.image.
+  # The web panel image (linux/amd64 + linux/arm64), published from the commit
+  # CI has just tested as clllagob/haproxy-admin-ui:go-alpha or :go-latest.
+  # Each image is labelled with the fingerprint of its build inputs: gateways
+  # pair the host with the panel by it, and hold a host update back until the
+  # matching image exists. Every check gates publication, the secret scan and
+  # the server-state test included.
   go-panel-image:
     name: Publish the Go web panel image
-    needs: [go-panel, go-parity, go-vulnerabilities, javascript, secrets]
+    needs: [go-panel, go-parity, go-vulnerabilities, javascript, secrets, python, shell, ansible, lint, udp-forwarding, server-state]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
@@ -729,7 +588,9 @@ jobs:
       - name: Fingerprint the Go web panel
         id: tree
         run: |
-          tree="$(git ls-tree -r --full-tree HEAD -- VERSION go/panel docker/app/haproxy_admin/static docker/app/haproxy_admin/translations docker/app/haproxy_admin/templates | sha256sum | cut -d' ' -f1)"
+          # The same inputs as installer/update_plan.py GO_WEB_TREE_INPUTS and
+          # the update broker's go_web_tree: the footer compares them.
+          tree="$(git ls-tree -r --full-tree HEAD -- VERSION go/panel | sha256sum | cut -d' ' -f1)"
           echo "tree=${tree}" >> "$GITHUB_OUTPUT"
           echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
@@ -816,7 +677,7 @@ jobs:
   # extra configuration.
   native-release-image:
     name: Publish native host binaries OCI image
-    needs: [rust-guardd, go-agent, go-parity, native-release, go-vulnerabilities, rust-vulnerabilities, secrets]
+    needs: [rust-guardd, go-agent, go-parity, native-release, go-vulnerabilities, rust-vulnerabilities, secrets, python, shell, ansible, lint, udp-forwarding, server-state]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
@@ -873,19 +734,16 @@ jobs:
       - name: Stage and publish multi-arch native binaries OCI image
         if: steps.credentials.outputs.ready == 'true'
         run: |
-          mkdir -p native-oci/ctx/amd64/sbin native-oci/ctx/amd64/lib \
-                   native-oci/ctx/arm64/sbin native-oci/ctx/arm64/lib
+          mkdir -p native-oci/ctx/amd64/sbin native-oci/ctx/arm64/sbin
           for arch in amd64 arm64; do
             install -m 0755 "native-oci/rust/guardd-core-linux-${arch}" "native-oci/ctx/${arch}/sbin/guardd-core"
-            install -m 0644 "native-oci/rust/libguardd_core-linux-${arch}.so" "native-oci/ctx/${arch}/lib/libguardd_core.so"
             install -m 0755 "native-oci/go/easy-ha-proxy-agent-linux-${arch}" "native-oci/ctx/${arch}/sbin/easy-ha-proxy-agent"
-            (cd "native-oci/ctx/${arch}" && sha256sum sbin/easy-ha-proxy-agent sbin/guardd-core lib/libguardd_core.so > SHA256SUMS)
+            (cd "native-oci/ctx/${arch}" && sha256sum sbin/easy-ha-proxy-agent sbin/guardd-core > SHA256SUMS)
           done
           cat > native-oci/ctx/Dockerfile <<'EOF'
           FROM scratch
           ARG TARGETARCH
           COPY ${TARGETARCH}/sbin/ /sbin/
-          COPY ${TARGETARCH}/lib/ /lib/
           COPY ${TARGETARCH}/SHA256SUMS /SHA256SUMS
           ENTRYPOINT ["/sbin/easy-ha-proxy-agent"]
           CMD ["version"]

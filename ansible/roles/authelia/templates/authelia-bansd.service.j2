@@ -7,11 +7,7 @@ Requires=docker.service
 Type=simple
 User=root
 Group={{ authelia_log_reader_group }}
-{% if native_authelia_bansd_enabled | default(native_daemons_enabled | default(false)) | bool %}
 ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} authelia-bansd
-{% else %}
-ExecStart=/usr/local/sbin/authelia-bansd.py
-{% endif %}
 Restart=always
 RestartSec=2
 
@@ -22,7 +18,6 @@ Environment="AUTHELIA_BANS_LOG_LEVEL=INFO"
 Environment="AUTHELIA_BANS_COMMAND_TIMEOUT={{ authelia_bans_command_timeout | default(5) }}"
 Environment="AUTHELIA_BANS_MAX_REQUEST_BYTES={{ authelia_bans_max_request_bytes | default(65536) }}"
 Environment="AUTHELIA_BANS_MAX_WORKERS={{ authelia_bans_max_workers | default(4) }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-bansd.py', rstrip=false) | hash('sha256') }}"
 
 # Some hardening, but the process is root and docker must not be hindered
 NoNewPrivileges=true

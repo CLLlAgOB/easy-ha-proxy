@@ -19,25 +19,6 @@
     - "{{ updated_state_root }}"
     - "{{ updated_jobs_dir }}"
 
-- name: "easy-ha-proxy-updated | Install broker script"
-  ansible.builtin.copy:
-    src: easy-ha-proxy-updated.py
-    dest: /usr/local/sbin/easy-ha-proxy-updated.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: updated_script
-
-- name: "easy-ha-proxy-updated | Install updated package"
-  ansible.builtin.copy:
-    src: updated/
-    dest: /usr/local/sbin/updated/
-    owner: root
-    group: root
-    mode: "0644"
-    directory_mode: "0755"
-  register: updated_package
-
 - name: "easy-ha-proxy-updated | Install systemd unit"
   ansible.builtin.template:
     src: easy-ha-proxy-updated.service.j2
@@ -52,15 +33,13 @@
     daemon_reload: true
   when: updated_unit.changed
 
-# The Go broker runs from the shared agent binary. native.yml restarts the
+# The broker runs from the shared agent binary. native.yml restarts the
 # other agent units when that binary is replaced but leaves this one to the
-# rules below, which only knew the Python files: a replaced binary kept the
-# old broker running from a deleted file until the next reboot.
+# rules below: a replaced binary must not keep the old broker running from a
+# deleted file until the next reboot.
 - name: "easy-ha-proxy-updated | Note a replaced native agent binary"
   ansible.builtin.set_fact:
-    updated_binary_changed: >-
-      {{ (native_updated_enabled | default(false) | bool)
-         and ((_native_agent_copy | default({})) is changed) }}
+    updated_binary_changed: "{{ (_native_agent_copy | default({})) is changed }}"
 
 - name: "easy-ha-proxy-updated | Inspect active update marker"
   ansible.builtin.stat:
@@ -77,7 +56,7 @@
     mode: "0600"
   when:
     - updated_active.stat.exists
-    - updated_script.changed or updated_unit.changed or updated_package.changed or updated_binary_changed | bool or (daemons_env_t.changed | default(false))
+    - updated_unit.changed or updated_binary_changed | bool or (daemons_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-updated | Enable service"
   ansible.builtin.systemd:
@@ -90,7 +69,7 @@
     state: restarted
   when:
     - not updated_active.stat.exists
-    - updated_script.changed or updated_unit.changed or updated_package.changed or updated_binary_changed | bool or (daemons_env_t.changed | default(false))
+    - updated_unit.changed or updated_binary_changed | bool or (daemons_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-updated | Ensure service is started"
   ansible.builtin.systemd:

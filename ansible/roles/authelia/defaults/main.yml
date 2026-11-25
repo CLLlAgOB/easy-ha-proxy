@@ -209,8 +209,5 @@ authelia_gid: 19010
 authelia_redis_uid: 19011
 authelia_redis_gid: 19011
 
-native_daemons_enabled: true
-native_authelia_bansd_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_usersd_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_configd_enabled: "{{ native_daemons_enabled | bool }}"
+# The bans, users and config daemons run from the native agent.
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent

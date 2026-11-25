@@ -101,7 +101,6 @@ class Versions(unittest.TestCase):
         self.assertEqual(rows["authelia_version"]["latest"], "99.0.0")
         self.assertEqual(rows["authelia_redis_image"]["latest"], "99.0.0-alpine")
         self.assertEqual(rows["community.docker"]["latest"], "99.0.0")
-        self.assertIn("pypi unreachable", rows["geoip_maxminddb_version"]["error"])
         self.assertTrue(pinned.behind(list(rows.values())))
         self.assertIn("| `authelia_version` (authelia/authelia) |", pinned.report(list(rows.values())))
 
@@ -119,8 +118,7 @@ class TheConfiguration(unittest.TestCase):
     def test_dependabot_targets_alpha_everywhere(self):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
         ecosystems = set(dependabot_entries(config))
-        self.assertEqual(ecosystems, {("pip", "/docker/app"), ("pip", "/installer"),
-                                      ("docker", "/"), ("docker", "/go/panel"),
+        self.assertEqual(ecosystems, {("pip", "/installer"), ("docker", "/go/panel"),
                                       ("github-actions", "/"),
                                       ("gomod", "/go/agent"), ("gomod", "/go/panel"),
                                       ("cargo", "/rust/guardd")})
@@ -139,11 +137,6 @@ class TheConfiguration(unittest.TestCase):
         self.assertEqual(ignored["ansible-core"], minor)
         requirements = (ROOT / "installer/requirements.txt").read_text(encoding="utf-8")
         self.assertIn("ansible-core~=2.17.0", requirements)
-
-        # A new Python for the image is a decision, not a weekly pull request.
-        docker = entries[("docker", "/")]
-        ignored = {item["dependency-name"]: set(item["update-types"]) for item in docker["ignore"]}
-        self.assertEqual(ignored["python"], minor)
 
         # Every action in one pull request.
         actions = entries[("github-actions", "/")]

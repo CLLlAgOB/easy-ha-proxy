@@ -2,27 +2,6 @@
 # roles/haproxy-admin/tasks/alertd.yml
 # Installing the root daemon easy-ha-proxy-alertd (the alert engine).
 
-- name: "easy-ha-proxy-alertd | Install script"
-  ansible.builtin.copy:
-    src: easy-ha-proxy-alertd.py
-    dest: /usr/local/sbin/easy-ha-proxy-alertd.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: alertd_script
-
-# The reporting side of the alert engine, imported by the helper daemons from
-# their own directory. Installed with them rather than with alertd so a daemon
-# never imports a version older than itself.
-- name: "easy-ha-proxy-alertd | Install the shared alert client"
-  ansible.builtin.copy:
-    src: easy_ha_proxy_alert_client.py
-    dest: /usr/local/sbin/easy_ha_proxy_alert_client.py
-    owner: root
-    group: root
-    mode: "0644"
-  register: alert_client_script
-
 - name: "easy-ha-proxy-alertd | Ensure state directory"
   ansible.builtin.file:
     path: "{{ (alertd_database_path | default('/var/lib/easy-ha-proxy/alerts/alerts.db')) | dirname }}"
@@ -67,9 +46,7 @@
     name: easy-ha-proxy-alertd.service
     state: restarted
   when: >-
-    alertd_script.changed
-    or alert_client_script.changed
-    or alertd_unit.changed
+    alertd_unit.changed
     or (hapadm_env_t.changed | default(false))
     or (daemons_env_t.changed | default(false))
 

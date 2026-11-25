@@ -74,11 +74,9 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("docs/*", ()),
     (".gitignore", ()),
     (".gitattributes", ()),
-    (".dockerignore", ()),
-    # The web application ships as a container image built from these; the
-    # "web application" update pulls it. Nothing on the host changes.
-    ("Dockerfile", ()),
-    ("docker/*", ()),
+    # The web panel ships as a container image built from go/panel (its
+    # templates and static files in go/panel/web); the "web application"
+    # update pulls it. Nothing on the host changes.
     ("go/panel/*", ()),
     # Native Rust hot-path core and Go host agent. The sources do not deploy,
     # but CI publishes their binaries from them, and only the native stage
@@ -106,53 +104,35 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ansible/roles/update_packages/*", ()),
 
     # Adaptive protection.
-    (f"{_ADMIN}/files/easy-ha-proxy-guardd.py", ("ha-adm-guardd",)),
-    (f"{_ADMIN}/files/guardd/*", ("ha-adm-guardd",)),
     (f"{_ADMIN}/files/scanner-signatures.json", ("ha-adm-guardd",)),
     (f"{_ADMIN}/templates/guardd.json.j2", ("ha-adm-guardd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-guardd.service.j2", ("ha-adm-guardd",)),
     (f"{_ADMIN}/tasks/guardd.yml", ("ha-adm-guardd",)),
     # Metrics.
-    (f"{_ADMIN}/files/easy-ha-proxy-metricsd.py", ("ha-adm-metricsd",)),
-    (f"{_ADMIN}/files/metricsd/*", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/templates/metricsd.json.j2", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-metricsd.service.j2", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/tasks/metricsd.yml", ("ha-adm-metricsd",)),
-    # Alerts, and the client the other daemons import.
-    (f"{_ADMIN}/files/easy-ha-proxy-alertd.py", ("ha-adm-alertd",)),
-    (f"{_ADMIN}/files/easy_ha_proxy_alert_client.py", ("ha-adm-alertd",)),
+    # Alerts.
     (f"{_ADMIN}/templates/alertd.json.j2", ("ha-adm-alertd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-alertd.service.j2", ("ha-adm-alertd",)),
     (f"{_ADMIN}/tasks/alertd.yml", ("ha-adm-alertd",)),
     # Health.
-    (f"{_ADMIN}/files/haproxy-healthd.py", ("ha-adm-healthd",)),
     (f"{_ADMIN}/templates/healthd.json.j2", ("ha-adm-healthd",)),
     (f"{_ADMIN}/templates/haproxy-healthd.service.j2", ("ha-adm-healthd",)),
     (f"{_ADMIN}/tasks/healthd.yml", ("ha-adm-healthd",)),
     # Control.
-    (f"{_ADMIN}/files/haproxy-controld.py", ("ha-adm-controld",)),
-    (f"{_ADMIN}/files/controld/*", ("ha-adm-controld",)),
     (f"{_ADMIN}/templates/haproxy-controld.service.j2", ("ha-adm-controld",)),
     (f"{_ADMIN}/tasks/controld.yml", ("ha-adm-controld",)),
     # Backups.
-    (f"{_ADMIN}/files/easy-ha-proxy-backupd.py", ("ha-adm-backupd",)),
-    (f"{_ADMIN}/files/backupd/*", ("ha-adm-backupd",)),
-    (f"{_ADMIN}/files/easy-ha-proxy-backup-run.py", ("ha-adm-backupd",)),
-    (f"{_ADMIN}/files/easy-ha-proxy-unit-failed.py", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-backup.service.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-backup.timer.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-backupd.service.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-unit-failed@.service.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/tasks/backupd.yml", ("ha-adm-backupd",)),
     # The update broker.
-    (f"{_ADMIN}/files/easy-ha-proxy-updated.py", ("ha-adm-updated",)),
-    (f"{_ADMIN}/files/updated/*", ("ha-adm-updated",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-updated.service.j2", ("ha-adm-updated",)),
     (f"{_ADMIN}/tasks/updated.yml", ("ha-adm-updated",)),
     # Certificates: certd is only deployed by the install and daemons stages.
-    (f"{_ADMIN}/files/haproxy-certd.py", ("ha-adm-daemons",)),
-    (f"{_ADMIN}/files/certd/*", ("ha-adm-daemons",)),
-    (f"{_ADMIN}/files/easy-ha-proxy-cert-deliver.py", ("ha-adm-daemons",)),
     (f"{_ADMIN}/templates/haproxy-certd.service.j2", ("ha-adm-daemons",)),
     (f"{_ADMIN}/templates/certbot-renew.service.conf.j2", ("ha-adm-daemons",)),
     (f"{_ADMIN}/tasks/certd.yml", ("ha-adm-daemons",)),
@@ -165,7 +145,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_ADMIN}/tasks/journald-retention.yml", ("ha-adm-journald",)),
     # Firewall helpers and the admin host setup.
     (f"{_ADMIN}/files/haproxy_ban.rules", ("ha-adm-install",)),
-    (f"{_ADMIN}/files/haproxy-udp-forward.py", ("ha-adm-install",)),
     (f"{_ADMIN}/templates/iptables-haproxy-ban.service.j2", ("ha-adm-install",)),
     (f"{_ADMIN}/templates/iptables-haproxy-udp.service.j2", ("ha-adm-install",)),
     (f"{_ADMIN}/tasks/iptables-ban.yml", ("ha-adm-install",)),
@@ -221,9 +200,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
     # Authelia's host daemons. Its configuration and container are not
     # mapped: those go through the full stack.
-    (f"{_AUTHELIA}/files/authelia-bansd.py", ("aut-daemons",)),
-    (f"{_AUTHELIA}/files/authelia-configd.py", ("aut-daemons",)),
-    (f"{_AUTHELIA}/files/authelia-usersd.py", ("aut-daemons",)),
     (f"{_AUTHELIA}/templates/authelia-bans.sh.j2", ("aut-daemons",)),
     (f"{_AUTHELIA}/templates/authelia-bansd.service.j2", ("aut-daemons",)),
     (f"{_AUTHELIA}/templates/authelia-configd.service.j2", ("aut-daemons",)),

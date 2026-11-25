@@ -10,25 +10,24 @@ correct produced no backups for as long as anyone cared to wait.
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import unittest
 from pathlib import Path
-from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "docker" / "app" / "haproxy_admin"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
 ROUTES = APP / "routes_backup.py"
-TEMPLATE = APP / "templates" / "system_backups.html"
-SCRIPT = APP / "static" / "js" / "backup_schedule.js"
+TEMPLATE = _WEB_DIR / "templates" / "system_backups.html"
+SCRIPT = _WEB_DIR / "static" / "js" / "backup_schedule.js"
 DAEMON = (
     ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
     / "easy-ha-proxy-backupd.py"
 )
-RU_FRAGMENTS = APP / "translations" / "ru"
-RU_BASE = APP / "translations" / "ru.json"
+RU_FRAGMENTS = _WEB_DIR / "translations" / "ru"
+RU_BASE = _WEB_DIR / "translations" / "ru.json"
 
 
 def catalogue() -> dict:
@@ -47,73 +46,6 @@ def catalogue() -> dict:
             json.loads(path.read_text(encoding="utf-8")).get("messages", {})
         )
     return messages
-
-
-class RouteTests(unittest.TestCase):
-    def setUp(self):
-        self.source = ROUTES.read_text(encoding="utf-8")
-        self.tree = ast.parse(self.source)
-
-    def routes(self):
-        found = {}
-        for node in ast.walk(self.tree):
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            for decorator in node.decorator_list:
-                if not isinstance(decorator, ast.Call):
-                    continue
-                attribute = decorator.func
-                if not isinstance(attribute, ast.Attribute):
-                    continue
-                if decorator.args and isinstance(decorator.args[0], ast.Constant):
-                    found[(attribute.attr, decorator.args[0].value)] = node.name
-        return found
-
-    def test_the_schedule_can_be_read_and_written_and_run(self):
-        routes = self.routes()
-        self.assertIn(("get", "/api/schedule"), routes)
-        self.assertIn(("post", "/api/schedule"), routes)
-        self.assertIn(("post", "/api/schedule/run"), routes)
-
-    def test_every_action_the_daemon_offers_now_has_a_way_in(self):
-        # The gap this test exists to keep closed: an action implemented in
-        # the daemon that nothing can reach.
-        daemon = daemon_source("easy-ha-proxy-backupd.py")
-        actions = set(
-            re.findall(r'if action == "([a-z_]+)":', daemon)
-        )
-        reachable = set(re.findall(r'"action": "([a-z_]+)"', self.source))
-        unreachable = actions - reachable
-        self.assertEqual(
-            unreachable, set(), "daemon actions the interface cannot reach"
-        )
-
-    def test_running_it_by_hand_is_given_time_to_finish(self):
-        # A full backup plus an upload against the ten-second default would
-        # report a failure for a job that is still running.
-        block = self.source.split("def run_schedule_view")[1]
-        timeout = re.search(r"timeout=(\d+)", block)
-        self.assertIsNotNone(timeout)
-        self.assertGreaterEqual(int(timeout.group(1)), 600)
-
-    def test_the_passphrase_is_validated_but_an_empty_one_still_passes_through(self):
-        block = self.source.split("def save_schedule_view")[1]
-        self.assertIn("_passphrase(supplied)", block)
-        # "" is how the page asks for the stored passphrase to be forgotten;
-        # validating it as a new one would make that impossible.
-        self.assertIn('if supplied == "":', block)
-
-    def test_the_schedule_changes_are_audited(self):
-        self.assertIn('"schedule_save": ("backup_schedule.save"', self.source)
-        self.assertIn('"run_scheduled": ("backup_schedule.run"', self.source)
-
-    def test_the_passphrase_never_reaches_the_audit_summary(self):
-        # record_request builds its summary from these named fields only.
-        entry = re.search(
-            r'"schedule_save": \("backup_schedule\.save", \(([^)]*)\)', self.source
-        )
-        self.assertIsNotNone(entry)
-        self.assertNotIn("passphrase", entry.group(1))
 
 
 class PageTests(unittest.TestCase):

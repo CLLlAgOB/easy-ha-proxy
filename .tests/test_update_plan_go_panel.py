@@ -1,9 +1,9 @@
 """A gateway running the Go panel is checked against the Go panel's tag.
 
-The deployment picks "<repo>:go-<channel>" when haproxy_admin_use_go_panel
-is set, while vars.yml keeps "<repo>:<channel>". The check used to target
-the plain tag, offered a "channel change" every night that the deployment
-then undid, and the applied digest never matched the reviewed plan.
+The deployment runs "<repo>:go-<channel>" while vars.yml keeps
+"<repo>:<channel>". The check used to target the plain tag, offered a
+"channel change" every night that the deployment then undid, and the applied
+digest never matched the reviewed plan.
 """
 from pathlib import Path
 import json
@@ -74,14 +74,12 @@ class GoPanelFlavour(unittest.TestCase):
                 result = probe(Docker(running), target_channel="latest", target_flavour=flavour)
                 self.assertEqual(result["details"]["images"][0]["target_image"], target)
 
-    def test_candidate_defaults_and_user_toggle(self):
+    def test_every_deployment_targets_the_go_panel(self):
+        # The Flask panel is gone: a stale switch in vars.yml changes nothing.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            defaults = root / update_plan.ADMIN_DEFAULTS
-            defaults.parent.mkdir(parents=True)
-            defaults.write_text("haproxy_admin_use_go_panel: true\n", encoding="utf-8")
             self.assertEqual(update_plan._target_panel_flavour(root, {}), "go-")
-            self.assertEqual(update_plan._target_panel_flavour(root, {"haproxy_admin_use_go_panel": False}), "")
+            self.assertEqual(update_plan._target_panel_flavour(root, {"haproxy_admin_use_go_panel": False}), "go-")
 
     def test_flavour_helpers(self):
         self.assertEqual(update_plan._panel_flavour("r/p:go-alpha"), "go-")

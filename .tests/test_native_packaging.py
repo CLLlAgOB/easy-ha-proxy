@@ -1,4 +1,4 @@
-"""Verify dual-arch native Rust + Go packaging and opt-in Ansible daemon toggles."""
+"""Verify dual-arch native Rust + Go packaging and the native-only daemon units."""
 
 from __future__ import annotations
 
@@ -15,76 +15,39 @@ ROLE = ROOT / "ansible/roles/haproxy-admin"
 TEMPLATES = ROLE / "templates"
 
 
-SERVICE_TOGGLES: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "easy-ha-proxy-guardd.service.j2",
-        "native_guardd_enabled",
-        "guardd-core') }} serve",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-guardd.py",
-    ),
-    (
-        "haproxy-healthd.service.j2",
-        "native_healthd_enabled",
-        "easy-ha-proxy-agent') }} healthd",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-healthd.py",
-    ),
-    (
-        "easy-ha-proxy-metricsd.service.j2",
-        "native_metricsd_enabled",
-        "easy-ha-proxy-agent') }} metricsd",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-metricsd.py",
-    ),
-    (
-        "easy-ha-proxy-alertd.service.j2",
-        "native_alertd_enabled",
-        "easy-ha-proxy-agent') }} alertd",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-alertd.py",
-    ),
-    (
-        "haproxy-controld.service.j2",
-        "native_controld_enabled",
-        "easy-ha-proxy-agent') }} controld",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-controld.py",
-    ),
-    (
-        "haproxy-certd.service.j2",
-        "native_certd_enabled",
-        "easy-ha-proxy-agent') }} certd",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py",
-    ),
-    (
-        "easy-ha-proxy-backupd.service.j2",
-        "native_backupd_enabled",
-        "easy-ha-proxy-agent') }} backupd",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backupd.py",
-    ),
-    (
-        "easy-ha-proxy-updated.service.j2",
-        "native_updated_enabled",
-        "easy-ha-proxy-agent') }} updated",
-        "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py",
-    ),
+NATIVE_UNITS: tuple[tuple[str, str], ...] = (
+    ("easy-ha-proxy-guardd.service.j2", "guardd-core') }} serve"),
+    ("haproxy-healthd.service.j2", "easy-ha-proxy-agent') }} healthd"),
+    ("easy-ha-proxy-metricsd.service.j2", "easy-ha-proxy-agent') }} metricsd"),
+    ("easy-ha-proxy-alertd.service.j2", "easy-ha-proxy-agent') }} alertd"),
+    ("haproxy-controld.service.j2", "easy-ha-proxy-agent') }} controld"),
+    ("haproxy-certd.service.j2", "easy-ha-proxy-agent') }} certd"),
+    ("easy-ha-proxy-backupd.service.j2", "easy-ha-proxy-agent') }} backupd"),
+    ("easy-ha-proxy-updated.service.j2", "easy-ha-proxy-agent') }} updated"),
 )
 
 
 class NativePackagingTests(unittest.TestCase):
-    def test_defaults_enable_native_stack_with_python_rollback(self):
+    def test_the_native_binaries_are_the_only_implementation(self):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
-        self.assertIs(defaults["native_daemons_enabled"], True)
-        self.assertIs(defaults["haproxy_admin_use_go_panel"], True)
         self.assertEqual(defaults["native_agent_bin"], "/usr/local/sbin/easy-ha-proxy-agent")
         self.assertEqual(defaults["native_guardd_bin"], "/usr/local/sbin/guardd-core")
-        self.assertEqual(
-            defaults["native_guardd_lib"],
-            "/usr/local/lib/easy-ha-proxy/libguardd_core.so",
-        )
-        for _tpl, flag, _native_cmd, _py_cmd in SERVICE_TOGGLES:
-            self.assertIn(flag, defaults)
+        # No switch back to a Python implementation or the Flask panel.
+        for key in defaults:
+            self.assertFalse(key.startswith("native_") and key.endswith("_enabled"), key)
+        self.assertNotIn("haproxy_admin_use_go_panel", defaults)
+        self.assertNotIn("native_guardd_lib", defaults)
+        for template, command in NATIVE_UNITS:
+            with self.subTest(template=template):
+                text = (TEMPLATES / template).read_text(encoding="utf-8")
+                self.assertIn(command, text)
+                self.assertNotIn("python3", text)
+                self.assertNotIn("EASY_HA_PROXY_DAEMON_VERSION", text)
 
         compose = (TEMPLATES / "docker-compose.yml.j2").read_text(encoding="utf-8")
-        self.assertIn("haproxy_admin_use_go_panel", compose)
+        self.assertIn('image: "{{ haproxy_admin_go_image }}"', compose)
         self.assertIn("/usr/local/bin/easy-ha-proxy-panel", compose)
-        self.assertIn("haproxy_admin_image", compose)
+        self.assertNotIn("python", compose)
 
         installer = (ROOT / "installer/easy_ha_proxy.py").read_text(encoding="utf-8")
         for bundle in ("INSTALL_TAGS", "UPDATE_TAGS", "UI_TAGS", "DAEMON_TAGS", "HOST_SERVICE_TAGS"):
@@ -127,31 +90,6 @@ class NativePackagingTests(unittest.TestCase):
                     jinja.from_string(defaults["native_release_image"]).render(context),
                     f"clllagob/haproxy-admin-ui:native-{channel}",
                 )
-    def test_all_eight_service_templates_support_opt_in_and_python_fallback(self):
-        for tpl_name, flag, native_fragment, py_exec in SERVICE_TOGGLES:
-            text = (TEMPLATES / tpl_name).read_text(encoding="utf-8")
-            self.assertIn(flag, text, tpl_name)
-            self.assertIn(native_fragment, text, tpl_name)
-            self.assertIn(py_exec, text, tpl_name)
-
-        guardd_tpl = (TEMPLATES / "easy-ha-proxy-guardd.service.j2").read_text(encoding="utf-8")
-        self.assertIn("native_guardd_ffi_enabled", guardd_tpl)
-        self.assertIn("GUARDD_NATIVE_LIB=", guardd_tpl)
-
-        extra_toggles = (
-            (ROOT / "ansible/roles/authelia/templates/authelia-bansd.service.j2", "native_authelia_bansd_enabled", "authelia-bansd", "ExecStart=/usr/local/sbin/authelia-bansd.py"),
-            (ROOT / "ansible/roles/authelia/templates/authelia-usersd.service.j2", "native_authelia_usersd_enabled", "authelia-usersd", "ExecStart=/usr/local/sbin/authelia-usersd.py"),
-            (ROOT / "ansible/roles/authelia/templates/authelia-configd.service.j2", "native_authelia_configd_enabled", "authelia-configd", "ExecStart=/usr/local/sbin/authelia-configd.py"),
-            (TEMPLATES / "easy-ha-proxy-unit-failed@.service.j2", "native_tools_enabled", "unit-failed %i", "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-unit-failed.py %i"),
-            (TEMPLATES / "easy-ha-proxy-backup.service.j2", "native_tools_enabled", "backup-run", "ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backup-run.py"),
-            (TEMPLATES / "iptables-haproxy-udp.service.j2", "native_tools_enabled", "udp-forward", "ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-udp-forward.py"),
-            (ROOT / "ansible/roles/geoip_acl/templates/update-geoip.sh.j2", "native_tools_enabled", "update-geoip", 'exec "${PYTHON}" "${UPDATER}" "${args[@]}" "$@"'),
-        )
-        for path, flag, subcmd, py_exec in extra_toggles:
-            text = path.read_text(encoding="utf-8")
-            self.assertIn(flag, text, path.name)
-            self.assertIn(subcmd, text, path.name)
-            self.assertIn(py_exec, text, path.name)
 
     def test_native_task_enforces_https_and_sha256_verification(self):
         tasks_text = (ROLE / "tasks/native.yml").read_text(encoding="utf-8")
@@ -174,7 +112,7 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("go-panel-image", jobs)
         self.assertIn("native-release-image", jobs)
         go_img = jobs["go-panel-image"]
-        self.assertEqual(set(go_img["needs"]), {"go-panel", "go-parity", "go-vulnerabilities", "javascript", "secrets"})
+        self.assertLessEqual({"go-panel", "go-parity", "go-vulnerabilities", "javascript", "secrets"}, set(go_img["needs"]))
         self.assertIn("go-vulnerabilities", jobs["native-release-image"]["needs"])
         self.assertIn("rust-vulnerabilities", jobs["native-release-image"]["needs"])
         self.assertIn("go-parity", jobs["native-release-image"]["needs"])

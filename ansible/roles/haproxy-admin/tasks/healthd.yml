@@ -2,15 +2,6 @@
 # roles/haproxy-admin/tasks/healthd.yml
 # Installing the root daemon haproxy-healthd
 
-- name: "haproxy-healthd | Install script"
-  ansible.builtin.copy:
-    src: haproxy-healthd.py
-    dest: /usr/local/sbin/haproxy-healthd.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: healthd_script
-
 - name: "haproxy-healthd | Ensure config dir"
   ansible.builtin.file:
     path: "{{ app_dir | default('/opt/haproxy-admin') }}/config"
@@ -66,8 +57,7 @@
     name: haproxy-healthd.service
     state: restarted
   when: >-
-    healthd_script.changed
-    or healthd_unit.changed
+    healthd_unit.changed
     or healthd_cfg.changed
     or (hapadm_env_t.changed | default(false))
     or (daemons_env_t.changed | default(false))

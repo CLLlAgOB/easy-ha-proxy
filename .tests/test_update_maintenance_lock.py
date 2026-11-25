@@ -16,7 +16,6 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "installer"))
@@ -115,17 +114,6 @@ class TheWiring(unittest.TestCase):
         restart = source.split("def reexec_after_source_update(")[1].split("\ndef ")[0]
         self.assertIn("os.set_inheritable(_maintenance_lock_descriptor, True)", restart)
         self.assertLess(restart.index("set_inheritable"), restart.index("os.execve("))
-
-    def test_the_broker_and_the_cli_name_the_same_lock(self):
-        broker = daemon_source("easy-ha-proxy-updated.py")
-        self.assertIn('"/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock"', broker)
-        self.assertEqual(
-            str(easy_ha_proxy.MAINTENANCE_LOCK_PATH),
-            os.environ.get("EASY_HA_PROXY_MAINTENANCE_LOCK",
-                           "/run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock"),
-        )
-        self.assertIn('"EASY_HA_PROXY_MAINTENANCE_LOCK_HELD": "updated"', broker)
-        self.assertIn('f"easy-ha-proxy-updated-job-', broker)
 
 
 if __name__ == "__main__":

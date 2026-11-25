@@ -32,7 +32,7 @@ import update_scope
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "docker/app/haproxy_admin"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
 PLAYBOOK = ROOT / "ansible/easy-ha-proxy.yml"
 BROKER_PATH = ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
 
@@ -145,10 +145,10 @@ class WhatAChangeNeeds(unittest.TestCase):
 
     def test_a_daemon_change_runs_its_stage(self):
         scope = update_scope.scope_for([
-            "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py",
-            "ansible/roles/haproxy-admin/files/guardd/engine.py",
+            "ansible/roles/haproxy-admin/templates/guardd.json.j2",
+            "ansible/roles/haproxy-admin/templates/easy-ha-proxy-guardd.service.j2",
             "ansible/roles/haproxy-admin/files/scanner-signatures.json",
-            ".tests/test_guardd.py",
+            ".tests/test_rust_guardd.py",
             "README.md",
         ])
         self.assertFalse(scope["full"])
@@ -164,7 +164,7 @@ class WhatAChangeNeeds(unittest.TestCase):
         scope = update_scope.scope_for([
             "README.ru.md", "docs/screenshots/en/dashboard.webp",
             ".tests/test_x.py", ".github/workflows/ci.yml",
-            "docker/app/haproxy_admin/static/js/live_activity.js", "Dockerfile",
+            "go/panel/web/static/js/live_activity.js", "go/panel/internal/app/app.go",
             "installer/easy_ha_proxy.py",
             "ansible/callback_plugins/easy_ha_proxy_progress.py",
         ])
@@ -205,7 +205,7 @@ class TheRecord(unittest.TestCase):
         self.root = Path(temporary.name)
         self.source = self.root / "source"
         self.config = self.root / "config"
-        guardd = self.source / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
+        guardd = self.source / "ansible/roles/haproxy-admin/files/scanner-signatures.json"
         guardd.parent.mkdir(parents=True)
         guardd.write_text("v1\n", encoding="utf-8")
         (self.source / "README.md").write_text("docs\n", encoding="utf-8")
@@ -219,7 +219,7 @@ class TheRecord(unittest.TestCase):
         update_scope.write_applied(self.config, self.source, "a" * 40)
         self.assertEqual(update_scope.read_applied(self.config)["revision"], "a" * 40)
         self.assertEqual(update_scope.plan_scope(self.config, self.source)["tags"], [])
-        guardd = self.source / "ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py"
+        guardd = self.source / "ansible/roles/haproxy-admin/files/scanner-signatures.json"
         guardd.write_text("v2\n", encoding="utf-8")
         scope = update_scope.plan_scope(self.config, self.source)
         self.assertTrue(scope["ready"])
@@ -372,85 +372,16 @@ def load_broker():
     return module
 
 
-@unittest.skipIf(sys.platform == "win32", "the broker needs fcntl")
-class TheBroker(unittest.TestCase):
-    def setUp(self):
-        self.broker = load_broker()
-
-    def plan(self, ready=True):
-        return {
-            "id": "a" * 32, "source_channel": "github", "image_channel": "latest",
-            "expires_at": "2999-01-01T00:00:00+00:00",
-            "components": [{
-                "id": "all", "state": "available", "actionable": True,
-                "installed": "1" * 40, "available": "2" * 40,
-                "details": {"scope": {"ready": ready, "tags": ["ha-cfg", "status"] if ready else []}},
-            }],
-        }
-
-    def test_it_replaces_the_narrower_source_updates_but_not_containers(self):
-        self.assertEqual(
-            self.broker.selected_components(["os", "services", "changes", "admin-container", "daemons"]),
-            ["changes", "admin-container", "os"],
-        )
-        self.assertEqual(self.broker.selected_components(["changes", "all"]), ["all"])
-
-    def test_it_is_checked_against_the_source_components_scope(self):
-        with (
-            mock.patch.object(self.broker, "validate_plan_channel"),
-            mock.patch.object(self.broker, "CONFIG_DIR", Path(tempfile.mkdtemp())),
-            mock.patch.object(self.broker, "haproxy_transaction_active", return_value=False),
-        ):
-            (self.broker.CONFIG_DIR / "metadata.yml").write_text("configuration_pending: false\n")
-            self.broker.validate_selection(self.plan(), ["changes"])
-            with self.assertRaises(self.broker.UpdatedError):
-                self.broker.validate_selection(self.plan(ready=False), ["changes"])
-
-    def test_a_scope_that_moved_since_the_check_is_stale(self):
-        fresh = self.plan()
-        fresh["components"][0]["details"]["scope"]["tags"] = ["ha-cfg", "ha-install", "status"]
-        with self.assertRaises(self.broker.UpdatedError) as caught:
-            self.broker.validate_fresh_candidates(self.plan(), fresh, ["changes"])
-        self.assertEqual(caught.exception.code, "stale_plan")
-        self.broker.validate_fresh_candidates(self.plan(), self.plan(), ["changes"])
-
-    def test_the_command_pins_the_revision_and_forbids_the_fallback(self):
-        command = self.broker.update_command(
-            "changes", source_channel="github", image_channel="latest",
-            expected_source_revision="2" * 40,
-        )
-        self.assertEqual(command[:4], ["/usr/local/bin/easy-ha-proxy", "update", "--component", "changes"])
-        self.assertIn("--expected-source-revision", command)
-        self.assertEqual(command[-1], "--no-full-fallback")
-        self.assertNotIn("--image-channel", command)
-
-    def test_a_checker_cannot_offer_it_as_a_component_of_its_own(self):
-        payload = {"source_channel": "github", "image_channel": "latest",
-                   "components": [{"id": "changes", "state": "available"}]}
-        with self.assertRaises(self.broker.UpdatedError):
-            self.broker.parse_checker_output(json.dumps(payload))
-
-
 class ThePage(unittest.TestCase):
-    def test_route_and_script(self):
-        routes = (APP / "routes_updates.py").read_text(encoding="utf-8")
-        script = (APP / "static/js/system_updates.js").read_text(encoding="utf-8")
-        self.assertIn('"changes",', routes.split("UPDATE_COMPONENTS = frozenset(")[1].split(")")[0])
-        self.assertIn('"changes"', routes.split("CONFIG_SENSITIVE_COMPONENTS")[1].split("\n")[0])
-        core = (APP / "static/js/updates_core.js").read_text(encoding="utf-8")
-        self.assertIn("withChangesRow(normalizeComponents(plan))", script)
-        self.assertIn('changes: "Only what changed"', core)
-        # The scope is its own row, not a dump inside the source row.
-        self.assertIn('!["scope", "changelog", "requires"].includes(key)', script)
 
     def test_the_words_are_translated(self):
-        catalogue = json.loads((APP / "translations/ru/updates.json").read_text(encoding="utf-8"))["messages"]
+        catalogue = json.loads((_WEB_DIR / "translations/ru/updates.json").read_text(encoding="utf-8"))["messages"]
         for key in ("Only what changed", "{count} changed file(s). Steps to run: {steps}",
                     "These changes need the complete stack: {paths}",
                     "Available after the next complete update: there is no record of the last one yet."):
             self.assertIn(key, catalogue)
         merged = {}
-        for path in (APP / "translations").rglob("*.json"):
+        for path in (_WEB_DIR / "translations").rglob("*.json"):
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if "ru" in path.parts or path.name == "ru.json":
                 merged.update(loaded.get("messages", loaded))

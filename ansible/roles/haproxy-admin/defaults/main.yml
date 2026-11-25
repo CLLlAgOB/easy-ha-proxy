@@ -155,9 +155,9 @@ hadmin_gid: ""
 haproxy_admin_root_dir: "{{ app_dir }}"
 haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
 
-# Container image and name.
+# Container image and name. haproxy_admin_image carries the release channel
+# (set-channels writes it); the panel runs the matching go-<channel> image.
 haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
-haproxy_admin_use_go_panel: true
 haproxy_admin_image_channel: "{{ 'alpha' if haproxy_admin_image.endswith(':alpha') else 'latest' }}"
 haproxy_admin_go_image: "{{ haproxy_admin_image | regex_replace(':[^/:]+$', '') }}:go-{{ haproxy_admin_image_channel }}"
 haproxy_admin_container_name: "haproxy-admin"
@@ -264,27 +264,12 @@ backup_schedule_oncalendar: "*-*-* 03:20:00"
 backup_schedule_jitter: 20m
 backup_schedule_timeout: 8h
 
-# --- Native Rust + Go host binaries (default enabled on alpha) ---
-# Enabled by default so gateways run the compiled Rust guardd-core and static
-# Go easy-ha-proxy-agent without Python daemons. Set native_daemons_enabled: false
-# (or any per-daemon flag to false) in vars.yml for instant rollback to Python.
-native_daemons_enabled: true
-native_guardd_enabled: "{{ native_daemons_enabled | bool }}"
-native_guardd_ffi_enabled: "{{ native_daemons_enabled | bool }}"
-native_healthd_enabled: "{{ native_daemons_enabled | bool }}"
-native_metricsd_enabled: "{{ native_daemons_enabled | bool }}"
-native_alertd_enabled: "{{ native_daemons_enabled | bool }}"
-native_controld_enabled: "{{ native_daemons_enabled | bool }}"
-native_certd_enabled: "{{ native_daemons_enabled | bool }}"
-native_backupd_enabled: "{{ native_daemons_enabled | bool }}"
-native_updated_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_bansd_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_usersd_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_configd_enabled: "{{ native_daemons_enabled | bool }}"
-native_tools_enabled: "{{ native_daemons_enabled | bool }}"
+# --- Native host binaries ---
+# The Rust guardd-core and the static Go easy-ha-proxy-agent are the host
+# daemons and tools; the native stage installs them from one of the sources
+# below.
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
 native_guardd_bin: /usr/local/sbin/guardd-core
-native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url
 # together with mandatory SHA-256 checksums per architecture.

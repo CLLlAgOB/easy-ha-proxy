@@ -48,13 +48,13 @@ if cmd[0] == "cp":
     stage = os.path.dirname(dest)
     if src == "/SHA256SUMS":
         with open(dest, "w") as out:
-            for d in ("sbin", "lib"):
+            for d in ("sbin",):
                 for name in sorted(os.listdir(os.path.join(stage, d))):
                     data = open(os.path.join(stage, d, name), "rb").read()
                     out.write("%s  %s/%s\n" % (hashlib.sha256(data).hexdigest(), d, name))
     else:
         os.makedirs(dest)
-        open(os.path.join(dest, "easy-ha-proxy-agent" if src == "/sbin" else "libguardd_core.so"), "w").write(src)
+        open(os.path.join(dest, "easy-ha-proxy-agent"), "w").write(src)
     sys.exit(0)
 sys.exit(0)
 '''

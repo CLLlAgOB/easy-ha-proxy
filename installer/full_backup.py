@@ -50,6 +50,10 @@ CORE_PATHS = (
     "/var/log/haproxy.log",
     "/var/log/letsencrypt",
     "/usr/local/bin/update-geoip.sh",
+    # The former Python GeoIP updater (now the agent's update-geoip): kept
+    # here, as /usr/local/sbin/haproxy-* and authelia-* below match the former
+    # Python daemons, because restore authorizes an archive's paths by these
+    # lists and archives taken before still carry them.
     "/usr/local/lib/easy-ha-proxy/update_geoip.py",
 )
 CORE_GLOBS = (

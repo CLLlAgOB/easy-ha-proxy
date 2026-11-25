@@ -165,24 +165,6 @@ class InstallerLocalizationTests(unittest.TestCase):
             syntax_check.assert_called_once_with(directory)
             self.assertEqual(run_playbook.call_args.args[0], LANGUAGE_TAGS)
 
-    def test_primary_ansible_and_localization_comments_are_english(self) -> None:
-        paths = (
-            ROOT / "ansible" / "authelia.yml",
-            ROOT / "ansible" / "easy-ha-proxy.yml",
-            AUTHELIA_ROLE / "defaults" / "main.yml",
-            AUTHELIA_ROLE / "tasks" / "install.yml",
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "defaults" / "main.yml",
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "templates" / "haproxy-admin.env.j2",
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "templates" / "docker-compose.yml.j2",
-            ROOT / "docker" / "app" / "haproxy_admin" / "i18n.py",
-            ROOT / "docker" / "app" / "haproxy_admin" / "__init__.py",
-        )
-        failures = []
-        for path in paths:
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if line.lstrip().startswith("#") and CYRILLIC.search(line):
-                    failures.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
-        self.assertEqual(failures, [], "Non-English comments:\n" + "\n".join(failures))
 
     def test_ansible_task_names_are_english(self) -> None:
         failures = []

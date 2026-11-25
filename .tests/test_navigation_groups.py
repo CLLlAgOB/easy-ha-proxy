@@ -16,10 +16,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "docker" / "app" / "haproxy_admin"
-NAV = APP / "templates" / "_haproxy_nav.html"
-BASE = APP / "templates" / "base.html"
-SCRIPT = APP / "static" / "js" / "nav.js"
-STYLES = APP / "static" / "css" / "styles.css"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
+NAV = _WEB_DIR / "templates" / "_haproxy_nav.html"
+BASE = _WEB_DIR / "templates" / "base.html"
+SCRIPT = _WEB_DIR / "static" / "js" / "nav.js"
+STYLES = _WEB_DIR / "static" / "css" / "styles.css"
 
 # Every destination the header offers. The first four rows were the flat
 # button row on the HAProxy pages; the rest were reachable only from the
@@ -217,12 +218,12 @@ class TranslationTests(unittest.TestCase):
         import json
 
         messages = {}
-        base = APP / "translations" / "ru.json"
+        base = _WEB_DIR / "translations" / "ru.json"
         if base.is_file():
             messages.update(
                 json.loads(base.read_text(encoding="utf-8")).get("messages", {})
             )
-        for path in sorted((APP / "translations" / "ru").glob("*.json")):
+        for path in sorted((_WEB_DIR / "translations" / "ru").glob("*.json")):
             messages.update(
                 json.loads(path.read_text(encoding="utf-8")).get("messages", {})
             )

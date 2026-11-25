@@ -26,13 +26,12 @@ import tarfile
 import tempfile
 import unittest
 from unittest import mock
-from _guardd_source import daemon_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "installer" / "full_backup.py"
 BACKUPD = ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
-APP = ROOT / "docker/app/haproxy_admin"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
 
 
 def load():
@@ -233,14 +232,10 @@ class TheArchiveCarriesTheSnapshotNotTheLiveFile(unittest.TestCase):
 
 
 class ThePageSaysWhetherItIsThere(unittest.TestCase):
-    def test_the_daemon_passes_the_flag_on(self):
-        source = daemon_source("easy-ha-proxy-backupd.py")
-        keys = source.split("MANIFEST_KEYS = (")[1].split(")")[0]
-        self.assertIn('"metrics_included"', keys)
 
     def test_the_backup_details_show_it(self):
-        page = (APP / "templates/system_backups.html").read_text(encoding="utf-8")
-        script = (APP / "static/js/system_backups.js").read_text(encoding="utf-8")
+        page = (_WEB_DIR / "templates/system_backups.html").read_text(encoding="utf-8")
+        script = (_WEB_DIR / "static/js/system_backups.js").read_text(encoding="utf-8")
         self.assertIn('id="backup-metrics-state"', page)
         self.assertIn(
             'byId("backup-metrics-state").textContent = manifest.metrics_included ? t("Yes") : t("No");',

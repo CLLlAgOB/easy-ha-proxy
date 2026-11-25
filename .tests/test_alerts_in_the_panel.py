@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - the web requirements are not installed
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "docker" / "app" / "haproxy_admin"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
 sys.path.insert(0, str(ROOT / "docker" / "app"))
 
 
@@ -112,7 +113,7 @@ class TheRoutes(unittest.TestCase):
 
 class EveryPage(unittest.TestCase):
     def test_the_header_carries_the_indicator_and_its_script(self):
-        base = (APP / "templates/base.html").read_text(encoding="utf-8")
+        base = (_WEB_DIR / "templates/base.html").read_text(encoding="utf-8")
         self.assertIn('id="global-alerts"', base)
         self.assertIn("url_for('routes.api_alerts_portal')", base)
         self.assertIn("js/alerts_badge.js", base)
@@ -121,17 +122,17 @@ class EveryPage(unittest.TestCase):
         self.assertEqual(indicator.count("{% if g.is_superadmin %}"), indicator.count("{% endif %}"))
 
     def test_the_script_does_not_cry_wolf(self):
-        script = (APP / "static/js/alerts_badge.js").read_text(encoding="utf-8")
+        script = (_WEB_DIR / "static/js/alerts_badge.js").read_text(encoding="utf-8")
         # The alert service restarts with every update: one failed answer is
         # not shown, two in a row are.
         self.assertIn("if (failures >= 2) renderSilent(badge);", script)
         self.assertIn("badge.hidden = total === 0;", script)
         self.assertIn('"easy-ha-proxy:alerts-changed"', script)
-        page = (APP / "static/js/alerts.js").read_text(encoding="utf-8")
+        page = (_WEB_DIR / "static/js/alerts.js").read_text(encoding="utf-8")
         self.assertIn('new CustomEvent("easy-ha-proxy:alerts-changed")', page)
 
     def test_a_refresh_keeps_the_history_the_operator_is_looking_at(self):
-        page = (APP / "static/js/alerts.js").read_text(encoding="utf-8")
+        page = (_WEB_DIR / "static/js/alerts.js").read_text(encoding="utf-8")
         refresh = page.split("async function refresh(")[1].split("\n  }\n")[0]
         self.assertIn("if (!historyBusy()) await loadHistory(false);", refresh)
         busy = page.split("function historyBusy(")[1].split("\n  }\n")[0]
@@ -142,7 +143,7 @@ class EveryPage(unittest.TestCase):
         import json
 
         catalog = {}
-        for path in (APP / "translations").rglob("*.json"):
+        for path in (_WEB_DIR / "translations").rglob("*.json"):
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("meta", {}).get("code") == "ru":
                 catalog.update(data["messages"])

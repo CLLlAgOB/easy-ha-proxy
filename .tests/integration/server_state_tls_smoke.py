@@ -13,8 +13,7 @@ import time
 
 # The dumper's native-agent placeholder, rendered empty: these runs exercise the
 # Python normalizer they name, which the dumper then uses.
-NATIVE_AGENT = ("{{ (native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent')) if (native_tools_enabled"
-                " | default(native_daemons_enabled | default(true)) | bool) else '' }}")
+NATIVE_AGENT = "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
 
 
 def rpc(path, command):

@@ -11,7 +11,6 @@ import csv
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,7 +19,6 @@ import shutil
 import socket
 import ssl
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -28,11 +26,22 @@ import time
 from jinja2 import Environment, FileSystemLoader
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'docker/app'))
-from haproxy_admin.services_haproxy_config import (  # noqa: E402
-    jinja_combine, jinja_regex_replace,
-)
-from haproxy_admin.utils import parse_table_output  # noqa: E402
+
+
+def jinja_combine(value, other, recursive=False):
+    """Ansible's combine filter, as the panel's renderer provides it."""
+    base = dict(value or {})
+    for key, item in dict(other or {}).items():
+        if recursive and isinstance(base.get(key), dict) and isinstance(item, dict):
+            base[key] = jinja_combine(base[key], item, recursive=True)
+        else:
+            base[key] = item
+    return base
+
+
+def jinja_regex_replace(value, pattern, replacement):
+    """Ansible's regex_replace filter."""
+    return '' if value is None else re.sub(pattern, replacement, str(value))
 
 
 class Backend(BaseHTTPRequestHandler):
@@ -148,13 +157,6 @@ def qualify(expected):
             peers_enabled=False, haproxy_server_state_enabled=False,
             haproxy_socket_group='root', haproxy_certs_dir=str(certs) + '/',
         )
-        policy_spec = importlib.util.spec_from_file_location(
-            'haproxy_smoke_policy', ROOT / 'ansible/roles/haproxy-admin/files/haproxy-controld.py')
-        policy = importlib.util.module_from_spec(policy_spec)
-        sys.modules[policy_spec.name] = policy
-        policy_spec.loader.exec_module(policy)
-        policy._enforce_config_policy(config.encode())
-        checks.append('host control service accepts the generated configuration')
         config = config.replace('/etc/haproxy', str(config_dir)).replace('/var/lib/haproxy', str(base / 'state'))
         config = config.replace('/run/haproxy/admin.sock', str(base / 'admin.sock'))
         config = config.replace('ipv4@*:443', '127.0.0.1:' + str(tls_port))
@@ -244,12 +246,11 @@ def qualify(expected):
             reply = runtime(base / 'admin.sock', command)
             assert not reply.strip(), reply
             table = runtime(base / 'admin.sock', 'show table tbl_ban')
-            parsed_table = parse_table_output(table)
-            assert parsed_table and '198.51.100.20' in str(parsed_table), table
-            assert 'gpc0=1' in table and 'gpt0=900' in table, table
+            entry = next((line for line in table.splitlines() if 'key=198.51.100.20' in line.split()), '')
+            assert 'gpc0=1' in entry.split() and 'gpt0=900' in entry.split(), table
             runtime(base / 'admin.sock', 'clear table tbl_ban key 198.51.100.20')
             assert '198.51.100.20' not in runtime(base / 'admin.sock', 'show table tbl_ban')
-            checks.append('Runtime API ban table write/read/application parser/clear')
+            checks.append('Runtime API ban table write/read/clear')
             raw = runtime(base / 'admin.sock', 'show stat')
             rows = list(csv.DictReader(io.StringIO(raw.lstrip('# '))))
             assert any(r.get('pxname') == 'be_shop' and r.get('svname') == 'BACKEND' for r in rows), raw[:500]

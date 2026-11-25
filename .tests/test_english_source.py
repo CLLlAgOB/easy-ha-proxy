@@ -26,27 +26,21 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 CYRILLIC = re.compile(r"[Ѐ-ӿ]")
 
-SCANNED = ("ansible/roles", "docker/app/haproxy_admin", "installer", ".tests", ".github")
+SCANNED = ("ansible/roles", "go/panel/web", "installer", ".tests", ".github")
 
 # Comments that quote a mistranslation or a Russian page on purpose: the
 # point of them is the Russian text.
 QUOTES_RUSSIAN = {
     ".tests/js/i18n.test.js",
-    ".tests/test_alert_mail_retry.py",
-    ".tests/test_i18n_whole_sentences.py",
-    ".tests/test_api_error_shape.py",
     ".tests/test_backup_schedule_page.py",
     ".tests/test_english_source.py",
-    ".tests/test_guardd.py",
     ".tests/test_i18n.py",
     ".tests/test_machine_output_not_translated.py",
     ".tests/test_translatable_prose.py",
-    ".tests/test_update_channel_mismatch.py",
     ".tests/test_update_plan_translations.py",
-    "docker/app/haproxy_admin/api_errors.py",
-    "docker/app/haproxy_admin/static/js/detection_rules.js",
-    "docker/app/haproxy_admin/templates/detection_rules.html",
-    "docker/app/haproxy_admin/templates/haproxy_certs.html",
+    "go/panel/web/static/js/detection_rules.js",
+    "go/panel/web/templates/detection_rules.html",
+    "go/panel/web/templates/haproxy_certs.html",
 }
 
 TEMPLATE_COMMENT = re.compile(r"\{#.*?#\}|<!--.*?-->", re.S)
@@ -149,7 +143,7 @@ class DaemonMessagesAreEnglish(unittest.TestCase):
         import json
 
         catalogue = json.loads(
-            (ROOT / "docker/app/haproxy_admin/translations/ru/backend.json").read_text(encoding="utf-8")
+            (ROOT / "go/panel/web/translations/ru/backend.json").read_text(encoding="utf-8")
         )["messages"]
         for message in ("Failed to save configuration.yml: ", "rules_yaml must be a YAML list",
                         "The password must be 8 to 1024 characters long", "Log file not found"):

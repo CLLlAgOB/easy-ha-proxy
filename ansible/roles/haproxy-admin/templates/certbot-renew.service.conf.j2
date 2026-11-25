@@ -2,11 +2,7 @@
 # but give each Route53 lineage its own AWS credential environment.
 [Service]
 ExecStart=
-{% if native_certd_enabled | default(false) | bool %}
 ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} certd --renew
-{% else %}
-ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py --renew
-{% endif %}
 Environment="LETSENCRYPT_ROOT_DIR={{ letsencrypt_root_dir | default('/etc/letsencrypt') }}"
 Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
 # The runner bounds every Certbot subprocess. A single global 90s timeout

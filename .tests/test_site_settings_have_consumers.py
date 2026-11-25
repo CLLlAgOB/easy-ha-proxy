@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FORM = ROOT / "docker" / "app" / "haproxy_admin" / "templates" / "haproxy_site_edit.html"
+FORM = ROOT / "go" / "panel" / "web" / "templates" / "haproxy_site_edit.html"
 TEMPLATE = ROOT / "ansible" / "roles" / "haproxy" / "templates" / "haproxy.cfg.j2"
 
 
@@ -31,8 +31,8 @@ def consumer_sources() -> str:
         "ansible/roles/*/templates/*.j2",
         "ansible/roles/*/tasks/*.yml",
         "ansible/roles/*/defaults/*.yml",
-        "ansible/roles/haproxy-admin/files/*.py",
-        "docker/app/haproxy_admin/*.py",
+        "go/agent/internal/*/*.go",
+        "go/panel/internal/*/*.go",
     ):
         for path in sorted(ROOT.glob(pattern)):
             parts.append(path.read_text(encoding="utf-8"))
@@ -105,13 +105,13 @@ class WithdrawnTests(unittest.TestCase):
     """The two that were facades are gone, not merely undocumented."""
 
     def pages(self) -> str:
-        directory = ROOT / "docker" / "app" / "haproxy_admin" / "templates"
+        directory = ROOT / "go" / "panel" / "web" / "templates"
         return "\n".join(
             path.read_text(encoding="utf-8") for path in directory.glob("*.html")
         )
 
     def scripts(self) -> str:
-        directory = ROOT / "docker" / "app" / "haproxy_admin" / "static" / "js"
+        directory = ROOT / "go" / "panel" / "web" / "static" / "js"
         return "\n".join(
             path.read_text(encoding="utf-8") for path in directory.glob("*.js")
         )

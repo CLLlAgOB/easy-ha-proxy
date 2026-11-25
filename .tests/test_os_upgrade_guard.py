@@ -1,7 +1,6 @@
 """Ordinary APT upgrades cannot bypass HAProxy or unattended runtime guards."""
 from __future__ import annotations
 
-import importlib.util
 from contextlib import ExitStack
 import json
 import os
@@ -158,40 +157,6 @@ class ScheduledWorker(unittest.TestCase):
         with patch.object(cli, 'require_root'), patch.object(cli, 'hold_maintenance_lock'):
             with self.assertRaisesRegex(cli.InstallerError, 'os component'):
                 cli.command_update(args)
-
-    def test_only_scheduled_os_commands_receive_the_automatic_guard(self):
-        spec = importlib.util.spec_from_file_location('os_upgrade_guard_broker', ROOT / 'ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py')
-        broker = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = broker
-        spec.loader.exec_module(broker)
-        for scheduled, maintenance in ((False, None), (True, None),
-                                       (True, {'revision':'a'*32, 'closes_at':123456, 'runtime':False}),
-                                       (True, {'revision':'a'*32, 'closes_at':123456, 'runtime':True})):
-            with self.subTest(scheduled=scheduled, maintenance=maintenance), tempfile.TemporaryDirectory() as temporary:
-                plan = {'source_channel': 'local', 'image_channel': 'latest', 'components': []}
-                with patch.object(broker, 'ACTIVE_MARKER', Path(temporary) / 'active'), \
-                     patch.object(broker.time, 'sleep'), \
-                     patch.object(broker, 'validate_selection'), \
-                     patch.object(broker, 'execute_checker', return_value=plan), \
-                     patch.object(broker, 'validate_fresh_candidates'), \
-                     patch.object(broker, 'validate_reviewed_container_candidates'), \
-                     patch.object(broker, 'store_plan', return_value={'id':'a'*32}), \
-                     patch.object(broker, 'report_availability'), \
-                     patch.object(broker, 'load_job', return_value={'scheduled':scheduled}), \
-                     patch.object(broker, 'update_job'), \
-                     patch.object(broker, 'release_operation'), \
-                     patch.object(broker, 'request_self_restart_if_needed'), \
-                     patch.object(broker, 'unified_policy', return_value={'id':'a'*32}), \
-                     patch.object(broker, 'maintenance_module') as clock, \
-                     patch.object(broker, 'finish_failed') as failed, \
-                     patch.object(broker, 'run_command', return_value=(0, '')) as run:
-                    clock.return_value.current.return_value = True
-                    broker.apply_worker('a'*32, 7, plan, ['os'], maintenance=maintenance)
-                failed.assert_not_called()
-                self.assertEqual('--automatic-os' in run.call_args.args[1], scheduled)
-                if maintenance:
-                    self.assertIn('--runtime-maintenance' if maintenance['runtime'] else '--maintenance-revision', run.call_args.args[1])
-                    self.assertEqual(run.call_args.args[1][-2:], ['--maintenance-until', '123456'])
 
 
 if __name__ == '__main__':

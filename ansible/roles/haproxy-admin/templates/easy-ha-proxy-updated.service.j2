@@ -38,16 +38,7 @@ Environment="UPDATED_SERVICE_NAME=easy-ha-proxy-updated.service"
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
-{% set _updated_hashes = [lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-updated.py', rstrip=false) | hash('sha256')] -%}
-{% for _updated_mod in (query('ansible.builtin.fileglob', playbook_dir ~ '/roles/haproxy-admin/files/updated/*.py') | sort) -%}
-{%   set _ = _updated_hashes.append(lookup('ansible.builtin.file', _updated_mod, rstrip=false) | hash('sha256')) -%}
-{% endfor -%}
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_updated_hashes | join(':')) | hash('sha256') }}"
-{% if native_updated_enabled | default(false) | bool %}
 ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} updated
-{% else %}
-ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py
-{% endif %}
 Restart=always
 RestartSec=3
 TimeoutStopSec={{ (updated_job_timeout_seconds | default(7200) | int) + 30 }}

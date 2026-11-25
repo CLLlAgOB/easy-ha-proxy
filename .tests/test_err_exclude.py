@@ -172,7 +172,7 @@ class SourceTests(unittest.TestCase):
 
     def test_the_page_and_the_template_agree_on_the_shapes(self):
         page = (
-            ROOT / "docker" / "app" / "haproxy_admin" / "templates"
+            ROOT / "go" / "panel" / "web" / "templates"
             / "haproxy_site_edit.html"
         ).read_text(encoding="utf-8")
         offered = set(re.findall(r'<option value="(path[a-z_]*)"', page))

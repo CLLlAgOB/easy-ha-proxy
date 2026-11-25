@@ -7,12 +7,8 @@ on:
       - 'go/**'
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
-      - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
       - 'ansible/roles/haproxy-admin/tasks/packages.yml'
       - 'ansible/roles/haproxy-admin/tasks/install.yml'
-      - 'docker/app/haproxy_admin/services_haproxy_config.py'
-      - 'docker/app/haproxy_admin/utils.py'
-      - 'docker/app/requirements.txt'
       - 'installer/requirements.txt'
       - 'installer/haproxy_package_migrate.py'
       - 'installer/haproxy_server_state.py'
@@ -25,12 +21,8 @@ on:
       - 'go/**'
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
-      - 'ansible/roles/haproxy-admin/files/haproxy-controld.py'
       - 'ansible/roles/haproxy-admin/tasks/packages.yml'
       - 'ansible/roles/haproxy-admin/tasks/install.yml'
-      - 'docker/app/haproxy_admin/services_haproxy_config.py'
-      - 'docker/app/haproxy_admin/utils.py'
-      - 'docker/app/requirements.txt'
       - 'installer/requirements.txt'
       - 'installer/haproxy_package_migrate.py'
       - 'installer/haproxy_server_state.py'
@@ -68,7 +60,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install migration dependencies
-        run: pip install -r installer/requirements.txt -r docker/app/requirements.txt
+        run: pip install -r installer/requirements.txt
       - name: Install the distribution baseline
         run: |
           test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
@@ -105,7 +97,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install test dependencies
-        run: pip install -r installer/requirements.txt -r docker/app/requirements.txt
+        run: pip install -r installer/requirements.txt
       - name: Qualify the distribution baseline and refuse an implicit migration
         run: |
           ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution

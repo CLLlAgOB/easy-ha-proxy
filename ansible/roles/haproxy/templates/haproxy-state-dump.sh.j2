@@ -14,9 +14,11 @@ STATE_FILE="{{ haproxy_server_state_file | default('/var/lib/haproxy/server-stat
 CONFIG_FILE="${1:-/etc/haproxy/haproxy.cfg}"
 NORMALIZER="${2:-}"
 # The native agent's port of the same normalizer, unless a normalizer is named.
-# Rendered empty when native tools are turned off; left unrendered (as the tests run it)
-# it is no executable either, so the Python normalizer is used.
-AGENT="{{ (native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent')) if (native_tools_enabled | default(native_daemons_enabled | default(true)) | bool) else '' }}"
+# The installer's Python normalizer (which the HAProxy package migration also
+# uses) is the fallback: on a fresh install HAProxy runs before the native
+# stage has put the agent in place, and left unrendered (as the tests run it)
+# AGENT is no executable either.
+AGENT="{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
 TMP_FILE="${STATE_FILE}.tmp.$$"
 FILTERED_FILE="${TMP_FILE}.config-transport"
 

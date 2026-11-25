@@ -1,8 +1,6 @@
 """Pair host updates with the running panel, even after a download moved its tag."""
 from pathlib import Path
-import importlib.util
 import json
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -116,42 +114,6 @@ class RunningPanelPairing(PanelFixture, unittest.TestCase):
         image = panel['details']['images'][0]
         self.assertIsNone(image['current_source_tree'])
         self.assertEqual(image['running'], 'different-content')
-
-
-@unittest.skipIf(sys.platform == 'win32', 'the broker needs fcntl')
-class AppliedPanelVerification(PanelFixture, unittest.TestCase):
-    def setUp(self):
-        path = Path(__file__).resolve().parents[1] / 'ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py'
-        spec = importlib.util.spec_from_file_location('updated_running_pairing_test', path)
-        self.broker = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = self.broker
-        spec.loader.exec_module(self.broker)
-
-    def test_downloaded_digest_is_not_proof_that_the_container_was_updated(self):
-        plan = {'components': [self.probe(Docker())]}
-        with self.assertRaises(self.broker.UpdatedError) as failure:
-            self.broker.validate_applied_container_digests(plan, plan, ['admin-container'])
-        self.assertEqual(failure.exception.code, 'verification_failed')
-
-    def test_a_new_registry_release_cannot_mask_an_unsuccessful_install(self):
-        reviewed = {'components': [self.probe(Docker())]}
-        observed = {'components': [self.probe(Docker(registry_digest='sha256:' + '3' * 64))]}
-        with self.assertRaises(self.broker.UpdatedError):
-            self.broker.validate_applied_container_digests(reviewed, observed, ['admin-container'])
-
-    def test_a_correctly_running_reviewed_image_survives_a_newer_release(self):
-        reviewed = {'components': [self.probe(Docker())]}
-        observed = {'components': [self.probe(Docker(running_tree=NEW, registry_digest='sha256:' + '3' * 64))]}
-        self.broker.validate_applied_container_digests(reviewed, observed, ['admin-container'])
-
-    def test_unreadable_running_metadata_is_not_success(self):
-        plan = {'components': [self.probe(Docker())]}
-        for field, value in [('state', 'unknown'), ('running', 'unchecked'), ('running', 'unreadable')]:
-            with self.subTest(field=field, value=value):
-                observed = {'components': [self.probe(Docker(running_tree=NEW))]}
-                observed['components'][0]['details']['images'][0][field] = value
-                with self.assertRaises(self.broker.UpdatedError):
-                    self.broker.validate_applied_container_digests(plan, observed, ['admin-container'])
 
 
 if __name__ == '__main__':

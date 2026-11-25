@@ -9,25 +9,6 @@
     state: present
   tags: restore-network
 
-- name: "haproxy-controld | Install bans daemon script"
-  ansible.builtin.copy:
-    src: haproxy-controld.py
-    dest: /usr/local/sbin/haproxy-controld.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: haproxy_controld_script
-
-- name: "haproxy-controld | Install controld package"
-  ansible.builtin.copy:
-    src: controld/
-    dest: /usr/local/sbin/controld/
-    owner: root
-    group: root
-    mode: "0644"
-    directory_mode: "0755"
-  register: haproxy_controld_package
-
 - name: "haproxy-controld | Install systemd unit"
   ansible.builtin.template:
     src: haproxy-controld.service.j2
@@ -65,9 +46,7 @@
       {{
         'restarted'
         if (
-          haproxy_controld_script.changed
-          or haproxy_controld_package.changed
-          or haproxy_controld_unit.changed
+          haproxy_controld_unit.changed
           or (hapadm_env_t.changed | default(false))
           or (daemons_env_t.changed | default(false))
         )

@@ -9,72 +9,15 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "docker" / "app" / "haproxy_admin"
-
-
-class RouteTests(unittest.TestCase):
-    def setUp(self):
-        self.routes = (APP_DIR / "routes_security.py").read_text(encoding="utf-8")
-        self.service = (APP_DIR / "services_security.py").read_text(encoding="utf-8")
-        self.client = (APP_DIR / "guardd_client.py").read_text(encoding="utf-8")
-
-    def test_the_explorer_reads_and_never_deletes(self):
-        block = self.routes.split("# Log Explorer")[1]
-        self.assertNotIn("@bp.delete", block)
-        # Two things in this section change anything: the switch that decides
-        # whether requests are recorded at all, and how much memory the
-        # latest requests may take. Neither deletes a stored request.
-        self.assertEqual(block.count("@bp.post"), 2)
-        self.assertIn('@bp.post("/api/security/requests/enabled")', block)
-        self.assertIn('@bp.post("/api/security/requests/memory")', block)
-
-    def test_the_recording_switch_is_guarded_like_a_mutation(self):
-        # It decides whether the gateway keeps a record of what every visitor
-        # asked for, so it is superadmin-only and it lands in the change log.
-        block = self.routes.split('@bp.post("/api/security/requests/enabled")')[1]
-        block = block.split("@bp.get")[0]
-        self.assertIn('getattr(g, "is_superadmin", False)', block)
-        self.assertIn("RESULT_DENIED", block)
-        self.assertIn('"request_log.enabled"', block)
-
-    def test_the_page_offers_the_switch_instead_of_naming_a_variable(self):
-        page = (APP_DIR / "templates" / "request_log.html").read_text(encoding="utf-8")
-        script = (APP_DIR / "static" / "js" / "request_log.js").read_text(encoding="utf-8")
-        # The old notice told the operator to set guardd_request_log_enabled
-        # and gave them no way to do it.
-        self.assertNotIn("guardd_request_log_enabled", page)
-        self.assertIn('id="rq-enable"', page)
-        self.assertIn('id="rq-disable"', page)
-        self.assertIn("/api/security/requests/enabled", script)
-        self.assertIn('"X-CSRFToken"', script)
-
-    def test_a_stopped_daemon_degrades_instead_of_erroring(self):
-        self.assertIn("GuarddUnavailable", self.routes)
-        self.assertIn("unavailable_payload", self.routes)
-
-    def test_switched_off_is_not_reported_as_unavailable(self):
-        # The daemon answers 404 with a body when the store is off; raising on
-        # status would turn "the feature is off" into "guardd is down".
-        block = self.client.split("def _request_log_get")[1].split("def guardd_requests")[0]
-        self.assertNotIn("raise_for_status", block)
-        self.assertIn("404", (APP_DIR / "static/js/request_log.js").read_text(encoding="utf-8"))
-
-    def test_the_filter_set_is_closed(self):
-        # An unknown query parameter is dropped rather than forwarded.
-        self.assertIn("REQUEST_FILTERS", self.service)
-        filters = self.service.split("REQUEST_FILTERS = (")[1].split(")")[0]
-        for name in ('"before"', '"count"', '"hide_admin"'):
-            self.assertIn(name, filters)
-        self.assertNotIn('"offset"', filters)
-        block = self.service.split("def requests(")[1].split("def requests_status")[0]
-        self.assertIn("for key in REQUEST_FILTERS", block)
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
 
 
 class PageTests(unittest.TestCase):
     def setUp(self):
-        self.template = (APP_DIR / "templates" / "request_log.html").read_text(
+        self.template = (_WEB_DIR / "templates" / "request_log.html").read_text(
             encoding="utf-8"
         )
-        self.javascript = (APP_DIR / "static" / "js" / "request_log.js").read_text(
+        self.javascript = (_WEB_DIR / "static" / "js" / "request_log.js").read_text(
             encoding="utf-8"
         )
 
@@ -125,7 +68,7 @@ class PageTests(unittest.TestCase):
     def test_the_panels_own_requests_are_hidden_unless_asked_for(self):
         self.assertIn('id="rq-admin"', self.template)
         self.assertIn('byId("rq-admin").checked', self.javascript)
-        core = (APP_DIR / "static" / "js" / "request_log_core.js").read_text(encoding="utf-8")
+        core = (_WEB_DIR / "static" / "js" / "request_log_core.js").read_text(encoding="utf-8")
         self.assertIn('if (!view.admin) params.hide_admin = "1";', core)
 
     def test_the_time_shown_is_the_servers_answer(self):
@@ -181,7 +124,7 @@ class PageTests(unittest.TestCase):
         self.assertIn("payload.reaches_back_to", self.javascript)
 
     def test_it_is_reachable_from_the_navigation(self):
-        nav = (APP_DIR / "templates" / "_haproxy_nav.html").read_text(encoding="utf-8")
+        nav = (_WEB_DIR / "templates" / "_haproxy_nav.html").read_text(encoding="utf-8")
         self.assertIn("routes.request_log_page", nav)
 
 

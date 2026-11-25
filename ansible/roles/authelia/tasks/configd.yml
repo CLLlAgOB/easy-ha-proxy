@@ -8,17 +8,6 @@
     - name: Include managed mail notification state
       ansible.builtin.include_tasks: mail_notify_state.yml
 
-    - name: "authelia-configd | Install daemon script"
-      become: true
-      ansible.builtin.copy:
-        src: authelia-configd.py
-        dest: /usr/local/sbin/authelia-configd.py
-        owner: root
-        group: root
-        mode: "0750"
-      register: authelia_configd_script
-      when: authelia_configd_enabled | default(true) | bool
-
     - name: "authelia-configd | Install systemd unit"
       become: true
       ansible.builtin.template:
@@ -52,7 +41,7 @@
         state: restarted
       when:
         - authelia_configd_enabled | default(true) | bool
-        - (authelia_configd_script is defined and authelia_configd_script.changed) or (authelia_configd_unit is defined and authelia_configd_unit.changed)
+        - authelia_configd_unit is defined and authelia_configd_unit.changed
 
     - name: "authelia-configd | Ensure service started"
       become: true

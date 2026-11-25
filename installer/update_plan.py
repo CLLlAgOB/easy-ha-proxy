@@ -65,21 +65,18 @@ CHANGELOG_LIMIT = 40
 CHANGELOG_SUBJECT_CHARS = 160
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
-# Which source version a web application image was built from. The publish
-# scripts label each image with the sha256 of `git ls-tree` over its build
-# inputs; git objects are the same on every platform, so a gateway can work
-# out the same value from any source tree it has in Git and know exactly which
-# source an image belongs to, whatever line endings the build machine used.
+# Which source version the web panel image was built from. CI labels each
+# image with the sha256 of `git ls-tree` over its build inputs; git objects
+# are the same on every platform, so a gateway can work out the same value
+# from any source tree it has in Git and know exactly which source an image
+# belongs to, whatever line endings the build machine used. The broker
+# (go_web_tree) and CI use the same inputs.
+#
+# WEB_TREE_LABEL is the former Flask image's label: only read, so a gateway
+# still running that image can be compared and moved to the Go panel.
 WEB_TREE_LABEL = "io.easy-ha-proxy.source-tree"
-WEB_TREE_INPUTS = ("Dockerfile", ".dockerignore", "docker/app")
 GO_WEB_TREE_LABEL = "io.easy-ha-proxy.go-panel-tree"
-GO_WEB_TREE_INPUTS = (
-    "VERSION",
-    "go/panel",
-    "docker/app/haproxy_admin/static",
-    "docker/app/haproxy_admin/translations",
-    "docker/app/haproxy_admin/templates",
-)
+GO_WEB_TREE_INPUTS = ("VERSION", "go/panel")
 ADMIN_DEFAULTS = Path("ansible/roles/haproxy-admin/defaults/main.yml")
 _WEB_TREE_RE = re.compile(r"^[0-9a-f]{64}$")
 # Components that move the host to the candidate source revision. "changes"
@@ -123,29 +120,8 @@ NATIVE_DAEMON_ARTIFACTS: tuple[tuple[str, str, Path, Path], ...] = (
         Path("/usr/local/sbin/guardd-core"),
         Path("rust/guardd"),
     ),
-    (
-        "libguardd_core",
-        "Native Rust adaptive protection library",
-        Path("/usr/local/lib/easy-ha-proxy/libguardd_core.so"),
-        Path("rust/guardd"),
-    ),
 )
-_NATIVE_ENABLE_KEYS: tuple[str, ...] = (
-    "native_daemons_enabled",
-    "native_guardd_enabled",
-    "native_guardd_ffi_enabled",
-    "native_healthd_enabled",
-    "native_metricsd_enabled",
-    "native_alertd_enabled",
-    "native_controld_enabled",
-    "native_certd_enabled",
-    "native_backupd_enabled",
-    "native_updated_enabled",
-    "native_authelia_bansd_enabled",
-    "native_authelia_usersd_enabled",
-    "native_authelia_configd_enabled",
-    "native_tools_enabled",
-)
+
 
 
 @dataclass(frozen=True)
@@ -203,56 +179,6 @@ class SubprocessRunner:
         )
 
 
-DAEMON_ARTIFACTS: tuple[tuple[str, str, Path, Path], ...] = (
-    (
-        "haproxy-certd",
-        "HAProxy certificate daemon",
-        Path("/usr/local/sbin/haproxy-certd.py"),
-        Path("ansible/roles/haproxy-admin/files/haproxy-certd.py"),
-    ),
-    (
-        "haproxy-controld",
-        "HAProxy control daemon",
-        Path("/usr/local/sbin/haproxy-controld.py"),
-        Path("ansible/roles/haproxy-admin/files/haproxy-controld.py"),
-    ),
-    (
-        "haproxy-healthd",
-        "HAProxy health daemon",
-        Path("/usr/local/sbin/haproxy-healthd.py"),
-        Path("ansible/roles/haproxy-admin/files/haproxy-healthd.py"),
-    ),
-    (
-        "easy-ha-proxy-backupd",
-        "Encrypted backup and restore broker",
-        Path("/usr/local/sbin/easy-ha-proxy-backupd.py"),
-        Path("ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"),
-    ),
-    (
-        "easy-ha-proxy-updated",
-        "Software update broker",
-        Path("/usr/local/sbin/easy-ha-proxy-updated.py"),
-        Path("ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py"),
-    ),
-    (
-        "authelia-configd",
-        "Authelia configuration daemon",
-        Path("/usr/local/sbin/authelia-configd.py"),
-        Path("ansible/roles/authelia/files/authelia-configd.py"),
-    ),
-    (
-        "authelia-usersd",
-        "Authelia users daemon",
-        Path("/usr/local/sbin/authelia-usersd.py"),
-        Path("ansible/roles/authelia/files/authelia-usersd.py"),
-    ),
-    (
-        "authelia-bansd",
-        "Authelia bans daemon",
-        Path("/usr/local/sbin/authelia-bansd.py"),
-        Path("ansible/roles/authelia/files/authelia-bansd.py"),
-    ),
-)
 
 
 def _component(
@@ -758,9 +684,8 @@ def _web_tree(root: Path, runner: Runner, flavour: str = "") -> str | None:
     try:
         if not (root / ".git").exists():
             return None
-        inputs = GO_WEB_TREE_INPUTS if flavour == "go-" else WEB_TREE_INPUTS
         result = runner.run(
-            ("git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--", *inputs),
+            ("git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--", *GO_WEB_TREE_INPUTS),
             timeout=GIT_TIMEOUT,
         )
         if result.returncode != 0 or not result.stdout.strip():
@@ -944,7 +869,6 @@ def _remote_candidate(
 
 
 def _service_fingerprint(root: Path) -> str | None:
-    excluded = {relative.as_posix() for _, _, _, relative in DAEMON_ARTIFACTS}
     files: dict[str, Path] = {}
     for selected in SERVICE_SOURCE_PATHS:
         path = root / selected
@@ -958,8 +882,7 @@ def _service_fingerprint(root: Path) -> str | None:
                 continue
             relative = candidate.relative_to(root).as_posix()
             if (
-                relative in excluded
-                or "/__pycache__/" in f"/{relative}/"
+                "/__pycache__/" in f"/{relative}/"
                 or "/target/" in f"/{relative}/"
                 or "/dist/" in f"/{relative}/"
                 or relative.endswith(".pyc")
@@ -1067,14 +990,6 @@ def _probe_services(
     )
 
 
-_DAEMON_PACKAGES: dict[str, str] = {
-    "haproxy-certd": "certd",
-    "haproxy-controld": "controld",
-    "easy-ha-proxy-backupd": "backupd",
-    "easy-ha-proxy-updated": "updated",
-    "easy-ha-proxy-metricsd": "metricsd",
-    "easy-ha-proxy-guardd": "guardd",
-}
 
 
 def _sha256(path: Path) -> str:
@@ -1083,61 +998,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _daemon_digest(path: Path, artifact_id: str) -> str:
-    base_digest = _sha256(path)
-    package_name = _DAEMON_PACKAGES.get(artifact_id)
-    if not package_name:
-        return base_digest
-    package_dir = path.parent / package_name
-    if not package_dir.is_dir():
-        return base_digest
-    module_files = sorted(
-        candidate
-        for candidate in package_dir.glob("*.py")
-        if candidate.is_file() and not candidate.is_symlink()
-    )
-    if not module_files:
-        return base_digest
-    combined = hashlib.sha256()
-    combined.update(base_digest.encode("ascii"))
-    for module_file in module_files:
-        combined.update(b":")
-        combined.update(module_file.name.encode("utf-8"))
-        combined.update(b"=")
-        combined.update(_sha256(module_file).encode("ascii"))
-    return combined.hexdigest()
-
-
-def _truthy_flag(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return False
-
-
-def _native_daemons_enabled(
-    source_dir: Path,
-    variables: dict[str, Any] | None,
-    resolve_installed: Callable[[Path], Path],
-) -> bool:
-    if variables:
-        explicit = [k for k in _NATIVE_ENABLE_KEYS if k in variables]
-        if explicit:
-            return any(_truthy_flag(variables[k]) for k in explicit)
-    defaults, _ = _read_mapping(source_dir / ADMIN_DEFAULTS)
-    if "native_daemons_enabled" in defaults:
-        return _truthy_flag(defaults["native_daemons_enabled"])
-    if resolve_installed(NATIVE_STAGING_METADATA).is_file():
-        return True
-    return any(
-        resolve_installed(installed_path).is_file()
-        for _, _, installed_path, _ in NATIVE_DAEMON_ARTIFACTS
-    )
 
 
 def _dir_fingerprint(root: Path, rel_dir: Path) -> str | None:
@@ -1191,94 +1051,59 @@ def _probe_daemons(
     available = False
     unknown = False
     checked = 0
-    for artifact_id, label, installed_path, relative_source in DAEMON_ARTIFACTS:
-        source_path = source_dir / relative_source
+    meta = _read_native_metadata(resolve_installed(NATIVE_STAGING_METADATA))
+    installed_rev = ""
+    if meta and isinstance(meta.get("revision"), str):
+        raw_rev = meta["revision"].strip().lower()
+        if _REVISION_RE.fullmatch(raw_rev):
+            installed_rev = raw_rev
+    target_rev = ""
+    if isinstance(target_revision, str):
+        raw_target = target_revision.strip().lower()
+        if _REVISION_RE.fullmatch(raw_target):
+            target_rev = raw_target
+    source_changed_cache: dict[Path, bool] = {}
+    base_source = installed_source or source_dir
+    for artifact_id, label, installed_path, rel_src_dir in NATIVE_DAEMON_ARTIFACTS:
         installed = resolve_installed(installed_path)
-        item: dict[str, Any] = {"id": artifact_id, "label": label}
-        if not source_path.is_file():
-            item.update({"state": "unknown", "reason": "source-file-missing"})
-            unknown = True
-            artifacts.append(item)
-            continue
-        try:
-            source_digest = _daemon_digest(source_path, artifact_id)
-            installed_digest = (
-                _daemon_digest(installed, artifact_id) if installed.is_file() else None
-            )
-        except OSError as exc:
-            item.update({"state": "unknown", "reason": "read-failed", "error": str(exc)})
-            unknown = True
-            artifacts.append(item)
-            continue
-        checked += 1
-        item["current_digest"] = installed_digest
-        item["available_digest"] = source_digest
-        if installed_digest == source_digest:
-            item["state"] = "current"
-        else:
-            item["state"] = "available"
-            item["reason"] = (
-                "installed-file-missing"
-                if installed_digest is None
-                else "digest-mismatch"
-            )
-            available = True
-        artifacts.append(item)
-
-    if _native_daemons_enabled(source_dir, variables, resolve_installed):
-        meta = _read_native_metadata(resolve_installed(NATIVE_STAGING_METADATA))
-        installed_rev = ""
-        if meta and isinstance(meta.get("revision"), str):
-            raw_rev = meta["revision"].strip().lower()
-            if _REVISION_RE.fullmatch(raw_rev):
-                installed_rev = raw_rev
-        target_rev = ""
-        if isinstance(target_revision, str):
-            raw_target = target_revision.strip().lower()
-            if _REVISION_RE.fullmatch(raw_target):
-                target_rev = raw_target
-        source_changed_cache: dict[Path, bool] = {}
-        base_source = installed_source or source_dir
-        for artifact_id, label, installed_path, rel_src_dir in NATIVE_DAEMON_ARTIFACTS:
-            installed = resolve_installed(installed_path)
-            item = {"id": artifact_id, "label": label, "native": True}
-            if rel_src_dir not in source_changed_cache:
-                if base_source != source_dir:
-                    old_fp = _dir_fingerprint(base_source, rel_src_dir)
-                    new_fp = _dir_fingerprint(source_dir, rel_src_dir)
-                    source_changed_cache[rel_src_dir] = (
-                        old_fp is not None and new_fp is not None and old_fp != new_fp
-                    )
-                else:
-                    source_changed_cache[rel_src_dir] = False
-            native_src_changed = source_changed_cache[rel_src_dir]
-            checked += 1
-            if not installed.is_file():
-                item.update({"state": "available", "reason": "installed-file-missing"})
-                available = True
-            elif native_src_changed:
-                item.update({
-                    "state": "available",
-                    "reason": "native-source-changed",
-                    "current_revision": installed_rev or None,
-                    "available_revision": target_rev or None,
-                })
-                available = True
-            elif target_rev and installed_rev != target_rev:
-                item.update({
-                    "state": "available",
-                    "reason": "revision-mismatch" if installed_rev else "native-metadata-missing",
-                    "current_revision": installed_rev or None,
-                    "available_revision": target_rev,
-                })
-                available = True
+        item = {"id": artifact_id, "label": label, "native": True}
+        if rel_src_dir not in source_changed_cache:
+            if base_source != source_dir:
+                old_fp = _dir_fingerprint(base_source, rel_src_dir)
+                new_fp = _dir_fingerprint(source_dir, rel_src_dir)
+                source_changed_cache[rel_src_dir] = (
+                    old_fp is not None and new_fp is not None and old_fp != new_fp
+                )
             else:
-                item.update({
-                    "state": "current",
-                    "current_revision": installed_rev or None,
-                    "available_revision": target_rev or installed_rev or None,
-                })
-            artifacts.append(item)
+                source_changed_cache[rel_src_dir] = False
+        native_src_changed = source_changed_cache[rel_src_dir]
+        checked += 1
+        if not installed.is_file():
+            item.update({"state": "available", "reason": "installed-file-missing"})
+            available = True
+        elif native_src_changed:
+            item.update({
+                "state": "available",
+                "reason": "native-source-changed",
+                "current_revision": installed_rev or None,
+                "available_revision": target_rev or None,
+            })
+            available = True
+        elif target_rev and installed_rev != target_rev:
+            item.update({
+                "state": "available",
+                "reason": "revision-mismatch" if installed_rev else "native-metadata-missing",
+                "current_revision": installed_rev or None,
+                "available_revision": target_rev,
+            })
+            available = True
+        else:
+            item.update({
+                "state": "current",
+                "current_revision": installed_rev or None,
+                "available_revision": target_rev or installed_rev or None,
+            })
+        artifacts.append(item)
 
     details = {
         "comparison": "installed-files-to-managed-source",
@@ -1503,15 +1328,13 @@ def _flavoured(reference: str | None, flavour: str) -> str | None:
 
 
 def _target_panel_flavour(root: Path, variables: dict[str, Any]) -> str | None:
-    flag = "haproxy_admin_use_go_panel"
-    if flag in variables:
-        value = variables[flag]
-    else:
-        defaults, error = _read_mapping(root / ADMIN_DEFAULTS)
-        if error or not defaults:
-            return None
-        value = defaults.get(flag, False)
-    return "go-" if str(value).lower() in {"true", "yes", "on", "1"} else ""
+    """Every deployment runs the Go panel: its "go-<channel>" image.
+
+    The Flask panel and its haproxy_admin_use_go_panel switch are gone; a
+    gateway still running the Flask image is moved to the Go one.
+    """
+    del root, variables
+    return "go-"
 
 
 def _probe_image(image: str, runner: Runner) -> dict[str, Any]:
@@ -2316,6 +2139,11 @@ def link_web_application(
     admin = by_id.get("admin-container")
     scope = ((source or {}).get("details") or {}).get("scope")
     scope = scope if isinstance(scope, dict) else None
+    # A gateway without the managed panel stack has no web application to
+    # pair with: requiring the panel's fingerprint there would hold every
+    # host update back for an image that will never run.
+    if admin is None or ((admin.get("details") or {}).get("reason") == "compose-file-missing"):
+        return
 
     host_ids = [cid for cid in HOST_SOURCE_COMPONENTS if by_id.get(cid, {}).get("state") == "available"]
     changes_offered = bool(scope and scope.get("ready") is True)
@@ -2632,7 +2460,12 @@ def build_update_plan(
             "image_changes": retargeted,
         }
 
-    if components[0].get("state") == "available" and candidate_source is None:
+    # The web application check above blocks the complete update when it
+    # cannot pair the panel with the source. When the candidate could not be
+    # read, or an image candidate not verified, that is the actual cause and
+    # replaces its generic reason; the update stays blocked either way.
+    paired_only = (components[0].get("details") or {}).get("reason") == "web-application-not-published"
+    if candidate_source is None and (components[0].get("state") == "available" or paired_only):
         # Only the candidate says what the complete update installs: which
         # services and daemons it changes, which images it re-pins. Without
         # it the update used to be offered anyway; it installed, and then
@@ -2656,7 +2489,8 @@ def build_update_plan(
             },
         )
 
-    if components[0].get("actionable") is True:
+    paired_only = (components[0].get("details") or {}).get("reason") == "web-application-not-published"
+    if components[0].get("actionable") is True or paired_only:
         unavailable_containers = [
             item["id"]
             for item in components

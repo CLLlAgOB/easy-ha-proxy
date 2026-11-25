@@ -110,35 +110,5 @@ class ItIsAppliedToBothCounters(unittest.TestCase):
         self.assertIn("site_{{ id }}_ex{{ rule }}_path", self.source)
 
 
-class TheTwoLayersAgree(unittest.TestCase):
-    """The engine and the counter should not disagree about what an asset is."""
-
-    def test_every_suffix_the_counter_forgives_the_engine_forgives_too(self):
-        import importlib.util
-        import sys
-
-        guardd_path = (
-            ROOT / "ansible" / "roles" / "haproxy-admin" / "files"
-            / "easy-ha-proxy-guardd.py"
-        )
-        spec = importlib.util.spec_from_file_location("guardd_assets",
-                                                      guardd_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["guardd_assets"] = module
-        spec.loader.exec_module(module)
-
-        source = TEMPLATE.read_text(encoding="utf-8")
-        counter = set()
-        for line in source.splitlines():
-            if line.strip().startswith("acl err_asset_path"):
-                counter.update(
-                    re.findall(r"\.[a-z0-9]+", line.split("-i", 1)[1])
-                )
-        engine = set(module.ASSET_SUFFIXES)
-        # The counter may forgive less than the engine, never more: anything
-        # it waves through must already be something the engine ignores.
-        self.assertEqual(counter - engine, set())
-
-
 if __name__ == "__main__":
     unittest.main()

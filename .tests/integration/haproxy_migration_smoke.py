@@ -190,8 +190,7 @@ backend be_admin
             "{{ haproxy_socket | default('/run/haproxy/admin.sock') }}", '/run/haproxy/admin.sock').replace(
             "{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}", '/var/lib/haproxy/server-state').replace(
             # No native agent here: the dumper uses the Python normalizer installed above.
-            "{{ (native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent')) if (native_tools_enabled"
-            " | default(native_daemons_enabled | default(true)) | bool) else '' }}", ''))
+            "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}", ''))
         dumper.chmod(0o755)
         (dropins / 'server-state.conf').write_text('[Service]\nExecStartPre=-/usr/local/sbin/haproxy-state-dump\n')
         (dropins / 'override.conf').write_text('[Service]\nExecStart=\nExecStart=/usr/sbin/haproxy -Ws \\\n    -S /run/haproxy/master.sock,mode,660,user,root,group,haproxy \\\n    -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid\n')

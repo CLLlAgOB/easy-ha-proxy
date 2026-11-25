@@ -268,31 +268,24 @@ daemon_labels=(
   "Authelia users daemon"
   "Authelia bans daemon"
 )
-daemon_scripts=(
-  /usr/local/sbin/haproxy-certd.py
-  /usr/local/sbin/haproxy-controld.py
-  /usr/local/sbin/haproxy-healthd.py
-  /usr/local/sbin/easy-ha-proxy-backupd.py
-  /usr/local/sbin/easy-ha-proxy-updated.py
-  /usr/local/sbin/easy-ha-proxy-alertd.py
-  /usr/local/sbin/easy-ha-proxy-guardd.py
-  /usr/local/sbin/easy-ha-proxy-metricsd.py
-  /usr/local/sbin/authelia-configd.py
-  /usr/local/sbin/authelia-usersd.py
-  /usr/local/sbin/authelia-bansd.py
-)
-daemon_sources=(
-  ansible/roles/haproxy-admin/files/haproxy-certd.py
-  ansible/roles/haproxy-admin/files/haproxy-controld.py
-  ansible/roles/haproxy-admin/files/haproxy-healthd.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-alertd.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-guardd.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-metricsd.py
-  ansible/roles/authelia/files/authelia-configd.py
-  ansible/roles/authelia/files/authelia-usersd.py
-  ansible/roles/authelia/files/authelia-bansd.py
+# The binary each unit runs: every daemon is a mode of the native agent,
+# except adaptive protection, which is guardd-core. The native stage records
+# the commit they were built from.
+native_agent_bin=/usr/local/sbin/easy-ha-proxy-agent
+native_guardd_bin=/usr/local/sbin/guardd-core
+native_metadata=/var/lib/easy-ha-proxy/native-staging/image.json
+daemon_binaries=(
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_guardd_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
 )
 managed_unit_units=(
   iptables-haproxy-ban.service
@@ -473,35 +466,19 @@ mode_label() {
 print_service_line() {
   local unit="$1"
   local label="$2"
-  local script="${3:-}"
-  local source_relative="${4:-}"
+  local binary="${3:-}"
   local state="not-installed"
-  local installed_version=""
-  local source_version=""
   local version_text=""
   if command -v systemctl >/dev/null 2>&1 &&
      systemctl cat "${unit}" >/dev/null 2>&1; then
     state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
     [[ -n "${state}" ]] || state="unknown"
   fi
-  if [[ -n "${script}" && -f "${script}" ]] &&
+  if [[ -n "${binary}" && -f "${binary}" ]] &&
      command -v sha256sum >/dev/null 2>&1; then
-    installed_version="$(
-      sha256sum "${script}" | awk '{ print substr($1, 1, 12) }'
+    version_text=" | ${binary##*/} $(
+      sha256sum "${binary}" | awk '{ print substr($1, 1, 12) }'
     )"
-    version_text=" | version=${installed_version}"
-    if [[ -n "${source_relative}" &&
-          -f "${source_dir}/${source_relative}" ]]; then
-      source_version="$(
-        sha256sum "${source_dir}/${source_relative}" |
-          awk '{ print substr($1, 1, 12) }'
-      )"
-      if [[ "${installed_version}" == "${source_version}" ]]; then
-        version_text+=" (current)"
-      else
-        version_text+=" -> ${source_version} (update available)"
-      fi
-    fi
   fi
   printf '  %-30s %-13s%s\n' "${label}:" "${state}" "${version_text}"
 }
@@ -547,8 +524,7 @@ inspect_system() {
     print_service_line \
       "${daemon_units[i]}" \
       "${daemon_labels[i]}" \
-      "${daemon_scripts[i]}" \
-      "${daemon_sources[i]}"
+      "${daemon_binaries[i]}"
   done
   for i in "${!managed_unit_units[@]}"; do
     print_service_line \
@@ -1218,77 +1194,77 @@ ensure_remote_source_snapshot() {
   remote_source_snapshot="${temporary_update_checkout}/source"
 }
 
+# The commit the native binaries were built from; empty when unknown.
+native_installed_revision() {
+  [[ -r "${native_metadata}" ]] || return 0
+  sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' \
+    "${native_metadata}" 2>/dev/null | head -n 1
+}
+
+source_revision_of() {
+  command -v git >/dev/null 2>&1 || return 0
+  git -C "$1" rev-parse HEAD 2>/dev/null || true
+}
+
+# The native binaries are pinned to the commit they were built from, so they
+# are due whenever the source to compare with is another commit -- what the
+# daemons component of `easy-ha-proxy update` installs.
 daemon_updates_available() {
   local comparison_root="${1:-${source_dir}}"
-  local installed=""
-  local source=""
+  local wanted=""
   local i=""
 
-  command -v sha256sum >/dev/null 2>&1 || return 1
   for i in "${!daemon_units[@]}"; do
-    [[ -f "${comparison_root}/${daemon_sources[i]}" ]] || continue
     if command -v systemctl >/dev/null 2>&1 &&
        ! systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
       return 0
     fi
-    if [[ ! -f "${daemon_scripts[i]}" ]]; then
-      return 0
-    fi
-    installed="$(sha256sum "${daemon_scripts[i]}" | awk '{ print $1 }')"
-    source="$(
-      sha256sum "${comparison_root}/${daemon_sources[i]}" | awk '{ print $1 }'
-    )"
-    [[ "${installed}" == "${source}" ]] || return 0
+    [[ -x "${daemon_binaries[i]}" ]] || return 0
   done
-  return 1
+  wanted="$(source_revision_of "${comparison_root}")"
+  [[ -n "${wanted}" && "$(native_installed_revision)" != "${wanted}" ]]
 }
 
 show_daemon_versions() {
   local comparison_root="${1:-${source_dir}}"
   local comparison_label="${2:-current source}"
   local installed=""
-  local source=""
+  local wanted=""
   local state=""
+  local tag=""
   local i=""
 
-  printf '\nВспомогательные systemd-демоны (сравнение: %s; версия = SHA-256):\n' \
+  installed="$(native_installed_revision)"
+  wanted="$(source_revision_of "${comparison_root}")"
+  printf '\nВспомогательные systemd-демоны (нативная сборка; сравнение: %s):\n' \
     "${comparison_label}"
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    printf '[WARN] sha256sum недоступен, версии демонов не проверены.\n'
-    return
+  if [[ -z "${installed}" ]]; then
+    printf '[WARN] Ревизия нативной сборки неизвестна (%s).\n' "${native_metadata}"
+  elif [[ -z "${wanted}" ]]; then
+    printf '[INFO] Нативная сборка %s; ревизию для сравнения определить не удалось.\n' \
+      "${installed:0:12}"
+  elif [[ "${installed}" == "${wanted}" ]]; then
+    printf '[ OK ] Нативная сборка %s совпадает с исходниками.\n' "${installed:0:12}"
+  else
+    printf '[UPD ] Нативная сборка %s -> %s\n' "${installed:0:12}" "${wanted:0:12}"
   fi
   for i in "${!daemon_units[@]}"; do
-    state="not-installed"
-    if command -v systemctl >/dev/null 2>&1 &&
-       systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
-      state="$(systemctl is-active "${daemon_units[i]}" 2>/dev/null || true)"
-      state="${state:-unknown}"
-    else
+    if ! command -v systemctl >/dev/null 2>&1 ||
+       ! systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
       printf '[INFO] %-27s не установлен\n' "${daemon_units[i]}"
       continue
     fi
-    if [[ ! -f "${daemon_scripts[i]}" ]]; then
-      printf '[MISS] %-27s state=%s, скрипт отсутствует\n' \
-        "${daemon_units[i]}" "${state}"
+    state="$(systemctl is-active "${daemon_units[i]}" 2>/dev/null || true)"
+    state="${state:-unknown}"
+    if [[ ! -x "${daemon_binaries[i]}" ]]; then
+      printf '[MISS] %-27s state=%s, нет %s\n' \
+        "${daemon_units[i]}" "${state}" "${daemon_binaries[i]}"
       continue
     fi
-    installed="$(sha256sum "${daemon_scripts[i]}" | awk '{ print $1 }')"
-    if [[ ! -f "${comparison_root}/${daemon_sources[i]}" ]]; then
-      printf '[WARN] %-27s state=%s, installed=%s, source отсутствует\n' \
-        "${daemon_units[i]}" "${state}" "${installed:0:12}"
-      continue
-    fi
-    source="$(
-      sha256sum "${comparison_root}/${daemon_sources[i]}" | awk '{ print $1 }'
-    )"
-    if [[ "${installed}" == "${source}" ]]; then
-      printf '[ OK ] %-27s state=%s, version=%s\n' \
-        "${daemon_units[i]}" "${state}" "${installed:0:12}"
-    else
-      printf '[UPD ] %-27s state=%s, %s -> %s\n' \
-        "${daemon_units[i]}" "${state}" \
-        "${installed:0:12}" "${source:0:12}"
-    fi
+    tag='[ OK ]'
+    [[ "${state}" == "active" ]] || tag='[WARN]'
+    printf '%s %-27s state=%s, %s\n' \
+      "${tag}" "${daemon_units[i]}" "${state}" "${daemon_binaries[i]##*/}"
   done
 }
 

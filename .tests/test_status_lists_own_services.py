@@ -50,14 +50,5 @@ class TheInventory(unittest.TestCase):
         self.assertIn("easy-ha-proxy-alertd.service", units)
 
 
-@unittest.skipIf(sys.platform == "win32", "healthd needs POSIX modules")
-class TheActions(unittest.TestCase):
-    def test_the_backup_job_is_shown_but_never_started_from_status(self):
-        module = healthd()
-        self.assertEqual(module._control_allowed_actions("systemd", "easy-ha-proxy-backup.service"), ())
-        self.assertIn("restart", module._control_allowed_actions("systemd", "easy-ha-proxy-backup.timer"))
-        self.assertIn("restart", module._control_allowed_actions("systemd", "easy-ha-proxy-alertd.service"))
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -2,33 +2,13 @@
 # roles/haproxy-admin/tasks/native.yml
 # Installation of the precompiled Rust (guardd-core) and Go
 # (easy-ha-proxy-agent) host binaries for x86_64 (amd64) and aarch64 (arm64).
+# They are the host daemons and tools: there is no other implementation.
 # Delivery priority:
 #   1. native_local_bundle_dir (air-gapped local tarball)
 #   2. native_release_base_url + native_release_checksums (HTTPS + mandatory SHA-256)
 #   3. native_release_image (multi-arch scratch OCI image pulled via Docker + SHA256SUMS check)
 
-- name: "native-daemons | Determine whether any native binary is requested"
-  ansible.builtin.set_fact:
-    _native_any_enabled: >-
-      {{
-        (native_daemons_enabled | default(false) | bool)
-        or (native_guardd_enabled | default(false) | bool)
-        or (native_guardd_ffi_enabled | default(false) | bool)
-        or (native_healthd_enabled | default(false) | bool)
-        or (native_metricsd_enabled | default(false) | bool)
-        or (native_alertd_enabled | default(false) | bool)
-        or (native_controld_enabled | default(false) | bool)
-        or (native_certd_enabled | default(false) | bool)
-        or (native_backupd_enabled | default(false) | bool)
-        or (native_updated_enabled | default(false) | bool)
-        or (native_authelia_bansd_enabled | default(false) | bool)
-        or (native_authelia_usersd_enabled | default(false) | bool)
-        or (native_authelia_configd_enabled | default(false) | bool)
-        or (native_tools_enabled | default(false) | bool)
-      }}
-
 - name: "native-daemons | Install and verify native binaries"
-  when: _native_any_enabled | bool
   block:
     - name: "native-daemons | Map host architecture to release arch"
       ansible.builtin.set_fact:
@@ -71,7 +51,7 @@
           https:// native_release_base_url and a 64-hex SHA-256 entry in
           native_release_checksums['{{ _native_arch }}'].
 
-    - name: "native-daemons | Ensure staging and native library directories exist"
+    - name: "native-daemons | Ensure the staging directory exists"
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -79,7 +59,6 @@
         group: root
         mode: "0755"
       loop:
-        - /usr/local/lib/easy-ha-proxy
         - /var/lib/easy-ha-proxy/native-staging
 
     - name: "native-daemons | Copy local release bundle when configured"
@@ -203,7 +182,6 @@
         trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
         rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
         docker cp "${cid}:/sbin" "${stage}/sbin"
-        docker cp "${cid}:/lib" "${stage}/lib"
         docker cp "${cid}:/SHA256SUMS" "${stage}/SHA256SUMS"
         (cd "${stage}" && sha256sum -c SHA256SUMS)
         python3 -c 'import json, sys; open(sys.argv[1], "w", encoding="utf-8").write(json.dumps({"image": sys.argv[2], "digest": sys.argv[3], "revision": sys.argv[4]}) + "\n")' \
@@ -244,9 +222,6 @@
           - source: sbin/guardd-core
             dest: "{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}"
             mode: "0755"
-          - source: lib/libguardd_core.so
-            dest: "{{ native_guardd_lib | default('/usr/local/lib/easy-ha-proxy/libguardd_core.so') }}"
-            mode: "0644"
       block:
         - name: Record existing native files
           ansible.builtin.stat:
@@ -339,26 +314,20 @@
       ansible.builtin.command:
         argv: "{{ ['systemctl', 'try-restart'] + _native_agent_units }}"
       vars:
-        _native_agent_units: >-
-          {{ [
-               ('haproxy-healthd.service' if native_healthd_enabled | default(false) | bool else ''),
-               ('easy-ha-proxy-metricsd.service' if native_metricsd_enabled | default(false) | bool else ''),
-               ('easy-ha-proxy-alertd.service' if native_alertd_enabled | default(false) | bool else ''),
-               ('haproxy-controld.service' if native_controld_enabled | default(false) | bool else ''),
-               ('haproxy-certd.service' if native_certd_enabled | default(false) | bool else ''),
-               ('authelia-bansd.service' if native_authelia_bansd_enabled | default(false) | bool else ''),
-               ('authelia-usersd.service' if native_authelia_usersd_enabled | default(false) | bool else ''),
-               ('authelia-configd.service' if native_authelia_configd_enabled | default(false) | bool else '')
-             ] | select | list }}
-      when:
-        - _native_agent_copy is changed
-        - _native_agent_units | length > 0
+        _native_agent_units:
+          - haproxy-healthd.service
+          - easy-ha-proxy-metricsd.service
+          - easy-ha-proxy-alertd.service
+          - haproxy-controld.service
+          - haproxy-certd.service
+          - authelia-bansd.service
+          - authelia-usersd.service
+          - authelia-configd.service
+      when: _native_agent_copy is changed
       changed_when: true
 
     - name: "native-daemons | Pick up the new backup broker outside active restores"
-      when:
-        - _native_agent_copy is changed
-        - native_backupd_enabled | default(false) | bool
+      when: _native_agent_copy is changed
       block:
         - name: Inspect the active restore marker
           ansible.builtin.stat:
@@ -392,9 +361,7 @@
         path: "{{ updated_active_marker | default('/run/easy-ha-proxy/easy-ha-proxy-update.active') }}"
         follow: false
       register: _native_update_active
-      when:
-        - _native_agent_copy is changed
-        - native_updated_enabled | default(false) | bool
+      when: _native_agent_copy is changed
 
     - name: "native-daemons | Ask the update broker to restart once its job ends"
       ansible.builtin.file:
@@ -405,7 +372,6 @@
         mode: "0600"
       when:
         - _native_agent_copy is changed
-        - native_updated_enabled | default(false) | bool
         - _native_update_active.stat.exists
 
     - name: "native-daemons | Restart the update broker on the replaced binary"
@@ -413,14 +379,43 @@
         argv: [systemctl, try-restart, easy-ha-proxy-updated.service]
       when:
         - _native_agent_copy is changed
-        - native_updated_enabled | default(false) | bool
         - not _native_update_active.stat.exists
       changed_when: true
 
     - name: "native-daemons | Restart guardd when its Rust binary was replaced"
       ansible.builtin.command:
         argv: [systemctl, try-restart, easy-ha-proxy-guardd.service]
-      when:
-        - _native_guardd_copy is changed
-        - native_guardd_enabled | default(false) | bool
+      when: _native_guardd_copy is changed
       changed_when: true
+
+    # Gateways installed before the Python implementation was removed still
+    # carry its scripts and packages, and the Rust library only it loaded.
+    # Nothing runs them any more; they go so no one starts one by hand.
+    - name: "native-daemons | Remove the former Python daemons and the FFI library"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/sbin/easy-ha-proxy-alertd.py
+        - /usr/local/sbin/easy_ha_proxy_alert_client.py
+        - /usr/local/sbin/easy-ha-proxy-backupd.py
+        - /usr/local/sbin/easy-ha-proxy-backup-run.py
+        - /usr/local/sbin/easy-ha-proxy-unit-failed.py
+        - /usr/local/sbin/easy-ha-proxy-guardd.py
+        - /usr/local/sbin/easy-ha-proxy-metricsd.py
+        - /usr/local/sbin/easy-ha-proxy-updated.py
+        - /usr/local/sbin/haproxy-certd.py
+        - /usr/local/sbin/haproxy-controld.py
+        - /usr/local/sbin/haproxy-healthd.py
+        - /usr/local/sbin/haproxy-udp-forward.py
+        - /usr/local/sbin/authelia-bansd.py
+        - /usr/local/sbin/authelia-configd.py
+        - /usr/local/sbin/authelia-usersd.py
+        - /usr/local/sbin/backupd
+        - /usr/local/sbin/certd
+        - /usr/local/sbin/controld
+        - /usr/local/sbin/guardd
+        - /usr/local/sbin/metricsd
+        - /usr/local/sbin/updated
+        - /usr/local/sbin/__pycache__
+        - /usr/local/lib/easy-ha-proxy/libguardd_core.so

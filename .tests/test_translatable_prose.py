@@ -20,13 +20,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "docker" / "app" / "haproxy_admin"
-TEMPLATES = APP / "templates"
-FRAGMENTS = APP / "translations" / "ru"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
+TEMPLATES = _WEB_DIR / "templates"
+FRAGMENTS = _WEB_DIR / "translations" / "ru"
 
 
 def catalog() -> dict:
     messages = {}
-    base = APP / "translations" / "ru.json"
+    base = _WEB_DIR / "translations" / "ru.json"
     if base.is_file():
         messages.update(json.loads(base.read_text(encoding="utf-8")).get("messages", {}))
     for path in sorted(FRAGMENTS.glob("*.json")):
@@ -99,7 +100,7 @@ class ProseTests(unittest.TestCase):
         )
         scripts = "\n".join(
             " ".join(path.read_text(encoding="utf-8").split())
-            for path in (APP / "static" / "js").glob("*.js")
+            for path in (_WEB_DIR / "static" / "js").glob("*.js")
         )
         stale = []
         for name in ("client_certificates.json",):

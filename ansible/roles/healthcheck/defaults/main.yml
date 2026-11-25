@@ -25,32 +25,22 @@ status_check_systemd_units:
   - name: "haproxy-certd.service"
     label: "HAProxy certificate daemon"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-    version_file: "/usr/local/sbin/haproxy-certd.py"
-    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-certd.py"
 
   - name: "haproxy-controld.service"
     label: "HAProxy control daemon"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-    version_file: "/usr/local/sbin/haproxy-controld.py"
-    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-controld.py"
 
   - name: "haproxy-healthd.service"
     label: "HAProxy health daemon"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-    version_file: "/usr/local/sbin/haproxy-healthd.py"
-    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-healthd.py"
 
   - name: "easy-ha-proxy-backupd.service"
     label: "Encrypted backup and restore broker"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-    version_file: "/usr/local/sbin/easy-ha-proxy-backupd.py"
-    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
 
   - name: "easy-ha-proxy-updated.service"
     label: "Software update broker"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-    version_file: "/usr/local/sbin/easy-ha-proxy-updated.py"
-    version_source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
 
   # The Authelia bans daemon (regulation helper)
   - name: "authelia-bansd.service"
@@ -59,24 +49,18 @@ status_check_systemd_units:
     enabled: >-
       {{ authelia_enabled | default(false) | bool
          and authelia_bans_daemon_enabled | default(true) | bool }}
-    version_file: "/usr/local/sbin/authelia-bansd.py"
-    version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-bansd.py"
 
   # The Authelia user management daemon (watcher)
   - name: "authelia-usersd.service"
     label: "Authelia users management daemon"
     enabled: "{{ authelia_enabled | default(false) | bool }}"
-    version_file: "/usr/local/sbin/authelia-usersd.py"
-    version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-usersd.py"
 
-  # The daemon that manages Authelia's configuration.yml (authelia-configd.py)
+  # The daemon that manages Authelia's configuration.yml (agent authelia-configd)
   - name: "authelia-configd.service"
     label: "Authelia config daemon (authelia-configd)"
     enabled: >-
       {{ authelia_enabled | default(false) | bool
          and authelia_configd_enabled | default(true) | bool }}
-    version_file: "/usr/local/sbin/authelia-configd.py"
-    version_source: "{{ playbook_dir }}/roles/authelia/files/authelia-configd.py"
 
   - name: "iptables-haproxy-ban.service"
     label: "HAProxy iptables ban loader"
@@ -153,7 +137,7 @@ status_check_systemd_units:
 #   enabled -- whether to check this container
 
 status_check_docker_containers:
-  # The HAProxy-admin web interface (the Flask application)
+  # The HAProxy-admin web interface (the Go panel)
   - name: "haproxy-admin"
     label: "HAProxy Admin UI"
     # If haproxy_admin_enabled is not defined, the service is expected to be there
@@ -225,13 +209,6 @@ status_check_managed_artifacts:
     source_type: "template"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
-  - name: "iptables-udp-generator"
-    label: "UDP forwarding generator"
-    path: "/usr/local/sbin/haproxy-udp-forward.py"
-    source: "{{ playbook_dir }}/roles/haproxy-admin/files/haproxy-udp-forward.py"
-    source_type: "file"
-    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-
   - name: "iptables-udp-unit"
     label: "UDP forwarding loader unit"
     path: "/etc/systemd/system/iptables-haproxy-udp.service"
@@ -274,25 +251,11 @@ status_check_managed_artifacts:
     source_type: "template"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
-  - name: "backupd-script"
-    label: "Encrypted backup and restore broker"
-    path: "/usr/local/sbin/easy-ha-proxy-backupd.py"
-    source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-backupd.py"
-    source_type: "file"
-    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-
   - name: "backupd-unit"
     label: "Encrypted backup and restore broker unit"
     path: "/etc/systemd/system/easy-ha-proxy-backupd.service"
     source: "{{ playbook_dir }}/roles/haproxy-admin/templates/easy-ha-proxy-backupd.service.j2"
     source_type: "template"
-    enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
-
-  - name: "updated-script"
-    label: "Software update broker"
-    path: "/usr/local/sbin/easy-ha-proxy-updated.py"
-    source: "{{ playbook_dir }}/roles/haproxy-admin/files/easy-ha-proxy-updated.py"
-    source_type: "file"
     enabled: "{{ haproxy_admin_enabled | default(true) | bool }}"
 
   - name: "updated-unit"
@@ -307,13 +270,6 @@ status_check_managed_artifacts:
     path: "/usr/local/bin/update-geoip.sh"
     source: "{{ playbook_dir }}/roles/geoip_acl/templates/update-geoip.sh.j2"
     source_type: "template"
-    enabled: "{{ geoip_database_enabled | default(true) | bool }}"
-
-  - name: "geoip-updater-python"
-    label: "Transactional GeoIP updater"
-    path: "/usr/local/lib/easy-ha-proxy/update_geoip.py"
-    source: "{{ playbook_dir }}/roles/geoip_acl/files/update_geoip.py"
-    source_type: "file"
     enabled: "{{ geoip_database_enabled | default(true) | bool }}"
 
   - name: "geoip-update-service"
@@ -434,22 +390,7 @@ status_check_docker_log_lines: 80
 # Can be overridden in group_vars/host_vars if needed.
 status_check_docker_logs_compose_dir: "/opt/authelia"
 
-# Keep native Rust + Go template defaults in sync with haproxy-admin so
-# status-check artifact digests match the rendered systemd units and wrappers.
-native_daemons_enabled: true
-native_guardd_enabled: "{{ native_daemons_enabled | bool }}"
-native_guardd_ffi_enabled: "{{ native_daemons_enabled | bool }}"
-native_healthd_enabled: "{{ native_daemons_enabled | bool }}"
-native_metricsd_enabled: "{{ native_daemons_enabled | bool }}"
-native_alertd_enabled: "{{ native_daemons_enabled | bool }}"
-native_controld_enabled: "{{ native_daemons_enabled | bool }}"
-native_certd_enabled: "{{ native_daemons_enabled | bool }}"
-native_backupd_enabled: "{{ native_daemons_enabled | bool }}"
-native_updated_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_bansd_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_usersd_enabled: "{{ native_daemons_enabled | bool }}"
-native_authelia_configd_enabled: "{{ native_daemons_enabled | bool }}"
-native_tools_enabled: "{{ native_daemons_enabled | bool }}"
+# The same binary paths as haproxy-admin, so the status check renders the
+# unit templates exactly as they were installed when comparing digests.
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
 native_guardd_bin: /usr/local/sbin/guardd-core
-native_guardd_lib: /usr/local/lib/easy-ha-proxy/libguardd_core.so

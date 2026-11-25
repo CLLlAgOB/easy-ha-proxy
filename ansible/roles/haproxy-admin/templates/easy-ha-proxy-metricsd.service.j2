@@ -9,8 +9,6 @@ Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
 
-Environment="PYTHONUNBUFFERED=1"
-Environment="PYTHONDONTWRITEBYTECODE=1"
 EnvironmentFile=-{{ haproxy_admin_env_file }}
 Environment="METRICSD_SOCKET_PATH={{ metricsd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-metricsd.sock') }}"
 Environment="METRICSD_SOCKET_GROUP={{ metricsd_socket_group | default(app_group | default('hadmin')) }}"
@@ -20,17 +18,8 @@ Environment="METRICSD_DATABASE={{ metricsd_database_path | default('/var/lib/eas
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
 EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
-{% set _metricsd_hashes = [lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-metricsd.py', rstrip=false) | hash('sha256')] -%}
-{% for _metricsd_mod in (query('ansible.builtin.fileglob', role_path ~ '/files/metricsd/*.py') | sort) -%}
-{%   set _ = _metricsd_hashes.append(lookup('ansible.builtin.file', _metricsd_mod, rstrip=false) | hash('sha256')) -%}
-{% endfor -%}
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ (_metricsd_hashes | join(':')) | hash('sha256') }}"
 
-{% if native_metricsd_enabled | default(false) | bool %}
 ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} metricsd
-{% else %}
-ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-metricsd.py
-{% endif %}
 
 Restart=always
 RestartSec=5

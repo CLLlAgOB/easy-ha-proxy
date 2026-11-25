@@ -38,7 +38,7 @@ type Options struct {
 	AdminAllowlistPath                                                       string
 	GeoIPDirectory, GeoIPUpdateCommand, GeoIPForceMarker, GeoIPTimerDropin   string
 	GeoIPUpdateTimeout                                                       int
-	UDPForwardState, UDPFailoverState, UDPConfig, UDPGenerator               string
+	UDPForwardState, UDPFailoverState, UDPConfig                             string
 	UDPHealthInterval                                                        int
 	MaxArchiveBytes, MaxArchiveFiles, MaxArchiveExpandedBytes                int64
 	MaxCompressionRatio                                                      int64
@@ -163,7 +163,6 @@ func OptionsFromEnv() Options {
 		UDPForwardState:                   env("HAPROXY_UDP_FORWARD_STATE", "/run/easy-ha-proxy/udp-forward-state.json"),
 		UDPFailoverState:                  env("HP_UDP_FAILOVER", "/run/easy-ha-proxy/udp-failover.json"),
 		UDPConfig:                         env("HP_UDP_CONFIG", "/opt/haproxy-admin/config/udp.yml"),
-		UDPGenerator:                      env("HP_UDP_GENERATOR", ""),
 		UDPHealthInterval:                 health,
 		MaxArchiveBytes:                   int64(envI("HAPADM_MAX_ARCHIVE_BYTES", 64*1024*1024)),
 		MaxArchiveFiles:                   int64(envI("HAPADM_MAX_ARCHIVE_FILES", 4096)),

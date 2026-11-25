@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATES = ROOT / "docker" / "app" / "haproxy_admin" / "templates"
+TEMPLATES = ROOT / "go" / "panel" / "web" / "templates"
 
 # Containers a script fills with text that came from a daemon: paths, commands,
 # exit codes, log lines, addresses. Each must be exempt from translation.
@@ -125,7 +125,7 @@ class MachineOutputTests(unittest.TestCase):
         # Exempting the container also stops the fallback text being
         # translated, so the script has to translate it instead -- otherwise
         # fixing the file name leaves "No file selected" in English.
-        js = ROOT / "docker" / "app" / "haproxy_admin" / "static" / "js"
+        js = ROOT / "go" / "panel" / "web" / "static" / "js"
         for name in ("haproxy_certs.js", "haproxy_site_edit.js"):
             with self.subTest(script=name):
                 source = (js / name).read_text(encoding="utf-8")
@@ -136,7 +136,7 @@ class MachineOutputTests(unittest.TestCase):
         # Belt and braces: the container attribute is one edit away from
         # being lost, and a signature must survive that edit.
         script = (
-            ROOT / "docker" / "app" / "haproxy_admin" / "static" / "js"
+            ROOT / "go" / "panel" / "web" / "static" / "js"
             / "detection_rules.js"
         ).read_text(encoding="utf-8")
         self.assertIn('setAttribute("data-i18n-skip", "")', script)
@@ -155,7 +155,7 @@ class VocabularyTests(unittest.TestCase):
     def test_the_replacement_rules_are_what_make_this_necessary(self):
         # Not a rule to change -- word-by-word substitution is the documented
         # fallback -- but a reason the exemptions above are not optional.
-        catalogue = ROOT / "docker" / "app" / "haproxy_admin" / "translations"
+        catalogue = ROOT / "go" / "panel" / "web" / "translations"
         russian = "".join(
             path.read_text(encoding="utf-8")
             for path in catalogue.rglob("*.json")

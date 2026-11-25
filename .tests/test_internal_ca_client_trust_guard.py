@@ -23,7 +23,6 @@ import unittest
 from unittest import mock
 
 import yaml
-from _guardd_source import daemon_source
 
 ROOT = Path(__file__).resolve().parents[1]
 CERTD_PATH = ROOT / "ansible/roles/haproxy-admin/files/haproxy-certd.py"
@@ -122,30 +121,6 @@ class TheGuard(unittest.TestCase):
         CERTD.handle_ca_client_auth({"ids": []})
         status, response = CERTD.handle_internal_ca_rotate({"confirmation": "ROTATE"})
         self.assertEqual(status, 200, response)
-
-
-class TheWords(unittest.TestCase):
-    def test_the_refusal_with_its_sites_translates_whole(self):
-        try:
-            spec = importlib.util.spec_from_file_location(
-                "client_trust_i18n", ROOT / "docker/app/haproxy_admin/i18n.py")
-            i18n = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(i18n)
-        except ImportError:
-            self.skipTest("the panel's dependencies are not installed here")
-        source = daemon_source("haproxy-certd.py")
-        routes = (ROOT / "docker/app/haproxy_admin/routes_haproxy_config.py").read_text(encoding="utf-8")
-        self.assertIn('" Sites that ask for its client certificates: "', routes)
-        for verb in ("rotating it", "deleting it"):
-            block = source.split(f"and {verb} would")[0].rsplit('"error": (', 1)[1]
-            rest = source.split(f"and {verb} would")[1].split('"client_trust"')[0]
-            pieces = [line.strip().strip('"') for line in (block + f"and {verb} would" + rest).splitlines()]
-            sentence = "".join(piece for piece in pieces if piece and piece not in ("),",))
-            sentence = sentence.replace('"', "")
-            for message in (sentence, sentence + " Sites that ask for its client certificates: 'vpn', 'files'."):
-                translated = i18n.translate(message, "ru")
-                self.assertNotEqual(translated, message, message)
-                self.assertNotRegex(translated, r"(trusted|rotate|delete|Sites|Move)")
 
 
 if __name__ == "__main__":

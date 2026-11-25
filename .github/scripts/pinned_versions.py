@@ -40,8 +40,6 @@ PINS = (
     ("ansible/roles/authelia/defaults/main.yml", "authelia_version", "dockerhub", "authelia/authelia"),
     ("ansible/roles/authelia/defaults/main.yml", "authelia_redis_image", "dockerhub", None),
     ("ansible/roles/authelia/defaults/main.yml", "mail_relay_image", "dockerhub", None),
-    ("ansible/roles/geoip_acl/defaults/main.yml", "geoip_maxminddb_version", "pypi", "maxminddb"),
-    ("ansible/roles/geoip_acl/defaults/main.yml", "geoip_pyyaml_version", "pypi", "PyYAML"),
     ("ansible/requirements.yml", "ansible.posix", "galaxy", "ansible.posix"),
     ("ansible/requirements.yml", "community.docker", "galaxy", "community.docker"),
 )

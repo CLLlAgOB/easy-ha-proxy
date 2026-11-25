@@ -12,11 +12,7 @@ Type=oneshot
 User=root
 # The daemon owns the maintenance lock, so the timer only asks it to run and
 # waits for the answer. Doing the work here would race a restore or an update.
-{% if native_tools_enabled | default(native_daemons_enabled | default(false)) | bool %}
 ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} backup-run
-{% else %}
-ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backup-run.py
-{% endif %}
 TimeoutStartSec={{ backup_schedule_timeout | default('8h') }}
 Nice=10
 IOSchedulingClass=idle

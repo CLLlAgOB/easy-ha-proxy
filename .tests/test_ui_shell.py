@@ -5,7 +5,7 @@ import unittest
 
 from jinja2 import Environment, FileSystemLoader
 
-TEMPLATES = Path(__file__).resolve().parents[1] / "docker/app/haproxy_admin/templates"
+TEMPLATES = Path(__file__).resolve().parents[1] / "go/panel/web/templates"
 
 
 def render(endpoint="routes.index", administrator=True, username="operator", source=None):

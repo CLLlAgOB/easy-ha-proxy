@@ -11,7 +11,6 @@ import os
 import socket
 import subprocess
 import tempfile
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,16 +101,14 @@ class DumperScriptTests(unittest.TestCase):
         self.assertNotRegex(self.script, r"(?m)^\s*exit [1-9][0-9]*\s*$")
 
 
-
 @unittest.skipIf(sys.platform == "win32", "the installed dumper is POSIX")
 class DumpedTransportTests(unittest.TestCase):
     HEADER = "be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state srv_uweight srv_iweight srv_time_since_last_change srv_check_status srv_check_result srv_check_health srv_check_state srv_agent_state bk_f_forced_id srv_f_forced_id srv_fqdn srv_port srvrecord srv_use_ssl srv_check_port srv_check_addr srv_agent_addr srv_agent_port"
     ROW = "36 target 1 main 127.0.0.1 2 1 17 100 10 15 3 4 6 0 0 0 - 1025 - 0 0 - - 0"
 
-    def dump(self, reply, online=True, config=None, previous="previous-state\n", mode=0o644, native=None):
-        # native: None names the Python normalizer, as before; True renders a
-        # stand-in native agent and names no normalizer; False renders the
-        # native tools off and names no normalizer either.
+    def dump(self, reply, online=True, config=None, previous="previous-state\n", mode=0o644, agent=False):
+        # agent: False names the Python normalizer; True renders a stand-in
+        # native agent and names no normalizer, so the dumper runs the agent.
         from jinja2 import Environment
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -126,16 +123,15 @@ class DumpedTransportTests(unittest.TestCase):
             helper.chmod(0o700)
             script = root / "dump.sh"
             environment = Environment()
-            environment.filters["bool"] = lambda value: str(value).strip().lower() in {"1", "true", "yes", "on"}
             context = {"haproxy_socket": str(root / "socket"), "haproxy_server_state_file": str(state)}
             arguments = [str(NORMALIZER)]
             calls_path = root / "agent-calls"
-            if native is not None:
-                agent = root / "agent"
-                agent.write_text(f'#!/bin/sh\necho "$@" >> "{calls_path}"\nshift\n'
-                                 f'exec "{sys.executable}" "{NORMALIZER}" "$@"\n')
-                agent.chmod(0o700)
-                context.update(native_agent_bin=str(agent), native_tools_enabled=native)
+            if agent:
+                stand_in = root / "agent"
+                stand_in.write_text(f'#!/bin/sh\necho "$@" >> "{calls_path}"\nshift\n'
+                                    f'exec "{sys.executable}" "{NORMALIZER}" "$@"\n')
+                stand_in.chmod(0o700)
+                context.update(native_agent_bin=str(stand_in))
                 arguments = []
             script.write_text(environment.from_string(DUMPER.read_text()).render(**context))
             config_path = root / "haproxy.cfg"
@@ -166,19 +162,16 @@ class DumpedTransportTests(unittest.TestCase):
     def test_the_native_agent_normalizes_when_no_normalizer_is_named(self):
         reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
         expected = self.dump(reply)
-        self.assertEqual(self.dump(reply, native=True), expected)
+        self.assertEqual(self.dump(reply, agent=True), expected)
         calls = self.agent_calls.split()
         self.assertEqual(calls[:2], ["server-state", "--config"])
         self.assertEqual(calls[3], "--state")
 
-    def test_turned_off_native_tools_keep_the_python_normalizer(self):
+    def test_the_dumper_names_the_agent(self):
         from jinja2 import Environment
-        environment = Environment()
-        environment.filters["bool"] = lambda value: str(value).strip().lower() in {"1", "true", "yes", "on"}
-        template = environment.from_string(DUMPER.read_text())
+        template = Environment().from_string(DUMPER.read_text())
         for context, agent in (({}, "/usr/local/sbin/easy-ha-proxy-agent"),
-                               ({"native_daemons_enabled": False}, ""),
-                               ({"native_tools_enabled": "False"}, "")):
+                               ({"native_agent_bin": "/opt/agent"}, "/opt/agent")):
             lines = [line for line in template.render(**context).splitlines() if line.startswith("AGENT=")]
             self.assertEqual(lines, [f'AGENT="{agent}"'], context)
 
@@ -247,47 +240,6 @@ class DumpedTransportTests(unittest.TestCase):
     def test_cold_start_normalization_does_not_weaken_private_snapshot_permissions(self):
         reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
         self.dump(reply, online=False, mode=0o600)
-
-
-class ControldHookTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.controld = load_controld()
-
-    def test_reload_dumps_the_state_first(self):
-        calls = []
-        with (
-            mock.patch.object(
-                self.controld, "dump_server_state",
-                side_effect=lambda: calls.append("dump"),
-            ),
-            mock.patch.object(
-                self.controld.subprocess, "run",
-                side_effect=lambda *a, **k: calls.append("reload")
-                or mock.Mock(returncode=0, stdout="reloaded", stderr=""),
-            ),
-        ):
-            ok, _ = self.controld.cmd_reload()
-        self.assertTrue(ok)
-        self.assertEqual(calls, ["dump", "reload"])
-
-    def test_a_failed_dump_does_not_block_the_reload(self):
-        with (
-            mock.patch.object(self.controld.os.path, "exists", return_value=True),
-            mock.patch.object(
-                self.controld.subprocess, "run", side_effect=OSError("boom")
-            ),
-        ):
-            # Must not raise: the timer keeps the file fresh anyway.
-            self.controld.dump_server_state()
-
-    def test_a_missing_dumper_is_skipped_quietly(self):
-        with (
-            mock.patch.object(self.controld.os.path, "exists", return_value=False),
-            mock.patch.object(self.controld.subprocess, "run") as run,
-        ):
-            self.controld.dump_server_state()
-        run.assert_not_called()
 
 
 class DocumentationTests(unittest.TestCase):

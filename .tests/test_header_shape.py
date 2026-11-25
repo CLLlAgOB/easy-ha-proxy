@@ -17,8 +17,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATES = ROOT / "docker" / "app" / "haproxy_admin" / "templates"
-STYLES = ROOT / "docker" / "app" / "haproxy_admin" / "static" / "css" / "styles.css"
+TEMPLATES = ROOT / "go" / "panel" / "web" / "templates"
+STYLES = ROOT / "go" / "panel" / "web" / "static" / "css" / "styles.css"
 BASE = TEMPLATES / "base.html"
 INDEX = TEMPLATES / "index.html"
 

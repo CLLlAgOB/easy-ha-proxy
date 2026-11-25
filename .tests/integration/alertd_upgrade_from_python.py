@@ -1,11 +1,12 @@
-"""Alert history survives the switch between the Python and the Go alertd.
+"""Alert history survives the update from the Python alertd to the agent.
 
-Usage: python3 alertd_upgrade_rollback.py --agent <easy-ha-proxy-agent>
+Usage: python3 alertd_upgrade_from_python.py --agent <easy-ha-proxy-agent>
+           --python-alertd <easy-ha-proxy-alertd.py of a 1.1.x release>
 
-Both daemons run in turn on one alerts.db, as a gateway does across an update
-to the native agent and a rollback: Python records two alerts, acknowledges
-one and mutes the other; Go must show both as they were and add an event of
-its own; Python, started again, must show all of it. Runs unprivileged.
+Gateways on 1.1.x run the Python alertd; the update moves them to the agent on
+the same alerts.db. Python records two alerts, acknowledges one and mutes the
+other; the agent must show both as they were and add an event of its own, and
+a restart of the agent must keep all of it. Runs unprivileged.
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ import sys
 import tempfile
 import time
 
-ROOT = Path(__file__).resolve().parents[2]
-PYTHON_ALERTD = ROOT / "ansible/roles/haproxy-admin/files/easy-ha-proxy-alertd.py"
 TOKEN = "upgrade-rollback-token"
 
 
@@ -93,6 +92,7 @@ class Daemon:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", required=True)
+    parser.add_argument("--python-alertd", required=True, type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="alertd-switch-") as directory:
         root = Path(directory)
@@ -108,7 +108,7 @@ def main() -> int:
             ALERTD_MAIL_LOCK=str(root / "mail.lock"),
             ALERTD_GATEWAY_NAME="gw.example.test",
         )
-        python = [sys.executable, str(PYTHON_ALERTD)]
+        python = [sys.executable, str(args.python_alertd)]
         go = [args.agent, "alertd"]
 
         # Python records, acknowledges and mutes.
@@ -139,15 +139,15 @@ def main() -> int:
         events_go = len(history(sock))
         daemon.stop()
 
-        # Rolled back to Python: everything, including what Go recorded.
-        daemon = Daemon(python, env, sock)
-        back = alerts(sock)
-        assert ("backup.failed", "weekly") in back, back
-        assert back[("backup.failed", "nightly")]["acknowledged_by"] == "ops"
-        assert back[("site.down", "app.example.test")]["muted_until"] == muted["muted_until"]
-        assert len(history(sock)) == events_go, "Python does not show the Go agent's history"
+        # Restarted, the agent keeps everything, including its own event.
+        daemon = Daemon(go, env, sock)
+        again = alerts(sock)
+        assert ("backup.failed", "weekly") in again, again
+        assert again[("backup.failed", "nightly")]["acknowledged_by"] == "ops"
+        assert again[("site.down", "app.example.test")]["muted_until"] == muted["muted_until"]
+        assert len(history(sock)) == events_go, "a restarted agent lost history"
         daemon.stop()
-    print(f"alertd switch: {events_go} events and both quieted alerts kept across Python -> Go -> Python")
+    print(f"alertd update: {events_go} events and both quieted alerts kept from Python 1.1.x to the agent")
     return 0
 
 

@@ -23,7 +23,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 UNIT_DIR = ROOT / "ansible/roles/haproxy-admin/templates"
-DAEMON_DIR = ROOT / "ansible/roles/haproxy-admin/files"
+AGENT_DIR = ROOT / "go/agent/internal"
+# The unit each agent package's daemon runs in.
+UNIT_FOR_PACKAGE = {"certd": "haproxy-certd.service.j2"}
 
 # ProtectHome=yes and =read-only both make /root unwritable. Only tmpfs both
 # hides the real home directories and leaves somewhere for snapd to write.
@@ -37,14 +39,15 @@ def units_running_certbot() -> list[Path]:
     certbot is covered the day it does.
     """
     units: list[Path] = []
-    for daemon in sorted(DAEMON_DIR.glob("*.py")):
-        source = daemon.read_text(encoding="utf-8")
-        # Naming the binary, not merely mentioning certbot in a comment.
-        if "CERTBOT_BIN" not in source:
+    for package in sorted(p for p in AGENT_DIR.iterdir() if p.is_dir()):
+        sources = [f for f in package.glob("*.go") if not f.name.endswith("_test.go")]
+        # Reading the binary's setting, not merely mentioning certbot.
+        if not any('"CERTBOT_BIN"' in f.read_text(encoding="utf-8") for f in sources):
             continue
-        unit = UNIT_DIR / f"{daemon.stem}.service.j2"
-        if unit.is_file():
-            units.append(unit)
+        name = UNIT_FOR_PACKAGE.get(package.name)
+        if name is None:
+            raise AssertionError(f"{package.name} runs certbot; add its unit to UNIT_FOR_PACKAGE")
+        units.append(UNIT_DIR / name)
     return units
 
 
@@ -99,19 +102,12 @@ class HealthdRunDirectoryTests(unittest.TestCase):
     UNIT = UNIT_DIR / "haproxy-healthd.service.j2"
 
     @staticmethod
-    def cursor_defaults() -> dict[str, str]:
-        python = (DAEMON_DIR / "haproxy-healthd.py").read_text(encoding="utf-8")
-        go = (ROOT / "go/agent/internal/healthd/state.go").read_text(encoding="utf-8")
-        found = {
-            "python": re.search(r'"HEALTHD_CURSOR_DIR",\s*"([^"]+)"', python),
-            "go": re.search(r'envOr\("HEALTHD_CURSOR_DIR",\s*"([^"]+)"\)', go),
-        }
-        out = {}
-        for daemon, match in found.items():
-            if match is None:
-                raise AssertionError(f"cursor directory default not found in the {daemon} healthd")
-            out[daemon] = match.group(1)
-        return out
+    def cursor_default() -> str:
+        go = (AGENT_DIR / "healthd/state.go").read_text(encoding="utf-8")
+        match = re.search(r'envOr\("HEALTHD_CURSOR_DIR",\s*"([^"]+)"\)', go)
+        if match is None:
+            raise AssertionError("cursor directory default not found in healthd")
+        return match.group(1)
 
     def test_the_unit_is_strict(self) -> None:
         # Without strict the directories below need not be listed, and this
@@ -122,13 +118,12 @@ class HealthdRunDirectoryTests(unittest.TestCase):
         runtime = {f"/run/{name}" for name in unit_setting(self.UNIT, "RuntimeDirectory")}
         # A leading "-" only makes a missing path non-fatal.
         writable = {p.lstrip("-") for p in unit_setting(self.UNIT, "ReadWritePaths")}
-        for daemon, path in self.cursor_defaults().items():
-            with self.subTest(daemon=daemon):
-                self.assertTrue(
-                    path in runtime or path in writable,
-                    f"{daemon} healthd writes cursors to {path}, which "
-                    f"ProtectSystem=strict leaves read-only (RuntimeDirectory: {sorted(runtime)})",
-                )
+        path = self.cursor_default()
+        self.assertTrue(
+            path in runtime or path in writable,
+            f"healthd writes cursors to {path}, which ProtectSystem=strict "
+            f"leaves read-only (RuntimeDirectory: {sorted(runtime)})",
+        )
 
     def test_socket_directory_is_still_listed(self) -> None:
         self.assertIn("easy-ha-proxy", unit_setting(self.UNIT, "RuntimeDirectory"))

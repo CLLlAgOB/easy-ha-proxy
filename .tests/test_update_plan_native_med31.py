@@ -28,17 +28,10 @@ class FakeRunner:
 
 def _seed_tree(root: Path, *, go_panel="v1", go_agent="v1", rust_guardd="v1", native_default=True) -> None:
     (root / ".git").mkdir(parents=True, exist_ok=True)
-    for _, _, _, rel_src in update_plan.DAEMON_ARTIFACTS:
-        p = root / rel_src
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"# {rel_src}\n", encoding="utf-8")
     defaults = root / update_plan.ADMIN_DEFAULTS
     defaults.parent.mkdir(parents=True, exist_ok=True)
-    defaults.write_text(
-        f"native_daemons_enabled: {'true' if native_default else 'false'}\n"
-        "haproxy_admin_use_go_panel: false\n",
-        encoding="utf-8",
-    )
+    defaults.write_text("app_group: hadmin\n", encoding="utf-8")
+    del native_default
     panel = root / "go/panel/cmd/easy-ha-proxy-panel/main.go"
     panel.parent.mkdir(parents=True, exist_ok=True)
     panel.write_text(f"// {go_panel}\n", encoding="utf-8")
@@ -52,10 +45,6 @@ def _seed_tree(root: Path, *, go_panel="v1", go_agent="v1", rust_guardd="v1", na
 
 def _seed_installed(root: Path, source: Path, *, installed_rev: str | None = REV_OLD, missing_agent: bool = False):
     fs_root = root / "installed"
-    for _, _, installed_path, rel_src in update_plan.DAEMON_ARTIFACTS:
-        dest = fs_root / installed_path.relative_to("/")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / rel_src, dest)
     for artifact_id, _, installed_path, _ in update_plan.NATIVE_DAEMON_ARTIFACTS:
         if missing_agent and artifact_id == "easy-ha-proxy-agent":
             continue

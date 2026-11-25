@@ -4,33 +4,11 @@
 - name: "haproxy-certd | Install runtime packages"
   ansible.builtin.package:
     name:
-      - python3
-      - python3-yaml
-      - python3-cryptography
       - openssl
     state: present
   tags: restore-network
 
 - import_tasks: dns-plugins.yml
-
-- name: "haproxy-certd | Install script"
-  ansible.builtin.copy:
-    src: haproxy-certd.py
-    dest: /usr/local/sbin/haproxy-certd.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: certd_script
-
-- name: "haproxy-certd | Install certd package"
-  ansible.builtin.copy:
-    src: certd/
-    dest: /usr/local/sbin/certd/
-    owner: root
-    group: root
-    mode: "0644"
-    directory_mode: "0755"
-  register: certd_package
 
 - name: "haproxy-certd | Install systemd unit"
   ansible.builtin.template:
@@ -74,27 +52,17 @@
   ansible.builtin.systemd:
     name: haproxy-certd.service
     state: restarted
-  when: certd_script.changed or certd_package.changed or certd_unit.changed or (daemons_env_t.changed | default(false))
+  when: certd_unit.changed or (daemons_env_t.changed | default(false))
 
 - name: "haproxy-certd | Ensure service started"
   ansible.builtin.systemd:
     name: haproxy-certd.service
     state: started
 
-# The worker certbot's 906 hook runs, and that certd calls when the operator
-# asks to send a certificate now. It lives with the other helpers rather than
-# in the cert role, whose files/ directory is not tracked.
+# The certificate delivery worker certbot's 906 hook runs, and that certd
+# calls when the operator asks to send a certificate now: the agent, under the
+# name both callers use.
 - name: Install the certificate delivery worker
-  ansible.builtin.copy:
-    src: easy-ha-proxy-cert-deliver.py
-    dest: /usr/local/sbin/easy-ha-proxy-cert-deliver
-    owner: root
-    group: root
-    mode: "0755"
-  when: not (native_tools_enabled | default(native_daemons_enabled | default(false)) | bool)
-
-# The agent's port of the same worker, under the name both callers use.
-- name: Install the certificate delivery worker (native agent)
   ansible.builtin.copy:
     content: |
       #!/bin/sh
@@ -104,7 +72,6 @@
     owner: root
     group: root
     mode: "0755"
-  when: native_tools_enabled | default(native_daemons_enabled | default(false)) | bool
 
 - name: Ensure certificate delivery targets directory exists
   ansible.builtin.file:

@@ -11,8 +11,6 @@
   ansible.builtin.package:
     name:
       - ca-certificates
-      - python3
-      - python3-venv
     state: present
   when: geoip_database_enabled | default(true) | bool
   tags: restore-network
@@ -25,51 +23,15 @@
     group: haproxy
     mode: "0755"
 
-- name: Ensure the GeoIP updater library directory exists
+# The updater is the native agent now: the Python updater and the private
+# environment it ran in are removed from gateways installed before.
+- name: Remove the former Python GeoIP updater and its environment
   ansible.builtin.file:
-    path: /usr/local/lib/easy-ha-proxy
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
-- name: Check the target-side GeoIP Python environment
-  ansible.builtin.stat:
-    path: "{{ geoip_runtime_venv }}/bin/pip"
-  register: geoip_runtime_pip
-  when: geoip_database_enabled | default(true) | bool
-
-- name: Create the target-side GeoIP Python environment
-  ansible.builtin.command:
-    argv:
-      - /usr/bin/python3
-      - -m
-      - venv
-      - "{{ geoip_runtime_venv }}"
-    creates: "{{ geoip_runtime_venv }}/bin/pip"
-  when:
-    - geoip_database_enabled | default(true) | bool
-    - not (geoip_runtime_pip.stat.exists | default(false))
-
-- name: Install the MaxMind DB reader in the target-side environment
-  ansible.builtin.pip:
-    name: "maxminddb=={{ geoip_maxminddb_version }}"
-    executable: "{{ geoip_runtime_venv }}/bin/pip"
-    state: present
-  when:
-    - geoip_database_enabled | default(true) | bool
-    - not ansible_check_mode or (geoip_runtime_pip.stat.exists | default(false))
-  tags: restore-network
-
-- name: Install the YAML reader in the target-side environment
-  ansible.builtin.pip:
-    name: "PyYAML=={{ geoip_pyyaml_version }}"
-    executable: "{{ geoip_runtime_venv }}/bin/pip"
-    state: present
-  when:
-    - geoip_database_enabled | default(true) | bool
-    - not ansible_check_mode or (geoip_runtime_pip.stat.exists | default(false))
-  tags: restore-network
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/lib/easy-ha-proxy/update_geoip.py
+    - /usr/local/lib/easy-ha-proxy/geoip-venv
 
 - name: Copy the static GeoIP bypass list
   ansible.builtin.copy:
@@ -161,15 +123,6 @@
     mode: "0644"
   register: geoip_selection_sync
 
-- name: Install the transactional GeoIP updater
-  ansible.builtin.copy:
-    src: update_geoip.py
-    dest: /usr/local/lib/easy-ha-proxy/update_geoip.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: geoip_updater_script
-
 - name: Install the GeoIP update command
   ansible.builtin.template:
     src: update-geoip.sh.j2
@@ -241,7 +194,6 @@
       or (geoip_selection_sync.changed | default(false))
       or (geoip_update_service.changed | default(false))
       or (geoip_update_timer.changed | default(false))
-      or (geoip_updater_script.changed | default(false))
       or (geoip_update_command.changed | default(false))
   tags: restore-network
 

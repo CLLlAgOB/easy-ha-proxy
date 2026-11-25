@@ -15,17 +15,6 @@
         group: root
         mode: "{{ authelia_bans_script_mode }}"
 
-    - name: "authelia-bansd | Install daemon script"
-      become: true
-      ansible.builtin.copy:
-        src: authelia-bansd.py
-        dest: /usr/local/sbin/authelia-bansd.py
-        owner: root
-        group: root
-        mode: "0750"
-      register: authelia_bansd_script
-      when: authelia_bans_daemon_enabled | default(true) | bool
-
     - name: "authelia-bansd | Install systemd unit"
       become: true
       ansible.builtin.template:
@@ -59,7 +48,7 @@
         state: restarted
       when:
         - authelia_bans_daemon_enabled | default(true) | bool
-        - (authelia_bansd_script is defined and authelia_bansd_script.changed) or (authelia_bansd_unit is defined and authelia_bansd_unit.changed)
+        - authelia_bansd_unit is defined and authelia_bansd_unit.changed
 
     - name: "authelia-bansd | Ensure service started"
       become: true

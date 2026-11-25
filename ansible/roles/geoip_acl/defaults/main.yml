@@ -4,13 +4,6 @@
 geoip_database_enabled: true
 geoip_database_base_url: "https://download.db-ip.com/free"
 
-# The updater is a target-side systemd service. Keep its Python environment on
-# the managed host instead of embedding the controller's Ansible interpreter
-# path in the service wrapper (which is invalid for remote inventories).
-geoip_runtime_venv: "/usr/local/lib/easy-ha-proxy/geoip-venv"
-geoip_maxminddb_version: "3.3.0"
-geoip_pyyaml_version: "6.0.4"
-
 # ISO 3166-1 alpha-2 countries used to derive the HAProxy ACL from the MMDB.
 geoip_country_codes:
   - RU
@@ -29,6 +22,6 @@ enable_geoip: false
 geoip_update_on_calendar: "weekly"
 geoip_update_randomized_delay: "2h"
 
-native_daemons_enabled: true
-native_tools_enabled: "{{ native_daemons_enabled | bool }}"
+# The updater: the native agent's update-geoip (installed by the
+# haproxy-admin native stage, which runs before this role).
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent

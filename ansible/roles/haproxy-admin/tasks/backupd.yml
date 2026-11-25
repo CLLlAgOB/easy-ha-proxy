@@ -28,25 +28,6 @@
   loop_control:
     label: "{{ item.path }}"
 
-- name: "easy-ha-proxy-backupd | Install daemon script"
-  ansible.builtin.copy:
-    src: easy-ha-proxy-backupd.py
-    dest: /usr/local/sbin/easy-ha-proxy-backupd.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: backupd_script
-
-- name: "easy-ha-proxy-backupd | Install backupd package"
-  ansible.builtin.copy:
-    src: backupd/
-    dest: /usr/local/sbin/backupd/
-    owner: root
-    group: root
-    mode: "0644"
-    directory_mode: "0755"
-  register: backupd_package
-
 - name: "easy-ha-proxy-backupd | Install systemd unit"
   ansible.builtin.template:
     src: easy-ha-proxy-backupd.service.j2
@@ -76,7 +57,7 @@
     mode: "0600"
   when:
     - backupd_restore_active.stat.exists
-    - backupd_script.changed or backupd_unit.changed or backupd_package.changed or (daemons_env_t.changed | default(false))
+    - backupd_unit.changed or (daemons_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-backupd | Enable service"
   ansible.builtin.systemd:
@@ -89,7 +70,7 @@
     state: restarted
   when:
     - not backupd_restore_active.stat.exists
-    - backupd_script.changed or backupd_unit.changed or backupd_package.changed or (daemons_env_t.changed | default(false))
+    - backupd_unit.changed or (daemons_env_t.changed | default(false))
 
 - name: "easy-ha-proxy-backupd | Ensure service is started"
   ansible.builtin.systemd:
@@ -108,23 +89,6 @@
     owner: root
     group: root
     mode: "0700"
-
-- name: "easy-ha-proxy-backupd | Install the schedule runner"
-  ansible.builtin.copy:
-    src: easy-ha-proxy-backup-run.py
-    dest: /usr/local/sbin/easy-ha-proxy-backup-run.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: backup_runner
-
-- name: "easy-ha-proxy-backupd | Install the unit-failure reporter"
-  ansible.builtin.copy:
-    src: easy-ha-proxy-unit-failed.py
-    dest: /usr/local/sbin/easy-ha-proxy-unit-failed.py
-    owner: root
-    group: root
-    mode: "0755"
 
 - name: "easy-ha-proxy-backupd | Install the unit-failure reporter unit"
   ansible.builtin.template:

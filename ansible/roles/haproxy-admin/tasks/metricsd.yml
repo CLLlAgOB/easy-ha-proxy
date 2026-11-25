@@ -2,25 +2,6 @@
 # roles/haproxy-admin/tasks/metricsd.yml
 # Installing the root daemon easy-ha-proxy-metricsd (HAProxy's historical statistics)
 
-- name: "easy-ha-proxy-metricsd | Install script"
-  ansible.builtin.copy:
-    src: easy-ha-proxy-metricsd.py
-    dest: /usr/local/sbin/easy-ha-proxy-metricsd.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: metricsd_script
-
-- name: "easy-ha-proxy-metricsd | Install metricsd package"
-  ansible.builtin.copy:
-    src: metricsd/
-    dest: /usr/local/sbin/metricsd/
-    owner: root
-    group: root
-    mode: "0644"
-    directory_mode: "0755"
-  register: metricsd_package
-
 # The daemon config sits beside healthd.json rather than inside config/, which
 # is recursively chowned to the app user after a backup restore.
 - name: "easy-ha-proxy-metricsd | Render config"
@@ -64,9 +45,7 @@
     name: easy-ha-proxy-metricsd.service
     state: restarted
   when: >-
-    metricsd_script.changed
-    or metricsd_package.changed
-    or metricsd_unit.changed
+    metricsd_unit.changed
     or metricsd_cfg.changed
     or (hapadm_env_t.changed | default(false))
     or (daemons_env_t.changed | default(false))

@@ -17,7 +17,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOGS = ROOT / "docker/app/haproxy_admin/translations"
+CATALOGS = ROOT / "go/panel/web/translations"
 
 
 def russian_messages() -> dict[str, str]:

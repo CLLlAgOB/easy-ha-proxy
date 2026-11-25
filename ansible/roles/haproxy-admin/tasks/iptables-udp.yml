@@ -1,5 +1,5 @@
 ---
-# Kernel-NAT UDP forwarding (variant A): generator script + loader unit.
+# Kernel-NAT UDP forwarding (variant A): the agent's udp-forward + loader unit.
 # HAProxy cannot proxy UDP, so UDP services are forwarded with iptables-legacy
 # DNAT programmed from the managed udp.yml. Reuses the haproxy_ban ipset.
 
@@ -8,7 +8,6 @@
     name:
       - ipset
       - iptables
-      - python3-yaml
       # UDP failover: ping checks a backend, conntrack moves existing flows
       # to the backup at once instead of after their timeout.
       - iputils-ping
@@ -51,15 +50,6 @@
     mode: "0640"
     force: no
 
-- name: "iptables-udp | Install UDP forwarding generator"
-  ansible.builtin.copy:
-    src: haproxy-udp-forward.py
-    dest: /usr/local/sbin/haproxy-udp-forward.py
-    owner: root
-    group: root
-    mode: "0755"
-  register: udp_generator
-
 - name: "iptables-udp | Install loader systemd unit"
   ansible.builtin.template:
     src: iptables-haproxy-udp.service.j2
@@ -81,6 +71,6 @@
     state: >-
       {{
         'restarted'
-        if (udp_generator.changed or udp_unit.changed)
+        if udp_unit.changed
         else 'started'
       }}

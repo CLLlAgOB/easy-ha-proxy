@@ -10,75 +10,16 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "docker" / "app" / "haproxy_admin"
+_WEB_DIR = Path(__file__).resolve().parents[1] / "go" / "panel" / "web"
 sys.path.insert(0, str(ROOT / "docker" / "app"))
-
-
-class RouteGuardTests(unittest.TestCase):
-    def setUp(self):
-        self.source = (APP_DIR / "routes_alerts.py").read_text(encoding="utf-8")
-
-    def test_settings_tests_and_deleting_history_require_superadmin(self):
-        for route in ("def api_alerts_config", "def api_alerts_test", "def api_alerts_history_delete"):
-            block = self.source.split(route)[1].split("@bp.")[0]
-            self.assertIn("if not _superadmin():", block, route)
-        # Acknowledging, muting and dismissing are how the person on duty says
-        # "I have it": open to every operator, and written down.
-        for route in ("def api_alerts_quieten", "def api_alerts_dismiss"):
-            block = self.source.split(route)[1].split("@bp.")[0]
-            self.assertNotIn("_superadmin", block, route)
-            self.assertIn("record_request(", block, route)
-        self.assertEqual(self.source.count("@bp.post"), 6)
-
-    def test_reads_stay_open_like_the_other_monitoring_pages(self):
-        for route in ("/api/alerts/state", "/api/alerts/health", "/api/alerts/history"):
-            self.assertIn(route, self.source)
-        block = self.source.split("def api_alerts_state")[1].split("@bp.")[0]
-        self.assertNotIn("_superadmin", block)
-
-    def test_a_stopped_daemon_degrades_instead_of_erroring(self):
-        self.assertIn("AlertdUnavailable", self.source)
-        self.assertIn('"unavailable": True', self.source)
-        self.assertIn("503", self.source)
-
-    def test_both_mutating_routes_are_audited(self):
-        for action in ("alerts.config", "alerts.test"):
-            self.assertIn(f'"{action}"', self.source)
-        self.assertIn("RESULT_DENIED", self.source)
-        self.assertIn("RESULT_FAILURE", self.source)
-
-    def test_the_audit_record_names_fields_and_never_values(self):
-        # The payload carries the webhook URL and its header secret.
-        block = self.source.split("def api_alerts_config")[1]
-        self.assertIn('"fields: " + ", ".join(sorted(str(key) for key in payload))', block)
-        self.assertNotIn("summary=str(payload)", block)
-
-
-class ClientTests(unittest.TestCase):
-    def setUp(self):
-        self.source = (APP_DIR / "alertd_client.py").read_text(encoding="utf-8")
-
-    def test_the_token_travels_only_on_writes(self):
-        self.assertIn("X-Alertd-Token", self.source)
-        read_block = self.source.split("def _get_json")[1].split("def _post_json")[0]
-        self.assertNotIn("X-Alertd-Token", read_block)
-
-    def test_a_rejected_setting_is_read_as_a_message_not_an_exception(self):
-        # The daemon answers 400 with the reason; raising on status would turn
-        # "that URL is not https" into "alertd is unavailable".
-        block = self.source.split("def _post_json")[1].split("def alertd_health")[0]
-        self.assertNotIn("raise_for_status", block)
-
-    def test_the_test_call_gets_a_longer_budget_than_a_save(self):
-        self.assertIn("TEST_TIMEOUT", self.source)
-        self.assertIn("timeout=TEST_TIMEOUT", self.source)
 
 
 class PageTests(unittest.TestCase):
     def setUp(self):
-        self.template = (APP_DIR / "templates" / "alerts.html").read_text(
+        self.template = (_WEB_DIR / "templates" / "alerts.html").read_text(
             encoding="utf-8"
         )
-        self.javascript = (APP_DIR / "static" / "js" / "alerts.js").read_text(
+        self.javascript = (_WEB_DIR / "static" / "js" / "alerts.js").read_text(
             encoding="utf-8"
         )
 
@@ -118,7 +59,7 @@ class PageTests(unittest.TestCase):
         self.assertIn("setUnavailable(Boolean(error.unavailable))", self.javascript)
 
     def test_the_page_is_reachable_from_the_navigation(self):
-        nav = (APP_DIR / "templates" / "_haproxy_nav.html").read_text(encoding="utf-8")
+        nav = (_WEB_DIR / "templates" / "_haproxy_nav.html").read_text(encoding="utf-8")
         self.assertIn("routes.alerts_page", nav)
 
     def test_the_container_is_given_the_socket_and_the_token(self):
@@ -127,10 +68,6 @@ class PageTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ALERTD_SOCKET_PATH=", env)
         self.assertIn("ALERTD_TOKEN=", env)
-
-    def test_the_module_is_registered(self):
-        package = (APP_DIR / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn("from . import routes_alerts", package)
 
 
 if __name__ == "__main__":

@@ -168,9 +168,6 @@
         - ha-install
         - apparmor
 
-    - role: geoip_acl
-      tags: geo
-
     - role: docker
       tags:
         - docker
@@ -191,6 +188,12 @@
     - role: haproxy-admin
       task_stage: native
       tags: ha-adm-native
+
+    # After the native stage: the GeoIP updater is the native agent, and a
+    # fresh install builds its first release here. The HAProxy configuration
+    # that reads the GeoIP lists is rendered further down.
+    - role: geoip_acl
+      tags: geo
 
     - role: haproxy-admin
       task_stage: getuseruid

@@ -302,7 +302,7 @@ class APlanWithoutTheCandidate(unittest.TestCase):
     def test_the_reason_is_in_russian(self):
         summary = self.build()["components"][0]["summary"]
         catalogue = json.loads(
-            (ROOT / "docker/app/haproxy_admin/translations/ru/updates.json").read_text(encoding="utf-8")
+            (ROOT / "go/panel/web/translations/ru/updates.json").read_text(encoding="utf-8")
         )["messages"]
         self.assertIn(summary, catalogue)
         self.assertIn("скачать новую версию", catalogue[summary])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import io
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -13,7 +14,7 @@ import unittest
 from unittest import mock
 
 import update_plan
-from update_plan import CommandResult, DAEMON_ARTIFACTS, build_update_plan
+from update_plan import CommandResult, NATIVE_DAEMON_ARTIFACTS, build_update_plan
 
 
 LOCAL_REVISION = "1" * 40
@@ -48,6 +49,23 @@ class StateNormalizerUpdateTests(unittest.TestCase):
             self.assertEqual(result["state"], "available")
 
 
+# What `git ls-tree` over the panel's inputs answers in these fakes, and the
+# fingerprint a published panel image built from it is labelled with.
+PANEL_LISTING = "100644 blob " + "c" * 40 + "\tgo/panel/web/templates/base.html\n"
+PANEL_TREE = hashlib.sha256(PANEL_LISTING.encode("utf-8")).hexdigest()
+
+
+def panel_image_answer(command: tuple[str, ...]) -> CommandResult | None:
+    """The panel fingerprint label, for the label reads of an image."""
+    if command[:3] == ("docker", "image", "inspect") and "{{json .Config.Labels}}" in command:
+        return CommandResult(0, json.dumps({update_plan.GO_WEB_TREE_LABEL: PANEL_TREE}))
+    if command[:4] == ("docker", "buildx", "imagetools", "inspect") and "{{json .Image}}" in command:
+        return CommandResult(0, json.dumps({"config": {"Labels": {update_plan.GO_WEB_TREE_LABEL: PANEL_TREE}}}))
+    if command[:2] == ("git", "-C") and "ls-tree" in command:
+        return CommandResult(0, PANEL_LISTING)
+    return None
+
+
 def prepare_source(root: Path) -> Path:
     source = root / "source"
     (source / ".git").mkdir(parents=True)
@@ -55,23 +73,28 @@ def prepare_source(root: Path) -> Path:
     (source / "ansible/easy-ha-proxy.yml").write_text(
         "---\n- hosts: easy_ha_proxy\n", encoding="utf-8"
     )
-    for _, _, _, relative in DAEMON_ARTIFACTS:
-        path = source / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"managed:{relative}\n", encoding="utf-8")
     return source
 
 
-def prepare_installed_daemons(root: Path, source: Path):
+def prepare_installed_daemons(root: Path, source: Path, revision: str | None = None):
+    """The native host binaries, as the native stage installs them, and the
+    revision they were built from when one is given."""
+    del source
     installed = root / "installed"
-    for _, _, absolute, relative in DAEMON_ARTIFACTS:
+    for _, _, absolute, _ in NATIVE_DAEMON_ARTIFACTS:
         target = installed / absolute.relative_to("/")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes((source / relative).read_bytes())
+        target.write_bytes(b"ELF native binary")
+    if revision is not None:
+        meta = installed / update_plan.NATIVE_STAGING_METADATA.relative_to("/")
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text(json.dumps({"revision": revision}) + "\n", encoding="utf-8")
     return lambda absolute: installed / absolute.relative_to("/")
 
 
 def git_handler(command: tuple[str, ...]) -> CommandResult:
+    if "ls-tree" in command:
+        return CommandResult(0, PANEL_LISTING)
     if command[-2:] == ("rev-parse", "HEAD"):
         return CommandResult(0, LOCAL_REVISION + "\n")
     if "status" in command:
@@ -124,9 +147,9 @@ class UpdatePlanTests(unittest.TestCase):
             root = Path(temporary)
             source = prepare_source(root)
             installed = prepare_installed_daemons(root, source)
-            artifact_id, label, installed_path, _relative = DAEMON_ARTIFACTS[0]
-            # Make exactly one installed daemon differ from the managed source.
-            installed(installed_path).write_text("stale\n", encoding="utf-8")
+            artifact_id, label, installed_path, _relative = NATIVE_DAEMON_ARTIFACTS[0]
+            # Exactly one native binary is not installed.
+            installed(installed_path).unlink()
 
             def handler(command):
                 if command == ("apt-get", "-s", "upgrade"):
@@ -246,7 +269,7 @@ class UpdatePlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = self._marker_source(root, REMOTE_REVISION, dirty=False)
-            installed = prepare_installed_daemons(root, source)
+            installed = prepare_installed_daemons(root, source, REMOTE_REVISION)
 
             def handler(command):
                 if command[:3] == ("git", "ls-remote", "--heads"):
@@ -267,7 +290,7 @@ class UpdatePlanTests(unittest.TestCase):
 
         components = {item["id"]: item for item in plan["components"]}
         self.assertEqual(components["all"]["state"], "current")
-        # Daemons are still compared against the on-disk source and match.
+        # The native binaries were built from the recorded revision.
         self.assertEqual(components["daemons"]["state"], "current")
 
     def test_recorded_dirty_source_is_blocked_before_network(self) -> None:
@@ -357,7 +380,7 @@ class UpdatePlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = prepare_source(root)
-            installed = prepare_installed_daemons(root, source)
+            installed = prepare_installed_daemons(root, source, LOCAL_REVISION)
 
             def handler(command):
                 if command[:2] == ("git", "clone"):
@@ -387,15 +410,19 @@ class UpdatePlanTests(unittest.TestCase):
         )
         self.assertEqual(components["all"]["available_version"], REMOTE_REVISION)
         self.assertEqual(components["services"]["state"], "current")
-        self.assertEqual(components["daemons"]["state"], "current")
         self.assertNotIn("services", plan["actionable_components"])
-        self.assertNotIn("daemons", plan["actionable_components"])
+        # The native binaries are pinned to the commit they were built from,
+        # so a moving source brings the candidate's build -- not a false
+        # positive, but what the native stage will install.
+        artifacts = {item["id"]: item for item in components["daemons"]["details"]["artifacts"]}
+        self.assertEqual(components["daemons"]["state"], "available")
+        self.assertEqual(artifacts["easy-ha-proxy-agent"]["reason"], "revision-mismatch")
 
     def test_plan_reports_only_managed_compose_stacks_without_pulling(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = prepare_source(root)
-            installed = prepare_installed_daemons(root, source)
+            installed = prepare_installed_daemons(root, source, LOCAL_REVISION)
             config = root / "config"
             config.mkdir()
             (config / "metadata.yml").write_text(
@@ -453,7 +480,9 @@ class UpdatePlanTests(unittest.TestCase):
                     "config",
                     "--images",
                 ):
-                    return CommandResult(0, "example/haproxy-admin:alpha\n")
+                    return CommandResult(0, "example/haproxy-admin:go-alpha\n")
+                if (answer := panel_image_answer(command)) is not None:
+                    return answer
                 if command[:3] == ("docker", "image", "inspect"):
                     image = command[3]
                     digest = DIGEST_A if image.startswith("authelia/") else DIGEST_A
@@ -488,9 +517,10 @@ class UpdatePlanTests(unittest.TestCase):
         self.assertEqual(plan["source_channel"], "github")
         self.assertEqual(plan["image_channel"], "alpha")
         self.assertEqual(plan["generated_at"], "2026-07-19T12:00:00Z")
+        # The source moves, so the native binaries of the candidate commit too.
         self.assertEqual(
             set(plan["actionable_components"]),
-            {"all", "services", "os", "admin-container"},
+            {"all", "services", "daemons", "os", "admin-container"},
         )
         self.assertEqual(json.loads(json.dumps(plan)), plan)
 
@@ -571,6 +601,8 @@ class UpdatePlanTests(unittest.TestCase):
                     return CommandResult(0, "registry.example/admin:latest\n")
                 if command[-2:] == ("ps", "-q"):
                     return CommandResult(0, "")
+                if (answer := panel_image_answer(command)) is not None:
+                    return answer
                 if command[:3] == ("docker", "image", "inspect"):
                     self.assertEqual(command[3], "registry.example/admin:latest")
                     return CommandResult(
@@ -582,7 +614,7 @@ class UpdatePlanTests(unittest.TestCase):
                     "imagetools",
                     "inspect",
                 ):
-                    self.assertEqual(command[4], "registry.example/admin:alpha")
+                    self.assertEqual(command[4], "registry.example/admin:go-alpha")
                     return CommandResult(0, f"Digest: {DIGEST_B}\n")
                 raise AssertionError(f"Unexpected command: {command!r}")
 
@@ -604,9 +636,10 @@ class UpdatePlanTests(unittest.TestCase):
         self.assertEqual(admin["state"], "available")
         self.assertEqual(admin["details"]["configured_channel"], "latest")
         self.assertEqual(admin["details"]["target_channel"], "alpha")
+        # Every deployment runs the Go panel: the channel's go- tag.
         self.assertEqual(
             admin["details"]["images"][0]["target_image"],
-            "registry.example/admin:alpha",
+            "registry.example/admin:go-alpha",
         )
         flattened = [value for command, _ in runner.calls for value in command]
         self.assertNotIn("pull", flattened)

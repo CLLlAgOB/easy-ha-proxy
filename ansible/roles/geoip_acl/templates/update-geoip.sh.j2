@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON={{ ((geoip_runtime_venv | default('/usr/local/lib/easy-ha-proxy/geoip-venv')) ~ '/bin/python') | quote }}
-UPDATER="/usr/local/lib/easy-ha-proxy/update_geoip.py"
+# The transactional GeoIP updater is the native agent's update-geoip.
+AGENT={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') | quote }}
 FORCE_MARKER="/run/easy-ha-proxy/geoip-force-download"
 FORCE_DOWNLOAD=0
 
@@ -15,16 +15,10 @@ if [[ -e "${FORCE_MARKER}" ]]; then
   FORCE_DOWNLOAD=1
 fi
 
-{% if not (native_tools_enabled | default(native_daemons_enabled | default(false)) | bool) %}
-if [[ ! -x "${PYTHON}" ]]; then
-  printf 'ERROR: GeoIP Python interpreter is not executable: %s\n' "${PYTHON}" >&2
+if [[ ! -x "${AGENT}" ]]; then
+  printf 'ERROR: the native agent is not installed: %s\n' "${AGENT}" >&2
   exit 1
 fi
-if ! "${PYTHON}" -c 'import maxminddb, yaml' >/dev/null 2>&1; then
-  printf 'ERROR: the maxminddb or PyYAML package is missing from %s\n' "${PYTHON}" >&2
-  exit 1
-fi
-{% endif %}
 
 # HAProxy config validation needs the same private environment as the service.
 if [[ -r /etc/haproxy/easy-ha-proxy.env ]]; then
@@ -46,10 +40,4 @@ if (( FORCE_DOWNLOAD )); then
   args+=(--force-download)
 fi
 
-{% if native_tools_enabled | default(native_daemons_enabled | default(false)) | bool %}
-NATIVE_BIN={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') | quote }}
-if [[ -x "${NATIVE_BIN}" ]]; then
-  exec "${NATIVE_BIN}" update-geoip "${args[@]}" "$@"
-fi
-{% endif %}
-exec "${PYTHON}" "${UPDATER}" "${args[@]}" "$@"
+exec "${AGENT}" update-geoip "${args[@]}" "$@"

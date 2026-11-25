@@ -5,24 +5,6 @@
 - name: "Authelia | usersd | install & start users daemon"
   when: authelia_enabled | default(false) | bool
   block:
-    - name: "authelia-usersd | Install password hashing dependency"
-      become: true
-      ansible.builtin.apt:
-        name: python3-argon2
-        state: present
-        update_cache: true
-      tags: restore-network
-
-    - name: "authelia-usersd | Install script"
-      become: true
-      ansible.builtin.copy:
-        src: authelia-usersd.py
-        dest: /usr/local/sbin/authelia-usersd.py
-        owner: root
-        group: root
-        mode: "0750"
-      register: authelia_usersd_script
-
     - name: "authelia-usersd | Install systemd unit"
       become: true
       ansible.builtin.template:
@@ -50,7 +32,7 @@
       ansible.builtin.systemd:
         name: authelia-usersd.service
         state: restarted
-      when: authelia_usersd_script.changed or authelia_usersd_unit.changed
+      when: authelia_usersd_unit.changed
 
     - name: "authelia-usersd | Ensure service started"
       become: true
