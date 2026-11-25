@@ -662,6 +662,16 @@ impl RequestLog {
             .sum()
     }
 
+    /// The files' size once the WAL has been folded back and cut, where no
+    /// reader holds it.
+    fn checkpointed_size(&self) -> u64 {
+        {
+            let conn = self.conn();
+            let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        }
+        self.size()
+    }
+
     fn free_bytes(&self) -> u64 {
         free_bytes(self.path.parent().unwrap_or(Path::new("/")))
     }
@@ -672,17 +682,31 @@ impl RequestLog {
             let conn = self.conn();
             let _ = conn.execute("DELETE FROM requests WHERE ts < ?1", params![cutoff]);
         }
+        // The budget counts the -wal file too, and SQLite keeps that file at
+        // its largest size until a TRUNCATE checkpoint. Measured without one,
+        // a WAL that a long search held open looked like a store over budget,
+        // and every pass deleted eight tenths in turn without the files
+        // shrinking. Measure after a checkpoint, and stop once deleting no
+        // longer makes the files smaller.
+        let mut size = self.checkpointed_size();
         for _ in 0..8 {
-            if self.size() <= self.config.request_log_max_bytes {
+            if size <= self.config.request_log_max_bytes {
                 break;
             }
-            let conn = self.conn();
-            let _ = conn.execute(
-                "DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY id LIMIT \
-                 (SELECT MAX(1, COUNT(*) / 10) FROM requests))",
-                [],
-            );
-            let _ = conn.execute_batch("PRAGMA incremental_vacuum;");
+            {
+                let conn = self.conn();
+                let _ = conn.execute(
+                    "DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY id LIMIT \
+                     (SELECT MAX(1, COUNT(*) / 10) FROM requests))",
+                    [],
+                );
+                let _ = conn.execute_batch("PRAGMA incremental_vacuum;");
+            }
+            let after = self.checkpointed_size();
+            if after >= size {
+                break;
+            }
+            size = after;
         }
         {
             let conn = self.conn();
@@ -1489,6 +1513,78 @@ mod tests {
         assert_eq!(step, 60);
         assert_eq!(first, 960);
         assert_eq!(bars, 61);
+    }
+
+    fn sample_request(id: &str) -> ParsedRequest {
+        ParsedRequest {
+            client_ip: "203.0.113.9".into(),
+            status: 404,
+            frontend: "fe".into(),
+            backend: "be_site/srv1".into(),
+            method: "GET".into(),
+            path: "/x".into(),
+            host: "a.example".into(),
+            bad_request: false,
+            query_flag: String::new(),
+            path_flag: String::new(),
+            observation_flags: Vec::new(),
+            ts: 0,
+            request_id: id.into(),
+            bytes_out: 5,
+            duration_ms: 3,
+            response_ms: 2,
+            times: String::new(),
+            term: "----".into(),
+            ban_reason: String::new(),
+            user_agent: "curl/8".into(),
+            authenticated_user: String::new(),
+            protocol: "HTTP/1.1".into(),
+        }
+    }
+
+    // A search held the WAL open, so deleting rows could not make the files
+    // smaller; maintenance went on deleting a tenth per round, eight rounds a
+    // minute, while the store was not over its budget at all.
+    #[test]
+    fn maintenance_stops_when_deleting_does_not_shrink_the_files() {
+        let dir = std::env::temp_dir().join(format!("guardd-reqlog-wal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("requests.db");
+        let cfg = GuardConfig::default();
+        let log = RequestLog::open(&path, &cfg).unwrap();
+        for i in 0..2000 {
+            log.add(
+                &sample_request(&format!("r{i}")),
+                Some(1000.0 + f64::from(i)),
+            );
+        }
+        assert_eq!(log.flush(4000), 2000);
+
+        let reader = Connection::open(&path).unwrap();
+        let held = reader.unchecked_transaction().unwrap();
+        let seen: i64 = held
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen, 2000);
+
+        let mut tight = cfg.clone();
+        tight.request_log_max_bytes = 1;
+        let squeezed = RequestLog::open(&path, &tight).unwrap();
+        {
+            let mut state = squeezed.state();
+            squeezed.maintain(4000, &mut state);
+        }
+        let left: i64 = squeezed
+            .conn()
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            left >= 1800,
+            "maintenance deleted {} of 2000 rows",
+            2000 - left
+        );
+        drop(held);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

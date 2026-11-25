@@ -1432,6 +1432,7 @@ impl Engine {
             .clone();
         let mut parsed = 0u64;
         let mut live_batch = Vec::new();
+        let mut failure = None;
         for line in lines {
             let Some(request) = parse_access_line(line, &sigs) else {
                 continue;
@@ -1446,16 +1447,25 @@ impl Engine {
             if let Some(store) = &requests {
                 store.add(&request, ts);
             }
-            self.observe_request(&request, now, ts, &sigs)?;
+            if let Err(e) = self.observe_request(&request, now, ts, &sigs) {
+                failure = Some(e);
+                break;
+            }
         }
         self.lines_parsed += parsed;
         if let Some(live) = &self.live {
             lock(live).extend(live_batch);
         }
+        // Written even when security.db failed: the cursor has moved past
+        // these lines, and rows kept for a flush that never came piled up in
+        // memory for as long as the database kept failing.
         if let Some(store) = &requests {
             store.flush(now);
         }
-        Ok(lines.len())
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(lines.len()),
+        }
     }
 
     fn apply_promotions(&mut self) {
@@ -3375,7 +3385,7 @@ impl Shared {
 
     pub fn apply_urgent_enforcement(&self, now: Option<i64>) -> EResult<Value> {
         let now = now.unwrap_or_else(utc_now);
-        let _decisions = lock(&self.decisions);
+        let decisions = lock(&self.decisions);
         let (mut enforcer, policy, urgent_batch) = {
             let e = self.engine();
             if !e.enforcer.allowed() || !e.sink.queue.has_urgent() {
@@ -3421,6 +3431,9 @@ impl Shared {
             Ok(json!({"applied": applied, "enforcing": true}))
         })();
         self.merge_enforcer_deltas(&before, &enforcer);
+        // Alerts go to alertd over a socket; ban and unban requests need not
+        // wait for it.
+        drop(decisions);
         self.flush_alerts();
         result
     }
@@ -3651,6 +3664,7 @@ impl Shared {
         ));
         let mut result = self.apply_enforcement_locked(&decisions, now)?;
         self.sync_shield_locked(&decisions, now);
+        drop(decisions);
         self.flush_alerts();
         result["mode"] = json!(mode);
         result["previous"] = json!(previous);
