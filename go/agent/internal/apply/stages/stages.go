@@ -25,7 +25,11 @@ type Context struct {
 // the hybrid period: roles/<Role>/tasks/<Name>.yml. Its steps are built with
 // the variables of the role entry that runs it (task_stage defaults to Name).
 type Part struct {
+	// Name is how Ansible and "apply run --part" call it: the task file's
+	// name for haproxy-admin, "<role>/<file>" for the other roles.
 	Name, Role string
+	// File is the task file's name without .yml; empty means Name.
+	File string
 	// Reads are registered results of other task files (or of Ansible) the
 	// part's conditions read; Ansible passes the changed ones as seeds.
 	Reads []string
@@ -48,6 +52,14 @@ func register(s Stage) {
 	for _, p := range s.Parts {
 		parts[p.Name] = p
 	}
+}
+
+// TaskFile is the part's task file name without .yml.
+func (p Part) TaskFile() string {
+	if p.File != "" {
+		return p.File
+	}
+	return p.Name
 }
 
 // Parts lists every part with the results it reads, for Ansible to ask.
@@ -85,7 +97,7 @@ func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
 		return fmt.Errorf("no part %q", name)
 	}
 	if taskStage == "" {
-		taskStage = part.Name
+		taskStage = part.TaskFile()
 	}
 	set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Role: part.Role,
 		Params: map[string]any{"task_stage": taskStage}, Extra: ctx.Extra, Facts: ctx.Facts})

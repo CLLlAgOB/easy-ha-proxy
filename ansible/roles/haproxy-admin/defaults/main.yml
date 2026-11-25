@@ -271,7 +271,8 @@ backup_schedule_timeout: 8h
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
 
 # The Go installer (easy-ha-proxy-agent apply), hybrid period: the task files
-# it may run in place of Ansible. Each is handed over only if the installed
+# it may run in place of Ansible (haproxy-admin's by name, other roles' as
+# <role>/<file>). Each is handed over only if the installed
 # agent lists it ("apply parts"); easy_ha_proxy_go_installer: false keeps all
 # of them with Ansible. A test holds this list to the agent's.
 go_installer_parts:
@@ -287,6 +288,8 @@ go_installer_parts:
   - guardd
   - healthd
   - journald-retention
+  - haproxy/protection
+  - haproxy/fs
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.
 go_installer_forwarded_vars:

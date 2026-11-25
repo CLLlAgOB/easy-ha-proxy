@@ -33,16 +33,24 @@ func taskNames(t *testing.T, dir, file string) []string {
 		t.Fatal(err)
 	}
 	var names []string
-	for _, task := range doc.([]any) {
-		m := task.(*pyyaml.Map)
-		if imported, ok := m.Value("import_tasks").(string); ok {
-			names = append(names, taskNames(t, dir, imported)...)
-			continue
-		}
-		if name, _ := m.Value("name").(string); !folded[name] {
-			names = append(names, name)
+	var walk func(list []any)
+	walk = func(list []any) {
+		for _, task := range list {
+			m := task.(*pyyaml.Map)
+			if imported, ok := m.Value("import_tasks").(string); ok {
+				names = append(names, taskNames(t, dir, imported)...)
+				continue
+			}
+			if block, ok := m.Value("block").([]any); ok {
+				walk(block) // a block's own name is not a task
+				continue
+			}
+			if name, _ := m.Value("name").(string); !folded[name] {
+				names = append(names, name)
+			}
 		}
 	}
+	walk(doc.([]any))
 	return names
 }
 
@@ -58,7 +66,7 @@ func TestStagesFollowTheirTaskFiles(t *testing.T) {
 	root := repoRoot(t)
 	for _, name := range Names() {
 		for _, part := range registry[name].Parts {
-			want := taskNames(t, filepath.Join(root, "ansible", "roles", part.Role, "tasks"), part.Name+".yml")
+			want := taskNames(t, filepath.Join(root, "ansible", "roles", part.Role, "tasks"), part.TaskFile()+".yml")
 			b := &Builder{Set: nil, Sys: &engine.System{}, RoleDir: ""}
 			b.Set = mustSet(t, root, part)
 			var got []string
@@ -103,7 +111,7 @@ func mustSet(t *testing.T, root string, part Part) *vars.Set {
 		t.Fatal(err)
 	}
 	set, err := vars.Load(vars.Options{SourceDir: source, ConfigDir: config, Role: part.Role,
-		Params: map[string]any{"task_stage": part.Name}})
+		Params: map[string]any{"task_stage": part.TaskFile()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +127,7 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy-admin/tasks/journald-retention.yml", "journald | Configure retention (MaxRetentionSec/MaxFileSec)", journaldRetention},
 		{"haproxy-admin/tasks/certd.yml", "Install the certificate delivery worker", certDeliver},
 		{"haproxy-admin/tasks/iptables-udp.yml", "iptables-udp | Ensure a managed udp.yml exists (empty by default)", udpForwards},
+		{"haproxy/tasks/protection.yml", "HAProxy updates | defer core restart to the controlled update", needrestartHaproxy},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", c.file))
 		if err != nil {
@@ -129,7 +138,15 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		found := false
+		var tasks []any
 		for _, task := range doc.([]any) {
+			if block, ok := task.(*pyyaml.Map).Value("block").([]any); ok {
+				tasks = append(tasks, block...)
+			} else {
+				tasks = append(tasks, task)
+			}
+		}
+		for _, task := range tasks {
 			m := task.(*pyyaml.Map)
 			if m.Value("name") != c.task {
 				continue
@@ -190,8 +207,10 @@ func TestMainYmlSendsTheSamePartsToTheFallback(t *testing.T) {
 	}
 	sort.Strings(listed)
 	var parts []string
-	for name := range Parts() {
-		parts = append(parts, name)
+	for name, p := range Parts() {
+		if p.Role == "haproxy-admin" {
+			parts = append(parts, name)
+		}
 	}
 	sort.Strings(parts)
 	if strings.Join(listed, ",") != strings.Join(parts, ",") {

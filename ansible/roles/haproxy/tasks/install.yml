@@ -20,7 +20,13 @@
     path: /var/lib/haproxy/.first_start_done
   register: haproxy_first
   
-- import_tasks: fs.yml
+# Run by the Go installer when the agent has it (the shared hand-over in
+# roles/haproxy-admin/tasks/go_part.yml), else included from fs.yml.
+- import_tasks: ../../haproxy-admin/tasks/go_part.yml
+  vars:
+    go_parts: [haproxy/fs]
+- include_tasks: {file: fs.yml, apply: {tags: [always]}}
+  when: "'haproxy/fs' not in (go_agent_part_names | default([]))"
 
 # 4) Validate the configuration before any start (if the file is already there)
 - name: Validate HAProxy config if present

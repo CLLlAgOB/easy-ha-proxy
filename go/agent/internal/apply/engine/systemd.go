@@ -193,3 +193,33 @@ func ParseMode(s string) (os.FileMode, error) {
 	}
 	return mode, nil
 }
+
+// Hold is dpkg_selections selection=hold for one package.
+type Hold struct{ Name string }
+
+func (h *Hold) Describe() string { return "dpkg hold " + h.Name }
+
+func (h *Hold) Check(sys *System) (Change, error) {
+	out, _, err := sys.Exec("dpkg", "--get-selections", h.Name)
+	if err != nil {
+		return Change{}, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && strings.SplitN(f[0], ":", 2)[0] == h.Name && f[1] == "hold" {
+			return Change{}, nil
+		}
+	}
+	return Change{Needed: true, Summary: "hold"}, nil
+}
+
+func (h *Hold) Apply(sys *System, _ Change) error {
+	out, code, err := sys.Exec("apt-mark", "hold", h.Name)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("apt-mark hold %s: exit %d %s", h.Name, code, strings.TrimSpace(out))
+	}
+	return nil
+}

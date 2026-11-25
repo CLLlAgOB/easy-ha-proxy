@@ -31,7 +31,7 @@
     - name: Protect existing HAProxy before host or system updates
       ansible.builtin.import_role:
         name: haproxy
-        tasks_from: protection.yml
+        tasks_from: go_protection.yml
       tags: [ha-install, upgrade]
 
     - name: Load easy-ha-proxy local secrets
