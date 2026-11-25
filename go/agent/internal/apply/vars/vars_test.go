@@ -212,3 +212,36 @@ func TestUnsupportedLayoutsAreRefusedNotGuessed(t *testing.T) {
 		t.Fatal("a missing vars_files entry fails, as in Ansible")
 	}
 }
+
+// The template module: trim_blocks on, lstrip_blocks off unless the task sets
+// it, the source's trailing newlines kept, no type conversion, local vars on top.
+func TestRenderFileFollowsTheTemplateModule(t *testing.T) {
+	source, config := fixture(t)
+	s := load(t, Options{SourceDir: source, ConfigDir: config, Role: "alpha"})
+	path := filepath.Join(t.TempDir(), "unit.j2")
+	body := "# {{ base }}\n  {% if alpha_enabled %}\nOn={{ alpha_port }}\n  {% endif %}\nItem={{ item }}\nList={{ items }}\n\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.RenderFile(path, map[string]any{"item": "local"}, TemplateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# example\n  On=8443\n  Item=local\nList=['one', 'two']\n\n"
+	if out != want {
+		t.Fatalf("render = %q, want %q", out, want)
+	}
+	out, err = s.RenderFile(path, map[string]any{"item": "local"}, TemplateOptions{LstripBlocks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "# example\nOn=8443\nItem=local\nList=['one', 'two']\n\n"; out != want {
+		t.Fatalf("lstrip_blocks render = %q, want %q", out, want)
+	}
+	if err := os.WriteFile(path, []byte("{{ nowhere }}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RenderFile(path, nil, TemplateOptions{}); err == nil {
+		t.Fatal("an undefined name in a template fails the render")
+	}
+}

@@ -88,3 +88,26 @@ func TestStrictUndefinedFailsOnlyWhenPrinted(t *testing.T) {
 		t.Fatalf("without StrictUndefined an undefined name still prints as nothing: %q, %v", out, err)
 	}
 }
+
+func TestAnsibleHashAndPathFilters(t *testing.T) {
+	sha256Of := func(v any) any { out, _ := AnsibleHash(nil, v, []any{"sha256"}, nil); return out }
+	if got := sha256Of("alertd:x"); got != "7f4a1318d8a81e0a53bb55bebbf7aceae71337b9be70c152ce6f9c2f81249e6f" {
+		t.Fatalf("sha256 = %v", got)
+	}
+	if got, _ := AnsibleHash(nil, "abc", nil, nil); got != "a9993e364706816aba3e25717850c26c9cd0d89d" {
+		t.Fatalf("sha1 is the default: %v", got)
+	}
+	if got, _ := AnsibleHash(nil, "abc", []any{"nope"}, nil); got != nil {
+		t.Fatalf("an unknown algorithm gives None: %v", got)
+	}
+	for in, want := range map[string]string{
+		"/var/lib/x/alerts.db": "/var/lib/x", "/etc/": "/etc", "alerts.db": "", "/": "/", "//a": "//", "a/b//c": "a/b",
+	} {
+		if got, _ := AnsibleDirname(nil, in, nil, nil); got != want {
+			t.Errorf("dirname(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got, _ := AnsibleBasename(nil, "/etc/systemd/x.service", nil, nil); got != "x.service" {
+		t.Fatalf("basename = %v", got)
+	}
+}

@@ -1,0 +1,179 @@
+// Package engine runs the Go installer's stages: an ordered list of steps,
+// each a resource that knows how to tell whether the host already matches it
+// (Check) and how to make it match (Apply).
+//
+// A stage reads like the Ansible task file it replaces: steps run in order,
+// a step may register its result, and a later step's condition may read
+// whether a registered step changed something -- "restart if the unit or the
+// config changed". In plan mode nothing is applied: each step reports what it
+// would change, and conditions see those would-be changes, so a plan shows
+// the restarts an apply would do.
+package engine
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"time"
+)
+
+// Mode says whether a run changes the host.
+type Mode int
+
+const (
+	// Plan checks every step and changes nothing.
+	Plan Mode = iota
+	// Apply makes the host match.
+	Apply
+)
+
+// Change is what a resource found: whether the host differs, and how.
+type Change struct {
+	Needed  bool
+	Summary string // one line: "content 1832 -> 1840 bytes", "would restart"
+}
+
+// Resource is one thing on the host a step manages.
+type Resource interface {
+	// Describe names it for the journal: "file /etc/systemd/system/x.service".
+	Describe() string
+	// Check compares the host with the resource, changing nothing.
+	Check(sys *System) (Change, error)
+	// Apply makes the host match what Check found different.
+	Apply(sys *System, c Change) error
+}
+
+// Step is one task of a stage.
+type Step struct {
+	Name     string                         // the Ansible task's name, so a log reads the same
+	Register string                         // when set, later conditions can ask Changed(Register)
+	When     func(r *Run) bool              // nil runs always
+	Resource Resource                       // what the step manages
+	Build    func(r *Run) (Resource, error) // or builds it when it runs (from earlier results)
+}
+
+// Result is one step's outcome, as the journal records it.
+type Result struct {
+	Stage    string  `json:"stage"`
+	Step     string  `json:"step"`
+	Resource string  `json:"resource,omitempty"`
+	Status   string  `json:"status"` // ok | changed | would_change | skipped | failed
+	Summary  string  `json:"summary,omitempty"`
+	Error    string  `json:"error,omitempty"`
+	Seconds  float64 `json:"seconds"`
+}
+
+// Run is one installer run: its mode, the host it works on, what earlier
+// steps changed, and the journal.
+type Run struct {
+	Mode    Mode
+	Sys     *System
+	Journal io.Writer // JSON lines, one per step; nil writes none
+	Results []Result
+
+	changed map[string]bool
+}
+
+// NewRun starts a run. seed names steps of earlier stages (or of Ansible,
+// during the hybrid period) that changed something, so their dependents here
+// still restart.
+func NewRun(mode Mode, sys *System, journal io.Writer, seed ...string) *Run {
+	r := &Run{Mode: mode, Sys: sys, Journal: journal, changed: map[string]bool{}}
+	for _, name := range seed {
+		r.changed[name] = true
+	}
+	return r
+}
+
+// Changed says whether the registered step changed something (or, in plan
+// mode, would).
+func (r *Run) Changed(register string) bool { return r.changed[register] }
+
+// ChangedAny is Changed for any of the names.
+func (r *Run) ChangedAny(registers ...string) bool {
+	for _, name := range registers {
+		if r.changed[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkChanged records a change made outside a step's resource.
+func (r *Run) MarkChanged(register string) { r.changed[register] = true }
+
+// Do runs a stage's steps in order and stops at the first failure.
+func (r *Run) Do(stage string, steps []Step) error {
+	for _, step := range steps {
+		start := time.Now()
+		res := Result{Stage: stage, Step: step.Name}
+		err := r.do(step, &res)
+		res.Seconds = time.Since(start).Seconds()
+		if err != nil {
+			res.Status, res.Error = "failed", err.Error()
+		}
+		r.record(res)
+		if err != nil {
+			return fmt.Errorf("%s: %s: %w", stage, step.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *Run) do(step Step, res *Result) error {
+	if step.When != nil && !step.When(r) {
+		res.Status = "skipped"
+		return nil
+	}
+	resource := step.Resource
+	if step.Build != nil {
+		built, err := step.Build(r)
+		if err != nil {
+			return err
+		}
+		resource = built
+	}
+	if resource == nil {
+		res.Status = "ok"
+		return nil
+	}
+	res.Resource = resource.Describe()
+	c, err := resource.Check(r.Sys)
+	if err != nil {
+		return err
+	}
+	res.Summary = c.Summary
+	if !c.Needed {
+		res.Status = "ok"
+		return nil
+	}
+	if step.Register != "" {
+		r.changed[step.Register] = true
+	}
+	if r.Mode == Plan {
+		res.Status = "would_change"
+		return nil
+	}
+	if err := resource.Apply(r.Sys, c); err != nil {
+		return err
+	}
+	res.Status = "changed"
+	return nil
+}
+
+func (r *Run) record(res Result) {
+	r.Results = append(r.Results, res)
+	if r.Journal != nil {
+		line, _ := json.Marshal(res)
+		fmt.Fprintf(r.Journal, "%s\n", line)
+	}
+}
+
+// Counts sums the run's results by status.
+func (r *Run) Counts() map[string]int {
+	out := map[string]int{}
+	for _, res := range r.Results {
+		out[res.Status]++
+	}
+	return out
+}
