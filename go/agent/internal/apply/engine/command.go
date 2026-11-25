@@ -115,7 +115,13 @@ func (s *Sysctl) Check(sys *System) (Change, error) {
 }
 
 func (s *Sysctl) Apply(sys *System, _ Change) error {
-	if err := writeAtomic(sys.Path(s.File), []byte(strings.Join(s.lines, "")), 0, 0, 0o644); err != nil {
+	// root:root as the module leaves it, resolved like every other owner (a
+	// test's System maps it to the user running the test).
+	uid, gid, err := sys.ids("root", "root")
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(sys.Path(s.File), []byte(strings.Join(s.lines, "")), uid, gid, 0o644); err != nil {
 		return err
 	}
 	if !s.Reload {
