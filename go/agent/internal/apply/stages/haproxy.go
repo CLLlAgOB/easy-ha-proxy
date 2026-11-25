@@ -8,14 +8,16 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/facts"
 )
 
-// The HAProxy stage: roles/haproxy's task files, as "haproxy/<file>". So far
-// the package protection the first play runs before anything else, and the
-// directories the install stage prepares; the package itself, AppArmor (its
-// handlers restart rsyslog and HAProxy) and config.yml follow.
+// The HAProxy stage: roles/haproxy's task files, as "haproxy/<file>": the
+// package protection the first play runs before anything else, the install
+// stage (package, directories, bootstrap, pages) and AppArmor. config.yml
+// follows. Their handlers (apply haproxy, the AppArmor chain) are handed back
+// to Ansible during the hybrid period.
 func init() {
 	register(Stage{Name: "haproxy", Parts: []Part{
-		{Name: "haproxy/protection", Role: "haproxy", File: "protection", Build: haproxyProtection},
-		{Name: "haproxy/fs", Role: "haproxy", File: "fs", Build: haproxyFS},
+		{Name: "haproxy/protection", Role: "haproxy", File: "protection", PreTask: true, Build: haproxyProtection},
+		{Name: "haproxy/install", Role: "haproxy", File: "install", Build: haproxyInstall},
+		{Name: "haproxy/apparmor", Role: "haproxy", File: "apparmor", Build: haproxyAppArmor},
 	}})
 }
 

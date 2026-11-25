@@ -18,6 +18,8 @@ var folded = map[string]bool{
 	"haproxy-controld | Check runtime environment":          true, // stat, read in the conditions
 	"easy-ha-proxy-backupd | Inspect active restore marker": true, // stat, read in the conditions
 	"easy-ha-proxy-updated | Inspect active update marker":  true, // stat, read in the conditions
+	"Check if HAProxy was initialized before":               true, // stat, read in the conditions
+	"AppArmor | info if disabled":                           true, // stat, read in the conditions
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
@@ -37,7 +39,11 @@ func taskNames(t *testing.T, dir, file string) []string {
 	walk = func(list []any) {
 		for _, task := range list {
 			m := task.(*pyyaml.Map)
-			if imported, ok := m.Value("import_tasks").(string); ok {
+			imported, ok := m.Value("import_tasks").(string)
+			if !ok {
+				imported, ok = m.Value("ansible.builtin.import_tasks").(string)
+			}
+			if ok {
 				names = append(names, taskNames(t, dir, imported)...)
 				continue
 			}
@@ -128,6 +134,9 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy-admin/tasks/certd.yml", "Install the certificate delivery worker", certDeliver},
 		{"haproxy-admin/tasks/iptables-udp.yml", "iptables-udp | Ensure a managed udp.yml exists (empty by default)", udpForwards},
 		{"haproxy/tasks/protection.yml", "HAProxy updates | defer core restart to the controlled update", needrestartHaproxy},
+		{"haproxy/tasks/apparmor.yml", "AppArmor | deploy local rules for rsyslogd (HAProxy chroot socket)", apparmorRsyslogd},
+		{"haproxy/tasks/package.yml", "HAProxy package | Keep package updates within the selected branch", haproxyPin},
+		{"haproxy/tasks/install.yml", "Ensure admin IPs file exists with static admin_allowed_ips", adminIPs},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", c.file))
 		if err != nil {
@@ -153,6 +162,9 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 			}
 			found = true
 			args, _ := m.Value("ansible.builtin.copy").(*pyyaml.Map)
+			if args == nil {
+				args, _ = m.Value("copy").(*pyyaml.Map)
+			}
 			if args == nil || args.Value("content") != c.content {
 				t.Errorf("%s: the Go content differs from the task's", c.task)
 			}
@@ -189,31 +201,35 @@ func TestTheRoleListsTheAgentsParts(t *testing.T) {
 	}
 }
 
-// main.yml writes the parts out (a static import's name is templated from the
-// role parameters alone); they must be the same parts as go_installer_parts.
+// Each role's main.yml writes its parts out (a static import's name is
+// templated from the role parameters alone); they must be that role's parts,
+// the pre-task ones aside.
 func TestMainYmlSendsTheSamePartsToTheFallback(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", "haproxy-admin", "tasks", "main.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(raw)
-	start, end := strings.Index(text, "task_stage in ["), strings.Index(text, "]\n")
-	if start < 0 || end < start {
-		t.Fatalf("main.yml has no inline part list:\n%s", text)
-	}
-	var listed []string
-	for _, item := range strings.Split(text[start+len("task_stage in ["):end], ",") {
-		listed = append(listed, strings.Trim(strings.TrimSpace(item), "'"))
-	}
-	sort.Strings(listed)
-	var parts []string
-	for name, p := range Parts() {
-		if p.Role == "haproxy-admin" {
-			parts = append(parts, name)
+	for _, role := range []string{"haproxy-admin", "haproxy"} {
+		raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", role, "tasks", "main.yml"))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	sort.Strings(parts)
-	if strings.Join(listed, ",") != strings.Join(parts, ",") {
-		t.Fatalf("main.yml lists %v, the agent has %v", listed, parts)
+		text := string(raw)
+		start := strings.Index(text, "task_stage in [")
+		end := strings.Index(text[start:], "]") + start
+		if start < 0 || end < start {
+			t.Fatalf("%s main.yml has no inline part list:\n%s", role, text)
+		}
+		var listed []string
+		for _, item := range strings.Split(text[start+len("task_stage in ["):end], ",") {
+			listed = append(listed, strings.Trim(strings.TrimSpace(item), "'"))
+		}
+		sort.Strings(listed)
+		var files []string
+		for _, p := range Parts() {
+			if p.Role == role && !p.PreTask {
+				files = append(files, p.TaskFile())
+			}
+		}
+		sort.Strings(files)
+		if strings.Join(listed, ",") != strings.Join(files, ",") {
+			t.Errorf("%s main.yml lists %v, the agent has %v", role, listed, files)
+		}
 	}
 }

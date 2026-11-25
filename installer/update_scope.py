@@ -65,8 +65,8 @@ _AUTHELIA = "ansible/roles/authelia"
 # The native stage installs the agent; the others run the task files the Go
 # installer takes over (go_installer_parts): the daemons, journald, the
 # install stage for certd and the iptables loaders, and HAProxy's install
-# stage (its protection pre-task and directories).
-_GO_INSTALLER = ("ha-adm-native", "ha-adm-daemons", "ha-adm-journald", "ha-adm-install", "ha-install")
+# and AppArmor stages (with the protection pre-task).
+_GO_INSTALLER = ("ha-adm-native", "ha-adm-daemons", "ha-adm-journald", "ha-adm-install", "ha-install", "apparmor")
 RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Nothing to deploy.
     (".tests/*", ()),

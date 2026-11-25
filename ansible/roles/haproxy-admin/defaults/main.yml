@@ -289,7 +289,8 @@ go_installer_parts:
   - healthd
   - journald-retention
   - haproxy/protection
-  - haproxy/fs
+  - haproxy/install
+  - haproxy/apparmor
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.
 go_installer_forwarded_vars:

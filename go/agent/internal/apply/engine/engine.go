@@ -54,6 +54,10 @@ type Step struct {
 	Resource Resource                       // what the step manages
 	Build    func(r *Run) (Resource, error) // or builds it when it runs (from earlier results)
 	Tags     []string                       // the task's own tags; a run can skip them
+	// Notify names the handlers the step notifies when it changes something.
+	// During the hybrid period they are handed back to Ansible, which runs
+	// its own handlers at the end of the play, as it always has.
+	Notify []string
 }
 
 // Result is one step's outcome, as the journal records it.
@@ -79,6 +83,7 @@ type Run struct {
 
 	changed   map[string]bool
 	registers map[string]bool // every register this run reached, changed or not
+	notified  []string        // handlers notified, in order, each once
 }
 
 // NewRun starts a run. seed names steps of earlier stages (or of Ansible,
@@ -109,6 +114,24 @@ func (r *Run) ChangedAny(registers ...string) bool {
 
 // MarkChanged records a change made outside a step's resource.
 func (r *Run) MarkChanged(register string) { r.changed[register] = true }
+
+// Notified lists the handlers the run's steps notified, in order, each once.
+func (r *Run) Notified() []string { return append([]string(nil), r.notified...) }
+
+func (r *Run) notify(names []string) {
+	for _, name := range names {
+		seen := false
+		for _, n := range r.notified {
+			if n == name {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			r.notified = append(r.notified, name)
+		}
+	}
+}
 
 // Registers is every register the run's steps reached, with whether it
 // changed: what Ansible would have registered, skipped steps included.
@@ -181,6 +204,7 @@ func (r *Run) do(step Step, res *Result) error {
 		r.changed[step.Register] = true
 		r.registers[step.Register] = true
 	}
+	r.notify(step.Notify)
 	if r.Mode == Plan {
 		res.Status = "would_change"
 		return nil

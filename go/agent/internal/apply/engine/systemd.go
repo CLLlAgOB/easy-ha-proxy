@@ -48,6 +48,8 @@ func (u *Unit) Check(sys *System) (Change, error) {
 	case "":
 	case "restarted":
 		u.action = "restart"
+	case "reloaded":
+		u.action = "reload"
 	case "started", "stopped":
 		out, _, err := sys.Exec("systemctl", "show", u.Name, "--property=ActiveState", "--value")
 		if err != nil {

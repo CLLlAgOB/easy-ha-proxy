@@ -69,7 +69,10 @@ type Summary struct {
 	// Exports are the registers some part reads (its Reads), the only ones
 	// Ansible needs to keep as facts for later calls.
 	Exports map[string]bool `json:"exports"`
-	Counts  map[string]int  `json:"counts"`
+	// Notified are the handlers the steps notified; during the hybrid period
+	// Ansible notifies its own handlers with them.
+	Notified []string       `json:"notified"`
+	Counts   map[string]int `json:"counts"`
 }
 
 // runStage checks (plan) or applies (run) a stage or one part. It prints one
@@ -146,7 +149,11 @@ func runStage(mode engine.Mode, args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
-	summary := Summary{Changed: counts["changed"]+counts["would_change"] > 0, Registers: registers, Exports: exports, Counts: counts}
+	summary := Summary{Changed: counts["changed"]+counts["would_change"] > 0, Registers: registers, Exports: exports,
+		Notified: run.Notified(), Counts: counts}
+	if summary.Notified == nil {
+		summary.Notified = []string{}
+	}
 	raw, _ := json.Marshal(summary)
 	fmt.Fprintln(stdout, string(raw))
 	if err != nil {

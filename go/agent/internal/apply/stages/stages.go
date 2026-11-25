@@ -30,6 +30,8 @@ type Part struct {
 	Name, Role string
 	// File is the task file's name without .yml; empty means Name.
 	File string
+	// PreTask marks a part the play's pre_tasks run, not a role entry.
+	PreTask bool
 	// Reads are registered results of other task files (or of Ansible) the
 	// part's conditions read; Ansible passes the changed ones as seeds.
 	Reads []string

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeSystem is a temp root, every name owned by the current user, and a
@@ -311,5 +312,40 @@ func TestCommandsSysctlLoopsAndTags(t *testing.T) {
 	}
 	if len(f.calls) != 1 || !strings.HasPrefix(f.calls[0], "certbot") {
 		t.Fatalf("a plan ran: %v", f.calls)
+	}
+}
+
+// As in the apt module, a stale package list is refreshed when a task that
+// names packages runs, but only an install counts as a change.
+func TestAptInstallRefreshesWithoutCallingItAChange(t *testing.T) {
+	f := newFake(t)
+	installed := ""
+	f.System.Exec = func(name string, args ...string) (string, int, error) {
+		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+		if name == "dpkg-query" {
+			return installed, 0, nil
+		}
+		return "", 0, nil
+	}
+	apt := &AptInstall{Names: []string{"socat"}, UpdateCache: true, CacheValid: time.Hour}
+	installed = "socat\tii \t1.8\n"
+	c := check(t, f.System, apt)
+	if c.Needed || !c.Run {
+		t.Fatalf("installed package, stale lists: %+v", c)
+	}
+	if err := apt.Apply(f.System, c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(f.calls, "\n"), "apt-get update") || strings.Contains(strings.Join(f.calls, "\n"), "apt-get install") {
+		t.Fatalf("calls: %v", f.calls)
+	}
+	pinned := &AptInstall{Names: []string{"haproxy-awslc=3.4.*"}}
+	installed = "haproxy-awslc\tii \t3.2.1-1\n"
+	if c := check(t, f.System, pinned); !c.Needed {
+		t.Fatal("an installed version outside the pin is a change")
+	}
+	installed = "haproxy-awslc\tii \t3.4.2-1\n"
+	if c := check(t, f.System, pinned); c.Needed {
+		t.Fatal("a version inside the pin is not")
 	}
 }
