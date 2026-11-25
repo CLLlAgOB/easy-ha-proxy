@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func envBounded(name string, def, lo, hi int64) int64 {

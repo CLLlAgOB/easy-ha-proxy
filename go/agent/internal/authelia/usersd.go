@@ -2,7 +2,7 @@ package authelia
 
 // The Go port of authelia-usersd.py: one JSON line per request on a Unix
 // socket, served one at a time; users_database.yml read without following
-// links and written back through internal/pyyaml (sort_keys=True), with a
+// links and written back through the shared pyyaml (sort_keys=True), with a
 // hard-link backup rotation; argon2id hashed locally with argon2-cffi's
 // parameters so the password never reaches a process's argv.
 
@@ -30,7 +30,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // UsersdOptions holds what authelia-usersd.py reads from the environment.

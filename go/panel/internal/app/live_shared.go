@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"easy-ha-proxy/panel/internal/jinja"
+	"easy-ha-proxy/panel/shared/jinja"
 )
 
 // What each ban code in tbl_ban (gpt0) means.

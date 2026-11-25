@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 const (

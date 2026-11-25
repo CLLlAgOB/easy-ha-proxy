@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"easy-ha-proxy/panel/internal/jinja"
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/jinja"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // staticVersion is _static_version: sha256("size:mtime_ns")[:12] of a regular file.

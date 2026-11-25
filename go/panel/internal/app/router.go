@@ -1,7 +1,7 @@
 // Package app is the web administration panel. It began as a port of the
 // former Flask application (removed after the Go panel replaced it): the
 // endpoints keep their Flask endpoint names, the Jinja templates in
-// go/panel/web are rendered by internal/jinja, and the file comments still
+// go/panel/web are rendered by shared/jinja, and the file comments still
 // name the Python module each part came from.
 package app
 

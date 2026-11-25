@@ -76,7 +76,10 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (".gitattributes", ()),
     # The web panel ships as a container image built from go/panel (its
     # templates and static files in go/panel/web); the "web application"
-    # update pulls it. Nothing on the host changes.
+    # update pulls it. Nothing on the host changes -- except for the packages
+    # the host agent compiles too (the Jinja engine and the Python-compatible
+    # YAML), which reach the host only through the native stage.
+    ("go/panel/shared/*", ("ha-adm-native",)),
     ("go/panel/*", ()),
     # Native Rust hot-path core and Go host agent. The sources do not deploy,
     # but CI publishes their binaries from them, and only the native stage

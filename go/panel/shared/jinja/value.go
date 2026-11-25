@@ -14,7 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // Map is a Python dict (ordered).

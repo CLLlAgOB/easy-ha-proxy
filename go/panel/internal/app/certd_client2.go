@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // certdSimple is the "try: post; data = response.json() except: request

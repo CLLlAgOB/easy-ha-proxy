@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // DaemonError is a client's error class (BackupdError, UpdatedError, ...).

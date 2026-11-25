@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // TestHAProxyCfgVectors renders haproxy.cfg.j2 on contexts the Flask renderer

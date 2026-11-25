@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func argOr(args []any, kwargs *Map, i int, name string, def any) any {

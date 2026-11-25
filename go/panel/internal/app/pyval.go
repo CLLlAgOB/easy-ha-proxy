@@ -10,8 +10,8 @@ import (
 	"strings"
 	"unicode"
 
-	"easy-ha-proxy/panel/internal/jinja"
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/jinja"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // Map is a Python dict.

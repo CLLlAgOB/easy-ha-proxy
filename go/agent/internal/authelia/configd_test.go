@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func newTestConfigd(t *testing.T) (*Configd, string) {

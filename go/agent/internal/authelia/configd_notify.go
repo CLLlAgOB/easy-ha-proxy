@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func randRead(b []byte) (int, error) { return rand.Read(b) }

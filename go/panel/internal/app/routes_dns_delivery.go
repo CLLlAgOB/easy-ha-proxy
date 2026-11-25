@@ -10,7 +10,7 @@ import (
 	"log"
 	"strings"
 
-	"easy-ha-proxy/panel/internal/jinja"
+	"easy-ha-proxy/panel/shared/jinja"
 )
 
 const (

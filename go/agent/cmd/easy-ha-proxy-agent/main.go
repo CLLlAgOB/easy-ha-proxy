@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alertd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/authelia"
@@ -21,7 +22,6 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/healthd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updated"
 )

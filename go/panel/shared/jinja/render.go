@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // Loader returns a template's source by name.

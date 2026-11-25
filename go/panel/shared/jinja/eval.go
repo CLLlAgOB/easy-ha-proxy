@@ -3,7 +3,7 @@ package jinja
 import (
 	"strings"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func (ctx *context) eval(e expr, f *frame) (any, error) {

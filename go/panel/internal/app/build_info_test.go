@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // The panel image is fingerprinted over the panel's inputs, which the host

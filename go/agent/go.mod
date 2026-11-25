@@ -3,6 +3,7 @@ module github.com/CLLlAgOB/easy-ha-proxy/go/agent
 go 1.27.4
 
 require (
+	easy-ha-proxy/panel v0.0.0
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
 	golang.org/x/crypto v0.59.0
 	golang.org/x/net v0.63.0
@@ -24,3 +25,8 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// The Jinja engine and the Python-compatible YAML live in the panel module
+// (go/panel/shared), inside the tree the panel image and its pairing label are
+// built from; the agent compiles the same packages.
+replace easy-ha-proxy/panel => ../panel

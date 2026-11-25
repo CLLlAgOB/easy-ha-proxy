@@ -4,8 +4,8 @@ package authelia
 // specification: one JSON line per request on a Unix socket, served one at
 // a time, the same replies, files (configuration.yml and its backups, the
 // managed mail files, the notification tombstone) and fixed docker
-// commands. YAML goes through internal/pyyaml so files and rules_yaml stay
-// byte-identical with PyYAML's output.
+// commands. YAML goes through go/panel/shared/pyyaml so files and rules_yaml
+// stay byte-identical with PyYAML's output.
 
 import (
 	"bufio"
@@ -36,7 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 

@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // RegexReplaceFilter is the haproxy.cfg renderer's regex_replace (re.sub).

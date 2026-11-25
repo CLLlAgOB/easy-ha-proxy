@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"easy-ha-proxy/panel/internal/jinja"
+	"easy-ha-proxy/panel/shared/jinja"
 )
 
 // Four transfers at once is all the Flask panel gave to downloads (two in

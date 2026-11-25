@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 var pauseActions = map[string]struct {

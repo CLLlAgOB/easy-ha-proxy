@@ -17,9 +17,9 @@ import (
 
 	"easy-ha-proxy/panel/internal/config"
 	"easy-ha-proxy/panel/internal/i18n"
-	"easy-ha-proxy/panel/internal/jinja"
-	"easy-ha-proxy/panel/internal/pyyaml"
 	"easy-ha-proxy/panel/internal/security"
+	"easy-ha-proxy/panel/shared/jinja"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // HandlerFunc serves one Flask endpoint.

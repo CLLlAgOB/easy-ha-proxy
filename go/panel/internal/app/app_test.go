@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"easy-ha-proxy/panel/internal/config"
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func testApp(t *testing.T) *App {

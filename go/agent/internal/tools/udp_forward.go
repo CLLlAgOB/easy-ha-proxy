@@ -25,7 +25,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // UDPForwardOptions holds what haproxy-udp-forward.py reads from the environment.

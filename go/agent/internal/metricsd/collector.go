@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
 )
 
 // alertSink is the part of the alert client metricsd uses.

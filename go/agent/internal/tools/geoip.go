@@ -39,7 +39,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 const (

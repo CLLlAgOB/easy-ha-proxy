@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // Form is request.form.get(name): the first body value, or ok=false.

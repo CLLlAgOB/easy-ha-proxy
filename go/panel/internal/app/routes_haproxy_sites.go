@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 // File is request.files.get(name): its name and bytes, ok=false when absent.

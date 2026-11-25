@@ -6,6 +6,8 @@
 !go/panel/cmd/**
 !go/panel/internal/
 !go/panel/internal/**
+!go/panel/shared/
+!go/panel/shared/**
 !go/panel/web/static/
 !go/panel/web/static/**
 !go/panel/web/translations/

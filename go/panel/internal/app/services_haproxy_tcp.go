@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"easy-ha-proxy/panel/internal/pyyaml"
+	"easy-ha-proxy/panel/shared/pyyaml"
 )
 
 func tcpProxiesOf(data *Map) any {

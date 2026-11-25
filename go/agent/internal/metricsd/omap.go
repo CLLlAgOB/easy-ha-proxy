@@ -1,6 +1,6 @@
 package metricsd
 
-import "github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyyaml"
+import "easy-ha-proxy/panel/shared/pyyaml"
 
 // OMap is a Python dict for replies: keys in insertion order, floats
 // written as Python's json.dumps writes them.

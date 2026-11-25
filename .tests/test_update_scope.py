@@ -160,6 +160,12 @@ class WhatAChangeNeeds(unittest.TestCase):
         scope = update_scope.scope_for(["ansible/roles/haproxy/templates/haproxy.cfg.j2"])
         self.assertEqual(scope["tags"], ["ha-adm-cfg", "ha-cfg", "status"])
 
+    def test_the_shared_go_packages_refresh_the_native_binaries(self):
+        # The agent compiles go/panel/shared too: a change there is a new agent.
+        scope = update_scope.scope_for(["go/panel/shared/jinja/render.go", "go/panel/internal/app/app.go"])
+        self.assertFalse(scope["full"])
+        self.assertEqual(scope["tags"], ["ha-adm-native", "status"])
+
     def test_documentation_tests_and_the_web_application_deploy_nothing(self):
         scope = update_scope.scope_for([
             "README.ru.md", "docs/screenshots/en/dashboard.webp",
