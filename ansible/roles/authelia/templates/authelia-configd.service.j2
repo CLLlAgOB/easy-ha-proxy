@@ -38,7 +38,9 @@ RuntimeDirectory=easy-ha-proxy
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 StateDirectory=easy-ha-proxy
-StateDirectoryMode=0700
+# haproxy-healthd names the same directory with 0750; one mode, or the
+# last unit started decides it.
+StateDirectoryMode=0750
 UMask=0007
 
 [Install]

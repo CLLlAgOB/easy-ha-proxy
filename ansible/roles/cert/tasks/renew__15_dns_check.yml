@@ -64,8 +64,8 @@
   shell: |
     set -eo pipefail
     ok=1
-    for n in {{ names | join(' ') }}; do
-      for r in {{ acme_resolvers | join(' ') }}; do
+    for n in {{ names | map('quote') | join(' ') }}; do
+      for r in {{ acme_resolvers | map('quote') | join(' ') }}; do
         if ! (dig +time=2 +tries=1 +short A "$n" @"$r" | grep -E '^[0-9]+\.' >/dev/null \
            || dig +time=2 +tries=1 +short AAAA "$n" @"$r" | grep -E '^[0-9a-f:]' >/dev/null); then
           ok=0

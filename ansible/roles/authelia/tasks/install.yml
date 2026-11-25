@@ -153,13 +153,22 @@
       no_log: true
       diff: false
 
-    - name: Allow {{ authelia_log_reader_user }} to read Authelia users file
+    # The panel reaches users through authelia-usersd and never reads this
+    # file, which holds the password hashes; earlier versions let its host
+    # account read it. That access is taken back where the file exists (in
+    # managed mode it is written later, by the config stage).
+    - name: Check the Authelia users file
+      ansible.builtin.stat:
+        path: "{{ authelia_users_file }}"
+      register: authelia_users_file_stat
+
+    - name: Take back {{ authelia_log_reader_user }}'s read access to the Authelia users file
       ansible.posix.acl:
         path: "{{ authelia_users_file }}"
         entity: "{{ authelia_log_reader_user }}"
         etype: user
-        permissions: r
-        state: present
+        state: absent
+      when: authelia_users_file_stat.stat.exists
 
     # Authelia logrotate configuration.
     - name: Deploy logrotate config for Authelia

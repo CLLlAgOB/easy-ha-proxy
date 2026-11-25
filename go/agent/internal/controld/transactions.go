@@ -103,6 +103,16 @@ func unfoldHAProxyLines(text string) []string {
 	return logical
 }
 
+// firstNonEmptyStr is the first value that is not empty.
+func firstNonEmptyStr(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func normalizedPrefixPath(raw, allowedPrefix string) bool {
 	if raw == "" || !strings.HasPrefix(raw, "/") || strings.Contains(raw, "\x00") {
 		return false
@@ -120,6 +130,11 @@ func normalizedPrefixPath(raw, allowedPrefix string) bool {
 }
 
 var (
+	// The lua-prepend-path values haproxy.cfg.j2 writes.
+	approvedLuaSearchPaths = map[string]bool{
+		"/etc/haproxy/lua/?/http.lua": true,
+		"/etc/haproxy/lua/?.lua":      true,
+	}
 	policyForbidden = map[string]bool{"program": true, "pidfile": true, "module-load": true, "setuid": true, "setgid": true,
 		"uid": true, "gid": true, "external-check": true, "external-check-path": true, "external-check-command": true,
 		"lua-load-per-thread": true, "setenv": true, "presetenv": true, "ssl-engine": true, "insecure-fork-wanted": true,
@@ -224,7 +239,10 @@ func enforceConfigPolicy(raw []byte) error {
 				return vErr("unapproved HAProxy Lua entry point")
 			}
 		case token == "lua-prepend-path":
-			if len(parts) != 2 || !normalizedPrefixPath(parts[1], "/etc/haproxy/lua/") {
+			// Lua splits package.path on ";", so a prefix check would let
+			// one value carry further directories; only the template's
+			// own entries are accepted, as for lua-load.
+			if len(parts) != 2 || !approvedLuaSearchPaths[parts[1]] {
 				return vErr("HAProxy Lua search path must stay under /etc/haproxy/lua")
 			}
 		case token == "server-state-file":
@@ -1286,7 +1304,7 @@ func (d *Daemon) recordConfigVersionInner(state map[string]any) (string, error) 
 		state = map[string]any{}
 	}
 	meta := map[string]any{"id": versionID, "ts": now.Unix(), "generation": generation, "parent": parent,
-		"files": stringsToAny(sortedKeys(sources)), "transaction_id": pyx.StrOr(state["id"]),
+		"files": stringsToAny(sortedKeys(sources)), "transaction_id": firstNonEmptyStr(pyx.StrOr(state["transaction_id"]), pyx.StrOr(state["id"])),
 		"cfg_sha256": pyx.StrOr(state["candidate_sha256"])}
 	metaRaw, _ := pyx.Encode(meta)
 	metaPath := filepath.Join(staging, configHistoryMeta)

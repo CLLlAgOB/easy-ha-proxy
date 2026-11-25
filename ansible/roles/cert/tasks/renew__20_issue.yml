@@ -17,14 +17,14 @@
     --standalone
     --non-interactive
     --agree-tos
-    --email {{ certbot_email }}
+    --email {{ certbot_email | quote }}
     --http-01-port 8000
     --http-01-address 0.0.0.0
     --preferred-challenges http-01
-    --key-type {{ key_type }}
-    {% if key_type == 'rsa' %}--rsa-key-size {{ rsa_key_size }}{% endif %}
-    {% if key_type == 'ecdsa' %}--elliptic-curve {{ ecdsa_curve }}{% endif %}
-    --cert-name {{ lineage }}
+    --key-type {{ key_type | quote }}
+    {% if key_type == 'rsa' %}--rsa-key-size {{ rsa_key_size | quote }}{% endif %}
+    {% if key_type == 'ecdsa' %}--elliptic-curve {{ ecdsa_curve | quote }}{% endif %}
+    --cert-name {{ lineage | quote }}
     --keep-until-expiring
     {{ san_flags }}
   args:
@@ -46,14 +46,14 @@
     --standalone
     --non-interactive
     --agree-tos
-    --email {{ certbot_email }}
+    --email {{ certbot_email | quote }}
     --http-01-port 8000
     --http-01-address 0.0.0.0
     --preferred-challenges http-01
-    --key-type {{ key_type }}
-    {% if key_type == 'rsa' %}--rsa-key-size {{ rsa_key_size }}{% endif %}
-    {% if key_type == 'ecdsa' %}--elliptic-curve {{ ecdsa_curve }}{% endif %}
-    --cert-name {{ lineage }}
+    --key-type {{ key_type | quote }}
+    {% if key_type == 'rsa' %}--rsa-key-size {{ rsa_key_size | quote }}{% endif %}
+    {% if key_type == 'ecdsa' %}--elliptic-curve {{ ecdsa_curve | quote }}{% endif %}
+    --cert-name {{ lineage | quote }}
     --keep-until-expiring
     {{ san_flags }}
   args:

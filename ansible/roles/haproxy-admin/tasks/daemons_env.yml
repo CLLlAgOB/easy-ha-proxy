@@ -5,7 +5,9 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    # Only root reads it; the installer and the cert role keep it 0700 too,
+    # so the stages no longer flip it between modes.
+    mode: "0700"
 
 - name: Render root-only daemon IPC token file
   ansible.builtin.template:

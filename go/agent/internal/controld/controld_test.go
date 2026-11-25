@@ -42,6 +42,32 @@ func TestConfigPolicy(t *testing.T) {
 	}
 }
 
+// Lua splits package.path on ";": a value under /etc/haproxy/lua may not
+// carry another directory along, or a module from it would run as root
+// during the configuration check.
+func TestLuaSearchPathPolicy(t *testing.T) {
+	withPaths := func(paths ...string) string {
+		lines := ""
+		for _, p := range paths {
+			lines += "    lua-prepend-path " + p + "\n"
+		}
+		return strings.Replace(goodConfig, "    chroot", lines+"    lua-load /etc/haproxy/lua/auth-request.lua\n    chroot", 1)
+	}
+	if err := enforceConfigPolicy([]byte(withPaths("/etc/haproxy/lua/?/http.lua", "/etc/haproxy/lua/?.lua"))); err != nil {
+		t.Fatalf("the template's own paths refused: %v", err)
+	}
+	for _, p := range []string{
+		"/etc/haproxy/lua/none/?.lua;/tmp/?.lua",
+		"/etc/haproxy/lua/x/../../../tmp/?.lua",
+		"/etc/haproxy/lua/other/?.lua",
+		`"/etc/haproxy/lua/?.lua;/var/tmp/?.lua"`,
+	} {
+		if err := enforceConfigPolicy([]byte(withPaths(p))); err == nil {
+			t.Errorf("accepted %s", p)
+		}
+	}
+}
+
 func TestLineHasIP(t *testing.T) {
 	if !lineHasIP("from 203.0.113.1:443", "203.0.113.1") || lineHasIP("from 203.0.113.10", "203.0.113.1") ||
 		lineHasIP("x1.203.0.113.1", "203.0.113.1") || !lineHasIP("203.0.113.1", "203.0.113.1") {

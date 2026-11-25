@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -149,12 +150,8 @@ class ThePEMBuildRewritesOnlyWhatChanged(unittest.TestCase):
         handlers = yaml.safe_load((ANSIBLE / "roles/cert/handlers/main.yml").read_text(encoding="utf-8"))
         task = next(h for h in handlers if h.get("name", "").startswith("Build PEMs (sites without key_types"))
         self.changed_when = task["changed_when"]
-        script = Environment().from_string(task["ansible.builtin.shell"]).render(
-            lineage="shop.example.com",
-            dest=str(self.root / "certs" / "shop.example.com.pem"),
-            haproxy_certs_available_dir=str(self.root / "available"),
-        )
-        self.script = script.replace("/etc/letsencrypt/live/", f"{self.root}/live/")
+        self.source = task["ansible.builtin.shell"]
+        self.script = self.render("shop.example.com", str(self.root / "certs" / "shop.example.com.pem"))
         self.live = self.root / "live" / "shop.example.com"
         self.dest = self.root / "certs" / "shop.example.com.pem"
         (self.root / "certs").mkdir()
@@ -165,6 +162,13 @@ class ThePEMBuildRewritesOnlyWhatChanged(unittest.TestCase):
         for tool in bin_dir.iterdir():
             tool.chmod(0o755)
         self.environment = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    def render(self, lineage, dest):
+        environment = Environment()
+        environment.filters["quote"] = shlex.quote  # Ansible's quote filter
+        script = environment.from_string(self.source).render(
+            lineage=lineage, dest=dest, haproxy_certs_available_dir=str(self.root / "available"))
+        return script.replace("/etc/letsencrypt/live/", f"{self.root}/live/")
 
     def issue(self, text):
         self.live.mkdir(parents=True, exist_ok=True)
@@ -211,6 +215,16 @@ class ThePEMBuildRewritesOnlyWhatChanged(unittest.TestCase):
         pin.write_text("standby", encoding="utf-8")
         self.assertFalse(self.build())
         self.assertFalse(self.dest.exists())
+
+    def test_shell_syntax_in_a_site_name_runs_nothing(self):
+        # websites.yml is written by the panel; this script runs as root.
+        marker = self.root / "ran"
+        self.script = self.render(f"shop.example.com$(touch {marker})",
+                                  f'{self.root}/certs/x.pem"; touch {marker}; echo "')
+        done = subprocess.run(["bash", "-c", self.script], capture_output=True, text=True,
+                              env=self.environment, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

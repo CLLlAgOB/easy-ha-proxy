@@ -162,7 +162,7 @@
 - name: "certbot delete orphaned lineages (non-interactive, quiet)"
   tags: [never, remove_site]
   command:
-    cmd: "certbot delete --non-interactive --quiet --cert-name {{ item }}"
+    cmd: "certbot delete --non-interactive --quiet --cert-name {{ item | quote }}"
   loop: "{{ orphan_lineages }}"
   when: not (cleanup_dry_run | default(false) | bool)
   register: _certbot_del
