@@ -113,6 +113,43 @@ class InternalCaInstallTests(unittest.TestCase):
             self.assertTrue(metadata["installation_complete"])
             self.assertTrue(metadata["configuration_pending"])
 
+    def test_fresh_access_gate_takes_the_installation_certificate_source(self) -> None:
+        # A site is issued by its own certificate_source, and one without it
+        # gets Let's Encrypt: the gate of an internal-CA install could not get
+        # a certificate, and the first apply in the panel failed.
+        for test_mode, source in ((True, "internal"), (False, "letsencrypt")):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+
+                def answer(label, default=None, validator=None):
+                    return {"Root domain": "example.com", "Timezone": "UTC"}.get(label) or default
+
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"EASY_HA_PROXY_CONFIG_DIR": str(directory), "EASY_HA_PROXY_ALLOW_STDIN": "1"},
+                    ),
+                    mock.patch("easy_ha_proxy.prompt", side_effect=answer),
+                    mock.patch("easy_ha_proxy.prompt_bool", side_effect=lambda label, default=False: default),
+                    mock.patch("easy_ha_proxy.prompt_password", return_value="a" * 16),
+                    mock.patch("easy_ha_proxy.detect_local_ip", return_value="192.168.56.10"),
+                    mock.patch("builtins.input", side_effect=("", "")),
+                    mock.patch("easy_ha_proxy.backup_configuration"),
+                ):
+                    configure_interactively(
+                        overwrite=True,
+                        test_mode=test_mode,
+                        certificate_source=source,
+                        image_channel="latest",
+                        source_channel="local",
+                    )
+
+                websites = yaml.safe_load((directory / "websites.yml").read_text())
+                gates = [site for site in websites["sites"] if site.get("access_gate")]
+                self.assertEqual(len(gates), 1)
+                self.assertEqual(gates[0]["certificate_source"], source)
+                self.assertEqual(gates[0]["le_managed"], source == "letsencrypt")
+
     def test_reconfigure_preserves_existing_managed_and_future_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

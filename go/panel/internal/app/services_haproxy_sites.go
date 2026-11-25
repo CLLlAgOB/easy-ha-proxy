@@ -379,6 +379,7 @@ func AddSiteMinimal(op *Op, name, domain, backendIP string, backendPort any, ext
 		}
 		gate := newMap("name", name, "domain", domain, "access_gate", true, "authelia_enabled", true, "allow_ips", []any{},
 			"tcp_passthrough", false, "zero_trust", false, "redirect_to_https", true, "access_portal_enabled", true)
+		startWithDefaultCertificateSource(gate, cv)
 		if c := SiteIdentityConflict(gate, sites); c != "" {
 			return false, c
 		}
@@ -419,12 +420,39 @@ func AddSiteMinimal(op *Op, name, domain, backendIP string, backendPort any, ext
 		site.Delete("backend_ip")
 		site.Delete("backend_port")
 	}
+	if cv, err := loadYAML(ConfigYAML); err == nil {
+		startWithDefaultCertificateSource(site, cv)
+	}
 	if c := SiteIdentityConflict(site, sites); c != "" {
 		return false, c
 	}
 	sites = append(sites, site)
 	data.Set("sites", sites)
 	return UpdateYAMLFile(op, "websites", dumpYAML(data))
+}
+
+// startWithDefaultCertificateSource gives a new site without a certificate
+// source the installation's default from site_defaults. Certificates are
+// issued by the site's own source, and a site without one gets Let's
+// Encrypt, which an internal-CA installation cannot use.
+func startWithDefaultCertificateSource(site, config *Map) {
+	if source, _ := site.Value("certificate_source").(string); validCertificateSource(source) {
+		return
+	}
+	defaults, _ := asMap(orValue(config.Value("site_defaults"), pyyaml.NewMap()))
+	if defaults == nil {
+		return
+	}
+	source, _ := defaults.Value("certificate_source").(string)
+	if !validCertificateSource(source) {
+		return
+	}
+	site.Set("certificate_source", source)
+	site.Set("le_managed", source == "letsencrypt")
+}
+
+func validCertificateSource(source string) bool {
+	return source == "letsencrypt" || source == "external" || source == "internal"
 }
 
 // DeleteSiteByName is delete_site_by_name.

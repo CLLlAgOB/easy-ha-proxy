@@ -1080,12 +1080,16 @@ def configure_interactively(
                 f"A site for {gate_domain} already exists; edit it in the web UI "
                 "to turn it into an access gate."
             )
+        # Certificates are issued by the site's own source; without one a
+        # site gets Let's Encrypt, which an internal-CA install cannot use.
         _existing_sites.append(
             {
                 "name": gate_domain,
                 "domain": gate_domain,
                 "access_gate": True,
                 "authelia_enabled": True,
+                "certificate_source": certificate_source,
+                "le_managed": certificate_source == "letsencrypt",
             }
         )
 
