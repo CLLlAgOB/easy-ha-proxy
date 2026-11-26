@@ -614,3 +614,26 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// RenderLocal templates a task argument with loop variables (item, say)
+// above every other source, as a loop's task sees them.
+func (s *Set) RenderLocal(src string, local map[string]any) (string, error) {
+	tpl, err := s.env.FromString("<template>", escapeBackslashes(src))
+	if err != nil {
+		return "", err
+	}
+	outer := s.failure
+	s.failure = nil
+	out, err := s.env.RenderTemplate(tpl, local)
+	if s.failure != nil {
+		err = s.failure
+	}
+	s.failure = outer
+	if err != nil {
+		return "", err
+	}
+	if want, have := trailingNewlines(src), trailingNewlines(out); want > have {
+		out += strings.Repeat("\n", want-have)
+	}
+	return out, nil
+}

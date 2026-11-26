@@ -25,7 +25,7 @@ def installed(package, old, new):
 
 class PackageSafety(unittest.TestCase):
     def test_ansible_passes_the_flag_and_state_path_without_shell_splitting(self):
-        tasks = yaml.safe_load((ROOT / 'ansible/roles/update_packages/tasks/main.yml').read_text())
+        tasks = yaml.safe_load((ROOT / 'ansible/roles/update_packages/tasks/upgrade.yml').read_text())
         task = next(t for t in tasks if 'ansible.builtin.script' in t)
         environment = Environment()
         environment.filters['quote'] = shlex.quote

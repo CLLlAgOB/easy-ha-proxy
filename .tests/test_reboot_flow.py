@@ -146,7 +146,7 @@ class RebootPromptTests(unittest.TestCase):
 class RebootIntegrationTests(unittest.TestCase):
     def test_local_ansible_connection_never_uses_reboot_module(self) -> None:
         tasks = (
-            ROOT / "ansible/roles/update_packages/tasks/main.yml"
+            ROOT / "ansible/roles/update_packages/tasks/upgrade.yml"
         ).read_text(encoding="utf-8")
 
         self.assertIn("easy_ha_proxy_reboot_after_upgrade", tasks)

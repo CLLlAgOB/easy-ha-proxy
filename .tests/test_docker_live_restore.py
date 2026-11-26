@@ -70,7 +70,7 @@ else:
 
 class Wiring(unittest.TestCase):
     def test_system_upgrade_configures_continuity_before_apt_can_restart_docker(self):
-        tasks = yaml.safe_load((ROOT / "ansible/roles/update_packages/tasks/main.yml").read_text())
+        tasks = yaml.safe_load((ROOT / "ansible/roles/update_packages/tasks/upgrade.yml").read_text())
         imported = next(i for i, t in enumerate(tasks)
                         if t.get("ansible.builtin.import_role", {}).get("tasks_from") == "live_restore")
         upgrade = next(i for i, t in enumerate(tasks) if t.get("apt", {}).get("upgrade"))

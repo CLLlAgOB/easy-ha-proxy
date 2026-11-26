@@ -18,7 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PLAYBOOK = ROOT / "ansible/easy-ha-proxy.yml"
 DOCKER_TASKS = ROOT / "ansible/roles/docker/tasks/docker.yml"
-UPGRADE_TASKS = ROOT / "ansible/roles/update_packages/tasks/main.yml"
+UPGRADE_TASKS = ROOT / "ansible/roles/update_packages/tasks/upgrade.yml"
 
 
 class AptCacheSpeedTests(unittest.TestCase):

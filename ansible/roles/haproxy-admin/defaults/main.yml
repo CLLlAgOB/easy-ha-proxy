@@ -305,6 +305,8 @@ go_installer_parts:
   - cert/notify
   - cert/hooks
   - cert/renew
+  - update_packages/upgrade
+  - healthcheck/status
   - geoip_acl/geoip
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.
@@ -319,6 +321,7 @@ go_installer_forwarded_vars:
   - easy_ha_proxy_runtime_maintenance_until
   # A pre_task fact that depends on the run's tags (addsite).
   - cert_issue_mode
+  - status_check_fail_on_error
 native_guardd_bin: /usr/local/sbin/guardd-core
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url

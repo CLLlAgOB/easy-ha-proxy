@@ -13,7 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "ansible/roles/healthcheck/files/status_probe.py"
-TASKS = ROOT / "ansible/roles/healthcheck/tasks/main.yml"
+TASKS = ROOT / "ansible/roles/healthcheck/tasks/status.yml"
 
 
 def fake(directory: Path, name: str, body: str) -> None:

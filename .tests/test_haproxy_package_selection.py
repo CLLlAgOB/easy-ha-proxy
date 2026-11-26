@@ -75,7 +75,7 @@ class ProviderSafety(unittest.TestCase):
 
 class HealthPackageSelection(unittest.TestCase):
     def test_health_checks_query_the_installed_package_even_with_stale_inventory(self):
-        tasks = yaml.safe_load((ROOT / 'ansible/roles/healthcheck/tasks/main.yml').read_text())
+        tasks = yaml.safe_load((ROOT / 'ansible/roles/healthcheck/tasks/status.yml').read_text())
         task = next(t for t in tasks if t.get('name') == 'Status check | select the actual HAProxy package name')
         selector = task['ansible.builtin.set_fact']['status_check_haproxy_apt_package']
         for status, expected in [

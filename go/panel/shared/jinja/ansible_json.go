@@ -3,6 +3,7 @@ package jinja
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -178,4 +179,41 @@ func pyJSONString(s string, ensureASCII bool) string {
 	}
 	b.WriteByte('"')
 	return b.String()
+}
+
+// AnsibleRegexFindall is regex_findall(regex, multiline=False,
+// ignorecase=False): re.findall -- the whole matches without groups, the
+// group with one, a tuple of groups with more.
+func AnsibleRegexFindall(_ *Environment, v any, args []any, kwargs *Map) (any, error) {
+	pattern := Str(argOr(args, kwargs, 0, "regex", ""))
+	flags := ""
+	if Truthy(argOr(nil, kwargs, 9, "multiline", false)) {
+		flags += "m"
+	}
+	if Truthy(argOr(nil, kwargs, 9, "ignorecase", false)) {
+		flags += "i"
+	}
+	if flags != "" {
+		pattern = "(?" + flags + ")" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, errf("bad regex %q: %v", pattern, err)
+	}
+	out := []any{}
+	for _, m := range re.FindAllStringSubmatch(Str(v), -1) {
+		switch len(m) {
+		case 1:
+			out = append(out, m[0])
+		case 2:
+			out = append(out, m[1])
+		default:
+			groups := make(Tuple, len(m)-1)
+			for i, g := range m[1:] {
+				groups[i] = g
+			}
+			out = append(out, groups)
+		}
+	}
+	return out, nil
 }

@@ -37,6 +37,8 @@ type Part struct {
 	File string
 	// PreTask marks a part the play's pre_tasks run, not a role entry.
 	PreTask bool
+	// Play is the index of the play whose role runs the part (0: the first).
+	Play int
 	// Exports are registers Ansible's handlers read: handed back as facts
 	// with the ones other parts read.
 	Exports []string
@@ -112,7 +114,7 @@ func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
 	if taskStage == "" {
 		taskStage = part.TaskFile()
 	}
-	set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Role: part.Role,
+	set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Play: part.Play, Role: part.Role,
 		Params: map[string]any{"task_stage": taskStage}, Extra: ctx.Extra, Facts: ctx.Facts, SetFacts: ctx.SetFacts,
 		HostTimezone: ctx.HostTimezone})
 	if err != nil {

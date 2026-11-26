@@ -37,6 +37,8 @@ var folded = map[string]bool{
 	"Stat Authelia log file":                                                 true, // stat, read in the conditions
 	"Check existing private Authelia paths for stale log-reader ACL cleanup": true, // stat, read in the conditions
 	"Look for the Redis session dump":                                        true, // stat, read in the conditions
+	"Check whether needrestart is installed":                                 true, // stat, read in the conditions
+	"Check whether a reboot is required":                                     true, // stat, read in the conditions
 	"Inspect the legacy managed msmtp configuration":                         true, // stat, read with the file
 }
 
@@ -167,7 +169,7 @@ func mustSet(t *testing.T, root string, part Part) *vars.Set {
 	if err := os.WriteFile(filepath.Join(source, vars.Playbook), playbook, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	set, err := vars.Load(vars.Options{SourceDir: source, ConfigDir: config, Role: part.Role,
+	set, err := vars.Load(vars.Options{SourceDir: source, ConfigDir: config, Play: part.Play, Role: part.Role,
 		Params: map[string]any{"task_stage": part.TaskFile()}})
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +194,8 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy/tasks/config.yml", "Configure HAProxy to load its private environment", haproxySecretDropIn},
 		{"haproxy/tasks/config.yml", "server-state | Normalize state before every cold start", haproxyStateGuard},
 		{"docker/tasks/docker.yml", "Add Docker APT repository", dockerRepo},
+		{"update_packages/tasks/upgrade.yml", "Configure APT retries and timeouts", aptRetries},
+		{"update_packages/tasks/upgrade.yml", "Keep needrestart from stopping active maintenance brokers", needrestartBrokers},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, "ansible", "roles", c.file))
 		if err != nil {
@@ -328,5 +332,44 @@ func TestShellScriptsMatchTheTaskFiles(t *testing.T) {
 	}
 	if strings.Join(paths, ",") != strings.Join(nativeLegacyPaths, ",") {
 		t.Errorf("native_legacy_paths: task file %v, Go %v", paths, nativeLegacyPaths)
+	}
+}
+
+// The status check's report is the task file's own message templates; hold
+// the Go copies to status.yml.
+func TestHealthcheckMessagesMatchTheTaskFile(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", "healthcheck", "tasks", "status.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := pyyaml.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	var walk func([]any)
+	walk = func(list []any) {
+		for _, task := range list {
+			m := task.(*pyyaml.Map)
+			if block, ok := m.Value("block").([]any); ok {
+				walk(block)
+				continue
+			}
+			for _, module := range []string{"ansible.builtin.debug", "ansible.builtin.fail"} {
+				args, _ := m.Value(module).(*pyyaml.Map)
+				if args == nil || args.Value("msg") == nil {
+					continue
+				}
+				seen++
+				name := m.Value("name").(string)
+				if healthcheckMsgs[name] != args.Value("msg") {
+					t.Errorf("%s: the Go message differs from the task's", name)
+				}
+			}
+		}
+	}
+	walk(doc.([]any))
+	if seen != len(healthcheckMsgs) {
+		t.Errorf("status.yml has %d messages, the Go copy %d", seen, len(healthcheckMsgs))
 	}
 }
