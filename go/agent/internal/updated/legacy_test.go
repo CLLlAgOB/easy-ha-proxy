@@ -148,6 +148,23 @@ func TestLegacyApplyIsCompletedOnceVerified(t *testing.T) {
 	}
 }
 
+func TestLegacyApplyIsCompletedWhenThePythonCheckerIsGone(t *testing.T) {
+	d, id := legacyFixture(t, reviewedByPython(), checkedAfterUpgrade(), map[string]any{
+		"error": legacyCheckerMissing, "progress": map[string]any{"phase": "rechecking"}})
+	pending := d.pendingLegacyRecheck()
+	if pending == nil || pending.jobID != id {
+		t.Fatalf("not picked up: %+v", pending)
+	}
+	d.runLegacyRecheck(pending)
+	job, err := d.loadJob(id, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job["status"] != "completed" || job["error"] != nil || rawJob(t, d, id)["legacy_recheck"] != "verified" {
+		t.Fatalf("job not completed: %v %v", job["status"], job["error"])
+	}
+}
+
 func TestLegacyApplyStaysFailedWhenMoreThanThePanelDiffers(t *testing.T) {
 	cases := map[string]func(fresh map[string]any){
 		"redis digest": func(f map[string]any) {
@@ -196,6 +213,10 @@ func TestLegacyRecheckOnlyForTheJobAPythonReviewFailed(t *testing.T) {
 		"other plan":        {job: map[string]any{"plan_id": "0123456789abcdef0123456789abcdef"}},
 		"no containers":     {job: map[string]any{"components": []any{"services"}}},
 		"already looked at": {job: map[string]any{"legacy_recheck": "not verified: earlier"}},
+		// Failed before its components ran: nothing was applied.
+		"checker gone, no phase": {job: map[string]any{"error": legacyCheckerMissing}},
+		"checker gone while applying": {job: map[string]any{"error": legacyCheckerMissing,
+			"progress": map[string]any{"phase": "applying"}}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

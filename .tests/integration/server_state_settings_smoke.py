@@ -5,6 +5,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -189,6 +190,6 @@ def main(template, normalizer):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", type=Path, required=True)
-    parser.add_argument("--normalizer", type=Path, default=Path(__file__).resolve().parents[2] / "installer/haproxy_server_state.py")
+    parser.add_argument("--normalizer", type=Path, default=Path(os.environ.get("AGENT_BIN", "/usr/local/sbin/easy-ha-proxy-agent")))
     options = parser.parse_args()
     main(options.template, options.normalizer)

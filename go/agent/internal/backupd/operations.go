@@ -410,8 +410,8 @@ func (d *Daemon) inspectWorker(jobID, uploadID, passphrase string, lock *os.File
 // copyRecoverySource copies the managed source so a restore that replaces it
 // keeps running from a stable tree.
 func (d *Daemon) copyRecoverySource(jobID string) (string, error) {
-	for _, rel := range []string{"install-local.sh", "installer/easy_ha_proxy.py",
-		"ansible/easy-ha-proxy.yml", "ansible/requirements.yml"} {
+	for _, rel := range []string{"install-local.sh", "installer/easy-ha-proxy",
+		"installer/agent-fetch.sh", "ansible/easy-ha-proxy.yml"} {
 		fi, err := os.Stat(filepath.Join(d.Opts.SourceDir, rel))
 		if err != nil || !fi.Mode().IsRegular() {
 			return "", bErr("invalid", "managed recovery source is incomplete")

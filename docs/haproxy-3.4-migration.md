@@ -119,7 +119,8 @@ haproxy_package_branch: "3.4"
 смены провайдера обычным обновлением или вручную удалять пакет на рабочем dev.
 Live-restore Docker не защищает от обновления самого HAProxy.
 
-Операция реализована в `installer/haproxy_package_migrate.py`. Это отдельная
+Операция реализована в агенте хоста (`easy-ha-proxy-agent haproxy-migrate`,
+`go/agent/internal/haproxymigrate`). Это отдельная
 команда оператора с правами root; обычное обновление её не вызывает. Поддержаны
 Ubuntu 24.04 ARM64 и AMD64 с дистрибутивным HAProxy 2.8, штатным unit и одним
 локальным peer. Пользовательский unit, удалённые peers, неизвестная схема таблиц,
@@ -162,15 +163,15 @@ libjemalloc2, libopentracing1 и libopentracing-c-wrapper0t64 заранее з�
 сети при заключительном обновлении индекса провайдера оставляет проверенный
 HAProxy работающим и записывает предупреждение для повторного обновления APT.
 
-Из каталога актуального исходного кода на хосте:
+На хосте:
 
 ```sh
-sudo python3 installer/haproxy_package_migrate.py prepare
-sudo python3 installer/haproxy_package_migrate.py apply --id ID --exercise-rollback
+sudo easy-ha-proxy-agent haproxy-migrate prepare
+sudo easy-ha-proxy-agent haproxy-migrate apply --id ID --exercise-rollback
 # После успешной репетиции создать новую подготовку для окончательного перехода:
-sudo python3 installer/haproxy_package_migrate.py prepare
-sudo python3 installer/haproxy_package_migrate.py apply --id NEW_ID
-sudo python3 installer/haproxy_package_migrate.py status --id NEW_ID
+sudo easy-ha-proxy-agent haproxy-migrate prepare
+sudo easy-ha-proxy-agent haproxy-migrate apply --id NEW_ID
+sudo easy-ha-proxy-agent haproxy-migrate status --id NEW_ID
 ```
 
 ID — 32 символа из ответа `prepare`. Подготовка действительна сутки и отменяется
@@ -285,7 +286,7 @@ TLS-библиотеку, проверяет новый бинарный фай�
 Операторская команда внутри ветки:
 
 ```sh
-sudo /opt/easy-ha-proxy/venv/bin/python /opt/easy-ha-proxy/source/installer/haproxy_package_migrate.py patch --expected-version VERSION
+sudo easy-ha-proxy-agent haproxy-migrate patch --expected-version VERSION
 ```
 
 `--reinstall` нужен только для осознанного повторного применения той же версии.

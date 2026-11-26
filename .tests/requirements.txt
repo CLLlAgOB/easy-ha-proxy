@@ -1,0 +1,4 @@
+# What the contract tests in .tests/ import: the template, page and script
+# checks render and parse with these. Nothing on a gateway runs Python.
+Jinja2~=3.1
+PyYAML~=6.0

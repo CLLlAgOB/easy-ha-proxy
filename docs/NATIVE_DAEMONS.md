@@ -13,17 +13,24 @@ removed, and updates go forward only.
   binary for the host daemons (`healthd`, `metricsd`, `alertd`, `controld`,
   `certd`, `backupd`, `updated`, `authelia-bansd`, `authelia-usersd`,
   `authelia-configd`) and the tools (`unit-failed`, `backup-run`,
-  `server-state`, `udp-forward`, `cert-deliver`, `update-geoip`,
-  `apt-metadata`, `probe-host`), the installer (`apply`), the encrypted full
-  backup and restore (`full-backup`) and the update checker the update broker
-  signs (`update-plan`, with `update-scope` for "only what changed").
+  `server-state`, `udp-forward`, `cert-deliver`, `cert-notify-state`,
+  `update-geoip`, `apt-metadata`, `probe-host`, the OS-security and SSH
+  helpers, `haproxy-migrate`), the installer (`cli` and `apply`), the
+  encrypted full backup and restore (`full-backup`) and the update checker the
+  update broker signs (`update-plan`, with `update-scope` for "only what
+  changed").
 - **`easy-ha-proxy-panel`** (Go, `CGO_ENABLED=0`): the web panel in a
   `FROM scratch` container with a built-in `healthcheck` subcommand. Its
   templates, static files and translations live in `go/panel/web`.
 
-The installer's command line (`installer/`) and the host tools the update
-broker's OS-security steps run (`os_security.py`, `ssh_protection.py`, ...)
-remain Python, on the platform interpreter.
+Nothing on a host runs Python. `installer/easy-ha-proxy` starts the agent's
+`cli`; a host without an agent yet (a fresh install, or the first update from
+a release whose installer was Python) gets the one built for its source from
+the GitHub release `agent-builds` (`installer/agent-fetch.sh`, checked against
+its SHA-256) or from its local bundle. Two Python files stay in `installer/`
+only for the update broker of releases before 1.2.0, which reads them while it
+applies the update to this version, and two placeholders only for its
+updater's check of a downloaded source.
 
 ## Release bundles and images
 

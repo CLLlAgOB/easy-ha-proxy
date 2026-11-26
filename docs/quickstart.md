@@ -15,9 +15,10 @@ For production:
 
 - point the administration and Authelia DNS A/AAAA records to the server;
 - allow inbound TCP 80 and 443;
-- allow outbound access to package repositories, GitHub, Python package index,
-  Ansible Galaxy, the container registry, Snap, Let's Encrypt, and DB-IP GeoIP
-  data during installation and periodic database updates.
+- allow outbound access to package repositories, GitHub (the source and the
+  host agent's release downloads), the container registry, Snap, Let's
+  Encrypt, and DB-IP GeoIP data during installation and periodic database
+  updates.
 
 For a remote installation, the workstation needs `bash`, `curl`, `ssh`, and
 `scp`.

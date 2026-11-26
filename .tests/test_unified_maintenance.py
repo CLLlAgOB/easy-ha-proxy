@@ -2,7 +2,8 @@
 
 Runtime maintenance and OS upgrade guard tests moved to
 go/agent/internal/hostsec/os_upgrade_guard_test.go. installer/maintenance_window.py
-stays until haproxy_package_migrate.py moves to Go in Step 5.
+stays only for the update broker of releases before 1.2.0, which loads it while
+it applies the update to this version.
 """
 from __future__ import annotations
 

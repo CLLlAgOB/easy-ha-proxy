@@ -404,7 +404,7 @@ var preflightRestoreControlPlane = func() error {
 	source := restoreControlPlaneSource()
 	var missing []string
 	for _, rel := range []string{"install.sh", "install-local.sh", "install-remote.sh", "easy-ha-proxy-helper.sh",
-		"installer/easy-ha-proxy", "installer/easy_ha_proxy.py", "installer/requirements.txt", "ansible/easy-ha-proxy.yml"} {
+		"installer/easy-ha-proxy", "installer/agent-fetch.sh", "ansible/easy-ha-proxy.yml"} {
 		if p := filepath.Join(source, rel); !isFile(p) {
 			missing = append(missing, p)
 		}
@@ -412,26 +412,12 @@ var preflightRestoreControlPlane = func() error {
 	if len(missing) > 0 {
 		return backupErrorf("Restore control-plane preflight failed: missing trusted source files: %s", strings.Join(missing, ", "))
 	}
-	home := os.Getenv("EASY_HA_PROXY_HOME")
-	if home == "" {
-		home = "/opt/easy-ha-proxy"
-	}
-	python := filepath.Join(home, "venv/bin/python")
 	agent := os.Getenv("EASY_HA_PROXY_AGENT")
 	if agent == "" {
 		agent = "/usr/local/sbin/easy-ha-proxy-agent"
 	}
-	missing = nil
-	for _, p := range []string{python, agent} {
-		if !executable(p) {
-			missing = append(missing, p)
-		}
-	}
-	if len(missing) > 0 {
-		return backupErrorf("Restore control-plane preflight failed: missing prepared executables: %s", strings.Join(missing, ", "))
-	}
-	if err := restoreStage("Restore control-plane Python dependency check", []string{python, "-c", "import jinja2, yaml"}, nil, true); err != nil {
-		return err
+	if !executable(agent) {
+		return backupErrorf("Restore control-plane preflight failed: missing prepared executables: %s", agent)
 	}
 	// The installed agent runs the playbook that reconciles the restored
 	// host; one older than "apply playbook" would have to be fetched, and a
@@ -480,7 +466,7 @@ var activateRecoverySource = func() (string, error) {
 		return managed, nil
 	}
 	var missing []string
-	for _, rel := range []string{"install-local.sh", "installer/easy_ha_proxy.py", "ansible/easy-ha-proxy.yml", "ansible/requirements.yml"} {
+	for _, rel := range []string{"install-local.sh", "installer/easy-ha-proxy", "installer/agent-fetch.sh", "ansible/easy-ha-proxy.yml"} {
 		if p := filepath.Join(recovery, rel); !isFile(p) {
 			missing = append(missing, p)
 		}

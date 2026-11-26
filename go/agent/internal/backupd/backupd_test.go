@@ -37,8 +37,8 @@ func newTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	for _, rel := range []string{"install-local.sh", "installer/easy_ha_proxy.py", "ansible/easy-ha-proxy.yml",
-		"ansible/requirements.yml"} {
+	for _, rel := range []string{"install-local.sh", "installer/easy-ha-proxy", "installer/agent-fetch.sh",
+		"ansible/easy-ha-proxy.yml"} {
 		p := filepath.Join(source, rel)
 		_ = os.MkdirAll(filepath.Dir(p), 0o755)
 		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
@@ -311,7 +311,8 @@ func TestCopyRecoverySourceKeepsGitAndSkipsPycache(t *testing.T) {
 	spool := filepath.Join(root, "spool")
 	for _, rel := range []string{
 		"install-local.sh",
-		"installer/easy_ha_proxy.py",
+		"installer/easy-ha-proxy",
+		"installer/agent-fetch.sh",
 		"installer/__pycache__/easy_ha_proxy.cpython-312.pyc",
 		"installer/leftover.pyc",
 		"ansible/easy-ha-proxy.yml",

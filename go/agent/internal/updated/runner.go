@@ -56,13 +56,6 @@ func (d *Daemon) stopTransientUnit(unit string) {
 // agentBinary is the installed agent: the transient jobs run its tools.
 var agentBinary = "/usr/local/sbin/easy-ha-proxy-agent"
 
-func (d *Daemon) python() string {
-	if isRegular(d.Opts.PythonPath) {
-		return d.Opts.PythonPath
-	}
-	return "/usr/bin/python3"
-}
-
 func (d *Daemon) runTransientCommand(jobID string, argv []string, timeout int, logPrefix string) (int, string, error) {
 	unit := "easy-ha-proxy-updated-job-" + pyx.RandomHex(6) + ".service"
 	outputPath := filepath.Join(d.Opts.JobsDir(), "."+jobID+".output")
@@ -279,15 +272,6 @@ func parseCheckerOutput(raw string) (map[string]any, error) {
 		return nil, uErr("invalid", "the update checker returned an invalid image channel")
 	}
 	return payload, nil
-}
-
-func (d *Daemon) trustedSource(filename string) (string, error) {
-	path := filepath.Join(d.Opts.SourceDir, "installer", filename)
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return "", uErr("invalid", "Update the host services before using controlled HAProxy updates")
-	}
-	return path, nil
 }
 
 func (d *Daemon) refreshAptMetadata(jobID string) (retErr error) {

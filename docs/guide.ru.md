@@ -59,8 +59,9 @@ UI и Authelia рассчитаны на доступ через HAProxy. Их �
 
     Клиенты (UDP) --> iptables DNAT (ядро) --> UDP-бэкенды приложений
 
-Ansible в `/opt/easy-ha-proxy/venv` управляет пакетами хоста, systemd-юнитами,
-конфигурацией HAProxy, сертификатами и Docker Compose-сервисами.
+Агент хоста (`/usr/local/sbin/easy-ha-proxy-agent`) применяет playbook из
+`ansible/`: пакеты хоста, systemd-юниты, конфигурацию HAProxy, сертификаты и
+Docker Compose-сервисы. Python на хосте ничего не запускает.
 Непривилегированный UI использует runtime-сокет HAProxy для оперативных команд
 и ограниченные helper API в `/run/easy-ha-proxy` для изменений конфигурации
 хоста.
@@ -77,13 +78,13 @@ Ansible в `/opt/easy-ha-proxy/venv` управляет пакетами хос�
   и портов проброса UDP;
 - production DNS A/AAAA-записи, направляющие домены админки и Authelia на этот
   сервер;
-- исходящий доступ к настроенным репозиториям пакетов ОС, GitHub, реестру
-  контейнеров, Python package index, Ansible Galaxy, Snap, Let's Encrypt и
+- исходящий доступ к настроенным репозиториям пакетов ОС, GitHub (исходники и
+  загрузки агента хоста из релиза), реестру контейнеров, Snap, Let's Encrypt и
   источнику DB-IP GeoIP во время установки и ежемесячных обновлений.
 
 Для удалённой установки на рабочей машине нужны только `bash`, `curl`, `ssh` и
-`scp`. Ansible устанавливается во внутреннее виртуальное окружение проекта на
-управляемом сервере.
+`scp`. Управляемому серверу Python не нужен: установщик загружает агент хоста,
+собранный для его исходников, и запускает его.
 
 ## Быстрый запуск
 
@@ -494,7 +495,7 @@ sudo flock -n /run/easy-ha-proxy/easy-ha-proxy-backupd.operation.lock /bin/bash 
 командой:
 
 ```bash
-sudo python3 /opt/easy-ha-proxy/source/installer/os_upgrade_guard.py --recover-runtime
+sudo easy-ha-proxy-agent os-upgrade-guard --recover-runtime
 ```
 
 Восстановление обрабатывает все сохранённые контейнеры, даже если один исчез
@@ -1506,7 +1507,8 @@ degraded, даже если сам процесс работает.
 
 - `/etc/easy-ha-proxy` — управляемая конфигурация и секреты;
 - `/opt/easy-ha-proxy/source` — управляемый checkout исходников;
-- `/opt/easy-ha-proxy/venv` — внутреннее окружение Python и Ansible;
+- `/usr/local/sbin/easy-ha-proxy-agent` — агент хоста: установщик, брокеры и
+  инструменты хоста;
 - `/etc/haproxy` — конфигурация HAProxy и сертификаты;
 - `/etc/haproxy/certificate-authorities` — импортированные пакеты CA и закрытый
   ключ внутреннего CA, доступный только root;
@@ -1576,21 +1578,18 @@ sudo easy-ha-proxy-agent apply playbook --tags ha-adm-daemons,aut-daemons,status
 Все тесты на Python и JavaScript лежат в `.tests/`, вне контекста сборки
 Docker, поэтому ничего из них не попадает в рабочий образ; тесты Go и Rust
 лежат рядом с кодом (`go test ./...` в `go/agent` и `go/panel`, `cargo test`
-в `rust/guardd`). `.github/workflows/ci.yml` выполняет приведённые ниже
-команды на Python от 3.10 до 3.14 -- на каждом интерпретаторе поддерживаемых
-систем, от Ubuntu 22.04 до Ubuntu 26.04 и Debian 13, -- потому что установщик
-и инструменты хоста, которые запускают брокеры, работают на системном
-интерпретаторе.
+в `rust/guardd`). Тесты на Python проверяют шаблоны, скрипты и workflow, а не
+код, который выполняется на хосте, поэтому `.github/workflows/ci.yml`
+выполняет приведённые ниже команды на одном интерпретаторе, 3.12.
 
 ```bash
-python3 -m py_compile installer/easy_ha_proxy.py
-python3 -m compileall -q installer ansible/roles
-PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
+pip install -r .tests/requirements.txt
+python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
-  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy installer/agent-fetch.sh
 shellcheck -S warning install.sh install-local.sh install-remote.sh \
-  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy installer/agent-fetch.sh
 ruff check .   # только явные ошибки, см. ruff.toml
 
 for script in go/panel/web/static/js/*.js; do node --check "$script"; done

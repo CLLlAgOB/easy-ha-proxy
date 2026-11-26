@@ -12,7 +12,7 @@ if [ -n "${rev}" ]; then
 fi
 prev_digest=""
 if [ -f "${stage}/image.json" ]; then
-  prev_digest="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("digest", ""))' "${stage}/image.json" 2>/dev/null || true)"
+  prev_digest="$(sed -n 's/.*"digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${stage}/image.json" 2>/dev/null | head -n 1 || true)"
 fi
 {% if not (easy_ha_proxy_offline_restore | default(false) | bool) %}
 if ! docker pull "${img}"; then
@@ -46,8 +46,8 @@ rm -rf "${stage}/sbin" "${stage}/lib" "${stage}/SHA256SUMS"
 docker cp "${cid}:/sbin" "${stage}/sbin"
 docker cp "${cid}:/SHA256SUMS" "${stage}/SHA256SUMS"
 (cd "${stage}" && sha256sum -c SHA256SUMS)
-python3 -c 'import json, sys; open(sys.argv[1], "w", encoding="utf-8").write(json.dumps({"image": sys.argv[2], "digest": sys.argv[3], "revision": sys.argv[4]}) + "\n")' \
-  "${stage}/image.json" "${img}" "${ref}" "${rev}"
+# Image references and revisions hold no character JSON would escape.
+printf '{"image": "%s", "digest": "%s", "revision": "%s"}\n' "${img}" "${ref}" "${rev}" > "${stage}/image.json"
 if [ "${prev_digest}" != "${ref}" ]; then
   echo "NATIVE_BUNDLE_CHANGED"
 fi

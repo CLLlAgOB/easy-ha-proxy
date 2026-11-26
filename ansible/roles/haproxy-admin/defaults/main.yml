@@ -5,7 +5,6 @@ app_user: haproxyadmin
 app_group: hadmin
 haproxy_admin_proxy_secret: "{{ authelia_session_secret | default('') }}"
 hapadm_ipset_name: haproxy_ban
-venv_dir: "{{ app_dir }}/venv"
 whitelist_global_file: /etc/haproxy/whitelist.ip
 whitelist_geo_file: /etc/haproxy/geoip/whitelist.geo
 ui_exclude_backends_exact:
@@ -212,7 +211,6 @@ updated_state_root: /var/lib/easy-ha-proxy/update-web
 updated_jobs_dir: "{{ updated_state_root }}/jobs"
 updated_source_dir: /opt/easy-ha-proxy/source
 updated_config_dir: /etc/easy-ha-proxy
-updated_python_path: /opt/easy-ha-proxy/venv/bin/python
 updated_cli_path: /usr/local/bin/easy-ha-proxy
 updated_max_request_bytes: 32768
 updated_max_response_bytes: 2097152

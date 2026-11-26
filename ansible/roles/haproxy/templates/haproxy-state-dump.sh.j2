@@ -13,10 +13,10 @@ SOCKET="{{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
 STATE_FILE="{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}"
 CONFIG_FILE="${1:-/etc/haproxy/haproxy.cfg}"
 NORMALIZER="${2:-}"
-# The installer agent normalizes the dump. A normalizer named as the second
-# argument is run with python3 instead (the tests drive the script that way).
-# Without either -- on a fresh install HAProxy starts before the native stage
-# has put the agent in place -- the last valid state file is kept as it is.
+# The installer agent normalizes the dump; an agent named as the second
+# argument is used instead (the tests drive the script with the one they
+# built). Without an agent -- on a fresh install HAProxy starts before the
+# native stage has put it in place -- the last valid state file is kept.
 AGENT="{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
 TMP_FILE="${STATE_FILE}.tmp.$$"
 FILTERED_FILE="${TMP_FILE}.config-transport"
@@ -25,7 +25,7 @@ trap 'rm -f "$TMP_FILE" "$FILTERED_FILE"' EXIT INT TERM
 
 normalize() {
     if [ -n "$NORMALIZER" ]; then
-        python3 "$NORMALIZER" --config "$CONFIG_FILE" --state "$1"
+        "$NORMALIZER" server-state --config "$CONFIG_FILE" --state "$1"
     elif [ -x "$AGENT" ]; then
         "$AGENT" server-state --config "$CONFIG_FILE" --state "$1"
     else

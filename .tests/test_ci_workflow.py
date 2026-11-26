@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -22,7 +21,6 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
 JOBS = WORKFLOW["jobs"]
-sys.path.insert(0, str(ROOT / "installer"))
 
 
 def step(job: str, name: str) -> dict:
@@ -87,9 +85,19 @@ class TheLinters(unittest.TestCase):
         self.assertEqual(guard["env"]["NAME_GUARD_WORDS"], "${{ secrets.NAME_GUARD_WORDS }}")
         self.assertEqual(guard["run"], "python3 .github/scripts/name_guard.py")
 
-    def test_the_python_matrix_covers_every_supported_host(self):
+    def test_one_python_runs_the_contract_tests(self):
+        # No gateway runs Python, so no host interpreter has to be covered.
         versions = JOBS["python"]["strategy"]["matrix"]["python-version"]
-        self.assertEqual(versions, ["3.10", "3.11", "3.12", "3.13", "3.14"])
+        self.assertEqual(versions, ["3.12"])
+        steps = "\n".join(item.get("run", "") for item in JOBS["python"]["steps"])
+        self.assertIn("pip install -r .tests/requirements.txt", steps)
+        self.assertNotIn("installer", steps)
+
+    def test_the_server_state_smoke_runs_the_agent_built_here(self):
+        build = step("server-state", "Build the agent")["run"]
+        self.assertIn("go build", build)
+        steps = "\n".join(item.get("run", "") for item in JOBS["server-state"]["steps"])
+        self.assertIn("--normalizer /usr/local/sbin/easy-ha-proxy-agent", steps)
 
     def test_a_pull_request_builds_the_panel_image_without_publishing_it(self):
         build = step("go-panel", "Build Go panel container image (smoke + live healthcheck + size)")["run"]
@@ -109,6 +117,24 @@ class ThePublishing(unittest.TestCase):
                 self.assertIn("refs/heads/alpha", job["if"])
                 self.assertIn("refs/heads/main", job["if"])
         self.assertIn("javascript", JOBS["go-panel-image"]["needs"])
+
+    def test_the_agent_release_holds_what_installers_fetch(self):
+        job = JOBS["agent-release-assets"]
+        # Published only from what the image is published from.
+        self.assertEqual(set(job["needs"]), set(JOBS["native-release-image"]["needs"]))
+        self.assertEqual(job["if"], JOBS["native-release-image"]["if"])
+        self.assertEqual(job["permissions"], {"contents": "write"})
+        self.assertEqual(job["env"]["RELEASE_TAG"], "agent-builds")
+        upload = step("agent-release-assets", "Upload this commit's agent")["run"]
+        # The names installer/agent-fetch.sh asks for.
+        self.assertIn('name="easy-ha-proxy-agent-${GITHUB_SHA}-linux-${arch}"', upload)
+        self.assertIn('sha256sum "${name}" > "${name}.sha256"', upload)
+        fetch = (ROOT / "installer/agent-fetch.sh").read_text(encoding="utf-8")
+        self.assertIn("releases/download/agent-builds", fetch)
+        self.assertIn('name="easy-ha-proxy-agent-${revision}-linux-${arch}"', fetch)
+        prune = step("agent-release-assets", "Keep the newest builds")
+        self.assertTrue(prune["continue-on-error"])
+        self.assertIn("grep -vxF -f tagged", prune["run"])
 
     @unittest.skipUnless(shutil.which("git") and shutil.which("bash"), "needs git and bash")
     def test_the_fingerprint_is_the_one_gateways_compute(self):

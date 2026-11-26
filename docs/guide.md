@@ -57,8 +57,9 @@ ports must not be exposed directly to untrusted networks.
 
     Clients (UDP) --> iptables DNAT (kernel) --> UDP application backends
 
-Ansible in `/opt/easy-ha-proxy/venv` manages host packages, systemd units,
-HAProxy configuration, certificates, and Docker Compose services. The
+The host agent (`/usr/local/sbin/easy-ha-proxy-agent`) applies the playbook in
+`ansible/`: host packages, systemd units, HAProxy configuration, certificates,
+and Docker Compose services. Nothing on the host runs Python. The
 unprivileged UI uses the HAProxy runtime socket for runtime operations and
 constrained helper APIs under `/run/easy-ha-proxy` for host/configuration
 changes.
@@ -75,13 +76,14 @@ The managed server must have:
   forward port;
 - production DNS A/AAAA records resolving the administration and Authelia
   domains to this server;
-- outbound access to the configured OS package repositories, GitHub, the
-  Python package index, Ansible Galaxy, container registry, Snap, Let's Encrypt,
-  and the DB-IP GeoIP data source during installation and monthly updates.
+- outbound access to the configured OS package repositories, GitHub (the
+  source and the host agent's release downloads), container registry, Snap,
+  Let's Encrypt, and the DB-IP GeoIP data source during installation and
+  monthly updates.
 
 For remote installation, the workstation only needs `bash`, `curl`, `ssh`, and
-`scp`. Ansible is installed into the project's private virtual environment on
-the managed server.
+`scp`. The managed server needs no Python: the installer fetches the host
+agent built for its source and runs it.
 
 ## Quick start
 
@@ -508,7 +510,7 @@ To restore the recorded container set without installing or
 downgrading packages, after resolving any package-manager problem run:
 
 ```bash
-sudo python3 /opt/easy-ha-proxy/source/installer/os_upgrade_guard.py --recover-runtime
+sudo easy-ha-proxy-agent os-upgrade-guard --recover-runtime
 ```
 
 Recovery attempts every recorded container even if another is missing or fails
@@ -1676,7 +1678,8 @@ the process itself is running.
 
 - `/etc/easy-ha-proxy` — managed configuration and secrets;
 - `/opt/easy-ha-proxy/source` — managed source checkout;
-- `/opt/easy-ha-proxy/venv` — private Python and Ansible environment;
+- `/usr/local/sbin/easy-ha-proxy-agent` — the host agent: installer, brokers
+  and host tools;
 - `/etc/haproxy` — HAProxy configuration and certificates;
 - `/etc/haproxy/certificate-authorities` — imported CA bundles and the
   root-only internal CA private key;
@@ -1744,20 +1747,18 @@ upgrade and defaults to deferring the reboot.
 Every Python and JavaScript test lives in `.tests/`, outside the Docker
 build context, so none of it reaches the runtime image; the Go and Rust tests
 sit beside their code (`go test ./...` in `go/agent` and `go/panel`, `cargo
-test` in `rust/guardd`). `.github/workflows/ci.yml` runs the commands below on
-Python 3.10 to 3.14 -- every interpreter a supported host ships, from Ubuntu
-22.04 to Ubuntu 26.04 and Debian 13 -- because the installer and the host
-tools the brokers run use the platform interpreter.
+test` in `rust/guardd`). The Python tests check templates, scripts and the
+workflow, not code a host runs, so `.github/workflows/ci.yml` runs the
+commands below on one interpreter, 3.12.
 
 ```bash
-python3 -m py_compile installer/easy_ha_proxy.py
-python3 -m compileall -q installer ansible/roles
-PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
+pip install -r .tests/requirements.txt
+python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
-  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy installer/agent-fetch.sh
 shellcheck -S warning install.sh install-local.sh install-remote.sh \
-  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy installer/agent-fetch.sh
 ruff check .   # mistakes only, see ruff.toml
 
 for script in go/panel/web/static/js/*.js; do node --check "$script"; done

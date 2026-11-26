@@ -32,7 +32,7 @@ jobs:
       - name: pip-audit
         run: |
           pip install pip-audit==2.7.3
-          pip-audit --progress-spinner off -r installer/requirements.txt
+          pip-audit --progress-spinner off -r .tests/requirements.txt
 
   pinned:
     name: Pinned versions

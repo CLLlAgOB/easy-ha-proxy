@@ -18,10 +18,7 @@ func updated(b *Builder) []engine.Step {
 	marker := b.S("{{ updated_active_marker }}")
 	updating := func(*engine.Run) bool { return b.Exists(marker, true) }
 	restartFor := Changed("updated_unit", "_native_agent_copy", "daemons_env_t")
-	debian := b.S("{{ ansible_os_family }}") == "Debian"
 	return []engine.Step{
-		{Name: "easy-ha-proxy-updated | Install the distribution APT reader", Tags: restoreNetwork,
-			When: func(*engine.Run) bool { return debian }, Resource: &engine.Packages{Names: []string{"python3-apt"}}},
 		{Name: "easy-ha-proxy-updated | Ensure persistent job directories", Resource: b.Dir("{{ updated_state_root }}", "root", group, "0750")},
 		{Name: "easy-ha-proxy-updated | Ensure persistent job directories", Resource: b.Dir("{{ updated_jobs_dir }}", "root", group, "0750")},
 		{Name: "easy-ha-proxy-updated | Install systemd unit", Register: "updated_unit",

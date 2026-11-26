@@ -125,21 +125,22 @@ prepare_legacy_config() {
     die "Controller source files not found under ${controller_dir}."
 
   output_dir="$(dirname -- "${live_dir}")/prepared-config"
-  if [[ -x /usr/local/sbin/easy-ha-proxy-agent ]] &&
-     /usr/local/sbin/easy-ha-proxy-agent prepare-legacy-config --help >/dev/null 2>&1; then
-    /usr/local/sbin/easy-ha-proxy-agent prepare-legacy-config \
-      --live-dir "${live_dir}" \
-      --controller-dir "${controller_dir}" \
-      --output-dir "${output_dir}"
-  else
-    component_path installer/prepare_legacy_config.py
-    preparer="${component}"
-    command -v python3 >/dev/null 2>&1 || die "python3 is required."
-    python3 "${preparer}" \
-      --live-dir "${live_dir}" \
-      --controller-dir "${controller_dir}" \
-      --output-dir "${output_dir}"
+  # The host agent converts the snapshot. A controlling machine without one
+  # uses the agent built for this source, fetched into a scratch directory.
+  preparer=/usr/local/sbin/easy-ha-proxy-agent
+  if ! { [[ -x "${preparer}" ]] && "${preparer}" prepare-legacy-config --help >/dev/null 2>&1; }; then
+    [[ -f "${controller_dir}/installer/agent-fetch.sh" ]] ||
+      die "Controller source files not found under ${controller_dir}."
+    # shellcheck source=installer/agent-fetch.sh
+    source "${controller_dir}/installer/agent-fetch.sh"
+    preparer="$(mktemp -d)/easy-ha-proxy-agent"
+    easy_ha_proxy_fetch_agent "${controller_dir}" "${preparer}" ||
+      die "The host agent could not be fetched."
   fi
+  "${preparer}" prepare-legacy-config \
+    --live-dir "${live_dir}" \
+    --controller-dir "${controller_dir}" \
+    --output-dir "${output_dir}"
 }
 
 stage_legacy_control_plane() {
@@ -165,7 +166,7 @@ stage_legacy_control_plane() {
 
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/easy_ha_proxy.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy-ha-proxy" ]] ||
     die "Controller source tree not found under ${controller_dir}."
 
   if [[ -z "${inventory}" ]]; then
@@ -194,7 +195,7 @@ sync_managed_source() {
 
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/easy_ha_proxy.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy-ha-proxy" ]] ||
     die "Controller source tree not found under ${controller_dir}."
 
   if [[ -z "${inventory}" ]]; then
@@ -243,7 +244,7 @@ restore_full_remote() {
     die "Encrypted full backup not found: ${backup:-<missing>}"
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/easy_ha_proxy.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy-ha-proxy" ]] ||
     die "Controller recovery source not found under ${controller_dir}."
   if [[ -z "${inventory}" ]]; then
     discover_inventory_files

@@ -387,10 +387,10 @@ func TestThePreflightRefusesTooLittleRollbackSpace(t *testing.T) {
 func TestActivatingTheRecoverySourceKeepsTheArchivedOne(t *testing.T) {
 	root := t.TempDir()
 	recovery, managed := filepath.Join(root, "recovery"), filepath.Join(root, "managed-source")
-	for _, rel := range []string{"install-local.sh", "installer/easy_ha_proxy.py", "ansible/easy-ha-proxy.yml", "ansible/requirements.yml"} {
+	for _, rel := range []string{"install-local.sh", "installer/easy-ha-proxy", "installer/agent-fetch.sh", "ansible/easy-ha-proxy.yml"} {
 		writeText(t, filepath.Join(recovery, rel), "recovery: "+rel+"\n")
 	}
-	if err := os.Symlink("installer/easy_ha_proxy.py", filepath.Join(recovery, "link")); err != nil {
+	if err := os.Symlink("installer/easy-ha-proxy", filepath.Join(recovery, "link")); err != nil {
 		t.Fatal(err)
 	}
 	writeText(t, filepath.Join(managed, "archived.txt"), "from backup\n")
@@ -404,7 +404,7 @@ func TestActivatingTheRecoverySourceKeepsTheArchivedOne(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if result != managed || !isFile(filepath.Join(managed, "installer/easy_ha_proxy.py")) || !isSymlink(filepath.Join(managed, "link")) {
+	if result != managed || !isFile(filepath.Join(managed, "installer/easy-ha-proxy")) || !isSymlink(filepath.Join(managed, "link")) {
 		t.Fatal("the recovery source is not in place")
 	}
 	preserved, _ := filepath.Glob(filepath.Join(root, "source.from-backup.*"))

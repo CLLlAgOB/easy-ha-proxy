@@ -19,7 +19,6 @@ from pathlib import Path
 import re
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -178,16 +177,12 @@ class NativeSmoke(unittest.TestCase):
                 "3 app 1 web 192.0.2.10 2 0 1 1 100 6 3 4 6 0 0 0 - 80 -\n"
             )
             args = ["--config", str(config), "--state", str(state)]
-            python = subprocess.run(
-                [sys.executable, str(ROOT / "installer/haproxy_server_state.py"), *args],
-                check=True, capture_output=True, timeout=10,
-            )
             go = subprocess.run(
                 [os.environ["AGENT_BIN"], "server-state", *args],
                 check=True, capture_output=True, timeout=10,
             )
-            self.assertIn(b"3 app 1 web", python.stdout)
-            self.assertEqual((go.stdout, go.stderr), (python.stdout, python.stderr))
+            self.assertIn(b"3 app 1 web", go.stdout)
+            self.assertEqual(go.stderr, b"")
 
 
 if __name__ == "__main__":

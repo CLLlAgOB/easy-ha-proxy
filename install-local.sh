@@ -6,7 +6,8 @@ repository="${EASY_HA_PROXY_REPOSITORY:-https://github.com/CLLlAgOB/easy-ha-prox
 config_dir="${EASY_HA_PROXY_CONFIG_DIR:-/etc/easy-ha-proxy}"
 install_root="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
 source_dir="${install_root}/source"
-venv_dir="${install_root}/venv"
+agent_bin="${EASY_HA_PROXY_AGENT_BIN:-/usr/local/sbin/easy-ha-proxy-agent}"
+staged_agent="${EASY_HA_PROXY_STAGED_AGENT:-/var/lib/easy-ha-proxy/native-staging/bootstrap/easy-ha-proxy-agent}"
 prepare_only=false
 skip_bootstrap_dependencies=false
 use_existing_source="${EASY_HA_PROXY_USE_EXISTING_SOURCE:-false}"
@@ -114,8 +115,7 @@ if [[ "${skip_bootstrap_dependencies}" != "true" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   log "Installing bootstrap dependencies"
   apt-get update
-  apt-get install -y --no-install-recommends \
-    ca-certificates curl git openssl python3 python3-apt python3-pip python3-venv
+  apt-get install -y --no-install-recommends ca-certificates curl git openssl
 fi
 
 install -d -m 0755 "${install_root}"
@@ -123,8 +123,7 @@ install -d -m 0755 "${install_root}"
 if [[ "${use_existing_source}" == "true" ]]; then
   for required in \
     installer/easy-ha-proxy \
-    installer/easy_ha_proxy.py \
-    installer/requirements.txt \
+    installer/agent-fetch.sh \
     ansible/easy-ha-proxy.yml; do
     [[ -f "${source_dir}/${required}" ]] ||
       die "Staged source is incomplete: ${source_dir}/${required}"
@@ -147,17 +146,20 @@ else
   git clone --depth=1 --branch "${branch}" "${repository}" "${source_dir}"
 fi
 
-if [[ "${skip_bootstrap_dependencies}" == "true" ]]; then
-  log "Reusing the prepared Python control plane"
-  [[ -x "${venv_dir}/bin/python" ]] ||
-    die "Prepared Python environment is missing: ${venv_dir}/bin/python"
+# The installer is the host agent's "cli". A host without an agent that runs
+# it gets the one built for this source from the project's GitHub release.
+# shellcheck source=installer/agent-fetch.sh
+source "${source_dir}/installer/agent-fetch.sh"
+if easy_ha_proxy_agent_runs_cli "${agent_bin}" || easy_ha_proxy_agent_runs_cli "${staged_agent}"; then
+  log "The host agent is ready"
+elif [[ "${skip_bootstrap_dependencies}" == "true" ]]; then
+  die "The prepared host agent is missing: ${agent_bin}"
 else
-  log "Creating isolated Python environment"
-  python3 -m venv "${venv_dir}"
-  "${venv_dir}/bin/pip" install --disable-pip-version-check --upgrade pip
-  "${venv_dir}/bin/pip" install \
-    --disable-pip-version-check \
-    -r "${source_dir}/installer/requirements.txt"
+  log "Fetching the host agent"
+  easy_ha_proxy_fetch_agent "${source_dir}" "${staged_agent}" ||
+    die "The host agent could not be fetched."
+  easy_ha_proxy_agent_runs_cli "${staged_agent}" ||
+    die "The fetched host agent cannot run the installer; it is older than this source."
 fi
 
 chmod 0755 \

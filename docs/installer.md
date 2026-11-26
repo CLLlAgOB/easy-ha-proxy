@@ -17,8 +17,8 @@ bash /tmp/easy-ha-proxy-install.sh
 Without arguments, the assistant:
 
 1. Asks for English or Russian; pressing Enter selects English.
-2. Looks for the installed CLI, managed configuration, private Python venv,
-   playbook, and system components.
+2. Looks for the installed CLI, managed configuration, host agent, playbook,
+   and system components.
 3. Classifies the system as clean, partially installed, legacy, or managed.
 4. Detects production or test mode.
 5. Shows only applicable actions and asks for confirmation before changes.
@@ -349,8 +349,8 @@ command:
   obsolete PEM files, or archives;
 - installs prepared configuration under `/etc/easy-ha-proxy` with `0700/0600`
   permissions;
-- creates `/opt/easy-ha-proxy/source`, the private Python venv, and the
-  `easy-ha-proxy`/`easy-ha-proxy-assistant` commands;
+- creates `/opt/easy-ha-proxy/source`, fetches the host agent built for that
+  source, and creates the `easy-ha-proxy`/`easy-ha-proxy-assistant` commands;
 - stops when target directories already exist.
 
 No playbook runs at this stage. Images are not downloaded, services are not
@@ -550,7 +550,7 @@ archive and `.sha256` file are downloaded automatically to
 The core payload contains:
 
 - `/etc/easy-ha-proxy` configuration, metadata, and secrets;
-- the exact `/opt/easy-ha-proxy/source` version without its disposable venv;
+- the exact `/opt/easy-ha-proxy/source` version;
 - HAProxy, GeoIP, managed iptables ban rules, AppArmor, rsyslog, logrotate, and
   sysctl configuration;
 - all of `/etc/letsencrypt`, including accounts, renewal configuration, and
@@ -560,7 +560,7 @@ The core payload contains:
 - systemd units/drop-ins and all managed helper scripts;
 - OS, package, systemd, container, and image-digest manifests.
 
-Container images, system packages, and the Python venv are not copied; the
+Container images, system packages, and the host agent are not copied; the
 installer reproduces them for the new server architecture.
 
 `/etc/iptables/rules.v4` and `rules.v6` are runtime snapshots rather than
@@ -607,9 +607,9 @@ Restore:
 4. Merges existing `authorized_keys` and does not restart sshd.
 5. Restores data, preserves archived source as
    `/opt/easy-ha-proxy/source.from-backup.<date>.<pid>`, activates current
-   recovery source from the controller, rebuilds the venv, installs
-   dependencies, and applies configuration. Restored iptables runtime snapshots
-   are disabled before Ansible starts.
+   recovery source from the controller, installs dependencies, and applies
+   configuration with the host agent. Restored iptables runtime snapshots are
+   disabled before the playbook starts.
 6. Does not reissue certificates automatically; restored certificates and
    Certbot renewal state are used.
 
@@ -702,7 +702,7 @@ A complete managed installation requires all of:
 
 - `/usr/local/bin/easy-ha-proxy` or the internal CLI;
 - `/etc/easy-ha-proxy/metadata.yml`;
-- `/opt/easy-ha-proxy/venv/bin/python`;
+- `/usr/local/sbin/easy-ha-proxy-agent`;
 - `/opt/easy-ha-proxy/source/ansible/easy-ha-proxy.yml`.
 
 The configuration also records completion only after the main playbook

@@ -137,7 +137,7 @@ var RequestFields = map[string]map[string]bool{
 
 // Options holds every path and limit constants.py and runner.py read.
 type Options struct {
-	SocketPath, StateRoot, SourceDir, ConfigDir, PythonPath, CLIPath   string
+	SocketPath, StateRoot, SourceDir, ConfigDir, CLIPath               string
 	AppUser, AppGroup, ServiceName                                     string
 	ActiveMarker, RestartRequestMarker, RebootMarker                   string
 	AssistantRebootMarker, MaintenanceLockPath                         string
@@ -167,7 +167,6 @@ func OptionsFromEnv() (Options, error) {
 		StateRoot:                envOr("UPDATED_STATE_ROOT", "/var/lib/easy-ha-proxy/update-web"),
 		SourceDir:                envOr("UPDATED_SOURCE_DIR", "/opt/easy-ha-proxy/source"),
 		ConfigDir:                envOr("UPDATED_CONFIG_DIR", "/etc/easy-ha-proxy"),
-		PythonPath:               envOr("UPDATED_PYTHON_PATH", "/opt/easy-ha-proxy/venv/bin/python"),
 		CLIPath:                  envOr("UPDATED_CLI_PATH", "/usr/local/bin/easy-ha-proxy"),
 		AppUser:                  envOr("UPDATED_SOCKET_USER", "haproxyadmin"),
 		AppGroup:                 envOr("UPDATED_APP_GROUP", "hadmin"),

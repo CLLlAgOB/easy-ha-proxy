@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import unittest
-
-import ssh_protection as ssh
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,9 +18,13 @@ class SshProtectionContractTests(unittest.TestCase):
         )
 
     def test_broker_shortcut_paths_match_ssh_protection_constants(self):
+        protection = (ROOT / "go/agent/internal/hostsec/ssh_protection.go").read_text(encoding="utf-8")
+        client = re.search(r'sshDefaultClient\s*=\s*"([^"]+)"', protection).group(1)
+        config_dir = re.search(r'sshDefaultConfigDir\s*=\s*"([^"]+)"', protection).group(1)
+        drop_in = re.search(r'sshDropInPath\s*=\s*filepath\.Join\(sshDefaultConfigDir, "jail\.d", "([^"]+)"\)', protection).group(1)
         broker = (ROOT / "go/agent/internal/updated/api.go").read_text(encoding="utf-8")
-        self.assertIn(f'fail2banClientPath = "{ssh.CLIENT}"', broker)
-        self.assertIn(f'fail2banDropInPath = "{ssh.DROP_IN}"', broker)
+        self.assertIn(f'fail2banClientPath = "{client}"', broker)
+        self.assertIn(f'fail2banDropInPath = "{config_dir}/jail.d/{drop_in}"', broker)
 
 
 if __name__ == "__main__":

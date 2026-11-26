@@ -52,7 +52,7 @@ var (
 	country2Up  = regexp.MustCompile(`^[A-Z]{2}$`)
 )
 
-// Tag bundles matching installer/easy_ha_proxy.py 1-to-1.
+// Tag bundles: which stages each kind of run applies.
 const (
 	InstallTags = "crt-install,crt-notify,crt-hooks,crt-renew,ha-install,apparmor,geo,ha-cfg,docker," +
 		"ha-adm-native,aut-install,ha-adm-install,ha-adm-healthd,ha-adm-cfg,ha-adm-controld," +

@@ -2,8 +2,11 @@ package tools
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -298,4 +301,35 @@ func NormalizeServerState(stateText, configText string, hasConfig bool) (string,
 		output = append(output, strings.Join(cols, " "))
 	}
 	return strings.Join(output, "\n") + "\n", nil
+}
+
+// RunServerState is "easy-ha-proxy-agent server-state --state FILE --config
+// FILE": the normalized state on stdout.
+func RunServerState(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("server-state", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	statePath := fs.String("state", "", "path to HAProxy server-state file")
+	cfgPath := fs.String("config", "", "path to haproxy.cfg")
+	if err := fs.Parse(args); err != nil || *statePath == "" || *cfgPath == "" {
+		fmt.Fprintln(stderr, "usage: easy-ha-proxy-agent server-state --state <path> --config <path>")
+		return 2
+	}
+	stateRaw, err := os.ReadFile(*statePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Cannot normalize HAProxy state: %v\n", err)
+		return 1
+	}
+	var cfgText string
+	hasCfg := false
+	if cfgRaw, err := os.ReadFile(*cfgPath); err == nil {
+		cfgText = string(cfgRaw)
+		hasCfg = true
+	}
+	out, err := NormalizeServerState(string(stateRaw), cfgText, hasCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "Cannot normalize HAProxy state: %v\n", err)
+		return 1
+	}
+	_, _ = io.WriteString(stdout, out)
+	return 0
 }

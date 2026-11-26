@@ -110,9 +110,7 @@ var Rules = []Rule{
 	{"install-local.sh", nil},
 	{"install-remote.sh", nil},
 	{"easy-ha-proxy-helper.sh", nil},
-	// The installer runs from the refreshed source too -- except for its
-	// Python dependencies, which only the full update reinstalls.
-	{"installer/requirements.txt", tags(Full)},
+	// The installer is the agent; its launcher runs from the refreshed source.
 	{"installer/*", nil},
 	// Always run, and the OS packages have their own update.
 	{"ansible/roles/healthcheck/*", nil},

@@ -90,6 +90,8 @@ func main() {
 		os.Exit(runUDPForward(args))
 	case "cert-deliver":
 		os.Exit(runCertDeliver(args))
+	case "cert-notify-state":
+		os.Exit(tools.RunCertNotifyState(args, os.Stdout, os.Stderr))
 	case "update-geoip":
 		os.Exit(runUpdateGeoIP(args))
 	case "apt-metadata":
@@ -128,7 +130,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|full-backup|update-plan|update-scope|os-security|service-restarts|auto-reboot|os-upgrade-guard|ssh-protection|haproxy-migrate|cli|prepare-legacy-config|probe-host|apply|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|cert-notify-state|update-geoip|apt-metadata|full-backup|update-plan|update-scope|os-security|service-restarts|auto-reboot|os-upgrade-guard|ssh-protection|haproxy-migrate|cli|prepare-legacy-config|probe-host|apply|version> [flags]")
 }
 
 func runUDPForward(args []string) int {
@@ -144,31 +146,7 @@ func runUpdateGeoIP(args []string) int {
 }
 
 func runServerState(args []string) int {
-	fs := flag.NewFlagSet("server-state", flag.ContinueOnError)
-	statePath := fs.String("state", "", "path to HAProxy server-state file")
-	cfgPath := fs.String("config", "", "path to haproxy.cfg")
-	if err := fs.Parse(args); err != nil || *statePath == "" || *cfgPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent server-state --state <path> --config <path>")
-		return 2
-	}
-	stateRaw, err := os.ReadFile(*statePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot normalize HAProxy state: %v\n", err)
-		return 1
-	}
-	var cfgText string
-	hasCfg := false
-	if cfgRaw, err := os.ReadFile(*cfgPath); err == nil {
-		cfgText = string(cfgRaw)
-		hasCfg = true
-	}
-	out, err := tools.NormalizeServerState(string(stateRaw), cfgText, hasCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot normalize HAProxy state: %v\n", err)
-		return 1
-	}
-	_, _ = os.Stdout.WriteString(out)
-	return 0
+	return tools.RunServerState(args, os.Stdout, os.Stderr)
 }
 
 func runCertd(args []string) {

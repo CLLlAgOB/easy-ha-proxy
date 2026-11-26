@@ -1,14 +1,15 @@
 # Regression tests
 
-The Python regression tests of the project: the installer and the host tools
-the update and backup brokers run, the Ansible templates, and the panel's
-templates, translations and scripts. The Go agent and panel and the Rust
-guardd-core keep their unit tests next to their code (`go test`, `cargo test`).
+The Python contract tests of the project: the Ansible templates, the shell
+entry points, the CI workflow and the panel's templates, translations and
+scripts. Nothing on a gateway runs Python: the installer, the brokers and the
+host tools are the Go agent, which keeps its unit tests next to its code
+(`go test`), as do the Go panel and the Rust guardd-core (`cargo test`).
 
 These tests are hermetic: no network, no Docker, no running easy-ha-proxy
-stack, no root. They read the installer from `installer/`, the playbook from
-`ansible/` and the panel's assets from `go/panel/web/`, so they must be run
-from the repository root.
+stack, no root. They read the playbook from `ansible/`, the entry points from
+the repository root and `installer/`, and the panel's assets from
+`go/panel/web/`, so they must be run from the repository root.
 
 `test_rust_guardd.py` needs a built guardd-core (`GUARDD_RUST_BIN`) and skips
 without one. The scripts in `integration/` exercise real HAProxy, iptables or
@@ -17,27 +18,21 @@ on a host that matters.
 
 ## Running
 
-Everything the Python job of CI runs, in the same order:
+Everything the Python job of CI runs:
 
 ```bash
-pip install -r installer/requirements.txt
-python -m py_compile installer/easy_ha_proxy.py
-python -m compileall -q installer ansible/roles
-PYTHONPATH=installer python -m unittest discover -s .tests -p 'test_*.py'
+pip install -r .tests/requirements.txt
+python -m unittest discover -s .tests -p 'test_*.py'
 ```
 
 A single module:
 
 ```bash
-PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_update_scope.py' -v
+python3 -m unittest discover -s .tests -p 'test_update_scope.py' -v
 ```
 
-## Supported interpreters
-
-CI runs the suite on 3.10 to 3.14, because the installer and the host tools
-execute on the platform interpreter rather than a bundled one: 3.10 is
-Ubuntu 22.04, 3.11 Debian 12, 3.12 Ubuntu 24.04, 3.13 Debian 13 and 3.14
-Ubuntu 26.04.
+CI runs them on one interpreter, 3.12: they test files, not code that runs
+on a gateway.
 
 ## Writing tests
 

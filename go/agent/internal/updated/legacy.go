@@ -15,8 +15,16 @@ import (
 // update the Python broker's check failed the job with legacyDigestError,
 // and the page showed the upgrade as failed. The first native broker checks
 // such a job again and completes it when the only difference is that panel.
+//
+// Since 1.2.0 the source carries no Python checker (installer/update_plan.py),
+// so the Python broker cannot even start that check: it fails the job with
+// legacyCheckerMissing instead, after every component was applied. The same
+// recheck completes it.
 
-const legacyDigestError = "an applied image digest differs from the reviewed update plan"
+const (
+	legacyDigestError    = "an applied image digest differs from the reviewed update plan"
+	legacyCheckerMissing = "the structured update checker is unavailable; run one controller update first"
+)
 
 // legacyRecheckAttempts and legacyRecheckDelay bound how long the broker
 // waits for the maintenance lock before it leaves the job as it is.
@@ -41,7 +49,7 @@ func (d *Daemon) pendingLegacyRecheck() *legacyRecheck {
 			break
 		}
 	}
-	if job == nil || job["status"] != "failed" || job["error"] != legacyDigestError {
+	if job == nil || job["status"] != "failed" || (job["error"] != legacyDigestError && job["error"] != legacyCheckerMissing) {
 		return nil
 	}
 	jobID := pyx.StrOr(job["id"])
@@ -51,6 +59,11 @@ func (d *Daemon) pendingLegacyRecheck() *legacyRecheck {
 	}
 	raw, err := d.safeJSONFile(path)
 	if err != nil || raw["legacy_recheck"] != nil {
+		return nil
+	}
+	// The Python broker enters this phase after the last component and just
+	// before its check; a job that failed earlier applied nothing to verify.
+	if job["error"] == legacyCheckerMissing && pyx.StrOr(pyx.Map(raw["progress"])["phase"]) != "rechecking" {
 		return nil
 	}
 	plan, err := d.loadLatestPlan()

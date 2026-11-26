@@ -13,7 +13,6 @@ Environment="UPDATED_SOCKET_PATH={{ updated_socket_path | default('/run/easy-ha-
 Environment="UPDATED_STATE_ROOT={{ updated_state_root | default('/var/lib/easy-ha-proxy/update-web') }}"
 Environment="UPDATED_SOURCE_DIR={{ updated_source_dir | default('/opt/easy-ha-proxy/source') }}"
 Environment="UPDATED_CONFIG_DIR={{ updated_config_dir | default('/etc/easy-ha-proxy') }}"
-Environment="UPDATED_PYTHON_PATH={{ updated_python_path | default('/opt/easy-ha-proxy/venv/bin/python') }}"
 Environment="UPDATED_CLI_PATH={{ updated_cli_path | default('/usr/local/bin/easy-ha-proxy') }}"
 Environment="UPDATED_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Environment="UPDATED_APP_GROUP={{ app_group | default('hadmin') }}"

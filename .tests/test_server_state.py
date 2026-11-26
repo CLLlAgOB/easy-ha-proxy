@@ -2,35 +2,16 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 import re
-import sys
 import unittest
-import os
-import socket
-import subprocess
-import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HAPROXY_ROLE = ROOT / "ansible" / "roles" / "haproxy"
 TEMPLATE = HAPROXY_ROLE / "templates" / "haproxy.cfg.j2"
 DUMPER = HAPROXY_ROLE / "templates" / "haproxy-state-dump.sh.j2"
-NORMALIZER = ROOT / "installer" / "haproxy_server_state.py"
-CONFIG_TASKS = HAPROXY_ROLE / "tasks" / "config.yml"
 DEFAULTS = HAPROXY_ROLE / "defaults" / "main.yml"
-
-
-def load_controld():
-    path = ROOT / "ansible/roles/haproxy-admin/files/haproxy-controld.py"
-    spec = importlib.util.spec_from_file_location("easy_ha_proxy_controld", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -88,73 +69,6 @@ class DumperScriptTests(unittest.TestCase):
         # A failed dump must not turn into a failed reload.
         self.assertNotRegex(self.script, r"(?m)^\s*exit [1-9][0-9]*\s*$")
 
-
-@unittest.skipIf(sys.platform == "win32", "the installed dumper is POSIX")
-class DumpedTransportTests(unittest.TestCase):
-    HEADER = "be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state srv_uweight srv_iweight srv_time_since_last_change srv_check_status srv_check_result srv_check_health srv_check_state srv_agent_state bk_f_forced_id srv_f_forced_id srv_fqdn srv_port srvrecord srv_use_ssl srv_check_port srv_check_addr srv_agent_addr srv_agent_port"
-    ROW = "36 target 1 main 127.0.0.1 2 1 17 100 10 15 3 4 6 0 0 0 - 1025 - 0 0 - - 0"
-
-    def dump(self, reply, online=True, config=None, previous="previous-state\n", mode=0o644, agent=False):
-        # agent: False names the Python normalizer; True renders a stand-in
-        # native agent and names no normalizer, so the dumper runs the agent.
-        from jinja2 import Environment
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            state = root / "state"
-            state.write_text(previous if online else reply)
-            state.chmod(mode)
-            owner = (state.stat().st_uid, state.stat().st_gid)
-            payload = root / "reply"
-            payload.write_text(reply)
-            helper = root / "socat"
-            helper.write_text('#!/bin/sh\ncat "$STATE_REPLY"\n')
-            helper.chmod(0o700)
-            script = root / "dump.sh"
-            environment = Environment()
-            context = {"haproxy_socket": str(root / "socket"), "haproxy_server_state_file": str(state)}
-            arguments = [str(NORMALIZER)]
-            calls_path = root / "agent-calls"
-            if agent:
-                stand_in = root / "agent"
-                stand_in.write_text(f'#!/bin/sh\necho "$@" >> "{calls_path}"\nshift\n'
-                                    f'exec "{sys.executable}" "{NORMALIZER}" "$@"\n')
-                stand_in.chmod(0o700)
-                context.update(native_agent_bin=str(stand_in))
-                arguments = []
-            script.write_text(environment.from_string(DUMPER.read_text()).render(**context))
-            config_path = root / "haproxy.cfg"
-            if config is not None:
-                config_path.write_text(config)
-            with socket.socket(socket.AF_UNIX) as server:
-                if online:
-                    server.bind(str(root / "socket"))
-                env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"], STATE_REPLY=str(payload))
-                result = subprocess.run(["sh", str(script), str(config_path), *arguments], env=env, capture_output=True, text=True, timeout=5)
-            self.agent_calls = calls_path.read_text() if calls_path.exists() else None
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(state.stat().st_mode & 0o777, mode)
-            self.assertEqual((state.stat().st_uid, state.stat().st_gid), owner)
-            self.assertEqual(list(root.glob("state.tmp.*")), [])
-            return state.read_text()
-
-    def test_tls_suffix_is_omitted_without_changing_maintenance_or_weights(self):
-        for tls in ("0", "1"):
-            fields = self.ROW.split()
-            fields[20] = tls
-            result = self.dump("1\n# " + self.HEADER + "\n" + " ".join(fields) + "\n")
-            lines = result.splitlines()
-            self.assertEqual(lines[2].split(), fields[:20])
-            self.assertEqual(lines[1].split()[1:], self.HEADER.split()[:20])
-            self.assertEqual(lines[2].split()[6:9], ["1", "17", "100"])
-
-    def test_the_native_agent_normalizes_when_no_normalizer_is_named(self):
-        reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
-        expected = self.dump(reply)
-        self.assertEqual(self.dump(reply, agent=True), expected)
-        calls = self.agent_calls.split()
-        self.assertEqual(calls[:2], ["server-state", "--config"])
-        self.assertEqual(calls[3], "--state")
-
     def test_the_dumper_names_the_agent(self):
         from jinja2 import Environment
         template = Environment().from_string(DUMPER.read_text())
@@ -163,60 +77,10 @@ class DumpedTransportTests(unittest.TestCase):
             lines = [line for line in template.render(**context).splitlines() if line.startswith("AGENT=")]
             self.assertEqual(lines, [f'AGENT="{agent}"'], context)
 
-    def test_older_twenty_field_format_is_kept(self):
-        row = " ".join(self.ROW.split()[:20])
-        reply = "1\n# " + " ".join(self.HEADER.split()[:20]) + "\n" + row + "\n"
-        self.assertEqual(self.dump(reply), reply)
 
-    def test_stopped_gateway_also_cleans_its_previous_state_before_start(self):
-        reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
-        self.assertEqual(len(self.dump(reply, online=False).splitlines()[2].split()), 20)
-
-    def test_configured_port_wins_without_changing_administration_or_weights(self):
-        reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
-        for online in (True, False):
-            for endpoint in ("127.0.0.1:1026", "[::1]:1026", "mesh.example.test:1026"):
-                with self.subTest(online=online, endpoint=endpoint):
-                    config = "backend target\n    server main " + endpoint + " weight 100 check\n"
-                    row = self.dump(reply, online=online, config=config).splitlines()[2].split()
-                    self.assertEqual(row[18], "1026")
-                    self.assertEqual(row[6:9], self.ROW.split()[6:9])
-
-    def test_ports_are_matched_by_both_backend_and_server_name(self):
-        second = self.ROW.replace("36 target ", "37 other ")
-        reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n" + second + "\n"
-        config = "backend target\n server main 127.0.0.1:1026\nbackend other\n server main 127.0.0.1:1043\n"
-        rows = self.dump(reply, config=config).splitlines()[2:]
-        self.assertEqual([row.split()[18] for row in rows], ["1026", "1043"])
-
-    def test_dns_srv_port_is_preserved_without_an_explicit_configured_port(self):
-        row = self.ROW.split()
-        row[17] = "target.example.test"
-        row[19] = "_service._tcp.example.test"
-        reply = "1\n# " + self.HEADER + "\n" + " ".join(row) + "\n"
-        config = "backend target\n server main _service._tcp.example.test resolvers dns\n"
-        row = self.dump(reply, config=config).splitlines()[2].split()
-        self.assertEqual(row[18], "1025")
-
-    def test_invalid_version_header_or_partial_row_never_replaces_state(self):
-        for reply in ("2\n# " + self.HEADER + "\n" + self.ROW + "\n",
-                      "1\n# wrong header\n" + self.ROW + "\n",
-                      "1\n# " + self.HEADER + "\n36 target 1 main\n",
-                      "permission denied\n"):
-            self.assertEqual(self.dump(reply), "previous-state\n")
-
-    def test_runtime_errors_still_reconcile_the_last_valid_snapshot(self):
-        previous = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
-        config = "backend target\n server main 127.0.0.1:1026 check\n"
-        for reply in ("", "permission denied\n", "1\n# " + self.HEADER + "\ntruncated\n"):
-            with self.subTest(reply=reply):
-                row = self.dump(reply, config=config, previous=previous).splitlines()[2].split()
-                self.assertEqual(row[18], "1026")
-                self.assertEqual(row[6:9], self.ROW.split()[6:9])
-
-    def test_cold_start_normalization_does_not_weaken_private_snapshot_permissions(self):
-        reply = "1\n# " + self.HEADER + "\n" + self.ROW + "\n"
-        self.dump(reply, online=False, mode=0o600)
+# How the dumper behaves with a real normalizer -- the TLS suffix, ports,
+# DNS, invalid replies, permissions -- is tested with the agent, in
+# go/agent/internal/tools/server_state_dump_test.go.
 
 
 class DocumentationTests(unittest.TestCase):

@@ -101,8 +101,7 @@ func getuseruid(b *Builder) []engine.Step {
 // restore-network.
 func adminPackages(b *Builder) []engine.Step {
 	steps := append(haproxyPackage(b), engine.Step{Name: "Install required panel packages",
-		Resource: &engine.AptInstall{Names: []string{"python3", "python3-pip", "python3-venv", "python3-yaml",
-			"python3-cryptography", "openssl", "socat", "ipset", "iptables", "iptables-persistent"},
+		Resource: &engine.AptInstall{Names: []string{"openssl", "socat", "ipset", "iptables", "iptables-persistent"},
 			UpdateCache: true, CacheValid: b.aptValid()}})
 	return withTags(steps, "restore-network")
 }

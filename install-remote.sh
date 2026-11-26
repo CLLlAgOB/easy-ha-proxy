@@ -147,9 +147,8 @@ build_source_archive() {
 installer_fingerprint() {
   local root="$1"
   local -a files=(
-    installer/easy_ha_proxy.py
     installer/easy-ha-proxy
-    installer/requirements.txt
+    installer/agent-fetch.sh
     install-local.sh
   )
   local file=""
@@ -554,7 +553,7 @@ if [[ "${remote_action}" == "stage-legacy" ||
       "${remote_action}" == "restore-full" ]]; then
   source_root="${source_root:-${script_dir:-${PWD}}}"
   [[ -d "${source_root}/ansible/roles" &&
-     -f "${source_root}/installer/easy_ha_proxy.py" &&
+     -f "${source_root}/installer/easy-ha-proxy" &&
      -f "${source_root}/install-local.sh" ]] ||
     die "easy-ha-proxy source tree not found under: ${source_root}"
 fi
@@ -565,7 +564,7 @@ if [[ "${source_channel}" == "local" &&
 fi
 if [[ -n "${source_root}" ]]; then
   [[ -d "${source_root}/ansible/roles" &&
-     -f "${source_root}/installer/easy_ha_proxy.py" &&
+     -f "${source_root}/installer/easy-ha-proxy" &&
      -f "${source_root}/install-local.sh" ]] ||
     die "easy-ha-proxy source tree not found under: ${source_root}"
 fi
@@ -842,19 +841,18 @@ case "${remote_action}" in
     if [[ "${source_channel}" == "local" ]]; then
       activate_current_source=true
     elif [[ -n "${controller_source_root}" &&
-            -f "${controller_source_root}/installer/easy_ha_proxy.py" ]]; then
+            -f "${controller_source_root}/installer/easy-ha-proxy" ]]; then
       local_installer_fingerprint="$(
         installer_fingerprint "${controller_source_root}" 2>/dev/null || true
       )"
       remote_installer_fingerprint="$(
         ssh "${ssh_options[@]}" "${target}" \
-          "if test -f /opt/easy-ha-proxy/source/installer/easy_ha_proxy.py && \
-              test -f /opt/easy-ha-proxy/source/installer/easy-ha-proxy && \
-              test -f /opt/easy-ha-proxy/source/installer/requirements.txt && \
+          "if test -f /opt/easy-ha-proxy/source/installer/easy-ha-proxy && \
+              test -f /opt/easy-ha-proxy/source/installer/agent-fetch.sh && \
               test -f /opt/easy-ha-proxy/source/install-local.sh; then \
              cd /opt/easy-ha-proxy/source && \
-             sha256sum installer/easy_ha_proxy.py installer/easy-ha-proxy \
-               installer/requirements.txt install-local.sh | \
+             sha256sum installer/easy-ha-proxy installer/agent-fetch.sh \
+               install-local.sh | \
              sha256sum | awk '{ print \$1 }'; fi" \
           </dev/null 2>/dev/null | tr -d '\r' | tail -n 1
       )"
@@ -896,7 +894,7 @@ if [[ "${activate_current_source}" == true ]]; then
   source_root="${controller_source_root}"
   [[ -n "${source_root}" &&
      -d "${source_root}/ansible/roles" &&
-     -f "${source_root}/installer/easy_ha_proxy.py" &&
+     -f "${source_root}/installer/easy-ha-proxy" &&
      -f "${source_root}/install-local.sh" ]] ||
     die "The current local source tree is unavailable; use --source-root DIR."
   source_channel="local"
@@ -918,7 +916,7 @@ if [[ "${stage_install_source}" == true ]]; then
   stage_command+="test ! -e /etc/easy-ha-proxy; "
   stage_command+="install -d -m 0755 /opt/easy-ha-proxy/source; "
   stage_command+="tar -xzf ${remote_source_archive} -C /opt/easy-ha-proxy/source; "
-  stage_command+="test -f /opt/easy-ha-proxy/source/installer/easy_ha_proxy.py; "
+  stage_command+="test -f /opt/easy-ha-proxy/source/installer/easy-ha-proxy; "
   stage_command+="test -f /opt/easy-ha-proxy/source/ansible/easy-ha-proxy.yml; "
   stage_command+="chown -R root:root /opt/easy-ha-proxy/source"
   remote_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${stage_command}'; "
@@ -1039,7 +1037,7 @@ EOF
   sync_command+="test ! -e ${next_source}; test ! -e ${backup_source}; "
   sync_command+="install -d -m 0755 ${next_source}; "
   sync_command+="tar -xzf ${remote_source_archive} -C ${next_source}; "
-  sync_command+="test -f ${next_source}/installer/easy_ha_proxy.py; "
+  sync_command+="test -f ${next_source}/installer/easy-ha-proxy; "
   sync_command+="test -f ${next_source}/ansible/easy-ha-proxy.yml; "
   sync_command+="chown -R root:root ${next_source}; "
   sync_command+="chmod 0755 ${next_source}/install.sh ${next_source}/install-local.sh "
@@ -1129,9 +1127,9 @@ EOF
   recovery_command+="test ! -e ${remote_recovery_root}; "
   recovery_command+="install -d -m 0700 ${remote_recovery_root}; "
   recovery_command+="tar -xzf ${remote_source_archive} -C ${remote_recovery_root}; "
-  recovery_command+="test -f ${remote_recovery_root}/installer/easy_ha_proxy.py; "
-  recovery_command+="if test -x /opt/easy-ha-proxy/venv/bin/python && test -f /etc/easy-ha-proxy/metadata.yml; then "
-  recovery_command+="recovery_python=/opt/easy-ha-proxy/venv/bin/python; "
+  recovery_command+="test -f ${remote_recovery_root}/installer/easy-ha-proxy; "
+  recovery_command+="if test -f /etc/easy-ha-proxy/metadata.yml && "
+  recovery_command+="/usr/local/sbin/easy-ha-proxy-agent cli --probe >/dev/null 2>&1; then "
   recovery_command+="recovery_source=${remote_recovery_root}; "
   recovery_command+="else "
   recovery_command+="install -d -m 0755 /opt/easy-ha-proxy; "
@@ -1141,11 +1139,10 @@ EOF
   recovery_command+="chmod 0755 /opt/easy-ha-proxy/source; "
   recovery_command+="chmod 0700 ${remote_installer}; "
   recovery_command+="EASY_HA_PROXY_USE_EXISTING_SOURCE=true bash ${remote_installer} --prepare-only; "
-  recovery_command+="recovery_python=/opt/easy-ha-proxy/venv/bin/python; "
   recovery_command+="recovery_source=${remote_recovery_root}; "
   recovery_command+="fi; "
   recovery_command+="EASY_HA_PROXY_SOURCE_DIR=\${recovery_source} "
-  recovery_command+="\${recovery_python} \${recovery_source}/installer/easy_ha_proxy.py "
+  recovery_command+="bash \${recovery_source}/installer/easy-ha-proxy "
   recovery_command+="restore-full ${remote_restore_archive} --mode ${restore_mode} --apply"
   remote_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${recovery_command}'; "
   remote_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${recovery_command}'; "
@@ -1178,7 +1175,7 @@ if [[ "${activate_current_source}" == true ]]; then
   sync_command+="test ! -e ${next_source}; test ! -e ${backup_source}; "
   sync_command+="install -d -m 0755 ${next_source}; "
   sync_command+="tar -xzf ${remote_source_archive} -C ${next_source}; "
-  sync_command+="test -f ${next_source}/installer/easy_ha_proxy.py; "
+  sync_command+="test -f ${next_source}/installer/easy-ha-proxy; "
   sync_command+="test -f ${next_source}/ansible/easy-ha-proxy.yml; "
   sync_command+="chown -R root:root ${next_source}; "
   sync_command+="chmod 0755 ${next_source}/install.sh ${next_source}/install-local.sh "

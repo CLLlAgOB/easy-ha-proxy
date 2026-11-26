@@ -84,7 +84,7 @@ class TheConfiguration(unittest.TestCase):
     def test_dependabot_targets_alpha_everywhere(self):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
         ecosystems = set(dependabot_entries(config))
-        self.assertEqual(ecosystems, {("pip", "/installer"), ("docker", "/go/panel"),
+        self.assertEqual(ecosystems, {("pip", "/.tests"), ("docker", "/go/panel"),
                                       ("github-actions", "/"),
                                       ("gomod", "/go/agent"), ("gomod", "/go/panel"),
                                       ("cargo", "/rust/guardd")})
@@ -94,11 +94,14 @@ class TheConfiguration(unittest.TestCase):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
         entries = dependabot_entries(config)
 
-        # The installer's ranges move only when a release falls outside them.
-        installer = entries[("pip", "/installer")]
-        self.assertEqual(installer["versioning-strategy"], "increase-if-necessary")
-        requirements = (ROOT / "installer/requirements.txt").read_text(encoding="utf-8")
+        # The test ranges move only when a release falls outside them.
+        tests = entries[("pip", "/.tests")]
+        self.assertEqual(tests["versioning-strategy"], "increase-if-necessary")
+        requirements = (ROOT / ".tests/requirements.txt").read_text(encoding="utf-8")
         self.assertNotIn("ansible-core", requirements)
+        # Nothing for a gateway: the installer is the host agent.
+        self.assertNotRegex((ROOT / "installer/requirements.txt").read_text(encoding="utf-8"),
+                            r"(?m)^[^#\s]")
 
         # Every action in one pull request.
         actions = entries[("github-actions", "/")]

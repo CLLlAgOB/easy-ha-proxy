@@ -243,7 +243,8 @@ func TestNativeSourcesTargetTheNativeStage(t *testing.T) {
 
 func TestDocumentationTestsAndTheWebApplicationDeployNothing(t *testing.T) {
 	scope := ScopeFor([]string{"README.ru.md", "docs/screenshots/en/dashboard.webp", ".tests/test_x.py", ".github/workflows/ci.yml",
-		"go/panel/web/static/js/live_activity.js", "go/panel/internal/app/app.go", "installer/easy_ha_proxy.py"})
+		"go/panel/web/static/js/live_activity.js", "go/panel/internal/app/app.go", "installer/easy_ha_proxy.py", "installer/requirements.txt",
+		"installer/agent-fetch.sh"})
 	if scope["full"] != false || len(scopeTags(scope)) != 0 {
 		t.Fatalf("scope %v", scope)
 	}
@@ -253,7 +254,6 @@ func TestAnythingUnknownOrStructuralMeansTheFullStack(t *testing.T) {
 	for _, path := range []string{
 		"ansible/easy-ha-proxy.yml",
 		"ansible/requirements.yml",
-		"installer/requirements.txt",
 		"ansible/roles/haproxy-admin/defaults/main.yml",
 		"ansible/roles/haproxy-admin/templates/docker-compose.yml.j2",
 		"ansible/roles/authelia/templates/configuration.yml.j2",

@@ -1,8 +1,9 @@
 """Check TLS/port changes with isolated HAProxy processes, no live reload.
 
-Usage: python3 server_state_tls_smoke.py --template haproxy-state-dump.sh.j2
+Usage: python3 server_state_tls_smoke.py --template haproxy-state-dump.sh.j2 [--normalizer AGENT]
 """
 import argparse
+import os
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ import tempfile
 import time
 
 # The dumper's native-agent placeholder, rendered empty: these runs exercise the
-# Python normalizer they name, which the dumper then uses.
+# agent they name (--normalizer), which the dumper then uses.
 NATIVE_AGENT = "{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
 
 
@@ -131,6 +132,6 @@ def main(template, normalizer):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--template", type=Path, required=True)
-    parser.add_argument("--normalizer", type=Path, default=Path(__file__).resolve().parents[2] / "installer/haproxy_server_state.py")
+    parser.add_argument("--normalizer", type=Path, default=Path(os.environ.get("AGENT_BIN", "/usr/local/sbin/easy-ha-proxy-agent")))
     options = parser.parse_args()
     main(options.template, options.normalizer)

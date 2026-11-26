@@ -6,15 +6,11 @@ on:
     paths:
       - 'go/agent/internal/hostsec/**'
       - 'go/agent/internal/tools/apt_metadata.go'
-      - 'installer/os_security.py'
-      - 'installer/auto_reboot.py'
       - '.github/workflows/os-security.yml'
   pull_request:
     paths:
       - 'go/agent/internal/hostsec/**'
       - 'go/agent/internal/tools/apt_metadata.go'
-      - 'installer/os_security.py'
-      - 'installer/auto_reboot.py'
       - '.github/workflows/os-security.yml'
   workflow_dispatch:
 

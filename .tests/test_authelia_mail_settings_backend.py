@@ -115,6 +115,10 @@ class MailDeploymentContractTests(unittest.TestCase):
         self.assertNotIn("127.0.0.1:2525", hook)
         self.assertNotIn("msmtp", hook)
         self.assertNotIn("eval ", hook)
+        # The agent validates the state (go/agent/internal/tools/cert_notify.go);
+        # the host has no Python for it.
+        self.assertIn('"${AGENT}" cert-notify-state "${STATE_FILE}" "${RENEWED_DOMAINS}"', hook)
+        self.assertNotIn("python", hook)
 
     def test_clean_install_starts_relay_before_first_certificate_renewal(self) -> None:
         playbook = self.read("ansible/easy-ha-proxy.yml")

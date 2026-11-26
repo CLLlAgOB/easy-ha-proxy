@@ -1,7 +1,6 @@
 package updated
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -62,30 +61,6 @@ func (d *Daemon) haproxyPatchActive() bool {
 		}
 	}
 	return false
-}
-
-func (d *Daemon) toolBytes(name, missing string, markers ...string) (string, []byte, error) {
-	tool, err := d.trustedSource(name)
-	if err != nil {
-		return "", nil, err
-	}
-	fi, err := os.Stat(tool)
-	if err != nil {
-		return "", nil, err
-	}
-	if fi.Size() > 1024*1024 {
-		return "", nil, uErr("dependency", "%s", missing)
-	}
-	raw, err := os.ReadFile(tool)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, m := range markers {
-		if !bytes.Contains(raw, []byte(m)) {
-			return "", nil, uErr("dependency", "%s", missing)
-		}
-	}
-	return tool, raw, nil
 }
 
 func (d *Daemon) migrationToolDigest() (string, error) {

@@ -61,7 +61,7 @@ type pullCase struct {
 
 func runPull(t *testing.T, c pullCase) pullRun {
 	t.Helper()
-	for _, tool := range []string{"bash", "python3", "sha256sum"} {
+	for _, tool := range []string{"bash", "sha256sum"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("needs %s", tool)
 		}

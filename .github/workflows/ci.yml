@@ -52,12 +52,23 @@ jobs:
               apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3 socat openssl && \
               rm -rf /var/lib/apt/lists/*
           EOF
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
+          cache: false
+      # The agent normalizes the dump, as on a gateway.
+      - name: Build the agent
+        working-directory: go/agent
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/easy-ha-proxy-agent" ./cmd/easy-ha-proxy-agent
       - name: Exercise configuration changes against real HAProxy
         run: >-
           docker run --rm --entrypoint python3
-          -v "$GITHUB_WORKSPACE:/src:ro" -w /src ehp-server-state-ci
+          -v "$GITHUB_WORKSPACE:/src:ro" -w /src
+          -v "$RUNNER_TEMP/easy-ha-proxy-agent:/usr/local/sbin/easy-ha-proxy-agent:ro"
+          ehp-server-state-ci
           .tests/integration/server_state_settings_smoke.py
           --template ansible/roles/haproxy/templates/haproxy-state-dump.sh.j2
+          --normalizer /usr/local/sbin/easy-ha-proxy-agent
 
   python:
     name: Python ${{ matrix.python-version }}
@@ -66,14 +77,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The installer and the host tools the update broker runs
-        # (os_security, ssh_protection, ...) use the platform
-        # interpreter rather than a bundled one, so every supported release
-        # is exercised: 3.10 is Ubuntu 22.04, 3.11 is Debian 12, 3.12 is
-        # Ubuntu 24.04, 3.13 is Debian 13, 3.14 is Ubuntu 26.04. The newer
-        # ones are where the standard library loses modules (cgi went in
-        # 3.13).
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        # Nothing on a gateway runs Python any more: these are the contract
+        # tests of the templates, the panel's pages and scripts, the shell
+        # entry points and this workflow, so one interpreter is enough.
+        python-version: ['3.12']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -81,21 +88,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: installer/requirements.txt
+          cache-dependency-path: .tests/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r installer/requirements.txt
+        run: pip install -r .tests/requirements.txt
 
-      - name: Byte-compile the installer and the role helpers
-        run: |
-          python -m py_compile installer/easy_ha_proxy.py
-          python -m compileall -q installer ansible/roles
-
-      # Everything lives in .tests/, so one discovery covers the installer,
-      # the playbook's templates and the panel's templates and scripts.
+      # Everything lives in .tests/, so one discovery covers the playbook's
+      # templates and the panel's templates and scripts.
       - name: Regression tests
-        env:
-          PYTHONPATH: installer
         run: |
           set -o pipefail
           python -m unittest discover -s .tests -p 'test_*.py' 2>&1 | tee /tmp/easy-ha-proxy-unittest.log
@@ -129,6 +129,7 @@ jobs:
           install-remote.sh
           easy-ha-proxy-helper.sh
           installer/easy-ha-proxy
+          installer/agent-fetch.sh
 
       # Warnings and up: unquoted expansions, unused variables, tildes that do
       # not expand. Style notes are left alone.
@@ -140,6 +141,7 @@ jobs:
           install-remote.sh
           easy-ha-proxy-helper.sh
           installer/easy-ha-proxy
+          installer/agent-fetch.sh
 
   lint:
     name: Lint
@@ -722,3 +724,71 @@ jobs:
           digest="$(docker buildx imagetools inspect "${REPOSITORY}:${channel}-${GITHUB_SHA::12}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           cosign sign --yes "${REPOSITORY}@${digest}"
           echo "Published and signed ${REPOSITORY}:${channel} (amd64 + arm64, ${digest})" >> "$GITHUB_STEP_SUMMARY"
+
+  # The host agent of every published commit, as files of the GitHub release
+  # "agent-builds": a host without an agent that runs the installer (a fresh
+  # install, or the first update from a release whose installer was Python)
+  # downloads the one built for its source with curl and checks it against
+  # the SHA-256 beside it (installer/agent-fetch.sh). The native stage then
+  # installs the agent from the signed OCI image as before.
+  agent-release-assets:
+    name: Publish the host agent to the agent-builds release
+    needs: [rust-guardd, go-agent, go-parity, native-release, go-vulnerabilities, rust-vulnerabilities, secrets, python, shell, lint, udp-forwarding, server-state]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: agent-builds
+      # How many commits' builds stay; release tags' builds always stay.
+      KEEP_BUILDS: '40'
+    steps:
+      - name: Download Go agent artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: go-agent-binaries
+          path: agent
+
+      - name: Upload this commit's agent
+        run: |
+          set -euo pipefail
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" --prerelease --target "${GITHUB_SHA}" \
+              --title "Host agent builds" \
+              --notes "The easy-ha-proxy host agent of each published alpha and main commit, for installers that have no agent yet. Each binary is named after its commit and comes with its SHA-256."
+          fi
+          mkdir -p upload
+          for arch in amd64 arm64; do
+            name="easy-ha-proxy-agent-${GITHUB_SHA}-linux-${arch}"
+            install -m 0755 "agent/easy-ha-proxy-agent-linux-${arch}" "upload/${name}"
+            (cd upload && sha256sum "${name}" > "${name}.sha256")
+          done
+          gh release upload "${RELEASE_TAG}" upload/* --clobber
+          echo "Uploaded the host agent of ${GITHUB_SHA::12} to ${RELEASE_TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Old builds go, so the release does not grow without end; a failure
+      # here leaves an extra build behind and nothing else.
+      - name: Keep the newest builds
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GH_REPO}/tags" --jq '.[].commit.sha' | sort -u > tagged
+          release="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          gh api --paginate "repos/${GH_REPO}/releases/${release}/assets?per_page=100" \
+            --jq '.[] | [.id, .name, .created_at] | @tsv' > assets
+          # Each revision's newest upload time, newest first.
+          awk -F'\t' '$2 ~ /^easy-ha-proxy-agent-[0-9a-f]+-linux-/ {
+              rev = substr($2, 21, 40); if ($3 > seen[rev]) seen[rev] = $3 }
+            END { for (rev in seen) print seen[rev] "\t" rev }' assets | sort -r | cut -f2 > revisions
+          tail -n +"$((KEEP_BUILDS + 1))" revisions | grep -vxF -f tagged > stale || true
+          while read -r rev; do
+            [ -n "${rev}" ] || continue
+            awk -F'\t' -v rev="${rev}" 'index($2, "easy-ha-proxy-agent-" rev "-") == 1 { print $1 }' assets |
+              while read -r id; do gh api -X DELETE "repos/${GH_REPO}/releases/assets/${id}"; done
+            echo "Removed the build of ${rev::12}"
+          done < stale

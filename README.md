@@ -162,10 +162,10 @@ daemons through UNIX sockets that only its group can open.
 logged; guardd reads the log, and the bans it makes are checked at the entry
 of the next connection.
 
-Ansible, in its own virtual environment on the server, manages packages,
-systemd units, the HAProxy configuration, certificates and the Docker Compose
-services. You never have to touch it: the assistant and the panel drive it for
-you.
+The host agent applies the playbook that manages packages, systemd units, the
+HAProxy configuration, certificates and the Docker Compose services; nothing
+on the server runs Python. You never have to touch it: the assistant and the
+panel drive it for you.
 
 ## Documentation
 

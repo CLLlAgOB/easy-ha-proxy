@@ -143,35 +143,63 @@ func TestRunPlaybookBootstrapAndFallback(t *testing.T) {
 	}
 }
 
-func TestSyncRuntimeDependenciesPrunesAnsible(t *testing.T) {
+// fakeProc points procRoot at a directory holding one process with the given
+// command line and memory map; @HOME@ stands for home.
+func fakeProc(t *testing.T, home, cmdline, maps string) {
+	t.Helper()
+	proc := t.TempDir()
+	orig := procRoot
+	procRoot = proc
+	t.Cleanup(func() { procRoot = orig })
+	_ = os.MkdirAll(filepath.Join(proc, "42"), 0o755)
+	_ = os.MkdirAll(filepath.Join(proc, "self"), 0o755)
+	_ = os.WriteFile(filepath.Join(proc, "42/cmdline"), []byte(strings.ReplaceAll(cmdline, "@HOME@", home)), 0o600)
+	_ = os.WriteFile(filepath.Join(proc, "42/maps"), []byte(strings.ReplaceAll(maps, "@HOME@", home)), 0o600)
+}
+
+func TestSyncRuntimeDependenciesRemovesTheUnusedVenv(t *testing.T) {
 	resetRunnerHooks(t)
 	home := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(home, "venv/bin"), 0o755)
-	_ = os.WriteFile(filepath.Join(home, "venv/bin/pip"), []byte("#!/bin/sh\n"), 0o755)
+	_ = os.WriteFile(filepath.Join(home, "venv/bin/python"), []byte("#!/bin/sh\n"), 0o755)
 	_ = os.MkdirAll(filepath.Join(home, "tmp/ansible/leftover"), 0o755)
-	src := filepath.Join(home, "source")
-	_ = os.MkdirAll(filepath.Join(src, "installer"), 0o755)
-	_ = os.WriteFile(filepath.Join(src, "installer/requirements.txt"), []byte("PyYAML~=6.0\n"), 0o600)
-
 	installHomeOverride = home
-	sourceDirOverride = src
-	runSubprocessFn = func(name string, args ...string) subprocessResult {
-		return subprocessResult{ExitCode: 0}
-	}
-	var cmds [][]string
+	fakeProc(t, home, "/usr/bin/sleep\x0060\x00", "7f00-7f01 r-xp 0 08:01 1 /usr/lib/libc.so.6\n")
 	runCommandFn = func(_ ioWriter, cmd []string, _ []string) error {
-		cmds = append(cmds, cmd)
+		t.Fatalf("no command expected, got %v", cmd)
 		return nil
 	}
 	var out bytes.Buffer
 	if err := SyncRuntimeDependencies(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(cmds) != 2 || cmds[0][1] != "install" || cmds[1][1] != "uninstall" {
-		t.Fatalf("expected install + uninstall ansible-core, got %v", cmds)
+	if fileExists(filepath.Join(home, "venv")) || fileExists(filepath.Join(home, "tmp/ansible")) {
+		t.Fatalf("venv and tmp/ansible should be gone: %s", out.String())
 	}
-	if fileExists(filepath.Join(home, "tmp/ansible")) {
-		t.Fatal("tmp/ansible should have been removed")
+}
+
+func TestSyncRuntimeDependenciesKeepsAVenvInUse(t *testing.T) {
+	for name, proc := range map[string][2]string{
+		// The pre-1.2.0 broker runs as venv/bin/python ...
+		"argument": {"@HOME@/venv/bin/python\x00-m\x00broker\x00", ""},
+		// ... and the venv python is a symlink, so the command line may name
+		// the system interpreter while the venv's modules are mapped.
+		"mapping": {"/usr/bin/python3\x00broker\x00", "7f00-7f01 r--p 0 08:01 1 @HOME@/venv/lib/python3.12/site-packages/yaml/_yaml.so\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetRunnerHooks(t)
+			home := t.TempDir()
+			installHomeOverride = home
+			_ = os.MkdirAll(filepath.Join(home, "venv/bin"), 0o755)
+			fakeProc(t, home, proc[0], proc[1])
+			var out bytes.Buffer
+			if err := SyncRuntimeDependencies(&out); err != nil {
+				t.Fatal(err)
+			}
+			if !fileExists(filepath.Join(home, "venv")) || !strings.Contains(out.String(), "still in use") {
+				t.Fatalf("a venv in use was touched: %s", out.String())
+			}
+		})
 	}
 }
 

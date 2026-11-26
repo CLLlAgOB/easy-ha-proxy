@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -315,25 +316,54 @@ func defaultRunPlaybook(ctx *Context, tags string, opts PlaybookOptions) error {
 	return nil
 }
 
-// SyncRuntimeDependencies updates/prunes the legacy Python venv if still present
-// and removes any leftover Ansible temp directory.
+// SyncRuntimeDependencies removes what the Python installer left: its
+// virtual environment, once nothing runs from it, and the Ansible scratch
+// directory.
 func SyncRuntimeDependencies(out io.Writer) error {
 	return syncRuntimeDepsFn(out)
 }
 
+// procRoot is /proc; the tests point it at a fake one.
+var procRoot = "/proc"
+
+// runsFrom says whether a running process executes from dir: its command
+// line names a program there, or it has a file from there mapped. The update
+// broker of a release before 1.2.0 runs from the Python environment while it
+// applies the update that replaces it.
+func runsFrom(dir string) bool {
+	prefix := strings.TrimRight(dir, "/") + "/"
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		if raw, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "cmdline")); err == nil {
+			for _, arg := range strings.Split(string(raw), "\x00") {
+				if strings.HasPrefix(arg, prefix) {
+					return true
+				}
+			}
+		}
+		if raw, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "maps")); err == nil && strings.Contains(string(raw), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func defaultSyncRuntimeDependencies(out io.Writer) error {
 	home := InstallHome()
-	pip := filepath.Join(home, "venv/bin/pip")
-	requirements := filepath.Join(SourceDir(), "installer/requirements.txt")
-	if fileExists(pip) && fileExists(requirements) {
-		if err := runCommand(out, []string{pip, "install", "--disable-pip-version-check", "-r", requirements}, nil); err != nil {
+	venv := filepath.Join(home, "venv")
+	if fileExists(venv) {
+		if runsFrom(venv) {
+			fmt.Fprintf(out, "The Python environment %s is still in use; a later update removes it.\n", venv)
+		} else if err := os.RemoveAll(venv); err != nil {
 			return err
-		}
-		present := runSubprocess(pip, "show", "--quiet", "ansible-core")
-		if present.Err == nil && present.ExitCode == 0 {
-			if err := runCommand(out, []string{pip, "uninstall", "--disable-pip-version-check", "--yes", "ansible-core"}, nil); err != nil {
-				return err
-			}
+		} else {
+			fmt.Fprintf(out, "Removed the Python environment the installer no longer needs: %s\n", venv)
 		}
 	}
 	_ = os.RemoveAll(filepath.Join(home, "tmp", "ansible"))
@@ -462,7 +492,7 @@ func defaultUpdateManagedSource(out io.Writer, expectedRevision string) (bool, e
 	if err := runCommand(out, []string{"git", "clone", "--depth=1", "--branch", branch, repository, checkout}, nil); err != nil {
 		return false, err
 	}
-	for _, required := range []string{"installer/easy_ha_proxy.py", "installer/requirements.txt", "ansible/easy-ha-proxy.yml"} {
+	for _, required := range []string{"installer/easy-ha-proxy", "installer/agent-fetch.sh", "ansible/easy-ha-proxy.yml"} {
 		if !isRegularFile(filepath.Join(checkout, required)) {
 			return false, installerErrorf("Downloaded source is incomplete: %s", required)
 		}

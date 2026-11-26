@@ -14,7 +14,7 @@ func newTestDaemon(t testing.TB) *Daemon {
 	root := t.TempDir()
 	opts := Options{
 		SocketPath: filepath.Join(root, "run", "u.sock"), StateRoot: filepath.Join(root, "state"),
-		SourceDir: filepath.Join(root, "src"), ConfigDir: filepath.Join(root, "etc"), PythonPath: "/nonexistent",
+		SourceDir: filepath.Join(root, "src"), ConfigDir: filepath.Join(root, "etc"),
 		CLIPath: "/bin/true", ActiveMarker: filepath.Join(root, "run", "active"),
 		RestartRequestMarker: filepath.Join(root, "run", "restart"), RebootMarker: filepath.Join(root, "run", "reboot.json"),
 		AssistantRebootMarker: filepath.Join(root, "run", "assistant"), MaintenanceLockPath: filepath.Join(root, "run", "op.lock"),

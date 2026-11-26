@@ -24,7 +24,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Constants matching installer/ssh_protection.py.
+// SSH protection constants; the update broker's Fail2ban shortcut (updated/api.go)
+// names the same client and drop-in.
 const (
 	sshDefaultClient      = "/usr/bin/fail2ban-client"
 	sshDefaultSystemctl   = "/usr/bin/systemctl"

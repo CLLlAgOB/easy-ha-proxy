@@ -266,7 +266,7 @@ raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/e
 
 metadata_file="${config_dir}/metadata.yml"
 source_dir="${install_home}/source"
-venv_python="${install_home}/venv/bin/python"
+agent_bin="${EASY_HA_PROXY_AGENT_BIN:-/usr/local/sbin/easy-ha-proxy-agent}"
 playbook_file="${source_dir}/ansible/easy-ha-proxy.yml"
 legacy_haproxy_config="${EASY_HA_PROXY_LEGACY_HAPROXY_CONFIG:-/etc/haproxy/haproxy.cfg}"
 legacy_authelia_compose="${EASY_HA_PROXY_LEGACY_AUTHELIA_COMPOSE:-/opt/authelia/docker-compose.yml}"
@@ -399,7 +399,7 @@ installation_state="clean"
 control_plane_ready=false
 if [[ -n "${cli_path}" &&
       -f "${metadata_file}" &&
-      -x "${venv_python}" &&
+      -x "${agent_bin}" &&
       -f "${playbook_file}" ]]; then
   control_plane_ready=true
 fi
@@ -679,7 +679,7 @@ run_install() {
       'Refreshing the managed source from GitHub before continuing' \
       'Обновляю управляемые исходники из GitHub перед продолжением')"
     bash "${local_installer}" "${arguments[@]}" || status=$?
-  elif [[ -f "${source_dir}/installer/easy_ha_proxy.py" &&
+  elif [[ -f "${source_dir}/installer/easy-ha-proxy" &&
           -f "${source_dir}/ansible/easy-ha-proxy.yml" ]]; then
     log "$(message \
       'Continuing with the source already prepared on this server' \
@@ -800,24 +800,22 @@ check_configs() {
       check_file "${config_dir}/${file}" "${file}" || ((failures += 1))
     done
     check_file "${playbook_file}" "Ansible playbook" || ((failures += 1))
-    if [[ -x "${venv_python}" ]]; then
-      printf '[ OK ] Python venv: %s\n' "${venv_python}"
-      if "${venv_python}" -c \
-        'import pathlib, sys, yaml; [yaml.safe_load(pathlib.Path(p).read_text()) for p in sys.argv[1:]]' \
-        "${config_dir}/metadata.yml" \
-        "${config_dir}/vars.yml" \
-        "${config_dir}/secrets.yml" \
-        "${config_dir}/authelia.yml" \
-        "${config_dir}/authelia_users_initial.yml" \
-        "${config_dir}/websites.yml" \
-        "${config_dir}/tcp.yml"; then
+    if [[ -x "${agent_bin}" ]]; then
+      printf '[ OK ] Host agent: %s\n' "${agent_bin}"
+      # The agent reads every managed YAML file the way the installer does;
+      # an empty name list prints nothing and only checks that they load.
+      names_file="$(mktemp)"
+      printf '[]' > "${names_file}"
+      if "${agent_bin}" apply vars --source "${source_dir}" --config "${config_dir}" \
+          --names "${names_file}" >/dev/null; then
         printf '[ OK ] %s\n' "$(message 'YAML files have valid syntax' 'YAML-файлы читаются без синтаксических ошибок')"
       else
         printf '[FAIL] %s\n' "$(message 'One or more YAML files are invalid' 'Один или несколько YAML-файлов повреждены')"
         ((failures += 1))
       fi
+      rm -f "${names_file}"
     else
-      printf '[FAIL] Python venv: %s\n' "${venv_python}"
+      printf '[FAIL] Host agent: %s\n' "${agent_bin}"
       ((failures += 1))
     fi
   fi
@@ -882,7 +880,7 @@ show_migration_plan() {
    /etc/easy-ha-proxy/secrets.yml с правами 0600.
 4. Сохранить текущую /opt/authelia/users_database.yml: режим selfservice не
    должен перезаписывать живую базу пользователей.
-5. Установить только управляющий source/venv и сформировать конфигурацию,
+5. Установить только управляющий source и агент и сформировать конфигурацию,
    ничего не применяя к сервисам.
 6. Выполнить syntax-check и Ansible check mode, сохранить diff и проверить его.
 7. Сначала применить безопасные точечные теги, затем — остальной стек.
