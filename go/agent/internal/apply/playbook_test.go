@@ -52,7 +52,7 @@ func TestEveryPlaybookEntryHasParts(t *testing.T) {
 		}
 	}
 	sort.Strings(missing)
-	want := []string{"authelia (remove)", "authelia (users_apply)", "cert (rdg)", "cert (remove_orphans)"}
+	want := []string{"authelia (remove)", "cert (rdg)", "cert (remove_orphans)"}
 	if strings.Join(missing, ",") != strings.Join(want, ",") {
 		t.Errorf("entries without parts: %v, want %v", missing, want)
 	}

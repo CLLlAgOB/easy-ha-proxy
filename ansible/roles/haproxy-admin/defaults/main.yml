@@ -306,6 +306,7 @@ go_installer_parts:
   - authelia/config
   - authelia/daemons
   - authelia/update
+  - authelia/users_apply
   - cert/install
   - cert/notify
   - cert/hooks
@@ -328,6 +329,7 @@ go_installer_forwarded_vars:
   # A pre_task fact that depends on the run's tags (addsite).
   - cert_issue_mode
   - status_check_fail_on_error
+  - authelia_users_ops_file
 native_guardd_bin: /usr/local/sbin/guardd-core
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url
