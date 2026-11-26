@@ -25,6 +25,8 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updated"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updateplan"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/updatescope"
 )
 
 var version = "dev"
@@ -84,6 +86,10 @@ func main() {
 		os.Exit(runUpdateGeoIP(args))
 	case "apt-metadata":
 		os.Exit(tools.RunAptMetadata(args, os.Stdout, os.Stderr))
+	case "update-plan":
+		os.Exit(updateplan.RunCLI(args, os.Stdout, os.Stderr))
+	case "update-scope":
+		os.Exit(updatescope.RunCLI(args, os.Stdout, os.Stderr))
 	case "apply":
 		os.Exit(apply.Run(args, os.Stdout, os.Stderr))
 	case "probe-host":
@@ -96,7 +102,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|probe-host|apply|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|update-plan|update-scope|probe-host|apply|version> [flags]")
 }
 
 func runUDPForward(args []string) int {

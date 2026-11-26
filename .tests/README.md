@@ -29,7 +29,7 @@ PYTHONPATH=installer python -m unittest discover -s .tests -p 'test_*.py'
 A single module:
 
 ```bash
-PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_update_plan.py' -v
+PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_update_scope.py' -v
 ```
 
 ## Supported interpreters

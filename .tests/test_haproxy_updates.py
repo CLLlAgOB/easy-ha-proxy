@@ -1,4 +1,7 @@
-"""Version truth, metadata freshness and package-update isolation."""
+"""APT metadata freshness and the HAProxy protection order.
+
+The HAProxy version status and the OS package isolation are part of the
+update checker and are tested with it, in the host agent (updateplan)."""
 from __future__ import annotations
 
 import json
@@ -6,15 +9,12 @@ from pathlib import Path
 import signal
 import subprocess
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import yaml
 
 import apt_metadata
-import haproxy_update_status as status
-from update_plan import CommandResult, _probe_os
 
 
 class Metadata(unittest.TestCase):
@@ -101,147 +101,6 @@ class Metadata(unittest.TestCase):
             kill.assert_called_once_with(100, signal.SIGTERM)
 
 
-class VersionStatus(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.binary = self.root / 'haproxy'
-        self.binary.write_bytes(b'fixture')
-        self.protection = self.root / 'needrestart.conf'
-        self.protection.write_text(r'$nrconf{override_rc}{qr(^haproxy\.service$)} = 0;')
-        self.package = 'haproxy-awslc'
-        self.installed = '3.4.7-0+ha34+ubuntu24.04u2'
-        self.candidate = self.installed
-        self.held = True
-        self.remote = True
-        self.runtime = {'running_version': self.installed, 'binary_matches': True, 'replaced_libraries': []}
-        self.calls = []
-
-    def command(self, argv, *, timeout):
-        self.calls.append(argv)
-        if argv[0] == 'dpkg-query':
-            return CommandResult(0, 'installed\t' + self.installed) if argv[-1] == self.package else CommandResult(1)
-        if argv[:2] == ('apt-cache', 'policy'):
-            remote = ' 990 https://example.test noble/main amd64 Packages\n' if self.remote else ''
-            return CommandResult(0, f'  Installed: {self.installed}\n  Candidate: {self.candidate}\n' + remote)
-        if argv == ('dpkg', '--get-selections'):
-            return CommandResult(0, (self.package + '\thold\nlibssl-awslc\thold') if self.held else '')
-        if argv[:2] == ('dpkg', '--compare-versions'):
-            return CommandResult(0 if self.candidate > self.installed else 1)
-        raise AssertionError(argv)
-
-    def probe(self, **kwargs):
-        return status.probe(SimpleNamespace(run=self.command), binary=self.binary, metadata=kwargs.pop('metadata', {'fresh': True}),
-                            reader=lambda _: dict(self.runtime), protection=self.protection,
-                            last_update=self.root / 'absent', qualified=kwargs.pop('qualified', True), **kwargs)
-
-    def test_installed_running_and_candidate_are_distinct_fields(self):
-        result = self.probe()
-        self.assertEqual(result['state'], 'current')
-        self.assertEqual(result['details']['installed_version'], self.installed)
-        self.assertEqual(result['details']['running_version'], self.installed)
-        self.assertEqual(result['details']['candidate_version'], self.candidate)
-
-    def test_a_patch_is_offered_but_a_branch_jump_and_downgrade_are_blocked(self):
-        for version, expected in [('3.4.8-1', 'available'), ('3.5.0-1', 'blocked'), ('3.4.6-1', 'blocked')]:
-            self.candidate = version
-            self.assertEqual(self.probe()['state'], expected)
-
-    def test_failed_metadata_does_not_claim_no_updates(self):
-        self.assertEqual(self.probe(metadata={'fresh': False})['state'], 'unknown')
-
-    def test_disk_runtime_mismatch_cannot_be_called_a_successful_update(self):
-        self.runtime['binary_matches'] = False
-        self.assertEqual(self.probe()['state'], 'blocked')
-
-    def test_replaced_libraries_offer_a_state_preserving_reload_even_at_same_version(self):
-        self.runtime['replaced_libraries'] = ['libc.so.6']
-        result = self.probe()
-        self.assertEqual(result['state'], 'available')
-        self.assertTrue(result['details']['needs_reload'])
-        self.assertEqual(result['current_version'], result['available_version'])
-
-    def test_missing_hold_or_restart_guard_blocks_the_controlled_action(self):
-        self.held = False
-        self.assertEqual(self.probe()['state'], 'blocked')
-        self.held = True
-        self.protection.unlink()
-        self.assertEqual(self.probe()['state'], 'blocked')
-
-    def test_distribution_package_is_detected_without_assuming_vendor_name(self):
-        self.package = 'haproxy'
-        self.installed = self.candidate = '2.8.30-0ubuntu0.24.04.2'
-        self.runtime['running_version'] = self.installed
-        self.assertEqual(self.probe()['details']['branch'], '2.8')
-        self.assertEqual(self.probe()['state'], 'current')
-
-    def test_an_installed_package_without_a_repository_is_not_current(self):
-        self.remote = False
-        self.assertEqual(self.probe()['state'], 'unknown')
-
-    def test_unsupported_platform_does_not_offer_a_controlled_install(self):
-        result = self.probe(qualified=False)
-        self.assertEqual(result['state'], 'blocked')
-        self.assertEqual(result['details']['manual_update'], 'vendor')
-        self.assertIn('including manual installation', result['summary'])
-
-    def test_unqualified_distribution_package_has_a_separate_manual_path_and_accurate_branch(self):
-        self.package = 'haproxy'
-        for version, branch in (('2.4.30-0ubuntu0.22.04.1', '2.4'), ('3.0.11-1+deb13u1', '3.0'), ('1:3.2.0-1', '3.2')):
-            with self.subTest(version=version):
-                self.installed = self.candidate = self.runtime['running_version'] = version
-                result = self.probe(qualified=False)
-                self.assertEqual(result['state'], 'blocked')
-                self.assertFalse(result['actionable'])
-                self.assertEqual(result['details']['manual_update'], 'distribution')
-                self.assertEqual(result['details']['branch'], branch)
-                self.assertEqual(result['details']['source'], 'APT')
-        self.assertFalse(any(command[0] in {'apt-get', 'apt-mark'} for command in self.calls))
-
-    def test_manual_upgrade_guidance_is_not_offered_when_runtime_recovery_is_required(self):
-        self.runtime['binary_matches'] = False
-        self.assertNotIn('manual_update', self.probe(qualified=False)['details'])
-
-    def test_last_operation_prefers_newer_migration_over_stale_patch_and_keeps_unsettled_first(self):
-        state_dir = self.root / 'haproxy-package-migration'
-        state_dir.mkdir()
-        last_update = state_dir / 'last-update.json'
-        last_migration = state_dir / 'last-migration.json'
-        old_id = '1' * 32
-        mig_id = '2' * 32
-        last_update.write_text(json.dumps({
-            'id': old_id, 'kind': 'patch', 'phase': 'prepared',
-            'old_version': '2.8.30-0ubuntu0.24.04.2', 'updated_at': 1000.0,
-        }))
-        last_migration.write_text(json.dumps({
-            'id': mig_id, 'kind': 'migration', 'phase': 'committed',
-            'old_version': '2.8.30-0ubuntu0.24.04.2', 'updated_at': 2000.0,
-            'target_verified': True,
-        }))
-        result = status.probe(
-            SimpleNamespace(run=self.command), binary=self.binary, metadata={'fresh': True},
-            reader=lambda _: dict(self.runtime), protection=self.protection,
-            last_update=last_update, qualified=True,
-        )
-        self.assertEqual(result['details']['last_operation']['id'], mig_id)
-        self.assertEqual(result['details']['last_operation']['kind'], 'migration')
-        self.assertEqual(result['details']['last_operation']['phase'], 'committed')
-
-        # An unsettled operation must still win over a newer settled record.
-        last_update.write_text(json.dumps({
-            'id': old_id, 'kind': 'patch', 'phase': 'rollback_failed',
-            'old_version': '2.8.30-0ubuntu0.24.04.2', 'updated_at': 1000.0,
-        }))
-        unsettled = status.probe(
-            SimpleNamespace(run=self.command), binary=self.binary, metadata={'fresh': True},
-            reader=lambda _: dict(self.runtime), protection=self.protection,
-            last_update=last_update, qualified=True,
-        )
-        self.assertEqual(unsettled['details']['last_operation']['id'], old_id)
-        self.assertEqual(unsettled['details']['last_operation']['phase'], 'rollback_failed')
-
-
 class OsIsolation(unittest.TestCase):
     def test_existing_core_is_protected_before_the_first_package_install_and_status_stays_read_only(self):
         play = yaml.safe_load((Path(__file__).resolve().parents[1] / 'ansible/easy-ha-proxy.yml').read_text(encoding='utf-8'))[0]
@@ -250,35 +109,6 @@ class OsIsolation(unittest.TestCase):
         self.assertEqual(protection['ansible.builtin.import_role']['name'], 'haproxy')
         self.assertEqual(set(protection['tags']), {'ha-install', 'upgrade'})
 
-    def test_managed_haproxy_and_tls_are_not_os_updates(self):
-        class Runner:
-            def run(self, *args, **kwargs):
-                return CommandResult(0, 'Inst haproxy-awslc [3.4.7] (3.4.8 repo)\nInst libssl-awslc [4.2] (4.3 repo)\nInst libc6 [2.39] (2.39.1 repo)')
-        result = _probe_os(Runner(), {'fresh': True}, status.PACKAGES)
-        self.assertEqual(result['details']['packages'], ['libc6'])
-        self.assertEqual(result['details']['candidates'], [
-            {'name':'libc6', 'version':'2.39.1', 'installed_version':'2.39'}])
 
-    def test_os_package_versions_keep_the_pairing_architecture_and_new_dependencies(self):
-        class Runner:
-            def run(self, *args, **kwargs):
-                return CommandResult(0, 'Inst containerd.io:arm64 [1:2.1.5-1] (1:2.2.0-1 repo [arm64])\n'
-                                     'Inst docker-buildx-plugin [0.38.0-1] (0.39.0-1 repo)\n'
-                                     'Inst new-dependency (1.0 repo)\n'
-                                     'Inst docker-buildx-plugin [0.38.0-1] (0.39.0-1 repo)\n')
-        result = _probe_os(Runner(), {'fresh': True})
-        self.assertEqual(result['details']['package_count'], 3)
-        self.assertEqual(result['details']['candidates'], [
-            {'name':'containerd.io:arm64', 'version':'1:2.2.0-1', 'installed_version':'1:2.1.5-1'},
-            {'name':'docker-buildx-plugin', 'version':'0.39.0-1', 'installed_version':'0.38.0-1'},
-            {'name':'new-dependency', 'version':'1.0', 'installed_version':None}])
-
-    def test_failed_refresh_marks_os_unknown_even_when_simulation_is_empty(self):
-        class Runner:
-            def run(self, *args, **kwargs):
-                return CommandResult(0, '')
-        self.assertEqual(_probe_os(Runner(), {'fresh': False})['state'], 'unknown')
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,13 @@ def step(job: str, name: str) -> dict:
     return next(item for item in JOBS[job]["steps"] if item.get("name") == name)
 
 
+def go_web_tree_inputs(relative: str) -> tuple[str, ...]:
+    """The panel's build inputs as a Go file lists them (goWebTreeInputs)."""
+    source = (ROOT / relative).read_text(encoding="utf-8")
+    listed = source.split("goWebTreeInputs = []string{", 1)[1].split("}", 1)[0]
+    return tuple(item.strip().strip('"') for item in listed.split(","))
+
+
 class TheLinters(unittest.TestCase):
     def test_ruff_and_shellcheck_run(self):
         self.assertIn("ruff check", step("lint", "Ruff")["run"])
@@ -105,7 +112,7 @@ class ThePublishing(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git") and shutil.which("bash"), "needs git and bash")
     def test_the_fingerprint_is_the_one_gateways_compute(self):
-        import update_plan
+        import hashlib
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -127,18 +134,20 @@ class ThePublishing(unittest.TestCase):
                 env={**environment, "GITHUB_OUTPUT": str(output), "GITHUB_REF_NAME": "alpha"},
             )
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-            expected = update_plan._web_tree(root, update_plan.SubprocessRunner())
+            # What the update checker on a gateway computes (updateplan.webTree).
+            listing = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "--full-tree", "HEAD", "--",
+                                      *go_web_tree_inputs("go/agent/internal/updateplan/source.go")],
+                                     check=True, capture_output=True, text=True).stdout
+            expected = hashlib.sha256(listing.encode("utf-8")).hexdigest()
         self.assertEqual(values["tree"], expected)
         self.assertEqual(values["key"], f"go-alpha-{expected}")
         self.assertEqual(values["channel"], "go-alpha")
 
     def test_the_broker_fingerprints_the_same_inputs(self):
-        import update_plan
-
-        config = (ROOT / "go/agent/internal/updated/config.go").read_text(encoding="utf-8")
-        listed = config.split("goWebTreeInputs = []string{", 1)[1].split("}", 1)[0]
-        self.assertEqual(tuple(item.strip().strip('"') for item in listed.split(",")),
-                         update_plan.GO_WEB_TREE_INPUTS)
+        # The footer (the broker) and the update checker read the same paths.
+        self.assertEqual(go_web_tree_inputs("go/agent/internal/updated/config.go"),
+                         go_web_tree_inputs("go/agent/internal/updateplan/source.go"))
+        self.assertEqual(go_web_tree_inputs("go/agent/internal/updateplan/source.go"), ("VERSION", "go/panel"))
 
 
 class TheRunners(unittest.TestCase):

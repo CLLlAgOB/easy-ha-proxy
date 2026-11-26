@@ -92,10 +92,9 @@ func legacyFixture(t *testing.T, stored, fresh, jobValues map[string]any) (*Daem
 	if err := os.WriteFile(checker, []byte("#!/bin/sh\ncat '"+planFile+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(d.Opts.SourceDir, "installer", "update_plan.py"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	d.Opts.PythonPath = checker
+	saved := agentBinary
+	agentBinary = checker
+	t.Cleanup(func() { agentBinary = saved })
 	return d, job["id"].(string)
 }
 

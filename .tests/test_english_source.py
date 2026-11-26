@@ -37,7 +37,6 @@ QUOTES_RUSSIAN = {
     ".tests/test_i18n.py",
     ".tests/test_machine_output_not_translated.py",
     ".tests/test_translatable_prose.py",
-    ".tests/test_update_plan_translations.py",
     "go/panel/web/static/js/detection_rules.js",
     "go/panel/web/templates/detection_rules.html",
     "go/panel/web/templates/haproxy_certs.html",

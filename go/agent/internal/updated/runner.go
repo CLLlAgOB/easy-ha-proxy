@@ -220,15 +220,12 @@ func (d *Daemon) runDirectCommand(jobID string, argv []string, timeout int, logP
 }
 
 func (d *Daemon) checkerCommand(imageChannel, sourceChannel, branch string) ([]string, error) {
-	checker := filepath.Join(d.Opts.SourceDir, "installer", "update_plan.py")
-	fi, err := os.Lstat(checker)
-	if err != nil || !fi.Mode().IsRegular() {
+	// The installed agent is the checker ("update-plan"); it always reports
+	// the HAProxy component.
+	if !isRegular(agentBinary) {
 		return nil, uErr("not_found", "the structured update checker is unavailable; run one controller update first")
 	}
-	command := []string{d.python(), checker, "--format", "json"}
-	if isRegular(filepath.Join(d.Opts.SourceDir, "installer", "haproxy_update_status.py")) {
-		command = append(command, "--haproxy-status")
-	}
+	command := []string{agentBinary, "update-plan", "--format", "json", "--haproxy-status"}
 	if imageChannel != "" {
 		command = append(command, "--image-channel", imageChannel)
 	}

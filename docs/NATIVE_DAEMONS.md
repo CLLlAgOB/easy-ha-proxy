@@ -14,15 +14,16 @@ removed, and updates go forward only.
   `certd`, `backupd`, `updated`, `authelia-bansd`, `authelia-usersd`,
   `authelia-configd`) and the tools (`unit-failed`, `backup-run`,
   `server-state`, `udp-forward`, `cert-deliver`, `update-geoip`,
-  `probe-host`).
+  `apt-metadata`, `probe-host`), the installer (`apply`) and the update
+  checker the update broker signs (`update-plan`, with `update-scope` for
+  "only what changed").
 - **`easy-ha-proxy-panel`** (Go, `CGO_ENABLED=0`): the web panel in a
   `FROM scratch` container with a built-in `healthcheck` subcommand. Its
   templates, static files and translations live in `go/panel/web`.
 
-The installer (`installer/`), the Ansible playbook and the host tools the
-update and backup brokers run (`full_backup.py`, `update_plan.py`,
-`os_security.py`, `ssh_protection.py`, ...) remain Python, on the platform
-interpreter.
+The installer's command line (`installer/`) and the host tools the backup
+and OS-security brokers run (`full_backup.py`, `os_security.py`,
+`ssh_protection.py`, ...) remain Python, on the platform interpreter.
 
 ## Release bundles and images
 

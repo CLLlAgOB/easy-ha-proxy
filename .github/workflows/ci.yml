@@ -67,7 +67,7 @@ jobs:
       fail-fast: false
       matrix:
         # The installer and the host tools the update and backup brokers
-        # run (full_backup, update_plan, os_security, ...) use the platform
+        # run (full_backup, os_security, ...) use the platform
         # interpreter rather than a bundled one, so every supported release
         # is exercised: 3.10 is Ubuntu 22.04, 3.11 is Debian 12, 3.12 is
         # Ubuntu 24.04, 3.13 is Debian 13, 3.14 is Ubuntu 26.04. The newer
@@ -545,7 +545,7 @@ jobs:
       - name: Fingerprint the Go web panel
         id: tree
         run: |
-          # The same inputs as installer/update_plan.py GO_WEB_TREE_INPUTS and
+          # The same inputs as the update checker (updateplan goWebTreeInputs) and
           # the update broker's go_web_tree: the footer compares them.
           tree="$(git ls-tree -r --full-tree HEAD -- VERSION go/panel | sha256sum | cut -d' ' -f1)"
           echo "tree=${tree}" >> "$GITHUB_OUTPUT"

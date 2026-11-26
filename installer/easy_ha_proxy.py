@@ -9,6 +9,7 @@ import datetime as dt
 import fcntl
 import getpass
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -23,12 +24,12 @@ from typing import Any
 
 import yaml
 
-# The sibling module that decides what a source change needs. The CLI runs as
-# a script from this directory, but tests and tools may load it by path.
+# Sibling modules (agent_bootstrap) are imported where they are needed. The
+# CLI runs as a script from this directory, but tests and tools may load it
+# by path.
 _INSTALLER_DIR = str(Path(__file__).resolve().parent)
 if _INSTALLER_DIR not in sys.path:
     sys.path.insert(0, _INSTALLER_DIR)
-import update_scope  # noqa: E402
 
 
 PRODUCT = "easy-ha-proxy"
@@ -297,8 +298,8 @@ HOST_SERVICE_TAGS = ",".join(
     )
 )
 # "changes" has no fixed tags: they are worked out from the files that differ
-# from the last complete update (see update_scope), and anything the map does
-# not know turns it into "all".
+# from the last complete update ("easy-ha-proxy-agent update-scope"), and
+# anything the map does not know turns it into "all".
 CHANGES_COMPONENT = "changes"
 UPDATE_COMPONENT_TAGS = {
     "all": UPDATE_TAGS,
@@ -3334,13 +3335,49 @@ def progress_phase(name: str) -> None:
         print(f"EHP-PROGRESS phase={name}", flush=True)
 
 
-def changes_scope(directory: Path | None = None) -> dict[str, Any]:
-    """What the installed source needs compared with the last complete update."""
+# What a "changes only" update falls back to when the agent cannot say: the
+# full stack, which an update the broker reviewed as narrower refuses.
+SCOPE_UNAVAILABLE: dict[str, Any] = {
+    "ready": False, "reason": "scope-unavailable", "full": True, "tags": [], "steps": [],
+    "changed": 0, "unmapped": [], "paths": [],
+}
 
-    return update_scope.plan_scope(directory or config_dir(), source_dir())
+
+def agent_update_scope(action: str, directory: Path, *extra: str) -> subprocess.CompletedProcess[str] | None:
+    """Run "easy-ha-proxy-agent update-scope"; None without a usable agent."""
+
+    if not AGENT_BINARY.is_file():
+        return None
+    command = [str(AGENT_BINARY), "update-scope", action, "--config", str(directory), "--source", str(source_dir()), *extra]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def changes_scope(directory: Path | None = None) -> dict[str, Any]:
+    """What the installed source needs compared with the last complete update.
+
+    The host agent decides it, as it does for the update broker's plan.
+    """
+
+    completed = agent_update_scope("plan", directory or config_dir())
+    if completed is None or completed.returncode != 0:
+        return dict(SCOPE_UNAVAILABLE)
+    try:
+        scope = json.loads(completed.stdout)
+    except ValueError:
+        return dict(SCOPE_UNAVAILABLE)
+    return scope if isinstance(scope, dict) else dict(SCOPE_UNAVAILABLE)
 
 
 def describe_changes_scope(scope: dict[str, Any]) -> None:
+    if scope.get("reason") == "scope-unavailable":
+        print(
+            "The installed host agent could not work out the changed files: "
+            "running the full stack."
+        )
+        return
     if scope.get("reason") == "no-applied-record":
         print(
             "No record of a complete update yet, so the changed files cannot be "
@@ -3373,10 +3410,13 @@ def record_applied_source(directory: Path | None = None) -> None:
         revision = git_revision(source_dir(), "HEAD")
     except (InstallerError, OSError):
         revision = ""
-    try:
-        update_scope.write_applied(directory or config_dir(), source_dir(), revision)
-    except OSError as exc:
-        print(f"Warning: could not record the applied source ({exc}).")
+    completed = agent_update_scope("record", directory or config_dir(), "--revision", revision)
+    if completed is None:
+        print("Warning: could not record the applied source (the host agent is unavailable).")
+    elif completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit status {completed.returncode}"
+        print(f"Warning: could not record the applied source ({reason}).")
 
 
 def update_tags_for_args(args: argparse.Namespace, *, check_mode: bool = False) -> str:
