@@ -2040,6 +2040,9 @@ def offline_restore_image_preflight(
 # selected entry has not moved to Go; EASY_HA_PROXY_ANSIBLE=1 or the extra
 # variable easy_ha_proxy_go_installer=false asks for Ansible outright.
 AGENT_BINARY = Path("/usr/local/sbin/easy-ha-proxy-agent")
+# Where an agent fetched for one run waits: not over the installed one, so
+# the native stage still sees the change and restarts what runs the old one.
+STAGED_AGENT = Path("/var/lib/easy-ha-proxy/native-staging/bootstrap/easy-ha-proxy-agent")
 ANSIBLE_ENV = "EASY_HA_PROXY_ANSIBLE"
 
 
@@ -2047,7 +2050,39 @@ def go_installer_allowed(extra_vars: dict[str, str] | None) -> bool:
     if os.environ.get(ANSIBLE_ENV) == "1":
         return False
     value = str((extra_vars or {}).get("easy_ha_proxy_go_installer", "true")).strip().lower()
-    return value not in {"false", "0", "no", "off"} and AGENT_BINARY.is_file()
+    return value not in {"false", "0", "no", "off"}
+
+
+def agent_runs_playbook(agent: Path) -> bool:
+    """Whether this agent has "apply playbook" (an older one prints usage)."""
+
+    if not agent.is_file():
+        return False
+    probe = subprocess.run([str(agent), "apply", "playbook", "--supported", "--tags", "never"],
+                           capture_output=True, text=True, check=False)
+    return probe.returncode in (0, 3)
+
+
+def fetch_runner(directory: Path) -> Path | None:
+    """The agent built for the source revision, fetched from the registry."""
+
+    import agent_bootstrap
+
+    revision = subprocess.run(["git", "-c", f"safe.directory={source_dir()}", "-C", str(source_dir()), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=False).stdout.strip()
+    if not SOURCE_REVISION_RE.fullmatch(revision):
+        return None
+    reference = agent_bootstrap.image_reference(load_yaml_mapping(directory / "vars.yml"), revision)
+    if reference is None:
+        return None
+    try:
+        binary = agent_bootstrap.fetch_agent(reference, revision)
+        agent_bootstrap.install_agent(binary, STAGED_AGENT)
+    except Exception as exc:  # noqa: BLE001 - Ansible remains the fallback
+        print(f"Could not fetch the Go installer from {reference}: {exc}", flush=True)
+        return None
+    print(f"Fetched the Go installer built from {revision[:12]} ({reference}).", flush=True)
+    return STAGED_AGENT if agent_runs_playbook(STAGED_AGENT) else None
 
 
 def agent_arguments(directory: Path, extra_vars: dict[str, str] | None) -> list[str]:
@@ -2067,6 +2102,8 @@ def bootstrap_agent(directory: Path, extra_vars: dict[str, str] | None) -> None:
     installer) is left alone: Ansible then runs and installs it.
     """
 
+    if not AGENT_BINARY.is_file():
+        return
     probe = subprocess.run([str(AGENT_BINARY), "apply", "parts"], capture_output=True, text=True, check=False)
     if probe.returncode != 0 or '"native"' not in probe.stdout:
         return
@@ -2080,10 +2117,11 @@ def agent_playbook_command(
     directory: Path,
     extra_vars: dict[str, str] | None,
     skip_tags: str | None,
+    agent: Path | None = None,
 ) -> list[str] | None:
     """The agent's command for this run, or None when Ansible must run it."""
 
-    command = [str(AGENT_BINARY), "apply", "playbook", "--tags", tags, *agent_arguments(directory, extra_vars)]
+    command = [str(agent or AGENT_BINARY), "apply", "playbook", "--tags", tags, *agent_arguments(directory, extra_vars)]
     if skip_tags:
         command.extend(("--skip-tags", skip_tags))
     probe = subprocess.run([*command, "--supported"], capture_output=True, text=True, check=False)
@@ -2097,18 +2135,8 @@ def agent_playbook_command(
     return command
 
 
-def require_configuration(directory: Path) -> None:
-    required = (
-        directory / "inventory.ini",
-        directory / "vars.yml",
-        directory / "secrets.yml",
-    )
-    missing = [str(path) for path in required if not path.exists()]
-    if missing:
-        raise InstallerError(
-            "Configuration is incomplete. Run easy-ha-proxy install first. Missing: "
-            + ", ".join(missing)
-        )
+def configuration_complete(directory: Path) -> bool:
+    return all((directory / name).exists() for name in ("inventory.ini", "vars.yml", "secrets.yml"))
 
 
 def run_playbook(
@@ -2125,18 +2153,25 @@ def run_playbook(
         # restarting or unhealthy. Plans remain non-blocking diagnostics.
         effective_extra_vars.setdefault("status_check_fail_on_error", "true")
     command = None
-    if go_installer_allowed(effective_extra_vars):
-        target = directory or config_dir()
-        require_configuration(target)
+    target = directory or config_dir()
+    # An incomplete configuration is refused below, by playbook_command,
+    # with the message the installer has always given.
+    if go_installer_allowed(effective_extra_vars) and configuration_complete(target):
         if not check_mode and "ha-adm-native" in tags.split(","):
             bootstrap_agent(target, effective_extra_vars)
-        command = agent_playbook_command(
-            tags,
-            check_mode=check_mode,
-            directory=target,
-            extra_vars=effective_extra_vars,
-            skip_tags=skip_tags,
-        )
+        agent: Path | None = AGENT_BINARY
+        if not agent_runs_playbook(AGENT_BINARY):
+            # No agent yet (a fresh host), or one older than "apply playbook".
+            agent = None if check_mode else fetch_runner(target)
+        if agent is not None:
+            command = agent_playbook_command(
+                tags,
+                check_mode=check_mode,
+                directory=target,
+                extra_vars=effective_extra_vars,
+                skip_tags=skip_tags,
+                agent=agent,
+            )
     if command is not None:
         run(command, env=os.environ.copy())
     else:

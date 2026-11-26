@@ -29,6 +29,7 @@ class GoInstallerSwitch(unittest.TestCase):
         self.probes: list[list[str]] = []
         self.supported = 0
         self.parts = '{"parts":{"native":{}}}'
+        self.fetched = None
 
     def fake_probe(self, command, **_kwargs):
         self.probes.append(command)
@@ -46,6 +47,7 @@ class GoInstallerSwitch(unittest.TestCase):
             mock.patch.object(easy_ha_proxy, "ansible_environment", return_value={}),
             mock.patch.object(easy_ha_proxy, "source_dir", return_value=self.root / "source"),
             mock.patch.object(easy_ha_proxy, "offer_pending_reboot"),
+            mock.patch.object(easy_ha_proxy, "fetch_runner", return_value=self.fetched),
         ):
             easy_ha_proxy.run_playbook(tags, directory=self.config, **kwargs)
         return runs
@@ -77,8 +79,18 @@ class GoInstallerSwitch(unittest.TestCase):
             self.assertEqual(self.play("status"), [["ansible-playbook"]])
         self.assertEqual(self.play("status", extra_vars={"easy_ha_proxy_go_installer": "false"}), [["ansible-playbook"]])
         self.agent.unlink()
+        self.probes.clear()
         self.assertEqual(self.play("status"), [["ansible-playbook"]])
         self.assertEqual(self.probes, [])
+
+    def test_a_fresh_host_runs_the_agent_fetched_for_this_revision(self) -> None:
+        self.agent.unlink()
+        self.fetched = self.root / "staged-agent"
+        self.fetched.write_text("#!/bin/sh\n")
+        runs = self.play("docker,ha-adm-native,status")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][0], str(self.fetched))
+        self.assertEqual(runs[0][1:3], ["apply", "playbook"])
 
     def test_an_agent_older_than_the_native_part_is_not_bootstrapped(self) -> None:
         self.parts = ""
