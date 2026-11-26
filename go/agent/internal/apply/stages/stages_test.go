@@ -37,6 +37,7 @@ var folded = map[string]bool{
 	"Stat Authelia log file":                                                 true, // stat, read in the conditions
 	"Check existing private Authelia paths for stale log-reader ACL cleanup": true, // stat, read in the conditions
 	"Look for the Redis session dump":                                        true, // stat, read in the conditions
+	"Inspect the legacy managed msmtp configuration":                         true, // stat, read with the file
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
@@ -83,7 +84,15 @@ func taskNames(t *testing.T, dir, file string) []string {
 			}
 			if block, ok := m.Value("block").([]any); ok {
 				walk(block) // a block's own name is not a task
+				// always: runs after it every time; rescue: is folded into
+				// the steps that can fail.
+				if always, ok := m.Value("always").([]any); ok {
+					walk(always)
+				}
 				continue
+			}
+			if _, ok := m.Get("meta"); ok {
+				continue // flush_handlers: the caller's job during the hybrid period
 			}
 			if name, _ := m.Value("name").(string); !folded[name] {
 				names = append(names, name)
@@ -251,7 +260,7 @@ func TestTheRoleListsTheAgentsParts(t *testing.T) {
 // templated from the role parameters alone); they must be that role's parts,
 // the pre-task ones aside.
 func TestMainYmlSendsTheSamePartsToTheFallback(t *testing.T) {
-	for _, role := range []string{"haproxy-admin", "haproxy", "authelia"} {
+	for _, role := range []string{"haproxy-admin", "haproxy", "authelia", "cert"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", role, "tasks", "main.yml"))
 		if err != nil {
 			t.Fatal(err)

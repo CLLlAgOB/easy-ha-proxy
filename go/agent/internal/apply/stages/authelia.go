@@ -409,7 +409,9 @@ func autheliaStart(b *Builder, cond func(*engine.Run) bool) []engine.Step {
 					kept = append(kept, line)
 				}
 			}
-			shown := strings.Join(kept, "\n")
+			// join('\n') inside {{ }}: Ansible doubles the backslash, so the
+			// lines are joined by a backslash and an n, as before.
+			shown := strings.Join(kept, `\n`)
 			if shown == "" {
 				shown = "no non-sensitive log lines collected"
 			}

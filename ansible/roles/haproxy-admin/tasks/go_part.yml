@@ -102,12 +102,16 @@
     - go_part_result is not skipped
     - (go_part_result.stdout_lines | last | from_json).exports | length > 0
 
-# set_fact values a part sets for later task files (its Facts): kept here and
-# handed to every later agent call. No Ansible task reads them, so they are
-# not set one by one.
-- name: "{{ go_parts | join(', ') }} | Keep the facts later parts read"
+# set_fact values a part sets for later task files (its Facts): set here for
+# Ansible's own tasks and handlers (cert's handler reads haproxy_present), and
+# kept in go_agent_facts for every later agent call.
+- name: "{{ go_parts | join(', ') }} | Keep the facts later tasks read"
   ansible.builtin.set_fact:
-    go_agent_facts: "{{ (go_agent_facts | default({})) | combine((go_part_result.stdout_lines | last | from_json).facts) }}"
+    "{{ item.key }}": "{{ item.value }}"
+    go_agent_facts: "{{ (go_agent_facts | default({})) | combine({item.key: item.value}) }}"
+  loop: "{{ (go_part_result.stdout_lines | last | from_json).facts | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
   when:
     - go_part_result is not skipped
     - (go_part_result.stdout_lines | last | from_json).facts | default({}) | length > 0

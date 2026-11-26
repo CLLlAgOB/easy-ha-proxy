@@ -417,7 +417,7 @@ func isTemplate(s string) bool {
 // render, keep the source's trailing newlines, then ansible_eval_concat --
 // text that looks like a dict, a list or a bool becomes one.
 func (s *Set) renderString(src string) (any, error) {
-	tpl, err := s.env.FromString("<template>", src)
+	tpl, err := s.env.FromString("<template>", escapeBackslashes(src))
 	if err != nil {
 		return nil, err
 	}

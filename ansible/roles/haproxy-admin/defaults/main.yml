@@ -301,6 +301,10 @@ go_installer_parts:
   - native-cleanup
   - docker/docker
   - authelia/install
+  - cert/install
+  - cert/notify
+  - cert/hooks
+  - cert/renew
   - geoip_acl/geoip
 # Extra variables the installer may pass to the playbook; forwarded to the
 # agent so it templates with the same values.
@@ -313,6 +317,8 @@ go_installer_forwarded_vars:
   - easy_ha_proxy_runtime_maintenance_revision
   - easy_ha_proxy_maintenance_revision
   - easy_ha_proxy_runtime_maintenance_until
+  # A pre_task fact that depends on the run's tags (addsite).
+  - cert_issue_mode
 native_guardd_bin: /usr/local/sbin/guardd-core
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url

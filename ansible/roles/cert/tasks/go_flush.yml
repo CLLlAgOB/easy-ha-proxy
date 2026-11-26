@@ -1,0 +1,4 @@
+---
+# Included by go_fallback.yml only when the agent notified a handler: a meta
+# task ignores when:, so the condition sits on the include.
+- ansible.builtin.meta: flush_handlers

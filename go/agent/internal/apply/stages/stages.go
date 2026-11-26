@@ -161,6 +161,15 @@ func (b *Builder) S(expr string) string {
 	return out
 }
 
+// Value templates a task argument to whatever it holds (a list, a mapping).
+func (b *Builder) Value(expr string) any {
+	v, err := b.Set.Template(expr)
+	if err != nil {
+		b.fail(fmt.Errorf("%q: %w", expr, err))
+	}
+	return v
+}
+
 // Bool templates a task argument to a bool, as a when: condition reads it.
 func (b *Builder) Bool(expr string) bool {
 	v, err := b.Set.Template(expr)
