@@ -17,11 +17,13 @@ import (
 
 // The Authelia stage: roles/authelia's install entry (install.yml with the
 // fs, config, start, configd, bansd and usersd files it imports and the
-// helpers they include). The role's other entries are run on request
-// (never-tagged) and stay in Ansible for now.
+// helpers they include), and the config and daemons entries run on request.
+// The update, users_apply and remove entries stay in Ansible for now.
 func init() {
 	register(Stage{Name: "authelia", Parts: []Part{
 		{Name: "authelia/install", Role: "authelia", File: "install", Build: autheliaInstall},
+		{Name: "authelia/config", Role: "authelia", File: "config", Build: autheliaConfigEntry},
+		{Name: "authelia/daemons", Role: "authelia", File: "daemons", Build: autheliaDaemonsEntry},
 	}})
 }
 
@@ -483,4 +485,25 @@ func autheliaBansd(b *Builder) []engine.Step {
 
 func autheliaUsersd(b *Builder) []engine.Step {
 	return autheliaDaemon(b, "authelia-usersd", "authelia_usersd_unit", true)
+}
+
+// whenEnabled is a task file's outer block: when authelia_enabled.
+func whenEnabled(b *Builder, steps []engine.Step) []engine.Step {
+	enabled := b.Bool("{{ authelia_enabled | default(false) | bool }}")
+	for i := range steps {
+		steps[i].When = andWhen(func(*engine.Run) bool { return enabled }, steps[i].When)
+	}
+	return steps
+}
+
+// autheliaConfigEntry is the config entry (config.yml): the files, then
+// restart.yml when one of them changed or a restart is forced.
+func autheliaConfigEntry(b *Builder) []engine.Step {
+	return whenEnabled(b, autheliaConfig(b, b.S("{{ task_stage | default('install') }}")))
+}
+
+// autheliaDaemonsEntry is daemons.yml: usersd, bansd, configd, in its order.
+func autheliaDaemonsEntry(b *Builder) []engine.Step {
+	steps := append(autheliaUsersd(b), autheliaBansd(b)...)
+	return whenEnabled(b, append(steps, autheliaConfigd(b)...))
 }
