@@ -16,6 +16,7 @@ import yaml
 from easy_ha_proxy import (
     InstallerError,
     UPDATE_SOURCE_REFRESHED_ENV,
+    command_install,
     command_update,
     dns_preflight,
     mark_installation_complete,
@@ -53,6 +54,36 @@ class ReleaseChannelTests(unittest.TestCase):
             self.assertEqual(metadata["branch"], "alpha")
             self.assertEqual(metadata["image_channel"], "alpha")
             self.assertTrue(variables["haproxy_admin_image"].endswith(":alpha"))
+
+    def install_records(self, environment: dict[str, str]) -> dict:
+        """What command_install leaves in metadata.yml, stopped right after."""
+
+        class Stop(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = self._config(Path(tmp))
+            args = Namespace(reconfigure=False, test_mode=True, certificate_source=None,
+                             image_channel=None, source_channel=None)
+            with (
+                mock.patch.dict(os.environ, environment),
+                mock.patch("easy_ha_proxy.require_root"),
+                mock.patch("easy_ha_proxy.hold_maintenance_lock"),
+                mock.patch("easy_ha_proxy.backup_configuration"),
+                mock.patch("easy_ha_proxy.configure_interactively", return_value=directory),
+                mock.patch("easy_ha_proxy.is_test_mode", side_effect=Stop),
+            ):
+                with self.assertRaises(Stop):
+                    command_install(args)
+            return yaml.safe_load((directory / "metadata.yml").read_text())
+
+    def test_an_install_from_a_branch_records_it_for_later_updates(self) -> None:
+        # An update fetches the recorded branch, main when none: an install
+        # from alpha without it was moved to main by its first update.
+        self.assertEqual(self.install_records({"EASY_HA_PROXY_BRANCH": "alpha"})["branch"], "alpha")
+        os.environ.pop("EASY_HA_PROXY_BRANCH", None)
+        self.assertNotIn("branch", self.install_records({}))
+        self.assertNotIn("branch", self.install_records({"EASY_HA_PROXY_BRANCH": "../x"}))
 
     def test_stable_channel_binds_main_and_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

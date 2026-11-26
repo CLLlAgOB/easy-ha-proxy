@@ -2279,6 +2279,16 @@ def reexec_after_source_update() -> None:
     raise InstallerError("Could not restart the refreshed installer.")
 
 
+def installed_branch() -> str | None:
+    """The branch this install was asked for (install.sh and install-local.sh
+    pass EASY_HA_PROXY_BRANCH down). Recorded, because an update fetches the
+    recorded branch and falls back to main: an install from alpha that left
+    it out was moved to main by its first update."""
+
+    branch = (os.environ.get("EASY_HA_PROXY_BRANCH") or "").strip()
+    return branch if branch and _valid_git_branch(branch) else None
+
+
 def persist_deployment_channels(
     *,
     source_channel: str | None = None,
@@ -3236,6 +3246,7 @@ def command_install(args: argparse.Namespace) -> None:
     persist_deployment_channels(
         source_channel=args.source_channel,
         image_channel=args.image_channel,
+        branch=installed_branch(),
         directory=directory,
     )
     test_mode = is_test_mode(directory)
