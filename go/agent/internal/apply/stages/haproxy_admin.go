@@ -29,6 +29,7 @@ func init() {
 		{Name: "config", Role: "haproxy-admin", Build: adminConfig},
 		{Name: "start", Role: "haproxy-admin", Build: adminStart},
 		{Name: "native-cleanup", Role: "haproxy-admin", Build: adminNativeCleanup},
+		{Name: "update_haproxy_admin", Role: "haproxy-admin", Build: adminImageUpdate},
 	}})
 }
 
@@ -470,4 +471,58 @@ func adminNative(b *Builder) []engine.Step {
 			Resource: &engine.Command{Argv: []string{"systemctl", "try-restart", "easy-ha-proxy-guardd.service"}, Changes: true}},
 	)
 	return steps
+}
+
+// adminImageUpdate is update_haproxy_admin.yml (ha-adm-update): Docker
+// started (either service; a failure is not one), the panel's images pulled,
+// the stack brought up, its health waited for.
+func adminImageUpdate(b *Builder) []engine.Step {
+	dir := b.S("{{ app_dir }}")
+	env := []string{"COMPOSE_PROGRESS=plain", "DOCKER_CLI_HINTS=false"}
+	container := b.S("{{ haproxy_admin_container_name }}")
+	wait, _ := strconv.Atoi(b.S("{{ haproxy_admin_start_wait_timeout | int }}"))
+	tries := wait / 5
+	if tries < 1 {
+		tries = 1
+	}
+	return []engine.Step{
+		{Name: "Ensure Docker daemon is running (classic docker.service)", Resource: ignoredUnit("docker")},
+		{Name: "Ensure Docker daemon is running (snap.docker.dockerd.service)", Resource: ignoredUnit("snap.docker.dockerd")},
+		{Name: "Pull images", Resource: &engine.Command{Argv: []string{"timeout", b.S("{{ haproxy_admin_compose_pull_timeout | int | string }}"),
+			"docker", "compose", "pull", "--quiet"}, Dir: dir, Env: env, Retries: 3, Delay: 20 * time.Second}},
+		{Name: "Up -d (recreate if needed)", Resource: &engine.Command{Argv: []string{"timeout", b.S("{{ haproxy_admin_compose_up_timeout | int | string }}"),
+			"docker", "compose", "up", "--detach", "--remove-orphans"}, Dir: dir, Env: env, MergeStderr: true, Retries: 2, Delay: 10 * time.Second,
+			ChangedWhen: func(out string, _ int) bool { return composeChanged.MatchString(out) }}},
+		{Name: "haproxy-admin | Read container health status",
+			Resource: &engine.Func{Desc: "container health " + container, CheckFn: func(sys *engine.System) (engine.Change, error) {
+				return engine.Change{Summary: "healthy"}, waitHealthy(sys, container, tries, wait)
+			}}},
+		{Name: "Remove the legacy external GeoIP JSON cache", Resource: &engine.Absent{Path: b.S("{{ haproxy_admin_root_dir }}") + "/backups/country_cache.json"}},
+	}
+}
+
+// ignoredUnit is a service task with failed_when: false: enabled and
+// started when the unit is there; a unit systemd does not know fails the
+// module, which is ignored and changes nothing.
+func ignoredUnit(name string) engine.Resource {
+	u := Unit(name, engine.Bool(true), "started")
+	return &engine.Func{Desc: "unit " + name,
+		CheckFn: func(sys *engine.System) (engine.Change, error) {
+			out, _, err := sys.Exec("systemctl", "show", name, "--property=LoadState", "--value")
+			if err != nil || strings.TrimSpace(out) != "loaded" {
+				return engine.Change{Summary: "not installed (ignored)"}, nil
+			}
+			c, err := u.Check(sys)
+			if err != nil {
+				return engine.Change{Summary: "failed (ignored): " + err.Error()}, nil
+			}
+			return c, nil
+		},
+		ApplyFn: func(sys *engine.System) error {
+			c, err := u.Check(sys)
+			if err == nil {
+				u.Apply(sys, c)
+			}
+			return nil
+		}}
 }

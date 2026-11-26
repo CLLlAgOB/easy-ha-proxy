@@ -7,5 +7,6 @@
     {{ 'go_fallback.yml'
        if task_stage in ['native', 'getuseruid', 'packages', 'fs', 'config', 'start', 'native-cleanup',
                          'daemons_env', 'certd', 'controld', 'backupd', 'iptables-ban', 'iptables-udp',
-                         'updated', 'alertd', 'metricsd', 'guardd', 'healthd', 'journald-retention']
+                         'updated', 'alertd', 'metricsd', 'guardd', 'healthd', 'journald-retention',
+                         'update_haproxy_admin']
        else task_stage ~ '.yml' }}

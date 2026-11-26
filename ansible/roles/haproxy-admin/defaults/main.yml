@@ -300,6 +300,7 @@ go_installer_parts:
   - config
   - start
   - native-cleanup
+  - update_haproxy_admin
   - docker/docker
   - authelia/install
   - authelia/config
