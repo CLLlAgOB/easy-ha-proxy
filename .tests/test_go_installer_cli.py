@@ -102,5 +102,40 @@ class GoInstallerSwitch(unittest.TestCase):
         self.assertEqual([command[1:3] for command in runs], [["apply", "playbook"]])
 
 
+class TheVenvLosesAnsible(unittest.TestCase):
+    """An update removes what earlier installers put in the private venv."""
+
+    def sync(self, installed: bool) -> tuple[list[list[str]], Path]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        home = Path(temporary.name)
+        (home / "venv/bin").mkdir(parents=True)
+        (home / "venv/bin/pip").write_text("#!/bin/sh\n")
+        (home / "tmp/ansible/leftover").mkdir(parents=True)
+        source = home / "source"
+        (source / "installer").mkdir(parents=True)
+        (source / "installer/requirements.txt").write_text("PyYAML~=6.0\n")
+        runs: list[list[str]] = []
+        shown = subprocess.CompletedProcess([], 0 if installed else 1, "", "")
+        with (
+            mock.patch.object(easy_ha_proxy, "install_home", return_value=home),
+            mock.patch.object(easy_ha_proxy, "source_dir", return_value=source),
+            mock.patch.object(easy_ha_proxy, "run", side_effect=lambda command, **_: runs.append(command)),
+            mock.patch.object(easy_ha_proxy.subprocess, "run", return_value=shown),
+        ):
+            easy_ha_proxy.sync_runtime_dependencies()
+        return runs, home
+
+    def test_ansible_core_is_uninstalled_when_present(self) -> None:
+        runs, home = self.sync(installed=True)
+        self.assertEqual([command[1] for command in runs], ["install", "uninstall"])
+        self.assertEqual(runs[1][-2:], ["--yes", "ansible-core"])
+        self.assertFalse((home / "tmp/ansible").exists())
+
+    def test_a_clean_venv_only_installs(self) -> None:
+        runs, _ = self.sync(installed=False)
+        self.assertEqual([command[1] for command in runs], ["install"])
+
+
 if __name__ == "__main__":
     unittest.main()

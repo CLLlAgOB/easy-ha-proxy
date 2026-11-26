@@ -2109,10 +2109,18 @@ def run_playbook(
 
 
 def sync_runtime_dependencies() -> None:
-    pip = install_home() / "venv/bin/pip"
+    home = install_home()
+    pip = home / "venv/bin/pip"
     requirements = source_dir() / "installer/requirements.txt"
     if pip.exists() and requirements.exists():
         run([str(pip), "install", "--disable-pip-version-check", "-r", str(requirements)])
+        # Gateways no longer run Ansible; pip keeps what earlier installers
+        # put in the private venv until it is told to remove it.
+        present = subprocess.run([str(pip), "show", "--quiet", "ansible-core"],
+                                 capture_output=True, text=True, check=False)
+        if present.returncode == 0:
+            run([str(pip), "uninstall", "--disable-pip-version-check", "--yes", "ansible-core"])
+    shutil.rmtree(home / "tmp" / "ansible", ignore_errors=True)
 
 
 def ensure_source_executables(directory: Path | None = None) -> None:
