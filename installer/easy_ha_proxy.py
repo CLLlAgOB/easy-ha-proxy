@@ -2006,7 +2006,10 @@ def fetch_runner(directory: Path) -> Path:
         # A staged source bundle has no checkout: like the native stage, take
         # the channel's current agent.
         revision = ""
-    variables = load_yaml_mapping(directory / "vars.yml")
+    # A machine being recovered from a backup has no configuration yet: the
+    # defaults name the release image.
+    vars_file = directory / "vars.yml"
+    variables = load_yaml_mapping(vars_file) if vars_file.is_file() else {}
     reference = agent_bootstrap.image_reference(variables, revision)
     source = reference or "the configured native bundle"
     try:
@@ -3742,17 +3745,34 @@ def command_language(args: argparse.Namespace) -> None:
         print("Run 'easy-ha-proxy language --language %s --apply' to apply it." % language)
 
 
-def full_backup_script() -> Path:
-    script = source_dir() / "installer/full_backup.py"
-    if not script.is_file():
-        raise InstallerError(f"Full backup helper is missing: {script}")
-    return script
+def agent_knows(agent: Path, command: str) -> bool:
+    """Whether this agent has the command (an older one lists the others)."""
+
+    if not agent.is_file():
+        return False
+    try:
+        probe = subprocess.run([str(agent), command], capture_output=True, text=True, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return f"easy-ha-proxy-agent {command}" in (probe.stderr or "")
+
+
+def full_backup_command() -> list[str]:
+    """The agent's encrypted full backup and restore ("full-backup").
+
+    An installed agent older than the command, or a host without one (a
+    disaster recovery onto a fresh machine), uses the agent built for the
+    source revision, as the playbook run does.
+    """
+
+    agent = AGENT_BINARY if agent_knows(AGENT_BINARY, "full-backup") else fetch_runner(config_dir())
+    return [str(agent), "full-backup"]
 
 
 def command_backup_full(args: argparse.Namespace) -> None:
     require_root()
     hold_maintenance_lock()
-    command = [sys.executable, str(full_backup_script()), "backup"]
+    command = [*full_backup_command(), "backup"]
     if args.output_dir:
         command.extend(["--output-dir", args.output_dir])
     include_ssh = args.include_ssh
@@ -3772,8 +3792,7 @@ def command_restore_full(args: argparse.Namespace) -> None:
     require_root()
     hold_maintenance_lock()
     command = [
-        sys.executable,
-        str(full_backup_script()),
+        *full_backup_command(),
         "restore",
         args.archive,
         "--mode",

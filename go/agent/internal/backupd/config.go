@@ -1,7 +1,7 @@
 // Package backupd is the Go port of easy-ha-proxy-backupd (ansible/roles/
 // haproxy-admin/files/backupd/*.py). The Python package is the specification:
 // the same socket protocol, request fields, error codes, state files, archive
-// format (made by installer/full_backup.py) and off-host copy layout, so the
+// format (made by the agent's full-backup command) and off-host copy layout, so the
 // two implementations can replace each other on a running gateway.
 package backupd
 

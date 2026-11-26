@@ -1129,7 +1129,7 @@ EOF
   recovery_command+="test ! -e ${remote_recovery_root}; "
   recovery_command+="install -d -m 0700 ${remote_recovery_root}; "
   recovery_command+="tar -xzf ${remote_source_archive} -C ${remote_recovery_root}; "
-  recovery_command+="test -f ${remote_recovery_root}/installer/full_backup.py; "
+  recovery_command+="test -f ${remote_recovery_root}/installer/easy_ha_proxy.py; "
   recovery_command+="if test -x /opt/easy-ha-proxy/venv/bin/python && test -f /etc/easy-ha-proxy/metadata.yml; then "
   recovery_command+="recovery_python=/opt/easy-ha-proxy/venv/bin/python; "
   recovery_command+="recovery_source=${remote_recovery_root}; "

@@ -587,16 +587,13 @@ func (d *Daemon) runHelper(argv []string, passphrase, jobID, recoverySource stri
 	return d.runDirectHelper(argv, passphrase, jobID, recoverySource)
 }
 
-func (d *Daemon) helperScript() (string, error) {
-	script := filepath.Join(d.Opts.SourceDir, "installer", "full_backup.py")
-	fi, err := os.Lstat(script)
-	if err != nil {
-		return "", err
+// helperCommand is the full-backup command, when its program is installed.
+func (d *Daemon) helperCommand() ([]string, error) {
+	fi, err := os.Stat(d.helper[0])
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, bErr("invalid", "the managed full-backup helper is unavailable")
 	}
-	if !fi.Mode().IsRegular() {
-		return "", bErr("invalid", "the managed full-backup helper is unavailable")
-	}
-	return script, nil
+	return append([]string(nil), d.helper...), nil
 }
 
 func (d *Daemon) rebootScheduled() bool {

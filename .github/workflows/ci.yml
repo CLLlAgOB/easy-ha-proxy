@@ -66,8 +66,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The installer and the host tools the update and backup brokers
-        # run (full_backup, os_security, ...) use the platform
+        # The installer and the host tools the update broker runs
+        # (os_security, ssh_protection, ...) use the platform
         # interpreter rather than a bundled one, so every supported release
         # is exercised: 3.10 is Ubuntu 22.04, 3.11 is Debian 12, 3.12 is
         # Ubuntu 24.04, 3.13 is Debian 13, 3.14 is Ubuntu 26.04. The newer

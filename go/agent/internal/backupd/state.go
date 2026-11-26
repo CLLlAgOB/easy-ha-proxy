@@ -49,9 +49,11 @@ type Daemon struct {
 	shutOnce  sync.Once
 	stopOnce  sync.Once
 	transient func() bool
-	python    string
-	rootUID   int // the owner trusted for daemon-written files (root)
-	sleep     func(time.Duration)
+	// helper is the full-backup command: the installed agent's
+	// "full-backup"; the tests put a stand-in there.
+	helper  []string
+	rootUID int // the owner trusted for daemon-written files (root)
+	sleep   func(time.Duration)
 }
 
 type uploadLock struct {
@@ -68,7 +70,7 @@ func NewDaemon(opts Options) *Daemon {
 		shutdown: make(chan struct{}),
 		stop:     make(chan struct{}),
 		sleep:    time.Sleep,
-		python:   "/usr/bin/python3",
+		helper:   []string{"/usr/local/sbin/easy-ha-proxy-agent", "full-backup"},
 	}
 	d.transient = d.transientJobsSupported
 	return d

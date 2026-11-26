@@ -235,7 +235,7 @@ restore_full_remote() {
     die "Encrypted full backup not found: ${backup:-<missing>}"
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/full_backup.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy_ha_proxy.py" ]] ||
     die "Controller recovery source not found under ${controller_dir}."
   if [[ -z "${inventory}" ]]; then
     discover_inventory_files

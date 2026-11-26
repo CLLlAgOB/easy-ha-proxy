@@ -241,11 +241,11 @@ func (d *Daemon) listUploads() []map[string]any {
 }
 
 func (d *Daemon) helperArgv(args ...string) ([]string, error) {
-	script, err := d.helperScript()
+	command, err := d.helperCommand()
 	if err != nil {
 		return nil, err
 	}
-	return append([]string{d.python, script}, args...), nil
+	return append(command, args...), nil
 }
 
 func (d *Daemon) backupWorker(jobID, passphrase string, includeSSH, quiesce bool, lock *os.File) {
@@ -410,7 +410,7 @@ func (d *Daemon) inspectWorker(jobID, uploadID, passphrase string, lock *os.File
 // copyRecoverySource copies the managed source so a restore that replaces it
 // keeps running from a stable tree.
 func (d *Daemon) copyRecoverySource(jobID string) (string, error) {
-	for _, rel := range []string{"install-local.sh", "installer/full_backup.py", "installer/easy_ha_proxy.py",
+	for _, rel := range []string{"install-local.sh", "installer/easy_ha_proxy.py",
 		"ansible/easy-ha-proxy.yml", "ansible/requirements.yml"} {
 		fi, err := os.Stat(filepath.Join(d.Opts.SourceDir, rel))
 		if err != nil || !fi.Mode().IsRegular() {
@@ -573,8 +573,13 @@ func (d *Daemon) restoreWorker(jobID, uploadID, expectedSHA string, manifest map
 		fail(err)
 		return
 	}
-	argv := []string{d.python, filepath.Join(recovery, "installer", "full_backup.py"), "restore", staged,
-		"--mode", "overlay", "--apply", "--yes", "--passphrase-stdin"}
+	// The installed agent restores; the recovery copy of the source is what
+	// it puts back over the source the archive brings.
+	argv, err := d.helperArgv("restore", staged, "--mode", "overlay", "--apply", "--yes", "--passphrase-stdin")
+	if err != nil {
+		fail(err)
+		return
+	}
 	if scope == "config" {
 		argv = append(argv, "--scope", "config", "--skip-ssh")
 	} else {

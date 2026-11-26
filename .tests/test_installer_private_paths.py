@@ -5,23 +5,20 @@ It runs as root. It wrote the public internal CA to
 /tmp/easy-ha-proxy-ansible to work in: fixed names in a directory everyone
 may write to. A symlink planted at the first had root write through it;
 whoever created the second owned it, and could swap the modules Ansible
-writes there before root ran them. The restore also extracted a backup
-bundle with no extraction filter of its own.
+writes there before root ran them. (How a restore extracts a backup bundle
+is tested with the agent's full-backup command.)
 """
 
 from __future__ import annotations
 
-import io
 import os
 from pathlib import Path
 import shutil
-import tarfile
 import tempfile
 import unittest
 from unittest import mock
 
 import easy_ha_proxy
-import full_backup
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,36 +78,6 @@ class NoFixedDirectoryInTmp(unittest.TestCase):
             text = (ROOT / name).read_text(encoding="utf-8")
             self.assertNotIn("/tmp/easy-ha-proxy-ansible", text, name)
             self.assertNotIn("/tmp/easy-ha-proxy-internal-ca", text, name)
-
-
-def bundle_with(mode: int) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for name in sorted(full_backup.OUTER_REQUIRED_MEMBERS):
-            data = b"{}" if name == "manifest.json" else b"x"
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            info.mode = mode
-            archive.addfile(info, io.BytesIO(data))
-    return buffer.getvalue()
-
-
-@unittest.skipUnless(hasattr(tarfile, "data_filter") and os.name == "posix", "needs tarfile filters")
-class TheBundleIsExtractedThroughTheDataFilter(unittest.TestCase):
-    def test_setuid_and_world_write_bits_do_not_survive(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            bundle = root / "bundle.tar.gz"
-            bundle.write_bytes(bundle_with(0o4777))
-            destination = root / "work"
-            destination.mkdir()
-            with mock.patch.object(full_backup, "RESTORE_MIN_FREE_BYTES", 0):
-                full_backup.extract_bundle(bundle, destination)
-            for name in full_backup.OUTER_REQUIRED_MEMBERS:
-                with self.subTest(member=name):
-                    mode = (destination / name).stat().st_mode
-                    self.assertEqual(mode & 0o4000, 0)
-                    self.assertEqual(mode & 0o022, 0)
 
 
 if __name__ == "__main__":

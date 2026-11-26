@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// fakeHelper stands in for installer/full_backup.py; run as `sh helper ...`.
+// fakeHelper stands in for "easy-ha-proxy-agent full-backup"; run as `sh helper ...`.
 const fakeHelper = `read pass
 case "$1" in
 backup)
@@ -37,17 +37,17 @@ func newTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	for _, rel := range []string{"install-local.sh", "installer/full_backup.py", "installer/easy_ha_proxy.py",
-		"ansible/easy-ha-proxy.yml", "ansible/requirements.yml"} {
+	for _, rel := range []string{"install-local.sh", "installer/easy_ha_proxy.py", "ansible/easy-ha-proxy.yml",
+		"ansible/requirements.yml"} {
 		p := filepath.Join(source, rel)
 		_ = os.MkdirAll(filepath.Dir(p), 0o755)
-		body := "x\n"
-		if strings.HasSuffix(rel, "full_backup.py") {
-			body = fakeHelper
-		}
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	helper := filepath.Join(root, "full-backup-helper")
+	if err := os.WriteFile(helper, []byte(fakeHelper), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	opts := Options{
 		SocketPath: filepath.Join(root, "run", "backupd.sock"), SpoolRoot: filepath.Join(root, "spool"),
@@ -70,7 +70,7 @@ func newTestDaemon(t *testing.T) *Daemon {
 	}
 	d := NewDaemon(opts)
 	d.Alerts = nil
-	d.python = "/bin/sh"
+	d.helper = []string{"/bin/sh", helper}
 	d.rootUID = os.Geteuid()
 	d.transient = func() bool { return false }
 	d.sleep = func(time.Duration) { time.Sleep(10 * time.Millisecond) }
@@ -217,7 +217,7 @@ func TestBusyAndFailedJob(t *testing.T) {
 		t.Fatalf("busy: %v", err)
 	}
 	d.releaseOperation(lock)
-	_ = os.WriteFile(filepath.Join(d.Opts.SourceDir, "installer", "full_backup.py"), []byte("echo boom >&2; exit 7\n"), 0o644)
+	_ = os.WriteFile(d.helper[1], []byte("echo boom >&2; exit 7\n"), 0o644)
 	started := mustCall(t, d, map[string]any{"action": "start_backup", "passphrase": "long enough passphrase", "include_ssh": true, "quiesce": false})
 	job := waitJob(t, d, started["job_id"].(string))
 	if job["status"] != "failed" || job["error"] != "full backup helper failed: boom" || job["output"].(map[string]any)["returncode"] != float64(7) && job["output"].(map[string]any)["returncode"] != nil {
