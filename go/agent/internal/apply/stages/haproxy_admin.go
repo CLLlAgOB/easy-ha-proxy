@@ -451,26 +451,60 @@ func adminNative(b *Builder) []engine.Step {
 			},
 			ApplyFn: func(sys *engine.System) error { return install.drop() }}},
 		engine.Step{Name: "native-daemons | Restart running daemons that use the replaced agent binary", When: agentChanged,
-			Resource: &engine.Command{Argv: []string{"systemctl", "try-restart", "haproxy-healthd.service", "easy-ha-proxy-metricsd.service",
+			Resource: tryRestart(false, "haproxy-healthd.service", "easy-ha-proxy-metricsd.service",
 				"easy-ha-proxy-alertd.service", "haproxy-controld.service", "haproxy-certd.service", "authelia-bansd.service",
-				"authelia-usersd.service", "authelia-configd.service"}, Changes: true}},
+				"authelia-usersd.service", "authelia-configd.service")},
 		engine.Step{Name: "Ask the backup broker to restart after restore cleanup",
 			When:     func(r *engine.Run) bool { return agentChanged(r) && b.Exists(restoreMarker, true) },
 			Resource: &engine.Touch{Path: b.S("{{ backupd_restart_request_marker }}"), Owner: "root", Group: group, Mode: 0o600}},
 		engine.Step{Name: "Restart the running backup broker outside a restore",
 			When:     func(r *engine.Run) bool { return agentChanged(r) && !b.Exists(restoreMarker, true) },
-			Resource: &engine.Command{Argv: []string{"systemctl", "try-restart", "--no-block", "easy-ha-proxy-backupd.service"}, Changes: true}},
+			Resource: tryRestart(true, "easy-ha-proxy-backupd.service")},
 		engine.Step{Name: "native-daemons | Ask the update broker to restart once its job ends",
 			When: func(r *engine.Run) bool { return agentChanged(r) && b.Exists(updateMarker, true) },
 			Resource: &engine.Touch{Path: b.S("{{ updated_restart_request_marker | default('/run/easy-ha-proxy/easy-ha-proxy-updated-restart.requested') }}"),
 				Owner: "root", Group: b.S("{{ app_group | default('hadmin') }}"), Mode: 0o600}},
 		engine.Step{Name: "native-daemons | Restart the update broker on the replaced binary",
 			When:     func(r *engine.Run) bool { return agentChanged(r) && !b.Exists(updateMarker, true) },
-			Resource: &engine.Command{Argv: []string{"systemctl", "try-restart", "easy-ha-proxy-updated.service"}, Changes: true}},
+			Resource: tryRestart(false, "easy-ha-proxy-updated.service")},
 		engine.Step{Name: "native-daemons | Restart guardd when its Rust binary was replaced", When: Changed("_native_guardd_copy"),
-			Resource: &engine.Command{Argv: []string{"systemctl", "try-restart", "easy-ha-proxy-guardd.service"}, Changes: true}},
+			Resource: tryRestart(false, "easy-ha-proxy-guardd.service")},
 	)
 	return steps
+}
+
+// tryRestart is the native stage's "systemctl try-restart" over the units
+// that exist. try-restart leaves a stopped unit alone, but a unit that is not
+// there at all is an error (exit 5) -- and on a fresh host the native stage
+// runs before the stages that install the daemons. Like the command task it
+// stands for (changed_when: true), it reports a change whenever it runs.
+func tryRestart(noBlock bool, units ...string) engine.Resource {
+	return &engine.Func{Desc: "systemctl try-restart " + strings.Join(units, " "),
+		CheckFn: func(*engine.System) (engine.Change, error) { return engine.Change{Needed: true, Summary: "run"}, nil },
+		ApplyFn: func(sys *engine.System) error {
+			argv := []string{"try-restart"}
+			if noBlock {
+				argv = append(argv, "--no-block")
+			}
+			present := argv
+			for _, unit := range units {
+				out, code, err := sys.Exec("systemctl", "show", "--property=LoadState", "--value", unit)
+				if err != nil {
+					return err
+				}
+				if code == 0 && strings.TrimSpace(out) == "loaded" {
+					present = append(present, unit)
+				}
+			}
+			if len(present) == len(argv) {
+				return nil
+			}
+			out, code, err := sys.Exec("systemctl", present...)
+			if err == nil && code != 0 {
+				err = fmt.Errorf("systemctl %s: exit %d %s", strings.Join(present, " "), code, strings.TrimSpace(out))
+			}
+			return err
+		}}
 }
 
 // adminImageUpdate is update_haproxy_admin.yml (ha-adm-update): Docker
