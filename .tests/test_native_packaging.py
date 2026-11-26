@@ -49,8 +49,8 @@ class NativePackagingTests(unittest.TestCase):
         self.assertIn("/usr/local/bin/easy-ha-proxy-panel", compose)
         self.assertNotIn("python", compose)
 
-        installer = (ROOT / "installer/easy_ha_proxy.py").read_text(encoding="utf-8")
-        for bundle in ("INSTALL_TAGS", "UPDATE_TAGS", "UI_TAGS", "DAEMON_TAGS", "HOST_SERVICE_TAGS"):
+        installer = (ROOT / "go/agent/internal/cli/config.go").read_text(encoding="utf-8")
+        for bundle in ("InstallTags", "UpdateTags", "UITags", "DaemonTags", "HostServiceTags"):
             self.assertIn(bundle, installer)
         self.assertGreaterEqual(installer.count("ha-adm-native"), 5)
 

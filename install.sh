@@ -125,13 +125,21 @@ prepare_legacy_config() {
     die "Controller source files not found under ${controller_dir}."
 
   output_dir="$(dirname -- "${live_dir}")/prepared-config"
-  component_path installer/prepare_legacy_config.py
-  preparer="${component}"
-  command -v python3 >/dev/null 2>&1 || die "python3 is required."
-  python3 "${preparer}" \
-    --live-dir "${live_dir}" \
-    --controller-dir "${controller_dir}" \
-    --output-dir "${output_dir}"
+  if [[ -x /usr/local/sbin/easy-ha-proxy-agent ]] &&
+     /usr/local/sbin/easy-ha-proxy-agent prepare-legacy-config --help >/dev/null 2>&1; then
+    /usr/local/sbin/easy-ha-proxy-agent prepare-legacy-config \
+      --live-dir "${live_dir}" \
+      --controller-dir "${controller_dir}" \
+      --output-dir "${output_dir}"
+  else
+    component_path installer/prepare_legacy_config.py
+    preparer="${component}"
+    command -v python3 >/dev/null 2>&1 || die "python3 is required."
+    python3 "${preparer}" \
+      --live-dir "${live_dir}" \
+      --controller-dir "${controller_dir}" \
+      --output-dir "${output_dir}"
+  fi
 }
 
 stage_legacy_control_plane() {

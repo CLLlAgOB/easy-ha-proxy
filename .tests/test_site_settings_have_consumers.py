@@ -135,7 +135,7 @@ class WithdrawnTests(unittest.TestCase):
         candidates = [
             ROOT / "ansible" / "roles" / "haproxy" / "defaults" / "main.yml",
             ROOT / "ansible" / "vars.yml",
-            ROOT / "installer" / "easy_ha_proxy.py",
+            ROOT / "go" / "agent" / "internal" / "cli" / "wizard.go",
         ]
         checked = 0
         for path in candidates:

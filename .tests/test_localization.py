@@ -4,14 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-import tempfile
 import unittest
-from argparse import Namespace
-from unittest import mock
-
-import yaml
-
-from easy_ha_proxy import LANGUAGE_TAGS, command_language
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,19 +82,11 @@ class InstallerLocalizationTests(unittest.TestCase):
         self.assertIn("Обновляю управляемые исходники из GitHub", helper)
 
     def test_configuration_wizard_persists_selected_language(self) -> None:
-        source = (ROOT / "installer" / "easy_ha_proxy.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            'INSTALLER_LANGUAGE = os.environ.get("EASY_HA_PROXY_LANGUAGE", "en")',
-            source,
-        )
-        self.assertIn(
-            '"authelia_notification_language": INSTALLER_LANGUAGE', source
-        )
-        self.assertIn(
-            '"haproxy_admin_default_language": INSTALLER_LANGUAGE', source
-        )
+        i18n = (ROOT / "go/agent/internal/cli/i18n.go").read_text(encoding="utf-8")
+        wizard = (ROOT / "go/agent/internal/cli/wizard.go").read_text(encoding="utf-8")
+        self.assertIn('os.Getenv("EASY_HA_PROXY_LANGUAGE")', i18n)
+        self.assertIn('"authelia_notification_language", lang', wizard)
+        self.assertIn('"haproxy_admin_default_language", lang', wizard)
 
     def test_authelia_has_complete_english_and_russian_template_sets(self) -> None:
         template_dir = AUTHELIA_ROLE / "templates"
@@ -126,37 +111,6 @@ class InstallerLocalizationTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('authelia_notification_language: "en"', defaults)
-
-    def test_language_command_updates_all_stack_preferences(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            (directory / "vars.yml").write_text(
-                "root_domain: example.test\n", encoding="utf-8"
-            )
-            (directory / "authelia.yml").write_text(
-                "authelia_notification_language: en\n", encoding="utf-8"
-            )
-            (directory / "metadata.yml").write_text(
-                "installer_language: en\n", encoding="utf-8"
-            )
-            with (
-                mock.patch("easy_ha_proxy.require_root"),
-                mock.patch("easy_ha_proxy.hold_maintenance_lock"),
-                mock.patch("easy_ha_proxy.config_dir", return_value=directory),
-                mock.patch("easy_ha_proxy.backup_configuration"),
-                mock.patch("easy_ha_proxy.run_playbook") as run_playbook,
-            ):
-                command_language(Namespace(language="ru", apply=True))
-
-            variables = yaml.safe_load((directory / "vars.yml").read_text())
-            authelia = yaml.safe_load((directory / "authelia.yml").read_text())
-            metadata = yaml.safe_load((directory / "metadata.yml").read_text())
-            self.assertEqual(variables["haproxy_admin_default_language"], "ru")
-            self.assertEqual(authelia["authelia_notification_language"], "ru")
-            self.assertIn("Уведомление безопасности", authelia["mail_subject"])
-            self.assertEqual(metadata["installer_language"], "ru")
-            self.assertEqual(run_playbook.call_args.args[0], LANGUAGE_TAGS)
-
 
     def test_ansible_task_names_are_english(self) -> None:
         failures = []

@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/authelia"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/backupd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certd"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/cli"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/fullbackup"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxymigrate"
@@ -35,6 +37,9 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 0 && filepath.Base(os.Args[0]) == "easy-ha-proxy" {
+		os.Exit(cli.RunCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -107,6 +112,10 @@ func main() {
 		os.Exit(hostsec.RunSSHProtectionCLI(args, os.Stdout, os.Stderr))
 	case "haproxy-migrate":
 		os.Exit(haproxymigrate.RunCLI(args, os.Stdout, os.Stderr))
+	case "cli":
+		os.Exit(cli.RunCLI(args, os.Stdin, os.Stdout, os.Stderr))
+	case "prepare-legacy-config":
+		os.Exit(cli.RunPrepareLegacyCLI(args, os.Stdout, os.Stderr))
 	case "apply":
 		os.Exit(apply.Run(args, os.Stdout, os.Stderr))
 	case "probe-host":
@@ -119,7 +128,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|full-backup|update-plan|update-scope|os-security|service-restarts|auto-reboot|os-upgrade-guard|ssh-protection|haproxy-migrate|probe-host|apply|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|full-backup|update-plan|update-scope|os-security|service-restarts|auto-reboot|os-upgrade-guard|ssh-protection|haproxy-migrate|cli|prepare-legacy-config|probe-host|apply|version> [flags]")
 }
 
 func runUDPForward(args []string) int {

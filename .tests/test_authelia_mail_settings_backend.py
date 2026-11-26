@@ -125,11 +125,11 @@ class MailDeploymentContractTests(unittest.TestCase):
         self.assertLess(renew, haproxy_config)
 
     def test_installer_and_legacy_adoption_enable_only_the_relay(self) -> None:
-        installer = self.read("installer/easy_ha_proxy.py")
-        migration = self.read("installer/prepare_legacy_config.py")
+        installer = self.read("go/agent/internal/cli/wizard.go")
+        migration = self.read("go/agent/internal/cli/legacy_config.go")
         self.assertIn("Configure email notifications through the internal relay", installer)
         self.assertNotIn("Configure direct SMTP notifications", installer)
-        self.assertIn('result["mail_relay_server"] = True', migration)
+        self.assertIn('result.Set("mail_relay_server", true)', migration)
 
 if __name__ == "__main__":
     unittest.main()

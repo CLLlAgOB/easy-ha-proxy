@@ -1,20 +1,16 @@
-"""Transitional shim and CLI tests for the Step 4 host security helpers.
+"""Transitional shim tests for the Step 4 host security helpers.
 
 The OS upgrade guard, OS security updates, service restarts, automatic reboots,
 and SSH protection moved into easy-ha-proxy-agent (go/agent/internal/hostsec),
-where their unit tests now live. This file verifies:
-  1. Each transitional installer/*.py shim preserves its protocol markers and
-     forwards its command line to easy-ha-proxy-agent unchanged.
-  2. easy_ha_proxy.py still carries --automatic-os into the OS update playbook.
+and the CLI --automatic-os forwarding moved into go/agent/internal/cli. This
+file verifies that each transitional installer/*.py shim preserves its protocol
+markers and forwards its command line to easy-ha-proxy-agent unchanged.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
 import importlib.util
 import json
-import os
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -75,42 +71,6 @@ class HostSecurityShims(unittest.TestCase):
             else:
                 with self.assertRaises(ValueError):
                     mod.read_json(p)
-
-
-@unittest.skipUnless(sys.platform == "linux", "Linux update broker")
-class ScheduledWorker(unittest.TestCase):
-    def test_cli_carries_the_automatic_policy_into_the_os_playbook(self):
-        import easy_ha_proxy as cli
-
-        for automatic in (False, True):
-            argv = ["update", "--component", "os", "--source-channel", "local"]
-            if automatic:
-                argv.append("--automatic-os")
-            args = cli.build_parser().parse_args(argv)
-            with ExitStack() as stack:
-                for name in (
-                    "require_root",
-                    "hold_maintenance_lock",
-                    "ensure_security_secrets",
-                    "persist_deployment_channels",
-                    "sync_runtime_haproxy_config_to_managed",
-                    "sync_runtime_authelia_rules_to_managed",
-                    "mark_installation_complete",
-                ):
-                    stack.enter_context(patch.object(cli, name))
-                stack.enter_context(patch.object(cli, "managed_configuration_is_pending", return_value=False))
-                stack.enter_context(patch.object(cli, "config_dir", return_value=Path("/unused")))
-                stack.enter_context(patch.dict(os.environ, {cli.UPDATE_SOURCE_REFRESHED_ENV: ""}))
-                playbook = stack.enter_context(patch.object(cli, "run_playbook"))
-                cli.command_update(args)
-            playbook.assert_called_once_with(
-                "upgrade,status",
-                extra_vars=({"easy_ha_proxy_automatic_os_upgrade": True} if automatic else None),
-            )
-        args = cli.build_parser().parse_args(["update", "--component", "all", "--automatic-os"])
-        with patch.object(cli, "require_root"), patch.object(cli, "hold_maintenance_lock"):
-            with self.assertRaisesRegex(cli.InstallerError, "os component"):
-                cli.command_update(args)
 
 
 if __name__ == "__main__":

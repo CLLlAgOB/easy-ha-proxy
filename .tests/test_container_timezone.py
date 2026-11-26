@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -22,9 +21,6 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "installer"))
-
-import easy_ha_proxy  # noqa: E402
 
 ADMIN_ROLE = ROOT / "ansible/roles/haproxy-admin"
 AUTHELIA_ROLE = ROOT / "ansible/roles/authelia"
@@ -125,37 +121,6 @@ class ThePlaybookReadsTheZoneOnTheGateway(unittest.TestCase):
             self.assertEqual(zone("Etc/GMT+3"), "Etc/GMT+3")
             for odd in ("Europe/Warsaw x", "../../etc/passwd", "/etc/localtime", "Europe/"):
                 self.assertEqual(zone(odd), "UTC", odd)
-
-
-class TheInstallerOffersTheSameZone(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
-        self.timezone = self.root / "timezone"
-        self.localtime = self.root / "localtime"
-
-    def detect(self) -> str:
-        return easy_ha_proxy.detect_timezone(self.timezone, self.localtime)
-
-    def link(self, target: str) -> None:
-        try:
-            os.symlink(target, self.localtime)
-        except (OSError, NotImplementedError):
-            self.skipTest("symbolic links are not available here")
-
-    def test_debian_names_it_in_etc_timezone(self):
-        self.timezone.write_text("Europe/Warsaw\n", encoding="utf-8")
-        self.assertEqual(self.detect(), "Europe/Warsaw")
-
-    def test_elsewhere_the_localtime_link_names_it(self):
-        self.link("../usr/share/zoneinfo/posix/Asia/Tokyo")
-        self.assertEqual(self.detect(), "Asia/Tokyo")
-
-    def test_a_host_that_says_nothing_or_nonsense_gets_utc(self):
-        self.assertEqual(self.detect(), "UTC")
-        self.timezone.write_text("Europe/Warsaw; true\n", encoding="utf-8")
-        self.assertEqual(self.detect(), "UTC")
 
 
 if __name__ == "__main__":

@@ -19,12 +19,12 @@ class DeploymentRegressionTests(unittest.TestCase):
         self.assertIn("--image-channel ${image_channel}", remote)
 
     def test_ui_update_deploys_compatible_certificate_daemon(self) -> None:
-        installer = (ROOT / "installer/easy_ha_proxy.py").read_text(encoding="utf-8")
-        ui_tags = installer.split("UI_TAGS =", maxsplit=1)[1].split(
-            "DAEMON_TAGS =", maxsplit=1
+        installer = (ROOT / "go/agent/internal/cli/config.go").read_text(encoding="utf-8")
+        ui_tags = installer.split("UITags =", maxsplit=1)[1].split(
+            "DaemonTags =", maxsplit=1
         )[0]
 
-        self.assertIn('"ha-adm-daemons"', ui_tags)
+        self.assertIn("ha-adm-daemons", ui_tags)
 
     def test_authelia_keeps_supported_container_hardening(self) -> None:
         compose = (

@@ -28,12 +28,11 @@ class SourceEntrypointTests(unittest.TestCase):
             for relative in ENTRYPOINTS:
                 self.assertTrue(os.access(source / relative, os.X_OK), relative)
             home = root / "home"
-            interpreter = home / "venv/bin/python"
-            interpreter.parent.mkdir(parents=True)
-            interpreter.write_text("#!/bin/sh\nprintf 'entrypoint-started\\n'\n")
-            interpreter.chmod(0o700)
+            agent = root / "easy-ha-proxy-agent"
+            agent.write_text("#!/bin/sh\nif [ \"$1\" = \"cli\" ] && [ \"$2\" = \"--probe\" ]; then exit 0; fi\nprintf 'entrypoint-started\\n'\n")
+            agent.chmod(0o700)
             result = subprocess.run([str(source / "installer/easy-ha-proxy"), "--help"],
-                env={**os.environ, "EASY_HA_PROXY_HOME": str(home), "EASY_HA_PROXY_SOURCE_DIR": str(source)},
+                env={**os.environ, "EASY_HA_PROXY_HOME": str(home), "EASY_HA_PROXY_SOURCE_DIR": str(source), "EASY_HA_PROXY_AGENT_BIN": str(agent)},
                 check=False, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "entrypoint-started\n")
