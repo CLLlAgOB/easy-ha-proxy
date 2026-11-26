@@ -184,7 +184,13 @@ func TestTheNamesComeFromASecret(t *testing.T) {
 	if got := guard.Value("env").(*pyyaml.Map).Value("NAME_GUARD_WORDS"); got != "${{ secrets.NAME_GUARD_WORDS }}" {
 		t.Fatalf("NAME_GUARD_WORDS %v", got)
 	}
-	if got := runOf(guard); got != "python3 .github/scripts/name_guard.py" {
+	if got := guard.Value("env").(*pyyaml.Map).Value("NAME_GUARD_ROOT"); got != "${{ github.workspace }}" {
+		t.Fatalf("NAME_GUARD_ROOT %v", got)
+	}
+	if got := guard.Value("working-directory"); got != "go/agent" {
+		t.Fatalf("the name guard runs in %v", got)
+	}
+	if got := runOf(guard); got != "go run ./cmd/name-guard" {
 		t.Fatalf("the name guard runs %q", got)
 	}
 }

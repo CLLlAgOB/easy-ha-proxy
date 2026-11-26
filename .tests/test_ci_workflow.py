@@ -83,7 +83,9 @@ class TheLinters(unittest.TestCase):
     def test_the_names_come_from_a_secret(self):
         guard = step("secrets", "Names of installations")
         self.assertEqual(guard["env"]["NAME_GUARD_WORDS"], "${{ secrets.NAME_GUARD_WORDS }}")
-        self.assertEqual(guard["run"], "python3 .github/scripts/name_guard.py")
+        self.assertEqual(guard["env"]["NAME_GUARD_ROOT"], "${{ github.workspace }}")
+        self.assertEqual(guard["working-directory"], "go/agent")
+        self.assertEqual(guard["run"], "go run ./cmd/name-guard")
 
     def test_one_python_runs_the_contract_tests(self):
         # No gateway runs Python, so no host interpreter has to be covered.

@@ -180,14 +180,20 @@ jobs:
             'git config --global --add safe.directory /repo &&
              gitleaks git /repo --gitleaks-ignore-path /repo/.gitleaksignore --no-banner --redact --verbose'
 
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
+          cache: false
       # The names live in a repository secret, one per line, never in the
       # repository; without it the step says so and passes.
       - name: Names of installations
         env:
           NAME_GUARD_WORDS: ${{ secrets.NAME_GUARD_WORDS }}
+          NAME_GUARD_ROOT: ${{ github.workspace }}
           NAME_GUARD_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
           NAME_GUARD_HEAD: ${{ github.sha }}
-        run: python3 .github/scripts/name_guard.py
+        working-directory: go/agent
+        run: go run ./cmd/name-guard
 
   # The admin pages' scripts: every one must parse, and the logic kept apart
   # from the page (the *_core.js scripts, the rules in i18n.js)
