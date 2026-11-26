@@ -145,6 +145,12 @@ func TestStagesFollowTheirTaskFiles(t *testing.T) {
 // refuses, so the roles are linked into a clean source dir).
 func mustSet(t *testing.T, root string, part Part) *vars.Set {
 	t.Helper()
+	return mustSetWith(t, root, part, nil)
+}
+
+// mustSetWith is mustSet with extra variables (--extra-vars).
+func mustSetWith(t *testing.T, root string, part Part, extra map[string]any) *vars.Set {
+	t.Helper()
 	source, config := t.TempDir(), t.TempDir()
 	if err := os.MkdirAll(filepath.Join(source, "ansible"), 0o755); err != nil {
 		t.Fatal(err)
@@ -169,7 +175,7 @@ func mustSet(t *testing.T, root string, part Part) *vars.Set {
 		t.Fatal(err)
 	}
 	set, err := vars.Load(vars.Options{SourceDir: source, ConfigDir: config, Play: part.Play, Role: part.Role,
-		Params: map[string]any{"task_stage": part.TaskFile()}})
+		Params: map[string]any{"task_stage": part.TaskFile()}, Extra: extra})
 	if err != nil {
 		t.Fatal(err)
 	}
