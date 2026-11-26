@@ -9,16 +9,26 @@
     update_cache: true
   tags: restore-network
 
+# On a fresh host the first installs replace snapd itself, which restarts and
+# may roll back across the restart; a moment later the same install succeeds.
 - name: Ensure snap core is installed
   command: snap install core --classic
   args:
     creates: /snap/core/current
+  register: _snap_core_install
+  until: _snap_core_install is succeeded
+  retries: 5
+  delay: 10
   tags: restore-network
 
 - name: Install Certbot with snap
   command: snap install --classic certbot
   args:
     creates: /snap/bin/certbot
+  register: _snap_certbot_install
+  until: _snap_certbot_install is succeeded
+  retries: 5
+  delay: 10
   tags: restore-network
 
 - name: Link /usr/bin/certbot to the snap executable

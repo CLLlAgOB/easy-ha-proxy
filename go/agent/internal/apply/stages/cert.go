@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"easy-ha-proxy/panel/shared/jinja"
 	"easy-ha-proxy/panel/shared/pyyaml"
@@ -46,10 +47,14 @@ func certInstall(b *Builder) []engine.Step {
 	return []engine.Step{
 		{Name: "Install snapd for the current Certbot release", Tags: restoreNet,
 			Resource: &engine.AptInstall{Names: []string{"snapd"}, UpdateCache: true, CacheValid: b.aptValid()}},
+		// On a fresh host the first installs replace snapd itself, which
+		// restarts and may roll back across the restart ("there was a snapd
+		// rollback across the restart"); a moment later the same install
+		// succeeds, and one already done is a no-op.
 		{Name: "Ensure snap core is installed", Tags: restoreNet, When: func(*engine.Run) bool { return !b.Exists("/snap/core/current", false) },
-			Resource: &engine.Command{Argv: []string{"snap", "install", "core", "--classic"}, Changes: true}},
+			Resource: &engine.Command{Argv: []string{"snap", "install", "core", "--classic"}, Changes: true, Retries: 5, Delay: 10 * time.Second}},
 		{Name: "Install Certbot with snap", Tags: restoreNet, When: func(*engine.Run) bool { return !b.Exists("/snap/bin/certbot", false) },
-			Resource: &engine.Command{Argv: []string{"snap", "install", "--classic", "certbot"}, Changes: true}},
+			Resource: &engine.Command{Argv: []string{"snap", "install", "--classic", "certbot"}, Changes: true, Retries: 5, Delay: 10 * time.Second}},
 		{Name: "Link /usr/bin/certbot to the snap executable", Resource: &engine.Link{Path: "/usr/bin/certbot", Target: "/snap/bin/certbot"}},
 		// service_facts and the set_fact that reads it are one step.
 		haproxyPresent(b, "Gather service facts"),
