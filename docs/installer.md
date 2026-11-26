@@ -322,51 +322,11 @@ and file mode `0600`. Preparation:
 - transfers existing Authelia and SMTP secrets without printing them;
 - creates a local inventory and migration metadata.
 
-This is a local operation: nothing is sent to the server, Ansible is not run,
-and services are not changed. `prepared-config` contains secrets and must never
+This is a local operation: nothing is sent to the server and services are not
+changed. `prepared-config` contains secrets and must never
 be committed.
 
-### Check mode for prepared legacy configuration
-
-After `prepared-config` exists:
-
-```bash
-bash ./install.sh plan-legacy
-```
-
-The command selects the newest prepared configuration and discovered remote
-inventory, prints their paths, and requests confirmation. It then runs:
-
-1. `ansible-playbook --syntax-check`;
-2. a restricted set of update/configuration tags with `--check`;
-3. read-only status tasks.
-
-`--diff` is deliberately omitted so secret-bearing templates do not enter the
-output. The full log is stored beside the snapshot as
-`legacy-plan-<date>.log` with mode `0600`. Nothing is applied.
-
-Explicit paths:
-
-```bash
-bash ./install.sh plan-legacy \
-  "$HOME/easy-ha-proxy-backups/legacy-<date>/prepared-config" \
-  ./inventory.ini
-```
-
-If the plan reports `Copy HAProxy configuration`, inspect a separate protected
-diff before applying anything:
-
-```bash
-bash ./install.sh diff-legacy-haproxy
-```
-
-This runs only `ha-cfg` with `--check --diff`, validates the rendered
-configuration with `haproxy -c`, and saves
-`legacy-haproxy-diff-<date>.log` with mode `0600`. HAProxy is not reloaded.
-
 ### Adopt a legacy server
-
-After `plan-legacy` succeeds and the HAProxy diff has been reviewed:
 
 ```bash
 bash ./install.sh stage-legacy
@@ -401,18 +361,20 @@ After staging, run the read-only server plan:
 sudo easy-ha-proxy plan
 ```
 
-If it completes with `failed=0`, services remain healthy, and the only real
-configuration change is synchronization of `haproxy.cfg.j2` for the UI,
-finalize adoption:
+The plan lists every step that would change something; `Copy HAProxy
+configuration` there means the rendered `haproxy.cfg` differs from the live
+one. If it completes with `failed=0`, services remain healthy, and the only
+real configuration change is synchronization of `haproxy.cfg.j2` for the UI,
+finalize adoption on the server:
 
 ```bash
-bash ./install.sh finalize-legacy
+sudo easy-ha-proxy-agent apply playbook --tags ha-adm-cfg,status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-The command requires `APPLY`, runs only `ha-adm-cfg,status`, and saves
-`legacy-finalize-<date>.log`. It does not update Docker, download images, or
-replace active `/etc/haproxy/haproxy.cfg`. It synchronizes the template the UI
-will use for later site changes.
+This runs only `ha-adm-cfg,status`: it does not update Docker, download
+images, or replace active `/etc/haproxy/haproxy.cfg`. It synchronizes the
+template the UI will use for later site changes.
 
 ### Synchronize local source
 
@@ -510,9 +472,9 @@ Quick GeoIP update FAQ:
   active release. A first install can continue without country display only
   when HAProxy GeoIP access filtering is disabled.
 - **What about a very old unmanaged installation?** Do not run a full apply
-  directly. Use `snapshot-legacy`, `prepare-legacy`, `plan-legacy`,
-  `stage-legacy`, and `finalize-legacy` first; after adoption, run a normal full
-  update to migrate the GeoIP updater and UI.
+  directly. Use `snapshot-legacy`, `prepare-legacy` and `stage-legacy`, review
+  `sudo easy-ha-proxy plan` on the server and finalize as above; after adoption,
+  run a normal full update to migrate the GeoIP updater and UI.
 
 ## Selective updates in HAProxy Admin
 

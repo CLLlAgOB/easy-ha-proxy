@@ -1554,28 +1554,22 @@ SSH-ключи включаются и восстанавливаются тол
 фраза не сохраняется: скачайте архив `.enc` и файл `.sha256`, а парольную фразу
 храните отдельно в менеджере паролей.
 
-## Ручной режим Ansible
+## Ручной запуск записей playbook
 
-Рекомендуемый интерфейс — штатный помощник. После создания локального inventory
-и исключённых из Git конфигурационных файлов, описанных в
-[ansible/README.ru.md](../ansible/README.ru.md), остаётся доступен прямой удалённый
-запуск Ansible:
+Рекомендуемый интерфейс — штатный помощник. Playbook выполняет на самом
+сервере агент установки, а точечный запуск принимает теги playbook напрямую
+(список — в [ansible/README.ru.md](../ansible/README.ru.md)):
 
 ```bash
-cd ansible
-ansible-galaxy collection install -r requirements.yml
-ansible-playbook --syntax-check -i inventory.ini easy-ha-proxy.yml
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
+sudo easy-ha-proxy-agent apply playbook --check --tags status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
+sudo easy-ha-proxy-agent apply playbook --tags ha-adm-daemons,aut-daemons,status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-Запуск playbook без тегов включает обновление пакетов ОС. Playbook никогда не
-перезагружает узел с `ansible_connection=local`: после обновления помощник
-easy-ha-proxy запрашивает перезагрузку, по умолчанию откладывая её. При прямом
-запуске playbook перезагрузите сервер вручную или явно передайте
-`easy_ha_proxy_reboot_after_upgrade=true` для целевого узла через SSH. Проверьте план и теги
-перед применением в production.
-
-Inventory, host variables и секреты намеренно не входят в публичный репозиторий.
+`--check` показывает, что изменилось бы, и ничего не меняет. Запуск без тегов
+включает обновление пакетов ОС и никогда не перезагружает сервер: помощник
+спрашивает после обновления и по умолчанию откладывает перезагрузку.
 
 ## Разработка и проверки
 
@@ -1601,9 +1595,6 @@ ruff check .   # только явные ошибки, см. ruff.toml
 
 for script in go/panel/web/static/js/*.js; do node --check "$script"; done
 node --test .tests/js/*.test.js
-
-ansible-galaxy collection install -r ansible/requirements.yml
-ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
 
 Логика страниц, которая что-то решает, живёт в скриптах без DOM, которые

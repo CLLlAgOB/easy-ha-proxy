@@ -3326,8 +3326,8 @@ PROGRESS_ENV = "EASY_HA_PROXY_PROGRESS"
 def progress_phase(name: str) -> None:
     """A phase marker for the web update page's progress bar.
 
-    Printed only when the update broker asks for it; the playbook's own task
-    counter comes from the easy_ha_proxy_progress callback plugin.
+    Printed only when the update broker asks for it; the playbook's own step
+    counter comes from the installer agent (EHP-PROGRESS done/total lines).
     """
 
     if os.environ.get(PROGRESS_ENV) == "1":

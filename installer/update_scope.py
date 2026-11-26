@@ -108,8 +108,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # does not update the copy used by HAProxy startup and reload.
     ("installer/haproxy_server_state.py", ("ha-cfg",)),
     ("installer/*", ()),
-    # Ansible loads its callback plugins from the source directory itself.
-    ("ansible/callback_plugins/*", ()),
     # Always run, and the OS packages have their own update.
     ("ansible/roles/healthcheck/*", ()),
     ("ansible/roles/update_packages/*", ()),

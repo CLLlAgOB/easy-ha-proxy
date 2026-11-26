@@ -92,7 +92,7 @@ class TheLinters(unittest.TestCase):
 
 class ThePublishing(unittest.TestCase):
     def test_only_a_tested_push_to_a_release_branch_publishes(self):
-        every_check = {"python", "shell", "ansible", "lint", "javascript", "udp-forwarding",
+        every_check = {"python", "shell", "lint", "javascript", "udp-forwarding",
                        "server-state", "secrets"}
         for name in ("go-panel-image", "native-release-image"):
             with self.subTest(job=name):

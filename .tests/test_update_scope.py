@@ -180,7 +180,6 @@ class WhatAChangeNeeds(unittest.TestCase):
             ".tests/test_x.py", ".github/workflows/ci.yml",
             "go/panel/web/static/js/live_activity.js", "go/panel/internal/app/app.go",
             "installer/easy_ha_proxy.py",
-            "ansible/callback_plugins/easy_ha_proxy_progress.py",
         ])
         self.assertFalse(scope["full"])
         self.assertEqual(scope["tags"], [])
@@ -401,14 +400,6 @@ class ThePage(unittest.TestCase):
         for label in update_scope.TAG_LABELS.values():
             with self.subTest(label=label):
                 self.assertIn(label, merged)
-
-
-class TimingInTheLog(unittest.TestCase):
-    def test_every_update_log_shows_where_the_time_went(self):
-        config = (ROOT / "ansible/ansible.cfg").read_text(encoding="utf-8")
-        self.assertIn("callbacks_enabled = ansible.posix.profile_tasks", config)
-        requirements = (ROOT / "ansible/requirements.yml").read_text(encoding="utf-8")
-        self.assertIn("ansible.posix", requirements)
 
 
 if __name__ == "__main__":

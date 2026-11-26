@@ -14,7 +14,6 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
-import re
 import shutil
 import tarfile
 import tempfile
@@ -78,23 +77,10 @@ class TheCAExportLivesUnderTheInstallHome(unittest.TestCase):
 
 class NoFixedDirectoryInTmp(unittest.TestCase):
     def test_no_script_names_a_fixed_directory_in_tmp(self):
-        assignment = re.compile(r"ANSIBLE_LOCAL_TEMP=(\S+)")
-        allowed = {'"${ansible_temp}"'}
-        found = []
         for name in SHELL_SCRIPTS:
             text = (ROOT / name).read_text(encoding="utf-8")
             self.assertNotIn("/tmp/easy-ha-proxy-ansible", text, name)
             self.assertNotIn("/tmp/easy-ha-proxy-internal-ca", text, name)
-            found += [(name, value) for value in assignment.findall(text)]
-        self.assertTrue(found)
-        self.assertEqual([item for item in found if item[1] not in allowed], [])
-
-    def test_the_controller_takes_a_private_directory_and_removes_it(self):
-        text = (ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn('ansible_temp="$(mktemp -d -t easy-ha-proxy-ansible.XXXXXX)"', text)
-        self.assertIn('temporary_directories+=("${ansible_temp}")', text)
-        cleanup = re.search(r"^cleanup\(\) \{\n(.*?)^\}", text, re.MULTILINE | re.DOTALL).group(1)
-        self.assertIn('for path in "${temporary_directories[@]}"; do\n    rm -rf -- "${path}"', cleanup)
 
 
 def bundle_with(mode: int) -> bytes:

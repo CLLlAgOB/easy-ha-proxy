@@ -520,49 +520,6 @@ jobs:
           path: release-out/
           retention-days: 30
 
-  ansible:
-    name: Ansible syntax
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
-        with:
-          python-version: '3.12'
-
-      # Gateways no longer run Ansible (the installer agent runs the
-      # playbook); the task files stay valid for the controller-side legacy
-      # commands. Galaxy keeps failing to serve GitHub's runners now and then (the same
-      # commit passes on one branch and fails on the other minutes later), so
-      # the job must not depend on it: the collections are cached, and when
-      # Galaxy does not answer they are built from the same tagged versions on
-      # GitHub. --no-deps there because community.docker's dependency comes
-      # from Galaxy again, and a syntax check does not need it.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.ansible/collections
-          key: ansible-collections-${{ hashFiles('ansible/requirements.yml') }}
-
-      - name: Install Ansible and the pinned collections
-        run: |
-          pip install "ansible-core~=2.17.0"
-          for attempt in 1 2; do
-            ansible-galaxy collection install -r ansible/requirements.yml && exit 0
-            echo "Galaxy download failed (attempt $attempt)"
-            sleep 10
-          done
-          echo "Galaxy is not answering; installing from the GitHub tags instead"
-          ansible-galaxy collection install --no-deps --force \
-            "git+https://github.com/ansible-collections/ansible.posix.git,2.2.2" \
-            "git+https://github.com/ansible-collections/community.docker.git,5.4.1"
-
-      # vars.yml, the inventories and group_vars are deliberately untracked, so
-      # the playbook is parsed against a throwaway inventory. This validates
-      # task and role structure, not host-specific variable resolution.
-      - name: Syntax-check the playbook
-        run: ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
-
   # The web panel image (linux/amd64 + linux/arm64), published from the commit
   # CI has just tested as clllagob/haproxy-admin-ui:go-alpha or :go-latest.
   # Each image is labelled with the fingerprint of its build inputs: gateways
@@ -571,7 +528,7 @@ jobs:
   # the server-state test included.
   go-panel-image:
     name: Publish the Go web panel image
-    needs: [go-panel, go-parity, go-vulnerabilities, javascript, secrets, python, shell, ansible, lint, udp-forwarding, server-state]
+    needs: [go-panel, go-parity, go-vulnerabilities, javascript, secrets, python, shell, lint, udp-forwarding, server-state]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')
@@ -678,7 +635,7 @@ jobs:
   # extra configuration.
   native-release-image:
     name: Publish native host binaries OCI image
-    needs: [rust-guardd, go-agent, go-parity, native-release, go-vulnerabilities, rust-vulnerabilities, secrets, python, shell, ansible, lint, udp-forwarding, server-state]
+    needs: [rust-guardd, go-agent, go-parity, native-release, go-vulnerabilities, rust-vulnerabilities, secrets, python, shell, lint, udp-forwarding, server-state]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/main')

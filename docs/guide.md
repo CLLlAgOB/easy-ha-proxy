@@ -1722,29 +1722,22 @@ committed or placed in a public artifact store. The passphrase is never stored;
 download the `.enc` archive and its `.sha256` file, and keep the passphrase in a
 separate password manager.
 
-## Manual Ansible workflow
+## Running playbook entries by hand
 
-The supported assistant is the preferred interface. After creating the ignored
-local inventory and configuration files described in
-[ansible/README.md](../ansible/README.md), direct remote Ansible use
-remains available:
+The supported assistant is the preferred interface. The installer agent runs
+the playbook on the server itself, and a targeted run takes the playbook's
+tags directly ([ansible/README.md](../ansible/README.md) lists them):
 
 ```bash
-cd ansible
-ansible-galaxy collection install -r requirements.yml
-ansible-playbook --syntax-check -i inventory.ini easy-ha-proxy.yml
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
+sudo easy-ha-proxy-agent apply playbook --check --tags status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
+sudo easy-ha-proxy-agent apply playbook --tags ha-adm-daemons,aut-daemons,status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-An untagged playbook run includes OS package upgrades. A local Ansible
-connection is never rebooted by the playbook: the easy-ha-proxy assistant asks
-after the upgrade and defaults to deferring the reboot. Direct playbook users
-must reboot manually, or explicitly set
-`easy_ha_proxy_reboot_after_upgrade=true` for an SSH-managed target. Review the
-plan and tags before applying it to production.
-
-Inventory, host variables, and secrets are intentionally not supplied by the
-public repository.
+`--check` shows what would change and changes nothing. An untagged run
+includes OS package upgrades and never reboots: the assistant asks after an
+upgrade and defaults to deferring the reboot.
 
 ## Development checks
 
@@ -1769,9 +1762,6 @@ ruff check .   # mistakes only, see ruff.toml
 
 for script in go/panel/web/static/js/*.js; do node --check "$script"; done
 node --test .tests/js/*.test.js
-
-ansible-galaxy collection install -r ansible/requirements.yml
-ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
 
 Page logic that decides something lives in a script without the DOM that the
