@@ -144,7 +144,7 @@ class ScheduledWorker(unittest.TestCase):
             with ExitStack() as stack:
                 for name in ('require_root', 'hold_maintenance_lock', 'ensure_security_secrets',
                              'persist_deployment_channels', 'sync_runtime_haproxy_config_to_managed',
-                             'sync_runtime_authelia_rules_to_managed', 'syntax_check', 'mark_installation_complete'):
+                             'sync_runtime_authelia_rules_to_managed', 'mark_installation_complete'):
                     stack.enter_context(patch.object(cli, name))
                 stack.enter_context(patch.object(cli, 'managed_configuration_is_pending', return_value=False))
                 stack.enter_context(patch.object(cli, 'config_dir', return_value=Path('/unused')))

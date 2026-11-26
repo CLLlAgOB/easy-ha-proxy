@@ -150,7 +150,6 @@ class InstallerLocalizationTests(unittest.TestCase):
                 mock.patch("easy_ha_proxy.hold_maintenance_lock"),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
                 mock.patch("easy_ha_proxy.backup_configuration"),
-                mock.patch("easy_ha_proxy.syntax_check") as syntax_check,
                 mock.patch("easy_ha_proxy.run_playbook") as run_playbook,
             ):
                 command_language(Namespace(language="ru", apply=True))
@@ -162,7 +161,6 @@ class InstallerLocalizationTests(unittest.TestCase):
             self.assertEqual(authelia["authelia_notification_language"], "ru")
             self.assertIn("Уведомление безопасности", authelia["mail_subject"])
             self.assertEqual(metadata["installer_language"], "ru")
-            syntax_check.assert_called_once_with(directory)
             self.assertEqual(run_playbook.call_args.args[0], LANGUAGE_TAGS)
 
 

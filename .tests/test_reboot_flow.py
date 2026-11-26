@@ -20,8 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class RebootPromptTests(unittest.TestCase):
     def test_upgrade_playbook_offers_reboot_only_after_real_apply(self) -> None:
         with (
-            mock.patch("easy_ha_proxy.playbook_command", return_value=["ansible-playbook"]),
-            mock.patch("easy_ha_proxy.ansible_environment", return_value={}),
+            mock.patch("easy_ha_proxy.require_configuration"),
+            mock.patch("easy_ha_proxy.agent_runs_playbook", return_value=True),
+            mock.patch("easy_ha_proxy.bootstrap_agent"),
             mock.patch("easy_ha_proxy.run"),
             mock.patch("easy_ha_proxy.offer_pending_reboot") as offer,
         ):

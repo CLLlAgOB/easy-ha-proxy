@@ -17,8 +17,8 @@ bash /tmp/easy-ha-proxy-install.sh
 Without arguments, the assistant:
 
 1. Asks for English or Russian; pressing Enter selects English.
-2. Looks for the installed CLI, managed configuration, private Python/Ansible
-   venv, playbook, and system components.
+2. Looks for the installed CLI, managed configuration, private Python venv,
+   playbook, and system components.
 3. Classifies the system as clean, partially installed, legacy, or managed.
 4. Detects production or test mode.
 5. Shows only applicable actions and asks for confirmation before changes.

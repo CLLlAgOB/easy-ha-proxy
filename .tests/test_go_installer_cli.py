@@ -1,9 +1,8 @@
-"""The CLI runs the playbook with the Go installer when the agent can, and
-with Ansible otherwise."""
+"""The CLI runs the playbook with the installer agent: the installed one when
+it can, else the one built for the source revision."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -29,7 +28,11 @@ class GoInstallerSwitch(unittest.TestCase):
         self.probes: list[list[str]] = []
         self.supported = 0
         self.parts = '{"parts":{"native":{}}}'
-        self.fetched = None
+        self.fetched = self.root / "staged-agent"
+        self.fetched.write_text("#!/bin/sh\n")
+        source = self.root / "source/ansible"
+        source.mkdir(parents=True)
+        (source / "easy-ha-proxy.yml").write_text("[]\n")
 
     def fake_probe(self, command, **_kwargs):
         self.probes.append(command)
@@ -43,11 +46,9 @@ class GoInstallerSwitch(unittest.TestCase):
             mock.patch.object(easy_ha_proxy, "AGENT_BINARY", self.agent),
             mock.patch.object(easy_ha_proxy.subprocess, "run", side_effect=self.fake_probe),
             mock.patch.object(easy_ha_proxy, "run", side_effect=lambda command, **_: runs.append(command)),
-            mock.patch.object(easy_ha_proxy, "playbook_command", return_value=["ansible-playbook"]),
-            mock.patch.object(easy_ha_proxy, "ansible_environment", return_value={}),
             mock.patch.object(easy_ha_proxy, "source_dir", return_value=self.root / "source"),
             mock.patch.object(easy_ha_proxy, "offer_pending_reboot"),
-            mock.patch.object(easy_ha_proxy, "fetch_runner", return_value=self.fetched),
+            mock.patch.object(easy_ha_proxy, "fetch_runner", return_value=self.fetched) as self.fetch,
         ):
             easy_ha_proxy.run_playbook(tags, directory=self.config, **kwargs)
         return runs
@@ -69,24 +70,27 @@ class GoInstallerSwitch(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertIn("--check", runs[0])
 
-    def test_an_entry_not_moved_yet_falls_back_to_ansible(self) -> None:
-        self.supported = 3
-        runs = self.play("a-new-tag")
-        self.assertEqual(runs, [["ansible-playbook"]])
+    def test_an_agent_older_than_the_playbook_command_is_replaced_for_the_run(self) -> None:
+        self.supported = 2  # usage: no "apply playbook" yet
+        runs = self.play("status")
+        self.assertEqual(runs, [[str(self.fetched), "apply", "playbook", "--tags", "status",
+                                 "--source", str(self.root / "source"), "--config", str(self.config),
+                                 "--extra", "status_check_fail_on_error=true"]])
 
-    def test_ansible_on_request_or_without_an_agent(self) -> None:
-        with mock.patch.dict(os.environ, {"EASY_HA_PROXY_ANSIBLE": "1"}):
-            self.assertEqual(self.play("status"), [["ansible-playbook"]])
-        self.assertEqual(self.play("status", extra_vars={"easy_ha_proxy_go_installer": "false"}), [["ansible-playbook"]])
+    def test_a_plan_on_a_host_without_an_agent_fetches_one_too(self) -> None:
         self.agent.unlink()
-        self.probes.clear()
-        self.assertEqual(self.play("status"), [["ansible-playbook"]])
+        runs = self.play("status", check_mode=True)
+        self.assertEqual(runs[0][0], str(self.fetched))
+        self.assertIn("--check", runs[0])
+
+    def test_an_incomplete_configuration_is_refused_before_anything_runs(self) -> None:
+        (self.config / "secrets.yml").unlink()
+        with self.assertRaisesRegex(easy_ha_proxy.InstallerError, "Configuration is incomplete"):
+            self.play("status")
         self.assertEqual(self.probes, [])
 
     def test_a_fresh_host_runs_the_agent_fetched_for_this_revision(self) -> None:
         self.agent.unlink()
-        self.fetched = self.root / "staged-agent"
-        self.fetched.write_text("#!/bin/sh\n")
         runs = self.play("docker,ha-adm-native,status")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0][0], str(self.fetched))

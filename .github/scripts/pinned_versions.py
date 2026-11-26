@@ -11,7 +11,7 @@ pin with its registry:
 - the newest release overall -- worth a look, may need care.
 
 A collection counts only releases that declare support for the ansible-core
-the installer pins: a newer one that needs a newer core is not an update.
+the CI syntax job pins: a newer one that needs a newer core is not an update.
 
 Prints a Markdown report; with --github it also writes the job summary and
 keeps one issue open while anything is behind (closed when nothing is).
@@ -94,9 +94,11 @@ def read_collection(text: str, name: str) -> Optional[str]:
 
 
 def ansible_core_series(root: Path = ROOT) -> tuple[int, ...]:
-    """The ansible-core release series the installer pins (~=2.17.0 is 2.17)."""
-    text = (root / "installer/requirements.txt").read_text(encoding="utf-8")
-    match = re.search(r"^ansible-core\s*~=\s*(\d+)\.(\d+)", text, re.MULTILINE)
+    """The ansible-core release series CI checks the task files with (~=2.17.0
+    is 2.17). Gateways no longer run Ansible; the controller-side legacy
+    commands and that check do."""
+    text = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    match = re.search(r"ansible-core\s*~=\s*(\d+)\.(\d+)", text)
     return (int(match.group(1)), int(match.group(2))) if match else ()
 
 

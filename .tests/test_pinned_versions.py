@@ -5,11 +5,11 @@ the workflows -- against alpha, since main is moved to alpha after testing.
 The versions pinned as Ansible variables (Authelia, Redis, the mail relay,
 the GeoIP packages) and the Galaxy collections are compared with their
 registries by a weekly job that keeps one issue open while anything is
-behind; a collection counts only releases for the ansible-core the installer
-pins. A separate weekly audit reports known vulnerabilities without
-blocking CI. Dependabot itself is told not to offer what cannot be taken: a
-newer ansible-core than Ubuntu 22.04's Python runs, a new Python for the
-image, a raised floor on a range that already allows the release.
+behind; a collection counts only releases for the ansible-core the CI
+syntax job pins. A separate weekly audit reports known vulnerabilities
+without blocking CI. Dependabot itself is told not to offer what cannot be
+taken: a new Python for the image, a raised floor on a range that already
+allows the release.
 """
 
 from __future__ import annotations
@@ -127,16 +127,12 @@ class TheConfiguration(unittest.TestCase):
     def test_dependabot_offers_only_what_can_be_taken(self):
         config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
         entries = dependabot_entries(config)
-        minor = {"version-update:semver-major", "version-update:semver-minor"}
 
-        # The installer's ranges move only when a release falls outside them,
-        # and ansible-core stays on the series Ubuntu 22.04's Python can run.
+        # The installer's ranges move only when a release falls outside them.
         installer = entries[("pip", "/installer")]
         self.assertEqual(installer["versioning-strategy"], "increase-if-necessary")
-        ignored = {item["dependency-name"]: set(item["update-types"]) for item in installer["ignore"]}
-        self.assertEqual(ignored["ansible-core"], minor)
         requirements = (ROOT / "installer/requirements.txt").read_text(encoding="utf-8")
-        self.assertIn("ansible-core~=2.17.0", requirements)
+        self.assertNotIn("ansible-core", requirements)
 
         # Every action in one pull request.
         actions = entries[("github-actions", "/")]
@@ -144,7 +140,7 @@ class TheConfiguration(unittest.TestCase):
 
     def test_the_galaxy_fallback_installs_the_pinned_collections(self):
         # CI installs from GitHub tags when Galaxy does not answer; those tags
-        # must be the versions the gateways get.
+        # must be the versions requirements.yml pins.
         requirements = (ROOT / "ansible/requirements.yml").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         for collection in ("ansible.posix", "community.docker"):
@@ -158,9 +154,8 @@ class TheConfiguration(unittest.TestCase):
         self.assertEqual(workflow["jobs"]["pinned"]["permissions"], {"contents": "read", "issues": "write"})
         audit = "\n".join(step.get("run", "") for step in workflow["jobs"]["audit"]["steps"])
         self.assertIn("pip-audit", audit)
-        # Every ignored advisory is explained next to it.
-        self.assertIn("--ignore-vuln PYSEC-2026-3458", audit)
-        self.assertIn("never roles", audit)
+        # Nothing is ignored since the gateways stopped installing ansible-core.
+        self.assertNotIn("--ignore-vuln", audit)
 
 
 if __name__ == "__main__":

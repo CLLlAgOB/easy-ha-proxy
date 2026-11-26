@@ -1795,13 +1795,13 @@ without publishing it.
 
 Dependabot proposes updates for the installer's requirements, the Go modules,
 the Rust crate, the panel's Dockerfile and the workflows against `alpha`. It
-does not offer what cannot be taken: ansible-core stays on 2.17, the last
-series that runs on Ubuntu 22.04's Python 3.10; the installer's ranges move
-only when a release falls outside them. The weekly **Dependencies** workflow reports
+does not offer what cannot be taken: the installer's ranges move only when a
+release falls outside them. The weekly **Dependencies** workflow reports
 known vulnerabilities (pip-audit) and keeps one issue open while a version
 pinned in an Ansible role (Authelia, Redis, the mail relay, the GeoIP packages)
 or a Galaxy collection has a newer release; for a collection, only releases
-that support the pinned ansible-core count.
+that support the ansible-core of the CI syntax check count. Gateways do not
+run Ansible: the installer agent runs the playbook.
 
 UI translations are JSON catalogs under
 [`go/panel/web/translations/`](../go/panel/web/translations/README.md).

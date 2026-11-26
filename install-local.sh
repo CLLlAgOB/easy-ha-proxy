@@ -125,8 +125,7 @@ if [[ "${use_existing_source}" == "true" ]]; then
     installer/easy-ha-proxy \
     installer/easy_ha_proxy.py \
     installer/requirements.txt \
-    ansible/easy-ha-proxy.yml \
-    ansible/requirements.yml; do
+    ansible/easy-ha-proxy.yml; do
     [[ -f "${source_dir}/${required}" ]] ||
       die "Staged source is incomplete: ${source_dir}/${required}"
   done
@@ -149,11 +148,9 @@ else
 fi
 
 if [[ "${skip_bootstrap_dependencies}" == "true" ]]; then
-  log "Reusing the prepared Python and Ansible control plane"
+  log "Reusing the prepared Python control plane"
   [[ -x "${venv_dir}/bin/python" ]] ||
     die "Prepared Python environment is missing: ${venv_dir}/bin/python"
-  [[ -x "${venv_dir}/bin/ansible-playbook" ]] ||
-    die "Prepared Ansible executable is missing: ${venv_dir}/bin/ansible-playbook"
 else
   log "Creating isolated Python environment"
   python3 -m venv "${venv_dir}"
@@ -161,11 +158,6 @@ else
   "${venv_dir}/bin/pip" install \
     --disable-pip-version-check \
     -r "${source_dir}/installer/requirements.txt"
-
-  log "Installing Ansible collections"
-  ANSIBLE_LOCAL_TEMP="${install_root}/tmp/ansible" \
-    "${venv_dir}/bin/ansible-galaxy" collection install \
-    -r "${source_dir}/ansible/requirements.yml"
 fi
 
 chmod 0755 \

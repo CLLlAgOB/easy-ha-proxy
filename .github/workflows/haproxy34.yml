@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install migration dependencies
-        run: pip install -r installer/requirements.txt
+        run: pip install -r installer/requirements.txt "ansible-core~=2.17.0"
       - name: Install the distribution baseline
         run: |
           test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
@@ -97,7 +97,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install test dependencies
-        run: pip install -r installer/requirements.txt
+        run: pip install -r installer/requirements.txt "ansible-core~=2.17.0"
       - name: Qualify the distribution baseline and refuse an implicit migration
         run: |
           ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution

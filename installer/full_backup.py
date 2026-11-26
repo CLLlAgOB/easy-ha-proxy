@@ -1851,7 +1851,6 @@ def preflight_restore_control_plane() -> None:
         source / "installer/easy_ha_proxy.py",
         source / "installer/requirements.txt",
         source / "ansible/easy-ha-proxy.yml",
-        source / "ansible/requirements.yml",
     )
     missing_sources = [str(path) for path in required_sources if not path.is_file()]
     if missing_sources:
@@ -1862,9 +1861,9 @@ def preflight_restore_control_plane() -> None:
 
     home = Path(os.environ.get("EASY_HA_PROXY_HOME", "/opt/easy-ha-proxy"))
     python = home / "venv/bin/python"
-    ansible_playbook = home / "venv/bin/ansible-playbook"
+    agent = Path(os.environ.get("EASY_HA_PROXY_AGENT", "/usr/local/sbin/easy-ha-proxy-agent"))
     missing_executables = [
-        str(path) for path in (python, ansible_playbook) if not os.access(path, os.X_OK)
+        str(path) for path in (python, agent) if not os.access(path, os.X_OK)
     ]
     if missing_executables:
         raise BackupError(
@@ -1874,12 +1873,15 @@ def preflight_restore_control_plane() -> None:
 
     _restore_stage(
         "Restore control-plane Python dependency check",
-        [str(python), "-c", "import ansible, yaml"],
+        [str(python), "-c", "import jinja2, yaml"],
         capture=True,
     )
+    # The installed agent runs the playbook that reconciles the restored
+    # host; one older than "apply playbook" would have to be fetched, and a
+    # restore must not depend on the network.
     _restore_stage(
-        "Restore control-plane Ansible check",
-        [str(ansible_playbook), "--version"],
+        "Restore control-plane installer check",
+        [str(agent), "apply", "playbook", "--supported", "--tags", "never"],
         capture=True,
     )
 
@@ -2065,7 +2067,7 @@ def restore_backup(args: argparse.Namespace) -> None:
         if args.apply:
             # A web restore runs inside the hardened backup broker, where APT
             # is intentionally unable to switch to the _apt uid. Verify that
-            # the already-installed Python/Ansible controller is complete
+            # the already-installed Python and installer agent are complete
             # before stopping services, taking a rollback snapshot, or
             # replacing any managed path. The destructive phase then remains
             # fully offline with respect to dependency managers.

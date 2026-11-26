@@ -45,7 +45,6 @@ class InstallerMaintenanceLock(unittest.TestCase):
             mock.patch.object(cli, "require_root"),
             mock.patch.object(cli, "RUNTIME_HAPROXY_CONFIG_DIR", self.root / "absent-runtime"),
             mock.patch.object(cli, "dns_preflight"),
-            mock.patch.object(cli, "syntax_check"),
             mock.patch.object(cli, "record_applied_source"),
         ):
             patch.start()

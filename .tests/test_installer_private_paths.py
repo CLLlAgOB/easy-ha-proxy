@@ -76,20 +76,10 @@ class TheCAExportLivesUnderTheInstallHome(unittest.TestCase):
         self.assertNotIn(b"PRIVATE KEY", export.read_bytes())
 
 
-class AnsibleWorksInARootOwnedDirectory(unittest.TestCase):
-    def test_the_installer_points_ansible_under_the_install_home(self):
-        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"EASY_HA_PROXY_HOME": home}):
-            os.environ.pop("ANSIBLE_LOCAL_TEMP", None)
-            environment = easy_ha_proxy.ansible_environment()
-        self.assertEqual(environment["ANSIBLE_LOCAL_TEMP"], str(Path(home) / "tmp" / "ansible"))
-
-    def test_an_explicit_choice_is_kept(self):
-        with mock.patch.dict(os.environ, {"ANSIBLE_LOCAL_TEMP": "/srv/ansible-tmp"}):
-            self.assertEqual(easy_ha_proxy.ansible_environment()["ANSIBLE_LOCAL_TEMP"], "/srv/ansible-tmp")
-
+class NoFixedDirectoryInTmp(unittest.TestCase):
     def test_no_script_names_a_fixed_directory_in_tmp(self):
         assignment = re.compile(r"ANSIBLE_LOCAL_TEMP=(\S+)")
-        allowed = {'"${ansible_temp}"', '"${install_root}/tmp/ansible"'}
+        allowed = {'"${ansible_temp}"'}
         found = []
         for name in SHELL_SCRIPTS:
             text = (ROOT / name).read_text(encoding="utf-8")

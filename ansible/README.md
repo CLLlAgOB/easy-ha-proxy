@@ -2,7 +2,7 @@
 
 The main playbook `easy-ha-proxy.yml` installs and configures HAProxy, Certbot, the GeoIP ACL, Authelia, the Docker build of `haproxy-admin` and the helper systemd daemons.
 
-For a single server the `easy-ha-proxy` command is the recommended way: it installs a local Ansible in a venv and runs this same playbook. This document describes the manual remote mode. [Русская версия](README.ru.md).
+For a single server the `easy-ha-proxy` command is the recommended way: its installer agent (`easy-ha-proxy-agent apply playbook`) runs this same playbook on the server, without Ansible. This document describes the manual remote mode. [Русская версия](README.ru.md).
 
 ## Requirements
 

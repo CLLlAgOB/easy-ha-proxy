@@ -300,7 +300,6 @@ class DeploymentChannelTests(unittest.TestCase):
                 ),
                 mock.patch("easy_ha_proxy.sync_runtime_haproxy_config_to_managed"),
                 mock.patch("easy_ha_proxy.sync_runtime_dependencies"),
-                mock.patch("easy_ha_proxy.syntax_check"),
                 mock.patch("easy_ha_proxy.run_playbook"),
                 mock.patch("easy_ha_proxy.mark_installation_complete"),
             ):
@@ -328,7 +327,6 @@ class DeploymentChannelTests(unittest.TestCase):
                 mock.patch("easy_ha_proxy.persist_deployment_channels") as persist,
                 mock.patch("easy_ha_proxy.managed_configuration_is_pending", return_value=False),
                 mock.patch("easy_ha_proxy.sync_runtime_haproxy_config_to_managed"),
-                mock.patch("easy_ha_proxy.syntax_check"),
                 mock.patch("easy_ha_proxy.run_playbook"),
                 mock.patch("easy_ha_proxy.mark_installation_complete"),
             ):

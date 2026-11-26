@@ -371,20 +371,15 @@ def install_home() -> Path:
     return Path(os.environ.get("EASY_HA_PROXY_HOME", str(DEFAULT_HOME))).expanduser()
 
 
-# The installer runs as root. Both of these used to be fixed names in /tmp,
-# where any local user may create a name first: a symlink planted at the CA
-# export had root write through it, and whoever owned /tmp/easy-ha-proxy-ansible
-# could swap the modules Ansible wrote there before root ran them. The install
-# home is root's alone, and readable, so the public CA can still be copied.
+# The installer runs as root. The CA export used to be a fixed name in /tmp,
+# where any local user may create a name first: a symlink planted there had
+# root write through it. The install home is root's alone, and readable, so
+# the public CA can still be copied.
 def internal_ca_export_path() -> Path:
     configured = os.environ.get("EASY_HA_PROXY_CA_EXPORT")
     if configured:
         return Path(configured).expanduser()
     return install_home() / "internal-ca.crt"
-
-
-def ansible_local_temp() -> Path:
-    return install_home() / "tmp" / "ansible"
 
 
 def require_root() -> None:
@@ -1771,68 +1766,19 @@ def dns_preflight(directory: Path) -> bool:
     return ready
 
 
-def ansible_playbook_path() -> str:
-    managed = install_home() / "venv/bin/ansible-playbook"
-    if managed.exists():
-        return str(managed)
-    discovered = shutil.which("ansible-playbook")
-    if discovered:
-        return discovered
-    raise InstallerError("ansible-playbook not found; run install-local.sh first.")
+CONFIGURATION_FILES = ("inventory.ini", "vars.yml", "secrets.yml")
 
 
-def ansible_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["ANSIBLE_CONFIG"] = str(source_dir() / "ansible/ansible.cfg")
-    environment["ANSIBLE_VARS_ENABLED"] = ""
-    environment["ANSIBLE_NOCOWS"] = "1"
-    environment.setdefault("ANSIBLE_LOCAL_TEMP", str(ansible_local_temp()))
-    return environment
-
-
-def playbook_command(
-    tags: str,
-    *,
-    check_mode: bool = False,
-    directory: Path | None = None,
-    extra_vars: dict[str, str] | None = None,
-    skip_tags: str | None = None,
-) -> list[str]:
-    directory = directory or config_dir()
-    required = (
-        directory / "inventory.ini",
-        directory / "vars.yml",
-        directory / "secrets.yml",
-    )
-    missing = [str(path) for path in required if not path.exists()]
+def require_configuration(directory: Path) -> None:
+    missing = [str(directory / name) for name in CONFIGURATION_FILES if not (directory / name).exists()]
     if missing:
         raise InstallerError(
             "Configuration is incomplete. Run easy-ha-proxy install first. Missing: "
             + ", ".join(missing)
         )
-
     playbook = source_dir() / "ansible/easy-ha-proxy.yml"
     if not playbook.exists():
         raise InstallerError(f"Playbook not found: {playbook}")
-
-    command = [
-        ansible_playbook_path(),
-        "-i",
-        str(directory / "inventory.ini"),
-        str(playbook),
-        "--extra-vars",
-        f"easy_ha_proxy_config_dir={directory}",
-        "--extra-vars",
-        "easy_ha_proxy_target=easy_ha_proxy",
-    ]
-    for key, value in (extra_vars or {}).items():
-        command.extend(("--extra-vars", f"{key}={value}"))
-    command.extend(("--tags", tags))
-    if skip_tags:
-        command.extend(("--skip-tags", skip_tags))
-    if check_mode:
-        command.append("--check")
-    return command
 
 
 def ensure_security_secrets(directory: Path) -> None:
@@ -1851,12 +1797,6 @@ def ensure_security_secrets(directory: Path) -> None:
     data["haproxy_admin_proxy_secret"] = secrets.token_urlsafe(48)
     write_yaml(path, data)
     print(f"Generated the missing internal proxy secret in {path}.")
-
-
-def syntax_check(directory: Path | None = None) -> None:
-    command = playbook_command("always", directory=directory)
-    command.append("--syntax-check")
-    run(command, env=ansible_environment())
 
 
 def offline_restore_required_images(
@@ -2034,23 +1974,14 @@ def offline_restore_image_preflight(
         )
 
 
-# The Go installer: the host agent runs the playbook itself ("apply
-# playbook"), role entry by role entry, handlers included. Ansible stays the
-# fallback while an older agent is installed (no "apply playbook" yet) or a
-# selected entry has not moved to Go; EASY_HA_PROXY_ANSIBLE=1 or the extra
-# variable easy_ha_proxy_go_installer=false asks for Ansible outright.
+# The installer: the host agent runs the playbook ("apply playbook"), role
+# entry by role entry, handlers included. A host without an agent that can
+# (a fresh one, or one older than the Go installer) first gets the agent built
+# for the source revision.
 AGENT_BINARY = Path("/usr/local/sbin/easy-ha-proxy-agent")
 # Where an agent fetched for one run waits: not over the installed one, so
 # the native stage still sees the change and restarts what runs the old one.
 STAGED_AGENT = Path("/var/lib/easy-ha-proxy/native-staging/bootstrap/easy-ha-proxy-agent")
-ANSIBLE_ENV = "EASY_HA_PROXY_ANSIBLE"
-
-
-def go_installer_allowed(extra_vars: dict[str, str] | None) -> bool:
-    if os.environ.get(ANSIBLE_ENV) == "1":
-        return False
-    value = str((extra_vars or {}).get("easy_ha_proxy_go_installer", "true")).strip().lower()
-    return value not in {"false", "0", "no", "off"}
 
 
 def agent_runs_playbook(agent: Path) -> bool:
@@ -2063,15 +1994,17 @@ def agent_runs_playbook(agent: Path) -> bool:
     return probe.returncode in (0, 3)
 
 
-def fetch_runner(directory: Path) -> Path | None:
-    """The agent built for the source revision, fetched from the registry."""
+def fetch_runner(directory: Path) -> Path:
+    """The agent built for the source revision, staged for this run."""
 
     import agent_bootstrap
 
     revision = subprocess.run(["git", "-c", f"safe.directory={source_dir()}", "-C", str(source_dir()), "rev-parse", "HEAD"],
                               capture_output=True, text=True, check=False).stdout.strip()
     if not SOURCE_REVISION_RE.fullmatch(revision):
-        return None
+        # A staged source bundle has no checkout: like the native stage, take
+        # the channel's current agent.
+        revision = ""
     variables = load_yaml_mapping(directory / "vars.yml")
     reference = agent_bootstrap.image_reference(variables, revision)
     source = reference or "the configured native bundle"
@@ -2085,13 +2018,18 @@ def fetch_runner(directory: Path) -> Path | None:
             if binary is None:
                 binary = agent_bootstrap.fetch_agent(reference, revision)
         if binary is None:
-            return None
+            raise agent_bootstrap.BootstrapError("no source of the native binaries is configured")
         agent_bootstrap.install_agent(binary, STAGED_AGENT)
-    except Exception as exc:  # noqa: BLE001 - Ansible remains the fallback
-        print(f"Could not fetch the Go installer from {source}: {exc}", flush=True)
-        return None
-    print(f"Fetched the Go installer built from {revision[:12]} ({source}).", flush=True)
-    return STAGED_AGENT if agent_runs_playbook(STAGED_AGENT) else None
+    except Exception as exc:  # noqa: BLE001 - one message for every source
+        raise InstallerError(
+            f"Could not get the installer agent from {source}: {exc}. "
+            "CI publishes it for each commit of main and alpha a few minutes after the commit."
+        ) from exc
+    if not agent_runs_playbook(STAGED_AGENT):
+        raise InstallerError(f"The agent from {source} cannot run the installer; it is older than this source.")
+    built = f"built from {revision[:12]}" if revision else "of this channel"
+    print(f"Fetched the installer agent {built} ({source}).", flush=True)
+    return STAGED_AGENT
 
 
 def agent_arguments(directory: Path, extra_vars: dict[str, str] | None) -> list[str]:
@@ -2108,7 +2046,7 @@ def bootstrap_agent(directory: Path, extra_vars: dict[str, str] | None) -> None:
     installed agent is the old one. Its native part pulls and installs the
     binaries CI built from this revision, so the playbook that follows runs
     the new agent's stages. An agent without the part (older than the Go
-    installer) is left alone: Ansible then runs and installs it.
+    installer) is left alone: the agent fetched for this run installs it.
     """
 
     if not AGENT_BINARY.is_file():
@@ -2120,32 +2058,20 @@ def bootstrap_agent(directory: Path, extra_vars: dict[str, str] | None) -> None:
 
 
 def agent_playbook_command(
+    agent: Path,
     tags: str,
     *,
     check_mode: bool,
     directory: Path,
     extra_vars: dict[str, str] | None,
     skip_tags: str | None,
-    agent: Path | None = None,
-) -> list[str] | None:
-    """The agent's command for this run, or None when Ansible must run it."""
-
-    command = [str(agent or AGENT_BINARY), "apply", "playbook", "--tags", tags, *agent_arguments(directory, extra_vars)]
+) -> list[str]:
+    command = [str(agent), "apply", "playbook", "--tags", tags, *agent_arguments(directory, extra_vars)]
     if skip_tags:
         command.extend(("--skip-tags", skip_tags))
-    probe = subprocess.run([*command, "--supported"], capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        detail = (probe.stderr or probe.stdout).strip().splitlines()
-        if probe.returncode == 3 and detail:
-            print(f"Ansible runs this: {detail[-1]}", flush=True)
-        return None
     if check_mode:
         command.append("--check")
     return command
-
-
-def configuration_complete(directory: Path) -> bool:
-    return all((directory / name).exists() for name in ("inventory.ini", "vars.yml", "secrets.yml"))
 
 
 def run_playbook(
@@ -2161,54 +2087,32 @@ def run_playbook(
         # Install/update must not report success while a managed service is
         # restarting or unhealthy. Plans remain non-blocking diagnostics.
         effective_extra_vars.setdefault("status_check_fail_on_error", "true")
-    command = None
     target = directory or config_dir()
-    # An incomplete configuration is refused below, by playbook_command,
-    # with the message the installer has always given.
-    if go_installer_allowed(effective_extra_vars) and configuration_complete(target):
-        if not check_mode and "ha-adm-native" in tags.split(","):
-            bootstrap_agent(target, effective_extra_vars)
-        agent: Path | None = AGENT_BINARY
-        if not agent_runs_playbook(AGENT_BINARY):
-            # No agent yet (a fresh host), or one older than "apply playbook".
-            agent = None if check_mode else fetch_runner(target)
-        if agent is not None:
-            command = agent_playbook_command(
-                tags,
-                check_mode=check_mode,
-                directory=target,
-                extra_vars=effective_extra_vars,
-                skip_tags=skip_tags,
-                agent=agent,
-            )
-    if command is not None:
-        run(command, env=os.environ.copy())
-    else:
-        run(
-            playbook_command(
-                tags,
-                check_mode=check_mode,
-                directory=directory,
-                extra_vars=effective_extra_vars,
-                skip_tags=skip_tags,
-            ),
-            env=ansible_environment(),
+    require_configuration(target)
+    if not check_mode and "ha-adm-native" in tags.split(","):
+        bootstrap_agent(target, effective_extra_vars)
+    # No capable agent yet: a fresh host, or one older than "apply playbook".
+    agent = AGENT_BINARY if agent_runs_playbook(AGENT_BINARY) else fetch_runner(target)
+    run(
+        agent_playbook_command(
+            agent,
+            tags,
+            check_mode=check_mode,
+            directory=target,
+            extra_vars=effective_extra_vars,
+            skip_tags=skip_tags,
         )
+    )
     selected_tags = {tag.strip() for tag in tags.split(",") if tag.strip()}
     if not check_mode and "upgrade" in selected_tags:
         offer_pending_reboot()
 
 
 def sync_runtime_dependencies() -> None:
-    home = install_home()
-    pip = home / "venv/bin/pip"
-    galaxy = home / "venv/bin/ansible-galaxy"
+    pip = install_home() / "venv/bin/pip"
     requirements = source_dir() / "installer/requirements.txt"
-    collections = source_dir() / "ansible/requirements.yml"
     if pip.exists() and requirements.exists():
         run([str(pip), "install", "--disable-pip-version-check", "-r", str(requirements)])
-    if galaxy.exists() and collections.exists():
-        run([str(galaxy), "collection", "install", "-r", str(collections)])
 
 
 def ensure_source_executables(directory: Path | None = None) -> None:
@@ -2320,7 +2224,6 @@ def update_managed_source(expected_revision: str | None = None) -> bool:
             "installer/easy_ha_proxy.py",
             "installer/requirements.txt",
             "ansible/easy-ha-proxy.yml",
-            "ansible/requirements.yml",
         ):
             if not (checkout / required).is_file():
                 raise InstallerError(
@@ -3229,8 +3132,7 @@ def command_migrate_domain(args: argparse.Namespace) -> None:
                 if target_internal_ca
                 else DOMAIN_MIGRATION_TAGS
             )
-        print("\nRunning syntax-check and domain migration plan...")
-        syntax_check(preview_dir)
+        print("\nRunning the domain migration plan...")
         run_playbook(
             migration_tags,
             check_mode=True,
@@ -3361,7 +3263,6 @@ def command_install(args: argparse.Namespace) -> None:
         raise InstallerError(
             f"Installation cancelled. Configuration remains in {directory}."
         )
-    syntax_check()
     managed_pending = managed_configuration_is_pending(directory)
     run_playbook(
         INTERNAL_CA_INSTALL_TAGS if internal_ca else INSTALL_TAGS,
@@ -3383,7 +3284,6 @@ def command_plan(args: argparse.Namespace) -> None:
     directory = config_dir()
     component = "ui" if getattr(args, "ui_only", False) else args.component
     managed_pending = managed_configuration_is_pending(directory)
-    syntax_check()
     tags = update_tags_for_args(args, check_mode=True)
     run_playbook(
         tags,
@@ -3627,8 +3527,6 @@ def command_update(args: argparse.Namespace) -> None:
         sync_runtime_dependencies()
     elif component != "all" and fetch_source:
         print("Source fetch skipped for targeted component update.")
-    progress_phase("syntax")
-    syntax_check()
     progress_phase("playbook")
     if changes_tags:
         tags = changes_tags
@@ -3758,7 +3656,6 @@ def command_language(args: argparse.Namespace) -> None:
         "the default web UI language, and Authelia notification templates."
     )
     if args.apply:
-        syntax_check(directory)
         run_playbook(
             LANGUAGE_TAGS,
             directory=directory,
@@ -3822,7 +3719,6 @@ def command_apply_restored(args: argparse.Namespace) -> None:
     offline = bool(getattr(args, "offline", False))
     scope = str(getattr(args, "scope", "full") or "full")
     ensure_security_secrets(directory)
-    syntax_check(directory)
     if scope == "config":
         # A configuration-scope restore replaced only site configs and
         # certificates; re-render and reload HAProxy without touching host
@@ -3877,7 +3773,6 @@ def command_configure(args: argparse.Namespace) -> None:
             generate_internal_certificate(directory)
         else:
             dns_preflight(directory)
-        syntax_check()
         run_playbook(
             UPDATE_TAGS if internal_ca else CONFIGURE_TAGS,
             extra_vars={"haproxy_admin_sync_managed_config": "true"},

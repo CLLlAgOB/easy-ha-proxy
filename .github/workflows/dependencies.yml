@@ -33,12 +33,7 @@ jobs:
       - name: pip-audit
         run: |
           pip install pip-audit==2.7.3
-          # PYSEC-2026-3458 (CVE-2026-11332): argument injection in
-          # `ansible-galaxy role install` from a malicious role's
-          # requirements. The installer only installs collections from the
-          # pinned ansible/requirements.yml, never roles, and 2.17 has no
-          # fixed release. Revisit when moving to ansible-core 2.18.
-          pip-audit --progress-spinner off -r installer/requirements.txt --ignore-vuln PYSEC-2026-3458
+          pip-audit --progress-spinner off -r installer/requirements.txt
 
   pinned:
     name: Pinned versions

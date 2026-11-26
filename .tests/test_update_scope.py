@@ -328,7 +328,6 @@ class TheInstaller(unittest.TestCase):
                 mock.patch("easy_ha_proxy.sync_runtime_haproxy_config_to_managed"),
                 mock.patch("easy_ha_proxy.sync_runtime_authelia_rules_to_managed"),
                 mock.patch("easy_ha_proxy.sync_runtime_dependencies") as deps,
-                mock.patch("easy_ha_proxy.syntax_check"),
                 mock.patch("easy_ha_proxy.run_playbook") as playbook,
                 mock.patch("easy_ha_proxy.mark_installation_complete"),
                 mock.patch("easy_ha_proxy.changes_scope", return_value=scope),

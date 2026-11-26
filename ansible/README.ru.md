@@ -2,7 +2,7 @@
 
 Главный плейбук `easy-ha-proxy.yml` устанавливает и настраивает HAProxy, Certbot, GeoIP ACL, Authelia, Docker-версию `haproxy-admin` и вспомогательные systemd-демоны.
 
-Для одного сервера рекомендуется команда `easy-ha-proxy`, которая устанавливает локальный Ansible в venv и вызывает этот же playbook. Этот документ описывает ручной удалённый режим. [English version](README.md).
+Для одного сервера рекомендуется команда `easy-ha-proxy`: её агент установки (`easy-ha-proxy-agent apply playbook`) выполняет этот же playbook на сервере, без Ansible. Этот документ описывает ручной удалённый режим. [English version](README.md).
 
 ## Требования
 

@@ -58,7 +58,7 @@ def image_reference(variables: dict, revision: str) -> str | None:
     reference = str(variables.get("native_release_image") or f"clllagob/haproxy-admin-ui:native-{channel}")
     if "{{" in reference:
         reference = f"clllagob/haproxy-admin-ui:native-{channel}"
-    if str(variables.get("native_release_pin_revision", True)).lower() not in ("false", "0", "no"):
+    if revision and str(variables.get("native_release_pin_revision", True)).lower() not in ("false", "0", "no"):
         reference += "-" + revision[:12]
     return reference
 

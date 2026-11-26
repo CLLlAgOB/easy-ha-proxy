@@ -136,12 +136,10 @@ class DomainMigrationTests(unittest.TestCase):
             with (
                 mock.patch("easy_ha_proxy.require_root"),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
-                mock.patch("easy_ha_proxy.syntax_check") as syntax,
                 mock.patch("easy_ha_proxy.run_playbook") as playbook,
             ):
                 command_migrate_domain(args)
 
-            syntax.assert_called_once()
             playbook.assert_called_once()
             self.assertTrue(playbook.call_args.kwargs["check_mode"])
             self.assertEqual(
@@ -232,7 +230,6 @@ class DomainMigrationTests(unittest.TestCase):
             with (
                 mock.patch("easy_ha_proxy.require_root"),
                 mock.patch("easy_ha_proxy.config_dir", return_value=directory),
-                mock.patch("easy_ha_proxy.syntax_check"),
                 mock.patch("easy_ha_proxy.run_playbook", side_effect=capture_plan),
             ):
                 command_migrate_domain(args)
