@@ -82,6 +82,14 @@ class Bootstrap(unittest.TestCase):
             with self.assertRaisesRegex(agent_bootstrap.BootstrapError, "no linux/amd64"):
                 agent_bootstrap.fetch_agent("clllagob/haproxy-admin-ui:native-alpha-0123456789ab", REVISION, "amd64")
 
+    def test_a_local_bundle_supplies_the_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "easy-ha-proxy-native-linux-arm64.tar.gz").write_bytes(layer({"./sbin/easy-ha-proxy-agent": b"local"}))
+            self.assertEqual(agent_bootstrap.bundle_agent({"native_local_bundle_dir": directory}, "arm64"), b"local")
+        self.assertIsNone(agent_bootstrap.bundle_agent({}, "arm64"))
+        with self.assertRaisesRegex(agent_bootstrap.BootstrapError, "no SHA-256"):
+            agent_bootstrap.bundle_agent({"native_release_base_url": "https://x"}, "arm64")
+
     def test_the_agent_is_installed_atomically_and_executable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sub" / "agent"

@@ -134,3 +134,76 @@ def install_agent(binary: bytes, destination: Path) -> None:
         if os.path.exists(temporary):
             os.unlink(temporary)
         raise
+
+
+def _agent_from_tarball(raw: bytes) -> bytes:
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as archive:
+        for member in archive.getmembers():
+            if member.isfile() and member.name.lstrip("./") == AGENT_MEMBER:
+                return archive.extractfile(member).read()
+    raise BootstrapError(f"the bundle holds no {AGENT_MEMBER}")
+
+
+def bundle_agent(variables: dict, arch: str | None = None) -> bytes | None:
+    """The agent from the native stage's other sources: a local bundle
+    (native_local_bundle_dir) or an HTTPS release with its pinned checksum
+    (native_release_base_url + native_release_checksums). None when neither
+    is configured."""
+
+    arch = arch or architecture()
+    name = f"easy-ha-proxy-native-linux-{arch}.tar.gz"
+    local = str(variables.get("native_local_bundle_dir") or "")
+    if local:
+        return _agent_from_tarball(Path(local, name).read_bytes())
+    base = str(variables.get("native_release_base_url") or "")
+    if not base:
+        return None
+    if not base.startswith("https://"):
+        raise BootstrapError("native_release_base_url must be an https:// URL")
+    checksum = str((variables.get("native_release_checksums") or {}).get(arch, "")).lower()
+    if len(checksum) != 64:
+        raise BootstrapError(f"native_release_checksums has no SHA-256 for {arch}")
+    request = urllib.request.Request(base.rstrip("/") + "/" + name, headers={"User-Agent": "easy-ha-proxy"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        raw = response.read(MAX_BLOB + 1)
+    if hashlib.sha256(raw).hexdigest() != checksum:
+        raise BootstrapError(f"{name} does not match native_release_checksums")
+    return _agent_from_tarball(raw)
+
+
+def docker_agent(reference: str, revision: str) -> bytes | None:
+    """The agent from the pinned image when Docker already holds it (an
+    offline restore with its images loaded). None without Docker or the image."""
+
+    import shutil
+    import subprocess
+
+    docker = shutil.which("docker")
+    if not docker:
+        return None
+    label = subprocess.run([docker, "image", "inspect", "--format",
+                            '{{ index .Config.Labels "org.opencontainers.image.revision" }}', reference],
+                           capture_output=True, text=True, check=False)
+    if label.returncode != 0:
+        return None
+    if revision and label.stdout.strip() != revision:
+        raise BootstrapError(f"{reference} was built from {label.stdout.strip() or 'an unknown revision'}, not {revision}")
+    created = subprocess.run([docker, "create", "--pull=never", reference], capture_output=True, text=True, check=False)
+    if created.returncode != 0:
+        return None
+    container = created.stdout.strip()
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            for path in ("/sbin/easy-ha-proxy-agent", "/SHA256SUMS"):
+                subprocess.run([docker, "cp", f"{container}:{path}", directory], check=True, capture_output=True)
+            agent = Path(directory, "easy-ha-proxy-agent").read_bytes()
+            sums = Path(directory, "SHA256SUMS").read_text()
+    finally:
+        subprocess.run([docker, "rm", "-f", container], capture_output=True, check=False)
+    for line in sums.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*").lstrip("./") == AGENT_MEMBER:
+            if hashlib.sha256(agent).hexdigest() != parts[0]:
+                raise BootstrapError(f"{AGENT_MEMBER} does not match SHA256SUMS in {reference}")
+            return agent
+    raise BootstrapError(f"SHA256SUMS in {reference} does not list {AGENT_MEMBER}")

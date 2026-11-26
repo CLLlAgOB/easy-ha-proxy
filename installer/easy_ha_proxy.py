@@ -2072,16 +2072,25 @@ def fetch_runner(directory: Path) -> Path | None:
                               capture_output=True, text=True, check=False).stdout.strip()
     if not SOURCE_REVISION_RE.fullmatch(revision):
         return None
-    reference = agent_bootstrap.image_reference(load_yaml_mapping(directory / "vars.yml"), revision)
-    if reference is None:
-        return None
+    variables = load_yaml_mapping(directory / "vars.yml")
+    reference = agent_bootstrap.image_reference(variables, revision)
+    source = reference or "the configured native bundle"
     try:
-        binary = agent_bootstrap.fetch_agent(reference, revision)
+        # The native stage's own order of sources: a local bundle or an HTTPS
+        # release when configured, else the pinned image -- from Docker when
+        # it already holds it (an offline restore), else from the registry.
+        binary = agent_bootstrap.bundle_agent(variables)
+        if binary is None and reference is not None:
+            binary = agent_bootstrap.docker_agent(reference, revision)
+            if binary is None:
+                binary = agent_bootstrap.fetch_agent(reference, revision)
+        if binary is None:
+            return None
         agent_bootstrap.install_agent(binary, STAGED_AGENT)
     except Exception as exc:  # noqa: BLE001 - Ansible remains the fallback
-        print(f"Could not fetch the Go installer from {reference}: {exc}", flush=True)
+        print(f"Could not fetch the Go installer from {source}: {exc}", flush=True)
         return None
-    print(f"Fetched the Go installer built from {revision[:12]} ({reference}).", flush=True)
+    print(f"Fetched the Go installer built from {revision[:12]} ({source}).", flush=True)
     return STAGED_AGENT if agent_runs_playbook(STAGED_AGENT) else None
 
 
