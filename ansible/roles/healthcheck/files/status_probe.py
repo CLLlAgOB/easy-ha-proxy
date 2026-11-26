@@ -35,11 +35,14 @@ def units(items, retries, delay):
 
     Reconciliation and snapd may restart units moments before the check;
     only a state that survives a few probes counts. The waits are shared:
-    every unit still not active is asked again after the same delay.
+    every unit still not active is asked again after the same delay. A unit
+    in the middle of a reload answers "reloading" with exit code 0, and the
+    installer's handlers reload HAProxy right before the check: that is not
+    active yet either.
     """
     states = [run(["systemctl", "is-active", str(item["name"])]) for item in items]
     for _ in range(max(0, retries)):
-        pending = [i for i, state in enumerate(states) if state["rc"] != 0]
+        pending = [i for i, state in enumerate(states) if state["rc"] != 0 or state["stdout"].strip() != "active"]
         if not pending:
             break
         time.sleep(max(0.0, delay))
