@@ -53,6 +53,9 @@ func (d *Daemon) stopTransientUnit(unit string) {
 	}
 }
 
+// agentBinary is the installed agent: the transient jobs run its tools.
+var agentBinary = "/usr/local/sbin/easy-ha-proxy-agent"
+
 func (d *Daemon) python() string {
 	if isRegular(d.Opts.PythonPath) {
 		return d.Opts.PythonPath
@@ -74,7 +77,7 @@ func (d *Daemon) runTransientCommand(jobID string, argv []string, timeout int, l
 	command := []string{systemdRunPath, "--quiet", "--no-block", "--unit", unit, "--service-type=oneshot",
 		"-p", "RemainAfterExit=yes", "-p", "StandardOutput=append:" + outputPath, "-p", "StandardError=inherit",
 		"-p", "KillMode=control-group", "-p", fmt.Sprintf("TimeoutStopSec=%d", transientStopTimeout)}
-	if len(argv) > 1 && filepath.Clean(argv[1]) == filepath.Join(d.Opts.SourceDir, "installer", "apt_metadata.py") {
+	if len(argv) > 1 && argv[0] == agentBinary && argv[1] == "apt-metadata" {
 		command = append(command, "-p", "CPUQuota=100%", "-p", "MemoryMax=512M")
 	}
 	for _, kv := range childEnvironment() {
@@ -291,7 +294,9 @@ func (d *Daemon) trustedSource(filename string) (string, error) {
 }
 
 func (d *Daemon) refreshAptMetadata(jobID string) (retErr error) {
-	if !exists(filepath.Join(d.Opts.SourceDir, "installer", "apt_metadata.py")) {
+	// The agent's tool does it; without the installed agent there is nothing
+	// to run it with (a host still being installed).
+	if !isRegular(agentBinary) {
 		return nil
 	}
 	defer func() {
@@ -312,11 +317,7 @@ func (d *Daemon) refreshAptMetadata(jobID string) (retErr error) {
 	if _, err := d.updateJob(jobID, map[string]any{"progress": map[string]any{"phase": "checking"}}); err != nil {
 		return err
 	}
-	tool, err := d.trustedSource("apt_metadata.py")
-	if err != nil {
-		return err
-	}
-	code, _, err := d.runCommand(jobID, []string{d.python(), tool, "refresh"}, 130,
+	code, _, err := d.runCommand(jobID, []string{agentBinary, "apt-metadata", "refresh"}, 130,
 		"Refreshing signed package metadata without installing packages…")
 	if err != nil {
 		return err

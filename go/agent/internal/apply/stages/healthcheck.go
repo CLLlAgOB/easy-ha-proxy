@@ -107,7 +107,7 @@ func healthcheck(b *Builder) []engine.Step {
 		}}
 	}
 	provider := &engine.Command{Argv: []string{"dpkg-query", "--show", "--showformat=${db:Status-Status}", "haproxy-awslc"}, Probe: true, IgnoreErrors: true}
-	probe := &engine.Command{Probe: true}
+	probe := &statusProbe{}
 	var jobs, timers []*engine.Command
 	var journals, composeLogs []*engine.Command
 	sha := func(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }
@@ -141,10 +141,6 @@ func healthcheck(b *Builder) []engine.Step {
 			return nil
 		}),
 		{Name: "Status check | probe services, files, packages and containers in one pass", Build: func(*engine.Run) (engine.Resource, error) {
-			script, err := os.ReadFile(filepath.Join(b.RoleDir, "files", "status_probe.py"))
-			if err != nil {
-				return nil, err
-			}
 			arg, err := b.Set.Render(`{{ {
      'units': status_check_systemd_enabled,
      'retries': status_check_is_active_retries | default(3) | int,
@@ -158,8 +154,7 @@ func healthcheck(b *Builder) []engine.Step {
 			if err != nil {
 				return nil, err
 			}
-			// lookup('file') strips the file's trailing newline.
-			probe.Argv = []string{"python3", "-c", strings.TrimRight(string(script), "\n"), arg}
+			probe.spec = arg
 			return probe, nil
 		}},
 		fact("Status check | read the probe", nil, func() error {

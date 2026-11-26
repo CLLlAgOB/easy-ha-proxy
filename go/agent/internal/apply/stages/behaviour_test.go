@@ -1,14 +1,17 @@
 package stages
 
 import (
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"easy-ha-proxy/panel/shared/jinja"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
+	_ "modernc.org/sqlite"
 )
 
 // pick returns the named steps, in the part's order.
@@ -614,64 +617,76 @@ func TestTheSpoolMigrationIsLockedQuiescedAndFailsClosed(t *testing.T) {
 // Authelia's database is copied before a different Authelia image runs on it,
 // and only then; a failed copy stops the update before the migration.
 
-func TestTheAutheliaDatabaseIsCopiedOnlyForADifferentImage(t *testing.T) {
-	for _, c := range []struct {
-		running, target string
-		code            int
-		copied          bool
-	}{
-		{"sha256:old authelia/authelia:4.39.27", "sha256:new", 0, true},
-		{"sha256:same authelia/authelia:4.39.28", "sha256:same", 0, false},
-		{"", "sha256:new", 1, false}, // no running container: nothing to copy from
-	} {
-		var calls []string
-		sys := &engine.System{Exec: func(name string, args ...string) (string, int, error) {
-			calls = append(calls, name+" "+strings.Join(args, " "))
-			switch {
-			case name == "docker" && args[0] == "inspect":
-				return c.running, c.code, nil
-			case name == "docker" && args[0] == "image":
-				return c.target, 0, nil
-			case name == "python3":
-				return "copied", 0, nil
-			}
-			return "", 0, nil
-		}}
-		root := repoRoot(t)
-		p := parts["authelia/install"]
-		b := &Builder{Set: mustSetWith(t, root, p, nil), Sys: sys, RoleDir: filepath.Join(root, "ansible", "roles", "authelia")}
-		steps := autheliaDBBackup(b)
-		if err := engine.NewRun(engine.Apply, sys, nil).Do("authelia", steps); err != nil {
-			t.Fatal(err)
-		}
-		copied := false
-		for _, call := range calls {
-			if strings.HasPrefix(call, "python3 ") {
-				copied = true
-				if !strings.Contains(call, "authelia_db_backup.py") || !strings.Contains(call, "/var/backups/easy-ha-proxy/authelia-db") {
-					t.Errorf("copy %s", call)
-				}
-			}
-		}
-		if copied != c.copied {
-			t.Errorf("running %q target %q: copied %v", c.running, c.target, copied)
-		}
+func autheliaCopyRun(t *testing.T, running string, runningCode int, target string, database []byte) (string, error) {
+	t.Helper()
+	root := t.TempDir()
+	if database != nil {
+		os.WriteFile(filepath.Join(root, "db.sqlite3"), database, 0o600)
 	}
-	fail := &engine.System{Exec: func(name string, args ...string) (string, int, error) {
-		switch name {
-		case "python3":
-			return "disk full", 1, nil
-		case "docker":
-			if args[0] == "inspect" {
-				return "sha256:old authelia/authelia:4.39.27", 0, nil
-			}
-			return "sha256:new", 0, nil
+	sys := &engine.System{Exec: func(name string, args ...string) (string, int, error) {
+		if name == "docker" && args[0] == "inspect" {
+			return running, runningCode, nil
 		}
+		if name == "docker" && args[0] == "image" {
+			return target, 0, nil
+		}
+		t.Fatalf("ran %s %v", name, args)
 		return "", 0, nil
 	}}
-	root := repoRoot(t)
-	b := &Builder{Set: mustSetWith(t, root, parts["authelia/install"], nil), Sys: fail, RoleDir: filepath.Join(root, "ansible", "roles", "authelia")}
-	if err := engine.NewRun(engine.Apply, fail, nil).Do("authelia", autheliaDBBackup(b)); err == nil {
+	copies := filepath.Join(root, "copies")
+	b := &Builder{Set: mustSetWith(t, repoRoot(t), parts["authelia/install"], map[string]any{
+		"authelia_root_dir": root, "authelia_db_backup_dir": copies, "authelia_db_backup_keep": 3}), Sys: sys}
+	err := engine.NewRun(engine.Apply, sys, nil).Do("authelia", autheliaDBBackup(b))
+	names, _ := filepath.Glob(filepath.Join(copies, "authelia-db-*.sqlite3"))
+	return strings.Join(names, ","), err
+}
+
+func TestTheAutheliaDatabaseIsCopiedOnlyForADifferentImage(t *testing.T) {
+	database := freshSQLite(t)
+	copied, err := autheliaCopyRun(t, "sha256:old authelia/authelia:4.39.27", 0, "sha256:new", database)
+	if err != nil || !strings.Contains(copied, "authelia_authelia_4.39.27") {
+		t.Fatalf("a different image: copied %q, %v", copied, err)
+	}
+	if copied, err := autheliaCopyRun(t, "sha256:same authelia/authelia:4.39.28", 0, "sha256:same", database); err != nil || copied != "" {
+		t.Fatalf("the same image: copied %q, %v", copied, err)
+	}
+	if copied, err := autheliaCopyRun(t, "", 1, "sha256:new", database); err != nil || copied != "" {
+		t.Fatalf("no running container: copied %q, %v", copied, err)
+	}
+	if copied, err := autheliaCopyRun(t, "sha256:old authelia/authelia:4.39.27", 0, "sha256:new", nil); err != nil || copied != "" {
+		t.Fatalf("no database: copied %q, %v", copied, err)
+	}
+	if _, err := autheliaCopyRun(t, "sha256:old authelia/authelia:4.39.27", 0, "sha256:new", []byte("not a database")); err == nil {
 		t.Fatal("a failed copy let the update go on")
+	}
+}
+
+// freshSQLite is the bytes of a small valid SQLite database.
+func freshSQLite(t *testing.T) []byte {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "seed.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("create table migrations (id integer primary key, version_after int); insert into migrations (version_after) values (29)"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// Where the copies go, and that at least one is kept.
+func TestAutheliaCopiesGoWhereTheRestoreLooks(t *testing.T) {
+	b := &Builder{Set: mustSet(t, repoRoot(t), parts["authelia/install"])}
+	if dir := b.S("{{ authelia_db_backup_dir }}"); dir != "/var/backups/easy-ha-proxy/authelia-db" {
+		t.Errorf("dir %s", dir)
+	}
+	if keep, _ := strconv.Atoi(b.S("{{ authelia_db_backup_keep | string }}")); keep < 1 {
+		t.Errorf("keep %d", keep)
 	}
 }

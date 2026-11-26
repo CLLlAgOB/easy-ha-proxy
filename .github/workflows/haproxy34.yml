@@ -69,7 +69,7 @@ jobs:
       - name: Exercise actual systemd reload, failed candidate and rollback
         run: |
           set -o pipefail
-          sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_migration_smoke.py --systemd 2>&1 | tee /tmp/native-migration-smoke.log
+          sudo env EHP_MIGRATION_DISPOSABLE=1 EHP_AGENT="$RUNNER_TEMP/easy-ha-proxy-agent" "$(command -v python)" .tests/integration/haproxy_migration_smoke.py --systemd 2>&1 | tee /tmp/native-migration-smoke.log
       - name: Annotate migration qualification failure
         if: failure()
         run: python3 .github/scripts/annotate_native_failure.py /tmp/native-migration-smoke.log

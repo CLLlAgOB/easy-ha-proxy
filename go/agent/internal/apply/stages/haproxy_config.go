@@ -219,9 +219,10 @@ func haproxyConfig(b *Builder) []engine.Step {
 		{Name: "Configure HAProxy to load its private environment", Register: "haproxy_secret_dropin", Notify: notify,
 			Build: b.CopyContent(haproxySecretDropIn, "/etc/systemd/system/haproxy.service.d/easy-ha-proxy.conf", "root", "root", "0644")},
 		{Name: "Reload systemd after HAProxy environment drop-in changed", When: Changed("haproxy_secret_dropin"), Resource: engine.DaemonReload{}},
-		{Name: "server-state | Ensure normalizer directory exists", When: onState, Resource: b.Dir("/usr/local/libexec/easy-ha-proxy", "root", "root", "0755")},
-		{Name: "server-state | Install the shared state normalizer", When: onState,
-			Build: b.CopySrc("{{ role_path }}/../../../installer/haproxy_server_state.py", "/usr/local/libexec/easy-ha-proxy/haproxy-server-state.py", "root", "root", "0644")},
+		// The agent normalizes the dumps (easy-ha-proxy-agent server-state);
+		// the Python copy earlier installers put here is not used any more.
+		{Name: "server-state | Remove the former Python normalizer",
+			Resource: &engine.Absent{Path: "/usr/local/libexec/easy-ha-proxy/haproxy-server-state.py"}},
 		{Name: "server-state | Install the dump script", When: onState,
 			Build: b.Template("haproxy-state-dump.sh.j2", "/usr/local/sbin/haproxy-state-dump", "root", "root", "0755")},
 		{Name: "server-state | Normalize state before every cold start", When: onState, Register: "haproxy_state_start_guard",

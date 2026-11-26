@@ -13,11 +13,10 @@ SOCKET="{{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
 STATE_FILE="{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}"
 CONFIG_FILE="${1:-/etc/haproxy/haproxy.cfg}"
 NORMALIZER="${2:-}"
-# The native agent's port of the same normalizer, unless a normalizer is named.
-# The installer's Python normalizer (which the HAProxy package migration also
-# uses) is the fallback: on a fresh install HAProxy runs before the native
-# stage has put the agent in place, and left unrendered (as the tests run it)
-# AGENT is no executable either.
+# The installer agent normalizes the dump. A normalizer named as the second
+# argument is run with python3 instead (the tests drive the script that way).
+# Without either -- on a fresh install HAProxy starts before the native stage
+# has put the agent in place -- the last valid state file is kept as it is.
 AGENT="{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
 TMP_FILE="${STATE_FILE}.tmp.$$"
 FILTERED_FILE="${TMP_FILE}.config-transport"
@@ -25,10 +24,12 @@ FILTERED_FILE="${TMP_FILE}.config-transport"
 trap 'rm -f "$TMP_FILE" "$FILTERED_FILE"' EXIT INT TERM
 
 normalize() {
-    if [ -z "$NORMALIZER" ] && [ -x "$AGENT" ]; then
+    if [ -n "$NORMALIZER" ]; then
+        python3 "$NORMALIZER" --config "$CONFIG_FILE" --state "$1"
+    elif [ -x "$AGENT" ]; then
         "$AGENT" server-state --config "$CONFIG_FILE" --state "$1"
     else
-        python3 "${NORMALIZER:-/usr/local/libexec/easy-ha-proxy/haproxy-server-state.py}" --config "$CONFIG_FILE" --state "$1"
+        return 1
     fi
 }
 

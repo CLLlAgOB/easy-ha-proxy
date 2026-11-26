@@ -92,7 +92,6 @@ _SECRET_QUERY_RE = re.compile(
 )
 
 SERVICE_SOURCE_PATHS: tuple[Path, ...] = (
-    Path("installer/haproxy_server_state.py"),
     Path("go/agent"),
     Path("rust/guardd"),
     Path("ansible/easy-ha-proxy.yml"),
@@ -103,7 +102,6 @@ SERVICE_SOURCE_PATHS: tuple[Path, ...] = (
     Path("ansible/roles/haproxy"),
     Path("ansible/roles/haproxy-admin"),
     Path("ansible/roles/healthcheck"),
-    Path("ansible/roles/update_packages"),
 )
 
 NATIVE_STAGING_METADATA = Path("/var/lib/easy-ha-proxy/native-staging/image.json")

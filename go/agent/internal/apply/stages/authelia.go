@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 )
 
 // The Authelia stage: roles/authelia's install entry (install.yml with the
@@ -504,11 +505,25 @@ func autheliaDBBackup(b *Builder) []engine.Step {
 				return running.code == 0 && target.code == 0 && fields[0] != trimmed(target.out)
 			},
 			Build: func(*engine.Run) (engine.Resource, error) {
+				// The copy is labelled with the image it can be restored under.
 				fields := strings.Split(trimmed(running.out), " ")
-				return &engine.Command{Argv: []string{"python3", b.RoleDir + "/files/authelia_db_backup.py",
-					root + "/" + filepath.Base(b.S("{{ authelia_storage_local_path | default('/config/db.sqlite3') }}")),
-					b.S("{{ authelia_db_backup_dir }}"), fields[len(fields)-1], b.S("{{ authelia_db_backup_keep | string }}")},
-					ChangedWhen: func(out string, _ int) bool { return !strings.Contains(out, "nothing to copy") }}, nil
+				source := root + "/" + filepath.Base(b.S("{{ authelia_storage_local_path | default('/config/db.sqlite3') }}"))
+				dir := b.S("{{ authelia_db_backup_dir }}")
+				keep, _ := strconv.Atoi(b.S("{{ authelia_db_backup_keep | string }}"))
+				return &engine.Func{Desc: "copy " + source + " to " + dir,
+					CheckFn: func(sys *engine.System) (engine.Change, error) {
+						fi, err := os.Stat(sys.Path(source))
+						if err != nil || !fi.Mode().IsRegular() {
+							return engine.Change{Summary: "no database at " + source + "; nothing to copy"}, nil
+						}
+						return engine.Change{Needed: true, Summary: "copy the database"}, nil
+					},
+					ApplyFn: func(sys *engine.System) error {
+						if _, err := tools.CopyAutheliaDB(sys.Path(source), sys.Path(dir), fields[len(fields)-1], keep); err != nil {
+							return fmt.Errorf("Authelia database backup failed: %w", err)
+						}
+						return nil
+					}}, nil
 			}},
 	}
 }

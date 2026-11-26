@@ -36,12 +36,14 @@ class FakeRunner:
 
 class StateNormalizerUpdateTests(unittest.TestCase):
     def test_normalizer_only_change_is_offered_as_a_host_service_update(self):
+        # The agent normalizes the state: a change to its port is a host
+        # service change.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             installed = prepare_source(root / "installed")
             candidate = prepare_source(root / "candidate")
             for source, contents in ((installed, "old\n"), (candidate, "new\n")):
-                helper = source / "installer/haproxy_server_state.py"
+                helper = source / "go/agent/internal/tools/server_state.go"
                 helper.parent.mkdir(parents=True)
                 helper.write_text(contents)
             result = update_plan._probe_services({"state": "available"}, "alpha",

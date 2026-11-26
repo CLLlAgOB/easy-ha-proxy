@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -181,24 +180,7 @@ func (d *Daemon) scheduleTimerMetadata() map[string]any {
 	if !d.timerAt.IsZero() && time.Since(d.timerAt) < 30*time.Second {
 		return copyMap(d.timerValue)
 	}
-	value := map[string]any{}
-	helper := filepath.Join(d.Opts.SourceDir, "installer", "timer_metadata.py")
-	if fi, err := os.Lstat(helper); err == nil && fi.Mode().IsRegular() {
-		rc, out, _, err := runCapture(8*time.Second, []byte{}, nil, d.python, helper, "backups")
-		if err == nil {
-			var metadata map[string]any
-			if json.Unmarshal(out, &metadata) == nil && rc == 0 && metadata != nil {
-				if p, ok := metadata["protocol"].(float64); ok && p == 1 {
-					others := metadata["other_timers"]
-					if others == nil {
-						others = []any{}
-					}
-					value = map[string]any{"timer": metadata["timer"], "other_timers": others,
-						"timer_checked_at": metadata["checked_at"]}
-				}
-			}
-		}
-	}
+	value := backupTimers(runTimerCommand, time.Now())
 	d.timerAt = time.Now()
 	d.timerValue = value
 	return copyMap(value)

@@ -117,10 +117,12 @@ class TheMapMatchesTheRoles(unittest.TestCase):
 
 
 class WhatAChangeNeeds(unittest.TestCase):
-    def test_state_normalizer_change_redeploys_the_installed_copy(self):
+    def test_the_python_state_normalizer_deploys_nothing(self):
+        # Gateways normalize with the agent; the package migration reads the
+        # Python normalizer from the source itself.
         scope = update_scope.scope_for(["installer/haproxy_server_state.py"])
         self.assertFalse(scope["full"])
-        self.assertEqual(scope["tags"], ["ha-cfg", "status"])
+        self.assertEqual(scope["tags"], [])
 
     def test_a_daemon_change_runs_its_stage(self):
         scope = update_scope.scope_for([

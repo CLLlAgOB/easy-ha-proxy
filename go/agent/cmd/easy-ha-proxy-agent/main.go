@@ -82,6 +82,8 @@ func main() {
 		os.Exit(runCertDeliver(args))
 	case "update-geoip":
 		os.Exit(runUpdateGeoIP(args))
+	case "apt-metadata":
+		os.Exit(tools.RunAptMetadata(args, os.Stdout, os.Stderr))
 	case "apply":
 		os.Exit(apply.Run(args, os.Stdout, os.Stderr))
 	case "probe-host":
@@ -94,7 +96,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|probe-host|apply|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|probe-host|apply|version> [flags]")
 }
 
 func runUDPForward(args []string) int {

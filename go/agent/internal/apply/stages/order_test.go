@@ -70,7 +70,7 @@ func TestStepsKeepTheOrderThatKeepsTheGatewaySafe(t *testing.T) {
 				"Refresh APT metadata before reviewing the package upgrade",
 				"Verify package upgrade safety and record the installation attempt", "Update and upgrade apt packages"}},
 		{"haproxy/config", "the state dumper and its normalizer exist before the configuration that reads them; state is refreshed before the start",
-			[]string{"server-state | Install the shared state normalizer", "server-state | Install the dump script",
+			[]string{"server-state | Install the dump script",
 				"server-state | Normalize state before every cold start", "server-state | Enable the refresh timer",
 				"Copy HAProxy configuration", "server-state | Refresh administrative state without transport overrides",
 				"Ensure HAProxy is enabled and running after configuration"}},

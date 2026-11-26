@@ -103,9 +103,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # The installer runs from the refreshed source too -- except for its
     # Python dependencies, which only the full update reinstalls.
     ("installer/requirements.txt", (FULL,)),
-    # This helper is copied to libexec; refreshing installer sources alone
-    # does not update the copy used by HAProxy startup and reload.
-    ("installer/haproxy_server_state.py", ("ha-cfg",)),
     ("installer/*", ()),
     # Always run, and the OS packages have their own update.
     ("ansible/roles/healthcheck/*", ()),
