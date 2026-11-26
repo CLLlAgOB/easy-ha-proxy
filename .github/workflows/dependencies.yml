@@ -13,6 +13,8 @@ on:
       - '**/requirements.txt'
       - 'ansible/roles/*/defaults/main.yml'
       - '.github/scripts/pinned_versions.py'
+      - 'go/agent/internal/pinnedversions/**'
+      - 'go/agent/cmd/pinned-versions/**'
       - '.github/workflows/dependencies.yml'
 
 permissions:
@@ -43,7 +45,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
+          cache: false
       - name: Compare with the registries
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/pinned_versions.py --github
+        working-directory: go/agent
+        run: go run ./cmd/pinned-versions --github --root "$GITHUB_WORKSPACE"
