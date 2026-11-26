@@ -24,6 +24,7 @@ func init() {
 		{Name: "authelia/install", Role: "authelia", File: "install", Build: autheliaInstall},
 		{Name: "authelia/config", Role: "authelia", File: "config", Build: autheliaConfigEntry},
 		{Name: "authelia/daemons", Role: "authelia", File: "daemons", Build: autheliaDaemonsEntry},
+		{Name: "authelia/update", Role: "authelia", File: "update", Build: autheliaUpdate},
 	}})
 }
 
@@ -326,22 +327,12 @@ func autheliaStart(b *Builder, cond func(*engine.Run) bool) []engine.Step {
 	if offline {
 		up = append(up, "--pull", "never")
 	}
-	running := &poll{argv: []string{"docker", "inspect", "--format", "{{.Image}} {{.Config.Image}}", name}, planRead: true}
-	target := &poll{argv: []string{"docker", "image", "inspect", "--format", "{{.Id}}", "authelia/authelia:" + version}, planRead: true}
-	dump := b.S("{{ authelia_redis_data_dir }}") + "/dump.rdb"
-	dumpCheck := &poll{argv: []string{"docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges:true", "--user", b.S("{{ authelia_redis_uid }}:{{ authelia_redis_gid }}"),
-		"--volume", b.S("{{ authelia_redis_data_dir }}") + ":/data:ro", "--entrypoint", "redis-check-rdb", b.S("{{ authelia_redis_image }}"), "/data/dump.rdb"},
-		planRead: true}
-	unreadable := func(r *engine.Run) bool { return dumpCheck.ran && dumpCheck.code == 1 }
-	relay := &poll{argv: []string{"docker", "inspect", "--format", "{{.State.Running}}", "mail_relay"}}
 	state := &poll{argv: []string{"docker", "inspect", "--format", "{{.State.Status}}", name}, tries: 12, delay: 5 * time.Second,
 		until: func(out string, code int) bool { return code == 0 && trimmed(out) == "running" }}
 	notRunning := func(r *engine.Run) bool { return state.ran && (state.code != 0 || trimmed(state.out) != "running") }
 	ps := &poll{argv: []string{"env", "-C", root, "docker", "compose", "ps", "--all"}}
 	logs := &poll{argv: []string{"/bin/sh", "-c", `exec docker logs --timestamps --tail 80 "$0" 2>&1`, name}}
 	timeStatus := &poll{argv: []string{"timedatectl", "status"}}
-	apply := func(r *engine.Run) bool { return r.Mode == engine.Apply }
 
 	steps := []engine.Step{
 		{Name: "Validate Authelia docker-compose.yml",
@@ -349,43 +340,11 @@ func autheliaStart(b *Builder, cond func(*engine.Run) bool) []engine.Step {
 		{Name: "Validate Authelia configuration.yml via CLI in container", Resource: &engine.Command{Argv: validate}},
 		{Name: "Pull Authelia stack images", Tags: restoreNet,
 			Resource: &engine.Command{Argv: []string{"docker", "compose", "pull"}, Dir: root, Env: env, Retries: 3, Delay: 20 * time.Second}},
-		{Name: "Safely migrate the legacy container-layer mail relay spool", When: apply,
-			Build: func(*engine.Run) (engine.Resource, error) {
-				script, err := b.Set.Render(autheliaSpoolMigration)
-				if err != nil {
-					return nil, err
-				}
-				return &rescueNote{Resource: &engine.Command{Argv: []string{"/bin/bash", "-c", script}, Dir: root,
-					ChangedWhen: func(out string, _ int) bool { return trimmed(out) == "migrated" }},
-					msg: "The legacy mail_relay spool could not be migrated safely. Its container and queue were preserved or recovered. " +
-						"Verify Docker, let any queued mail drain, and retry the update."}, nil
-			}},
-		{Name: "Read the image the running Authelia container was created from", Resource: running},
-		{Name: "Read the image Authelia is about to run", Resource: target},
-		{Name: "Copy the Authelia database before a different image starts on it",
-			When: func(*engine.Run) bool {
-				fields := strings.Split(trimmed(running.out), " ")
-				return running.code == 0 && target.code == 0 && fields[0] != trimmed(target.out)
-			},
-			Build: func(*engine.Run) (engine.Resource, error) {
-				fields := strings.Split(trimmed(running.out), " ")
-				return &engine.Command{Argv: []string{"python3", b.RoleDir + "/files/authelia_db_backup.py",
-					root + "/" + filepath.Base(b.S("{{ authelia_storage_local_path | default('/config/db.sqlite3') }}")),
-					b.S("{{ authelia_db_backup_dir }}"), fields[len(fields)-1], b.S("{{ authelia_db_backup_keep | string }}")},
-					ChangedWhen: func(out string, _ int) bool { return !strings.Contains(out, "nothing to copy") }}, nil
-			}},
-		{Name: "Let the Redis image about to run check the session dump",
-			When: func(*engine.Run) bool { return redis && b.Exists(dump, false) }, Resource: dumpCheck},
-		{Name: "Stop the Redis that wrote the dump", When: func(r *engine.Run) bool { return redis && unreadable(r) },
-			Resource: &engine.Command{Argv: []string{"docker", "stop", "authelia-redis"}, Changes: true, IgnoreErrors: true}},
-		{Name: "Move the unreadable dump out of the way", When: func(r *engine.Run) bool { return redis && unreadable(r) },
-			Build: func(*engine.Run) (engine.Resource, error) {
-				return &engine.Command{Argv: []string{"mv", "--no-clobber", dump, dump + ".unreadable-" + time.Now().UTC().Format("20060102T150405Z")},
-					Changes: true}, nil
-			}},
-		{Name: "Say why everyone has to sign in again", When: func(r *engine.Run) bool { return redis && unreadable(r) },
-			Resource: report(b.S("{{ authelia_redis_image }}") + " cannot read the session dump an earlier Redis wrote, so it was moved aside in " +
-				b.S("{{ authelia_redis_data_dir }}") + " and Redis starts empty. Signed-in users have to sign in again.")},
+	}
+	steps = append(steps, autheliaSpool(b)...)
+	steps = append(steps, autheliaDBBackup(b)...)
+	steps = append(steps, autheliaRedisGuard(b, redis)...)
+	steps = append(steps, []engine.Step{
 		{Name: "Ensure Authelia stack is up", Resource: &rescueNote{
 			Resource: &engine.Command{Argv: up, Dir: root, Env: env, Changes: true, Retries: 2, Delay: 10 * time.Second},
 			cleanup: func(sys *engine.System) {
@@ -396,10 +355,9 @@ func autheliaStart(b *Builder, cond func(*engine.Run) bool) []engine.Step {
 			},
 			msg: "Docker Compose could not reconcile the Authelia stack. If the legacy spool migration stopped Authelia, a best-effort " +
 				"restart was attempted and the old relay spool was not deleted explicitly."}},
-		{Name: "See whether the mail relay is running", Resource: relay},
-		{Name: "Send the mail the relay holds back", When: func(*engine.Run) bool { return relay.ran && trimmed(relay.out) == "true" },
-			Resource: &poll{argv: []string{"docker", "exec", "mail_relay", "postqueue", "-f"}, tries: 3, delay: 3 * time.Second,
-				until: func(_ string, code int) bool { return code == 0 }}},
+	}...)
+	steps = append(steps, autheliaRelayFlush()...)
+	steps = append(steps, []engine.Step{
 		{Name: "Inspect Authelia container state after compose up", Resource: state},
 		{Name: "Inspect Authelia compose status when container is not running", When: notRunning, Resource: ps},
 		{Name: "Collect recent Authelia logs when startup fails", When: notRunning, Resource: logs},
@@ -432,7 +390,7 @@ func autheliaStart(b *Builder, cond func(*engine.Run) bool) []engine.Step {
 			ApplyFn: func(*engine.System) error {
 				return waitPort("127.0.0.1:9091", 3*time.Second, time.Duration(wait)*time.Second)
 			}}},
-	}
+	}...)
 	for i := range steps {
 		steps[i].When = andWhen(cond, steps[i].When)
 	}
@@ -506,4 +464,142 @@ func autheliaConfigEntry(b *Builder) []engine.Step {
 func autheliaDaemonsEntry(b *Builder) []engine.Step {
 	steps := append(autheliaUsersd(b), autheliaBansd(b)...)
 	return whenEnabled(b, append(steps, autheliaConfigd(b)...))
+}
+
+// autheliaSpool is mail_relay_spool.yml with its rescue (start.yml and
+// update.yml both run it).
+func autheliaSpool(b *Builder) []engine.Step {
+	root := b.S("{{ authelia_root_dir }}")
+	apply := func(r *engine.Run) bool { return r.Mode == engine.Apply }
+	return []engine.Step{
+		{Name: "Safely migrate the legacy container-layer mail relay spool", When: apply,
+			Build: func(*engine.Run) (engine.Resource, error) {
+				script, err := b.Set.Render(autheliaSpoolMigration)
+				if err != nil {
+					return nil, err
+				}
+				return &rescueNote{Resource: &engine.Command{Argv: []string{"/bin/bash", "-c", script}, Dir: root,
+					ChangedWhen: func(out string, _ int) bool { return trimmed(out) == "migrated" }},
+					msg: "The legacy mail_relay spool could not be migrated safely. Its container and queue were preserved or recovered. " +
+						"Verify Docker, let any queued mail drain, and retry the update."}, nil
+			}},
+	}
+}
+
+// autheliaDBBackup is db_backup.yml: the database copied before a different
+// Authelia image starts on it.
+func autheliaDBBackup(b *Builder) []engine.Step {
+	root := b.S("{{ authelia_root_dir }}")
+	name := b.S("{{ authelia_container_name }}")
+	version := b.S("{{ authelia_version | default('4.39.28') }}")
+	running := &poll{argv: []string{"docker", "inspect", "--format", "{{.Image}} {{.Config.Image}}", name}, planRead: true}
+	target := &poll{argv: []string{"docker", "image", "inspect", "--format", "{{.Id}}", "authelia/authelia:" + version}, planRead: true}
+	return []engine.Step{
+		{Name: "Read the image the running Authelia container was created from", Resource: running},
+		{Name: "Read the image Authelia is about to run", Resource: target},
+		{Name: "Copy the Authelia database before a different image starts on it",
+			When: func(*engine.Run) bool {
+				fields := strings.Split(trimmed(running.out), " ")
+				return running.code == 0 && target.code == 0 && fields[0] != trimmed(target.out)
+			},
+			Build: func(*engine.Run) (engine.Resource, error) {
+				fields := strings.Split(trimmed(running.out), " ")
+				return &engine.Command{Argv: []string{"python3", b.RoleDir + "/files/authelia_db_backup.py",
+					root + "/" + filepath.Base(b.S("{{ authelia_storage_local_path | default('/config/db.sqlite3') }}")),
+					b.S("{{ authelia_db_backup_dir }}"), fields[len(fields)-1], b.S("{{ authelia_db_backup_keep | string }}")},
+					ChangedWhen: func(out string, _ int) bool { return !strings.Contains(out, "nothing to copy") }}, nil
+			}},
+	}
+}
+
+// autheliaRedisGuard is redis_dump_guard.yml, included when redis is on.
+func autheliaRedisGuard(b *Builder, redis bool) []engine.Step {
+	dump := b.S("{{ authelia_redis_data_dir }}") + "/dump.rdb"
+	dumpCheck := &poll{argv: []string{"docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges:true", "--user", b.S("{{ authelia_redis_uid }}:{{ authelia_redis_gid }}"),
+		"--volume", b.S("{{ authelia_redis_data_dir }}") + ":/data:ro", "--entrypoint", "redis-check-rdb", b.S("{{ authelia_redis_image }}"), "/data/dump.rdb"},
+		planRead: true}
+	unreadable := func(r *engine.Run) bool { return dumpCheck.ran && dumpCheck.code == 1 }
+	return []engine.Step{
+		{Name: "Let the Redis image about to run check the session dump",
+			When: func(*engine.Run) bool { return redis && b.Exists(dump, false) }, Resource: dumpCheck},
+		{Name: "Stop the Redis that wrote the dump", When: func(r *engine.Run) bool { return redis && unreadable(r) },
+			Resource: &engine.Command{Argv: []string{"docker", "stop", "authelia-redis"}, Changes: true, IgnoreErrors: true}},
+		{Name: "Move the unreadable dump out of the way", When: func(r *engine.Run) bool { return redis && unreadable(r) },
+			Build: func(*engine.Run) (engine.Resource, error) {
+				return &engine.Command{Argv: []string{"mv", "--no-clobber", dump, dump + ".unreadable-" + time.Now().UTC().Format("20060102T150405Z")},
+					Changes: true}, nil
+			}},
+		{Name: "Say why everyone has to sign in again", When: func(r *engine.Run) bool { return redis && unreadable(r) },
+			Resource: report(b.S("{{ authelia_redis_image }}") + " cannot read the session dump an earlier Redis wrote, so it was moved aside in " +
+				b.S("{{ authelia_redis_data_dir }}") + " and Redis starts empty. Signed-in users have to sign in again.")},
+	}
+}
+
+// autheliaRelayFlush is mail_relay_flush.yml.
+func autheliaRelayFlush() []engine.Step {
+	relay := &poll{argv: []string{"docker", "inspect", "--format", "{{.State.Running}}", "mail_relay"}}
+	return []engine.Step{
+		{Name: "See whether the mail relay is running", Resource: relay},
+		{Name: "Send the mail the relay holds back", When: func(*engine.Run) bool { return relay.ran && trimmed(relay.out) == "true" },
+			Resource: &poll{argv: []string{"docker", "exec", "mail_relay", "postqueue", "-f"}, tries: 3, delay: 3 * time.Second,
+				until: func(_ string, code int) bool { return code == 0 }}},
+	}
+}
+
+// autheliaUpdate is update.yml (aut-update): the current files rendered, the
+// images pulled, the same guards as start.yml, compose up (no forced
+// recreate), the relay flush and the port wait.
+func autheliaUpdate(b *Builder) []engine.Step {
+	root := b.S("{{ authelia_root_dir }}")
+	name := b.S("{{ authelia_container_name }}")
+	env := []string{"COMPOSE_PROGRESS=plain", "DOCKER_CLI_HINTS=false"}
+	redis := b.Bool("{{ authelia_session_redis_enabled | default(true) | bool }}")
+	relayUsed := b.Bool("{{ mail_notify_enabled | default(false) | bool or mail_relay_server | default(false) | bool }}")
+	wait, _ := strconv.Atoi(b.S("{{ authelia_start_wait_timeout | int }}"))
+	trustSrc := filepath.Join(b.RoleDir, "files", "mail_relay.d", "10-trust.sh")
+	steps := []engine.Step{
+		{Name: "Ensure Docker daemon is running", Resource: Unit("docker", engine.Bool(true), "started")},
+		autheliaMailNotifyState(b),
+		{Name: "Render the current mail relay environment before migration",
+			Build: b.Template("authelia.env.j2", "{{ authelia_env_file }}", "root", "root", "0600")},
+		{Name: "Create the mail relay start-up scripts directory", Resource: b.Dir(root+"/mail_relay.d", "root", "root", "0755")},
+		{Name: "Install the mail relay trust settings", Register: "authelia_mail_relay_trust",
+			Build: b.CopyFile("mail_relay.d/10-trust.sh", root+"/mail_relay.d/10-trust.sh", "root", "root", "0644")},
+		fact("Remember the mail relay scripts' checksum", nil, func() error {
+			raw, err := os.ReadFile(trustSrc)
+			if err != nil {
+				return err
+			}
+			sum := sha1.Sum(raw)
+			b.Set.SetFact("authelia_mail_relay_scripts_digest", hex.EncodeToString(sum[:]))
+			return nil
+		}),
+		{Name: "Render the current Authelia Compose definition before migration",
+			Build: b.Template("docker-compose.yml.j2", root+"/docker-compose.yml", "root", "docker", "0640")},
+		{Name: "Pull Authelia stack images", Resource: &engine.Command{Argv: []string{"docker", "compose", "pull"}, Dir: root, Env: env}},
+	}
+	steps = append(steps, autheliaSpool(b)...)
+	steps = append(steps, autheliaDBBackup(b)...)
+	steps = append(steps, autheliaRedisGuard(b, redis)...)
+	steps = append(steps, engine.Step{Name: "Reconcile Authelia stack after image pull", Resource: &rescueNote{
+		Resource: &engine.Command{Argv: []string{"docker", "compose", "up", "--detach", "--remove-orphans"}, Dir: root, Env: env, MergeStderr: true,
+			ChangedWhen: func(out string, _ int) bool { return composeChanged.MatchString(out) }},
+		cleanup: func(sys *engine.System) {
+			if relayUsed {
+				sys.Exec("docker", "start", "mail_relay")
+			}
+			sys.Exec("docker", "start", name)
+		},
+		msg: "Docker Compose could not reconcile the updated Authelia stack. A best-effort Authelia restart was attempted after spool migration."}})
+	steps = append(steps, autheliaRelayFlush()...)
+	steps = append(steps, engine.Step{Name: "Wait for Authelia after image update", When: func(r *engine.Run) bool { return r.Mode == engine.Apply },
+		Resource: &engine.Func{Desc: "wait for 127.0.0.1:9091",
+			CheckFn: func(*engine.System) (engine.Change, error) {
+				return engine.Change{Summary: "runs on apply", Run: true}, nil
+			},
+			ApplyFn: func(*engine.System) error {
+				return waitPort("127.0.0.1:9091", 3*time.Second, time.Duration(wait)*time.Second)
+			}}})
+	return whenEnabled(b, steps)
 }

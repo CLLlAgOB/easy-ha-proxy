@@ -2,4 +2,4 @@
 # agent runs them, or else the task file is included); every other one is
 # imported as it is. A test keeps the list equal to the authelia parts.
 - import_tasks: >-
-    {{ 'go_fallback.yml' if task_stage in ['install', 'config', 'daemons'] else task_stage ~ '.yml' }}
+    {{ 'go_fallback.yml' if task_stage in ['install', 'config', 'daemons', 'update'] else task_stage ~ '.yml' }}
