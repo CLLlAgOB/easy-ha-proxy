@@ -317,9 +317,16 @@ func createPayload(destination string, paths, excludes []string) ([]string, erro
 }
 
 // extractPayload extracts over "/"; with members, only those (and what is
-// below them).
+// below them). Full extractions preserve host broker/control-plane subtrees
+// (such as backup-web) so a live web restore cannot overwrite its own job
+// files or recovery source.
 var extractPayload = func(payload string, members []string) error {
 	argv := []string{"tar", "--acls", "--xattrs", "--xattrs-exclude=security.*", "--numeric-owner", "-xzpf", payload, "-C", "/"}
+	if len(members) == 0 {
+		for _, rel := range relativePaths(effectiveRestorePreservedPaths()) {
+			argv = append(argv, "--exclude="+rel, "--exclude=./"+rel)
+		}
+	}
 	argv = append(argv, members...)
 	_, err := run(argv, runOptions{check: true})
 	return err

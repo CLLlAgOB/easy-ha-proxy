@@ -1833,7 +1833,7 @@ def offline_restore_required_images(
     templates = {
         controller_source
         / "ansible/roles/haproxy-admin/templates/docker-compose.yml.j2": (
-            "haproxy_admin_image",
+            "haproxy_admin_go_image",
         ),
         controller_source
         / "ansible/roles/authelia/templates/docker-compose.yml.j2": (
@@ -1907,10 +1907,14 @@ def offline_restore_required_images(
         )
         if enabled("authelia_session_redis_enabled", True):
             images.add(str(effective.get("authelia_redis_image", "")).strip())
-        # The relay service is always rendered (possibly behind a profile),
-        # and the spool migration may recreate an existing legacy relay even
-        # when notifications are currently disabled.
-        images.add(str(effective.get("mail_relay_image", "")).strip())
+        # The relay service sits behind the mail-relay profile when disabled;
+        # require its image offline only when notifications/relay are enabled
+        # or when a legacy mail_relay container exists for spool migration.
+        relay_enabled = enabled("mail_notify_enabled", False) or enabled(
+            "mail_relay_server", False
+        )
+        if relay_enabled or _docker_container_exists("mail_relay"):
+            images.add(str(effective.get("mail_relay_image", "")).strip())
 
     invalid = sorted(
         image
@@ -1923,6 +1927,22 @@ def offline_restore_required_images(
             + ", ".join(repr(image) for image in invalid)
         )
     return images
+
+
+def _docker_container_exists(name: str) -> bool:
+    docker = shutil.which("docker")
+    if not docker:
+        return False
+    try:
+        result = subprocess.run(
+            [docker, "inspect", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def offline_restore_image_preflight(

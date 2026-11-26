@@ -100,6 +100,19 @@ var (
 		"var/lib/easy-ha-proxy/requests",
 	}
 
+	// Host broker and package-control subtrees under managed roots that belong
+	// to the running host rather than restored gateway data. A full restore
+	// with --replace-managed (and its rollback) must keep them intact so the
+	// live backupd job, its stdout/stderr capture, recovery source copy, local
+	// backups, update-web spool, package migration history and native staging
+	// survive intact.
+	restorePreservedPaths = []string{
+		"/var/lib/easy-ha-proxy/backup-web",
+		"/var/lib/easy-ha-proxy/update-web",
+		"/var/lib/easy-ha-proxy/haproxy-package-migration",
+		"/var/lib/easy-ha-proxy/native-staging",
+	}
+
 	// The monitoring history: SQLite's online backup copies it consistently
 	// while the collector keeps writing. The snapshot lives under an
 	// archived root only while the archive is written; a restore moves it
@@ -541,6 +554,46 @@ func relativePaths(paths []string) []string {
 		out[i] = strings.TrimLeft(p, "/")
 	}
 	return out
+}
+
+// effectiveRestorePreservedPaths returns the cleaned absolute paths that must
+// never be removed or overwritten by full-restore replacement or rollback,
+// including an explicit EASY_HA_PROXY_SOURCE_DIR recovery copy if set.
+func effectiveRestorePreservedPaths() []string {
+	seen := map[string]bool{}
+	for _, p := range restorePreservedPaths {
+		if norm, ok := normalizedAbsolutePath(p); ok {
+			seen[norm] = true
+		}
+	}
+	if configured := strings.TrimSpace(os.Getenv("EASY_HA_PROXY_SOURCE_DIR")); configured != "" {
+		if abs, err := filepath.Abs(configured); err == nil {
+			if norm, ok := normalizedAbsolutePath(abs); ok && norm != managedSource {
+				seen[norm] = true
+			}
+		}
+	}
+	return sortedKeys(seen)
+}
+
+func pathIsPreserved(p string, preserved []string) bool {
+	norm := filepath.Clean(p)
+	for _, keep := range preserved {
+		if isSameOrBelow(norm, keep) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPreservedDescendant(p string, preserved []string) bool {
+	norm := filepath.Clean(p)
+	for _, keep := range preserved {
+		if keep != norm && isSameOrBelow(keep, norm) {
+			return true
+		}
+	}
+	return false
 }
 
 // splitLines is Python's str.splitlines for the usual line ends.

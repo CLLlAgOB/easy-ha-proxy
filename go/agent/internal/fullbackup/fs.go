@@ -56,8 +56,10 @@ func executable(p string) bool {
 }
 
 // removePaths removes exact, already-authorized paths, deepest first,
-// without following symbolic links.
+// without following symbolic links, while keeping host control-plane subtrees
+// listed in effectiveRestorePreservedPaths intact.
 var removePaths = func(paths []string) error {
+	preserved := effectiveRestorePreservedPaths()
 	unique := map[string]bool{}
 	for _, p := range paths {
 		unique[p] = true
@@ -79,15 +81,40 @@ var removePaths = func(paths []string) error {
 		}
 	}
 	for _, p := range ordered {
-		fi, err := os.Lstat(p)
-		if err != nil {
-			continue
+		if err := removeOnePreserving(p, preserved); err != nil {
+			return err
 		}
-		if fi.IsDir() {
-			if err := os.RemoveAll(p); err != nil {
-				return err
-			}
-		} else if err := os.Remove(p); err != nil {
+	}
+	return nil
+}
+
+func removeOnePreserving(p string, preserved []string) error {
+	clean := filepath.Clean(p)
+	if pathIsPreserved(clean, preserved) {
+		return nil
+	}
+	fi, err := os.Lstat(clean)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return os.Remove(clean)
+	}
+	if !hasPreservedDescendant(clean, preserved) {
+		return os.RemoveAll(clean)
+	}
+	entries, err := os.ReadDir(clean)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if err := removeOnePreserving(filepath.Join(clean, entry.Name()), preserved); err != nil {
 			return err
 		}
 	}

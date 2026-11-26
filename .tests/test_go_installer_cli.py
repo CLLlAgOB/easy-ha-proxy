@@ -137,5 +137,64 @@ class TheVenvLosesAnsible(unittest.TestCase):
         self.assertEqual([command[1] for command in runs], ["install"])
 
 
+class OfflineRestoreRequiredImagesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repo_root = Path(__file__).resolve().parents[1]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = Path(self.tmp.name)
+        (self.cfg / "vars.yml").write_text(
+            "haproxy_admin_image_channel: alpha\n"
+            "haproxy_admin_use_docker: true\n"
+            "authelia_enabled: true\n"
+            "authelia_session_redis_enabled: true\n",
+            encoding="utf-8",
+        )
+        (self.cfg / "authelia.yml").write_text(
+            "mail_notify_enabled: false\n"
+            "mail_relay_server: false\n",
+            encoding="utf-8",
+        )
+
+    def test_uses_go_panel_template_and_skips_unused_mail_relay(self) -> None:
+        fake_git = subprocess.CompletedProcess([], 0, "1d91160cd370abcdef0123456789\n", "")
+        with (
+            mock.patch.object(easy_ha_proxy.subprocess, "run", return_value=fake_git),
+            mock.patch.object(easy_ha_proxy, "_docker_container_exists", return_value=False),
+        ):
+            images = easy_ha_proxy.offline_restore_required_images(
+                directory=self.cfg,
+                controller_source=self.repo_root,
+            )
+        self.assertIn("clllagob/haproxy-admin-ui:go-alpha", images)
+        self.assertIn("clllagob/haproxy-admin-ui:native-alpha-1d91160cd370", images)
+        self.assertTrue(any(img.startswith("authelia/authelia:") for img in images))
+        self.assertTrue(any(img.startswith("redis:") for img in images))
+        self.assertFalse(any("postfix" in img for img in images))
+
+    def test_requires_mail_relay_when_enabled_or_container_present(self) -> None:
+        fake_git = subprocess.CompletedProcess([], 0, "1d91160cd370abcdef0123456789\n", "")
+        with (
+            mock.patch.object(easy_ha_proxy.subprocess, "run", return_value=fake_git),
+            mock.patch.object(easy_ha_proxy, "_docker_container_exists", return_value=True),
+        ):
+            images = easy_ha_proxy.offline_restore_required_images(
+                directory=self.cfg,
+                controller_source=self.repo_root,
+            )
+        self.assertTrue(any("postfix" in img for img in images))
+
+        (self.cfg / "authelia.yml").write_text("mail_notify_enabled: true\n", encoding="utf-8")
+        with (
+            mock.patch.object(easy_ha_proxy.subprocess, "run", return_value=fake_git),
+            mock.patch.object(easy_ha_proxy, "_docker_container_exists", return_value=False),
+        ):
+            images_enabled = easy_ha_proxy.offline_restore_required_images(
+                directory=self.cfg,
+                controller_source=self.repo_root,
+            )
+        self.assertTrue(any("postfix" in img for img in images_enabled))
+
+
 if __name__ == "__main__":
     unittest.main()

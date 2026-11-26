@@ -304,3 +304,48 @@ func TestPythonVectors(t *testing.T) {
 		t.Fatalf("retention differs: got %d victims, python %d", len(got), len(v.Victims))
 	}
 }
+
+func TestCopyRecoverySourceKeepsGitAndSkipsPycache(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "source")
+	spool := filepath.Join(root, "spool")
+	for _, rel := range []string{
+		"install-local.sh",
+		"installer/easy_ha_proxy.py",
+		"installer/__pycache__/easy_ha_proxy.cpython-312.pyc",
+		"installer/leftover.pyc",
+		"ansible/easy-ha-proxy.yml",
+		"ansible/requirements.yml",
+		".git/HEAD",
+		".git/refs/heads/alpha",
+	} {
+		p := filepath.Join(src, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("content-"+rel), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(spool, "jobs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDaemon(Options{SpoolRoot: spool, SourceDir: src})
+
+	dst, err := d.copyRecoverySource(strings.Repeat("a", 32))
+	if err != nil {
+		t.Fatalf("copyRecoverySource: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".git/HEAD")); err != nil {
+		t.Fatalf("expected .git/HEAD in recovery source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".git/refs/heads/alpha")); err != nil {
+		t.Fatalf("expected .git/refs/heads/alpha in recovery source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "installer/__pycache__")); !os.IsNotExist(err) {
+		t.Fatalf("expected __pycache__ to be skipped, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "installer/leftover.pyc")); !os.IsNotExist(err) {
+		t.Fatalf("expected .pyc to be skipped, got err=%v", err)
+	}
+}

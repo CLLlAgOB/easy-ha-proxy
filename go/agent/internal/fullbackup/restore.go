@@ -184,7 +184,7 @@ var createPreRestoreBackup = func(paths []string) (string, error) {
 		return "", err
 	}
 	archive := filepath.Join(destination, "previous-state.tar.gz")
-	if _, err := createPayload(archive, existing, nil); err != nil {
+	if _, err := createPayload(archive, existing, relativePaths(effectiveRestorePreservedPaths())); err != nil {
 		return "", err
 	}
 	return archive, nil
@@ -205,10 +205,14 @@ var cleanupPreRestoreBackup = func(archive string) {
 var managedPathsApparentUsage = func(paths []string) (int64, int64, map[uint64]bool, error) {
 	var bytes, members int64
 	devices := map[uint64]bool{}
+	preserved := effectiveRestorePreservedPaths()
 	type identity struct{ dev, ino uint64 }
 	seen := map[identity]bool{}
 	var visit func(string) error
 	visit = func(value string) error {
+		if pathIsPreserved(value, preserved) {
+			return nil
+		}
 		fi, err := os.Lstat(value)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil

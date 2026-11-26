@@ -544,3 +544,70 @@ func TestTheQuiesceUnwindsAfterAPartialEntryFailure(t *testing.T) {
 		t.Fatalf("calls %v", r.calls)
 	}
 }
+
+func TestReplaceManagedPreservesBrokerSpoolAndRecoverySource(t *testing.T) {
+	root := t.TempDir()
+	varLib := filepath.Join(root, "var/lib/easy-ha-proxy")
+	auditFile := filepath.Join(varLib, "audit/audit.db")
+	strayFile := filepath.Join(varLib, "stray.tmp")
+	localBackup := filepath.Join(varLib, "backup-web/backups/existing.tar.gz.enc")
+	jobStderr := filepath.Join(varLib, "backup-web/jobs/.job-abc.stderr")
+	recoveryFile := filepath.Join(varLib, "backup-web/jobs/.0123.recovery-source/install-local.sh")
+	updatePlan := filepath.Join(varLib, "update-web/latest-plan.json")
+	migrationState := filepath.Join(varLib, "haproxy-package-migration/last-migration.json")
+	nativeStage := filepath.Join(varLib, "native-staging/image.json")
+	writeText(t, auditFile, "old-audit")
+	writeText(t, strayFile, "remove-me")
+	writeText(t, localBackup, "keep-backup")
+	writeText(t, jobStderr, "live-stderr")
+	writeText(t, recoveryFile, "#!/bin/sh\n")
+	writeText(t, updatePlan, "{}")
+	writeText(t, migrationState, "{}")
+	writeText(t, nativeStage, "{}")
+
+	preserved := []string{
+		filepath.Join(varLib, "backup-web"),
+		filepath.Join(varLib, "update-web"),
+		filepath.Join(varLib, "haproxy-package-migration"),
+		filepath.Join(varLib, "native-staging"),
+	}
+	swap(t, &restorePreservedPaths, preserved)
+
+	// Apparent usage must skip preserved subtrees (like gigabytes of local backups).
+	usedBytes, _, _, err := managedPathsApparentUsage([]string{varLib})
+	if err != nil {
+		t.Fatalf("apparent usage: %v", err)
+	}
+	wantBytes := int64(len("old-audit") + len("remove-me"))
+	if usedBytes != wantBytes {
+		t.Fatalf("apparent usage included preserved files: got %d, want %d", usedBytes, wantBytes)
+	}
+
+	// removePaths on /var/lib/easy-ha-proxy must delete managed data while keeping broker state.
+	if err := removePaths([]string{varLib}); err != nil {
+		t.Fatalf("removePaths: %v", err)
+	}
+	for _, gone := range []string{auditFile, filepath.Dir(auditFile), strayFile} {
+		if lexists(gone) {
+			t.Fatalf("managed path should have been removed: %s", gone)
+		}
+	}
+	for _, kept := range []string{localBackup, jobStderr, recoveryFile, updatePlan, migrationState, nativeStage} {
+		if !lexists(kept) {
+			t.Fatalf("preserved host path was deleted: %s", kept)
+		}
+	}
+
+	// Full extractPayload must exclude preserved subtrees so an archive cannot clobber live jobs.
+	r := record(t, nil)
+	if err := extractPayload("/tmp/payload.tar.gz", nil); err != nil {
+		t.Fatalf("extractPayload: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 tar call, got %v", r.calls)
+	}
+	wantExclude := "--exclude=" + strings.TrimLeft(filepath.Join(varLib, "backup-web"), "/")
+	if !contains(r.calls[0], wantExclude) {
+		t.Fatalf("extractPayload argv missing %q: %v", wantExclude, r.calls[0])
+	}
+}

@@ -427,7 +427,7 @@ func (d *Daemon) copyRecoverySource(jobID string) (string, error) {
 		}
 		rel, _ := filepath.Rel(d.Opts.SourceDir, path)
 		name := entry.Name()
-		if path != d.Opts.SourceDir && (name == ".git" || name == "__pycache__" || strings.HasSuffix(name, ".pyc")) {
+		if path != d.Opts.SourceDir && (name == "__pycache__" || strings.HasSuffix(name, ".pyc")) {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}
