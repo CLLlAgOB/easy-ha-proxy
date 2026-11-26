@@ -29,7 +29,12 @@ func (a *ACL) args(test bool) []string {
 		args = append(args, "-d")
 	}
 	if a.Absent {
-		args = append(args, "-x", "user:"+a.User)
+		// -n: removing an entry leaves the mask as it is. Recalculated, the
+		// mask widened to a group entry an earlier chmod had masked, so a
+		// file the role keeps at 0640 showed 0650 after every removal -- and
+		// --test reported that recalculation as a change even when the entry
+		// was long gone, flipping the file's mode on every run.
+		args = append(args, "-n", "-x", "user:"+a.User)
 	} else {
 		args = append(args, "-m", "user:"+a.User+":"+a.Perms)
 	}
