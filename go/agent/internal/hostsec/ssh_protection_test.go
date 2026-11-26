@@ -258,15 +258,18 @@ func TestSSHSetProtectionInstallAndRollback(t *testing.T) {
 	oldMigDir := haproxyMigrationDir
 	oldUI := haproxyPendingUIFile
 	oldTx := haproxyGuardTxFile
+	oldLocks := aptLockPaths
 	runGuardDir = filepath.Join(dir, "run")
 	haproxyMigrationDir = filepath.Join(dir, "mig")
 	haproxyPendingUIFile = filepath.Join(dir, "ui")
 	haproxyGuardTxFile = filepath.Join(dir, "tx")
+	aptLockPaths = nil
 	t.Cleanup(func() {
 		runGuardDir = oldGuardDir
 		haproxyMigrationDir = oldMigDir
 		haproxyPendingUIFile = oldUI
 		haproxyGuardTxFile = oldTx
+		aptLockPaths = oldLocks
 	})
 
 	// 1. Install stages disabled rule before apt-get, then writes active config.
