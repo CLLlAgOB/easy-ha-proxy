@@ -203,6 +203,44 @@ class VersionStatus(unittest.TestCase):
         self.runtime['binary_matches'] = False
         self.assertNotIn('manual_update', self.probe(qualified=False)['details'])
 
+    def test_last_operation_prefers_newer_migration_over_stale_patch_and_keeps_unsettled_first(self):
+        state_dir = self.root / 'haproxy-package-migration'
+        state_dir.mkdir()
+        last_update = state_dir / 'last-update.json'
+        last_migration = state_dir / 'last-migration.json'
+        old_id = '1' * 32
+        mig_id = '2' * 32
+        last_update.write_text(json.dumps({
+            'id': old_id, 'kind': 'patch', 'phase': 'prepared',
+            'old_version': '2.8.30-0ubuntu0.24.04.2', 'updated_at': 1000.0,
+        }))
+        last_migration.write_text(json.dumps({
+            'id': mig_id, 'kind': 'migration', 'phase': 'committed',
+            'old_version': '2.8.30-0ubuntu0.24.04.2', 'updated_at': 2000.0,
+            'target_verified': True,
+        }))
+        result = status.probe(
+            SimpleNamespace(run=self.command), binary=self.binary, metadata={'fresh': True},
+            reader=lambda _: dict(self.runtime), protection=self.protection,
+            last_update=last_update, qualified=True,
+        )
+        self.assertEqual(result['details']['last_operation']['id'], mig_id)
+        self.assertEqual(result['details']['last_operation']['kind'], 'migration')
+        self.assertEqual(result['details']['last_operation']['phase'], 'committed')
+
+        # An unsettled operation must still win over a newer settled record.
+        last_update.write_text(json.dumps({
+            'id': old_id, 'kind': 'patch', 'phase': 'rollback_failed',
+            'old_version': '2.8.30-0ubuntu0.24.04.2', 'updated_at': 1000.0,
+        }))
+        unsettled = status.probe(
+            SimpleNamespace(run=self.command), binary=self.binary, metadata={'fresh': True},
+            reader=lambda _: dict(self.runtime), protection=self.protection,
+            last_update=last_update, qualified=True,
+        )
+        self.assertEqual(unsettled['details']['last_operation']['id'], old_id)
+        self.assertEqual(unsettled['details']['last_operation']['phase'], 'rollback_failed')
+
 
 class OsIsolation(unittest.TestCase):
     def test_existing_core_is_protected_before_the_first_package_install_and_status_stays_read_only(self):

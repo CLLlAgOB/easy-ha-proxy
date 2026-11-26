@@ -2324,6 +2324,7 @@ def build_update_plan(
         freshness = apt_metadata.assess(map_path(apt_metadata.STATE))
         haproxy = (haproxy_update_status.probe(command_runner, binary=map_path(Path('/usr/sbin/haproxy')),
                                              metadata=freshness, last_update=map_path(haproxy_update_status.LAST_UPDATE),
+                                             last_migration=map_path(haproxy_update_status.LAST_MIGRATION),
                                              protection=map_path(Path('/etc/needrestart/conf.d/easy-ha-proxy-haproxy.conf')))
                    if include_haproxy else None)
         protected = bool(haproxy and haproxy['details'].get('qualified') and haproxy['details'].get('protected'))

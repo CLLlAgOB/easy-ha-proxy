@@ -218,6 +218,7 @@ func (a *App) registerUpdatesOps() {
 			if summary, ok := asMap(result.Value("summary")); ok {
 				RememberBadge(summary)
 			}
+			SyncHAProxyVersionFromStatus(result)
 		}
 		return err
 	})
@@ -348,6 +349,9 @@ func (a *App) registerUpdatesOps() {
 					"error_code", "configuration_not_clean", "configuration_state", st, "blocked_components", strList(sensitive...)))
 			}
 		}
+		if seen["haproxy"] || seen["all"] {
+			ForgetHAProxyVersion()
+		}
 		return c.daemon(newMap("action", "start_apply", "plan_id", planID, "components", list, "confirmation", "UPDATE"), true)
 	})
 
@@ -362,6 +366,7 @@ func (a *App) registerUpdatesOps() {
 		if blocked, err := c.migrationConfigurationError(); blocked {
 			return err
 		}
+		ForgetHAProxyVersion()
 		return c.daemon(newMap("action", "start_haproxy_transition", "target_branch", "3.4", "confirmed", true), true)
 	})
 	a.Handle("system_updates.prepare_haproxy_migration", func(c *Ctx) error {
@@ -392,6 +397,7 @@ func (a *App) registerUpdatesOps() {
 		if blocked, err := c.migrationConfigurationError(); blocked {
 			return err
 		}
+		ForgetHAProxyVersion()
 		return c.daemon(newMap("action", "apply_haproxy_migration", "plan_id", planID, "confirmation", "MIGRATE 3.4"), true)
 	})
 	a.Handle("system_updates.reboot", func(c *Ctx) error {

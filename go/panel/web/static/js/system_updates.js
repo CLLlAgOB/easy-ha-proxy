@@ -1166,8 +1166,7 @@
     }
     storageSet(ACTIVE_JOB_KEY, "");
     const applied = currentApplyComponents.length ? currentApplyComponents : jobComponents(job);
-    if (state === "completed" &&
-        (applied.includes("admin-container") || applied.includes("all")) &&
+    if (core.shouldReloadAfterJob(job, applied) &&
         storageGet(RELOADED_JOB_KEY) !== currentJobId) {
       storageSet(RELOADED_JOB_KEY, currentJobId);
       window.setTimeout(() => window.location.reload(), 600);

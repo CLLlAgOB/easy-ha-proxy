@@ -12,6 +12,32 @@ import apt_metadata
 
 PACKAGES = frozenset({'haproxy', 'haproxy-awslc', 'libssl-awslc'})
 LAST_UPDATE = Path('/var/lib/easy-ha-proxy/haproxy-package-migration/last-update.json')
+LAST_MIGRATION = Path('/var/lib/easy-ha-proxy/haproxy-package-migration/last-migration.json')
+SETTLED_PHASES = frozenset({'committed', 'rolled_back', 'aborted', 'preparing', 'prepared'})
+
+
+def _load_latest_operation(paths):
+    candidates = []
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            continue
+        if not isinstance(raw, dict) or not re.fullmatch(r'[0-9a-f]{32}', str(raw.get('id', ''))):
+            continue
+        phase = str(raw.get('phase') or '')
+        updated = raw.get('updated_at')
+        ts = float(updated) if isinstance(updated, (int, float)) and not isinstance(updated, bool) else 0.0
+        candidates.append((phase not in SETTLED_PHASES, ts, raw))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    last = candidates[0][2]
+    return {key: last.get(key) for key in
+            ('id', 'kind', 'phase', 'old_version', 'target_packages', 'updated_at', 'failure',
+             'rollback_verified', 'target_verified')}
 
 
 def checksum(path):
@@ -49,7 +75,8 @@ def runtime_state(binary, sock=Path('/run/haproxy/admin.sock')):
             'replaced_libraries': sorted(libraries)}
 
 
-def probe(runner, *, binary=Path('/usr/sbin/haproxy'), metadata=None, reader=runtime_state, last_update=LAST_UPDATE, qualified=None,
+def probe(runner, *, binary=Path('/usr/sbin/haproxy'), metadata=None, reader=runtime_state, last_update=LAST_UPDATE,
+          last_migration=None, qualified=None,
           protection=Path('/etc/needrestart/conf.d/easy-ha-proxy-haproxy.conf')):
     if qualified is None:
         try:
@@ -67,14 +94,11 @@ def probe(runner, *, binary=Path('/usr/sbin/haproxy'), metadata=None, reader=run
                 'current_version': details['installed_version'], 'available_version': details['candidate_version'],
                 'installed': details['installed_version'], 'available': details['candidate_version'], 'details': details}
 
-    try:
-        last = json.loads(last_update.read_text())
-        if re.fullmatch(r'[0-9a-f]{32}', str(last.get('id', ''))):
-            details['last_operation'] = {key: last.get(key) for key in
-                                         ('id', 'phase', 'old_version', 'target_packages', 'updated_at', 'failure',
-                                          'rollback_verified', 'target_verified')}
-    except (OSError, ValueError, TypeError):
-        pass
+    if last_migration is None and last_update is not None and last_update.name == LAST_UPDATE.name:
+        last_migration = last_update.with_name(LAST_MIGRATION.name)
+    latest_op = _load_latest_operation((last_update, last_migration))
+    if latest_op is not None:
+        details['last_operation'] = latest_op
     if not binary.is_file():
         return result('blocked', 'HAProxy is not installed on this host.')
     found = {}

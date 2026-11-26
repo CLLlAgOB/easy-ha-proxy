@@ -345,3 +345,17 @@ test("the move to 3.4 shows the card only on a branch the plan found older", () 
   assert.equal(core.haproxyAttention(null, {now: NOW, migration: offer}), false);
   assert.equal(core.haproxyOnTarget(haproxy("current", {branch: "2.8"}), offer), false);
 });
+
+test("completing a panel or HAProxy update triggers a page reload for fresh chrome", () => {
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "haproxy-transition", components: ["haproxy"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "haproxy-migrate", components: ["haproxy"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["haproxy"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["admin-container"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["all"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply"}, ["haproxy"]), true);
+  assert.equal(core.shouldReloadAfterJob({status: "failed", operation: "haproxy-transition", components: ["haproxy"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "running", operation: "haproxy-transition", components: ["haproxy"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "haproxy-prepare", components: ["haproxy"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["os"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "check", components: []}), false);
+});

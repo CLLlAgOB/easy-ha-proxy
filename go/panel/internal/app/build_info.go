@@ -129,6 +129,92 @@ func (a *App) readHAProxyVersion() any {
 	return nil
 }
 
+// ForgetHAProxyVersion drops the cached footer HAProxy version so the next
+// render queries the live HAProxy runtime socket immediately.
+func ForgetHAProxyVersion() {
+	haproxyVer.mu.Lock()
+	haproxyVer.at = time.Time{}
+	haproxyVer.value = nil
+	haproxyVer.mu.Unlock()
+}
+
+func cachedHAProxyVersionFull() string {
+	haproxyVer.mu.Lock()
+	defer haproxyVer.mu.Unlock()
+	if haproxyVer.at.IsZero() {
+		return ""
+	}
+	if m, ok := haproxyVer.value.(*pyyaml.Map); ok {
+		return strings.TrimSpace(strOrEmpty(m.Value("full")))
+	}
+	return ""
+}
+
+func jobTouchesHAProxy(job *pyyaml.Map) bool {
+	if job == nil {
+		return false
+	}
+	op := strings.ToLower(strings.TrimSpace(strOrEmpty(job.Value("operation"))))
+	if op == "haproxy-transition" || op == "haproxy-migrate" {
+		return true
+	}
+	if list, ok := job.Value("components").([]any); ok {
+		for _, item := range list {
+			if s, ok := item.(string); ok && (s == "haproxy" || s == "all") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SyncHAProxyVersionFromStatus invalidates the cached HAProxy footer version
+// whenever a status poll reports an active HAProxy change or a running/applied
+// HAProxy version that differs from the cached value.
+func SyncHAProxyVersionFromStatus(result *pyyaml.Map) {
+	if result == nil {
+		return
+	}
+	if active, ok := result.Value("active_job").(*pyyaml.Map); ok && jobTouchesHAProxy(active) {
+		ForgetHAProxyVersion()
+		return
+	}
+	cached := cachedHAProxyVersionFull()
+	if cached == "" {
+		return
+	}
+	if op, ok := result.Value("haproxy_operation").(*pyyaml.Map); ok {
+		phase := strings.ToLower(strings.TrimSpace(strOrEmpty(op.Value("phase"))))
+		if phase == "committed" {
+			if target := strings.TrimSpace(strOrEmpty(op.Value("target_runtime_version"))); target != "" && target != cached {
+				ForgetHAProxyVersion()
+				return
+			}
+		} else if phase == "rolled_back" {
+			if old := strings.TrimSpace(strOrEmpty(op.Value("old_version"))); old != "" && old != cached {
+				ForgetHAProxyVersion()
+				return
+			}
+		}
+	}
+	if plan, ok := result.Value("plan").(*pyyaml.Map); ok {
+		if comps, ok := plan.Value("components").([]any); ok {
+			for _, item := range comps {
+				comp, ok := item.(*pyyaml.Map)
+				if !ok || strOrEmpty(comp.Value("id")) != "haproxy" {
+					continue
+				}
+				if details, ok := comp.Value("details").(*pyyaml.Map); ok {
+					if running := strings.TrimSpace(strOrEmpty(details.Value("running_version"))); running != "" && running != cached {
+						ForgetHAProxyVersion()
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
 func (a *App) haproxyVersion() any {
 	haproxyVer.mu.Lock()
 	if !haproxyVer.at.IsZero() && time.Since(haproxyVer.at) < haproxyVersionTTL {

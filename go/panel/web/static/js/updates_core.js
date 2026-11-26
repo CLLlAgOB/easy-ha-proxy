@@ -514,12 +514,26 @@
       component.state !== "current" || stale || apt.error || details.needs_reload));
   }
 
+  // Whether finishing a job should reload the page so server-rendered chrome
+  // (panel assets, build info, and the footer HAProxy version) catches up.
+  function shouldReloadAfterJob(job, appliedComponents) {
+    if (jobState(job) !== "completed") return false;
+    const operation = jobOperation(job);
+    if (operation === "haproxy-transition" || operation === "haproxy-migrate") return true;
+    if (operation && operation !== "apply") return false;
+    const components = Array.isArray(appliedComponents) && appliedComponents.length
+      ? appliedComponents
+      : jobComponents(job);
+    return components.includes("admin-container") || components.includes("all") || components.includes("haproxy");
+  }
+
   return {
     rebootState,
     HAPROXY_UNFINISHED_PHASES,
     HAPROXY_PACKAGE_CHECK_MAX_AGE,
     haproxyOnTarget,
     haproxyAttention,
+    shouldReloadAfterJob,
     TERMINAL_STATES,
     AVAILABLE_STATES,
     SOURCE_SUPERSEDES,
