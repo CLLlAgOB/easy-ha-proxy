@@ -838,11 +838,11 @@ func (d *Daemon) applyHAProxyPatch(jobID string, plan map[string]any, logPrefix 
 	if !ok || !haproxyVersionRe.MatchString(exp) {
 		return nil, "", uErr("stale_plan", "The reviewed HAProxy version is unavailable")
 	}
-	tool, err := d.trustedSource("haproxy_package_migrate.py")
+	command, err := d.hostAgentTool("haproxy-migrate", "Update host services before updating HAProxy")
 	if err != nil {
 		return nil, "", err
 	}
-	command := []string{d.python(), tool, "patch", "--expected-version", exp}
+	command = append(command, "patch", "--expected-version", exp)
 	if maintenance != nil {
 		command = append(command, "--maintenance-revision", pyx.Str(maintenance["revision"]),
 			"--maintenance-until", pyFloatStr(maintenance["closes_at"]), "--maintenance-state-root", d.Opts.OSSecurityRoot())

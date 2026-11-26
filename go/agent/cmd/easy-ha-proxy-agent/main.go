@@ -22,6 +22,7 @@ import (
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/controld"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/fullbackup"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxymigrate"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/healthd"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostsec"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/metricsd"
@@ -104,6 +105,8 @@ func main() {
 		os.Exit(hostsec.RunOSUpgradeGuardCLI(args, os.Stdout, os.Stderr))
 	case "ssh-protection":
 		os.Exit(hostsec.RunSSHProtectionCLI(args, os.Stdout, os.Stderr))
+	case "haproxy-migrate":
+		os.Exit(haproxymigrate.RunCLI(args, os.Stdout, os.Stderr))
 	case "apply":
 		os.Exit(apply.Run(args, os.Stdout, os.Stderr))
 	case "probe-host":
@@ -116,7 +119,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|full-backup|update-plan|update-scope|os-security|service-restarts|auto-reboot|os-upgrade-guard|ssh-protection|probe-host|apply|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: easy-ha-proxy-agent <healthd|metricsd|alertd|controld|certd|backupd|updated|authelia-bansd|authelia-usersd|authelia-configd|unit-failed|backup-run|server-state|udp-forward|cert-deliver|update-geoip|apt-metadata|full-backup|update-plan|update-scope|os-security|service-restarts|auto-reboot|os-upgrade-guard|ssh-protection|haproxy-migrate|probe-host|apply|version> [flags]")
 }
 
 func runUDPForward(args []string) int {

@@ -89,8 +89,10 @@ func (d *Daemon) toolBytes(name, missing string, markers ...string) (string, []b
 }
 
 func (d *Daemon) migrationToolDigest() (string, error) {
-	_, raw, err := d.toolBytes("haproxy_package_migrate.py", "Update host services before preparing a HAProxy migration",
-		"WEB_MIGRATION_PROTOCOL = 1")
+	if !isRegular(agentBinary) {
+		return "", uErr("dependency", "Update host services before preparing a HAProxy migration")
+	}
+	raw, err := os.ReadFile(agentBinary)
 	if err != nil {
 		return "", err
 	}
@@ -237,19 +239,11 @@ func migrationPlatformSupported() bool {
 	return release["ID"] == "ubuntu" && release["VERSION_ID"] == "24.04" && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64")
 }
 
-func (d *Daemon) automaticMigrationTool() (string, error) {
-	if _, err := d.migrationToolDigest(); err != nil {
-		return "", err
+func (d *Daemon) automaticMigrationTool() ([]string, error) {
+	if !isRegular(agentBinary) {
+		return nil, uErr("dependency", "Update host services before using the automatic HAProxy transition")
 	}
-	tool, _, err := d.toolBytes("haproxy_package_migrate.py", "Update host services before using the automatic HAProxy transition",
-		"AUTOMATIC_MIGRATION_PROTOCOL = 1")
-	if err != nil {
-		return "", err
-	}
-	if _, err := d.trustedSource("apt_metadata.py"); err != nil {
-		return "", err
-	}
-	return tool, nil
+	return []string{agentBinary, "haproxy-migrate"}, nil
 }
 
 func (d *Daemon) automaticMigrationOffer(plan, op map[string]any, recoveryBlocked bool) map[string]any {
@@ -305,11 +299,10 @@ func (d *Daemon) migrationWorker(jobID string, lock *os.File, review map[string]
 		if err := os.WriteFile(d.Opts.ActiveMarker, []byte("job_id="+jobID+"\n"), 0o600); err != nil {
 			return err
 		}
-		tool, err := d.trustedSource("haproxy_package_migrate.py")
+		command, err := d.hostAgentTool("haproxy-migrate", "Update host services before preparing a HAProxy migration")
 		if err != nil {
 			return err
 		}
-		command := []string{d.python(), tool}
 		previous := readHAProxyOperation(d.Opts.HAProxyMigrationState)
 		prevID := pyx.Map(anyMap(previous))["id"]
 		switch {

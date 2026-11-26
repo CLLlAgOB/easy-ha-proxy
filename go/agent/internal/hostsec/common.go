@@ -620,6 +620,20 @@ func requireMWWindow(root, revision string, local time.Time) error {
 	return nil
 }
 
+// RequireUnifiedWindow verifies that the unified maintenance window for revision
+// is still open and before the deadline (used by haproxy-migrate patch).
+func RequireUnifiedWindow(root, revision string, until float64, hasUntil bool) error {
+	value, err := readMWPolicy(root)
+	if err != nil {
+		return err
+	}
+	if value == nil || value.ID != revision || currentMWWindow(value, localTimeFunc()) == nil ||
+		!hasUntil || unixSeconds(nowFunc()) >= until {
+		return errors.New("The unified maintenance window closed before HAProxy application")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Timer metadata (port of installer/timer_metadata.py)
 // ---------------------------------------------------------------------------
