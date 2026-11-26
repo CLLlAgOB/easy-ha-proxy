@@ -1,7 +1,9 @@
 package stages
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
@@ -87,6 +89,37 @@ func haproxyFS(b *Builder) []engine.Step {
 	} {
 		steps = append(steps, engine.Step{Name: "Ensure HAProxy base dirs exist", Resource: b.Dir(d.path, d.owner, d.group, "0755")})
 	}
+	// On images where /var/log is root-owned 0755, rsyslog cannot create the
+	// access log itself, and the panel compose bind mount of the missing file
+	// creates a directory in its place, leaving guardd and the Log Explorer
+	// without their source. Keep the file rsyslog writes (syslog:adm 0640, as
+	// rsyslog creates it) before anything mounts it; an empty directory left
+	// at the path is replaced, a filled one is refused.
+	const logPath = "/var/log/haproxy.log"
+	steps = append(steps,
+		engine.Step{Name: "Replace an empty directory at the HAProxy access log path",
+			Resource: &engine.Func{Desc: "empty directory " + logPath,
+				CheckFn: func(sys *engine.System) (engine.Change, error) {
+					fi, err := os.Lstat(sys.Path(logPath))
+					if errors.Is(err, os.ErrNotExist) || (err == nil && !fi.IsDir()) {
+						return engine.Change{}, nil
+					}
+					if err != nil {
+						return engine.Change{}, err
+					}
+					entries, err := os.ReadDir(sys.Path(logPath))
+					if err != nil {
+						return engine.Change{}, err
+					}
+					if len(entries) > 0 {
+						return engine.Change{}, fmt.Errorf("%s is a directory with contents; empty it by hand before the access log can be restored", logPath)
+					}
+					return engine.Change{Needed: true, Summary: "replace the empty directory with a file"}, nil
+				},
+				ApplyFn: func(sys *engine.System) error { return os.Remove(sys.Path(logPath)) }}},
+		engine.Step{Name: "Ensure the HAProxy access log exists for rsyslog and the panel",
+			Resource: &engine.Touch{Path: logPath, Owner: "syslog", Group: "adm", Mode: 0o640, Preserve: true}},
+	)
 	return append(steps,
 		engine.Step{Name: "Ensure HAProxy errors directory exists", Resource: b.Dir("/etc/haproxy/errors", "root", "root", "0755")},
 		engine.Step{Name: "Ensure HAProxy certs directory exists", Resource: b.Dir("{{ haproxy_certs_dir }}", "root", "root", "0755")},
