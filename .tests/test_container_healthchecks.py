@@ -51,25 +51,6 @@ class ContainerHealthcheckTests(unittest.TestCase):
         self.assertEqual(interval * retries, 120)
 
 
-    def test_start_and_update_wait_for_docker_health(self) -> None:
-        start = (
-            ROOT / "ansible/roles/haproxy-admin/tasks/start.yml"
-        ).read_text(encoding="utf-8")
-        update = (
-            ROOT / "ansible/roles/haproxy-admin/tasks/update_haproxy_admin.yml"
-        ).read_text(encoding="utf-8")
-        wait = (
-            ROOT
-            / "ansible/roles/haproxy-admin/tasks/wait_haproxy_admin_healthy.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("wait_haproxy_admin_healthy.yml", start)
-        self.assertIn("wait_haproxy_admin_healthy.yml", update)
-        self.assertNotIn("ansible.builtin.wait_for:", start)
-        self.assertIn(".State.Health.Status", wait)
-        self.assertIn('== "healthy"', wait)
-        self.assertIn("Docker health details", wait)
-
     def test_redis_has_a_native_ping_healthcheck(self) -> None:
         compose = (
             ROOT / "ansible/roles/authelia/templates/docker-compose.yml.j2"

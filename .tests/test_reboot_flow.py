@@ -145,16 +145,6 @@ class RebootPromptTests(unittest.TestCase):
 
 
 class RebootIntegrationTests(unittest.TestCase):
-    def test_local_ansible_connection_never_uses_reboot_module(self) -> None:
-        tasks = (
-            ROOT / "ansible/roles/update_packages/tasks/upgrade.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("easy_ha_proxy_reboot_after_upgrade", tasks)
-        self.assertIn("(ansible_connection | default('smart')) != 'local'", tasks)
-        self.assertIn("Explain why a local Ansible connection is not rebooted", tasks)
-        self.assertNotIn("Reboot if kernel is updated", tasks)
-
     def test_helper_exits_cleanly_and_remote_launcher_waits_for_reboot(self) -> None:
         helper = (ROOT / "easy-ha-proxy-helper.sh").read_text(encoding="utf-8")
         remote = (ROOT / "install-remote.sh").read_text(encoding="utf-8")

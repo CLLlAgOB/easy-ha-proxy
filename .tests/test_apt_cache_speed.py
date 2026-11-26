@@ -17,8 +17,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAYBOOK = ROOT / "ansible/easy-ha-proxy.yml"
-DOCKER_TASKS = ROOT / "ansible/roles/docker/tasks/docker.yml"
-UPGRADE_TASKS = ROOT / "ansible/roles/update_packages/tasks/upgrade.yml"
 
 
 class AptCacheSpeedTests(unittest.TestCase):
@@ -29,40 +27,6 @@ class AptCacheSpeedTests(unittest.TestCase):
         self.assertIn("cache_valid_time", apt_defaults)
         # Overridable and non-zero by default.
         self.assertIn("easy_ha_proxy_apt_cache_valid_time", str(apt_defaults))
-
-    def test_docker_forces_refresh_only_when_repository_changed(self) -> None:
-        tasks = yaml.safe_load(DOCKER_TASKS.read_text(encoding="utf-8"))
-        names = [t.get("name", "") for t in tasks]
-        self.assertIn("Refresh APT cache after adding the Docker repository", names)
-        refresh = next(
-            t for t in tasks
-            if t.get("name") == "Refresh APT cache after adding the Docker repository"
-        )
-        self.assertEqual(refresh["apt"]["cache_valid_time"], 0)
-        self.assertIn("docker_repo_added is changed", str(refresh.get("when")))
-        # The repository task must register the change it keys off.
-        repo = next(t for t in tasks if t.get("name") == "Add Docker APT repository")
-        self.assertEqual(repo.get("register"), "docker_repo_added")
-        # The refresh must run before the engine install.
-        self.assertLess(
-            names.index("Refresh APT cache after adding the Docker repository"),
-            names.index("Install Docker Engine and plugins"),
-        )
-
-    def test_os_upgrade_always_refreshes_the_cache(self) -> None:
-        tasks = yaml.safe_load(UPGRADE_TASKS.read_text(encoding="utf-8"))
-        upgrade = next(
-            t for t in tasks if t.get("name") == "Update and upgrade apt packages"
-        )
-        refresh = next(t for t in tasks if t.get("name") == "Refresh APT metadata before reviewing the package upgrade")
-        guard = next(t for t in tasks if "ansible.builtin.script" in t)
-        self.assertEqual(refresh["apt"]["cache_valid_time"], 0)
-        self.assertTrue(refresh["apt"]["update_cache"])
-        self.assertLess(tasks.index(refresh), tasks.index(guard))
-        self.assertLess(tasks.index(guard), tasks.index(upgrade))
-        self.assertFalse(upgrade["apt"]["update_cache"])
-        self.assertTrue(upgrade["apt"]["upgrade"])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,43 +118,7 @@ class TheCopy(unittest.TestCase):
 class TheRoleTakesItAtTheRightMoment(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tasks = yaml.safe_load((ROLE / "tasks/db_backup.yml").read_text(encoding="utf-8"))
         cls.defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
-
-    def test_before_every_reconcile_that_can_change_the_image(self):
-        for name, reconcile in (
-            ("start.yml", "Reconcile the Authelia stack with migration recovery"),
-            ("update.yml", "Reconcile the updated Authelia stack with migration recovery"),
-        ):
-            block = yaml.safe_load((ROLE / "tasks" / name).read_text(encoding="utf-8"))[0]["block"]
-            names = [task.get("name") for task in block]
-            include = next(
-                i for i, task in enumerate(block)
-                if task.get("ansible.builtin.include_tasks") == "db_backup.yml"
-            )
-            pull = names.index("Pull Authelia stack images")
-            self.assertLess(pull, include, name)
-            self.assertLess(include, names.index(reconcile), name)
-
-    def test_only_when_the_image_differs_from_the_running_one(self):
-        copy = self.tasks[2]
-        self.assertIn("authelia_db_backup.py", " ".join(copy["ansible.builtin.command"]["argv"]))
-        conditions = " ".join(copy["when"])
-        self.assertIn("authelia_db_backup_running.rc == 0", conditions)
-        self.assertIn("!= authelia_db_backup_target.stdout", conditions)
-        # A failed copy must stop the update before the migration.
-        self.assertNotIn("failed_when", copy)
-        self.assertNotIn("ignore_errors", copy)
-
-    def test_the_reads_answer_under_check_mode_and_change_nothing(self):
-        for task in self.tasks[:2]:
-            self.assertIs(task["check_mode"], False)
-            self.assertIs(task["changed_when"], False)
-
-    def test_the_target_is_the_image_the_compose_file_names(self):
-        compose = (ROLE / "templates/docker-compose.yml.j2").read_text(encoding="utf-8")
-        target = self.tasks[1]["ansible.builtin.command"]["argv"][-1]
-        self.assertIn(target, compose)
 
     def test_where_and_how_many(self):
         self.assertEqual(

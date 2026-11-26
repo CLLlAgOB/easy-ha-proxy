@@ -116,22 +116,6 @@ class MailDeploymentContractTests(unittest.TestCase):
         self.assertNotIn("msmtp", hook)
         self.assertNotIn("eval ", hook)
 
-    def test_spool_migration_is_locked_quiesced_and_fail_closed(self) -> None:
-        guard = self.read("ansible/roles/authelia/tasks/mail_relay_spool.yml")
-        self.assertIn("flock --exclusive --wait 30", guard)
-        self.assertGreaterEqual(guard.count("postqueue -p"), 2)
-        self.assertIn("docker stop \"{{ authelia_container_name }}\"", guard)
-        self.assertIn("trap recover EXIT", guard)
-        self.assertIn("easy-ha-proxy-mail-relay-spool", guard)
-
-    def test_targeted_update_renders_new_compose_before_migrating_spool(self) -> None:
-        update = self.read("ansible/roles/authelia/tasks/update.yml")
-        render = update.index("Render the current Authelia Compose definition before migration")
-        guard = update.index("Run the fail-closed mail relay spool migration guard")
-        reconcile = update.index("Reconcile the updated Authelia stack")
-        self.assertLess(render, guard)
-        self.assertLess(guard, reconcile)
-
     def test_clean_install_starts_relay_before_first_certificate_renewal(self) -> None:
         playbook = self.read("ansible/easy-ha-proxy.yml")
         authelia = playbook.index("task_stage: install\n      tags:\n        - authelia")
@@ -146,15 +130,6 @@ class MailDeploymentContractTests(unittest.TestCase):
         self.assertIn("Configure email notifications through the internal relay", installer)
         self.assertNotIn("Configure direct SMTP notifications", installer)
         self.assertIn('result["mail_relay_server"] = True', migration)
-
-    def test_new_install_does_not_add_msmtp_or_a_host_smtp_listener(self) -> None:
-        notify = self.read("ansible/roles/cert/tasks/notify.yml")
-        compose = self.read("ansible/roles/authelia/templates/docker-compose.yml.j2")
-        self.assertNotIn("msmtp-mta", notify)
-        self.assertNotIn("mail_smtp_pass | string", notify)
-        self.assertNotIn("127.0.0.1:2525", compose)
-        self.assertFalse((ROOT / "ansible/roles/cert/templates/msmtprc.j2").exists())
-
 
 if __name__ == "__main__":
     unittest.main()

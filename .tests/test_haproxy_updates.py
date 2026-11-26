@@ -207,15 +207,10 @@ class VersionStatus(unittest.TestCase):
 class OsIsolation(unittest.TestCase):
     def test_existing_core_is_protected_before_the_first_package_install_and_status_stays_read_only(self):
         play = yaml.safe_load((Path(__file__).resolve().parents[1] / 'ansible/easy-ha-proxy.yml').read_text(encoding='utf-8'))[0]
-        # The pre-task hands protection.yml to the Go installer, or includes it
-        # when the installed agent cannot run it (go_protection.yml).
-        protection = next(task for task in play['pre_tasks'] if task.get('ansible.builtin.import_role', {}).get('tasks_from') == 'go_protection.yml')
+        # The pre-task is the installer agent's haproxy/protection part.
+        protection = next(task for task in play['pre_tasks'] if task.get('ansible.builtin.import_role', {}).get('tasks_from') == 'protection')
         self.assertEqual(protection['ansible.builtin.import_role']['name'], 'haproxy')
         self.assertEqual(set(protection['tags']), {'ha-install', 'upgrade'})
-        wrapper = yaml.safe_load((Path(__file__).resolve().parents[1] / 'ansible/roles/haproxy/tasks/go_protection.yml').read_text(encoding='utf-8'))
-        self.assertEqual(wrapper[0]['ansible.builtin.import_tasks'], '../../haproxy-admin/tasks/go_part.yml')
-        self.assertEqual(wrapper[0]['vars']['go_parts'], ['haproxy/protection'])
-        self.assertEqual(wrapper[1]['ansible.builtin.include_tasks']['file'], 'protection.yml')
 
     def test_managed_haproxy_and_tls_are_not_os_updates(self):
         class Runner:

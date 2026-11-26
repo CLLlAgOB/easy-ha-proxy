@@ -13,7 +13,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "ansible/roles/healthcheck/files/status_probe.py"
-TASKS = ROOT / "ansible/roles/healthcheck/tasks/status.yml"
 
 
 def fake(directory: Path, name: str, body: str) -> None:
@@ -92,14 +91,6 @@ class StatusProbeTests(unittest.TestCase):
         snaps = {r["item"]: r for r in report["snaps"]["results"]}
         self.assertEqual((snaps["certbot"]["rc"], snaps["certbot"]["stdout_lines"][-1]), (0, "certbot 5.1.0"))
         self.assertNotEqual(snaps["lego"]["rc"], 0)
-
-    def test_the_role_no_longer_loops_over_hosts_tools(self):
-        tasks = TASKS.read_text()
-        self.assertIn("status_probe.py", tasks)
-        for module in ("community.docker.docker_container_info", "cmd: \"systemctl is-active",
-                       "- apt-cache", "- dpkg-query\n      - --show\n      - \"--showformat=${Version}\""):
-            self.assertNotIn(module, tasks)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,7 +92,7 @@ class NoOtherHookRepeatsTheMistake(unittest.TestCase):
         offenders = []
         for path in sorted(
             list((CERT / "templates").glob("*.sh.j2"))
-            + list((CERT / "tasks").glob("*.yml"))
+            + list((ROOT / "go/agent/internal/apply/stages").glob("*_scripts.go"))
         ):
             text = path.read_text(encoding="utf-8")
             if "pipefail" not in text:

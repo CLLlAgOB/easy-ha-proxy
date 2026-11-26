@@ -63,33 +63,17 @@ def playbook_entries() -> list[tuple[str, str, set[str]]]:
     return entries
 
 
-# import_tasks: x.yml, include_tasks: x.yml, and include_tasks: {file: x.yml, apply: ...}.
-_IMPORT_RE = re.compile(r"(?:import_tasks|include_tasks):\s*(?:\{\s*file:\s*)?['\"]?([\w./-]+\.yml)")
-
-
-def stage_text(role: str, stage: str, seen: set | None = None) -> tuple[str, set[str]]:
-    """The stage's task file with everything it imports, and the file names."""
-    seen = seen if seen is not None else set()
-    path = ROOT / "ansible/roles" / role / "tasks" / f"{stage}.yml"
-    if path in seen or not path.is_file():
-        return "", set()
-    seen.add(path)
-    text = path.read_text(encoding="utf-8")
-    names = {f"{stage}.yml"}
-    for imported in _IMPORT_RE.findall(text):
-        more, more_names = stage_text(role, imported[:-4], seen)
-        text += "\n" + more
-        names |= more_names
-    return text, names
+def stage_sources() -> str:
+    """The installer agent's stage code: what reads the roles' templates and files."""
+    return "\n".join(path.read_text(encoding="utf-8")
+                     for path in sorted((ROOT / "go/agent/internal/apply/stages").glob("*.go"))
+                     if not path.name.endswith("_test.go"))
 
 
 class TheMapMatchesTheRoles(unittest.TestCase):
     def setUp(self):
         self.entries = playbook_entries()
         self.all_tags = set().union(*(tags for _, _, tags in self.entries))
-
-    def stages_for(self, tag):
-        return [(role, stage) for role, stage, tags in self.entries if tag in tags]
 
     def test_every_tag_the_map_uses_exists_in_the_playbook(self):
         for pattern, tags in update_scope.RULES:
@@ -111,26 +95,20 @@ class TheMapMatchesTheRoles(unittest.TestCase):
             else:
                 self.assertIn(pattern, files)
 
-    def test_each_mapped_file_is_deployed_by_the_stage_it_names(self):
+    def test_each_mapped_file_is_one_the_agent_deploys(self):
+        # A rule for a template or file no stage reads any more maps a change
+        # to a step that does not pick it up.
+        sources = stage_sources()
         for pattern, tags in update_scope.RULES:
             if not tags or update_scope.FULL in tags or any(c in pattern for c in "*?["):
                 continue
-            match = re.match(r"ansible/roles/([^/]+)/(files|templates|tasks)/(.+)$", pattern)
-            if not match:
-                continue
-            role, kind, name = match.groups()
-            for tag in tags:
-                with self.subTest(file=pattern, tag=tag):
-                    texts, task_files = "", set()
-                    for stage_role, stage in self.stages_for(tag):
-                        text, names = stage_text(stage_role, stage)
-                        texts += text
-                        if stage_role == role:
-                            task_files |= names
-                    if kind == "tasks":
-                        self.assertIn(name, task_files, f"{tag} does not run {name}")
-                    else:
-                        self.assertIn(Path(name).name, texts, f"{tag} does not deploy {name}")
+            match = re.match(r"ansible/roles/([^/]+)/(files|templates)/(.+)$", pattern)
+            if match:
+                name = Path(match.group(3)).name
+                # A daemon's unit template is named after the daemon there.
+                named = name.removesuffix(".service.j2")
+                with self.subTest(file=pattern):
+                    self.assertTrue(name in sources or f'"{named}"' in sources, f"no stage deploys {pattern}")
 
     def test_the_whole_roles_mapped_to_one_stage_have_only_that_stage(self):
         for role, tag in (("geoip_acl", "geo"), ("docker", "docker")):
@@ -162,8 +140,8 @@ class WhatAChangeNeeds(unittest.TestCase):
         self.assertEqual(scope["tags"], ["ha-adm-cfg", "ha-cfg", "status"])
 
     def test_the_shared_go_packages_refresh_the_native_binaries(self):
-        # The agent compiles go/panel/shared too, and the Go installer renders
-        # the daemon task files with it: a new agent and those stages.
+        # The agent compiles go/panel/shared too, and renders the roles'
+        # templates with it: a new agent and its stages.
         scope = update_scope.scope_for(["go/panel/shared/jinja/render.go", "go/panel/internal/app/app.go"])
         self.assertFalse(scope["full"])
         self.assertEqual(scope["tags"], ["apparmor", "authelia", "crt-hooks", "crt-install", "crt-notify", "docker", "geo", "ha-adm-cfg", "ha-adm-daemons", "ha-adm-install", "ha-adm-journald", "ha-adm-native", "ha-adm-start", "ha-cfg", "ha-install", "status"])
@@ -190,10 +168,7 @@ class WhatAChangeNeeds(unittest.TestCase):
             "ansible/requirements.yml",
             "installer/requirements.txt",
             "ansible/roles/haproxy-admin/defaults/main.yml",
-            "ansible/roles/haproxy-admin/handlers/main.yml",
-            "ansible/roles/haproxy-admin/tasks/main.yml",
             "ansible/roles/haproxy-admin/templates/docker-compose.yml.j2",
-            "ansible/roles/haproxy-admin/tasks/start.yml",
             "ansible/roles/authelia/templates/configuration.yml.j2",
             "ansible/roles/cert/defaults/main.yml",
             "some/new/thing.py",

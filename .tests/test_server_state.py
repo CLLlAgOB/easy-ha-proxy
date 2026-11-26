@@ -62,18 +62,6 @@ class ConfigurationTests(unittest.TestCase):
                       defaults)
         self.assertIn("haproxy_server_state_enabled: true", defaults)
 
-    def test_the_dumper_is_installed_before_the_configuration_reads_it(self):
-        tasks = CONFIG_TASKS.read_text(encoding="utf-8")
-        dumper = tasks.index("haproxy-state-dump.sh.j2")
-        config = tasks.index("src: haproxy.cfg.j2")
-        self.assertLess(dumper, config)
-
-    def test_the_timer_is_enabled(self):
-        tasks = CONFIG_TASKS.read_text(encoding="utf-8")
-        self.assertIn("haproxy-state-dump.timer", tasks)
-        self.assertIn("enabled: true", tasks)
-
-
 class DumperScriptTests(unittest.TestCase):
     def setUp(self):
         self.script = DUMPER.read_text(encoding="utf-8")
@@ -209,17 +197,6 @@ class DumpedTransportTests(unittest.TestCase):
         config = "backend target\n server main _service._tcp.example.test resolvers dns\n"
         row = self.dump(reply, config=config).splitlines()[2].split()
         self.assertEqual(row[18], "1025")
-
-    def test_ansible_refreshes_after_render_and_before_first_start(self):
-        tasks = CONFIG_TASKS.read_text()
-        self.assertGreater(tasks.index('Refresh administrative state'), tasks.index('src: haproxy.cfg.j2'))
-        self.assertLess(tasks.index('Refresh administrative state'), tasks.index('Ensure HAProxy is enabled and running'))
-
-    def test_shared_normalizer_is_installed_before_dumper_and_start_guard(self):
-        tasks = CONFIG_TASKS.read_text()
-        self.assertLess(tasks.index('Install the shared state normalizer'), tasks.index('Install the dump script'))
-        self.assertLess(tasks.index('Install the dump script'), tasks.index('Normalize state before every cold start'))
-        self.assertIn('ExecStartPre=-/usr/local/sbin/haproxy-state-dump', tasks)
 
     def test_invalid_version_header_or_partial_row_never_replaces_state(self):
         for reply in ("2\n# " + self.HEADER + "\n" + self.ROW + "\n",

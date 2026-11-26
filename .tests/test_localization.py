@@ -125,13 +125,7 @@ class InstallerLocalizationTests(unittest.TestCase):
         defaults = (AUTHELIA_ROLE / "defaults" / "main.yml").read_text(
             encoding="utf-8"
         )
-        tasks = (AUTHELIA_ROLE / "tasks" / "install.yml").read_text(
-            encoding="utf-8"
-        )
         self.assertIn('authelia_notification_language: "en"', defaults)
-        self.assertIn("authelia_notification_language in ['en', 'ru']", tasks)
-        self.assertEqual(tasks.count("{{ authelia_notification_language }}.j2"), 6)
-        self.assertEqual(tasks.count("authelia_notification_language | upper"), 6)
 
     def test_language_command_updates_all_stack_preferences(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

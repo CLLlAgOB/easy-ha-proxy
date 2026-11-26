@@ -67,9 +67,6 @@ class NativePackagingTests(unittest.TestCase):
             tags = roles[pos]["tags"]
             tags = [tags] if isinstance(tags, str) else tags
             self.assertTrue(set(tags) - {"never"} <= set(roles[stage]["tags"]))
-        tasks = yaml.safe_load((ROLE / "tasks/daemons_env.yml").read_text())
-        template = next(task["ansible.builtin.template"] for task in tasks if "ansible.builtin.template" in task)
-        self.assertEqual((template["src"], template["mode"]), ("daemons.env.j2", "0600"))
 
     def test_native_images_follow_the_configured_channel(self):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text(encoding="utf-8"))
@@ -90,18 +87,6 @@ class NativePackagingTests(unittest.TestCase):
                     jinja.from_string(defaults["native_release_image"]).render(context),
                     f"clllagob/haproxy-admin-ui:native-{channel}",
                 )
-
-    def test_native_task_enforces_https_and_sha256_verification(self):
-        tasks_text = (ROLE / "tasks/native.yml").read_text(encoding="utf-8")
-        parsed = yaml.safe_load(tasks_text)
-        self.assertIsInstance(parsed, list)
-        self.assertIn("x86_64", tasks_text)
-        self.assertIn("aarch64", tasks_text)
-        self.assertIn("^https://", tasks_text)
-        self.assertIn("checksum: \"sha256:", tasks_text)
-        self.assertIn("sha256sum -c SHA256SUMS", tasks_text)
-        self.assertIn("native_release_image", tasks_text)
-        self.assertIn("easy-ha-proxy-native-linux-", tasks_text)
 
     def test_ci_assembles_dual_arch_native_release_bundles_with_sha256(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))

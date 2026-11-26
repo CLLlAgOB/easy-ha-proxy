@@ -18,6 +18,9 @@ func init() {
 	register(Stage{Name: "haproxy", Parts: []Part{
 		{Name: "haproxy/protection", Role: "haproxy", File: "protection", PreTask: true, Build: haproxyProtection},
 		{Name: "haproxy/install", Role: "haproxy", File: "install", Build: haproxyInstall},
+		// No playbook entry runs it alone: the HAProxy 3.4 package workflow
+		// does, on disposable runners (haproxy/install includes it).
+		{Name: "haproxy/package", Role: "haproxy", File: "package", Build: haproxyPackage},
 		{Name: "haproxy/apparmor", Role: "haproxy", File: "apparmor", Build: haproxyAppArmor},
 		{Name: "haproxy/config", Role: "haproxy", File: "config", Build: haproxyConfig,
 			Exports: []string{"haproxy_runtime_environment", "haproxy_secret_dropin"}},

@@ -55,17 +55,16 @@ FULL = "full"
 STATUS_TAG = "status"
 
 # First match wins. A rule maps a source path pattern to the tags that deploy
-# it; an empty tuple means the file deploys nothing on the host. Every rule
-# naming a stage is checked by a test against the stage's own task file, so
-# the map cannot quietly drift from the roles.
+# it; an empty tuple means the file deploys nothing on the host. The roles'
+# templates and files are read by the installer agent's stages; the stages
+# themselves are Go, and a change there reaches every stage they run.
 _ADMIN = "ansible/roles/haproxy-admin"
 _HAPROXY = "ansible/roles/haproxy"
 _CERT = "ansible/roles/cert"
 _AUTHELIA = "ansible/roles/authelia"
-# The native stage installs the agent; the others run the task files the Go
-# installer takes over (go_installer_parts): the daemons, journald, the
-# install stage for certd and the iptables loaders, and HAProxy's install
-# and AppArmor stages (with the protection pre-task), and GeoIP.
+# The native stage installs the agent; the others are the stages a change to
+# the agent's stage code (or to the template engine it renders with) can
+# alter on a host.
 _GO_INSTALLER = ("ha-adm-native", "ha-adm-daemons", "ha-adm-journald", "ha-adm-install", "ha-install", "apparmor", "geo", "ha-cfg", "ha-adm-cfg", "ha-adm-start", "docker", "authelia", "crt-install", "crt-notify", "crt-hooks")
 RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Nothing to deploy.
@@ -91,8 +90,8 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # installs those binaries and restarts the daemons that run them. Mapped
     # to nothing, a changes-only update after a Go fix kept the old binary.
     ("rust/guardd/*", ("ha-adm-native",)),
-    # The Go installer (agent apply) runs the daemon task files Ansible hands
-    # it: a change there must reach those stages, not only the new binary.
+    # The installer agent's stages: a change there must reach those stages,
+    # not only the new binary.
     ("go/agent/internal/apply/*", _GO_INSTALLER),
     ("go/agent/*", ("ha-adm-native",)),
     # Install entry points and the menu helper run from the source directory
@@ -110,81 +109,55 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("installer/*", ()),
     # Always run, and the OS packages have their own update.
     ("ansible/roles/healthcheck/*", ()),
-    ("ansible/roles/update_packages/*", ()),
 
     # Adaptive protection.
     (f"{_ADMIN}/files/scanner-signatures.json", ("ha-adm-guardd",)),
     (f"{_ADMIN}/templates/guardd.json.j2", ("ha-adm-guardd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-guardd.service.j2", ("ha-adm-guardd",)),
-    (f"{_ADMIN}/tasks/guardd.yml", ("ha-adm-guardd",)),
     # Metrics.
     (f"{_ADMIN}/templates/metricsd.json.j2", ("ha-adm-metricsd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-metricsd.service.j2", ("ha-adm-metricsd",)),
-    (f"{_ADMIN}/tasks/metricsd.yml", ("ha-adm-metricsd",)),
     # Alerts.
     (f"{_ADMIN}/templates/alertd.json.j2", ("ha-adm-alertd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-alertd.service.j2", ("ha-adm-alertd",)),
-    (f"{_ADMIN}/tasks/alertd.yml", ("ha-adm-alertd",)),
     # Health.
     (f"{_ADMIN}/templates/healthd.json.j2", ("ha-adm-healthd",)),
     (f"{_ADMIN}/templates/haproxy-healthd.service.j2", ("ha-adm-healthd",)),
-    (f"{_ADMIN}/tasks/healthd.yml", ("ha-adm-healthd",)),
     # Control.
     (f"{_ADMIN}/templates/haproxy-controld.service.j2", ("ha-adm-controld",)),
-    (f"{_ADMIN}/tasks/controld.yml", ("ha-adm-controld",)),
     # Backups.
     (f"{_ADMIN}/templates/easy-ha-proxy-backup.service.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-backup.timer.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-backupd.service.j2", ("ha-adm-backupd",)),
     (f"{_ADMIN}/templates/easy-ha-proxy-unit-failed@.service.j2", ("ha-adm-backupd",)),
-    (f"{_ADMIN}/tasks/backupd.yml", ("ha-adm-backupd",)),
     # The update broker.
     (f"{_ADMIN}/templates/easy-ha-proxy-updated.service.j2", ("ha-adm-updated",)),
-    (f"{_ADMIN}/tasks/updated.yml", ("ha-adm-updated",)),
     # Certificates: certd is only deployed by the install and daemons stages.
     (f"{_ADMIN}/templates/haproxy-certd.service.j2", ("ha-adm-daemons",)),
     (f"{_ADMIN}/templates/certbot-renew.service.conf.j2", ("ha-adm-daemons",)),
-    (f"{_ADMIN}/tasks/certd.yml", ("ha-adm-daemons",)),
-    (f"{_ADMIN}/tasks/dns-plugins.yml", ("ha-adm-daemons",)),
-    (f"{_ADMIN}/tasks/daemons.yml", ("ha-adm-daemons",)),
-    (f"{_ADMIN}/tasks/native.yml", ("ha-adm-native",)),
-    (f"{_ADMIN}/tasks/native-cleanup.yml", ("ha-adm-native",)),
     # Journal retention.
     (f"{_ADMIN}/templates/journal-vacuum.service.j2", ("ha-adm-journald",)),
     (f"{_ADMIN}/templates/journal-vacuum.timer.j2", ("ha-adm-journald",)),
-    (f"{_ADMIN}/tasks/journald-retention.yml", ("ha-adm-journald",)),
     # Firewall helpers and the admin host setup.
     (f"{_ADMIN}/files/haproxy_ban.rules", ("ha-adm-install",)),
     (f"{_ADMIN}/templates/iptables-haproxy-ban.service.j2", ("ha-adm-install",)),
     (f"{_ADMIN}/templates/iptables-haproxy-udp.service.j2", ("ha-adm-install",)),
-    (f"{_ADMIN}/tasks/iptables-ban.yml", ("ha-adm-install",)),
-    (f"{_ADMIN}/tasks/iptables-udp.yml", ("ha-adm-install",)),
-    (f"{_ADMIN}/tasks/install.yml", ("ha-adm-install",)),
-    (f"{_ADMIN}/tasks/fs.yml", ("ha-adm-install",)),
     # The web application's Compose file, environment and start stage are
     # left to the full stack on purpose: starting it also pulls the image,
     # which would update the container without the digest review the "web
     # application" update does.
-    # Pulling the image is the web application update's job.
-    (f"{_ADMIN}/tasks/update_haproxy_admin.yml", ()),
 
     # HAProxy.
     # The web application renders the configuration from its own copy of the
     # template, which the admin settings stage refreshes.
     (f"{_HAPROXY}/templates/haproxy.cfg.j2", ("ha-cfg", "ha-adm-cfg")),
     (f"{_HAPROXY}/templates/haproxy-state-dump.*", ("ha-cfg",)),
-    (f"{_HAPROXY}/tasks/config.yml", ("ha-cfg",)),
     (f"{_HAPROXY}/files/default-favicon.ico", ("ha-install",)),
     (f"{_HAPROXY}/templates/access_granted.http.j2", ("ha-install",)),
     (f"{_HAPROXY}/templates/maintenance.http.j2", ("ha-install",)),
     (f"{_HAPROXY}/templates/update-admin-rt.*", ("ha-install",)),
-    (f"{_HAPROXY}/tasks/install.yml", ("ha-install",)),
-    (f"{_HAPROXY}/tasks/package.yml", ("ha-install",)),
-    (f"{_HAPROXY}/tasks/fs.yml", ("ha-install",)),
-    (f"{_HAPROXY}/tasks/apparmor.yml", ("apparmor",)),
     # A default can change the rendered configuration and what install lays down.
     (f"{_HAPROXY}/defaults/*", ("ha-install", "ha-cfg")),
-    (f"{_HAPROXY}/handlers/*", ("ha-install", "ha-cfg")),
 
     # GeoIP: one stage owns the whole role.
     ("ansible/roles/geoip_acl/*", ("geo",)),
@@ -195,12 +168,8 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # of any update, full or not.
     (f"{_CERT}/templates/905-haproxy-pems-reload.sh.j2", ("crt-hooks",)),
     (f"{_CERT}/templates/906-deliver-certificates.sh.j2", ("crt-hooks",)),
-    (f"{_CERT}/tasks/hooks.yml", ("crt-hooks",)),
     (f"{_CERT}/templates/910-mail-notify.sh.j2", ("crt-notify",)),
     (f"{_CERT}/templates/mail-notify.json.j2", ("crt-notify",)),
-    (f"{_CERT}/tasks/notify.yml", ("crt-notify",)),
-    (f"{_CERT}/tasks/install.yml", ("crt-install",)),
-    (f"{_CERT}/tasks/renew*.yml", ()),
     (f"{_CERT}/templates/_san_flags.j2", ()),
 
     # Authelia's host daemons. Its configuration and container are not
@@ -209,10 +178,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_AUTHELIA}/templates/authelia-bansd.service.j2", ("aut-daemons",)),
     (f"{_AUTHELIA}/templates/authelia-configd.service.j2", ("aut-daemons",)),
     (f"{_AUTHELIA}/templates/authelia-usersd.service.j2", ("aut-daemons",)),
-    (f"{_AUTHELIA}/tasks/bansd.yml", ("aut-daemons",)),
-    (f"{_AUTHELIA}/tasks/configd.yml", ("aut-daemons",)),
-    (f"{_AUTHELIA}/tasks/usersd.yml", ("aut-daemons",)),
-    (f"{_AUTHELIA}/tasks/daemons.yml", ("aut-daemons",)),
 )
 
 # What each step is called on the page and in the log.

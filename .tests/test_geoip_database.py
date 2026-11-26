@@ -23,7 +23,7 @@ class DeploymentAssertions(unittest.TestCase):
             ROOT / "go/panel/web/static/js/health.js"
         ).read_text(encoding="utf-8")
         healthcheck_tasks = (
-            ROOT / "ansible/roles/healthcheck/tasks/status.yml"
+            ROOT / "go/agent/internal/apply/stages/healthcheck.go"
         ).read_text(encoding="utf-8")
 
         for unit in (

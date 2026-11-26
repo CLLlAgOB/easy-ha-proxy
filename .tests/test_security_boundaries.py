@@ -57,19 +57,5 @@ class DeploymentRegressionTests(unittest.TestCase):
         )
 
 
-    def test_haproxy_environment_change_forces_service_restart(self) -> None:
-        tasks = (
-            ROOT / "ansible/roles/haproxy/tasks/config.yml"
-        ).read_text(encoding="utf-8")
-        handlers = (
-            ROOT / "ansible/roles/haproxy/handlers/main.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("register: haproxy_runtime_environment", tasks)
-        self.assertIn("haproxy_runtime_environment.changed", handlers)
-        self.assertIn("haproxy_secret_dropin.changed", handlers)
-        self.assertIn("'restarted'", handlers)
-
-
 if __name__ == "__main__":
     unittest.main()

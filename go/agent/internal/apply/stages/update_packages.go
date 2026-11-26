@@ -167,14 +167,14 @@ func updatePackages(b *Builder) []engine.Step {
 			When:     func(*engine.Run) bool { return strings.TrimSpace(timesyncd.Output) == "loaded" },
 			Resource: Unit("systemd-timesyncd.service", engine.Bool(true), "started")},
 		engine.Step{Name: "Report the required reboot", When: reboot,
-			Resource: report("The system requires a reboot. The easy-ha-proxy assistant will ask whether to schedule it after Ansible exits. " +
-				"When running this playbook directly, reboot the server manually or explicitly enable the remote reboot option.")},
+			Resource: report("The system requires a reboot. The easy-ha-proxy assistant will ask whether to schedule it after the installer finishes. " +
+				"When running the agent directly, reboot the server manually.")},
 		engine.Step{Name: "Reboot an SSH-managed target when explicitly requested",
 			When: func(r *engine.Run) bool { return reboot(r) && wanted && !local },
 			Build: func(*engine.Run) (engine.Resource, error) {
 				return nil, fmt.Errorf("the Go installer runs on the gateway itself and cannot reboot it and wait for it like an SSH-managed target; reboot it from the assistant")
 			}},
-		engine.Step{Name: "Explain why a local Ansible connection is not rebooted", When: func(r *engine.Run) bool { return reboot(r) && wanted && local },
-			Resource: report("Automatic reboot was deferred because Ansible is running with a local connection. Use the easy-ha-proxy assistant prompt or reboot manually.")},
+		engine.Step{Name: "Explain why the gateway is not rebooted from here", When: func(r *engine.Run) bool { return reboot(r) && wanted && local },
+			Resource: report("Automatic reboot was deferred: the installer runs on the gateway itself. Use the easy-ha-proxy assistant prompt or reboot manually.")},
 	)
 }

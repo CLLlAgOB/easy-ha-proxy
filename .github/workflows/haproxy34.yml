@@ -7,8 +7,6 @@ on:
       - 'go/**'
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
-      - 'ansible/roles/haproxy-admin/tasks/packages.yml'
-      - 'ansible/roles/haproxy-admin/tasks/install.yml'
       - 'installer/requirements.txt'
       - 'installer/haproxy_package_migrate.py'
       - 'installer/haproxy_server_state.py'
@@ -21,8 +19,6 @@ on:
       - 'go/**'
       - 'ansible/roles/haproxy/**'
       - 'ansible/roles/authelia/files/lua/**'
-      - 'ansible/roles/haproxy-admin/tasks/packages.yml'
-      - 'ansible/roles/haproxy-admin/tasks/install.yml'
       - 'installer/requirements.txt'
       - 'installer/haproxy_package_migrate.py'
       - 'installer/haproxy_server_state.py'
@@ -52,19 +48,24 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
-    env:
-      ANSIBLE_ROLES_PATH: ansible/roles
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Install migration dependencies
-        run: pip install -r installer/requirements.txt "ansible-core~=2.17.0"
+        run: pip install -r installer/requirements.txt
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
+          cache: false
+      - name: Build the installer agent
+        working-directory: go/agent
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/easy-ha-proxy-agent" ./cmd/easy-ha-proxy-agent
       - name: Install the distribution baseline
         run: |
           test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
-          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
+          .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" haproxy/package distribution
       - name: Exercise actual systemd reload, failed candidate and rollback
         run: |
           set -o pipefail
@@ -73,7 +74,7 @@ jobs:
         if: failure()
         run: python3 .github/scripts/annotate_native_failure.py /tmp/native-migration-smoke.log
       - name: Qualify distribution prerequisites for the panel
-        run: ansible-playbook -i localhost, .tests/integration/haproxy34-admin-packages.yml -e haproxy_package_provider=distribution
+        run: .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" packages distribution
       - name: Qualify distribution patches against a signed disposable repository
         run: sudo env EHP_MIGRATION_DISPOSABLE=1 "$(command -v python)" .tests/integration/haproxy_patch_smoke.py --systemd
 
@@ -89,20 +90,25 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
-    env:
-      ANSIBLE_ROLES_PATH: ansible/roles
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Install test dependencies
-        run: pip install -r installer/requirements.txt "ansible-core~=2.17.0"
+        run: pip install -r installer/requirements.txt
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
+          cache: false
+      - name: Build the installer agent
+        working-directory: go/agent
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/easy-ha-proxy-agent" ./cmd/easy-ha-proxy-agent
       - name: Qualify the distribution baseline and refuse an implicit migration
         run: |
-          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution
+          .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" haproxy/package distribution
           sudo "$(command -v python)" .tests/integration/haproxy_package_smoke.py --expected-branch 2.8
-          if ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml > /tmp/haproxy34-guard.log 2>&1; then
+          if .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" haproxy/package > /tmp/haproxy34-guard.log 2>&1; then
             echo 'An ordinary install must not replace the installed provider'
             exit 1
           fi
@@ -111,8 +117,8 @@ jobs:
           # This runner is disposable; provider replacement on a gateway has
           # a separate backup, maintenance and rollback procedure.
           sudo apt-get remove -y --allow-change-held-packages haproxy
-      - name: Install the signed package using the project role
-        run: ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml
+      - name: Install the signed package with the installer agent
+        run: .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" haproxy/package
       - name: Verify architecture and exercise the real configuration
         run: |
           test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
@@ -126,15 +132,15 @@ jobs:
         if: failure()
         run: python3 .github/scripts/annotate_native_failure.py /tmp/native-state-smoke.log
       - name: Qualify panel prerequisites without replacing the selected provider
-        run: ansible-playbook -i localhost, .tests/integration/haproxy34-admin-packages.yml
+        run: .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" packages
       - name: Verify a second installation changes nothing
         run: |
-          ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml > /tmp/haproxy34-repeat.log
+          .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" haproxy/package > /tmp/haproxy34-repeat.log
           cat /tmp/haproxy34-repeat.log
-          grep -Eq 'changed=0[[:space:]]+unreachable=0[[:space:]]+failed=0' /tmp/haproxy34-repeat.log
+          tail -n 1 /tmp/haproxy34-repeat.log | grep -q '"changed":false'
       - name: Refuse a silent return to the distribution provider
         run: |
-          if ansible-playbook -i localhost, .tests/integration/haproxy34-package.yml -e haproxy_package_provider=distribution > /tmp/haproxy34-rollback-guard.log 2>&1; then
+          if .tests/integration/agent_part.sh "$RUNNER_TEMP/easy-ha-proxy-agent" haproxy/package distribution > /tmp/haproxy34-rollback-guard.log 2>&1; then
             echo 'A missing provider setting must not replace the vendor package'
             exit 1
           fi

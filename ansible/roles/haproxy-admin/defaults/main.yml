@@ -270,62 +270,6 @@ backup_schedule_timeout: 8h
 # below.
 native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
 
-# The Go installer (easy-ha-proxy-agent apply), hybrid period: the task files
-# it may run in place of Ansible (haproxy-admin's by name, other roles' as
-# <role>/<file>). Each is handed over only if the installed
-# agent lists it ("apply parts"); easy_ha_proxy_go_installer: false keeps all
-# of them with Ansible. A test holds this list to the agent's.
-go_installer_parts:
-  - daemons_env
-  - certd
-  - controld
-  - backupd
-  - iptables-ban
-  - iptables-udp
-  - updated
-  - alertd
-  - metricsd
-  - guardd
-  - healthd
-  - journald-retention
-  - haproxy/protection
-  - haproxy/install
-  - haproxy/apparmor
-  - haproxy/config
-  - native
-  - getuseruid
-  - packages
-  - fs
-  - config
-  - start
-  - native-cleanup
-  - update_haproxy_admin
-  - docker/docker
-  - authelia/install
-  - authelia/config
-  - authelia/daemons
-  - authelia/update
-  - cert/install
-  - cert/notify
-  - cert/hooks
-  - cert/renew
-  - update_packages/upgrade
-  - healthcheck/status
-  - geoip_acl/geoip
-# Extra variables the installer may pass to the playbook; forwarded to the
-# agent so it templates with the same values.
-go_installer_forwarded_vars:
-  - haproxy_admin_sync_managed_config
-  - haproxy_admin_force_recreate
-  - authelia_force_restart
-  - easy_ha_proxy_offline_restore
-  - easy_ha_proxy_automatic_os_upgrade
-  - easy_ha_proxy_runtime_maintenance_revision
-  - easy_ha_proxy_maintenance_revision
-  - easy_ha_proxy_runtime_maintenance_until
-  # A pre_task fact that depends on the run's tags (addsite).
-  - cert_issue_mode
-  - status_check_fail_on_error
 native_guardd_bin: /usr/local/sbin/guardd-core
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url

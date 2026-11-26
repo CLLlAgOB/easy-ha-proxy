@@ -4,15 +4,12 @@ from __future__ import annotations
 from contextlib import ExitStack
 import json
 import os
-import shlex
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from jinja2 import Environment
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'installer'))
@@ -24,36 +21,6 @@ def installed(package, old, new):
 
 
 class PackageSafety(unittest.TestCase):
-    def test_ansible_passes_the_flag_and_state_path_without_shell_splitting(self):
-        tasks = yaml.safe_load((ROOT / 'ansible/roles/update_packages/tasks/upgrade.yml').read_text())
-        task = next(t for t in tasks if 'ansible.builtin.script' in t)
-        environment = Environment()
-        environment.filters['quote'] = shlex.quote
-        environment.filters['bool'] = bool
-        for automatic in (False, True):
-            command = environment.from_string(task['ansible.builtin.script']['cmd']).render(
-                playbook_dir='/source with spaces/ansible', updated_state_root='/state with spaces',
-                easy_ha_proxy_automatic_os_upgrade=automatic)
-            argv = shlex.split(command)
-            self.assertEqual(argv[0], '/source with spaces/ansible/../installer/os_upgrade_guard.py')
-            self.assertEqual('--automatic' in argv, automatic)
-            self.assertEqual(argv[-2:], ['--state-root', '/state with spaces/os-security'])
-        for runtime in (False, True):
-            command = environment.from_string(task['ansible.builtin.script']['cmd']).render(
-                playbook_dir='/source with spaces/ansible', easy_ha_proxy_automatic_os_upgrade=True,
-                easy_ha_proxy_maintenance_revision='a'*32, easy_ha_proxy_runtime_maintenance_until=123456,
-                easy_ha_proxy_runtime_maintenance_revision='a'*32 if runtime else '')
-            argv = shlex.split(command)
-            self.assertIn('--runtime-maintenance' if runtime else '--maintenance-revision', argv)
-            self.assertEqual(argv[-2:], ['--maintenance-until', '123456'])
-
-    def test_haproxy_holds_apply_on_every_supported_distribution(self):
-        task = yaml.safe_load((ROOT / 'ansible/roles/haproxy/tasks/protection.yml').read_text())[0]
-        expression = Environment().compile_expression(task['when'])
-        for distro, version in (('Debian', '12'), ('Debian', '13'), ('Ubuntu', '22.04'), ('Ubuntu', '24.04')):
-            self.assertTrue(expression(ansible_os_family='Debian', ansible_distribution=distro,
-                                       ansible_distribution_version=version))
-
     def test_unheld_haproxy_is_refused_even_if_not_selected_for_upgrade(self):
         for package in guard.HAPROXY_PACKAGES:
             with self.subTest(package=package), self.assertRaisesRegex(guard.UpgradeRefused, 'protection'):

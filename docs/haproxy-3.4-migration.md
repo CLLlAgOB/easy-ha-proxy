@@ -81,8 +81,8 @@ haproxy_package_branch: "3.4"
 - Проверить повторную установку без изменений. CI должен выполнять проверку
   нативно на Ubuntu 24.04 AMD64 и ARM64.
 
-Для одноразовой среды есть `.tests/integration/haproxy34-package.yml` и
-`.tests/integration/haproxy_package_smoke.py`. Последний поднимает только
+Для одноразовой среды есть `.tests/integration/agent_part.sh` (запускает
+часть агента `haproxy/package`) и `.tests/integration/haproxy_package_smoke.py`. Последний поднимает только
 локальные временные слушатели и использует тестовый сервер ответов авторизации.
 Это проверка Lua-контракта, а не полноценный вход в реальную Authelia.
 
