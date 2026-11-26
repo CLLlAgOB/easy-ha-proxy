@@ -23,6 +23,7 @@ func init() {
 		{Name: "cert/notify", Role: "cert", File: "notify", Build: certNotify},
 		{Name: "cert/hooks", Role: "cert", File: "hooks", Build: certHooks},
 		{Name: "cert/renew", Role: "cert", File: "renew", Build: certRenew, Facts: []string{"haproxy_present"}},
+		{Name: "cert/test", Role: "cert", File: "test", Build: certTest},
 	}})
 }
 
@@ -646,3 +647,19 @@ func (d *delRule) Apply(sys *engine.System, _ engine.Change) error {
 }
 
 func (d *delRule) Changed() bool { return d.changed }
+
+// certTest is test.yml (crt-test): the PEMs kept in the role's files/
+// copied into HAProxy's certificate directory.
+func certTest(b *Builder) []engine.Step {
+	steps := []engine.Step{
+		{Name: b.S("Ensure certs dir {{ haproxy_certs_dir }} exists"), Resource: b.Dir("{{ haproxy_certs_dir }}", "root", "root", "0755")},
+		{Name: "Show certbot domains", Build: func(*engine.Run) (engine.Resource, error) {
+			return report(fmt.Sprintf("certbot_domains: %v", strList(b.Value("{{ certbot_domains }}")))), nil
+		}},
+	}
+	for _, domain := range strList(b.Value("{{ certbot_domains }}")) {
+		steps = append(steps, engine.Step{Name: "Deploy existing assembled PEM files to HAProxy",
+			Build: b.CopyFile(domain+".pem", "{{ haproxy_certs_dir }}/"+domain+".pem", "root", "root", "0600")})
+	}
+	return steps
+}

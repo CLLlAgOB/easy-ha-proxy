@@ -292,6 +292,7 @@ go_installer_parts:
   - haproxy/install
   - haproxy/apparmor
   - haproxy/config
+  - haproxy/addadmin
   - native
   - getuseruid
   - packages
@@ -307,6 +308,7 @@ go_installer_parts:
   - cert/notify
   - cert/hooks
   - cert/renew
+  - cert/test
   - update_packages/upgrade
   - healthcheck/status
   - geoip_acl/geoip
