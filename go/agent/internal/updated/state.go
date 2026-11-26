@@ -744,7 +744,7 @@ func childEnvironment() []string {
 	}
 	return []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"LANG=" + lang, "LC_ALL=" + lcAll, "PYTHONUNBUFFERED=1", "EASY_HA_PROXY_LANGUAGE=en",
+		"LANG=" + lang, "LC_ALL=" + lcAll, "EASY_HA_PROXY_LANGUAGE=en",
 		"EASY_HA_PROXY_PROGRESS=1", "EASY_HA_PROXY_REBOOT_DECISION=no",
 		"EASY_HA_PROXY_MAINTENANCE_LOCK_HELD=updated",
 	}

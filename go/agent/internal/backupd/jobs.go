@@ -317,7 +317,6 @@ func childEnvironment(recoverySource string) []string {
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"LANG=" + lang,
 		"LC_ALL=" + lcAll,
-		"PYTHONUNBUFFERED=1",
 		"EASY_HA_PROXY_OFFLINE_RESTORE=1",
 		"EASY_HA_PROXY_MAINTENANCE_LOCK_HELD=backupd",
 	}

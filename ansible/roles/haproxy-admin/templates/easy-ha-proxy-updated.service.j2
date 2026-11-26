@@ -7,8 +7,6 @@ Wants=network-online.target docker.service
 Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
-Environment="PYTHONUNBUFFERED=1"
-Environment="PYTHONDONTWRITEBYTECODE=1"
 Environment="UPDATED_SOCKET_PATH={{ updated_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-updated.sock') }}"
 Environment="UPDATED_STATE_ROOT={{ updated_state_root | default('/var/lib/easy-ha-proxy/update-web') }}"
 Environment="UPDATED_SOURCE_DIR={{ updated_source_dir | default('/opt/easy-ha-proxy/source') }}"

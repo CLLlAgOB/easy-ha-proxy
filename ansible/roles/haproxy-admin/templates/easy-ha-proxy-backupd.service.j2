@@ -7,8 +7,6 @@ Wants=network-online.target docker.service
 Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
-Environment="PYTHONUNBUFFERED=1"
-Environment="PYTHONDONTWRITEBYTECODE=1"
 Environment="BACKUPD_SOCKET_PATH={{ backupd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.sock') }}"
 Environment="BACKUPD_ROOT_DIR={{ backupd_root_dir | default('/var/lib/easy-ha-proxy/backup-web') }}"
 Environment="BACKUPD_SOURCE_DIR={{ backupd_source_dir | default('/opt/easy-ha-proxy/source') }}"
