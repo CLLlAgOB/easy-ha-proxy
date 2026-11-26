@@ -374,3 +374,37 @@ func TestHealthcheckMessagesMatchTheTaskFile(t *testing.T) {
 		t.Errorf("status.yml has %d messages, the Go copy %d", seen, len(healthcheckMsgs))
 	}
 }
+
+// The PEM assembly scripts are the cert handlers' own; hold them to the file.
+func TestHandlerScriptsMatchTheHandlersFile(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "ansible", "roles", "cert", "handlers", "main.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := pyyaml.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scripts []string
+	for _, task := range doc.([]any) {
+		if s, ok := task.(*pyyaml.Map).Value("ansible.builtin.shell").(string); ok {
+			scripts = append(scripts, s)
+		}
+	}
+	if len(scripts) != 2 || scripts[0] != pemExplicit || scripts[1] != pemSingle {
+		t.Error("the PEM scripts differ from roles/cert/handlers/main.yml")
+	}
+}
+
+// Every topic a part notifies has a Go handler.
+func TestEveryNotifiedTopicHasAHandler(t *testing.T) {
+	topics := map[string]bool{}
+	for _, name := range HandlerTopics() {
+		topics[name] = true
+	}
+	for _, name := range []string{validateHaproxy, applyHaproxy, apparmorRsyslog, buildPEMs, "Restart Docker"} {
+		if !topics[name] {
+			t.Errorf("no handler for %q", name)
+		}
+	}
+}

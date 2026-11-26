@@ -24,6 +24,9 @@ type Context struct {
 	SetFacts, Handed map[string]any
 	// HostTimezone is facts.Timezone, once per run.
 	HostTimezone string
+	// Shared carries what one part leaves for another in the same run (the
+	// handlers' haproxy -c result); nil is allowed.
+	Shared map[string]any
 }
 
 // Part is one task file of a role, the unit Ansible hands to the agent during
@@ -111,6 +114,40 @@ func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
 	if !ok {
 		return fmt.Errorf("no part %q", name)
 	}
+	return runPart(ctx, part, taskStage, run)
+}
+
+// CountSteps is how many steps a part has, for a progress bar; a part that
+// cannot be built yet counts as one.
+func CountSteps(ctx Context, name, taskStage string) int {
+	part, ok := parts[name]
+	if !ok {
+		return 1
+	}
+	b, err := builder(ctx, part, taskStage)
+	if err != nil {
+		return 1
+	}
+	if n := len(part.Build(b)); n > 0 {
+		return n
+	}
+	return 1
+}
+
+func builder(ctx Context, part Part, taskStage string) (*Builder, error) {
+	if taskStage == "" {
+		taskStage = part.TaskFile()
+	}
+	set, err := vars.Load(vars.Options{SourceDir: ctx.SourceDir, ConfigDir: ctx.ConfigDir, Play: part.Play, Role: part.Role,
+		Params: map[string]any{"task_stage": taskStage}, Extra: ctx.Extra, Facts: ctx.Facts, SetFacts: ctx.SetFacts,
+		HostTimezone: ctx.HostTimezone})
+	if err != nil {
+		return nil, err
+	}
+	return &Builder{Set: set, Sys: ctx.Sys, RoleDir: filepath.Join(ctx.SourceDir, "ansible", "roles", part.Role), Shared: ctx.Shared}, nil
+}
+
+func runPart(ctx Context, part Part, taskStage string, run *engine.Run) error {
 	if taskStage == "" {
 		taskStage = part.TaskFile()
 	}
@@ -120,7 +157,7 @@ func RunPart(ctx Context, name, taskStage string, run *engine.Run) error {
 	if err != nil {
 		return fmt.Errorf("%s/%s: %w", part.Role, part.Name, err)
 	}
-	b := &Builder{Set: set, Sys: ctx.Sys, RoleDir: filepath.Join(ctx.SourceDir, "ansible", "roles", part.Role)}
+	b := &Builder{Set: set, Sys: ctx.Sys, RoleDir: filepath.Join(ctx.SourceDir, "ansible", "roles", part.Role), Shared: ctx.Shared}
 	steps := part.Build(b)
 	if b.err != nil {
 		return fmt.Errorf("%s/%s: %w", part.Role, part.Name, b.err)
@@ -145,6 +182,7 @@ type Builder struct {
 	Set     *vars.Set
 	Sys     *engine.System
 	RoleDir string
+	Shared  map[string]any
 	err     error
 }
 

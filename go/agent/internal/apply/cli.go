@@ -1,7 +1,8 @@
 // Package apply is the Go installer that replaces ansible/easy-ha-proxy.yml,
 // stage by stage: its inputs (vars, facts), the engine that checks and applies
-// resources (engine), and the stages themselves (stages). So far it only reads:
-// "apply vars" prints a role's variables, "apply plan" what a stage would change.
+// resources (engine), and the stages themselves (stages): "apply vars" prints a
+// role's variables, "apply plan|run" checks or applies parts, and "apply
+// playbook" runs the whole playbook, handlers included.
 package apply
 
 import (
@@ -32,12 +33,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return runStage(engine.Apply, args[1:], stdout, stderr)
 		case "parts":
 			return runParts(stdout)
+		case "playbook":
+			return runPlaybook(args[1:], stdout, stderr)
 		}
 	}
 	fmt.Fprintln(stderr, "usage: easy-ha-proxy-agent apply vars [--play N] [--role NAME] [--param k=v]... [--extra k=v]... [--names FILE]")
 	fmt.Fprintln(stderr, "       easy-ha-proxy-agent apply plan|run (--stage NAME | --part NAME [--task-stage NAME])")
 	fmt.Fprintln(stderr, "                            [--changed REGISTER]... [--skip-tag TAG]... [--extra k=v]... [--json]")
 	fmt.Fprintln(stderr, "       easy-ha-proxy-agent apply parts")
+	fmt.Fprintln(stderr, "       easy-ha-proxy-agent apply playbook [--tags T] [--skip-tags T] [--check] [--extra k=v]... [--supported]")
 	return 2
 }
 

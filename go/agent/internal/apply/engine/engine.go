@@ -80,6 +80,8 @@ type Run struct {
 	Results []Result
 	// SkipTags are Ansible's --skip-tags for the steps' own tags.
 	SkipTags map[string]bool
+	// OnStep, when set, is told each step before it runs (a progress bar).
+	OnStep func(stage, step string)
 
 	changed   map[string]bool
 	registers map[string]bool // every register this run reached, changed or not
@@ -146,6 +148,9 @@ func (r *Run) Registers() map[string]bool {
 // Do runs a stage's steps in order and stops at the first failure.
 func (r *Run) Do(stage string, steps []Step) error {
 	for _, step := range steps {
+		if r.OnStep != nil {
+			r.OnStep(stage, step.Name)
+		}
 		start := time.Now()
 		res := Result{Stage: stage, Step: step.Name}
 		err := r.do(step, &res)
@@ -242,3 +247,14 @@ func (r *Run) Counts() map[string]int {
 	}
 	return out
 }
+
+// TakeNotified returns the handlers notified since the last call and
+// forgets them, as a flush does.
+func (r *Run) TakeNotified() []string {
+	out := r.notified
+	r.notified = nil
+	return out
+}
+
+// Notify adds handlers to the notified list (a handler notifying others).
+func (r *Run) Notify(names ...string) { r.notify(names) }

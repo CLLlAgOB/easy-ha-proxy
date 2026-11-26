@@ -2034,6 +2034,83 @@ def offline_restore_image_preflight(
         )
 
 
+# The Go installer: the host agent runs the playbook itself ("apply
+# playbook"), role entry by role entry, handlers included. Ansible stays the
+# fallback while an older agent is installed (no "apply playbook" yet) or a
+# selected entry has not moved to Go; EASY_HA_PROXY_ANSIBLE=1 or the extra
+# variable easy_ha_proxy_go_installer=false asks for Ansible outright.
+AGENT_BINARY = Path("/usr/local/sbin/easy-ha-proxy-agent")
+ANSIBLE_ENV = "EASY_HA_PROXY_ANSIBLE"
+
+
+def go_installer_allowed(extra_vars: dict[str, str] | None) -> bool:
+    if os.environ.get(ANSIBLE_ENV) == "1":
+        return False
+    value = str((extra_vars or {}).get("easy_ha_proxy_go_installer", "true")).strip().lower()
+    return value not in {"false", "0", "no", "off"} and AGENT_BINARY.is_file()
+
+
+def agent_arguments(directory: Path, extra_vars: dict[str, str] | None) -> list[str]:
+    arguments = ["--source", str(source_dir()), "--config", str(directory)]
+    for key, value in (extra_vars or {}).items():
+        arguments.extend(("--extra", f"{key}={value}"))
+    return arguments
+
+
+def bootstrap_agent(directory: Path, extra_vars: dict[str, str] | None) -> None:
+    """Install the agent built for this source revision before it runs.
+
+    During an update the source is already the new revision while the
+    installed agent is the old one. Its native part pulls and installs the
+    binaries CI built from this revision, so the playbook that follows runs
+    the new agent's stages. An agent without the part (older than the Go
+    installer) is left alone: Ansible then runs and installs it.
+    """
+
+    probe = subprocess.run([str(AGENT_BINARY), "apply", "parts"], capture_output=True, text=True, check=False)
+    if probe.returncode != 0 or '"native"' not in probe.stdout:
+        return
+    run([str(AGENT_BINARY), "apply", "run", "--part", "native", *agent_arguments(directory, extra_vars)])
+
+
+def agent_playbook_command(
+    tags: str,
+    *,
+    check_mode: bool,
+    directory: Path,
+    extra_vars: dict[str, str] | None,
+    skip_tags: str | None,
+) -> list[str] | None:
+    """The agent's command for this run, or None when Ansible must run it."""
+
+    command = [str(AGENT_BINARY), "apply", "playbook", "--tags", tags, *agent_arguments(directory, extra_vars)]
+    if skip_tags:
+        command.extend(("--skip-tags", skip_tags))
+    probe = subprocess.run([*command, "--supported"], capture_output=True, text=True, check=False)
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout).strip().splitlines()
+        if probe.returncode == 3 and detail:
+            print(f"Ansible runs this: {detail[-1]}", flush=True)
+        return None
+    if check_mode:
+        command.append("--check")
+    return command
+
+
+def require_configuration(directory: Path) -> None:
+    required = (
+        directory / "inventory.ini",
+        directory / "vars.yml",
+        directory / "secrets.yml",
+    )
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise InstallerError(
+            "Configuration is incomplete. Run easy-ha-proxy install first. Missing: "
+            + ", ".join(missing)
+        )
+
+
 def run_playbook(
     tags: str,
     *,
@@ -2047,16 +2124,32 @@ def run_playbook(
         # Install/update must not report success while a managed service is
         # restarting or unhealthy. Plans remain non-blocking diagnostics.
         effective_extra_vars.setdefault("status_check_fail_on_error", "true")
-    run(
-        playbook_command(
+    command = None
+    if go_installer_allowed(effective_extra_vars):
+        target = directory or config_dir()
+        require_configuration(target)
+        if not check_mode and "ha-adm-native" in tags.split(","):
+            bootstrap_agent(target, effective_extra_vars)
+        command = agent_playbook_command(
             tags,
             check_mode=check_mode,
-            directory=directory,
+            directory=target,
             extra_vars=effective_extra_vars,
             skip_tags=skip_tags,
-        ),
-        env=ansible_environment(),
-    )
+        )
+    if command is not None:
+        run(command, env=os.environ.copy())
+    else:
+        run(
+            playbook_command(
+                tags,
+                check_mode=check_mode,
+                directory=directory,
+                extra_vars=effective_extra_vars,
+                skip_tags=skip_tags,
+            ),
+            env=ansible_environment(),
+        )
     selected_tags = {tag.strip() for tag in tags.split(",") if tag.strip()}
     if not check_mode and "upgrade" in selected_tags:
         offer_pending_reboot()
