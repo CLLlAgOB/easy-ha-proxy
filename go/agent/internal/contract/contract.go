@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -20,14 +21,15 @@ func repoRoot(t *testing.T) string {
 	return filepath.Join(filepath.Dir(file), "..", "..", "..", "..")
 }
 
-// read is the text of a file of the checkout, relative to its root.
+// read is the text of a file of the checkout, relative to its root, with
+// universal newlines as Python's read_text gives them.
 func read(t *testing.T, rel string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(rel)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(raw)
+	return strings.ReplaceAll(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\r", "\n")
 }
 
 // cyrillic is the Cyrillic block the English-source checks look for.
