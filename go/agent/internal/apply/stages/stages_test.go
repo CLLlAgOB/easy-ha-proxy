@@ -196,6 +196,8 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy/tasks/config.yml", "Configure HAProxy to load its private environment", haproxySecretDropIn},
 		{"haproxy/tasks/config.yml", "server-state | Normalize state before every cold start", haproxyStateGuard},
 		{"docker/tasks/docker.yml", "Add Docker APT repository", dockerRepo},
+		{"cert/tasks/rdg.yml", "RDG env for post-hook", rdgEnv},
+		{"cert/tasks/rdg.yml", "POST-hook — RDG deploy + HAProxy reload", rdgPostHook},
 		{"update_packages/tasks/upgrade.yml", "Configure APT retries and timeouts", aptRetries},
 		{"update_packages/tasks/upgrade.yml", "Keep needrestart from stopping active maintenance brokers", needrestartBrokers},
 	} {
