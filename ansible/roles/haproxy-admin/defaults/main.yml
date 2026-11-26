@@ -307,6 +307,7 @@ go_installer_parts:
   - authelia/daemons
   - authelia/update
   - authelia/users_apply
+  - authelia/remove
   - cert/install
   - cert/notify
   - cert/hooks

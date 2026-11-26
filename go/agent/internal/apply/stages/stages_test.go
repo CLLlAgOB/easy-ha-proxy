@@ -40,6 +40,7 @@ var folded = map[string]bool{
 	"Check whether needrestart is installed":                                 true, // stat, read in the conditions
 	"Check whether a reboot is required":                                     true, // stat, read in the conditions
 	"Authelia | users_apply | check users file exists":                       true, // stat, read in the assert
+	"Check if Authelia project directory exists":                             true, // stat, read in the condition
 	"Inspect the legacy managed msmtp configuration":                         true, // stat, read with the file
 }
 
