@@ -3343,16 +3343,33 @@ SCOPE_UNAVAILABLE: dict[str, Any] = {
 }
 
 
-def agent_update_scope(action: str, directory: Path, *extra: str) -> subprocess.CompletedProcess[str] | None:
-    """Run "easy-ha-proxy-agent update-scope"; None without a usable agent."""
-
-    if not AGENT_BINARY.is_file():
+def run_update_scope(agent: Path, action: str, directory: Path, extra: tuple[str, ...]) -> subprocess.CompletedProcess[str] | None:
+    if not agent.is_file():
         return None
-    command = [str(AGENT_BINARY), "update-scope", action, "--config", str(directory), "--source", str(source_dir()), *extra]
+    command = [str(agent), "update-scope", action, "--config", str(directory), "--source", str(source_dir()), *extra]
     try:
         return subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def agent_update_scope(action: str, directory: Path, *extra: str) -> subprocess.CompletedProcess[str] | None:
+    """Run "easy-ha-proxy-agent update-scope"; None without a usable agent.
+
+    An installed agent older than the command (the update being applied is
+    the one that brings it) leaves the answer to the agent built for the
+    source, as the playbook run does.
+    """
+
+    completed = run_update_scope(AGENT_BINARY, action, directory, extra)
+    unsupported = completed is not None and completed.returncode == 2 and "update-scope" not in (completed.stderr or "")
+    if completed is not None and not unsupported:
+        return completed
+    try:
+        staged = fetch_runner(directory)
+    except (InstallerError, OSError):
+        return completed
+    return run_update_scope(staged, action, directory, extra) or completed
 
 
 def changes_scope(directory: Path | None = None) -> dict[str, Any]:

@@ -101,8 +101,12 @@ class TheAgentDecides(unittest.TestCase):
         self.root = Path(temporary.name)
         self.agent = self.root / "easy-ha-proxy-agent"
         self.agent.write_text("", encoding="utf-8")
+        # No agent built for the source can be fetched unless a test says so.
+        self.fetch = mock.patch.object(easy_ha_proxy, "fetch_runner",
+                                       side_effect=easy_ha_proxy.InstallerError("offline"))
         for patch in (mock.patch.object(easy_ha_proxy, "AGENT_BINARY", self.agent),
-                      mock.patch.object(easy_ha_proxy, "source_dir", return_value=self.root / "source")):
+                      mock.patch.object(easy_ha_proxy, "source_dir", return_value=self.root / "source"),
+                      self.fetch):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -131,6 +135,24 @@ class TheAgentDecides(unittest.TestCase):
         with mock.patch("easy_ha_proxy.subprocess.run") as run:
             self.assertEqual(self.cli.changes_scope(self.root)["reason"], "scope-unavailable")
         run.assert_not_called()
+
+    def test_an_agent_older_than_the_command_leaves_it_to_the_one_built_for_the_source(self):
+        # The update being applied is the one that brings "update-scope".
+        staged = self.root / "staged-agent"
+        staged.write_text("", encoding="utf-8")
+        answers = [subprocess.CompletedProcess([], 2, "", "usage: easy-ha-proxy-agent <healthd|apply|version> [flags]\n"),
+                   subprocess.CompletedProcess([], 0, '{"full": false, "ready": true, "tags": ["ha-adm-native", "status"]}', "")]
+        with mock.patch.object(self.cli, "fetch_runner", return_value=staged), \
+                mock.patch("easy_ha_proxy.subprocess.run", side_effect=answers) as run:
+            scope = self.cli.changes_scope(self.root)
+        self.assertEqual(scope["tags"], ["ha-adm-native", "status"])
+        self.assertEqual(run.call_args.args[0][:3], [str(staged), "update-scope", "plan"])
+
+    def test_a_refusal_of_the_command_itself_is_not_retried(self):
+        with mock.patch.object(self.cli, "fetch_runner") as fetch, \
+                self.answer(code=2, stderr="usage: easy-ha-proxy-agent update-scope plan|record ...\n"):
+            self.assertEqual(self.cli.changes_scope(self.root)["reason"], "scope-unavailable")
+        fetch.assert_not_called()
 
     def test_an_unavailable_scope_says_so(self):
         with mock.patch("builtins.print") as printed:
