@@ -501,7 +501,7 @@ func guardArgv(t *testing.T, extra map[string]any) []string {
 func TestTheUpgradeGuardGetsItsArgumentsWithoutShellSplitting(t *testing.T) {
 	for _, automatic := range []bool{false, true} {
 		argv := guardArgv(t, map[string]any{"updated_state_root": "/state with spaces", "easy_ha_proxy_automatic_os_upgrade": automatic})
-		if argv[0] != "/usr/bin/python3" || !strings.HasSuffix(argv[1], "/ansible/../installer/os_upgrade_guard.py") {
+		if argv[0] != "/usr/local/sbin/easy-ha-proxy-agent" || argv[1] != "os-upgrade-guard" {
 			t.Fatalf("argv %q", argv)
 		}
 		if strings.Contains(strings.Join(argv, "\x00"), "--automatic") != automatic {

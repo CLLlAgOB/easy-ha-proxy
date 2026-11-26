@@ -132,8 +132,8 @@ func updatePackages(b *Builder) []engine.Step {
 	needrestart := func(*engine.Run) bool { return b.Exists("/usr/sbin/needrestart", false) }
 	revision := b.S("{{ easy_ha_proxy_maintenance_revision | default('') }}")
 	runtimeRevision := b.S("{{ easy_ha_proxy_runtime_maintenance_revision | default('') }}")
-	guard := b.S(`{{ (playbook_dir ~ '/../installer/os_upgrade_guard.py') | quote }}
-      {{ '--automatic' if easy_ha_proxy_automatic_os_upgrade | default(false) | bool else '' }}
+	agent := b.S("{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}")
+	guard := b.S(`{{ '--automatic' if easy_ha_proxy_automatic_os_upgrade | default(false) | bool else '' }}
       --state-root {{ ((updated_state_root | default('/var/lib/easy-ha-proxy/update-web')) ~ '/os-security') | quote }}
       {{ ('--runtime-maintenance ' ~ (easy_ha_proxy_runtime_maintenance_revision | quote) ~ ' --maintenance-until ' ~ (easy_ha_proxy_runtime_maintenance_until | string | quote))
          if easy_ha_proxy_runtime_maintenance_revision | default('') | length > 0 else
@@ -157,8 +157,7 @@ func updatePackages(b *Builder) []engine.Step {
 		engine.Step{Name: "Verify package upgrade safety and record the installation attempt",
 			When: func(r *engine.Run) bool { return r.Mode == engine.Apply },
 			Build: func(*engine.Run) (engine.Resource, error) {
-				// script: runs the guard with its executable; it always reports changed.
-				return &engine.Command{Argv: append([]string{"/usr/bin/python3"}, shlexSplit(guard)...), Changes: true}, nil
+				return &engine.Command{Argv: append([]string{agent, "os-upgrade-guard"}, shlexSplit(guard)...), Changes: true}, nil
 			}},
 		engine.Step{Name: "Update and upgrade apt packages", When: func(*engine.Run) bool { return revision == "" && runtimeRevision == "" },
 			Resource: AptUpgrade{}},

@@ -4,21 +4,17 @@ on:
   push:
     branches: [alpha, main]
     paths:
+      - 'go/agent/internal/hostsec/**'
+      - 'go/agent/internal/tools/apt_metadata.go'
       - 'installer/os_security.py'
-      - 'installer/timer_metadata.py'
       - 'installer/auto_reboot.py'
-      - 'installer/apt_metadata.py'
-      - '.tests/integration/os_security_smoke.py'
-      - '.tests/integration/auto_reboot_smoke.py'
       - '.github/workflows/os-security.yml'
   pull_request:
     paths:
+      - 'go/agent/internal/hostsec/**'
+      - 'go/agent/internal/tools/apt_metadata.go'
       - 'installer/os_security.py'
-      - 'installer/timer_metadata.py'
       - 'installer/auto_reboot.py'
-      - 'installer/apt_metadata.py'
-      - '.tests/integration/os_security_smoke.py'
-      - '.tests/integration/auto_reboot_smoke.py'
       - '.github/workflows/os-security.yml'
   workflow_dispatch:
 
@@ -44,13 +40,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
+      - name: Build disposable hostsec smoke test binary
+        working-directory: go/agent
+        run: go test -c -tags=hostsec_smoke -o /tmp/hostsec-smoke.test ./internal/hostsec
       - name: Prepare disposable native tools
         run: |
           sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer
           sudo apt-get update
-          sudo env NEEDRESTART_MODE=l apt-get install -y --no-install-recommends python3-apt unattended-upgrades needrestart gnupg
+          sudo env NEEDRESTART_MODE=l apt-get install -y --no-install-recommends unattended-upgrades needrestart gnupg
       - name: Verify signed security origins, actual installation and timer restoration
-        run: sudo env EHP_SECURITY_DISPOSABLE=1 /usr/bin/python3 .tests/integration/os_security_smoke.py --systemd
+        run: sudo env EHP_SECURITY_DISPOSABLE=1 EHP_SMOKE_SYSTEMD=1 /tmp/hostsec-smoke.test -test.v -test.run '^TestDisposableOSSecurityAndAutoReboot$'
 
   debian:
     name: Native APT (Debian ${{ matrix.release }})
@@ -66,6 +68,10 @@ jobs:
       - name: Prepare disposable native tools
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends python3 python3-apt unattended-upgrades needrestart gnupg ca-certificates
+          DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends unattended-upgrades needrestart gnupg ca-certificates
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go/agent/go.mod
       - name: Verify native APT with the container timer adapter
-        run: EHP_SECURITY_DISPOSABLE=1 /usr/bin/python3 .tests/integration/os_security_smoke.py
+        working-directory: go/agent
+        run: EHP_SECURITY_DISPOSABLE=1 go test -tags=hostsec_smoke -v -run '^TestDisposableOSSecurityAndAutoReboot$' ./internal/hostsec

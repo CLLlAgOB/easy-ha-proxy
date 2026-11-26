@@ -48,12 +48,12 @@ func (d *Daemon) startOSSecurity(req map[string]any, scheduled bool) (map[string
 	if (action == "install" || action == "configure" || action == "restart") && req["confirmation"] != "SECURITY" {
 		return nil, uErr("invalid", "Type SECURITY to confirm OS security management")
 	}
-	if _, _, err := d.osSecurityTool(); err != nil {
+	if _, err := d.osSecurityCommand(); err != nil {
 		return nil, err
 	}
 	restartAction := action == "restart-check" || action == "restart" || action == "restart-cycle"
 	if restartAction {
-		if _, err := d.serviceRestartTool(); err != nil {
+		if _, err := d.serviceRestartCommand(); err != nil {
 			return nil, err
 		}
 	}
@@ -278,11 +278,10 @@ func (d *Daemon) osSecurityResponse(req map[string]any) (map[string]any, error) 
 // ---------------------------------------------------------------------------
 
 func (d *Daemon) sshProtectionCommand(operation string) ([]string, error) {
-	tool, err := d.trustedSource("ssh_protection.py")
-	if err != nil {
-		return nil, err
+	if !isRegular(agentBinary) {
+		return nil, uErr("dependency", "Update host services before using SSH protection")
 	}
-	return []string{"/usr/bin/python3", tool, operation}, nil
+	return []string{agentBinary, "ssh-protection", operation}, nil
 }
 
 func (d *Daemon) sshProtectionQuery(operation string, options ...string) (map[string]any, error) {
@@ -845,12 +844,13 @@ func (d *Daemon) requestReboot(req map[string]any, automatic map[string]any, hel
 		command := []string{systemdRunPath, "--unit=" + unit, "--description=easy-ha-proxy web controlled reboot",
 			fmt.Sprintf("--on-active=%ds", d.Opts.RebootDelaySeconds), "--timer-property=AccuracySec=1s"}
 		if automatic != nil {
-			tool, _, err := d.autoRebootTool()
+			tool, err := d.autoRebootCommand()
 			if err != nil {
 				return err
 			}
-			command = append(command, "--timer-property=RemainAfterElapse=no", "--property=TimeoutStartSec=infinity",
-				"--", "/usr/bin/python3", tool, "fire", "--state-root", d.Opts.OSSecurityRoot(),
+			command = append(command, "--timer-property=RemainAfterElapse=no", "--property=TimeoutStartSec=infinity", "--")
+			command = append(command, tool...)
+			command = append(command, "fire", "--state-root", d.Opts.OSSecurityRoot(),
 				"--maintenance-lock", d.Opts.MaintenanceLockPath, "--reboot-marker", d.Opts.RebootMarker,
 				"--required-marker", d.Opts.RebootRequiredPath, "--unit", unit)
 		} else {

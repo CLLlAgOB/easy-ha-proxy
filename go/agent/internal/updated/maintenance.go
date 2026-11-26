@@ -88,8 +88,10 @@ func mwRestartPolicy(value map[string]any) map[string]any {
 }
 
 func (d *Daemon) maintenanceModule() error {
-	_, err := d.trustedSource("maintenance_window.py")
-	return err
+	if !isRegular(agentBinary) {
+		return uErr("dependency", "Update host services before using unified maintenance")
+	}
+	return nil
 }
 
 func (d *Daemon) unifiedPolicy() (map[string]any, error) {

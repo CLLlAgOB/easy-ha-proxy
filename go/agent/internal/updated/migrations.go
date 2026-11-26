@@ -526,17 +526,23 @@ func defaultOSPolicy() map[string]any {
 	return map[string]any{"mode": "system", "interval": int64(4), "start": int64(3), "end": int64(5)}
 }
 
-func (d *Daemon) osSecurityTool() (string, []byte, error) {
-	return d.toolBytes("os_security.py", "Update host services before using OS security management", "PROTOCOL = 1")
+func (d *Daemon) hostAgentTool(subcommand, missing string) ([]string, error) {
+	if !isRegular(agentBinary) {
+		return nil, uErr("dependency", "%s", missing)
+	}
+	return []string{agentBinary, subcommand}, nil
 }
 
-func (d *Daemon) autoRebootTool() (string, []byte, error) {
-	return d.toolBytes("auto_reboot.py", "Update host services before configuring automatic reboots", "AUTO_REBOOT_PROTOCOL = 1")
+func (d *Daemon) osSecurityCommand() ([]string, error) {
+	return d.hostAgentTool("os-security", "Update host services before using OS security management")
 }
 
-func (d *Daemon) serviceRestartTool() (string, error) {
-	tool, _, err := d.toolBytes("service_restarts.py", "Update host services before managing service restarts", "SERVICE_RESTART_PROTOCOL = 1")
-	return tool, err
+func (d *Daemon) autoRebootCommand() ([]string, error) {
+	return d.hostAgentTool("auto-reboot", "Update host services before configuring automatic reboots")
+}
+
+func (d *Daemon) serviceRestartCommand() ([]string, error) {
+	return d.hostAgentTool("service-restarts", "Update host services before managing service restarts")
 }
 
 func (d *Daemon) autoRebootRecord() (map[string]any, error) {
@@ -660,7 +666,7 @@ func (d *Daemon) serviceRestartDue(value, status map[string]any, local time.Time
 func (d *Daemon) serviceRestartSnapshot() map[string]any {
 	result := map[string]any{"available": false, "enabled": false, "time": "02:15", "status": nil}
 	err := func() error {
-		if _, err := d.serviceRestartTool(); err != nil {
+		if _, err := d.serviceRestartCommand(); err != nil {
 			return err
 		}
 		result["available"] = true
@@ -732,7 +738,7 @@ func (d *Daemon) setServiceRestarts(req map[string]any) (map[string]any, error) 
 	if !okE || !okT || !autoRebootTimeRe.MatchString(t) || req["confirmation"] != "SECURITY" {
 		return nil, uErr("invalid", "Confirm a valid service restart policy")
 	}
-	if _, err := d.serviceRestartTool(); err != nil {
+	if _, err := d.serviceRestartCommand(); err != nil {
 		return nil, err
 	}
 	lock, err := d.acquireOperation(true, !enabled)
@@ -810,11 +816,12 @@ func (d *Daemon) serviceRestartTick() (string, error) {
 }
 
 func (d *Daemon) serviceRebootReason() ([]any, error) {
-	tool, err := d.serviceRestartTool()
+	tool, err := d.serviceRestartCommand()
 	if err != nil {
 		return nil, err
 	}
-	rc, out, _, err := d.commandRunner(90*time.Second, nil, "/usr/bin/python3", tool, "reboot-reason", "--state-root", d.Opts.OSSecurityRoot())
+	argv := append(tool, "reboot-reason", "--state-root", d.Opts.OSSecurityRoot())
+	rc, out, _, err := d.commandRunner(90*time.Second, nil, argv...)
 	failed := uErr("verification_failed", "The remaining service restarts could not be verified")
 	if err != nil {
 		return nil, failed
@@ -845,7 +852,7 @@ func autoRebootDue(record map[string]any, local time.Time) (bool, string) {
 func (d *Daemon) autoRebootSnapshot() map[string]any {
 	result := map[string]any{"available": false, "required": exists(d.Opts.RebootRequiredPath), "pending": nil}
 	err := func() error {
-		if _, _, err := d.autoRebootTool(); err != nil {
+		if _, err := d.autoRebootCommand(); err != nil {
 			return err
 		}
 		result["available"] = true
@@ -926,17 +933,12 @@ func (d *Daemon) setAutoReboot(req map[string]any) (map[string]any, error) {
 	if !okE || !okT || !autoRebootTimeRe.MatchString(t) || req["confirmation"] != "REBOOT" || !okA {
 		return nil, uErr("invalid", "Confirm a valid automatic reboot policy")
 	}
-	if _, _, err := d.autoRebootTool(); err != nil {
+	if _, err := d.autoRebootCommand(); err != nil {
 		return nil, err
 	}
 	if allow {
-		if _, err := d.serviceRestartTool(); err != nil {
+		if _, err := d.serviceRestartCommand(); err != nil {
 			return nil, err
-		}
-		if _, raw, err := d.autoRebootTool(); err != nil {
-			return nil, err
-		} else if !bytes.Contains(raw, []byte("SERVICE_REBOOT_PROTOCOL = 1")) {
-			return nil, uErr("dependency", "Update host services before allowing service reboot fallback")
 		}
 	}
 	lock, err := d.acquireOperation(true, !enabled)
@@ -995,7 +997,7 @@ func (d *Daemon) autoRebootTick() (string, error) {
 	if due, _ := autoRebootDue(record, local); !due {
 		return "waiting", nil
 	}
-	if _, _, err := d.autoRebootTool(); err != nil {
+	if _, err := d.autoRebootCommand(); err != nil {
 		var ue *Error
 		if errors.As(err, &ue) {
 			return ue.Code, nil
@@ -1056,12 +1058,11 @@ func (d *Daemon) autoRebootTick() (string, error) {
 func (d *Daemon) osSecuritySnapshot() map[string]any {
 	result := map[string]any{"policy": defaultOSPolicy(), "status": nil, "recovery_required": false, "available": false}
 	err := func() error {
-		_, raw, err := d.osSecurityTool()
-		if err != nil {
+		if _, err := d.osSecurityCommand(); err != nil {
 			return err
 		}
 		result["available"] = true
-		result["daily_supported"] = bytes.Contains(raw, []byte("SETTINGS_PROTOCOL = 1"))
+		result["daily_supported"] = true
 		if path := d.osPath("policy.json"); lexists(path) {
 			record, err := d.safeJSONFile(path)
 			if err != nil {
@@ -1169,14 +1170,12 @@ func (d *Daemon) osSecurityLiveSettings() map[string]any {
 		return cached
 	}
 	value := func() map[string]any {
-		tool, raw, err := d.osSecurityTool()
+		tool, err := d.osSecurityCommand()
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
-		if !bytes.Contains(raw, []byte("SETTINGS_PROTOCOL = 1")) {
-			return map[string]any{"error": "Update host services to read current Linux settings"}
-		}
-		rc, out, _, err := d.commandRunner(8*time.Second, nil, "/usr/bin/python3", tool, "inspect")
+		argv := append(tool, "inspect")
+		rc, out, _, err := d.commandRunner(8*time.Second, nil, argv...)
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
@@ -1400,12 +1399,12 @@ func (d *Daemon) osSecurityWorker(jobID string, lock *os.File, action string, po
 		if d.haproxyTransactionActive() {
 			return uErr("config_pending", "Resolve pending HAProxy configuration changes before OS maintenance")
 		}
-		var tool string
+		var tool []string
 		var err error
 		if action == "restart-check" || action == "restart" || action == "restart-cycle" {
-			tool, err = d.serviceRestartTool()
+			tool, err = d.serviceRestartCommand()
 		} else {
-			tool, _, err = d.osSecurityTool()
+			tool, err = d.osSecurityCommand()
 		}
 		if err != nil {
 			return err
@@ -1417,8 +1416,8 @@ func (d *Daemon) osSecurityWorker(jobID string, lock *os.File, action string, po
 		if err := os.WriteFile(d.Opts.ActiveMarker, []byte("job_id="+jobID+"\n"), 0o600); err != nil {
 			return err
 		}
-		command := []string{"/usr/bin/python3", tool, action, "--state-root", d.Opts.OSSecurityRoot(),
-			"--maintenance-lock", d.Opts.MaintenanceLockPath, "--request-id", jobID}
+		command := append(tool, action, "--state-root", d.Opts.OSSecurityRoot(),
+			"--maintenance-lock", d.Opts.MaintenanceLockPath, "--request-id", jobID)
 		if maintenanceRevision != "" {
 			command = append(command, "--maintenance-revision", maintenanceRevision)
 		}

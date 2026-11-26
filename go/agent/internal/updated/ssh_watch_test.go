@@ -12,13 +12,13 @@ import (
 // watch answers "not installed" itself; with either one it asks the tool.
 func TestSSHWatchStartsNoToolWithoutFail2ban(t *testing.T) {
 	d := newTestDaemon(t)
-	tool := filepath.Join(d.Opts.SourceDir, "installer", "ssh_protection.py")
-	if err := os.MkdirAll(filepath.Dir(tool), 0o755); err != nil {
+	agent := filepath.Join(t.TempDir(), "easy-ha-proxy-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tool, []byte("# tool\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	savedAgent := agentBinary
+	agentBinary = agent
+	defer func() { agentBinary = savedAgent }()
 	var calls []string
 	d.commandRunner = func(_ time.Duration, _ []string, argv ...string) (int, string, string, error) {
 		calls = append(calls, strings.Join(argv, " "))
@@ -40,7 +40,7 @@ func TestSSHWatchStartsNoToolWithoutFail2ban(t *testing.T) {
 			t.Fatal(err)
 		}
 		status, err = d.sshMonitorStatus()
-		if err != nil || status["state"] != "active" || len(calls) != 1 || !strings.HasSuffix(calls[0], "ssh_protection.py monitor") {
+		if err != nil || status["state"] != "active" || len(calls) != 1 || !strings.HasSuffix(calls[0], "ssh-protection monitor") {
 			t.Fatalf("with %s: %v %v, tool runs %v", filepath.Base(present), status, err, calls)
 		}
 		if err := os.Remove(present); err != nil {

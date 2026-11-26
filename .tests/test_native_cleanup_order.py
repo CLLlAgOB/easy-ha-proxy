@@ -36,8 +36,8 @@ class NeedrestartKeepsTheUpdateJob(unittest.TestCase):
 
     def test_every_place_that_writes_exclusions_names_the_job_unit(self):
         agent = (ROOT / "go" / "agent" / "internal" / "apply" / "stages" / "update_packages.go").read_text(encoding="utf-8")
-        os_security = (ROOT / "installer" / "os_security.py").read_text(encoding="utf-8")
-        restarts = (ROOT / "installer" / "service_restarts.py").read_text(encoding="utf-8")
+        os_security = (ROOT / "go" / "agent" / "internal" / "hostsec" / "os_security.go").read_text(encoding="utf-8")
+        restarts = (ROOT / "go" / "agent" / "internal" / "hostsec" / "service_restarts.go").read_text(encoding="utf-8")
         for name, text in (("installer agent", agent), ("os_security", os_security), ("service_restarts", restarts)):
             self.assertIn(self.JOB, text, name)
 
