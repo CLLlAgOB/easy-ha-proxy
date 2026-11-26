@@ -187,8 +187,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # A default can change the rendered configuration and what install lays down.
     (f"{_HAPROXY}/defaults/*", ("ha-install", "ha-cfg")),
     (f"{_HAPROXY}/handlers/*", ("ha-install", "ha-cfg")),
-    # Run by hand, never by an update.
-    (f"{_HAPROXY}/tasks/addadmin.yml", ()),
 
     # GeoIP: one stage owns the whole role.
     ("ansible/roles/geoip_acl/*", ("geo",)),
@@ -206,9 +204,6 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (f"{_CERT}/tasks/install.yml", ("crt-install",)),
     (f"{_CERT}/tasks/renew*.yml", ()),
     (f"{_CERT}/templates/_san_flags.j2", ()),
-    (f"{_CERT}/tasks/rdg.yml", ()),
-    (f"{_CERT}/tasks/test.yml", ()),
-    (f"{_CERT}/tasks/remove_orphans.yml", ()),
 
     # Authelia's host daemons. Its configuration and container are not
     # mapped: those go through the full stack.

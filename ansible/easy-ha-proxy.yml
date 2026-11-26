@@ -139,25 +139,6 @@
         - crt-hooks
         - crt-install
 
-    - role: cert
-      task_stage: remove_orphans
-      tags:
-        - never
-        - remove_site
-
-    - role: cert
-      task_stage: rdg
-      tags:
-        - crt-rdg
-        - cert
-        - never
-
-    - role: cert
-      task_stage: test
-      tags:
-        - crt-test
-        - never
-
     - role: haproxy
       task_stage: install
       tags: ha-install
@@ -291,12 +272,6 @@
         - ha-adm-update
 
     - role: authelia
-      task_stage: remove
-      tags:
-        - never
-        - aut-remove
-
-    - role: authelia
       task_stage: config
       tags:
         - never
@@ -314,18 +289,6 @@
       tags:
         - never
         - aut-update
-
-    - role: authelia
-      task_stage: users_apply
-      tags:
-        - never
-        - aut-users
-
-    - role: haproxy
-      task_stage: addadmin
-      tags:
-        - ha-add-adm-ip
-        - never
 
 - hosts: "{{ easy_ha_proxy_target | default('easy_ha_proxy') }}"
   become: true

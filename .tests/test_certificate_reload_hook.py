@@ -38,7 +38,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CERT = ROOT / "ansible" / "roles" / "cert"
 HOOK = CERT / "templates" / "905-haproxy-pems-reload.sh.j2"
-RDG = CERT / "tasks" / "rdg.yml"
 
 
 class TheReloadRuns(unittest.TestCase):

@@ -78,22 +78,6 @@ class FailuresAreNotSwallowed(unittest.TestCase):
         self.assertIn("reload_res is failed", fallback["when"])
         self.assertEqual(fallback["service"]["state"], "restarted")
 
-    def test_authelia_removal_skips_only_helpers_that_were_never_installed(self):
-        tasks = list(tasks_in(yaml.safe_load(
-            (ANSIBLE / "roles/authelia/tasks/remove.yml").read_text(encoding="utf-8")
-        )))
-        names = [task.get("name") for task in tasks]
-        facts = names.index("Collect the services systemd knows")
-        stop = names.index("Stop and disable the Authelia helper services")
-        self.assertLess(facts, stop)
-        task = tasks[stop]
-        self.assertEqual(task["when"], "item in ansible_facts.services")
-        self.assertEqual(
-            task["loop"],
-            ["authelia-configd.service", "authelia-usersd.service", "authelia-bansd.service"],
-        )
-        self.assertNotIn("failed_when", task)
-
 
 class ChangesAreReported(unittest.TestCase):
     def test_every_command_says_when_it_changed_something(self):

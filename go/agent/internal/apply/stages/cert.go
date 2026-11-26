@@ -23,7 +23,6 @@ func init() {
 		{Name: "cert/notify", Role: "cert", File: "notify", Build: certNotify},
 		{Name: "cert/hooks", Role: "cert", File: "hooks", Build: certHooks},
 		{Name: "cert/renew", Role: "cert", File: "renew", Build: certRenew, Facts: []string{"haproxy_present"}},
-		{Name: "cert/test", Role: "cert", File: "test", Build: certTest},
 	}})
 }
 
@@ -63,45 +62,12 @@ func certInstall(b *Builder) []engine.Step {
 	}
 }
 
-var (
-	msmtpManaged = regexp.MustCompile(`Ansible managed|managed by Ansible`)
-)
-
 func certNotify(b *Builder) []engine.Step {
-	remove := false
 	return []engine.Step{
 		{Name: "Ensure the managed configuration directory exists",
 			Resource: b.Dir("{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}", "root", "root", "0700")},
 		{Name: "Write the dynamic certificate notification state",
 			Build: b.Template("mail-notify.json.j2", "{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}/mail-notify.json", "root", "root", "0600")},
-		fact("Read the legacy managed msmtp configuration", nil, func() error {
-			remove = false
-			fi, err := os.Lstat(b.Sys.Path("/etc/msmtprc"))
-			if err != nil || !fi.Mode().IsRegular() {
-				return nil
-			}
-			raw, err := os.ReadFile(b.Sys.Path("/etc/msmtprc"))
-			if err != nil {
-				return err
-			}
-			uid, gid := fileOwner(fi)
-			text := string(raw)
-			// Ansible doubles the backslashes of string literals inside
-			// {{ }}, so the task's '\ndefaults\n' is a backslash and an n,
-			// not a newline: the check has never matched a real file, and
-			// no gateway's msmtprc was ever removed. Kept so: removing it now
-			// is a change of behaviour for the operator to decide.
-			remove = uid == 0 && gid == 0 && fi.Mode().Perm() == 0o600 && msmtpManaged.MatchString(text) &&
-				strings.Contains(text, `\ndefaults\n`) && strings.Contains(text, `\nsyslog          LOG_MAIL\n`) &&
-				strings.Contains(text, `\naccount         default\n`) && strings.Contains(text, `\nset_from_header on\n`)
-			return nil
-		}),
-		fact("Recognize the legacy role-owned msmtp configuration", nil, func() error {
-			b.Set.SetFact("cert_remove_legacy_msmtprc", remove)
-			return nil
-		}),
-		{Name: "Remove the recognized legacy role-owned msmtp configuration", When: func(*engine.Run) bool { return remove },
-			Resource: &engine.Absent{Path: "/etc/msmtprc"}},
 		{Name: "Ensure deploy-hooks directory exists", Resource: b.Dir("/etc/letsencrypt/renewal-hooks/deploy", "root", "root", "0755")},
 		{Name: "Deploy the dynamic Certbot e-mail notification hook",
 			Build: b.Template("910-mail-notify.sh.j2", "/etc/letsencrypt/renewal-hooks/deploy/910-mail-notify.sh", "root", "root", "0755")},
@@ -647,19 +613,3 @@ func (d *delRule) Apply(sys *engine.System, _ engine.Change) error {
 }
 
 func (d *delRule) Changed() bool { return d.changed }
-
-// certTest is test.yml (crt-test): the PEMs kept in the role's files/
-// copied into HAProxy's certificate directory.
-func certTest(b *Builder) []engine.Step {
-	steps := []engine.Step{
-		{Name: b.S("Ensure certs dir {{ haproxy_certs_dir }} exists"), Resource: b.Dir("{{ haproxy_certs_dir }}", "root", "root", "0755")},
-		{Name: "Show certbot domains", Build: func(*engine.Run) (engine.Resource, error) {
-			return report(fmt.Sprintf("certbot_domains: %v", strList(b.Value("{{ certbot_domains }}")))), nil
-		}},
-	}
-	for _, domain := range strList(b.Value("{{ certbot_domains }}")) {
-		steps = append(steps, engine.Step{Name: "Deploy existing assembled PEM files to HAProxy",
-			Build: b.CopyFile(domain+".pem", "{{ haproxy_certs_dir }}/"+domain+".pem", "root", "root", "0600")})
-	}
-	return steps
-}

@@ -39,9 +39,6 @@ var folded = map[string]bool{
 	"Look for the Redis session dump":                                        true, // stat, read in the conditions
 	"Check whether needrestart is installed":                                 true, // stat, read in the conditions
 	"Check whether a reboot is required":                                     true, // stat, read in the conditions
-	"Authelia | users_apply | check users file exists":                       true, // stat, read in the assert
-	"Check if Authelia project directory exists":                             true, // stat, read in the condition
-	"Inspect the legacy managed msmtp configuration":                         true, // stat, read with the file
 }
 
 // taskNames lists a task file's task names in order, its import_tasks
@@ -192,13 +189,10 @@ func TestInlineContentMatchesTheTaskFile(t *testing.T) {
 		{"haproxy/tasks/apparmor.yml", "AppArmor | deploy local rules for rsyslogd (HAProxy chroot socket)", apparmorRsyslogd},
 		{"haproxy/tasks/package.yml", "HAProxy package | Keep package updates within the selected branch", haproxyPin},
 		{"haproxy/tasks/install.yml", "Ensure admin IPs file exists with static admin_allowed_ips", adminIPs},
-		{"haproxy/tasks/addadmin.yml", "Ensure admin IPs file exists with static admin_allowed_ips", adminIPs},
 		{"haproxy/tasks/config.yml", "Install private HAProxy runtime environment", haproxyEnvironment},
 		{"haproxy/tasks/config.yml", "Configure HAProxy to load its private environment", haproxySecretDropIn},
 		{"haproxy/tasks/config.yml", "server-state | Normalize state before every cold start", haproxyStateGuard},
 		{"docker/tasks/docker.yml", "Add Docker APT repository", dockerRepo},
-		{"cert/tasks/rdg.yml", "RDG env for post-hook", rdgEnv},
-		{"cert/tasks/rdg.yml", "POST-hook — RDG deploy + HAProxy reload", rdgPostHook},
 		{"update_packages/tasks/upgrade.yml", "Configure APT retries and timeouts", aptRetries},
 		{"update_packages/tasks/upgrade.yml", "Keep needrestart from stopping active maintenance brokers", needrestartBrokers},
 	} {
@@ -410,42 +404,5 @@ func TestEveryNotifiedTopicHasAHandler(t *testing.T) {
 		if !topics[name] {
 			t.Errorf("no handler for %q", name)
 		}
-	}
-}
-
-// users_apply's operations: deletions first, then adds keep what a user had,
-// replaces take the op's fields, groups follow groups_action.
-func TestUserOpsFollowTheTaskFile(t *testing.T) {
-	doc, err := pyyaml.Load([]byte(`users:
-  alice: {displayname: Alice, password: H1, email: a@x, groups: [admins], disabled: false}
-  bob: {displayname: Bob, password: H2, email: b@x, groups: [users]}
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ops, err := pyyaml.Load([]byte(`bob: {user_action: delete}
-alice: {user_action: replace, password_action: replace, password_hash: " H9 ", groups_action: add, groups: [users, admins]}
-carol: {displayname: Carol, password_hash: H3, email: c@x, groups: [users]}
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := applyUserOps(doc.(*pyyaml.Map).Value("users").(*pyyaml.Map), ops.(*pyyaml.Map))
-	if _, ok := out.Get("bob"); ok {
-		t.Error("bob was not deleted")
-	}
-	alice := out.Value("alice").(*pyyaml.Map)
-	if alice.Value("password") != "H9" || alice.Value("displayname") != "Alice" || alice.Value("email") != "a@x" {
-		t.Errorf("alice: %v %v %v", alice.Value("password"), alice.Value("displayname"), alice.Value("email"))
-	}
-	if g := alice.Value("groups").([]any); len(g) != 2 || g[0] != "admins" || g[1] != "users" {
-		t.Errorf("alice's groups: %v", g)
-	}
-	if _, ok := alice.Get("disabled"); ok {
-		t.Error("a replaced user keeps only displayname, password, email and groups")
-	}
-	carol := out.Value("carol").(*pyyaml.Map)
-	if carol.Value("password") != "H3" || carol.Value("displayname") != "Carol" {
-		t.Errorf("carol: %v", carol)
 	}
 }

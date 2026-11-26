@@ -98,7 +98,7 @@ ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
 проверяет iptables loader, systemd timers, journald, Certbot, cron/logrotate,
 версии APT/Snap и контрольные суммы остальных управляемых scripts/hooks/Lua.
 
-Опасные или редкие сценарии имеют тег `never` и запускаются явно: `remove_site`, `aut-remove`, `aut-cfg`, `aut-users`, `ha-adm-update`, `ha-add-adm-ip`, `crt-rdg`, `crt-test`.
+Сценарии вне обычного обновления имеют тег `never` и запускаются явно: `aut-cfg`, `aut-daemons`, `aut-update`, `ha-adm-daemons`, `ha-adm-update`. Установщик только устанавливает и обновляет; сайты, пользователи, адреса администраторов и остальные настройки меняются в веб-панели (основной домен — командой `easy-ha-proxy migrate-domain`).
 
 ## Компоненты
 

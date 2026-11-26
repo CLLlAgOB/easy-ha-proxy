@@ -35,7 +35,7 @@ class GoInstallerSwitch(unittest.TestCase):
         self.probes.append(command)
         if command[2] == "parts":
             return subprocess.CompletedProcess(command, 0, self.parts, "")
-        return subprocess.CompletedProcess(command, self.supported, "", "not in the Go installer yet: cert (rdg)\n")
+        return subprocess.CompletedProcess(command, self.supported, "", "not in the Go installer yet: a new entry\n")
 
     def play(self, tags: str, **kwargs) -> list[list[str]]:
         runs: list[list[str]] = []
@@ -71,7 +71,7 @@ class GoInstallerSwitch(unittest.TestCase):
 
     def test_an_entry_not_moved_yet_falls_back_to_ansible(self) -> None:
         self.supported = 3
-        runs = self.play("crt-rdg")
+        runs = self.play("a-new-tag")
         self.assertEqual(runs, [["ansible-playbook"]])
 
     def test_ansible_on_request_or_without_an_agent(self) -> None:

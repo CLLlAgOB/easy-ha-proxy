@@ -19,7 +19,6 @@ func init() {
 		{Name: "haproxy/protection", Role: "haproxy", File: "protection", PreTask: true, Build: haproxyProtection},
 		{Name: "haproxy/install", Role: "haproxy", File: "install", Build: haproxyInstall},
 		{Name: "haproxy/apparmor", Role: "haproxy", File: "apparmor", Build: haproxyAppArmor},
-		{Name: "haproxy/addadmin", Role: "haproxy", File: "addadmin", Build: haproxyAddAdmin},
 		{Name: "haproxy/config", Role: "haproxy", File: "config", Build: haproxyConfig,
 			Exports: []string{"haproxy_runtime_environment", "haproxy_secret_dropin"}},
 	}})
@@ -90,11 +89,4 @@ func haproxyFS(b *Builder) []engine.Step {
 		engine.Step{Name: "Ensure HAProxy certs directory exists", Resource: b.Dir("{{ haproxy_certs_dir }}", "root", "root", "0755")},
 		engine.Step{Name: "Ensure the client authentication directory exists", Resource: b.Dir("{{ haproxy_mtls_dir }}", "root", "root", "0755")},
 	)
-}
-
-// haproxyAddAdmin is addadmin.yml (ha-add-adm-ip): the static admin IP list,
-// checked and applied by HAProxy's handlers.
-func haproxyAddAdmin(b *Builder) []engine.Step {
-	return []engine.Step{{Name: "Ensure admin IPs file exists with static admin_allowed_ips", Notify: []string{validateHaproxy, applyHaproxy},
-		Build: b.CopyContent(adminIPs, "{{ admin_ips_file }}", "root", "haproxy", "0640")}}
 }

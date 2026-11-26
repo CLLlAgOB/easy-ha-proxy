@@ -18,15 +18,6 @@ cert_key_type: ecdsa                 # rsa | ecdsa (ecdsa by default)
 rsa_key_size: 3072
 ecdsa_curve: secp256r1               # p-256 (the best compatibility)
 
-# RDG settings (used in the post-hook)
-rdg_domain:   "example.com"          # the certificate's CN/SAN
-rdg_host:     "example.com"          # the Windows server's FQDN or IP
-rdg_ssh_user: "certbot"              # the account for the SFTP chroot
-rdg_ssh_key:  "/root/.ssh/id_cert"   # the private key on the HAProxy host
-rdg_ssh_port: 22                     # SSH port
-rdg_pfx_password: ""                 # an empty password is allowed
-rdg_remote_path: "C:/SFTP/upload/rdg_cert.pfx"
-
 # Bootstrap mode: a temporary DNAT 80->8000 for Certbot's standalone server
 haproxy_autoreload: true
 haproxy_certs_dir: /etc/haproxy/certs

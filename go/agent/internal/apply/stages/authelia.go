@@ -12,22 +12,20 @@ import (
 	"strings"
 	"time"
 
-	"easy-ha-proxy/panel/shared/jinja"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
-	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/facts"
 )
 
 // The Authelia stage: roles/authelia's install entry (install.yml with the
 // fs, config, start, configd, bansd and usersd files it imports and the
 // helpers they include), and the config and daemons entries run on request.
-// The update, users_apply and remove entries stay in Ansible for now.
+// The installer installs and updates only: users and every other setting are
+// the web panel's.
 func init() {
 	register(Stage{Name: "authelia", Parts: []Part{
 		{Name: "authelia/install", Role: "authelia", File: "install", Build: autheliaInstall},
 		{Name: "authelia/config", Role: "authelia", File: "config", Build: autheliaConfigEntry},
 		{Name: "authelia/daemons", Role: "authelia", File: "daemons", Build: autheliaDaemonsEntry},
 		{Name: "authelia/update", Role: "authelia", File: "update", Build: autheliaUpdate},
-		{Name: "authelia/remove", Role: "authelia", File: "remove", Build: autheliaRemove},
 	}})
 }
 
@@ -606,49 +604,3 @@ func autheliaUpdate(b *Builder) []engine.Step {
 			}}})
 	return whenEnabled(b, steps)
 }
-
-// autheliaRemove is remove.yml (aut-remove): the stack taken down with its
-// volumes, its files, the Lua helpers and the helper services removed.
-func autheliaRemove(b *Builder) []engine.Step {
-	var services map[string]bool
-	steps := []engine.Step{
-		{Name: "Remove Authelia docker stack (containers, networks, volumes)", When: func(*engine.Run) bool { return b.Exists("/opt/authelia", false) },
-			Resource: &engine.Command{Argv: []string{"docker", "compose", "down", "--remove-orphans", "--volumes"}, Dir: "/opt/authelia", MergeStderr: true,
-				ChangedWhen: func(out string, _ int) bool { return composeDown.MatchString(out) }}},
-		{Name: "Remove Authelia project directory", Resource: &engine.Absent{Path: "/opt/authelia"}},
-		{Name: "Remove Authelia logrotate config", Resource: &engine.Absent{Path: "/etc/logrotate.d/authelia"}},
-		{Name: "Remove Authelia email templates directory", Resource: &engine.Absent{Path: "/opt/authelia/email_templates"}},
-		{Name: "Remove Authelia Redis data dir sysctl config", Resource: &engine.Absent{Path: b.S("{{ authelia_redis_sysctl_file }}")}},
-		{Name: "Remove Redis data dir for Authelia", Resource: &engine.Absent{Path: b.S("{{ authelia_redis_data_dir }}")}},
-		{Name: "Remove haproxy-lua-http directory", Resource: &engine.Absent{Path: "/etc/haproxy/lua/haproxy-lua-http"}},
-		{Name: "Remove json.lua", Resource: &engine.Absent{Path: "/etc/haproxy/lua/json.lua"}},
-		{Name: "Remove auth-request.lua", Resource: &engine.Absent{Path: "/etc/haproxy/lua/auth-request.lua"}},
-		{Name: "Collect the services systemd knows", Resource: &engine.Func{Desc: "service_facts", CheckFn: func(sys *engine.System) (engine.Change, error) {
-			m, err := facts.Services(execRunner(sys))
-			services = map[string]bool{}
-			if m != nil {
-				m.Each(func(k, _ any) { services[jinja.Str(k)] = true })
-			}
-			return engine.Change{Summary: "read"}, err
-		}}},
-	}
-	for _, unit := range []string{"authelia-configd.service", "authelia-usersd.service", "authelia-bansd.service"} {
-		unit := unit
-		steps = append(steps, engine.Step{Name: "Stop and disable the Authelia helper services",
-			When: func(*engine.Run) bool { return services[unit] }, Resource: Unit(unit, engine.Bool(false), "stopped")})
-	}
-	for _, f := range []struct{ name, path string }{
-		{"Remove authelia-configd service unit", "/etc/systemd/system/authelia-configd.service"},
-		{"Remove authelia-usersd service unit", "/etc/systemd/system/authelia-usersd.service"},
-		{"Remove authelia-bansd service unit", "/etc/systemd/system/authelia-bansd.service"},
-		{"Remove authelia-configd script", "/usr/local/sbin/authelia-configd.py"},
-		{"Remove local Authelia notification dashboard state", "/var/lib/easy-ha-proxy/authelia-notification-state.json"},
-		{"Remove authelia-usersd script", "/usr/local/sbin/authelia-usersd.py"},
-		{"Remove authelia-bansd script", "/usr/local/sbin/authelia-bansd.py"},
-	} {
-		steps = append(steps, engine.Step{Name: f.name, Resource: &engine.Absent{Path: f.path}})
-	}
-	return steps
-}
-
-var composeDown = regexp.MustCompile(`(?i)(stopping|stopped|removing|removed)`)

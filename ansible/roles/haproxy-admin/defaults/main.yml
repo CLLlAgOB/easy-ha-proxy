@@ -292,7 +292,6 @@ go_installer_parts:
   - haproxy/install
   - haproxy/apparmor
   - haproxy/config
-  - haproxy/addadmin
   - native
   - getuseruid
   - packages
@@ -306,15 +305,10 @@ go_installer_parts:
   - authelia/config
   - authelia/daemons
   - authelia/update
-  - authelia/users_apply
-  - authelia/remove
   - cert/install
   - cert/notify
   - cert/hooks
   - cert/renew
-  - cert/test
-  - cert/rdg
-  - cert/remove_orphans
   - update_packages/upgrade
   - healthcheck/status
   - geoip_acl/geoip
@@ -332,8 +326,6 @@ go_installer_forwarded_vars:
   # A pre_task fact that depends on the run's tags (addsite).
   - cert_issue_mode
   - status_check_fail_on_error
-  - authelia_users_ops_file
-  - cleanup_dry_run
 native_guardd_bin: /usr/local/sbin/guardd-core
 # Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
 # Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url

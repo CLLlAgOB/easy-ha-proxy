@@ -99,7 +99,7 @@ also covers the iptables loader, the systemd timers, journald, Certbot,
 cron/logrotate, the APT/Snap versions and the checksums of the other managed
 scripts, hooks and Lua files.
 
-Dangerous or rare scenarios carry the `never` tag and run only when named: `remove_site`, `aut-remove`, `aut-cfg`, `aut-users`, `ha-adm-update`, `ha-add-adm-ip`, `crt-rdg`, `crt-test`.
+Scenarios outside a normal update carry the `never` tag and run only when named: `aut-cfg`, `aut-daemons`, `aut-update`, `ha-adm-daemons`, `ha-adm-update`. The installer only installs and updates; sites, users, admin addresses and every other setting are changed in the web panel (the main domain with `easy-ha-proxy migrate-domain`).
 
 ## Components
 

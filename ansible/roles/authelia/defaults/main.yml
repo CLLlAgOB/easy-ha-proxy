@@ -162,10 +162,6 @@ authelia_users_host_path: "/opt/authelia/users_database.yml"
 #  - selfservice: Ansible creates it once (force: no), then Authelia/admin manages it.
 authelia_users_mode: "selfservice"
 
-# Ansible user management through users_apply.
-# authelia_users_ops_enable is currently not used by tasks; task_stage=users_apply is the trigger.
-authelia_users_ops_enable: false
-authelia_users_ops_file: "authelia_users_ops.yml"
 
 # Optional users_database.yml backup directory.
 # Tasks default to playbook_dir + '/cache/authelia-users'.

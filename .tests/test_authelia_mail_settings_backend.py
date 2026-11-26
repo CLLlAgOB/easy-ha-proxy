@@ -152,7 +152,6 @@ class MailDeploymentContractTests(unittest.TestCase):
         compose = self.read("ansible/roles/authelia/templates/docker-compose.yml.j2")
         self.assertNotIn("msmtp-mta", notify)
         self.assertNotIn("mail_smtp_pass | string", notify)
-        self.assertIn("set_from_header on", notify)
         self.assertNotIn("127.0.0.1:2525", compose)
         self.assertFalse((ROOT / "ansible/roles/cert/templates/msmtprc.j2").exists())
 
