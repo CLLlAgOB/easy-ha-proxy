@@ -206,6 +206,9 @@ type LineInFile struct {
 	Line         string
 	Owner, Group string
 	Mode         os.FileMode
+	// Same, when set, says an existing line already says what Line says in
+	// other words (a YAML value quoted or not): it is then left as written.
+	Same func(existing, want string) bool
 
 	content []byte
 	write   bool
@@ -235,7 +238,8 @@ func (l *LineInFile) Check(sys *System) (Change, error) {
 	want := []byte(l.Line + "\n")
 	var notes []string
 	switch {
-	case last >= 0 && !bytes.Equal(lines[last], want):
+	case last >= 0 && !bytes.Equal(lines[last], want) &&
+		(l.Same == nil || !l.Same(string(bytes.TrimRight(lines[last], "\r\n")), l.Line)):
 		lines[last] = want
 		l.write = true
 		notes = append(notes, "line replaced")

@@ -534,3 +534,17 @@ func TestTreeAndAttrs(t *testing.T) {
 		t.Fatalf("mode: %+v", c)
 	}
 }
+
+func TestLineInFileLeavesALineThatSaysTheSame(t *testing.T) {
+	f := newFake(t)
+	f.write(t, "/c/vars.yml", "haproxy_socket: /run/x\nb: 2\n", 0o644)
+	same := func(existing, want string) bool { return strings.ReplaceAll(want, `"`, "") == existing }
+	line := &LineInFile{Path: "/c/vars.yml", Regexp: regexp.MustCompile(`^\s*haproxy_socket\s*:`), Line: `haproxy_socket: "/run/x"`, Same: same}
+	if c := check(t, f.System, line); c.Needed {
+		t.Fatalf("the same value in other words is rewritten: %+v", c)
+	}
+	line.Line = `haproxy_socket: "/run/y"`
+	if c := check(t, f.System, line); !c.Needed || c.Summary != "line replaced" {
+		t.Fatalf("another value is not replaced: %+v", c)
+	}
+}

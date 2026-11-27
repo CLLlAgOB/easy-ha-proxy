@@ -171,7 +171,7 @@ func adminConfig(b *Builder) []engine.Step {
 	} {
 		steps = append(steps, engine.Step{Name: "Persist managed HAProxy runtime socket values",
 			Resource: &engine.LineInFile{Path: vars, Regexp: regexp.MustCompile(`^\s*` + regexp.QuoteMeta(kv[0]) + `\s*:`),
-				Line: kv[0] + ": " + pyJSON(kv[1]), Owner: owner, Group: grp, Mode: mode}})
+				Line: kv[0] + ": " + pyJSON(kv[1]), Same: sameYAMLLine, Owner: owner, Group: grp, Mode: mode}})
 	}
 	steps = append(steps,
 		fact("Calculate effective HAProxy thread count for the UI renderer", nil, func() error {
@@ -180,7 +180,7 @@ func adminConfig(b *Builder) []engine.Step {
 		}),
 		engine.Step{Name: "Persist effective HAProxy thread count in runtime vars",
 			Resource: &engine.LineInFile{Path: vars, Regexp: regexp.MustCompile(`^\s*haproxy_nbthread\s*:`),
-				Line: "haproxy_nbthread: " + nbthread, Owner: owner, Group: grp, Mode: mode}},
+				Line: "haproxy_nbthread: " + nbthread, Same: sameYAMLLine, Owner: owner, Group: grp, Mode: mode}},
 		engine.Step{Name: "haproxy-admin | Ensure data dir exists (for container)", When: onDocker,
 			Resource: b.Dir("{{ haproxy_admin_data_dir }}", user, group, "0750")},
 	)
@@ -562,4 +562,29 @@ func ignoredUnit(name string) engine.Resource {
 			}
 			return nil
 		}}
+}
+
+// sameYAMLLine: two "key: value" lines of the runtime vars.yml that give the
+// key the same value. The panel rewrites that file through a YAML dump,
+// which drops the quotes these steps write; rewriting them back changed the
+// file, so the configuration generation HAProxy carries, and the next update
+// reloaded HAProxy for nothing after every save of the panel's settings.
+func sameYAMLLine(existing, want string) bool {
+	a, errA := pyyaml.Load([]byte(existing))
+	b, errB := pyyaml.Load([]byte(want))
+	am, okA := a.(*pyyaml.Map)
+	bm, okB := b.(*pyyaml.Map)
+	if errA != nil || errB != nil || !okA || !okB || am.Len() != 1 || bm.Len() != 1 {
+		return false
+	}
+	ka, kb := am.Keys()[0], bm.Keys()[0]
+	va, vb := am.Value(ka), bm.Value(kb)
+	if ka != kb {
+		return false
+	}
+	switch va.(type) {
+	case string, int64, int, bool, float64:
+		return va == vb
+	}
+	return false
 }
