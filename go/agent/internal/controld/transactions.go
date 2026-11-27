@@ -572,6 +572,20 @@ func validateGuardedControlPlaneTransition(previous, candidate []byte, checks []
 	return nil
 }
 
+// backupFchown gives a config backup its owner; a variable so tests, which do
+// not run as root, can see what it was asked to do.
+var backupFchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
+
+// directoryOwner is the owner of dir itself, not of a link's target: ok is
+// false for anything but a real directory.
+func directoryOwner(dir string) (uid, gid int, ok bool) {
+	var st unix.Stat_t
+	if err := unix.Lstat(dir, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return 0, 0, false
+	}
+	return int(st.Uid), int(st.Gid), true
+}
+
 func (d *Daemon) createGuardedConfigBackup(raw []byte, candidateSHA string) (string, error) {
 	if len(raw) == 0 || len(raw) > d.Opts.MaxConfigBytes {
 		return "", vErr("the current HAProxy configuration cannot be backed up")
@@ -591,16 +605,29 @@ func (d *Daemon) createGuardedConfigBackup(raw []byte, candidateSHA string) (str
 		os.Remove(tmpPath)
 		return "", err
 	}
+	// Mode and owner through the open descriptor: the panel can write this
+	// directory, so a path here could be swapped for a link before a root
+	// chmod or chown follows it.
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", err
+	}
+	// The directory is the panel's, and the installer gives that whole tree to
+	// the panel's user: a root-owned copy made every update after an apply
+	// change its owner back. It protected nothing either: the panel reads the
+	// live haproxy.cfg, which holds no secret (they come from the environment).
+	if uid, gid, ok := directoryOwner(dir); ok {
+		if err := backupFchown(tmp, uid, gid); err != nil {
+			log.Printf("Could not give the HAProxy config backup %s to the owner of its directory: %v", tmpPath, err)
+		}
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return "", err
 	}
 	tmp.Close()
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		os.Remove(tmpPath)
-		return "", err
-	}
 	if err := os.Rename(tmpPath, backup); err != nil {
 		os.Remove(tmpPath)
 		return "", err
