@@ -64,6 +64,7 @@ frontend fe2
 	}
 	attacks := []string{
 		goodConfig + "\nfrontend x\n    http-request return status 200 content-type text/plain file /etc/easy-ha-proxy/daemons.env\n",
+		goodConfig + `    http-response return status 200 content-type "image/x-icon" file /etc/haproxy/errors/custom.ico` + "\n",
 		goodConfig + "\ndefaults\n    errorfile 403 /etc/easy-ha-proxy/daemons.env\n",
 		goodConfig + "\nfrontend x\n    bind /etc/cron.d/pwned mode 660\n",
 		goodConfig + "\nfrontend x\n    acl leak src -f /etc/easy-ha-proxy/secrets.yml\n",
@@ -98,10 +99,16 @@ func TestConfigPolicyAcceptsTheRenderedTemplate(t *testing.T) {
 	env.Filters["regex_replace"] = jinja.RegexReplaceFilter
 	env.Filters["combine"] = jinja.CombineFilter
 	rendered, err := env.Render("haproxy.cfg.j2", map[string]any{
-		"sites": []any{}, "tcp_proxies": []any{}, "ansible_processor_vcpus": int64(1),
+		"sites": []any{map[string]any{
+			"name": "site", "domain": "site.example.test", "backend_ip": "127.0.0.1", "backend_port": 8080,
+		}},
+		"tcp_proxies": []any{}, "ansible_processor_vcpus": int64(1),
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(rendered, "file /etc/haproxy/errors/default-favicon.ico") {
+		t.Fatal("the template fixture did not render the default favicon rule")
 	}
 	if err := enforceConfigPolicy([]byte(rendered)); err != nil {
 		t.Fatalf("the rendered template config is refused by the policy: %v", err)

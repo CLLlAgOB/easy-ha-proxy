@@ -150,6 +150,9 @@ func policyPathUnder(raw string, prefixes ...string) bool {
 	return false
 }
 
+// The template serves the host-installed binary icon only for a missing favicon.
+const defaultFaviconResponse = `http-response return status 200 content-type "image/x-icon" file /etc/haproxy/errors/default-favicon.ico hdr Cache-Control "public, max-age=86400" if { var(txn.favicon_req) -m bool } { status 404 }`
+
 // policyFilePaths guards file-bearing directives in EVERY section. HAProxy
 // starts as UID 0 and opens files / creates Unix sockets before the chroot and
 // privilege drop, so a path outside the host-owned directories in any section
@@ -202,9 +205,8 @@ func policyFilePaths(token string, parts []string) error {
 				return vErr("HAProxy acl file must stay under /etc/haproxy")
 			}
 		case "file":
-			// "return ... file <path>" reads an arbitrary root file into the
-			// response; the template only uses lf-file under /etc/haproxy.
-			if token == "http-request" || token == "http-response" {
+			// Limit raw file responses to the template's fixed favicon rule.
+			if (token == "http-request" || token == "http-response") && strings.Join(parts, " ") != defaultFaviconResponse {
 				return vErr("HAProxy %s ... file is not allowed", token)
 			}
 		case "lf-file":
