@@ -107,7 +107,6 @@
     "Restore system management after the interrupted OS security policy change": "Изменение режима было прервано. Выберите существующие настройки Linux для восстановления управления",
     "Restore system management after the interrupted policy change": "Изменение режима было прервано. Восстановите управление средствами Linux",
     "Update host services before using OS security management": "Перед настройкой безопасности ОС обновите службы хоста",
-    "Update host services to install python3-apt before using OS security management": "Обновите службы хоста, чтобы установить средство чтения пакетов python3-apt",
     "Invalid OS security policy": "Недопустимые настройки безопасности ОС",
     "Invalid OS security policy or confirmation": "Недопустимые настройки или подтверждение безопасности ОС",
     "Enable OS security management before installing updates": "Перед установкой включите управление безопасностью ОС через панель",
